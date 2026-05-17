@@ -69,6 +69,30 @@ async def move_to_in_progress(api_key: str, linear_issue_id: str, team_key: str)
         await move_issue(api_key, linear_issue_id, state_id)
 
 
+async def move_to_planning(api_key: str, linear_issue_id: str, team_key: str) -> None:
+    """Move issue to Planning when spec work starts."""
+    states = await get_team_states(api_key, team_key)
+    state_id = states.get("planning")
+    if state_id:
+        await move_issue(api_key, linear_issue_id, state_id)
+
+
+async def move_to_design_review(api_key: str, linear_issue_id: str, team_key: str) -> None:
+    """Move issue to Design Review when spec is ready for human review."""
+    states = await get_team_states(api_key, team_key)
+    state_id = states.get("design review")
+    if state_id:
+        await move_issue(api_key, linear_issue_id, state_id)
+
+
+async def move_to_implementing(api_key: str, linear_issue_id: str, team_key: str) -> None:
+    """Move issue to Implementing when spec is approved and coding starts."""
+    states = await get_team_states(api_key, team_key)
+    state_id = states.get("implementing")
+    if state_id:
+        await move_issue(api_key, linear_issue_id, state_id)
+
+
 async def move_to_blocked(api_key: str, linear_issue_id: str, team_key: str) -> None:
     """Move issue to Blocked when agent needs user input."""
     states = await get_team_states(api_key, team_key)

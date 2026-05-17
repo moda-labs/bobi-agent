@@ -6,13 +6,14 @@ from pathlib import Path
 
 from .config import GlobalConfig, RepoConfig
 from .conversation import poll_blocked_sessions
-from .dispatcher import spawn_agent, check_in_flight, respawn_for_review, read_agent_output
+from .dispatcher import spawn_agent, check_in_flight, respawn_for_review, read_agent_output, _get_worktree_path
 from .pr_monitor import poll_pr_reviews, poll_merged_prs
 from .scanner import scan_linear, scan_slack, WorkItem, WorkSource
 from .state import StateStore, Status
 from .reporter import (
     report_completion, report_failure,
     move_to_in_progress, move_to_in_review, move_to_done, move_to_blocked,
+    move_to_planning, move_to_design_review, move_to_implementing,
     add_comment,
 )
 
@@ -48,26 +49,53 @@ async def run_cycle() -> dict:
                     pass
 
         elif update["status"] == "done":
-            summary["completed"] += 1
             tracked = state._items.get(item_id)
-            if tracked and tracked.linear_issue_id:
-                repo_path = Path(tracked.repo_path)
-                try:
-                    repo_config = RepoConfig.from_file(repo_path)
-                    creds = repo_config.get_credentials()
-                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                    if api_key:
-                        await move_to_in_review(api_key, tracked.linear_issue_id, repo_config.linear_project)
-                        # Post summary of what was done
-                        result = read_agent_output(item_id)
-                        summary_text = result.get("output", "")[:1000] if result else ""
-                        pr_text = f"\n\nPR: {tracked.pr_url}" if tracked.pr_url else ""
-                        comment = f"🤖 **Done.** Ready for review.{pr_text}"
-                        if summary_text:
-                            comment += f"\n\n**Summary:**\n{summary_text}"
-                        await add_comment(api_key, tracked.linear_issue_id, comment)
-                except FileNotFoundError:
-                    pass
+            if not tracked:
+                continue
+
+            repo_path = Path(tracked.repo_path)
+            try:
+                repo_config = RepoConfig.from_file(repo_path)
+                creds = repo_config.get_credentials()
+                api_key = creds.get("linear_api_key") or global_config.linear_api_key
+            except FileNotFoundError:
+                continue
+
+            if tracked.phase == "spec":
+                # Spec phase done — post SPEC.md to Linear, enter Design Review
+                from .dispatcher import _get_worktree_path
+                worktree = _get_worktree_path(tracked)
+                spec_content = ""
+                if worktree:
+                    spec_file = worktree / "SPEC.md"
+                    if spec_file.exists():
+                        spec_content = spec_file.read_text().strip()
+
+                if api_key and tracked.linear_issue_id:
+                    await move_to_design_review(api_key, tracked.linear_issue_id, repo_config.linear_project)
+                    comment = f"🤖 **Spec ready for review.**\n\n{spec_content[:3000]}"
+                    if len(spec_content) > 3000:
+                        comment += "\n\n_(truncated — full spec in worktree SPEC.md)_"
+                    comment += "\n\n**Reply 'approved' to proceed with implementation, or provide feedback.**"
+                    await add_comment(api_key, tracked.linear_issue_id, comment)
+
+                # Enter BLOCKED waiting for approval
+                state.update_status(item_id, Status.BLOCKED,
+                    pending_question_id=None, phase="spec")
+                log.info(f"Spec ready for {item_id} — waiting for design review")
+
+            else:
+                # Implementation phase done — move to In Review
+                summary["completed"] += 1
+                if api_key and tracked.linear_issue_id:
+                    await move_to_in_review(api_key, tracked.linear_issue_id, repo_config.linear_project)
+                    result = read_agent_output(item_id)
+                    summary_text = result.get("output", "")[:1000] if result else ""
+                    pr_text = f"\n\nPR: {tracked.pr_url}" if tracked.pr_url else ""
+                    comment = f"🤖 **Done.** Ready for review.{pr_text}"
+                    if summary_text:
+                        comment += f"\n\n**Summary:**\n{summary_text}"
+                    await add_comment(api_key, tracked.linear_issue_id, comment)
 
         elif update["status"] == "blocked":
             # Agent has a question — post it to Linear and move to Blocked
@@ -136,20 +164,73 @@ async def run_cycle() -> dict:
     # 1c. Poll blocked sessions for user replies on Linear
     unblocked = await poll_blocked_sessions(global_config, state)
     summary["unblocked"] = len(unblocked)
-    for item in unblocked:
-        log.info(f"Unblocked {item['id']}: user replied on Linear")
-        # Move back to In Progress
-        tracked = state._items.get(item["id"])
-        if tracked and tracked.linear_issue_id:
-            repo_path = Path(tracked.repo_path)
-            try:
-                repo_config = RepoConfig.from_file(repo_path)
-                creds = repo_config.get_credentials()
-                api_key = creds.get("linear_api_key") or global_config.linear_api_key
+    for unblocked_item in unblocked:
+        item_id = unblocked_item["id"]
+        reply = unblocked_item.get("reply", "")
+        tracked = state._items.get(item_id)
+        if not tracked:
+            continue
+
+        log.info(f"Unblocked {item_id}: user replied on Linear")
+
+        repo_path = Path(tracked.repo_path)
+        try:
+            repo_config = RepoConfig.from_file(repo_path)
+            creds = repo_config.get_credentials()
+            api_key = creds.get("linear_api_key") or global_config.linear_api_key
+        except FileNotFoundError:
+            continue
+
+        if tracked.phase == "spec":
+            # Check if the reply is approval or feedback
+            approval_words = ["approved", "approve", "lgtm", "looks good", "go ahead", "ship it", "proceed"]
+            is_approved = any(word in reply.lower() for word in approval_words)
+
+            if is_approved:
+                # Read the approved spec
+                worktree = _get_worktree_path(tracked)
+                spec = ""
+                if worktree:
+                    spec_file = worktree / "SPEC.md"
+                    if spec_file.exists():
+                        spec = spec_file.read_text()
+
+                # Spawn implementation phase
+                # Build a temporary WorkItem for spawning
+                from .scanner import WorkItem, WorkSource, Complexity
+                work_item = WorkItem(
+                    id=item_id,
+                    source=WorkSource.LINEAR,
+                    title=tracked.title,
+                    body="",
+                    repo_config=repo_config,
+                    complexity=Complexity.MEDIUM,
+                    labels=[],
+                    linear_issue_id=tracked.linear_issue_id,
+                )
+
+                # Remove from state so spawn_agent can re-add it
+                del state._items[item_id]
+                state._save()
+
+                result = spawn_agent(work_item, state, phase="implement", spec=spec)
+                if result and api_key:
+                    await move_to_implementing(api_key, tracked.linear_issue_id, repo_config.linear_project)
+                    await add_comment(api_key, tracked.linear_issue_id,
+                        f"🤖 **Spec approved.** Starting implementation.")
+                    log.info(f"Spec approved for {item_id}, starting implementation (PID {result['pid']})")
+            else:
+                # Feedback — re-spawn spec phase with the feedback
                 if api_key:
-                    await move_to_in_progress(api_key, tracked.linear_issue_id, repo_config.linear_project)
-            except FileNotFoundError:
-                pass
+                    await move_to_planning(api_key, tracked.linear_issue_id, repo_config.linear_project)
+                    await add_comment(api_key, tracked.linear_issue_id,
+                        f"🤖 **Revising spec based on feedback.**")
+                # TODO: re-spawn spec agent with feedback context
+                log.info(f"Spec feedback for {item_id}, needs revision")
+        else:
+            # Implementation phase unblocked
+            if api_key:
+                await move_to_implementing(api_key, tracked.linear_issue_id, repo_config.linear_project)
 
     # 1d. Re-dispatch failed items — move back to Todo and clear state (max 3 retries)
     from .reporter import get_team_states, move_issue
@@ -231,20 +312,20 @@ async def run_cycle() -> dict:
             summary["skipped"] += 1
             continue
 
-        # Dispatch
-        result = spawn_agent(item, state)
+        # Dispatch — always starts in spec phase
+        result = spawn_agent(item, state, phase="spec")
         if result:
             summary["dispatched"] += 1
-            log.info(f"Dispatched {item.id}: {item.title} (PID {result['pid']})")
+            log.info(f"Dispatched {item.id}: {item.title} (spec phase, PID {result['pid']})")
 
-            # Move to In Progress and comment on the issue
+            # Move to Planning and comment on the issue
             if item.linear_issue_id:
                 creds = item.repo_config.get_credentials()
                 api_key = creds.get("linear_api_key") or global_config.linear_api_key
                 if api_key:
-                    await move_to_in_progress(api_key, item.linear_issue_id, item.repo_config.linear_project)
+                    await move_to_planning(api_key, item.linear_issue_id, item.repo_config.linear_project)
                     await add_comment(api_key, item.linear_issue_id,
-                        f"🤖 **Picked up by agent-dispatch.**\n\n"
+                        f"🤖 **Picked up by agent-dispatch.** Writing implementation spec.\n\n"
                         f"Worktree: `{result['worktree']}`\n"
                         f"Branch: `{result['branch']}`")
         else:

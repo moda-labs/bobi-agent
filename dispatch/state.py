@@ -37,6 +37,7 @@ class TrackedItem:
     linear_issue_id: str | None = None
     pending_question_id: str | None = None
     last_reply: str | None = None
+    phase: str = "spec"  # "spec" or "implement"
 
     def to_dict(self) -> dict:
         d = asdict(self)

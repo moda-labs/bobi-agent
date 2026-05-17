@@ -27,55 +27,63 @@ def _make_item(complexity: Complexity = Complexity.MEDIUM, **kwargs) -> WorkItem
     return WorkItem(**defaults)
 
 
-def test_trivial_prompt_has_branch_and_pr():
-    item = _make_item(Complexity.TRIVIAL)
-    prompt = build_prompt(item, BRANCH)
+# Spec phase tests
+
+def test_spec_prompt_does_not_implement():
+    item = _make_item()
+    prompt = build_prompt(item, BRANCH, phase="spec")
+
+    assert "SPEC.md" in prompt
+    assert "Do NOT write any implementation code" in prompt
+    assert "principal" in prompt.lower()
+
+
+def test_spec_prompt_includes_task():
+    item = _make_item()
+    prompt = build_prompt(item, BRANCH, phase="spec")
 
     assert "Add user avatars" in prompt
+    assert "Gravatar" in prompt
+
+
+def test_spec_prompt_has_scope_assessment():
+    item = _make_item()
+    prompt = build_prompt(item, BRANCH, phase="spec")
+
+    assert "Scope Assessment" in prompt
+    assert "multiple tickets" in prompt.lower()
+
+
+# Implementation phase tests
+
+def test_implement_prompt_has_branch_and_pr():
+    item = _make_item()
+    prompt = build_prompt(item, BRANCH, phase="implement", spec="The approved spec here.")
+
     assert BRANCH in prompt
     assert "gh pr create" in prompt
     assert "git push" in prompt
+    assert "The approved spec here." in prompt
 
 
-def test_medium_prompt_has_plan_step():
-    item = _make_item(Complexity.MEDIUM)
-    prompt = build_prompt(item, BRANCH)
-
-    assert "plan" in prompt.lower()
-    assert "CLAUDE.md" in prompt
-    assert "pytest -x" in prompt
-    assert BRANCH in prompt
-    assert "gh pr create" in prompt
-
-
-def test_heavy_prompt_has_skills():
-    item = _make_item(Complexity.HEAVY)
-    prompt = build_prompt(item, BRANCH)
+def test_implement_prompt_has_review():
+    item = _make_item()
+    prompt = build_prompt(item, BRANCH, phase="implement", spec="spec")
 
     assert "/review" in prompt
-    assert "/ship" in prompt
-    assert "CLAUDE.md" in prompt
+    assert "PROJ-1" in prompt
+
+
+def test_implement_prompt_has_test_command():
+    item = _make_item()
+    prompt = build_prompt(item, BRANCH, phase="implement", spec="spec")
+
     assert "pytest -x" in prompt
-    assert "gh pr create" in prompt
-
-
-def test_prompt_includes_issue_body():
-    item = _make_item(body="Use Gravatar as fallback for missing avatars.")
-    prompt = build_prompt(item, BRANCH)
-
-    assert "Gravatar" in prompt
 
 
 def test_no_test_command_shows_placeholder():
     item = _make_item()
     item.repo_config.test_command = ""
-    prompt = build_prompt(item, BRANCH)
+    prompt = build_prompt(item, BRANCH, phase="implement", spec="spec")
 
     assert "no test command configured" in prompt
-
-
-def test_prompt_includes_issue_id():
-    item = _make_item()
-    prompt = build_prompt(item, BRANCH)
-
-    assert "PROJ-1" in prompt

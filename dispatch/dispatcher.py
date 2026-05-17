@@ -52,6 +52,108 @@ what you're doing from their phone.
 """
 
 
+SPEC_PROMPT = """You are working in: {repo_path}
+
+Read CLAUDE.md first if it exists.
+
+## Your role
+
+You are a principal-level engineer doing design review for this task.
+You do NOT implement anything. You produce a spec for a human to review.
+
+## Task
+{title}
+
+{body}
+
+## What to produce
+
+Write SPEC.md in this directory with the following structure:
+
+### 1. Problem Analysis
+- What is being asked?
+- What is the user-facing outcome?
+- What are the constraints?
+
+### 2. Scope Assessment
+- Is this one task or should it be broken into multiple tickets?
+- If multiple: list each sub-ticket with title, description, and dependencies
+- If one: confirm it's appropriately scoped for a single PR
+
+### 3. Technical Approach
+- Which files need to change and why?
+- What is the architecture / data flow?
+- What are the key design decisions and trade-offs?
+- Are there alternative approaches? Why this one?
+
+### 4. Edge Cases & Risks
+- What could go wrong?
+- What are the edge cases?
+- What assumptions are we making?
+
+### 5. Testing Strategy
+- What needs to be tested?
+- How do we verify this works?
+
+### 6. Implementation Plan
+- Ordered list of steps
+- Dependencies between steps
+- Estimated complexity (trivial / moderate / complex)
+
+## How to work
+
+1. Read the codebase thoroughly. Understand the architecture.
+2. Think about this like a principal engineer — not just "how" but "should we"
+3. Consider whether the scope is right. A good engineer pushes back on scope
+   as often as they accept it.
+4. Write SPEC.md with your analysis
+5. Exit cleanly
+
+Do NOT write any implementation code. Do NOT create branches or PRs.
+Your only output is SPEC.md.
+
+{skills}
+"""
+
+
+IMPLEMENT_PROMPT = """You are working in: {repo_path}
+
+Read CLAUDE.md first if it exists.
+
+## Task
+{title}
+
+{body}
+
+## Approved Spec
+
+The following implementation plan was reviewed and approved by a human engineer.
+Follow it closely:
+
+{spec}
+
+## Lifecycle: Implement → Review → Ship
+
+1. git checkout -b {branch}
+2. Follow the implementation plan in the approved spec
+3. Run tests: {test_command}
+4. Run /review to catch bugs before shipping
+5. Fix anything /review finds
+6. git push -u origin {branch}
+7. gh pr create --title "{title}" --body "Fixes {issue_id}\\n\\n<description of changes>"
+
+You MUST push and create a PR. The task is not done until the PR exists.
+
+## Constraints
+- Follow the approved spec — don't deviate without good reason
+- If you discover something the spec missed, note it in the PR description
+- One logical change per commit
+- Run tests before creating the PR
+
+{skills}
+"""
+
+
 PROMPT_TEMPLATES = {
     Complexity.TRIVIAL: """You are working in: {repo_path}
 
@@ -157,34 +259,57 @@ You MUST push and create a PR. The task is not done until the PR exists.
 }
 
 
-def build_prompt(item: WorkItem, branch: str) -> str:
-    """Assemble the prompt for the coding agent."""
-    config = item.repo_config
-    template = PROMPT_TEMPLATES[item.complexity]
-
-    # Discover installed skills and filter to relevant ones
+def _get_skills_text(item: WorkItem) -> str:
+    """Get formatted skills text for prompts."""
     packs = discover_skill_packs()
     relevant = get_relevant_skills(packs, item.labels)
     discovered_skills = format_skills_for_prompt(relevant)
 
-    # Also include explicitly configured skills from .dispatch.yaml
     explicit_skills = ""
-    if config.skills:
-        explicit_skills = "\n".join(f"  - /{s}" for s in config.skills)
+    if item.repo_config.skills:
+        explicit_skills = "\n".join(f"  - /{s}" for s in item.repo_config.skills)
 
-    skills_text = discovered_skills or explicit_skills
+    return discovered_skills or explicit_skills
 
-    prompt = template.format(
-        repo_path=config.path,
+
+def build_spec_prompt(item: WorkItem) -> str:
+    """Build the spec/planning phase prompt."""
+    skills_text = _get_skills_text(item)
+
+    prompt = SPEC_PROMPT.format(
+        repo_path=item.repo_config.path,
         title=item.title,
         body=item.body,
-        branch=branch,
-        issue_id=item.id,
-        test_command=config.test_command or "(no test command configured)",
         skills=skills_text,
     )
 
     return AGENT_PREAMBLE + prompt
+
+
+def build_implement_prompt(item: WorkItem, branch: str, spec: str) -> str:
+    """Build the implementation phase prompt with approved spec."""
+    skills_text = _get_skills_text(item)
+
+    prompt = IMPLEMENT_PROMPT.format(
+        repo_path=item.repo_config.path,
+        title=item.title,
+        body=item.body,
+        branch=branch,
+        issue_id=item.id,
+        test_command=item.repo_config.test_command or "(no test command configured)",
+        spec=spec,
+        skills=skills_text,
+    )
+
+    return AGENT_PREAMBLE + prompt
+
+
+def build_prompt(item: WorkItem, branch: str, phase: str = "spec", spec: str = "") -> str:
+    """Assemble the prompt for the coding agent based on phase."""
+    if phase == "spec":
+        return build_spec_prompt(item)
+    else:
+        return build_implement_prompt(item, branch, spec)
 
 
 def _slugify(text: str) -> str:
@@ -216,7 +341,7 @@ def create_worktree(repo_path: Path, branch: str, issue_id: str, title: str) -> 
     return worktree_dir
 
 
-def spawn_agent(item: WorkItem, state: StateStore) -> dict | None:
+def spawn_agent(item: WorkItem, state: StateStore, phase: str = "spec", spec: str = "") -> dict | None:
     """Spawn a coding agent for the work item. Returns {pid, worktree, branch} or None."""
     config = item.repo_config
 
@@ -231,8 +356,8 @@ def spawn_agent(item: WorkItem, state: StateStore) -> dict | None:
     # Create an isolated worktree for the agent
     worktree_dir = create_worktree(config.path, branch, item.id, item.title)
 
-    # Build the prompt
-    prompt = build_prompt(item, branch)
+    # Build the prompt based on phase
+    prompt = build_prompt(item, branch, phase=phase, spec=spec)
 
     # Write prompt to a temp file (avoids shell argument length limits)
     prompt_file = Path(tempfile.mktemp(prefix="dispatch-prompt-", suffix=".md"))
