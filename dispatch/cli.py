@@ -215,30 +215,36 @@ def register(repo_path: str):
 @main.command()
 @click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip prompts (use flags/env vars only)")
 def init(non_interactive):
-    """Initialize global config and install the cron job.
+    """Initialize global config and install the dispatch daemon.
 
-    Creates the config directory, empty config, and installs the
-    cron job (if not already running). Credentials are stored
-    per-project — use `dispatch setup` in each repo.
+    Creates the config directory, empty config, and installs a launchd
+    agent (macOS) to run dispatch every 60 seconds. launchd runs in
+    the user's session, so it can access the Keychain for Claude OAuth.
+    Credentials are stored per-project — use `dispatch setup` in each repo.
     """
-    import subprocess
-
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config = GlobalConfig.load()
     config.save()
     click.echo(f"Config initialized at {GLOBAL_CONFIG_DIR / 'config.yaml'}")
 
-    # Auto-install cron if not already running
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    current = result.stdout if result.returncode == 0 else ""
-
-    if CRON_COMMENT not in current:
-        cron_line = _get_cron_line()
-        new_crontab = current.rstrip("\n") + f"\n{CRON_COMMENT}\n{cron_line}\n"
-        subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
-        click.echo("Cron installed. Dispatch runs every minute.")
+    # Install launchd agent (replaces cron — cron can't access Keychain)
+    import platform
+    if platform.system() == "Darwin":
+        from .launchd import install, status
+        result = install()
+        click.echo(f"Daemon: {result}")
     else:
-        click.echo("Cron already running.")
+        # Fall back to cron on Linux
+        import subprocess
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        current = result.stdout if result.returncode == 0 else ""
+        if CRON_COMMENT not in current:
+            cron_line = _get_cron_line()
+            new_crontab = current.rstrip("\n") + f"\n{CRON_COMMENT}\n{cron_line}\n"
+            subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
+            click.echo("Cron installed. Dispatch runs every minute.")
+        else:
+            click.echo("Cron already running.")
 
 
 @main.command()

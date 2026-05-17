@@ -449,6 +449,14 @@ def spawn_agent(item: WorkItem, state: StateStore, phase: str = "spec", spec: st
     # Build env — ensure HOME and PATH are set for Keychain + tool access
     spawn_env = os.environ.copy()
     spawn_env.setdefault("HOME", str(Path.home()))
+    # Claude needs USER for some auth flows
+    spawn_env.setdefault("USER", os.environ.get("USER", Path.home().name))
+    # Ensure temp dir is accessible
+    spawn_env.setdefault("TMPDIR", "/tmp")
+
+    # Log file for child stderr (debugging auth issues)
+    child_stderr_path = Path.home() / ".dispatch" / "runs" / item.id / "stderr.log"
+    child_stderr_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Spawn based on agent tool — run in the WORKTREE, not the main repo
     if config.agent_tool == "claude":
@@ -467,15 +475,15 @@ def spawn_agent(item: WorkItem, state: StateStore, phase: str = "spec", spec: st
         cmd = [claude_path, "-p", "--dangerously-skip-permissions"]
 
     # Spawn in background in the worktree
-    # Pipe prompt via stdin, capture output to file
-    with open(output_file, "w") as out_f:
+    # Pipe prompt via stdin, capture output to file, stderr to log
+    with open(output_file, "w") as out_f, open(child_stderr_path, "w") as err_f:
         with open(prompt_file, "r") as prompt_in:
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(worktree_dir),
                 stdin=prompt_in,
                 stdout=out_f,
-                stderr=subprocess.PIPE,
+                stderr=err_f,
                 env=spawn_env,
             )
 
