@@ -103,9 +103,9 @@ def status():
         phase = getattr(item, "phase", "?")
 
         # Check for progress file
-        from .dispatcher import _get_worktree_path
+        from .dispatcher import get_worktree_path
         progress = ""
-        worktree = _get_worktree_path(item)
+        worktree = get_worktree_path(item)
         if worktree:
             progress_file = worktree / ".dispatch-progress.md"
             if progress_file.exists():
@@ -141,7 +141,7 @@ def watch(interval: int):
     import time as time_mod
     import subprocess
 
-    from .dispatcher import _get_worktree_path
+    from .dispatcher import get_worktree_path
 
     try:
         while True:
@@ -177,7 +177,7 @@ def watch(interval: int):
                     # Commits and progress
                     commits = 0
                     progress_lines = []
-                    worktree = _get_worktree_path(item)
+                    worktree = get_worktree_path(item)
                     if worktree:
                         result = subprocess.run(
                             ["git", "log", "--oneline", "main..HEAD"],

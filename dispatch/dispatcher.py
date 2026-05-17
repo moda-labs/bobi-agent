@@ -67,6 +67,21 @@ Test command: {item.repo_config.test_command or '(none configured)'}
     return context
 
 
+def get_worktree_path(item) -> Path | None:
+    """Find the worktree for a tracked item (read-only lookup)."""
+    if not item.repo_path:
+        return None
+    repo = Path(item.repo_path)
+    worktrees_dir = repo / "worktrees"
+    if not worktrees_dir.exists():
+        return None
+    issue_prefix = item.id.lower()
+    for child in worktrees_dir.iterdir():
+        if child.is_dir() and child.name.startswith(issue_prefix):
+            return child
+    return None
+
+
 def _get_or_create_worktree(repo_path: Path, issue_id: str, title: str) -> Path:
     """Get existing worktree or create a new one."""
     slug = _slugify(title)
