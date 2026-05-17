@@ -66,30 +66,43 @@ def get_pr_review_state(repo_path: str, pr_url: str) -> dict | None:
 
 
 async def poll_pr_reviews(global_config: GlobalConfig, state: StateStore) -> list[dict]:
-    """Check completed items with PRs for review feedback. Returns items to re-dispatch."""
+    """Check items with PRs for review feedback. Returns items to re-dispatch."""
     re_dispatch = []
 
     for item_id, item in list(state._items.items()):
-        if item.status != Status.DONE:
-            continue
-        if not item.pr_url:
-            continue
+        # Implementation PRs: done items with changes requested
+        if item.status == Status.DONE and item.pr_url and item.phase == "implement":
+            review = get_pr_review_state(item.repo_path, item.pr_url)
+            if review and review["decision"] == "CHANGES_REQUESTED":
+                re_dispatch.append({
+                    "id": item_id,
+                    "phase": "implement",
+                    "feedback": review["feedback"],
+                    "pr_url": item.pr_url,
+                    "repo_path": item.repo_path,
+                    "title": item.title,
+                    "branch": item.branch,
+                    "linear_issue_id": item.linear_issue_id,
+                })
+                state.update_status(item_id, Status.WORKING)
+                log.info(f"PR changes requested on {item_id}, re-dispatching implementation")
 
-        review = get_pr_review_state(item.repo_path, item.pr_url)
-        if review and review["decision"] == "CHANGES_REQUESTED":
-            re_dispatch.append({
-                "id": item_id,
-                "feedback": review["feedback"],
-                "pr_url": item.pr_url,
-                "repo_path": item.repo_path,
-                "title": item.title,
-                "branch": item.branch,
-                "linear_issue_id": item.linear_issue_id,
-            })
-
-            # Move back to WORKING so it gets re-dispatched
-            state.update_status(item_id, Status.WORKING)
-            log.info(f"PR changes requested on {item_id}, re-dispatching")
+        # Spec PRs: blocked items in spec phase with a PR
+        elif item.status == Status.BLOCKED and item.phase == "spec" and item.pr_url:
+            review = get_pr_review_state(item.repo_path, item.pr_url)
+            if review and review["decision"] == "CHANGES_REQUESTED":
+                re_dispatch.append({
+                    "id": item_id,
+                    "phase": "spec",
+                    "feedback": review["feedback"],
+                    "pr_url": item.pr_url,
+                    "repo_path": item.repo_path,
+                    "title": item.title,
+                    "branch": item.branch,
+                    "linear_issue_id": item.linear_issue_id,
+                })
+                state.update_status(item_id, Status.WORKING, phase="spec")
+                log.info(f"Spec changes requested on {item_id}, re-dispatching spec revision")
 
     return re_dispatch
 

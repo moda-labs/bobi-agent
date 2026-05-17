@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .config import GlobalConfig, RepoConfig
 from .conversation import poll_blocked_sessions
-from .dispatcher import spawn_agent, check_in_flight, respawn_for_review, read_agent_output, _get_worktree_path
+from .dispatcher import spawn_agent, check_in_flight, respawn_for_review, respawn_for_spec_revision, read_agent_output, _get_worktree_path
 from .pr_monitor import poll_pr_reviews, poll_merged_prs
 from .scanner import scan_linear, scan_slack, WorkItem, WorkSource
 from .state import StateStore, Status
@@ -105,9 +105,9 @@ async def run_cycle() -> dict:
                             f"🤖 **Spec ready for review.** (SPEC.md in worktree — draft PR failed)\n\n"
                             f"**Reply 'approved' to proceed with implementation, or provide feedback.**")
 
-                # Enter BLOCKED waiting for approval
+                # Enter BLOCKED waiting for approval — store spec PR URL
                 state.update_status(item_id, Status.BLOCKED,
-                    pending_question_id=None, phase="spec")
+                    pending_question_id=None, phase="spec", pr_url=pr_url)
                 log.info(f"Spec ready for {item_id} — waiting for design review")
 
             else:
@@ -176,16 +176,26 @@ async def run_cycle() -> dict:
         except FileNotFoundError:
             continue
 
-        # Post to Linear that we're addressing feedback
-        if api_key:
-            await move_to_in_progress(api_key, tracked.linear_issue_id, repo_config.linear_project)
-            await add_comment(api_key, tracked.linear_issue_id,
-                f"🤖 **Addressing PR feedback.**\n\n{review_item['feedback'][:500]}")
+        if review_item.get("phase") == "spec":
+            # Spec review feedback — revise the spec
+            if api_key:
+                await move_to_planning(api_key, tracked.linear_issue_id, repo_config.linear_project)
+                await add_comment(api_key, tracked.linear_issue_id,
+                    f"🤖 **Revising spec based on review feedback.**")
 
-        # Re-spawn in the same worktree
-        result = respawn_for_review(item_id, review_item["feedback"], state)
-        if result:
-            log.info(f"Re-dispatched {item_id} for PR review feedback (PID {result['pid']})")
+            result = respawn_for_spec_revision(item_id, review_item["feedback"], state)
+            if result:
+                log.info(f"Re-dispatched {item_id} for spec revision (PID {result['pid']})")
+        else:
+            # Implementation review feedback
+            if api_key:
+                await move_to_implementing(api_key, tracked.linear_issue_id, repo_config.linear_project)
+                await add_comment(api_key, tracked.linear_issue_id,
+                    f"🤖 **Addressing PR feedback.**\n\n{review_item['feedback'][:500]}")
+
+            result = respawn_for_review(item_id, review_item["feedback"], state)
+            if result:
+                log.info(f"Re-dispatched {item_id} for implementation feedback (PID {result['pid']})")
 
     # 1c. Poll blocked sessions for user replies on Linear
     unblocked = await poll_blocked_sessions(global_config, state)

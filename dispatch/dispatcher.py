@@ -614,6 +614,79 @@ async def check_in_flight(state: StateStore) -> list[dict]:
     return updates
 
 
+def respawn_for_spec_revision(item_id: str, feedback: str, state: StateStore) -> dict | None:
+    """Re-spawn the spec agent to revise SPEC.md based on review feedback."""
+    import shutil
+
+    tracked = state._items.get(item_id)
+    if not tracked:
+        return None
+
+    worktree = _get_worktree_path(tracked)
+    if not worktree:
+        return None
+
+    # Read current spec so agent has context
+    spec_file = worktree / "SPEC.md"
+    current_spec = spec_file.read_text() if spec_file.exists() else ""
+
+    prompt = AGENT_PREAMBLE + f"""You are working in: {worktree}
+
+## Spec Revision
+
+Your SPEC.md received feedback during design review. Revise it.
+
+## Current SPEC.md
+
+{current_spec}
+
+## Review Feedback
+
+{feedback}
+
+## Process
+
+1. Read the feedback carefully
+2. Revise SPEC.md to address every point
+3. If feedback challenges your approach, explain your reasoning OR change it
+4. Commit and push
+
+Do NOT implement any code. Only revise SPEC.md.
+"""
+
+    prompt_file = Path(tempfile.mktemp(prefix="dispatch-prompt-", suffix=".md"))
+    prompt_file.write_text(prompt)
+
+    output_file = Path(tempfile.mktemp(prefix="dispatch-output-", suffix=".jsonl"))
+
+    claude_path = shutil.which("claude") or "/opt/homebrew/bin/claude"
+    cmd = [
+        claude_path, "-p",
+        "--output-format", "json",
+        "--max-turns", "30",
+        "--dangerously-skip-permissions",
+    ]
+
+    with open(output_file, "w") as out_f:
+        with open(prompt_file, "r") as prompt_in:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(worktree),
+                stdin=prompt_in,
+                stdout=out_f,
+                stderr=subprocess.PIPE,
+            )
+
+    state.update_status(item_id, Status.WORKING, agent_pid=proc.pid, phase="spec")
+
+    meta_path = Path.home() / ".dispatch" / "runs" / item_id
+    meta_path.mkdir(parents=True, exist_ok=True)
+    (meta_path / "prompt.md").write_text(prompt)
+    (meta_path / "output_file").write_text(str(output_file))
+
+    return {"pid": proc.pid, "worktree": str(worktree)}
+
+
 def respawn_for_review(item_id: str, feedback: str, state: StateStore) -> dict | None:
     """Re-spawn an agent to address PR review feedback in the existing worktree."""
     import shutil
