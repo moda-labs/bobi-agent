@@ -23,6 +23,26 @@ def get_plist_content() -> str:
     log_dir = Path.home() / ".dispatch"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # Capture all relevant env vars at install time
+    env_vars = {
+        "HOME": str(Path.home()),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "USER": os.environ.get("USER", ""),
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "SHELL": os.environ.get("SHELL", "/bin/zsh"),
+    }
+
+    # Claude-specific env vars
+    for key in ["CLAUDE_CODE_EXECPATH", "ANTHROPIC_API_KEY"]:
+        val = os.environ.get(key)
+        if val:
+            env_vars[key] = val
+
+    env_xml = "\n".join(
+        f"        <key>{k}</key>\n        <string>{v}</string>"
+        for k, v in env_vars.items() if v
+    )
+
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -42,10 +62,7 @@ def get_plist_content() -> str:
     <string>{log_dir}/dispatch.err</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>HOME</key>
-        <string>{Path.home()}</string>
-        <key>PATH</key>
-        <string>{os.environ.get("PATH", "/usr/bin:/bin")}</string>
+{env_xml}
     </dict>
     <key>RunAtLoad</key>
     <true/>
