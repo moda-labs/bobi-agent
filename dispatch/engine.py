@@ -7,12 +7,12 @@ from pathlib import Path
 from .config import GlobalConfig, RepoConfig
 from .conversation import poll_blocked_sessions
 from .dispatcher import spawn_agent, check_in_flight, respawn_for_review, read_agent_output
-from .pr_monitor import poll_pr_reviews
+from .pr_monitor import poll_pr_reviews, poll_merged_prs
 from .scanner import scan_linear, scan_slack, WorkItem, WorkSource
 from .state import StateStore, Status
 from .reporter import (
     report_completion, report_failure,
-    move_to_in_progress, move_to_in_review, add_comment,
+    move_to_in_progress, move_to_in_review, move_to_done, add_comment,
 )
 
 log = logging.getLogger(__name__)
@@ -173,7 +173,31 @@ async def run_cycle() -> dict:
             summary["skipped"] += 1
             log.debug(f"Skipped {item.id}: at parallel limit")
 
-    # 4. Cleanup old entries
+    # 4. Check for merged PRs — close the Linear issue
+    merged = await poll_merged_prs(state)
+    for merged_item in merged:
+        item_id = merged_item["id"]
+        linear_issue_id = merged_item.get("linear_issue_id")
+        if linear_issue_id:
+            repo_path = Path(merged_item["repo_path"])
+            try:
+                repo_config = RepoConfig.from_file(repo_path)
+                creds = repo_config.get_credentials()
+                api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                if api_key:
+                    await move_to_done(api_key, linear_issue_id, repo_config.linear_project)
+                    await add_comment(api_key, linear_issue_id,
+                        f"🤖 **PR merged.** Issue complete.")
+            except FileNotFoundError:
+                pass
+
+        # Remove from state — fully done
+        if item_id in state._items:
+            del state._items[item_id]
+            state._save()
+        log.info(f"Closed {item_id}: PR merged")
+
+    # 5. Cleanup old entries
     state.cleanup_old()
 
     return summary

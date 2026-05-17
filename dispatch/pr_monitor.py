@@ -89,3 +89,51 @@ async def poll_pr_reviews(global_config: GlobalConfig, state: StateStore) -> lis
             log.info(f"PR changes requested on {item_id}, re-dispatching")
 
     return re_dispatch
+
+
+def check_pr_merged(repo_path: str, pr_url: str) -> bool:
+    """Check if a PR has been merged."""
+    if not pr_url:
+        return False
+
+    try:
+        pr_number = pr_url.rstrip("/").split("/")[-1]
+    except (IndexError, AttributeError):
+        return False
+
+    result = subprocess.run(
+        ["gh", "pr", "view", pr_number, "--json", "state"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        return False
+
+    try:
+        data = json.loads(result.stdout)
+        return data.get("state") == "MERGED"
+    except json.JSONDecodeError:
+        return False
+
+
+async def poll_merged_prs(state: StateStore) -> list[dict]:
+    """Check Done items for merged PRs. Returns items to close."""
+    merged = []
+
+    for item_id, item in list(state._items.items()):
+        if item.status != Status.DONE:
+            continue
+        if not item.pr_url:
+            continue
+
+        if check_pr_merged(item.repo_path, item.pr_url):
+            merged.append({
+                "id": item_id,
+                "pr_url": item.pr_url,
+                "linear_issue_id": item.linear_issue_id,
+                "repo_path": item.repo_path,
+            })
+
+    return merged

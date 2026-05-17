@@ -69,6 +69,14 @@ async def move_to_in_progress(api_key: str, linear_issue_id: str, team_key: str)
         await move_issue(api_key, linear_issue_id, state_id)
 
 
+async def move_to_done(api_key: str, linear_issue_id: str, team_key: str) -> None:
+    """Move issue to Done when PR is merged."""
+    states = await get_team_states(api_key, team_key)
+    state_id = states.get("done") or states.get("completed")
+    if state_id:
+        await move_issue(api_key, linear_issue_id, state_id)
+
+
 async def move_to_in_review(api_key: str, linear_issue_id: str, team_key: str) -> None:
     """Move issue to In Review (or Done if no review state) when PR is created."""
     states = await get_team_states(api_key, team_key)
