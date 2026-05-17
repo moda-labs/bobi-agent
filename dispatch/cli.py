@@ -123,9 +123,8 @@ def repos():
 @main.command()
 @click.argument("repo_path", type=click.Path(exists=True), default=".")
 @click.option("--linear-project", default=None, help="Linear project key (e.g., ENG)")
-@click.option("--slack-channel", default=None, help="Slack channel for notifications (e.g., #eng-agents)")
 @click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip prompts, use flags/defaults only")
-def setup(repo_path: str, linear_project: str | None, slack_channel: str | None, non_interactive: bool):
+def setup(repo_path: str, linear_project: str | None, non_interactive: bool):
     """Auto-generate .dispatch.yaml for a repo and register it.
 
     Inspects the repo to detect test commands, framework, and suggests
@@ -151,8 +150,6 @@ def setup(repo_path: str, linear_project: str | None, slack_channel: str | None,
     # Override with flags if provided
     if linear_project:
         config["linear"]["project"] = linear_project
-    if slack_channel:
-        config["notify"]["slack_channel"] = slack_channel
 
     # Write it
     config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
@@ -162,45 +159,37 @@ def setup(repo_path: str, linear_project: str | None, slack_channel: str | None,
     test_cmd = config.get("verify", {}).get("test_command", "")
     project = config.get("linear", {}).get("project", "")
     skills = config.get("agent", {}).get("skills", [])
-    channel = config.get("notify", {}).get("slack_channel", "")
 
     click.echo("")
     click.echo("Detected:")
     click.echo(f"  Test command:   {test_cmd or '(none detected)'}")
     click.echo(f"  Skills:         {', '.join(skills)}")
     click.echo("")
-    click.echo("Needs user input:")
     if not linear_project:
         click.echo(f"  Linear project: \"{project}\" (GUESSED from repo name — please verify)")
     else:
-        click.echo(f"  Linear project: {project} (set via flag)")
-    if not channel:
-        click.echo(f"  Slack channel:  (not set — add to .dispatch.yaml)")
-    else:
-        click.echo(f"  Slack channel:  {channel}")
-    click.echo("")
+        click.echo(f"  Linear project: {project}")
 
     # Auto-register
     global_config = GlobalConfig.load()
     if path not in global_config.repos:
         global_config.repos.append(path)
         global_config.save()
+        click.echo("")
         click.echo("Registered with dispatch engine.")
     else:
+        click.echo("")
         click.echo("Already registered.")
 
-    # Clear guidance for the agent/user
-    click.echo("")
-    if not linear_project or not channel:
-        click.echo("ACTION REQUIRED:")
-        if not linear_project:
-            click.echo("  1. Set linear.project in .dispatch.yaml to your Linear project key")
-            click.echo("     (the prefix on issue IDs, e.g., ENG if issues are ENG-42)")
-        if not channel:
-            click.echo("  2. Set notify.slack_channel in .dispatch.yaml (e.g., #eng-agents)")
+    # Guidance if project was guessed
+    if not linear_project:
         click.echo("")
-        click.echo("Or re-run with flags:")
-        click.echo(f"  dispatch setup {repo_path} --linear-project YOUR_KEY --slack-channel '#your-channel'")
+        click.echo("ACTION REQUIRED:")
+        click.echo("  Set linear.project in .dispatch.yaml to your Linear project key")
+        click.echo("  (the prefix on issue IDs, e.g., ENG if issues are ENG-42)")
+        click.echo("")
+        click.echo("Or re-run with:")
+        click.echo(f"  dispatch setup {repo_path} --linear-project YOUR_KEY")
 
 
 if __name__ == "__main__":

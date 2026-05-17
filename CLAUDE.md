@@ -27,15 +27,19 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### Step 2: Ask for Linear API key
+### Step 2: Check if Linear API key exists
 
-Ask the user: "What's your Linear API key? You can create one at
-https://linear.app/settings/api → click 'Create key'."
+Check if `~/.dispatch/config.yaml` exists and has a `linear_api_key` value.
+
+If NOT configured yet, ask the user: "What's your Linear API key? You can
+create one at https://linear.app/settings/api → click 'Create key'."
 
 Then run:
 ```bash
 dispatch init --non-interactive --linear-key <THEIR_KEY>
 ```
+
+If already configured, skip this step.
 
 ### Step 3: Setup the repo
 

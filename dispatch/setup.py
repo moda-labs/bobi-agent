@@ -128,9 +128,6 @@ def generate_dispatch_yaml(repo_path: Path) -> dict:
             "review_required": True,
             "auto_merge": False,
         },
-        "notify": {
-            "slack_channel": "",
-        },
     }
 
 
