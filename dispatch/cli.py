@@ -395,6 +395,19 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
         click.echo("Or re-run with:")
         click.echo(f"  dispatch setup {repo_path} --linear-project YOUR_KEY")
 
+    # Bootstrap Linear board with required workflow states
+    resolved_key = linear_key or (creds.get(credential_name) or {}).get("linear_api_key")
+    resolved_project = linear_project or config["linear"]["project"]
+    if resolved_key and resolved_project:
+        click.echo("")
+        click.echo("Bootstrapping Linear board...")
+        from .board_setup import bootstrap_board
+        import truststore
+        truststore.inject_into_ssl()
+        actions = bootstrap_board(resolved_key, resolved_project)
+        for action in actions:
+            click.echo(f"  {action}")
+
 
 if __name__ == "__main__":
     main()

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .config import GlobalConfig, RepoConfig
 from .conversation import get_latest_human_comment
-from .dispatcher import spawn_agent, check_processes, _get_worktree_path
+from .dispatcher import spawn_agent, check_processes
 from .scanner import scan_linear, WorkItem, WorkSource
 from .state import StateStore, Status
 
