@@ -13,6 +13,17 @@ from .setup import setup_repo, generate_dispatch_yaml
 from .state import StateStore
 
 
+CRON_COMMENT = "# agent-dispatch: scan Linear and dispatch work"
+CRON_JOB = "* * * * * {dispatch} cycle >> {log} 2>&1"
+
+
+def _get_cron_line() -> str:
+    """Build the cron line using the venv's dispatch binary."""
+    dispatch_bin = Path(sys.executable).parent / "dispatch"
+    log_path = GLOBAL_CONFIG_DIR / "dispatch.log"
+    return CRON_JOB.format(dispatch=dispatch_bin, log=log_path)
+
+
 @click.group()
 def main():
     """Agent dispatch engine — scan Linear, spawn coding agents."""
@@ -71,15 +82,30 @@ def register(repo_path: str):
 @main.command()
 @click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip prompts (use flags/env vars only)")
 def init(non_interactive):
-    """Initialize global config at ~/.dispatch/.
+    """Initialize global config and install the cron job.
 
-    Creates the config directory and empty config. Credentials are
-    stored per-project — use `dispatch setup` in each repo.
+    Creates the config directory, empty config, and installs the
+    cron job (if not already running). Credentials are stored
+    per-project — use `dispatch setup` in each repo.
     """
+    import subprocess
+
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config = GlobalConfig.load()
     config.save()
     click.echo(f"Config initialized at {GLOBAL_CONFIG_DIR / 'config.yaml'}")
+
+    # Auto-install cron if not already running
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    current = result.stdout if result.returncode == 0 else ""
+
+    if CRON_COMMENT not in current:
+        cron_line = _get_cron_line()
+        new_crontab = current.rstrip("\n") + f"\n{CRON_COMMENT}\n{cron_line}\n"
+        subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
+        click.echo("Cron installed. Dispatch runs every minute.")
+    else:
+        click.echo("Cron already running.")
 
 
 @main.command()
@@ -195,6 +221,49 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
         click.echo("")
         click.echo("Or re-run with:")
         click.echo(f"  dispatch setup {repo_path} --linear-project YOUR_KEY")
+
+
+@main.command(name="cron")
+@click.argument("action", type=click.Choice(["install", "uninstall", "status"]))
+def cron_cmd(action: str):
+    """Manage the dispatch cron job (install/uninstall/status)."""
+    import subprocess
+
+    # Read current crontab
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    current = result.stdout if result.returncode == 0 else ""
+
+    cron_line = _get_cron_line()
+
+    if action == "status":
+        if CRON_COMMENT in current:
+            click.echo("Cron is installed and running every minute.")
+            click.echo(f"  {cron_line}")
+        else:
+            click.echo("Cron is not installed.")
+        return
+
+    if action == "install":
+        if CRON_COMMENT in current:
+            click.echo("Cron already installed.")
+            return
+
+        new_crontab = current.rstrip("\n") + f"\n{CRON_COMMENT}\n{cron_line}\n"
+        subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
+        click.echo("Cron installed. Dispatch runs every minute.")
+        click.echo(f"  {cron_line}")
+        return
+
+    if action == "uninstall":
+        if CRON_COMMENT not in current:
+            click.echo("Cron not installed, nothing to remove.")
+            return
+
+        lines = current.splitlines()
+        new_lines = [l for l in lines if CRON_COMMENT not in l and "dispatch" not in l.split("#")[0]]
+        new_crontab = "\n".join(new_lines) + "\n"
+        subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
+        click.echo("Cron uninstalled.")
 
 
 if __name__ == "__main__":
