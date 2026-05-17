@@ -137,6 +137,42 @@ async def check_for_reply(
     return None
 
 
+async def get_latest_human_comment(api_key: str, linear_issue_id: str) -> str | None:
+    """Get the most recent non-agent comment on an issue."""
+    query = """
+    query($issueId: String!) {
+        issue(id: $issueId) {
+            comments(orderBy: createdAt) {
+                nodes { id body createdAt }
+            }
+        }
+    }
+    """
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            LINEAR_API,
+            headers={"Authorization": api_key, "Content-Type": "application/json"},
+            json={"query": query, "variables": {"issueId": linear_issue_id}},
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+
+    comments = data.get("data", {}).get("issue", {}).get("comments", {}).get("nodes", [])
+
+    # Walk backwards to find the most recent human comment
+    for comment in reversed(comments):
+        body = comment.get("body", "")
+        if body.startswith(AGENT_COMMENT_PREFIX) or body.startswith(AGENT_STATUS_PREFIX):
+            continue
+        if "🤖" in body:
+            continue
+        return body
+
+    return None
+
+
 async def poll_blocked_sessions(
     global_config: GlobalConfig,
     state: StateStore,
@@ -148,7 +184,7 @@ async def poll_blocked_sessions(
         if item.status != Status.BLOCKED:
             continue
 
-        if not item.linear_issue_id or not item.pending_question_id:
+        if not item.linear_issue_id:
             continue
 
         # Resolve credentials for this repo
@@ -164,9 +200,14 @@ async def poll_blocked_sessions(
         if not api_key:
             continue
 
-        reply = await check_for_reply(
-            api_key, item.linear_issue_id, item.pending_question_id
-        )
+        if item.pending_question_id:
+            # Has a specific question — look for reply after it
+            reply = await check_for_reply(
+                api_key, item.linear_issue_id, item.pending_question_id
+            )
+        else:
+            # Spec review or general block — look for any recent human comment
+            reply = await get_latest_human_comment(api_key, item.linear_issue_id)
 
         if reply:
             unblocked.append({
