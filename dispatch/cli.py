@@ -69,29 +69,17 @@ def register(repo_path: str):
 
 
 @main.command()
-@click.option("--linear-key", envvar="LINEAR_API_KEY", default=None, help="Linear API key")
 @click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip prompts (use flags/env vars only)")
-def init(linear_key, non_interactive):
+def init(non_interactive):
     """Initialize global config at ~/.dispatch/.
 
-    In non-interactive mode (--non-interactive, or CI=1), skips prompts and
-    only uses values from flags or env vars. Safe to run from agents/scripts.
+    Creates the config directory and empty config. Credentials are
+    stored per-project — use `dispatch setup` in each repo.
     """
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config = GlobalConfig.load()
-
-    if linear_key:
-        config.linear_api_key = linear_key
-    elif not config.linear_api_key and not non_interactive:
-        try:
-            key = click.prompt("Linear API key (or press Enter to skip)", default="", show_default=False)
-            if key:
-                config.linear_api_key = key
-        except (EOFError, click.Abort):
-            pass
-
     config.save()
-    click.echo(f"Config saved to {GLOBAL_CONFIG_DIR / 'config.yaml'}")
+    click.echo(f"Config initialized at {GLOBAL_CONFIG_DIR / 'config.yaml'}")
 
 
 @main.command()
@@ -112,15 +100,18 @@ def repos():
 @main.command()
 @click.argument("repo_path", type=click.Path(exists=True), default=".")
 @click.option("--linear-project", default=None, help="Linear project key (e.g., ENG)")
+@click.option("--linear-key", envvar="LINEAR_API_KEY", default=None, help="Linear API key for this project")
 @click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip prompts, use flags/defaults only")
-def setup(repo_path: str, linear_project: str | None, non_interactive: bool):
+def setup(repo_path: str, linear_project: str | None, linear_key: str | None, non_interactive: bool):
     """Auto-generate .dispatch.yaml for a repo and register it.
 
     Inspects the repo to detect test commands, framework, and suggests
-    Linear project key and gstack skills. One command to wire up any repo.
+    Linear project key and gstack skills. Stores the Linear API key as
+    a per-project credential (not global).
     """
     path = Path(repo_path).resolve()
     config_path = path / ".dispatch.yaml"
+    credential_name = path.name  # use repo dir name as credential key
 
     if config_path.exists() and not non_interactive:
         try:
@@ -130,11 +121,35 @@ def setup(repo_path: str, linear_project: str | None, non_interactive: bool):
         except (EOFError, click.Abort):
             click.echo("Overwriting (non-interactive).")
 
+    # Store Linear API key as a per-project credential
+    from .config import Credentials
+    creds = Credentials.load()
+    existing_cred = creds.get(credential_name)
+    has_key = bool(existing_cred.get("linear_api_key"))
+
+    if linear_key:
+        creds.add(credential_name, linear_api_key=linear_key)
+        click.echo(f"Linear API key stored for project '{credential_name}'")
+    elif not has_key and not non_interactive:
+        try:
+            key = click.prompt(
+                "Linear API key (https://linear.app/settings/api → Create key)",
+                default="", show_default=False,
+            )
+            if key:
+                creds.add(credential_name, linear_api_key=key)
+                click.echo(f"Linear API key stored for project '{credential_name}'")
+        except (EOFError, click.Abort):
+            pass
+    elif has_key:
+        click.echo(f"Linear API key already configured for '{credential_name}'")
+
     # Generate config
     from .setup import generate_dispatch_yaml
     import yaml
 
     config = generate_dispatch_yaml(path)
+    config["credentials"] = credential_name
 
     # Override with flags if provided
     if linear_project:
@@ -153,6 +168,7 @@ def setup(repo_path: str, linear_project: str | None, non_interactive: bool):
     click.echo("Detected:")
     click.echo(f"  Test command:   {test_cmd or '(none detected)'}")
     click.echo(f"  Skills:         {', '.join(skills)}")
+    click.echo(f"  Credentials:    {credential_name}")
     click.echo("")
     if not linear_project:
         click.echo(f"  Linear project: \"{project}\" (GUESSED from repo name — please verify)")

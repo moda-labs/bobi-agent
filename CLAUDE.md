@@ -24,33 +24,28 @@ cd ~/dev/agent-dispatch
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+dispatch init --non-interactive
 ```
 
-### Step 2: Check if Linear API key exists
+### Step 2: Setup the repo
 
-Check if `~/.dispatch/config.yaml` exists and has a `linear_api_key` value.
+Ask the user TWO things:
 
-If NOT configured yet, ask the user: "What's your Linear API key? You can
-create one at https://linear.app/settings/api → click 'Create key'."
+1. "What's your Linear API key? You can create one at
+   https://linear.app/settings/api → click 'Create key'."
+
+2. "What's your Linear project key? This is the prefix on your issue
+   IDs (e.g., if issues look like ENG-42, the key is ENG)."
 
 Then run:
 ```bash
-dispatch init --non-interactive --linear-key <THEIR_KEY>
+dispatch setup --linear-key <API_KEY> --linear-project <PROJECT_KEY>
 ```
 
-If already configured, skip this step.
+This stores the API key per-project (in ~/.dispatch/credentials.yaml,
+not in the repo) and generates `.dispatch.yaml`.
 
-### Step 3: Setup the repo
-
-Ask the user: "What's your Linear project key? This is the prefix on
-your issue IDs (e.g., if issues look like ENG-42, the key is ENG)."
-
-Then run:
-```bash
-dispatch setup --linear-project <KEY>
-```
-
-### Step 4: Verify
+### Step 3: Verify
 
 Show the user the generated `.dispatch.yaml` and ask if the detected
 test command and skills look correct.
@@ -58,8 +53,9 @@ test command and skills look correct.
 ### Important
 
 - NEVER guess the Linear project key — always ask
-- The `dispatch setup` command auto-detects test commands and skills, but
-  the Linear project key MUST come from the user
+- NEVER guess the Linear API key — always ask
+- Credentials are per-project, stored in ~/.dispatch/credentials.yaml
+- `.dispatch.yaml` is safe to commit (no secrets, just references a credential name)
 
 ## Commands
 
