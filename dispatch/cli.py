@@ -41,8 +41,37 @@ def main():
 
 
 @main.command()
+@click.option("--interval", default=60, help="Seconds between cycles")
+def daemon(interval):
+    """Run dispatch as a long-running daemon. Best run in tmux.
+
+    This is the most reliable way to run dispatch — it inherits your
+    full shell environment including macOS Keychain access for Claude
+    OAuth. No cron or launchd needed.
+
+    Usage:
+        dispatch daemon              # foreground, 60s interval
+        tmux new -d -s dispatch 'dispatch daemon'  # background in tmux
+    """
+    import time as time_mod
+    click.echo(f"Dispatch daemon starting. Polling every {interval}s. Ctrl+C to stop.")
+    try:
+        while True:
+            try:
+                summary = run()
+                # Only log if something happened
+                if any(v > 0 for k, v in summary.items() if k != "skipped"):
+                    click.echo(f"{time_mod.strftime('%H:%M:%S')} {json.dumps(summary)}")
+            except Exception as e:
+                click.echo(f"{time_mod.strftime('%H:%M:%S')} ERROR: {e}", err=True)
+            time_mod.sleep(interval)
+    except KeyboardInterrupt:
+        click.echo("\nDaemon stopped.")
+
+
+@main.command()
 def cycle():
-    """Run one dispatch cycle (the cron entrypoint)."""
+    """Run one dispatch cycle (manual/debugging)."""
     summary = run()
     click.echo(json.dumps(summary, indent=2))
 
@@ -215,36 +244,45 @@ def register(repo_path: str):
 @main.command()
 @click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip prompts (use flags/env vars only)")
 def init(non_interactive):
-    """Initialize global config and install the dispatch daemon.
+    """Initialize global config and start the dispatch daemon.
 
-    Creates the config directory, empty config, and installs a launchd
-    agent (macOS) to run dispatch every 60 seconds. launchd runs in
-    the user's session, so it can access the Keychain for Claude OAuth.
+    Creates the config directory and empty config. Starts the daemon
+    in a tmux session so it runs in the background with full env
+    (including macOS Keychain access for Claude OAuth).
     Credentials are stored per-project — use `dispatch setup` in each repo.
     """
+    import subprocess, shutil
+
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config = GlobalConfig.load()
     config.save()
     click.echo(f"Config initialized at {GLOBAL_CONFIG_DIR / 'config.yaml'}")
 
-    # Install launchd agent (replaces cron — cron can't access Keychain)
-    import platform
-    if platform.system() == "Darwin":
-        from .launchd import install, status
-        result = install()
-        click.echo(f"Daemon: {result}")
-    else:
-        # Fall back to cron on Linux
-        import subprocess
-        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        current = result.stdout if result.returncode == 0 else ""
-        if CRON_COMMENT not in current:
-            cron_line = _get_cron_line()
-            new_crontab = current.rstrip("\n") + f"\n{CRON_COMMENT}\n{cron_line}\n"
-            subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
-            click.echo("Cron installed. Dispatch runs every minute.")
-        else:
-            click.echo("Cron already running.")
+    # Start daemon in tmux
+    tmux_path = shutil.which("tmux")
+    dispatch_bin = Path(sys.executable).parent / "dispatch"
+
+    if not tmux_path:
+        click.echo("tmux not found. Run the daemon manually: dispatch daemon")
+        return
+
+    # Check if already running
+    result = subprocess.run(
+        [tmux_path, "has-session", "-t", "dispatch"],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        click.echo("Daemon already running in tmux session 'dispatch'.")
+        return
+
+    # Start new tmux session with the daemon
+    subprocess.run(
+        [tmux_path, "new-session", "-d", "-s", "dispatch", f"{dispatch_bin} daemon"],
+        check=True,
+    )
+    click.echo("Daemon started in tmux session 'dispatch'.")
+    click.echo("  Attach: tmux attach -t dispatch")
+    click.echo("  Logs:   dispatch watch")
 
 
 @main.command()
