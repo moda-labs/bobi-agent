@@ -12,7 +12,8 @@ from .scanner import scan_linear, scan_slack, WorkItem, WorkSource
 from .state import StateStore, Status
 from .reporter import (
     report_completion, report_failure,
-    move_to_in_progress, move_to_in_review, move_to_done, add_comment,
+    move_to_in_progress, move_to_in_review, move_to_done, move_to_blocked,
+    add_comment,
 )
 
 log = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ async def run_cycle() -> dict:
                     pass
 
         elif update["status"] == "blocked":
-            # Agent has a question — post it to Linear
+            # Agent has a question — post it to Linear and move to Blocked
             tracked = state._items.get(item_id)
             if tracked and tracked.linear_issue_id:
                 repo_path = Path(tracked.repo_path)
@@ -84,6 +85,7 @@ async def run_cycle() -> dict:
                         if comment_id:
                             state.update_status(item_id, Status.BLOCKED,
                                 pending_question_id=comment_id)
+                        await move_to_blocked(api_key, tracked.linear_issue_id, repo_config.linear_project)
                         log.info(f"Blocked {item_id}: question posted to Linear")
                 except FileNotFoundError:
                     pass
@@ -136,6 +138,18 @@ async def run_cycle() -> dict:
     summary["unblocked"] = len(unblocked)
     for item in unblocked:
         log.info(f"Unblocked {item['id']}: user replied on Linear")
+        # Move back to In Progress
+        tracked = state._items.get(item["id"])
+        if tracked and tracked.linear_issue_id:
+            repo_path = Path(tracked.repo_path)
+            try:
+                repo_config = RepoConfig.from_file(repo_path)
+                creds = repo_config.get_credentials()
+                api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                if api_key:
+                    await move_to_in_progress(api_key, tracked.linear_issue_id, repo_config.linear_project)
+            except FileNotFoundError:
+                pass
 
     # 1d. Re-dispatch failed items — move back to Todo and clear state
     from .reporter import get_team_states, move_issue
