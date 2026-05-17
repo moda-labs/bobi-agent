@@ -48,15 +48,14 @@ async def scan_linear(global_config: GlobalConfig, repo_config: RepoConfig) -> l
         return []
 
     query = """
-    query($project: String!, $labels: [String!]!) {
+    query($team: String!) {
         issues(
             filter: {
-                project: { key: { eq: $project } }
-                labels: { name: { in: $labels } }
+                team: { key: { eq: $team } }
                 state: { type: { in: ["triage", "unstarted"] } }
             }
             first: 20
-            orderBy: priority
+            orderBy: updatedAt
         ) {
             nodes {
                 id
@@ -81,8 +80,7 @@ async def scan_linear(global_config: GlobalConfig, repo_config: RepoConfig) -> l
             json={
                 "query": query,
                 "variables": {
-                    "project": repo_config.linear_project,
-                    "labels": repo_config.trigger_labels,
+                    "team": repo_config.linear_project,
                 },
             },
         )
@@ -93,6 +91,10 @@ async def scan_linear(global_config: GlobalConfig, repo_config: RepoConfig) -> l
     items = []
     for node in data.get("data", {}).get("issues", {}).get("nodes", []):
         issue_labels = [l["name"] for l in node.get("labels", {}).get("nodes", [])]
+
+        # Must have at least one trigger label
+        if not any(trigger in issue_labels for trigger in repo_config.trigger_labels):
+            continue
 
         if any(skip in issue_labels for skip in repo_config.skip_labels):
             continue
