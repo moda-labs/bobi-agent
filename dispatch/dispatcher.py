@@ -1,6 +1,5 @@
 """Spawn coding agents with assembled context."""
 
-import asyncio
 import json
 import os
 import subprocess
@@ -9,8 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import RepoConfig
-from .scanner import Complexity, WorkItem
+from .scanner import WorkItem
 from .skills import discover_skill_packs, get_relevant_skills, format_skills_for_prompt
 from .state import StateStore, Status
 
@@ -201,111 +199,6 @@ You MUST push and create a PR. The task is not done until the PR exists.
 
 {skills}
 """
-
-
-PROMPT_TEMPLATES = {
-    Complexity.TRIVIAL: """You are working in: {repo_path}
-
-Read CLAUDE.md first if it exists.
-
-## Task
-{title}
-
-{body}
-
-## Lifecycle: Implement → Review → Ship
-
-1. git checkout -b {branch}
-2. Implement the fix
-3. Run tests: {test_command}
-4. Commit
-5. Run /review to check your work
-6. git push -u origin {branch}
-7. gh pr create --title "{title}" --body "Fixes {issue_id}"
-
-You MUST push and create a PR. The task is not done until the PR exists.
-
-{skills}
-""",
-    Complexity.MEDIUM: """You are working in: {repo_path}
-
-Read CLAUDE.md first if it exists.
-
-## Task
-{title}
-
-{body}
-
-## Lifecycle: Plan → Implement → Review → Ship
-
-1. git checkout -b {branch}
-2. Read the relevant code. Write a brief plan (what, why, which files, risk).
-3. Implement. One logical change per commit.
-4. Run tests: {test_command}
-5. Run /review to catch bugs before shipping
-6. Fix anything /review finds
-7. git push -u origin {branch}
-8. gh pr create --title "{title}" --body "Fixes {issue_id}\\n\\n<description of changes>"
-
-You MUST push and create a PR. The task is not done until the PR exists.
-
-## Constraints
-- Don't modify unrelated code
-- If tests fail, fix them before creating the PR
-
-{skills}
-""",
-    Complexity.HEAVY: """You are working in: {repo_path}
-
-Read CLAUDE.md first if it exists.
-
-## Task
-{title}
-
-{body}
-
-## Lifecycle: Think → Plan → Implement → Review → Ship
-
-**Step 1: Decide if this needs product thinking.**
-
-If the task is vague, ambitious, or describes a new feature/system without
-a clear spec (e.g., "build notifications", "add social features", "create
-an onboarding flow"), then START with:
-
-1. Run /office-hours — this will challenge your assumptions, reframe the
-   problem, and produce a design doc
-2. Run /plan-ceo-review — this will pressure-test the scope and find the
-   10-star version
-
-Post the resulting plan as a commit (PLAN.md) so it's reviewable.
-
-If the task already has a clear spec (specific files to change, defined
-acceptance criteria, obvious implementation), skip to Step 2.
-
-**Step 2: Engineering plan and implementation.**
-
-1. git checkout -b {branch}
-2. Run /plan-eng-review or write a detailed plan: architecture, data flow,
-   edge cases, test strategy
-3. Implement incrementally — commit after each logical step
-4. Run tests after each step: {test_command}
-5. Run /review to catch bugs, security issues, and completeness gaps
-6. Fix anything /review finds
-7. Run /ship to push and create the PR (or manually):
-   git push -u origin {branch}
-   gh pr create --title "{title}" --body "Fixes {issue_id}\\n\\n<description>"
-
-You MUST push and create a PR. The task is not done until the PR exists.
-
-## Constraints
-- Break large changes into reviewable commits
-- Run the full test suite before creating the PR
-- If stuck for >5 minutes on one approach, try a different angle
-- If fundamentally blocked, write what you learned and stop
-
-{skills}
-""",
-}
 
 
 def _get_skills_text(item: WorkItem) -> str:
@@ -653,10 +546,56 @@ async def check_in_flight(state: StateStore) -> list[dict]:
     return updates
 
 
-def respawn_for_spec_revision(item_id: str, feedback: str, state: StateStore) -> dict | None:
-    """Re-spawn the spec agent to revise SPEC.md based on review feedback."""
+def _spawn_claude_in_worktree(
+    item_id: str,
+    prompt: str,
+    worktree: Path,
+    max_turns: int = 30,
+) -> int:
+    """Spawn a Claude agent in a worktree. Returns the process PID.
+
+    Shared helper for respawn_for_spec_revision and respawn_for_review.
+    Handles temp files, env setup, Popen, and metadata persistence.
+    """
     import shutil
 
+    prompt_file = Path(tempfile.mktemp(prefix="dispatch-prompt-", suffix=".md"))
+    prompt_file.write_text(prompt)
+
+    output_file = Path(tempfile.mktemp(prefix="dispatch-output-", suffix=".jsonl"))
+
+    claude_path = shutil.which("claude") or "/opt/homebrew/bin/claude"
+    cmd = [
+        claude_path, "-p",
+        "--output-format", "json",
+        "--max-turns", str(max_turns),
+        "--dangerously-skip-permissions",
+    ]
+
+    spawn_env = os.environ.copy()
+    spawn_env.setdefault("HOME", str(Path.home()))
+
+    with open(output_file, "w") as out_f:
+        with open(prompt_file, "r") as prompt_in:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(worktree),
+                stdin=prompt_in,
+                stdout=out_f,
+                stderr=subprocess.PIPE,
+                env=spawn_env,
+            )
+
+    meta_path = Path.home() / ".dispatch" / "runs" / item_id
+    meta_path.mkdir(parents=True, exist_ok=True)
+    (meta_path / "prompt.md").write_text(prompt)
+    (meta_path / "output_file").write_text(str(output_file))
+
+    return proc.pid
+
+
+def respawn_for_spec_revision(item_id: str, feedback: str, state: StateStore) -> dict | None:
+    """Re-spawn the spec agent to revise SPEC.md based on review feedback."""
     tracked = state._items.get(item_id)
     if not tracked:
         return None
@@ -694,47 +633,14 @@ Your spec received feedback during design review. Revise it.
 Do NOT implement any code. Only revise the spec file.
 """
 
-    prompt_file = Path(tempfile.mktemp(prefix="dispatch-prompt-", suffix=".md"))
-    prompt_file.write_text(prompt)
+    pid = _spawn_claude_in_worktree(item_id, prompt, worktree)
+    state.update_status(item_id, Status.WORKING, agent_pid=pid, phase="spec")
 
-    output_file = Path(tempfile.mktemp(prefix="dispatch-output-", suffix=".jsonl"))
-
-    claude_path = shutil.which("claude") or "/opt/homebrew/bin/claude"
-    cmd = [
-        claude_path, "-p",
-        "--output-format", "json",
-        "--max-turns", "30",
-        "--dangerously-skip-permissions",
-    ]
-
-    spawn_env = os.environ.copy()
-    spawn_env.setdefault("HOME", str(Path.home()))
-
-    with open(output_file, "w") as out_f:
-        with open(prompt_file, "r") as prompt_in:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(worktree),
-                stdin=prompt_in,
-                stdout=out_f,
-                stderr=subprocess.PIPE,
-                env=spawn_env,
-            )
-
-    state.update_status(item_id, Status.WORKING, agent_pid=proc.pid, phase="spec")
-
-    meta_path = Path.home() / ".dispatch" / "runs" / item_id
-    meta_path.mkdir(parents=True, exist_ok=True)
-    (meta_path / "prompt.md").write_text(prompt)
-    (meta_path / "output_file").write_text(str(output_file))
-
-    return {"pid": proc.pid, "worktree": str(worktree)}
+    return {"pid": pid, "worktree": str(worktree)}
 
 
 def respawn_for_review(item_id: str, feedback: str, state: StateStore) -> dict | None:
     """Re-spawn an agent to address PR review feedback in the existing worktree."""
-    import shutil
-
     tracked = state._items.get(item_id)
     if not tracked:
         return None
@@ -761,41 +667,10 @@ Your PR received changes requested. Address this feedback:
 Do NOT create a new PR. Push to the existing branch and the PR updates automatically.
 """
 
-    prompt_file = Path(tempfile.mktemp(prefix="dispatch-prompt-", suffix=".md"))
-    prompt_file.write_text(prompt)
+    pid = _spawn_claude_in_worktree(item_id, prompt, worktree)
+    state.update_status(item_id, Status.WORKING, agent_pid=pid)
 
-    output_file = Path(tempfile.mktemp(prefix="dispatch-output-", suffix=".jsonl"))
-
-    claude_path = shutil.which("claude") or "/opt/homebrew/bin/claude"
-    cmd = [
-        claude_path, "-p",
-        "--output-format", "json",
-        "--max-turns", "30",
-        "--dangerously-skip-permissions",
-    ]
-
-    spawn_env = os.environ.copy()
-    spawn_env.setdefault("HOME", str(Path.home()))
-
-    with open(output_file, "w") as out_f:
-        with open(prompt_file, "r") as prompt_in:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(worktree),
-                stdin=prompt_in,
-                stdout=out_f,
-                stderr=subprocess.PIPE,
-                env=spawn_env,
-            )
-
-    state.update_status(item_id, Status.WORKING, agent_pid=proc.pid)
-
-    meta_path = Path.home() / ".dispatch" / "runs" / item_id
-    meta_path.mkdir(parents=True, exist_ok=True)
-    (meta_path / "prompt.md").write_text(prompt)
-    (meta_path / "output_file").write_text(str(output_file))
-
-    return {"pid": proc.pid, "worktree": str(worktree)}
+    return {"pid": pid, "worktree": str(worktree)}
 
 
 def _get_worktree_path(item) -> Path | None:

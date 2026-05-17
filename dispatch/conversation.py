@@ -1,11 +1,9 @@
 """Linear-based conversation: post questions, poll for replies, resume sessions."""
 
-import time
-
 import httpx
 
-from .config import GlobalConfig, RepoConfig
-from .state import StateStore, Status, TrackedItem
+from .config import GlobalConfig
+from .state import StateStore, Status
 
 LINEAR_API = "https://api.linear.app/graphql"
 

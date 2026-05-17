@@ -3,7 +3,7 @@
 import httpx
 
 from .config import GlobalConfig, RepoConfig
-from .state import StateStore, TrackedItem, Status
+from .state import TrackedItem
 
 
 LINEAR_API = "https://api.linear.app/graphql"

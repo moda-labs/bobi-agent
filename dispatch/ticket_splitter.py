@@ -6,8 +6,6 @@ import logging
 import httpx
 import yaml
 
-from .config import RepoConfig
-
 log = logging.getLogger(__name__)
 
 LINEAR_API = "https://api.linear.app/graphql"

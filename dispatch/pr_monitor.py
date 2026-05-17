@@ -4,10 +4,9 @@ import shutil
 import subprocess
 import json
 import logging
-from pathlib import Path
 
-from .config import GlobalConfig, RepoConfig
-from .state import StateStore, Status, TrackedItem
+from .config import GlobalConfig
+from .state import StateStore, Status
 
 GH_PATH = shutil.which("gh") or "/opt/homebrew/bin/gh"
 

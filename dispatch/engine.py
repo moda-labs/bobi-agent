@@ -8,16 +8,33 @@ from .config import GlobalConfig, RepoConfig
 from .conversation import poll_blocked_sessions
 from .dispatcher import spawn_agent, check_in_flight, respawn_for_review, respawn_for_spec_revision, read_agent_output, _get_worktree_path, find_spec_file
 from .pr_monitor import poll_pr_reviews, poll_merged_prs
-from .scanner import scan_linear, scan_slack, WorkItem, WorkSource
+from .scanner import scan_linear, WorkItem, WorkSource
 from .state import StateStore, Status
 from .reporter import (
-    report_completion, report_failure,
-    move_to_in_progress, move_to_in_review, move_to_done, move_to_blocked,
+    move_to_in_review, move_to_done, move_to_blocked,
     move_to_planning, move_to_design_review, move_to_implementing,
     add_comment,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _resolve_linear_credentials(
+    repo_path: str | Path,
+    global_config: GlobalConfig,
+) -> tuple[RepoConfig | None, str | None]:
+    """Resolve repo config and Linear API key for a tracked item's repo.
+
+    Returns (repo_config, api_key). Either or both may be None if the
+    repo config is missing or no API key is available.
+    """
+    try:
+        repo_config = RepoConfig.from_file(Path(repo_path))
+        creds = repo_config.get_credentials()
+        api_key = creds.get("linear_api_key") or global_config.linear_api_key
+        return repo_config, api_key
+    except FileNotFoundError:
+        return None, None
 
 
 async def run_cycle() -> dict:
@@ -37,28 +54,18 @@ async def run_cycle() -> dict:
         if update["status"] == "progress":
             tracked = state._items.get(item_id)
             if tracked and tracked.linear_issue_id:
-                repo_path = Path(tracked.repo_path)
-                try:
-                    repo_config = RepoConfig.from_file(repo_path)
-                    creds = repo_config.get_credentials()
-                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                    if api_key:
-                        await add_comment(api_key, tracked.linear_issue_id,
-                            f"🤖 **Progress update:**\n\n{update['progress']}")
-                except FileNotFoundError:
-                    pass
+                _, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
+                if api_key:
+                    await add_comment(api_key, tracked.linear_issue_id,
+                        f"🤖 **Progress update:**\n\n{update['progress']}")
 
         elif update["status"] == "done":
             tracked = state._items.get(item_id)
             if not tracked:
                 continue
 
-            repo_path = Path(tracked.repo_path)
-            try:
-                repo_config = RepoConfig.from_file(repo_path)
-                creds = repo_config.get_credentials()
-                api_key = creds.get("linear_api_key") or global_config.linear_api_key
-            except FileNotFoundError:
+            repo_config, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
+            if not repo_config:
                 continue
 
             if tracked.phase == "spec":
@@ -126,38 +133,26 @@ async def run_cycle() -> dict:
             # Agent has a question — post it to Linear and move to Blocked
             tracked = state._items.get(item_id)
             if tracked and tracked.linear_issue_id:
-                repo_path = Path(tracked.repo_path)
-                try:
-                    repo_config = RepoConfig.from_file(repo_path)
-                    creds = repo_config.get_credentials()
-                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                    if api_key:
-                        from .conversation import post_question
-                        question_text = update.get("question", "Agent needs input")
-                        comment_id = await post_question(api_key, tracked.linear_issue_id, question_text)
-                        if comment_id:
-                            state.update_status(item_id, Status.BLOCKED,
-                                pending_question_id=comment_id)
-                        await move_to_blocked(api_key, tracked.linear_issue_id, repo_config.linear_project)
-                        log.info(f"Blocked {item_id}: question posted to Linear")
-                except FileNotFoundError:
-                    pass
+                repo_config, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
+                if api_key and repo_config:
+                    from .conversation import post_question
+                    question_text = update.get("question", "Agent needs input")
+                    comment_id = await post_question(api_key, tracked.linear_issue_id, question_text)
+                    if comment_id:
+                        state.update_status(item_id, Status.BLOCKED,
+                            pending_question_id=comment_id)
+                    await move_to_blocked(api_key, tracked.linear_issue_id, repo_config.linear_project)
+                    log.info(f"Blocked {item_id}: question posted to Linear")
 
         elif update["status"] == "failed":
             summary["failed"] += 1
             tracked = state._items.get(item_id)
             if tracked and tracked.linear_issue_id:
-                repo_path = Path(tracked.repo_path)
-                try:
-                    repo_config = RepoConfig.from_file(repo_path)
-                    creds = repo_config.get_credentials()
-                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                    if api_key:
-                        error_text = f"\n\nError: {tracked.error}" if tracked.error else ""
-                        await add_comment(api_key, tracked.linear_issue_id,
-                            f"🤖 **Failed/stuck.** Needs human attention.{error_text}")
-                except FileNotFoundError:
-                    pass
+                _, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
+                if api_key:
+                    error_text = f"\n\nError: {tracked.error}" if tracked.error else ""
+                    await add_comment(api_key, tracked.linear_issue_id,
+                        f"🤖 **Failed/stuck.** Needs human attention.{error_text}")
 
     # 1b. Poll PRs for review feedback — re-dispatch if changes requested
     pr_reviews = await poll_pr_reviews(global_config, state)
@@ -167,12 +162,8 @@ async def run_cycle() -> dict:
         if not tracked or not tracked.linear_issue_id:
             continue
 
-        repo_path = Path(tracked.repo_path)
-        try:
-            repo_config = RepoConfig.from_file(repo_path)
-            creds = repo_config.get_credentials()
-            api_key = creds.get("linear_api_key") or global_config.linear_api_key
-        except FileNotFoundError:
+        repo_config, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
+        if not repo_config:
             continue
 
         if review_item.get("phase") == "spec":
@@ -208,12 +199,8 @@ async def run_cycle() -> dict:
 
         log.info(f"Unblocked {item_id}: user replied on Linear")
 
-        repo_path = Path(tracked.repo_path)
-        try:
-            repo_config = RepoConfig.from_file(repo_path)
-            creds = repo_config.get_credentials()
-            api_key = creds.get("linear_api_key") or global_config.linear_api_key
-        except FileNotFoundError:
+        repo_config, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
+        if not repo_config:
             continue
 
         if tracked.phase == "spec":
@@ -304,17 +291,11 @@ async def run_cycle() -> dict:
             log.warning(f"Giving up on {item_id} after {item.attempts} attempts")
             # Leave in failed state, post to Linear
             if item.linear_issue_id:
-                repo_path = Path(item.repo_path)
-                try:
-                    repo_config = RepoConfig.from_file(repo_path)
-                    creds = repo_config.get_credentials()
-                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                    if api_key:
-                        await move_to_blocked(api_key, item.linear_issue_id, repo_config.linear_project)
-                        await add_comment(api_key, item.linear_issue_id,
-                            f"🤖 **Giving up after {item.attempts} attempts.** Needs human intervention.\n\nLast error: {item.error or 'unknown'}")
-                except FileNotFoundError:
-                    pass
+                repo_config, api_key = _resolve_linear_credentials(item.repo_path, global_config)
+                if api_key and repo_config:
+                    await move_to_blocked(api_key, item.linear_issue_id, repo_config.linear_project)
+                    await add_comment(api_key, item.linear_issue_id,
+                        f"🤖 **Giving up after {item.attempts} attempts.** Needs human intervention.\n\nLast error: {item.error or 'unknown'}")
             # Remove from state so we stop retrying
             del state._items[item_id]
             state._save()
@@ -322,18 +303,12 @@ async def run_cycle() -> dict:
 
         # Move back to Todo on Linear for retry
         if item.linear_issue_id:
-            repo_path = Path(item.repo_path)
-            try:
-                repo_config = RepoConfig.from_file(repo_path)
-                creds = repo_config.get_credentials()
-                api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                if api_key:
-                    states = await get_team_states(api_key, repo_config.linear_project)
-                    todo_id = states.get("todo") or states.get("unstarted")
-                    if todo_id:
-                        await move_issue(api_key, item.linear_issue_id, todo_id)
-            except FileNotFoundError:
-                pass
+            repo_config, api_key = _resolve_linear_credentials(item.repo_path, global_config)
+            if api_key and repo_config:
+                states = await get_team_states(api_key, repo_config.linear_project)
+                todo_id = states.get("todo") or states.get("unstarted")
+                if todo_id:
+                    await move_issue(api_key, item.linear_issue_id, todo_id)
         # Track attempt count in meta, then remove from state
         meta_path = Path.home() / ".dispatch" / "runs" / item_id
         meta_path.mkdir(parents=True, exist_ok=True)
@@ -362,10 +337,6 @@ async def run_cycle() -> dict:
         linear_items = await scan_linear(global_config, repo_config)
         all_work.extend(linear_items)
         summary["scanned"] += len(linear_items)
-
-    # Scan Slack (not repo-specific — needs resolution)
-    slack_items = await scan_slack(global_config)
-    summary["scanned"] += len(slack_items)
 
     # 3. Filter and dispatch
     for item in all_work:
@@ -400,17 +371,11 @@ async def run_cycle() -> dict:
         item_id = merged_item["id"]
         linear_issue_id = merged_item.get("linear_issue_id")
         if linear_issue_id:
-            repo_path = Path(merged_item["repo_path"])
-            try:
-                repo_config = RepoConfig.from_file(repo_path)
-                creds = repo_config.get_credentials()
-                api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                if api_key:
-                    await move_to_done(api_key, linear_issue_id, repo_config.linear_project)
-                    await add_comment(api_key, linear_issue_id,
-                        f"🤖 **PR merged.** Issue complete.")
-            except FileNotFoundError:
-                pass
+            repo_config, api_key = _resolve_linear_credentials(merged_item["repo_path"], global_config)
+            if api_key and repo_config:
+                await move_to_done(api_key, linear_issue_id, repo_config.linear_project)
+                await add_comment(api_key, linear_issue_id,
+                    f"🤖 **PR merged.** Issue complete.")
 
         # Remove from state — fully done
         if item_id in state._items:
