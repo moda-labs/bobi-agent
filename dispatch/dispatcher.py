@@ -384,6 +384,69 @@ async def check_in_flight(state: StateStore) -> list[dict]:
     return updates
 
 
+def respawn_for_review(item_id: str, feedback: str, state: StateStore) -> dict | None:
+    """Re-spawn an agent to address PR review feedback in the existing worktree."""
+    import shutil
+
+    tracked = state._items.get(item_id)
+    if not tracked:
+        return None
+
+    worktree = _get_worktree_path(tracked)
+    if not worktree:
+        return None
+
+    prompt = AGENT_PREAMBLE + f"""You are working in: {worktree}
+
+## PR Review Feedback
+
+Your PR received changes requested. Address this feedback:
+
+{feedback}
+
+## Process
+1. Read the feedback carefully
+2. Make the requested changes
+3. Run tests if available
+4. Run /review on your changes
+5. Commit and push to the same branch: git push
+
+Do NOT create a new PR. Push to the existing branch and the PR updates automatically.
+"""
+
+    prompt_file = Path(tempfile.mktemp(prefix="dispatch-prompt-", suffix=".md"))
+    prompt_file.write_text(prompt)
+
+    output_file = Path(tempfile.mktemp(prefix="dispatch-output-", suffix=".jsonl"))
+
+    claude_path = shutil.which("claude") or "/opt/homebrew/bin/claude"
+    cmd = [
+        claude_path, "-p",
+        "--output-format", "json",
+        "--max-turns", "30",
+        "--dangerously-skip-permissions",
+    ]
+
+    with open(output_file, "w") as out_f:
+        with open(prompt_file, "r") as prompt_in:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(worktree),
+                stdin=prompt_in,
+                stdout=out_f,
+                stderr=subprocess.PIPE,
+            )
+
+    state.update_status(item_id, Status.WORKING, agent_pid=proc.pid)
+
+    meta_path = Path.home() / ".dispatch" / "runs" / item_id
+    meta_path.mkdir(parents=True, exist_ok=True)
+    (meta_path / "prompt.md").write_text(prompt)
+    (meta_path / "output_file").write_text(str(output_file))
+
+    return {"pid": proc.pid, "worktree": str(worktree)}
+
+
 def _get_worktree_path(item) -> Path | None:
     """Resolve the worktree path for a tracked item."""
     if not item.repo_path or not item.branch:

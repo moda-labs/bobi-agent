@@ -6,9 +6,10 @@ from pathlib import Path
 
 from .config import GlobalConfig, RepoConfig
 from .conversation import poll_blocked_sessions
+from .dispatcher import spawn_agent, check_in_flight, respawn_for_review, read_agent_output
+from .pr_monitor import poll_pr_reviews
 from .scanner import scan_linear, scan_slack, WorkItem, WorkSource
 from .state import StateStore, Status
-from .dispatcher import spawn_agent, check_in_flight
 from .reporter import (
     report_completion, report_failure,
     move_to_in_progress, move_to_in_review, add_comment,
@@ -33,7 +34,6 @@ async def run_cycle() -> dict:
 
         if update["status"] == "done":
             summary["completed"] += 1
-            # Move Linear to In Review and comment
             tracked = state._items.get(item_id)
             if tracked and tracked.linear_issue_id:
                 repo_path = Path(tracked.repo_path)
@@ -43,9 +43,14 @@ async def run_cycle() -> dict:
                     api_key = creds.get("linear_api_key") or global_config.linear_api_key
                     if api_key:
                         await move_to_in_review(api_key, tracked.linear_issue_id, repo_config.linear_project)
+                        # Post summary of what was done
+                        result = read_agent_output(item_id)
+                        summary_text = result.get("output", "")[:1000] if result else ""
                         pr_text = f"\n\nPR: {tracked.pr_url}" if tracked.pr_url else ""
-                        await add_comment(api_key, tracked.linear_issue_id,
-                            f"🤖 **Done.** Ready for review.{pr_text}")
+                        comment = f"🤖 **Done.** Ready for review.{pr_text}"
+                        if summary_text:
+                            comment += f"\n\n**Summary:**\n{summary_text}"
+                        await add_comment(api_key, tracked.linear_issue_id, comment)
                 except FileNotFoundError:
                     pass
 
@@ -85,7 +90,34 @@ async def run_cycle() -> dict:
                 except FileNotFoundError:
                     pass
 
-    # 1b. Poll blocked sessions for user replies on Linear
+    # 1b. Poll PRs for review feedback — re-dispatch if changes requested
+    pr_reviews = await poll_pr_reviews(global_config, state)
+    for review_item in pr_reviews:
+        item_id = review_item["id"]
+        tracked = state._items.get(item_id)
+        if not tracked or not tracked.linear_issue_id:
+            continue
+
+        repo_path = Path(tracked.repo_path)
+        try:
+            repo_config = RepoConfig.from_file(repo_path)
+            creds = repo_config.get_credentials()
+            api_key = creds.get("linear_api_key") or global_config.linear_api_key
+        except FileNotFoundError:
+            continue
+
+        # Post to Linear that we're addressing feedback
+        if api_key:
+            await move_to_in_progress(api_key, tracked.linear_issue_id, repo_config.linear_project)
+            await add_comment(api_key, tracked.linear_issue_id,
+                f"🤖 **Addressing PR feedback.**\n\n{review_item['feedback'][:500]}")
+
+        # Re-spawn in the same worktree
+        result = respawn_for_review(item_id, review_item["feedback"], state)
+        if result:
+            log.info(f"Re-dispatched {item_id} for PR review feedback (PID {result['pid']})")
+
+    # 1c. Poll blocked sessions for user replies on Linear
     unblocked = await poll_blocked_sessions(global_config, state)
     summary["unblocked"] = len(unblocked)
     for item in unblocked:
