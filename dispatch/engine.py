@@ -73,11 +73,22 @@ async def run_cycle() -> dict:
 
                 if api_key and tracked.linear_issue_id:
                     await move_to_design_review(api_key, tracked.linear_issue_id, repo_config.linear_project)
-                    comment = f"🤖 **Spec ready for review.**\n\n{spec_content[:3000]}"
-                    if len(spec_content) > 3000:
-                        comment += "\n\n_(truncated — full spec in worktree SPEC.md)_"
-                    comment += "\n\n**Reply 'approved' to proceed with implementation, or provide feedback.**"
-                    await add_comment(api_key, tracked.linear_issue_id, comment)
+
+                    # Post full spec across multiple comments if needed
+                    chunk_size = 3500
+                    if len(spec_content) <= chunk_size:
+                        await add_comment(api_key, tracked.linear_issue_id,
+                            f"🤖 **Spec ready for review.**\n\n{spec_content}\n\n"
+                            f"**Reply 'approved' to proceed with implementation, or provide feedback.**")
+                    else:
+                        chunks = [spec_content[i:i+chunk_size] for i in range(0, len(spec_content), chunk_size)]
+                        await add_comment(api_key, tracked.linear_issue_id,
+                            f"🤖 **Spec ready for review.** ({len(chunks)} parts)\n\n{chunks[0]}")
+                        for j, chunk in enumerate(chunks[1:], 2):
+                            await add_comment(api_key, tracked.linear_issue_id,
+                                f"🤖 **Spec (part {j}/{len(chunks)}):**\n\n{chunk}")
+                        await add_comment(api_key, tracked.linear_issue_id,
+                            f"**Reply 'approved' to proceed with implementation, or provide feedback.**")
 
                 # Enter BLOCKED waiting for approval
                 state.update_status(item_id, Status.BLOCKED,
