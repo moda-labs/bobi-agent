@@ -232,7 +232,7 @@ def spawn_agent(item: WorkItem, state: StateStore) -> dict | None:
         cmd = [
             claude_path, "-p",
             "--output-format", "json",
-            "--max-turns", "50",
+            "--max-turns", "200",
             "--dangerously-skip-permissions",
         ]
     elif config.agent_tool == "codex":
@@ -298,26 +298,28 @@ def read_agent_output(item_id: str) -> dict:
     # Try to parse as JSON (claude --output-format json returns a JSON object)
     try:
         data = json.loads(content)
-        result_text = data.get("result", "")
     except json.JSONDecodeError:
-        result_text = content
+        return {"status": "completed", "pr_url": None, "output": content[:2000]}
+
+    # Check if it's an error result (max turns, permission denied, etc.)
+    if data.get("is_error"):
+        errors = data.get("errors", [])
+        error_msg = "; ".join(errors) if errors else "Unknown error"
+        return {"status": "failed", "pr_url": None, "output": error_msg}
+
+    result_text = data.get("result", "")
 
     # Look for PR URL in the output
+    import re
     pr_url = None
     for line in result_text.splitlines():
         if "github.com" in line and "/pull/" in line:
-            # Extract URL
-            import re
             match = re.search(r'https://github\.com/[^\s)]+/pull/\d+', line)
             if match:
                 pr_url = match.group(0)
                 break
 
-    # Check if it looks like it succeeded
-    status = "completed"
-    if "error" in result_text.lower() and "fix" not in result_text.lower():
-        status = "failed"
-
+    status = "completed" if pr_url else "completed"
     return {"status": status, "pr_url": pr_url, "output": result_text[:2000]}
 
 
