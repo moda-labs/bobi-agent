@@ -195,30 +195,57 @@ async def run_cycle() -> dict:
                     if spec_file.exists():
                         spec = spec_file.read_text()
 
-                # Spawn implementation phase
-                # Build a temporary WorkItem for spawning
-                from .scanner import WorkItem, WorkSource, Complexity
-                work_item = WorkItem(
-                    id=item_id,
-                    source=WorkSource.LINEAR,
-                    title=tracked.title,
-                    body="",
-                    repo_config=repo_config,
-                    complexity=Complexity.MEDIUM,
-                    labels=[],
-                    linear_issue_id=tracked.linear_issue_id,
-                )
+                # Check if spec recommends splitting into sub-tickets
+                from .ticket_splitter import parse_split_from_spec, create_sub_tickets
+                split_info = parse_split_from_spec(spec)
 
-                # Remove from state so spawn_agent can re-add it
-                del state._items[item_id]
-                state._save()
+                if split_info and split_info.get("split") is True and split_info.get("tickets"):
+                    # Create sub-tickets in Linear
+                    sub_tickets = await create_sub_tickets(
+                        api_key,
+                        tracked.linear_issue_id,
+                        repo_config.linear_project,
+                        split_info["tickets"],
+                        repo_config.trigger_labels,
+                    )
 
-                result = spawn_agent(work_item, state, phase="implement", spec=spec)
-                if result and api_key:
-                    await move_to_implementing(api_key, tracked.linear_issue_id, repo_config.linear_project)
-                    await add_comment(api_key, tracked.linear_issue_id,
-                        f"🤖 **Spec approved.** Starting implementation.")
-                    log.info(f"Spec approved for {item_id}, starting implementation (PID {result['pid']})")
+                    if sub_tickets and api_key:
+                        ticket_list = "\n".join(
+                            f"- **{t['identifier']}**: {t['title']}" for t in sub_tickets
+                        )
+                        await add_comment(api_key, tracked.linear_issue_id,
+                            f"🤖 **Spec approved. Created {len(sub_tickets)} sub-tickets:**\n\n{ticket_list}\n\n"
+                            f"Each sub-ticket will go through its own spec → design review → implement cycle.\n"
+                            f"This parent ticket will close when all children are complete.")
+
+                    # Remove parent from state — children will be dispatched individually
+                    del state._items[item_id]
+                    state._save()
+                    log.info(f"Spec approved for {item_id}, created {len(sub_tickets)} sub-tickets")
+                else:
+                    # Single ticket — spawn implementation phase
+                    from .scanner import WorkItem, WorkSource, Complexity
+                    work_item = WorkItem(
+                        id=item_id,
+                        source=WorkSource.LINEAR,
+                        title=tracked.title,
+                        body="",
+                        repo_config=repo_config,
+                        complexity=Complexity.MEDIUM,
+                        labels=[],
+                        linear_issue_id=tracked.linear_issue_id,
+                    )
+
+                    # Remove from state so spawn_agent can re-add it
+                    del state._items[item_id]
+                    state._save()
+
+                    result = spawn_agent(work_item, state, phase="implement", spec=spec)
+                    if result and api_key:
+                        await move_to_implementing(api_key, tracked.linear_issue_id, repo_config.linear_project)
+                        await add_comment(api_key, tracked.linear_issue_id,
+                            f"🤖 **Spec approved.** Starting implementation.")
+                        log.info(f"Spec approved for {item_id}, starting implementation (PID {result['pid']})")
             else:
                 # Feedback — re-spawn spec phase with the feedback
                 if api_key:

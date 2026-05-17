@@ -77,8 +77,20 @@ Write SPEC.md in this directory with the following structure:
 
 ### 2. Scope Assessment
 - Is this one task or should it be broken into multiple tickets?
-- If multiple: list each sub-ticket with title, description, and dependencies
-- If one: confirm it's appropriately scoped for a single PR
+- If multiple: list each sub-ticket as a YAML block (parsed by the dispatch system):
+
+```yaml
+split: true
+tickets:
+  - title: "Short descriptive title"
+    description: "What this ticket delivers"
+    depends_on: []
+  - title: "Second ticket"
+    description: "What this delivers"
+    depends_on: ["Short descriptive title"]
+```
+
+- If one task: write `split: false` and confirm it's appropriately scoped
 
 ### 3. Technical Approach
 - Which files need to change and why?
@@ -91,9 +103,31 @@ Write SPEC.md in this directory with the following structure:
 - What are the edge cases?
 - What assumptions are we making?
 
-### 5. Testing Strategy
-- What needs to be tested?
-- How do we verify this works?
+### 5. Verification Plan
+
+Three levels of verification, each must be specified:
+
+**Level 1: Unit Tests**
+- List specific unit tests to write
+- What functions/components need test coverage?
+- What edge cases must be covered?
+- Example test names and what they verify
+
+**Level 2: Integration Tests**
+- How do the pieces work together?
+- What API contracts need testing?
+- What end-to-end flows need coverage?
+- Any cross-service or cross-module interactions?
+
+**Level 3: Manual QA (human gate)**
+- Step-by-step QA script a human can follow
+- What to look at, click, and verify
+- Expected vs unexpected behavior
+- Specific URLs, pages, or flows to test
+- Screenshots or recordings to capture
+
+The agent implements Levels 1 and 2. Level 3 is a checklist for the
+human reviewer to follow after the PR is created.
 
 ### 6. Implementation Plan
 - Ordered list of steps
@@ -132,23 +166,37 @@ Follow it closely:
 
 {spec}
 
-## Lifecycle: Implement → Review → Ship
+## Lifecycle: Implement → Test → Review → Ship
 
 1. git checkout -b {branch}
 2. Follow the implementation plan in the approved spec
-3. Run tests: {test_command}
-4. Run /review to catch bugs before shipping
-5. Fix anything /review finds
-6. git push -u origin {branch}
-7. gh pr create --title "{title}" --body "Fixes {issue_id}\\n\\n<description of changes>"
+3. Write the unit tests specified in the Verification Plan (Level 1)
+4. Implement the feature, ensuring unit tests pass
+5. Write the integration tests specified in the Verification Plan (Level 2)
+6. Run all tests: {test_command}
+7. Run /review to catch bugs before shipping
+8. Fix anything /review finds
+9. git push -u origin {branch}
+10. gh pr create --title "{title}" --body "$(cat <<'PRBODY'
+Fixes {issue_id}
+
+<description of changes>
+
+## Manual QA Checklist (Level 3)
+
+<Copy the Level 3 manual QA steps from the spec here so the reviewer
+can follow them when testing the PR>
+PRBODY
+)"
 
 You MUST push and create a PR. The task is not done until the PR exists.
 
 ## Constraints
 - Follow the approved spec — don't deviate without good reason
+- Tests first: write unit tests BEFORE implementation when possible
+- Include the Level 3 manual QA checklist in the PR description
 - If you discover something the spec missed, note it in the PR description
 - One logical change per commit
-- Run tests before creating the PR
 
 {skills}
 """
