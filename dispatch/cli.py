@@ -5,6 +5,9 @@ import logging
 import sys
 from pathlib import Path
 
+import truststore
+truststore.inject_into_ssl()
+
 import click
 
 from .config import GlobalConfig, GLOBAL_CONFIG_DIR

@@ -86,7 +86,8 @@ async def scan_linear(global_config: GlobalConfig, repo_config: RepoConfig) -> l
                 },
             },
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            return []
         data = resp.json()
 
     items = []
