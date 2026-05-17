@@ -32,7 +32,21 @@ async def run_cycle() -> dict:
     for update in updates:
         item_id = update["id"]
 
-        if update["status"] == "done":
+        if update["status"] == "progress":
+            tracked = state._items.get(item_id)
+            if tracked and tracked.linear_issue_id:
+                repo_path = Path(tracked.repo_path)
+                try:
+                    repo_config = RepoConfig.from_file(repo_path)
+                    creds = repo_config.get_credentials()
+                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                    if api_key:
+                        await add_comment(api_key, tracked.linear_issue_id,
+                            f"🤖 **Progress update:**\n\n{update['progress']}")
+                except FileNotFoundError:
+                    pass
+
+        elif update["status"] == "done":
             summary["completed"] += 1
             tracked = state._items.get(item_id)
             if tracked and tracked.linear_issue_id:

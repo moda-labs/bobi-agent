@@ -33,6 +33,22 @@ user to reply. You will be resumed with their answer.
 
 Do NOT guess on important decisions. It's better to stop and ask than to
 build the wrong thing.
+
+## Progress tracking
+
+Update .dispatch-progress.md in your working directory as you work.
+Write a short status after each major step, for example:
+
+```
+## Progress
+- [x] Read codebase, wrote plan
+- [x] Implemented core feature
+- [ ] Running /review
+- [ ] Push and create PR
+```
+
+Keep it short. This file is posted to Linear so the user can see
+what you're doing from their phone.
 """
 
 
@@ -347,6 +363,23 @@ async def check_in_flight(state: StateStore) -> list[dict]:
                             "question": question,
                         })
                         continue
+
+                    # Check for progress updates
+                    progress_file = worktree / ".dispatch-progress.md"
+                    if progress_file.exists():
+                        progress = progress_file.read_text().strip()
+                        # Only report if changed since last check
+                        meta_path = Path.home() / ".dispatch" / "runs" / item.id
+                        last_progress_file = meta_path / "last_progress"
+                        last_progress = last_progress_file.read_text().strip() if last_progress_file.exists() else ""
+                        if progress != last_progress:
+                            meta_path.mkdir(parents=True, exist_ok=True)
+                            last_progress_file.write_text(progress)
+                            updates.append({
+                                "id": item.id,
+                                "status": "progress",
+                                "progress": progress,
+                            })
 
                 # Check for timeout
                 elapsed = time.time() - item.dispatched_at
