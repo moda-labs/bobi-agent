@@ -589,14 +589,24 @@ async def check_in_flight(state: StateStore) -> list[dict]:
                 # Read output
                 result = read_agent_output(item.id)
 
-                if result.get("pr_url"):
-                    state.update_status(item.id, Status.DONE, pr_url=result["pr_url"])
-                    updates.append({"id": item.id, "status": "done", "pr_url": result["pr_url"]})
-                elif result.get("status") == "failed":
+                if result.get("status") == "failed":
                     state.mark_failed(item.id, error=result.get("output", "")[:500])
                     updates.append({"id": item.id, "status": "failed"})
+                elif item.phase == "spec":
+                    # Spec phase: success = SPEC.md exists
+                    worktree = _get_worktree_path(item)
+                    spec_exists = worktree and (worktree / "SPEC.md").exists()
+                    if spec_exists:
+                        state.update_status(item.id, Status.DONE)
+                        updates.append({"id": item.id, "status": "done"})
+                    else:
+                        state.mark_failed(item.id, error="Spec phase finished but no SPEC.md written")
+                        updates.append({"id": item.id, "status": "failed"})
+                elif result.get("pr_url"):
+                    state.update_status(item.id, Status.DONE, pr_url=result["pr_url"])
+                    updates.append({"id": item.id, "status": "done", "pr_url": result["pr_url"]})
                 else:
-                    # Completed but no PR found — mark auditing for manual check
+                    # Implementation finished but no PR found
                     state.update_status(item.id, Status.AUDITING)
                     updates.append({"id": item.id, "status": "auditing"})
 
