@@ -15,6 +15,27 @@ from .skills import discover_skill_packs, get_relevant_skills, format_skills_for
 from .state import StateStore, Status
 
 
+AGENT_PREAMBLE = """## Running unattended (agent-dispatch)
+
+You are running as an automated agent dispatched from a Linear issue.
+There is no human at the terminal.
+
+When gstack skills ask you questions (AskUserQuestion):
+- Pick the recommended option for routine choices (formatting, naming, style)
+- For significant decisions (scope changes, architecture choices, "should we
+  also do X?"), STOP and do the following:
+  1. Commit any work done so far
+  2. Write the question and your recommendation to a file: .dispatch-question.md
+  3. Exit cleanly
+
+The dispatch system will post your question to Linear and wait for the
+user to reply. You will be resumed with their answer.
+
+Do NOT guess on important decisions. It's better to stop and ask than to
+build the wrong thing.
+"""
+
+
 PROMPT_TEMPLATES = {
     Complexity.TRIVIAL: """You are working in: {repo_path}
 
@@ -137,7 +158,7 @@ def build_prompt(item: WorkItem, branch: str) -> str:
 
     skills_text = discovered_skills or explicit_skills
 
-    return template.format(
+    prompt = template.format(
         repo_path=config.path,
         title=item.title,
         body=item.body,
@@ -146,6 +167,8 @@ def build_prompt(item: WorkItem, branch: str) -> str:
         test_command=config.test_command or "(no test command configured)",
         skills=skills_text,
     )
+
+    return AGENT_PREAMBLE + prompt
 
 
 def _slugify(text: str) -> str:
@@ -303,13 +326,43 @@ async def check_in_flight(state: StateStore) -> list[dict]:
         if item.agent_pid:
             try:
                 os.kill(item.agent_pid, 0)
-                # Still running — check for timeout
+                # Still running — check for question file (agent wants to ask user)
+                worktree = _get_worktree_path(item)
+                if worktree:
+                    question_file = worktree / ".dispatch-question.md"
+                    if question_file.exists():
+                        question = question_file.read_text().strip()
+                        state.update_status(item.id, Status.BLOCKED,
+                            pending_question_id=None)
+                        updates.append({
+                            "id": item.id,
+                            "status": "blocked",
+                            "question": question,
+                        })
+                        continue
+
+                # Check for timeout
                 elapsed = time.time() - item.dispatched_at
                 if elapsed > 7200:  # 2 hours
                     state.mark_stuck(item.id)
                     updates.append({"id": item.id, "status": "stuck", "reason": "timeout"})
             except ProcessLookupError:
-                # Process finished — read output
+                # Process finished — check for question file first
+                worktree = _get_worktree_path(item)
+                if worktree:
+                    question_file = worktree / ".dispatch-question.md"
+                    if question_file.exists():
+                        question = question_file.read_text().strip()
+                        state.update_status(item.id, Status.BLOCKED,
+                            pending_question_id=None)
+                        updates.append({
+                            "id": item.id,
+                            "status": "blocked",
+                            "question": question,
+                        })
+                        continue
+
+                # Read output
                 result = read_agent_output(item.id)
 
                 if result.get("pr_url"):
@@ -324,3 +377,21 @@ async def check_in_flight(state: StateStore) -> list[dict]:
                     updates.append({"id": item.id, "status": "auditing"})
 
     return updates
+
+
+def _get_worktree_path(item) -> Path | None:
+    """Resolve the worktree path for a tracked item."""
+    if not item.repo_path or not item.branch:
+        return None
+    repo = Path(item.repo_path)
+    # Derive worktree dir from the branch name
+    # branch is like "agent/bet-5-abc123", worktree is "worktrees/bet-5-<slug>"
+    worktrees_dir = repo / "worktrees"
+    if not worktrees_dir.exists():
+        return None
+    # Find the matching worktree
+    issue_prefix = item.id.lower()
+    for child in worktrees_dir.iterdir():
+        if child.is_dir() and child.name.startswith(issue_prefix):
+            return child
+    return None

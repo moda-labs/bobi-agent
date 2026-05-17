@@ -49,6 +49,26 @@ async def run_cycle() -> dict:
                 except FileNotFoundError:
                     pass
 
+        elif update["status"] == "blocked":
+            # Agent has a question — post it to Linear
+            tracked = state._items.get(item_id)
+            if tracked and tracked.linear_issue_id:
+                repo_path = Path(tracked.repo_path)
+                try:
+                    repo_config = RepoConfig.from_file(repo_path)
+                    creds = repo_config.get_credentials()
+                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                    if api_key:
+                        from .conversation import post_question
+                        question_text = update.get("question", "Agent needs input")
+                        comment_id = await post_question(api_key, tracked.linear_issue_id, question_text)
+                        if comment_id:
+                            state.update_status(item_id, Status.BLOCKED,
+                                pending_question_id=comment_id)
+                        log.info(f"Blocked {item_id}: question posted to Linear")
+                except FileNotFoundError:
+                    pass
+
         elif update["status"] == "failed":
             summary["failed"] += 1
             tracked = state._items.get(item_id)
