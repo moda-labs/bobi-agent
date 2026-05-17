@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .config import GlobalConfig, RepoConfig
 from .conversation import poll_blocked_sessions
-from .dispatcher import spawn_agent, check_in_flight, respawn_for_review, respawn_for_spec_revision, read_agent_output, _get_worktree_path
+from .dispatcher import spawn_agent, check_in_flight, respawn_for_review, respawn_for_spec_revision, read_agent_output, _get_worktree_path, find_spec_file
 from .pr_monitor import poll_pr_reviews, poll_merged_prs
 from .scanner import scan_linear, scan_slack, WorkItem, WorkSource
 from .state import StateStore, Status
@@ -63,12 +63,11 @@ async def run_cycle() -> dict:
 
             if tracked.phase == "spec":
                 # Spec phase done — post SPEC.md to Linear, enter Design Review
-                from .dispatcher import _get_worktree_path
                 worktree = _get_worktree_path(tracked)
                 spec_content = ""
                 if worktree:
-                    spec_file = worktree / "SPEC.md"
-                    if spec_file.exists():
+                    spec_file = find_spec_file(worktree)
+                    if spec_file:
                         spec_content = spec_file.read_text().strip()
 
                 if api_key and tracked.linear_issue_id:
@@ -81,7 +80,7 @@ async def run_cycle() -> dict:
 
                     pr_url = None
                     if worktree:
-                        subprocess.run([git_path, "add", "SPEC.md"], cwd=str(worktree), capture_output=True)
+                        subprocess.run([git_path, "add", "specs/"], cwd=str(worktree), capture_output=True)
                         subprocess.run([git_path, "commit", "-m", f"spec: {tracked.title}"], cwd=str(worktree), capture_output=True)
                         subprocess.run([git_path, "push", "-u", "origin", tracked.branch], cwd=str(worktree), capture_output=True)
                         result = subprocess.run(
@@ -227,8 +226,8 @@ async def run_cycle() -> dict:
                 worktree = _get_worktree_path(tracked)
                 spec = ""
                 if worktree:
-                    spec_file = worktree / "SPEC.md"
-                    if spec_file.exists():
+                    spec_file = find_spec_file(worktree)
+                    if spec_file:
                         spec = spec_file.read_text()
 
                 # Check if spec recommends splitting into sub-tickets

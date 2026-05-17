@@ -76,7 +76,7 @@ Follow the /frontdoor intake process:
 - **Update** — new or changed capability. Future-tense.
 
 If Bug: note it and write a spec focused on investigation + fix.
-If Inquiry: write a short answer in SPEC.md and stop.
+If Inquiry: write a short answer in specs/{spec_filename} and stop.
 If Update: continue with full spec.
 
 ### Step 2 — Problem & solution read-back
@@ -140,10 +140,10 @@ The agent writes Levels 1 and 2. Level 3 goes in the PR for the human reviewer.
 
 ## Output
 
-Write SPEC.md in this directory with all of the above.
+Write specs/{spec_filename} with all of the above. Create the specs/ directory if needed.
 
 Do NOT write any implementation code. Do NOT create branches or PRs.
-Your only output is SPEC.md.
+Your only output is specs/{spec_filename}
 
 {skills}
 """
@@ -321,15 +321,41 @@ def _get_skills_text(item: WorkItem) -> str:
     return discovered_skills or explicit_skills
 
 
+def _spec_filename(issue_id: str, title: str) -> str:
+    """Generate spec filename: bet-9-extract-restaurant-name.md"""
+    slug = _slugify(title)
+    return f"{issue_id.lower()}-{slug}.md"
+
+
+def get_spec_path(worktree: Path, item_id: str, title: str) -> Path:
+    """Get the spec file path for an item."""
+    return worktree / "specs" / _spec_filename(item_id, title)
+
+
+def find_spec_file(worktree: Path) -> Path | None:
+    """Find any spec file in the worktree's specs/ directory."""
+    specs_dir = worktree / "specs"
+    if not specs_dir.exists():
+        # Fall back to SPEC.md for backward compat
+        legacy = worktree / "SPEC.md"
+        return legacy if legacy.exists() else None
+    for f in specs_dir.iterdir():
+        if f.suffix == ".md":
+            return f
+    return None
+
+
 def build_spec_prompt(item: WorkItem) -> str:
     """Build the spec/planning phase prompt."""
     skills_text = _get_skills_text(item)
+    spec_filename = _spec_filename(item.id, item.title)
 
     prompt = SPEC_PROMPT.format(
         repo_path=item.repo_config.path,
         title=item.title,
         body=item.body,
         skills=skills_text,
+        spec_filename=spec_filename,
     )
 
     return AGENT_PREAMBLE + prompt
@@ -594,14 +620,14 @@ async def check_in_flight(state: StateStore) -> list[dict]:
                     state.mark_failed(item.id, error=result.get("output", "")[:500])
                     updates.append({"id": item.id, "status": "failed"})
                 elif item.phase == "spec":
-                    # Spec phase: success = SPEC.md exists
+                    # Spec phase: success = spec file exists
                     worktree = _get_worktree_path(item)
-                    spec_exists = worktree and (worktree / "SPEC.md").exists()
-                    if spec_exists:
+                    spec_file = find_spec_file(worktree) if worktree else None
+                    if spec_file:
                         state.update_status(item.id, Status.DONE)
                         updates.append({"id": item.id, "status": "done"})
                     else:
-                        state.mark_failed(item.id, error="Spec phase finished but no SPEC.md written")
+                        state.mark_failed(item.id, error="Spec phase finished but no spec file written")
                         updates.append({"id": item.id, "status": "failed"})
                 elif result.get("pr_url"):
                     state.update_status(item.id, Status.DONE, pr_url=result["pr_url"])
@@ -627,16 +653,17 @@ def respawn_for_spec_revision(item_id: str, feedback: str, state: StateStore) ->
         return None
 
     # Read current spec so agent has context
-    spec_file = worktree / "SPEC.md"
-    current_spec = spec_file.read_text() if spec_file.exists() else ""
+    spec_file = find_spec_file(worktree)
+    current_spec = spec_file.read_text() if spec_file else ""
+    spec_path = spec_file.relative_to(worktree) if spec_file else "specs/spec.md"
 
     prompt = AGENT_PREAMBLE + f"""You are working in: {worktree}
 
 ## Spec Revision
 
-Your SPEC.md received feedback during design review. Revise it.
+Your spec received feedback during design review. Revise it.
 
-## Current SPEC.md
+## Current spec ({spec_path})
 
 {current_spec}
 
@@ -647,11 +674,11 @@ Your SPEC.md received feedback during design review. Revise it.
 ## Process
 
 1. Read the feedback carefully
-2. Revise SPEC.md to address every point
+2. Revise {spec_path} to address every point
 3. If feedback challenges your approach, explain your reasoning OR change it
 4. Commit and push
 
-Do NOT implement any code. Only revise SPEC.md.
+Do NOT implement any code. Only revise the spec file.
 """
 
     prompt_file = Path(tempfile.mktemp(prefix="dispatch-prompt-", suffix=".md"))

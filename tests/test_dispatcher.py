@@ -33,7 +33,7 @@ def test_spec_prompt_does_not_implement():
     item = _make_item()
     prompt = build_prompt(item, BRANCH, phase="spec")
 
-    assert "SPEC.md" in prompt
+    assert "specs/" in prompt
     assert "Do NOT write any implementation code" in prompt
     assert "principal" in prompt.lower()
 
