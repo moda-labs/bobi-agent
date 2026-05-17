@@ -1,0 +1,38 @@
+{
+  "name": "modastack",
+  "version": "0.1.0",
+  "description": "Luke's authored skill layer on top of gstack — the control plane (intake, brand, build) around gstack's execution engine.",
+  "requires": {
+    "gstack": "*"
+  },
+  "skills": [
+    {
+      "name": "frontdoor",
+      "version": "2.0.0",
+      "role": "task intake & routing (the airlock)",
+      "lineage": "lean-custom",
+      "routesTo": ["build", "investigate", "office-hours", "autoplan"]
+    },
+    {
+      "name": "brand-identity",
+      "version": "1.0.0",
+      "role": "brand discovery & visual identity",
+      "lineage": "lean-custom",
+      "routesTo": ["design-shotgun", "design-html"]
+    },
+    {
+      "name": "build",
+      "version": "1.0.0",
+      "role": "staff-engineer implementer",
+      "lineage": "lean-custom",
+      "routesTo": ["review", "qa", "ship"]
+    },
+    {
+      "name": "office-helper",
+      "version": "0.1.0",
+      "role": "adversarial design-doc reviewer",
+      "lineage": "gstack-template",
+      "note": "lineage outlier — rewrite-to-house-style candidate"
+    }
+  ]
+}

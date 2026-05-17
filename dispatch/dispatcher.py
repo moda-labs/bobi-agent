@@ -58,26 +58,44 @@ Read CLAUDE.md first if it exists.
 
 ## Your role
 
-You are a principal-level engineer doing design review for this task.
-You do NOT implement anything. You produce a spec for a human to review.
+You are a principal-level engineer doing design review. You classify,
+scope, plan, and route. You do NOT implement anything.
 
 ## Task
 {title}
 
 {body}
 
-## What to produce
+## Process: /frontdoor methodology
 
-Write SPEC.md in this directory with the following structure:
+Follow the /frontdoor intake process:
 
-### 1. Problem Analysis
-- What is being asked?
-- What is the user-facing outcome?
-- What are the constraints?
+### Step 1 — Classify
+- **Bug** — broken, regressing, or failing. Past-tense.
+- **Inquiry** — question or exploration, no code change implied.
+- **Update** — new or changed capability. Future-tense.
 
-### 2. Scope Assessment
-- Is this one task or should it be broken into multiple tickets?
-- If multiple: list each sub-ticket as a YAML block (parsed by the dispatch system):
+If Bug: note it and write a spec focused on investigation + fix.
+If Inquiry: write a short answer in SPEC.md and stop.
+If Update: continue with full spec.
+
+### Step 2 — Problem & solution read-back
+State back in plain prose:
+- The problem this solves, and the user/moment it solves it for
+- Your one-sentence read of the proposed solution
+- What is explicitly OUT of scope
+
+### Step 3 — Scope guards
+Check for: billing/payment primitives, multi-screen user flows,
+schema changes on production tables. Note any that apply with your
+assessment.
+
+### Step 4 — Size verdict
+- **Small** — one cohesive PR, single domain
+- **Medium** — one PR, multi-domain
+- **Large** — propose a carve into 2-4 tickets
+
+If Large, include a ticket breakdown as YAML:
 
 ```yaml
 split: true
@@ -90,58 +108,39 @@ tickets:
     depends_on: ["Short descriptive title"]
 ```
 
-- If one task: write `split: false` and confirm it's appropriately scoped
+If Small or Medium: write `split: false`.
 
-### 3. Technical Approach
+### Step 5 — Technical Approach
 - Which files need to change and why?
-- What is the architecture / data flow?
-- What are the key design decisions and trade-offs?
-- Are there alternative approaches? Why this one?
+- Architecture / data flow (ASCII diagram if helpful)
+- Key design decisions and trade-offs
+- Alternative approaches considered
 
-### 4. Edge Cases & Risks
-- What could go wrong?
-- What are the edge cases?
-- What assumptions are we making?
+### Step 6 — Verification Plan
 
-### 5. Verification Plan
-
-Three levels of verification, each must be specified:
+Three levels, all required:
 
 **Level 1: Unit Tests**
-- List specific unit tests to write
-- What functions/components need test coverage?
-- What edge cases must be covered?
-- Example test names and what they verify
+- Specific test names and what they verify
+- Edge cases to cover
 
 **Level 2: Integration Tests**
-- How do the pieces work together?
-- What API contracts need testing?
-- What end-to-end flows need coverage?
-- Any cross-service or cross-module interactions?
+- End-to-end flows, API contracts, cross-module interactions
 
 **Level 3: Manual QA (human gate)**
-- Step-by-step QA script a human can follow
-- What to look at, click, and verify
-- Expected vs unexpected behavior
+- Step-by-step script a human follows to verify
+- What to look at, click, and check
 - Specific URLs, pages, or flows to test
-- Screenshots or recordings to capture
 
-The agent implements Levels 1 and 2. Level 3 is a checklist for the
-human reviewer to follow after the PR is created.
+The agent writes Levels 1 and 2. Level 3 goes in the PR for the human reviewer.
 
-### 6. Implementation Plan
-- Ordered list of steps
-- Dependencies between steps
+### Step 7 — Implementation Plan
+- Ordered list of steps with dependencies
 - Estimated complexity (trivial / moderate / complex)
 
-## How to work
+## Output
 
-1. Read the codebase thoroughly. Understand the architecture.
-2. Think about this like a principal engineer — not just "how" but "should we"
-3. Consider whether the scope is right. A good engineer pushes back on scope
-   as often as they accept it.
-4. Write SPEC.md with your analysis
-5. Exit cleanly
+Write SPEC.md in this directory with all of the above.
 
 Do NOT write any implementation code. Do NOT create branches or PRs.
 Your only output is SPEC.md.
@@ -161,42 +160,44 @@ Read CLAUDE.md first if it exists.
 
 ## Approved Spec
 
-The following implementation plan was reviewed and approved by a human engineer.
-Follow it closely:
+The following spec was reviewed and approved. Follow it closely:
 
 {spec}
 
-## Lifecycle: Implement → Test → Review → Ship
+## Your role: /build staff-engineer mode
+
+You are a staff engineer shipping production-quality code. Follow the
+/build methodology:
+
+1. **Read before you write.** Understand the full system first.
+2. **Simple > clever.** Boring, obvious implementations.
+3. **Match the codebase.** Your code should look native.
+4. **Ship the whole thing.** No TODOs, no stubs, no "implement later."
+5. **Tests are not optional.** Every codepath gets a test.
+
+## Lifecycle
 
 1. git checkout -b {branch}
-2. Follow the implementation plan in the approved spec
-3. Write the unit tests specified in the Verification Plan (Level 1)
-4. Implement the feature, ensuring unit tests pass
-5. Write the integration tests specified in the Verification Plan (Level 2)
-6. Run all tests: {test_command}
-7. Run /review to catch bugs before shipping
-8. Fix anything /review finds
-9. git push -u origin {branch}
-10. gh pr create --title "{title}" --body "$(cat <<'PRBODY'
-Fixes {issue_id}
-
-<description of changes>
-
-## Manual QA Checklist (Level 3)
-
-<Copy the Level 3 manual QA steps from the spec here so the reviewer
-can follow them when testing the PR>
-PRBODY
-)"
+2. Write the Level 1 unit tests from the spec's Verification Plan
+3. Implement the feature, ensuring tests pass
+4. Write the Level 2 integration tests
+5. Run all tests: {test_command}
+6. Run /review to catch bugs before shipping
+7. Fix anything /review finds
+8. git push -u origin {branch}
+9. Create the PR with the Level 3 QA checklist in the body:
+   gh pr create --title "{title}" --body "Fixes {issue_id}\\n\\n<description>\\n\\n## Manual QA Checklist\\n<Level 3 steps from spec>"
 
 You MUST push and create a PR. The task is not done until the PR exists.
 
 ## Constraints
 - Follow the approved spec — don't deviate without good reason
-- Tests first: write unit tests BEFORE implementation when possible
+- Tests first: write unit tests BEFORE implementation
 - Include the Level 3 manual QA checklist in the PR description
-- If you discover something the spec missed, note it in the PR description
+- If you discover something the spec missed, note it in the PR
 - One logical change per commit
+- No `any` types, no empty catches, no console.log in production code
+- Use CLI tools for dependencies/config/migrations (never hand-edit manifests)
 
 {skills}
 """

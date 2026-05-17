@@ -46,12 +46,13 @@ def test_spec_prompt_includes_task():
     assert "Gravatar" in prompt
 
 
-def test_spec_prompt_has_scope_assessment():
+def test_spec_prompt_has_scope_and_sizing():
     item = _make_item()
     prompt = build_prompt(item, BRANCH, phase="spec")
 
-    assert "Scope Assessment" in prompt
-    assert "multiple tickets" in prompt.lower()
+    assert "Size verdict" in prompt
+    assert "split" in prompt.lower()
+    assert "Verification Plan" in prompt
 
 
 # Implementation phase tests
