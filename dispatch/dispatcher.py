@@ -222,21 +222,26 @@ def spawn_agent(item: WorkItem, state: StateStore) -> dict | None:
     # Output file for capturing agent results
     output_file = Path(tempfile.mktemp(prefix="dispatch-output-", suffix=".jsonl"))
 
+    # Resolve full path to agent binary (cron doesn't have PATH)
+    import shutil
+    claude_path = shutil.which("claude") or "/opt/homebrew/bin/claude"
+    codex_path = shutil.which("codex") or "codex"
+
     # Spawn based on agent tool — run in the WORKTREE, not the main repo
     if config.agent_tool == "claude":
         cmd = [
-            "claude", "-p",
+            claude_path, "-p",
             "--output-format", "json",
             "--max-turns", "50",
             "--dangerously-skip-permissions",
         ]
     elif config.agent_tool == "codex":
         cmd = [
-            "codex", "--full-auto",
+            codex_path, "--full-auto",
             "--prompt", prompt,
         ]
     else:
-        cmd = ["claude", "-p", "--dangerously-skip-permissions"]
+        cmd = [claude_path, "-p", "--dangerously-skip-permissions"]
 
     # Spawn in background in the worktree
     # Pipe prompt via stdin, capture output to file
