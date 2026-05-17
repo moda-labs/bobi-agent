@@ -25,13 +25,15 @@ Read CLAUDE.md first if it exists.
 
 {body}
 
-## Process
-1. Create a new branch: git checkout -b {branch}
-2. Make the fix
+## Lifecycle: Implement → Review → Ship
+
+1. git checkout -b {branch}
+2. Implement the fix
 3. Run tests: {test_command}
-4. Commit with a clear message
-5. Push the branch: git push -u origin {branch}
-6. Create a PR: gh pr create --title "{title}" --body "Fixes {issue_id}"
+4. Commit
+5. Run /review to check your work
+6. git push -u origin {branch}
+7. gh pr create --title "{title}" --body "Fixes {issue_id}"
 
 You MUST push and create a PR. The task is not done until the PR exists.
 
@@ -46,14 +48,16 @@ Read CLAUDE.md first if it exists.
 
 {body}
 
-## Process
-1. Create a new branch: git checkout -b {branch}
-2. Read relevant files before modifying
-3. Write a brief plan, then implement
+## Lifecycle: Plan → Implement → Review → Ship
+
+1. git checkout -b {branch}
+2. Read the relevant code. Write a brief plan (what, why, which files, risk).
+3. Implement. One logical change per commit.
 4. Run tests: {test_command}
-5. Commit with clear messages (one logical change per commit)
-6. Push: git push -u origin {branch}
-7. Create a PR: gh pr create --title "{title}" --body "Fixes {issue_id}\\n\\n<description of changes>"
+5. Run /review to catch bugs before shipping
+6. Fix anything /review finds
+7. git push -u origin {branch}
+8. gh pr create --title "{title}" --body "Fixes {issue_id}\\n\\n<description of changes>"
 
 You MUST push and create a PR. The task is not done until the PR exists.
 
@@ -72,15 +76,19 @@ Read CLAUDE.md first if it exists.
 
 {body}
 
-## Process
-1. Create a new branch: git checkout -b {branch}
-2. Read CLAUDE.md and understand the project architecture
-3. Plan the implementation
+## Lifecycle: Plan → Implement → Review → Ship
+
+1. git checkout -b {branch}
+2. Read CLAUDE.md and understand the architecture
+3. Run /plan-eng-review or write a detailed plan: architecture, data flow,
+   edge cases, test strategy. Think before you code.
 4. Implement incrementally — commit after each logical step
 5. Run tests after each step: {test_command}
-6. Self-review: read your own diff, check for issues
-7. Push: git push -u origin {branch}
-8. Create a PR with a clear description: gh pr create --title "{title}" --body "Fixes {issue_id}\\n\\n<description>"
+6. Run /review to catch bugs, security issues, and completeness gaps
+7. Fix anything /review finds
+8. Run /ship to push and create the PR (or manually):
+   git push -u origin {branch}
+   gh pr create --title "{title}" --body "Fixes {issue_id}\\n\\n<description>"
 
 You MUST push and create a PR. The task is not done until the PR exists.
 
