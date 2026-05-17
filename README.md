@@ -30,7 +30,7 @@ Every N minutes (cron):
 
 From inside any repo you want to wire up:
 
-> Set up agent-dispatch for this repo: run `bash <(curl -sL https://raw.githubusercontent.com/zkozick/agent-dispatch/main/bootstrap.sh)` — this clones, installs, and runs `dispatch setup` in the current directory.
+> Set up agent-dispatch for this repo: run `bash <(curl -sL https://raw.githubusercontent.com/underminedsk/agent-dispatch/main/bootstrap.sh)` — this clones, installs, and runs `dispatch setup` in the current directory.
 
 Or if already cloned locally:
 
@@ -39,7 +39,7 @@ Or if already cloned locally:
 ### Manual
 
 ```bash
-git clone https://github.com/zkozick/agent-dispatch.git ~/dev/agent-dispatch
+git clone https://github.com/underminedsk/agent-dispatch.git ~/dev/agent-dispatch
 cd ~/dev/agent-dispatch
 python3 -m venv .venv
 source .venv/bin/activate

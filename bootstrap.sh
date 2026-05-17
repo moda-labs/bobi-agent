@@ -9,7 +9,7 @@ set -euo pipefail
 # 4. Run `dispatch setup` in the current repo (if called from a repo)
 
 INSTALL_DIR="${AGENT_DISPATCH_DIR:-$HOME/dev/agent-dispatch}"
-REPO_URL="https://github.com/zkozick/agent-dispatch.git"
+REPO_URL="https://github.com/underminedsk/agent-dispatch.git"
 
 echo "==> agent-dispatch bootstrap"
 
