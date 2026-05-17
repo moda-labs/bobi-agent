@@ -42,7 +42,16 @@ echo "    Installing dependencies..."
 # Make dispatch available without activating venv
 DISPATCH="$INSTALL_DIR/.venv/bin/dispatch"
 
-# 3. Init global config if it doesn't exist
+# 3. Ensure gstack is installed (required dependency)
+if [ ! -d "$HOME/.claude/skills/gstack" ]; then
+    echo "    Installing gstack (required for review/ship/plan skills)..."
+    git clone --single-branch --depth 1 https://github.com/garrytan/gstack.git "$HOME/.claude/skills/gstack"
+    (cd "$HOME/.claude/skills/gstack" && ./setup 2>/dev/null)
+else
+    echo "    gstack found at ~/.claude/skills/gstack"
+fi
+
+# 4. Init global config if it doesn't exist
 if [ ! -f "$HOME/.dispatch/config.yaml" ]; then
     echo "    Initializing config (non-interactive)..."
     "$DISPATCH" init --non-interactive

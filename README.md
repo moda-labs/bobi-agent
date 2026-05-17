@@ -2,6 +2,8 @@
 
 Cron-based agent dispatch loop. Scans Linear for work, spawns Claude Code (or Codex) to implement, reports results via Linear comments.
 
+Requires [gstack](https://github.com/garrytan/gstack) — the agent uses `/review`, `/ship`, `/office-hours`, and `/plan-eng-review` to enforce a real engineering lifecycle instead of vibe coding.
+
 Built from scratch to understand the agentic product engineering loop. Takes design decisions from OpenClaw (persistent heartbeat, state machine per issue, CAS dispatch) and Hermes (tiered complexity, prompt templates, cross-repo portability).
 
 ## Architecture
