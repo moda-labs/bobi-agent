@@ -52,7 +52,7 @@ async def scan_linear(global_config: GlobalConfig, repo_config: RepoConfig) -> l
         issues(
             filter: {
                 team: { key: { eq: $team } }
-                state: { type: { in: ["triage", "unstarted"] } }
+                state: { type: { in: ["unstarted"] } }
             }
             first: 20
             orderBy: updatedAt
