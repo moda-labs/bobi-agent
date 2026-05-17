@@ -29,8 +29,41 @@ async def run_cycle() -> dict:
     # 1. Check in-flight work first
     updates = await check_in_flight(state)
     for update in updates:
-        if update["status"] == "auditing":
+        item_id = update["id"]
+
+        if update["status"] == "done":
             summary["completed"] += 1
+            # Move Linear to In Review and comment
+            tracked = state._items.get(item_id)
+            if tracked and tracked.linear_issue_id:
+                repo_path = Path(tracked.repo_path)
+                try:
+                    repo_config = RepoConfig.from_file(repo_path)
+                    creds = repo_config.get_credentials()
+                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                    if api_key:
+                        await move_to_in_review(api_key, tracked.linear_issue_id, repo_config.linear_project)
+                        pr_text = f"\n\nPR: {tracked.pr_url}" if tracked.pr_url else ""
+                        await add_comment(api_key, tracked.linear_issue_id,
+                            f"🤖 **Done.** Ready for review.{pr_text}")
+                except FileNotFoundError:
+                    pass
+
+        elif update["status"] == "failed":
+            summary["failed"] += 1
+            tracked = state._items.get(item_id)
+            if tracked and tracked.linear_issue_id:
+                repo_path = Path(tracked.repo_path)
+                try:
+                    repo_config = RepoConfig.from_file(repo_path)
+                    creds = repo_config.get_credentials()
+                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                    if api_key:
+                        error_text = f"\n\nError: {tracked.error}" if tracked.error else ""
+                        await add_comment(api_key, tracked.linear_issue_id,
+                            f"🤖 **Failed/stuck.** Needs human attention.{error_text}")
+                except FileNotFoundError:
+                    pass
 
     # 1b. Poll blocked sessions for user replies on Linear
     unblocked = await poll_blocked_sessions(global_config, state)
@@ -88,45 +121,7 @@ async def run_cycle() -> dict:
             summary["skipped"] += 1
             log.debug(f"Skipped {item.id}: at parallel limit")
 
-    # 4. Report completed/failed items
-    for item in state.get_in_flight():
-        if item.status == Status.DONE:
-            repo_path = Path(item.repo_path)
-            try:
-                repo_config = RepoConfig.from_file(repo_path)
-                await report_completion(global_config, repo_config, item)
-
-                # Move to In Review on Linear
-                if item.linear_issue_id:
-                    creds = repo_config.get_credentials()
-                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                    if api_key:
-                        await move_to_in_review(api_key, item.linear_issue_id, repo_config.linear_project)
-                        pr_text = f"\n\nPR: {item.pr_url}" if item.pr_url else ""
-                        await add_comment(api_key, item.linear_issue_id,
-                            f"🤖 **Done.** Ready for review.{pr_text}")
-            except FileNotFoundError:
-                pass
-
-        elif item.status in (Status.FAILED, Status.STUCK):
-            summary["failed"] += 1
-            repo_path = Path(item.repo_path)
-            try:
-                repo_config = RepoConfig.from_file(repo_path)
-                await report_failure(global_config, repo_config, item)
-
-                # Comment the failure on Linear
-                if item.linear_issue_id:
-                    creds = repo_config.get_credentials()
-                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                    if api_key:
-                        error_text = f"\n\nError: {item.error}" if item.error else ""
-                        await add_comment(api_key, item.linear_issue_id,
-                            f"🤖 **Failed/stuck.** Needs human attention.{error_text}")
-            except FileNotFoundError:
-                pass
-
-    # 5. Cleanup old entries
+    # 4. Cleanup old entries
     state.cleanup_old()
 
     return summary
