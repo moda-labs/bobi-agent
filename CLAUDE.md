@@ -1,11 +1,11 @@
-# agent-dispatch
+# agentd
 
 Cron-based agent dispatch loop. Scans Linear for work, spawns coding agents, reports results via Linear comments.
 
 ## Setup
 
 ```bash
-cd ~/dev/agent-dispatch
+cd ~/dev/agentd
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -20,7 +20,7 @@ Do NOT guess or skip these steps.
 ### Step 1: Install
 
 ```bash
-cd ~/dev/agent-dispatch
+cd ~/dev/agentd
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -70,7 +70,7 @@ dispatch status            # show in-flight work
 ## Cron
 
 ```bash
-* * * * * ~/dev/agent-dispatch/.venv/bin/python -m dispatch.cli cycle >> ~/.dispatch/dispatch.log 2>&1
+* * * * * ~/dev/agentd/.venv/bin/python -m dispatch.cli cycle >> ~/.dispatch/dispatch.log 2>&1
 ```
 
 ## Adding a repo to dispatch

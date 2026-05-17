@@ -149,7 +149,7 @@ def watch(interval: int):
             state = StateStore()
             now = time_mod.time()
 
-            click.echo("agent-dispatch | Ctrl+C to stop")
+            click.echo("agentd | Ctrl+C to stop")
             click.echo(f"{'─' * 70}")
 
             if not state._items:

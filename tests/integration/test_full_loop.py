@@ -28,7 +28,7 @@ LINEAR_API = "https://api.linear.app/graphql"
 POLL_INTERVAL = 10  # seconds between checks
 MAX_WAIT_SPEC = 180  # 3 minutes for spec phase
 MAX_WAIT_IMPL = 300  # 5 minutes for implementation
-REPO_PATH = Path(__file__).parent.parent.parent  # agent-dispatch root
+REPO_PATH = Path(__file__).parent.parent.parent  # agentd root
 
 
 def get_api_key() -> str:

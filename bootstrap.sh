@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# agent-dispatch bootstrap
+# agentd bootstrap
 # Paste into any coding agent or run directly. Handles:
 # 1. Clone (if not already installed)
 # 2. Create venv + install
 # 3. Run `dispatch init` (if no config exists)
 # 4. Run `dispatch setup` in the current repo (if called from a repo)
 
-REPO_URL="https://github.com/underminedsk/agent-dispatch.git"
+REPO_URL="https://github.com/underminedsk/agentd.git"
 
-echo "==> agent-dispatch bootstrap"
+echo "==> agentd bootstrap"
 
 # 1. Detect install location — if we're inside the repo already, use it
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -19,7 +19,7 @@ if [ -f "$SCRIPT_DIR/dispatch/__init__.py" ]; then
 elif [ -f "./dispatch/__init__.py" ]; then
     INSTALL_DIR="$(pwd)"
 else
-    INSTALL_DIR="${AGENT_DISPATCH_DIR:-$HOME/dev/agent-dispatch}"
+    INSTALL_DIR="${AGENTD_DIR:-$HOME/dev/agentd}"
 fi
 
 # Clone only if truly not present

@@ -1,6 +1,6 @@
 # Linear Setup
 
-Get a Linear API key for agent-dispatch to scan issues and post comments.
+Get a Linear API key for agentd to scan issues and post comments.
 
 **Time:** ~2 minutes.
 
@@ -8,12 +8,12 @@ Get a Linear API key for agent-dispatch to scan issues and post comments.
 
 1. Go to https://linear.app/settings/api
 2. Click **Create key**
-3. Name it `agent-dispatch`
+3. Name it `agentd`
 4. Copy the key (starts with `lin_api_`)
 
 That's it. Personal API keys have access to all teams/projects your account can see.
 
-## 2. Add the key to agent-dispatch
+## 2. Add the key to agentd
 
 ```bash
 dispatch init

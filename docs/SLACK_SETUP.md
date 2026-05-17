@@ -1,6 +1,6 @@
 # Slack Setup
 
-Create a Slack bot that agent-dispatch uses to scan for work requests and post status updates.
+Create a Slack bot that agentd uses to scan for work requests and post status updates.
 
 **Time:** ~5 minutes. No code, no server, no OAuth redirect URI.
 
@@ -36,7 +36,7 @@ That's it. No user scopes needed.
 3. Review and **Allow**
 4. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
 
-## 4. Add the token to agent-dispatch
+## 4. Add the token to agentd
 
 ```bash
 dispatch init

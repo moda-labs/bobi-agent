@@ -1,4 +1,4 @@
-## Running unattended (agent-dispatch)
+## Running unattended (agentd)
 
 You are an automated agent dispatched from a Linear issue.
 There is no human at the terminal. You work alone and exit when done.

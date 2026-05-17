@@ -1,4 +1,4 @@
-# agent-dispatch
+# agentd
 
 Cron-based agent dispatch loop. Scans Linear for work, spawns Claude Code (or Codex) to implement, reports results via Linear comments.
 
@@ -31,17 +31,17 @@ Every N minutes (cron):
 
 From inside any repo you want to wire up:
 
-> Set up agent-dispatch for this repo: run `bash <(curl -sL https://raw.githubusercontent.com/underminedsk/agent-dispatch/main/bootstrap.sh)` — this clones, installs, and runs `dispatch setup` in the current directory.
+> Set up agentd for this repo: run `bash <(curl -sL https://raw.githubusercontent.com/underminedsk/agentd/main/bootstrap.sh)` — this clones, installs, and runs `dispatch setup` in the current directory.
 
 Or if already cloned locally:
 
-> Set up agent-dispatch: run `~/dev/agent-dispatch/bootstrap.sh`
+> Set up agentd: run `~/dev/agentd/bootstrap.sh`
 
 ### Manual
 
 ```bash
-git clone https://github.com/underminedsk/agent-dispatch.git ~/dev/agent-dispatch
-cd ~/dev/agent-dispatch
+git clone https://github.com/underminedsk/agentd.git ~/dev/agentd
+cd ~/dev/agentd
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -85,7 +85,7 @@ verify:
 
 ```bash
 # Run every minute
-* * * * * cd ~/dev/agent-dispatch && python -m dispatch.cli cycle >> ~/.dispatch/dispatch.log 2>&1
+* * * * * cd ~/dev/agentd && python -m dispatch.cli cycle >> ~/.dispatch/dispatch.log 2>&1
 ```
 
 ## State machine

@@ -1,6 +1,6 @@
 # Skill Packs
 
-agent-dispatch auto-discovers installed skills and incorporates them into agent prompts. No configuration needed — if skills are installed, they're used.
+agentd auto-discovers installed skills and incorporates them into agent prompts. No configuration needed — if skills are installed, they're used.
 
 ## How discovery works
 
