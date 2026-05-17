@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 from .config import GlobalConfig, RepoConfig
+from .conversation import poll_blocked_sessions
 from .scanner import scan_linear, scan_slack, WorkItem, WorkSource
 from .state import StateStore, Status
 from .dispatcher import spawn_agent, check_in_flight
@@ -20,13 +21,19 @@ async def run_cycle() -> dict:
     """
     global_config = GlobalConfig.load()
     state = StateStore()
-    summary = {"scanned": 0, "dispatched": 0, "completed": 0, "failed": 0, "skipped": 0}
+    summary = {"scanned": 0, "dispatched": 0, "completed": 0, "failed": 0, "skipped": 0, "unblocked": 0}
 
     # 1. Check in-flight work first
     updates = await check_in_flight(state)
     for update in updates:
         if update["status"] == "auditing":
             summary["completed"] += 1
+
+    # 1b. Poll blocked sessions for user replies on Linear
+    unblocked = await poll_blocked_sessions(global_config, state)
+    summary["unblocked"] = len(unblocked)
+    for item in unblocked:
+        log.info(f"Unblocked {item['id']}: user replied on Linear")
 
     # 2. Scan for new work across all registered repos
     all_work: list[WorkItem] = []

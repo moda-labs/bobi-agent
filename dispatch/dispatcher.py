@@ -143,6 +143,10 @@ def spawn_agent(item: WorkItem, state: StateStore) -> int | None:
         branch=branch,
     )
 
+    # Store Linear issue ID for conversation threading
+    if item.linear_issue_id:
+        state.update_status(item.id, Status.DISPATCHED, linear_issue_id=item.linear_issue_id)
+
     return proc.pid
 
 

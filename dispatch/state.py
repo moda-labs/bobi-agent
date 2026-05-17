@@ -12,6 +12,7 @@ from .config import STATE_PATH
 class Status(Enum):
     DISPATCHED = "dispatched"
     WORKING = "working"
+    BLOCKED = "blocked"
     AUDITING = "auditing"
     DONE = "done"
     FAILED = "failed"
@@ -33,6 +34,9 @@ class TrackedItem:
     last_checked: float = 0
     attempts: int = 1
     error: str | None = None
+    linear_issue_id: str | None = None
+    pending_question_id: str | None = None
+    last_reply: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -75,6 +79,7 @@ class StateStore:
         return item_id in self._items and self._items[item_id].status in (
             Status.DISPATCHED,
             Status.WORKING,
+            Status.BLOCKED,
             Status.AUDITING,
         )
 
@@ -111,7 +116,7 @@ class StateStore:
         """Get all items currently being worked on."""
         return [
             item for item in self._items.values()
-            if item.status in (Status.DISPATCHED, Status.WORKING, Status.AUDITING)
+            if item.status in (Status.DISPATCHED, Status.WORKING, Status.BLOCKED, Status.AUDITING)
         ]
 
     def get_by_repo(self, repo_path: str) -> list[TrackedItem]:
