@@ -27,13 +27,15 @@ Read CLAUDE.md first if it exists.
 
 ## Process
 1. Create a new branch: git checkout -b {branch}
-2. Make the fix — keep it minimal
+2. Make the fix
 3. Run tests: {test_command}
 4. Commit with a clear message
 5. Push the branch: git push -u origin {branch}
 6. Create a PR: gh pr create --title "{title}" --body "Fixes {issue_id}"
 
 You MUST push and create a PR. The task is not done until the PR exists.
+
+{skills}
 """,
     Complexity.MEDIUM: """You are working in: {repo_path}
 
@@ -58,6 +60,8 @@ You MUST push and create a PR. The task is not done until the PR exists.
 ## Constraints
 - Don't modify unrelated code
 - If tests fail, fix them before creating the PR
+
+{skills}
 """,
     Complexity.HEAVY: """You are working in: {repo_path}
 

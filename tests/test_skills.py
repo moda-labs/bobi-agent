@@ -129,4 +129,4 @@ def test_format_skills_output():
     assert "/review" in output
     assert "/ship" in output
     assert "Code review" in output
-    assert "Available skills" in output
+    assert "use these" in output.lower()

@@ -88,12 +88,19 @@ def discover_skill_packs() -> list[SkillPack]:
 
 
 def get_relevant_skills(packs: list[SkillPack], task_labels: list[str] | None = None) -> list[Skill]:
-    """Filter skills to those relevant for a given task."""
-    # Relevance mapping: label → skill names that help
+    """Return skills to inject into the prompt.
+
+    Always includes universally useful skills (review, ship, investigate).
+    Adds task-specific skills based on labels.
+    """
+    if not packs:
+        return []
+
+    # Relevance mapping: label → additional skill names
     relevance = {
-        "bug": ["investigate", "review"],
-        "feature": ["office-hours", "plan-eng-review", "ship", "review"],
-        "refactor": ["review", "ship"],
+        "bug": ["investigate"],
+        "feature": ["office-hours", "plan-eng-review"],
+        "refactor": [],
         "security": ["cso"],
         "docs": ["document-release"],
         "performance": ["benchmark"],
@@ -102,20 +109,16 @@ def get_relevant_skills(packs: list[SkillPack], task_labels: list[str] | None = 
         "deploy": ["land-and-deploy", "canary"],
     }
 
-    if not task_labels:
-        # Default: return the most universally useful skills
-        universal = {"review", "ship", "investigate"}
-        return [s for p in packs for s in p.skills if s.name in universal]
+    # Always include these
+    relevant_names = {"review", "ship", "investigate"}
 
-    relevant_names = set()
-    for label in task_labels:
-        label_lower = label.lower()
-        for key, skill_names in relevance.items():
-            if key in label_lower:
-                relevant_names.update(skill_names)
-
-    if not relevant_names:
-        relevant_names = {"review", "ship"}
+    # Add label-specific skills
+    if task_labels:
+        for label in task_labels:
+            label_lower = label.lower()
+            for key, skill_names in relevance.items():
+                if key in label_lower:
+                    relevant_names.update(skill_names)
 
     return [s for p in packs for s in p.skills if s.name in relevant_names]
 
@@ -125,13 +128,15 @@ def format_skills_for_prompt(skills: list[Skill]) -> str:
     if not skills:
         return ""
 
-    lines = ["## Available skills (auto-detected)", ""]
+    lines = ["## Skills (use these)", ""]
+    lines.append("You have these skills installed. Use them:")
+    lines.append("")
     for skill in skills:
         desc = f" — {skill.description}" if skill.description else ""
         lines.append(f"- `{skill.trigger}`{desc}")
 
     lines.append("")
-    lines.append("Use these skills when appropriate for the task.")
+    lines.append("At minimum, run `/review` on your changes before creating the PR.")
     return "\n".join(lines)
 
 
