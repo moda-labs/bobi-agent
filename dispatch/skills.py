@@ -87,40 +87,9 @@ def discover_skill_packs() -> list[SkillPack]:
     return packs
 
 
-def get_relevant_skills(packs: list[SkillPack], task_labels: list[str] | None = None) -> list[Skill]:
-    """Return skills to inject into the prompt.
-
-    Always includes universally useful skills (review, ship, investigate).
-    Adds task-specific skills based on labels.
-    """
-    if not packs:
-        return []
-
-    # Relevance mapping: label → additional skill names
-    relevance = {
-        "bug": ["investigate"],
-        "feature": ["office-hours", "plan-eng-review"],
-        "refactor": [],
-        "security": ["cso"],
-        "docs": ["document-release"],
-        "performance": ["benchmark"],
-        "design": ["design-review", "plan-design-review"],
-        "qa": ["qa", "browse"],
-        "deploy": ["land-and-deploy", "canary"],
-    }
-
-    # Always include these
-    relevant_names = {"review", "ship", "investigate"}
-
-    # Add label-specific skills
-    if task_labels:
-        for label in task_labels:
-            label_lower = label.lower()
-            for key, skill_names in relevance.items():
-                if key in label_lower:
-                    relevant_names.update(skill_names)
-
-    return [s for p in packs for s in p.skills if s.name in relevant_names]
+def get_all_skills(packs: list[SkillPack]) -> list[Skill]:
+    """Return all discovered skills to inject into the prompt."""
+    return [s for p in packs for s in p.skills]
 
 
 def format_skills_for_prompt(skills: list[Skill]) -> str:

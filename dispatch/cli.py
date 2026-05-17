@@ -15,21 +15,6 @@ from .engine import run
 from .setup import generate_dispatch_yaml
 from .state import StateStore
 
-
-CRON_COMMENT = "# agent-dispatch: scan Linear and dispatch work"
-CRON_JOB = "* * * * * HOME={home} PATH={path} {dispatch} cycle >> {log} 2>&1"
-
-
-def _get_cron_line() -> str:
-    """Build the cron line using the venv's dispatch binary and current env."""
-    import os
-    dispatch_bin = Path(sys.executable).parent / "dispatch"
-    log_path = GLOBAL_CONFIG_DIR / "dispatch.log"
-    current_path = os.environ.get("PATH", "/usr/bin:/bin")
-    home = os.environ.get("HOME", str(Path.home()))
-    return CRON_JOB.format(dispatch=dispatch_bin, log=log_path, path=current_path, home=home)
-
-
 LOG_PATH = GLOBAL_CONFIG_DIR / "dispatch.log"
 
 
@@ -409,49 +394,6 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
         click.echo("")
         click.echo("Or re-run with:")
         click.echo(f"  dispatch setup {repo_path} --linear-project YOUR_KEY")
-
-
-@main.command(name="cron")
-@click.argument("action", type=click.Choice(["install", "uninstall", "status"]))
-def cron_cmd(action: str):
-    """Manage the dispatch cron job (install/uninstall/status)."""
-    import subprocess
-
-    # Read current crontab
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    current = result.stdout if result.returncode == 0 else ""
-
-    cron_line = _get_cron_line()
-
-    if action == "status":
-        if CRON_COMMENT in current:
-            click.echo("Cron is installed and running every minute.")
-            click.echo(f"  {cron_line}")
-        else:
-            click.echo("Cron is not installed.")
-        return
-
-    if action == "install":
-        if CRON_COMMENT in current:
-            click.echo("Cron already installed.")
-            return
-
-        new_crontab = current.rstrip("\n") + f"\n{CRON_COMMENT}\n{cron_line}\n"
-        subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
-        click.echo("Cron installed. Dispatch runs every minute.")
-        click.echo(f"  {cron_line}")
-        return
-
-    if action == "uninstall":
-        if CRON_COMMENT not in current:
-            click.echo("Cron not installed, nothing to remove.")
-            return
-
-        lines = current.splitlines()
-        new_lines = [l for l in lines if CRON_COMMENT not in l and "dispatch" not in l.split("#")[0]]
-        new_crontab = "\n".join(new_lines) + "\n"
-        subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
-        click.echo("Cron uninstalled.")
 
 
 if __name__ == "__main__":

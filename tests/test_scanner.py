@@ -1,6 +1,6 @@
 """Tests for scanner classification logic."""
 
-from dispatch.scanner import classify_complexity, Complexity, _looks_actionable
+from dispatch.scanner import classify_complexity, Complexity
 from dispatch.config import RepoConfig
 
 
@@ -63,16 +63,3 @@ def test_classify_no_rules():
     labels = ["feature"]
 
     assert classify_complexity(issue, labels, config) == Complexity.MEDIUM
-
-
-def test_looks_actionable_positive():
-    assert _looks_actionable("Can you fix the login bug?")
-    assert _looks_actionable("Build a new dashboard page")
-    assert _looks_actionable("The deploy is broken")
-    assert _looks_actionable("Please add dark mode support")
-
-
-def test_looks_actionable_negative():
-    assert not _looks_actionable("Hey how's it going?")
-    assert not _looks_actionable("Meeting at 3pm")
-    assert not _looks_actionable("Thanks!")

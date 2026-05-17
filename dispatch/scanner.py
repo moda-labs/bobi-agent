@@ -1,4 +1,4 @@
-"""Scan Linear and Slack for actionable work."""
+"""Scan Linear for actionable work."""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -10,7 +10,6 @@ from .config import GlobalConfig, RepoConfig
 
 class WorkSource(Enum):
     LINEAR = "linear"
-    SLACK = "slack"
 
 
 class Complexity(Enum):
@@ -21,7 +20,7 @@ class Complexity(Enum):
 
 @dataclass
 class WorkItem:
-    """A unit of work detected from Linear or Slack."""
+    """A unit of work detected from Linear."""
 
     id: str
     source: WorkSource
@@ -31,8 +30,6 @@ class WorkItem:
     complexity: Complexity = Complexity.MEDIUM
     labels: list[str] | None = None
     linear_issue_id: str | None = None
-    slack_thread_ts: str | None = None
-    slack_channel: str | None = None
 
 
 LINEAR_API = "https://api.linear.app/graphql"
@@ -146,66 +143,3 @@ def _matches_rule(rule: str, labels: list[str], issue: dict) -> bool:
             if (issue.get("estimate") or 0) > threshold:
                 return True
     return False
-
-
-async def scan_slack(global_config: GlobalConfig, slack_token: str | None = None) -> list[WorkItem]:
-    """Scan Slack for actionable messages (DMs/mentions with work intent)."""
-    token = slack_token or global_config.slack_bot_token
-    if not token:
-        return []
-
-    # Fetch unread DMs and mentions from the bot's conversations
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            "https://slack.com/api/conversations.list",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"types": "im", "limit": 20},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-    if not data.get("ok"):
-        return []
-
-    items = []
-    async with httpx.AsyncClient() as client:
-        for channel in data.get("channels", []):
-            if not channel.get("is_im"):
-                continue
-
-            hist_resp = await client.get(
-                "https://slack.com/api/conversations.history",
-                headers={"Authorization": f"Bearer {token}"},
-                params={
-                    "channel": channel["id"],
-                    "limit": 5,
-                    "unreads": "true",
-                },
-            )
-            hist_data = hist_resp.json()
-            if not hist_data.get("ok"):
-                continue
-
-            for msg in hist_data.get("messages", []):
-                text = msg.get("text", "")
-                if not _looks_actionable(text):
-                    continue
-
-                items.append(WorkItem(
-                    id=f"slack-{msg['ts']}",
-                    source=WorkSource.SLACK,
-                    title=text[:80],
-                    body=text,
-                    repo_config=None,  # needs repo resolution
-                    slack_thread_ts=msg["ts"],
-                    slack_channel=channel["id"],
-                ))
-
-    return items
-
-
-def _looks_actionable(text: str) -> bool:
-    """Quick heuristic: does this message look like a work request?"""
-    action_words = ["fix", "build", "add", "create", "update", "deploy", "bug", "broken", "implement"]
-    text_lower = text.lower()
-    return any(word in text_lower for word in action_words)

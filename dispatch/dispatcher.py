@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 
 from .scanner import WorkItem
-from .skills import discover_skill_packs, get_relevant_skills, format_skills_for_prompt
+from .skills import discover_skill_packs, get_all_skills, format_skills_for_prompt
 from .state import StateStore, Status
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
@@ -110,8 +110,7 @@ def build_prompt(item: WorkItem, branch: str, user_reply: str = "") -> str:
 
     # Skills
     packs = discover_skill_packs()
-    relevant = get_relevant_skills(packs, item.labels)
-    skills_text = format_skills_for_prompt(relevant)
+    skills_text = format_skills_for_prompt(get_all_skills(packs))
     if not skills_text and item.repo_config.skills:
         skills_text = "\n".join(f"  - /{s}" for s in item.repo_config.skills)
 
@@ -206,7 +205,6 @@ def spawn_agent(item: WorkItem, state: StateStore, user_reply: str = "") -> dict
     spawn_env.setdefault("USER", os.environ.get("USER", Path.home().name))
 
     # Pass Linear API key to the agent so it can call the API
-    from .config import RepoConfig, Credentials
     creds = config.get_credentials()
     linear_key = creds.get("linear_api_key", "")
     if linear_key:

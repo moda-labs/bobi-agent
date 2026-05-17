@@ -8,7 +8,7 @@ from dispatch.skills import (
     Skill,
     SkillPack,
     discover_skill_packs,
-    get_relevant_skills,
+    get_all_skills,
     format_skills_for_prompt,
 )
 
@@ -57,7 +57,7 @@ def test_skill_pack_nonexistent():
     assert pack is None
 
 
-def test_get_relevant_skills_bug_label():
+def test_get_all_skills_returns_everything():
     packs = [SkillPack(
         name="test",
         path=Path("/tmp"),
@@ -69,51 +69,29 @@ def test_get_relevant_skills_bug_label():
         ],
     )]
 
-    relevant = get_relevant_skills(packs, ["bug", "agent"])
-    names = {s.name for s in relevant}
-    assert "investigate" in names
-    assert "review" in names
-    assert "benchmark" not in names
+    all_skills = get_all_skills(packs)
+    names = {s.name for s in all_skills}
+    assert names == {"investigate", "review", "ship", "benchmark"}
 
 
-def test_get_relevant_skills_feature_label():
-    packs = [SkillPack(
-        name="test",
-        path=Path("/tmp"),
-        skills=[
-            Skill("office-hours", "Product thinking", "/office-hours"),
-            Skill("ship", "Ship code", "/ship"),
+def test_get_all_skills_empty_packs():
+    assert get_all_skills([]) == []
+
+
+def test_get_all_skills_multiple_packs():
+    packs = [
+        SkillPack(name="a", path=Path("/tmp"), skills=[
             Skill("review", "Code review", "/review"),
-            Skill("cso", "Security audit", "/cso"),
-        ],
-    )]
-
-    relevant = get_relevant_skills(packs, ["feature"])
-    names = {s.name for s in relevant}
-    assert "office-hours" in names
-    assert "ship" in names
-    assert "review" in names
-    assert "cso" not in names
-
-
-def test_get_relevant_skills_no_labels_defaults():
-    packs = [SkillPack(
-        name="test",
-        path=Path("/tmp"),
-        skills=[
-            Skill("review", "Code review", "/review"),
+        ]),
+        SkillPack(name="b", path=Path("/tmp"), skills=[
             Skill("ship", "Ship code", "/ship"),
-            Skill("investigate", "Debug", "/investigate"),
-            Skill("benchmark", "Perf", "/benchmark"),
-        ],
-    )]
+        ]),
+    ]
 
-    relevant = get_relevant_skills(packs, None)
-    names = {s.name for s in relevant}
+    all_skills = get_all_skills(packs)
+    names = {s.name for s in all_skills}
     assert "review" in names
     assert "ship" in names
-    assert "investigate" in names
-    assert "benchmark" not in names
 
 
 def test_format_skills_empty():
