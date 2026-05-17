@@ -151,12 +151,33 @@ async def run_cycle() -> dict:
             except FileNotFoundError:
                 pass
 
-    # 1d. Re-dispatch failed items — move back to Todo and clear state
+    # 1d. Re-dispatch failed items — move back to Todo and clear state (max 3 retries)
     from .reporter import get_team_states, move_issue
     for item_id, item in list(state._items.items()):
         if item.status not in (Status.FAILED, Status.STUCK):
             continue
-        # Move back to Todo on Linear
+
+        if item.attempts >= 3:
+            log.warning(f"Giving up on {item_id} after {item.attempts} attempts")
+            # Leave in failed state, post to Linear
+            if item.linear_issue_id:
+                repo_path = Path(item.repo_path)
+                try:
+                    repo_config = RepoConfig.from_file(repo_path)
+                    creds = repo_config.get_credentials()
+                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                    if api_key:
+                        await move_to_blocked(api_key, item.linear_issue_id, repo_config.linear_project)
+                        await add_comment(api_key, item.linear_issue_id,
+                            f"🤖 **Giving up after {item.attempts} attempts.** Needs human intervention.\n\nLast error: {item.error or 'unknown'}")
+                except FileNotFoundError:
+                    pass
+            # Remove from state so we stop retrying
+            del state._items[item_id]
+            state._save()
+            continue
+
+        # Move back to Todo on Linear for retry
         if item.linear_issue_id:
             repo_path = Path(item.repo_path)
             try:
@@ -170,10 +191,15 @@ async def run_cycle() -> dict:
                         await move_issue(api_key, item.linear_issue_id, todo_id)
             except FileNotFoundError:
                 pass
-        # Remove from state so the scanner picks it up fresh
+        # Track attempt count in meta, then remove from state
+        meta_path = Path.home() / ".dispatch" / "runs" / item_id
+        meta_path.mkdir(parents=True, exist_ok=True)
+        attempts_file = meta_path / "attempts"
+        attempts_file.write_text(str(item.attempts))
+
         del state._items[item_id]
         state._save()
-        log.info(f"Cleared failed item {item_id} — moved back to Todo for retry")
+        log.info(f"Cleared failed item {item_id} — moved back to Todo for retry (attempt {item.attempts})")
 
     # 2. Scan for new work across all registered repos
     all_work: list[WorkItem] = []

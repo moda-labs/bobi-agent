@@ -196,10 +196,13 @@ def _slugify(text: str) -> str:
 
 
 def create_worktree(repo_path: Path, branch: str, issue_id: str, title: str) -> Path:
-    """Create a git worktree for isolated agent work."""
+    """Create a git worktree for isolated agent work. Reuses existing if present."""
     slug = _slugify(title)
     worktree_name = f"{issue_id.lower()}-{slug}"
     worktree_dir = repo_path / "worktrees" / worktree_name
+
+    if worktree_dir.exists():
+        return worktree_dir
 
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
 
@@ -271,6 +274,11 @@ def spawn_agent(item: WorkItem, state: StateStore) -> dict | None:
                 stderr=subprocess.PIPE,
             )
 
+    # Read previous attempt count if retrying
+    meta_path = Path.home() / ".dispatch" / "runs" / item.id
+    attempts_file = meta_path / "attempts"
+    prev_attempts = int(attempts_file.read_text().strip()) if attempts_file.exists() else 0
+
     # Track in state
     state.dispatch(
         item_id=item.id,
@@ -279,6 +287,9 @@ def spawn_agent(item: WorkItem, state: StateStore) -> dict | None:
         agent_pid=proc.pid,
         branch=branch,
     )
+    # Carry forward attempt count
+    if prev_attempts > 0:
+        state.update_status(item.id, Status.DISPATCHED, attempts=prev_attempts + 1)
 
     # Store metadata for later retrieval
     if item.linear_issue_id:
