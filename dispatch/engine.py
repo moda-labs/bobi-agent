@@ -74,20 +74,35 @@ async def run_cycle() -> dict:
                 if api_key and tracked.linear_issue_id:
                     await move_to_design_review(api_key, tracked.linear_issue_id, repo_config.linear_project)
 
-                    # Post full spec across multiple comments if needed
-                    chunk_size = 3500
-                    if len(spec_content) <= chunk_size:
+                    # Push the spec and open a draft PR for review
+                    import subprocess, shutil
+                    gh_path = shutil.which("gh") or "/opt/homebrew/bin/gh"
+                    git_path = shutil.which("git") or "/usr/bin/git"
+
+                    pr_url = None
+                    if worktree:
+                        subprocess.run([git_path, "add", "SPEC.md"], cwd=str(worktree), capture_output=True)
+                        subprocess.run([git_path, "commit", "-m", f"spec: {tracked.title}"], cwd=str(worktree), capture_output=True)
+                        subprocess.run([git_path, "push", "-u", "origin", tracked.branch], cwd=str(worktree), capture_output=True)
+                        result = subprocess.run(
+                            [gh_path, "pr", "create", "--draft",
+                             "--title", f"[SPEC] {tracked.title}",
+                             "--body", f"## Design Review for {item_id}\n\nSPEC.md contains the full implementation plan.\n\n"
+                                       f"**Review the spec, then reply 'approved' on the Linear issue to start implementation.**"],
+                            cwd=str(worktree), capture_output=True, text=True,
+                        )
+                        if result.returncode == 0:
+                            pr_url = result.stdout.strip()
+
+                    # Post link to Linear
+                    if pr_url:
                         await add_comment(api_key, tracked.linear_issue_id,
-                            f"🤖 **Spec ready for review.**\n\n{spec_content}\n\n"
+                            f"🤖 **Spec ready for review.**\n\n"
+                            f"Draft PR: {pr_url}\n\n"
                             f"**Reply 'approved' to proceed with implementation, or provide feedback.**")
                     else:
-                        chunks = [spec_content[i:i+chunk_size] for i in range(0, len(spec_content), chunk_size)]
                         await add_comment(api_key, tracked.linear_issue_id,
-                            f"🤖 **Spec ready for review.** ({len(chunks)} parts)\n\n{chunks[0]}")
-                        for j, chunk in enumerate(chunks[1:], 2):
-                            await add_comment(api_key, tracked.linear_issue_id,
-                                f"🤖 **Spec (part {j}/{len(chunks)}):**\n\n{chunk}")
-                        await add_comment(api_key, tracked.linear_issue_id,
+                            f"🤖 **Spec ready for review.** (SPEC.md in worktree — draft PR failed)\n\n"
                             f"**Reply 'approved' to proceed with implementation, or provide feedback.**")
 
                 # Enter BLOCKED waiting for approval
