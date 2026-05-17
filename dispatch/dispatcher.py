@@ -441,10 +441,14 @@ def spawn_agent(item: WorkItem, state: StateStore, phase: str = "spec", spec: st
     # Output file for capturing agent results
     output_file = Path(tempfile.mktemp(prefix="dispatch-output-", suffix=".jsonl"))
 
-    # Resolve full path to agent binary (cron doesn't have PATH)
+    # Resolve full path to agent binary
     import shutil
     claude_path = shutil.which("claude") or "/opt/homebrew/bin/claude"
     codex_path = shutil.which("codex") or "codex"
+
+    # Build env — ensure HOME and PATH are set for Keychain + tool access
+    spawn_env = os.environ.copy()
+    spawn_env.setdefault("HOME", str(Path.home()))
 
     # Spawn based on agent tool — run in the WORKTREE, not the main repo
     if config.agent_tool == "claude":
@@ -472,6 +476,7 @@ def spawn_agent(item: WorkItem, state: StateStore, phase: str = "spec", spec: st
                 stdin=prompt_in,
                 stdout=out_f,
                 stderr=subprocess.PIPE,
+                env=spawn_env,
             )
 
     # Read previous attempt count if retrying
@@ -694,6 +699,9 @@ Do NOT implement any code. Only revise the spec file.
         "--dangerously-skip-permissions",
     ]
 
+    spawn_env = os.environ.copy()
+    spawn_env.setdefault("HOME", str(Path.home()))
+
     with open(output_file, "w") as out_f:
         with open(prompt_file, "r") as prompt_in:
             proc = subprocess.Popen(
@@ -702,6 +710,7 @@ Do NOT implement any code. Only revise the spec file.
                 stdin=prompt_in,
                 stdout=out_f,
                 stderr=subprocess.PIPE,
+                env=spawn_env,
             )
 
     state.update_status(item_id, Status.WORKING, agent_pid=proc.pid, phase="spec")
@@ -757,6 +766,9 @@ Do NOT create a new PR. Push to the existing branch and the PR updates automatic
         "--dangerously-skip-permissions",
     ]
 
+    spawn_env = os.environ.copy()
+    spawn_env.setdefault("HOME", str(Path.home()))
+
     with open(output_file, "w") as out_f:
         with open(prompt_file, "r") as prompt_in:
             proc = subprocess.Popen(
@@ -765,6 +777,7 @@ Do NOT create a new PR. Push to the existing branch and the PR updates automatic
                 stdin=prompt_in,
                 stdout=out_f,
                 stderr=subprocess.PIPE,
+                env=spawn_env,
             )
 
     state.update_status(item_id, Status.WORKING, agent_pid=proc.pid)
