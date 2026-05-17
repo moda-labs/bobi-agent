@@ -17,14 +17,17 @@ from .state import StateStore
 
 
 CRON_COMMENT = "# agent-dispatch: scan Linear and dispatch work"
-CRON_JOB = "* * * * * {dispatch} cycle >> {log} 2>&1"
+CRON_JOB = "* * * * * PATH={path} {dispatch} cycle >> {log} 2>&1"
 
 
 def _get_cron_line() -> str:
-    """Build the cron line using the venv's dispatch binary."""
+    """Build the cron line using the venv's dispatch binary and current PATH."""
+    import os
     dispatch_bin = Path(sys.executable).parent / "dispatch"
     log_path = GLOBAL_CONFIG_DIR / "dispatch.log"
-    return CRON_JOB.format(dispatch=dispatch_bin, log=log_path)
+    # Capture the user's PATH at install time so cron finds gh, git, claude
+    current_path = os.environ.get("PATH", "/usr/bin:/bin")
+    return CRON_JOB.format(dispatch=dispatch_bin, log=log_path, path=current_path)
 
 
 @click.group()
