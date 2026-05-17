@@ -38,11 +38,21 @@ dispatch init --non-interactive --linear-key <THEIR_KEY>
 
 ### Step 3: Ask about Slack
 
-Ask the user: "Do you want Slack notifications when agents finish work?
-If yes, I'll need a Slack bot token. See docs/SLACK_SETUP.md for the
-5-minute setup, or I can walk you through it."
+Ask the user: "Do you want Slack notifications when agents finish work?"
 
-If they provide a token:
+If yes, ask: "Do you already have a Slack bot token (starts with xoxb-)?"
+
+- If they have one: collect it
+- If not: walk them through creating one. The short version:
+  1. Go to https://api.slack.com/apps → Create New App → From scratch
+  2. OAuth & Permissions → add scopes: channels:history, channels:read,
+     chat:write, im:history, im:read, users:read
+  3. Install to Workspace → copy the Bot User OAuth Token (xoxb-...)
+  4. /invite @YourBot in the target channel
+
+Then ask: "What Slack channel should agent updates go to? (e.g., #eng-agents)"
+
+Store the token:
 ```bash
 dispatch init --non-interactive --linear-key <KEY> --slack-token <TOKEN>
 ```
@@ -52,11 +62,9 @@ dispatch init --non-interactive --linear-key <KEY> --slack-token <TOKEN>
 Ask the user: "What's your Linear project key? This is the prefix on
 your issue IDs (e.g., if issues look like ENG-42, the key is ENG)."
 
-Ask the user: "What Slack channel should agent updates go to? (e.g., #eng-agents)"
-
-Then run:
+Then run (include --slack-channel only if they provided one in step 3):
 ```bash
-dispatch setup --linear-project <KEY> --slack-channel '<CHANNEL>'
+dispatch setup --linear-project <KEY> --slack-channel '#channel'
 ```
 
 ### Step 5: Verify
