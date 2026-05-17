@@ -9,50 +9,93 @@ from .state import StateStore, TrackedItem, Status
 LINEAR_API = "https://api.linear.app/graphql"
 
 
-async def update_linear_status(
-    global_config: GlobalConfig,
-    item_id: str,
-    linear_issue_id: str,
-    status: Status,
-    comment: str | None = None,
-) -> None:
-    """Update a Linear issue's state and optionally add a comment."""
-    if not global_config.linear_api_key or not linear_issue_id:
-        return
-
-    # Map our status to Linear workflow states
-    state_map = {
-        Status.DISPATCHED: "started",
-        Status.WORKING: "started",
-        Status.AUDITING: "started",
-        Status.DONE: "done",
-        Status.FAILED: "unstarted",
-        Status.STUCK: "unstarted",
-    }
-
-    async with httpx.AsyncClient() as client:
-        if comment:
-            mutation = """
-            mutation($issueId: String!, $body: String!) {
-                commentCreate(input: { issueId: $issueId, body: $body }) {
-                    success
-                }
+async def get_team_states(api_key: str, team_key: str) -> dict[str, str]:
+    """Fetch workflow state IDs for a team. Returns {state_type: state_id}."""
+    query = """
+    query($team: String!) {
+        teams(filter: { key: { eq: $team } }) {
+            nodes {
+                states { nodes { id name type } }
             }
-            """
-            await client.post(
-                LINEAR_API,
-                headers={
-                    "Authorization": global_config.linear_api_key,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "query": mutation,
-                    "variables": {
-                        "issueId": linear_issue_id,
-                        "body": comment,
-                    },
-                },
-            )
+        }
+    }
+    """
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            LINEAR_API,
+            headers={"Authorization": api_key, "Content-Type": "application/json"},
+            json={"query": query, "variables": {"team": team_key}},
+        )
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+
+    teams = data.get("data", {}).get("teams", {}).get("nodes", [])
+    if not teams:
+        return {}
+
+    states = {}
+    for state in teams[0].get("states", {}).get("nodes", []):
+        states[state["name"].lower()] = state["id"]
+        states[state["type"]] = state["id"]
+    return states
+
+
+async def move_issue(api_key: str, linear_issue_id: str, state_id: str) -> None:
+    """Move a Linear issue to a new workflow state."""
+    mutation = """
+    mutation($issueId: String!, $stateId: String!) {
+        issueUpdate(id: $issueId, input: { stateId: $stateId }) {
+            success
+        }
+    }
+    """
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            LINEAR_API,
+            headers={"Authorization": api_key, "Content-Type": "application/json"},
+            json={
+                "query": mutation,
+                "variables": {"issueId": linear_issue_id, "stateId": state_id},
+            },
+        )
+
+
+async def move_to_in_progress(api_key: str, linear_issue_id: str, team_key: str) -> None:
+    """Move issue to In Progress when work starts."""
+    states = await get_team_states(api_key, team_key)
+    state_id = states.get("in progress") or states.get("started")
+    if state_id:
+        await move_issue(api_key, linear_issue_id, state_id)
+
+
+async def move_to_in_review(api_key: str, linear_issue_id: str, team_key: str) -> None:
+    """Move issue to In Review (or Done if no review state) when PR is created."""
+    states = await get_team_states(api_key, team_key)
+    # Try "in review" first, fall back to "done"
+    state_id = states.get("in review") or states.get("completed")
+    if state_id:
+        await move_issue(api_key, linear_issue_id, state_id)
+
+
+async def add_comment(api_key: str, linear_issue_id: str, body: str) -> None:
+    """Add a comment to a Linear issue."""
+    mutation = """
+    mutation($issueId: String!, $body: String!) {
+        commentCreate(input: { issueId: $issueId, body: $body }) {
+            success
+        }
+    }
+    """
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            LINEAR_API,
+            headers={"Authorization": api_key, "Content-Type": "application/json"},
+            json={
+                "query": mutation,
+                "variables": {"issueId": linear_issue_id, "body": body},
+            },
+        )
 
 
 async def post_slack_update(

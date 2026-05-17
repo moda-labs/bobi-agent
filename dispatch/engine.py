@@ -9,7 +9,10 @@ from .conversation import poll_blocked_sessions
 from .scanner import scan_linear, scan_slack, WorkItem, WorkSource
 from .state import StateStore, Status
 from .dispatcher import spawn_agent, check_in_flight
-from .reporter import report_completion, report_failure
+from .reporter import (
+    report_completion, report_failure,
+    move_to_in_progress, move_to_in_review, add_comment,
+)
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +73,15 @@ async def run_cycle() -> dict:
         if pid:
             summary["dispatched"] += 1
             log.info(f"Dispatched {item.id}: {item.title} (PID {pid})")
+
+            # Move to In Progress and comment on the issue
+            if item.linear_issue_id:
+                creds = item.repo_config.get_credentials()
+                api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                if api_key:
+                    await move_to_in_progress(api_key, item.linear_issue_id, item.repo_config.linear_project)
+                    await add_comment(api_key, item.linear_issue_id,
+                        f"🤖 **Picked up by agent-dispatch.** Working on it now (PID {pid}).")
         else:
             summary["skipped"] += 1
             log.debug(f"Skipped {item.id}: at parallel limit")
@@ -81,6 +93,16 @@ async def run_cycle() -> dict:
             try:
                 repo_config = RepoConfig.from_file(repo_path)
                 await report_completion(global_config, repo_config, item)
+
+                # Move to In Review on Linear
+                if item.linear_issue_id:
+                    creds = repo_config.get_credentials()
+                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                    if api_key:
+                        await move_to_in_review(api_key, item.linear_issue_id, repo_config.linear_project)
+                        pr_text = f"\n\nPR: {item.pr_url}" if item.pr_url else ""
+                        await add_comment(api_key, item.linear_issue_id,
+                            f"🤖 **Done.** Ready for review.{pr_text}")
             except FileNotFoundError:
                 pass
 
@@ -90,6 +112,15 @@ async def run_cycle() -> dict:
             try:
                 repo_config = RepoConfig.from_file(repo_path)
                 await report_failure(global_config, repo_config, item)
+
+                # Comment the failure on Linear
+                if item.linear_issue_id:
+                    creds = repo_config.get_credentials()
+                    api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                    if api_key:
+                        error_text = f"\n\nError: {item.error}" if item.error else ""
+                        await add_comment(api_key, item.linear_issue_id,
+                            f"🤖 **Failed/stuck.** Needs human attention.{error_text}")
             except FileNotFoundError:
                 pass
 
