@@ -1,5 +1,6 @@
 """Monitor open PRs for review feedback and re-dispatch agents."""
 
+import shutil
 import subprocess
 import json
 import logging
@@ -7,6 +8,8 @@ from pathlib import Path
 
 from .config import GlobalConfig, RepoConfig
 from .state import StateStore, Status, TrackedItem
+
+GH_PATH = shutil.which("gh") or "/opt/homebrew/bin/gh"
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +27,7 @@ def get_pr_review_state(repo_path: str, pr_url: str) -> dict | None:
 
     # Use gh CLI to check review status
     result = subprocess.run(
-        ["gh", "pr", "view", pr_number, "--json", "reviewDecision,reviews,comments"],
+        [GH_PATH, "pr", "view", pr_number, "--json", "reviewDecision,reviews,comments"],
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -102,7 +105,7 @@ def check_pr_merged(repo_path: str, pr_url: str) -> bool:
         return False
 
     result = subprocess.run(
-        ["gh", "pr", "view", pr_number, "--json", "state"],
+        [GH_PATH, "pr", "view", pr_number, "--json", "state"],
         cwd=repo_path,
         capture_output=True,
         text=True,
