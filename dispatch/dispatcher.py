@@ -145,8 +145,8 @@ def create_worktree(repo_path: Path, branch: str, issue_id: str, title: str) -> 
     return worktree_dir
 
 
-def spawn_agent(item: WorkItem, state: StateStore) -> int | None:
-    """Spawn a coding agent for the work item. Returns PID or None on failure."""
+def spawn_agent(item: WorkItem, state: StateStore) -> dict | None:
+    """Spawn a coding agent for the work item. Returns {pid, worktree, branch} or None."""
     config = item.repo_config
 
     # Check parallel limit
@@ -219,7 +219,7 @@ def spawn_agent(item: WorkItem, state: StateStore) -> int | None:
     (meta_path / "output_file").write_text(str(output_file))
     (meta_path / "prompt_file").write_text(str(prompt_file))
 
-    return proc.pid
+    return {"pid": proc.pid, "worktree": str(worktree_dir), "branch": branch}
 
 
 def read_agent_output(item_id: str) -> dict:

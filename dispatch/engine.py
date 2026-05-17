@@ -69,10 +69,10 @@ async def run_cycle() -> dict:
             continue
 
         # Dispatch
-        pid = spawn_agent(item, state)
-        if pid:
+        result = spawn_agent(item, state)
+        if result:
             summary["dispatched"] += 1
-            log.info(f"Dispatched {item.id}: {item.title} (PID {pid})")
+            log.info(f"Dispatched {item.id}: {item.title} (PID {result['pid']})")
 
             # Move to In Progress and comment on the issue
             if item.linear_issue_id:
@@ -81,7 +81,9 @@ async def run_cycle() -> dict:
                 if api_key:
                     await move_to_in_progress(api_key, item.linear_issue_id, item.repo_config.linear_project)
                     await add_comment(api_key, item.linear_issue_id,
-                        f"🤖 **Picked up by agent-dispatch.** Working on it now (PID {pid}).")
+                        f"🤖 **Picked up by agent-dispatch.**\n\n"
+                        f"Worktree: `{result['worktree']}`\n"
+                        f"Branch: `{result['branch']}`")
         else:
             summary["skipped"] += 1
             log.debug(f"Skipped {item.id}: at parallel limit")
