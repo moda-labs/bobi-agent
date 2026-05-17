@@ -1,109 +1,84 @@
-"""Tests for prompt assembly."""
+"""Tests for prompt assembly and spawning."""
 
 from pathlib import Path
 
 from dispatch.config import RepoConfig
 from dispatch.scanner import WorkItem, WorkSource, Complexity
-from dispatch.dispatcher import build_prompt
+from dispatch.dispatcher import _build_context, _load_prompts, _slugify, _get_or_create_worktree
 
 
 BRANCH = "agent/proj-1-abc123"
 
 
-def _make_item(complexity: Complexity = Complexity.MEDIUM, **kwargs) -> WorkItem:
+def _make_item(**kwargs) -> WorkItem:
     defaults = {
         "id": "PROJ-1",
         "source": WorkSource.LINEAR,
         "title": "Add user avatars",
-        "body": "Users should see avatars in the sidebar. Use Gravatar as fallback.",
+        "body": "Users should see avatars in the sidebar.",
         "repo_config": RepoConfig(
             path=Path("/home/dev/myapp"),
             test_command="pytest -x",
             skills=["review", "ship"],
         ),
-        "complexity": complexity,
+        "complexity": Complexity.MEDIUM,
     }
     defaults.update(kwargs)
     return WorkItem(**defaults)
 
 
-def test_prompt_includes_preamble():
+def test_load_prompts_includes_all_sections():
+    prompts = _load_prompts()
+    assert "Running unattended" in prompts
+    assert "Lifecycle" in prompts
+    assert "Spec Phase" in prompts
+    assert "Implementation Phase" in prompts
+    assert "LINEAR_API_KEY" in prompts
+    assert "gh pr create" in prompts
+
+
+def test_build_context_includes_issue():
     item = _make_item()
-    prompt = build_prompt(item, BRANCH)
+    context = _build_context(item, BRANCH)
 
-    assert "Running unattended" in prompt
-    assert ".dispatch/state.md" in prompt
+    assert "PROJ-1" in context
+    assert "Add user avatars" in context
+    assert "avatars in the sidebar" in context
+    assert BRANCH in context
 
 
-def test_prompt_includes_lifecycle():
+def test_build_context_includes_user_reply():
     item = _make_item()
-    prompt = build_prompt(item, BRANCH)
+    context = _build_context(item, BRANCH, user_reply="approved")
 
-    assert "Phase 1: Spec" in prompt
-    assert "Phase 2: Implement" in prompt
-    assert "Exit cleanly" in prompt
+    assert "approved" in context
+    assert "User reply" in context
 
 
-def test_prompt_includes_tools():
+def test_build_context_no_reply():
     item = _make_item()
-    prompt = build_prompt(item, BRANCH)
+    context = _build_context(item, BRANCH)
 
-    assert "LINEAR_API_KEY" in prompt
-    assert "gh pr create" in prompt
+    assert "User reply" not in context
 
 
-def test_prompt_includes_spec_methodology():
+def test_build_context_includes_test_command():
     item = _make_item()
-    prompt = build_prompt(item, BRANCH)
+    context = _build_context(item, BRANCH)
 
-    assert "Scope guards" in prompt
-    assert "Size verdict" in prompt
-    assert "Verification Plan" in prompt
+    assert "pytest -x" in context
 
 
-def test_prompt_includes_implement_methodology():
-    item = _make_item()
-    prompt = build_prompt(item, BRANCH)
-
-    assert "staff engineer" in prompt.lower()
-    assert "Tests are not optional" in prompt
+def test_slugify():
+    assert _slugify("Add user avatars") == "add-user-avatars"
+    assert _slugify("Fix the BUG!!!") == "fix-the-bug"
+    assert _slugify("") == ""
 
 
-def test_prompt_includes_issue_context():
-    item = _make_item()
-    prompt = build_prompt(item, BRANCH)
+def test_get_or_create_worktree_reuses_existing(tmp_path):
+    # Create a fake existing worktree
+    worktree = tmp_path / "worktrees" / "proj-1-add-user-avatars"
+    worktree.mkdir(parents=True)
 
-    assert "PROJ-1" in prompt
-    assert "Add user avatars" in prompt
-    assert "Gravatar" in prompt
-    assert BRANCH in prompt
-
-
-def test_prompt_includes_user_reply_when_provided():
-    item = _make_item()
-    prompt = build_prompt(item, BRANCH, user_reply="approved, go ahead")
-
-    assert "approved, go ahead" in prompt
-    assert "User reply" in prompt
-
-
-def test_prompt_without_reply_has_no_reply_section():
-    item = _make_item()
-    prompt = build_prompt(item, BRANCH)
-
-    assert "User reply" not in prompt
-
-
-def test_prompt_includes_test_command():
-    item = _make_item()
-    prompt = build_prompt(item, BRANCH)
-
-    assert "pytest -x" in prompt
-
-
-def test_no_test_command_shows_placeholder():
-    item = _make_item()
-    item.repo_config.test_command = ""
-    prompt = build_prompt(item, BRANCH)
-
-    assert "none configured" in prompt
+    result = _get_or_create_worktree(tmp_path, "PROJ-1", "Add user avatars")
+    assert result == worktree
