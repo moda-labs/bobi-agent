@@ -1,6 +1,6 @@
 # agent-dispatch
 
-Cron-based agent dispatch loop. Scans Linear + Slack for work, spawns Claude Code (or Codex) to implement, reports results back.
+Cron-based agent dispatch loop. Scans Linear for work, spawns Claude Code (or Codex) to implement, reports results via Linear comments.
 
 Built from scratch to understand the agentic product engineering loop. Takes design decisions from OpenClaw (persistent heartbeat, state machine per issue, CAS dispatch) and Hermes (tiered complexity, prompt templates, cross-repo portability).
 
@@ -10,7 +10,6 @@ Built from scratch to understand the agentic product engineering loop. Takes des
 Every N minutes (cron):
 
   SCAN          →  Linear API (issues labeled for automation)
-                   Slack API (DMs with actionable intent)
                           │
   CLASSIFY      →  Complexity: trivial / medium / heavy
                    (from .dispatch.yaml rules)
@@ -19,9 +18,9 @@ Every N minutes (cron):
                    Track PID + branch in state.json
                           │
   CHECK         →  In-flight items: still running? finished? stuck?
+                   Blocked items: did the user reply on Linear?
                           │
-  REPORT        →  Linear comment + status update
-                   Slack message in configured channel
+  REPORT        →  Linear comments (status updates + questions)
 ```
 
 ## Setup
@@ -50,7 +49,7 @@ dispatch init
 ### Quick reference
 
 ```bash
-dispatch init              # configure Linear API key + Slack bot token
+dispatch init              # configure Linear API key
 dispatch register <path>   # register a repo for automated dispatch
 dispatch repos             # list registered repos
 dispatch cycle             # run one scan/dispatch cycle
@@ -78,15 +77,12 @@ agent:
 verify:
   test_command: "pytest"
   review_required: true
-
-notify:
-  slack_channel: "#eng-agents"
 ```
 
 ## Cron setup
 
 ```bash
-# Run every 5 minutes
+# Run every minute
 * * * * * cd ~/dev/agent-dispatch && python -m dispatch.cli cycle >> ~/.dispatch/dispatch.log 2>&1
 ```
 
@@ -95,10 +91,12 @@ notify:
 Each work item progresses through:
 
 ```
-TODO → DISPATCHED → WORKING → AUDITING → DONE
+TODO → DISPATCHED → WORKING ⇄ BLOCKED → AUDITING → DONE
                                   ↓
                                FAILED / STUCK (escalates to human)
 ```
+
+When an agent needs input, it posts a question as a Linear comment and enters BLOCKED. Each cron cycle polls for replies. When you respond on the issue, the session unblocks and resumes.
 
 Key invariant: the worker agent cannot mark its own work as done. `review_required: true` means a separate verification step before closing.
 

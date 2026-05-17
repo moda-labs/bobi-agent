@@ -4,7 +4,7 @@
 # No file = invisible to the engine. Add file = automated.
 
 # Which credential set to use (from ~/.dispatch/credentials.yaml)
-# Allows different repos to use different Linear teams / Slack workspaces.
+# Allows different repos to use different Linear teams.
 # Omit or set "default" to use the default credentials.
 credentials: "default"
 
@@ -30,5 +30,3 @@ verify:
   review_required: true                # Agent can't close its own issue
   auto_merge: false                    # Human approves the PR
 
-notify:
-  slack_channel: "#eng-agents"         # Where to post completions/failures

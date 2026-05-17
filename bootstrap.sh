@@ -47,7 +47,7 @@ if [ ! -f "$HOME/.dispatch/config.yaml" ]; then
     echo "    Initializing config (non-interactive)..."
     "$DISPATCH" init --non-interactive
     echo "    Config created at ~/.dispatch/config.yaml"
-    echo "    Add credentials later: dispatch init --linear-key KEY --slack-token TOKEN"
+    echo "    Add your Linear API key: dispatch init --linear-key YOUR_KEY"
 fi
 
 # 4. Setup current repo if we're in one

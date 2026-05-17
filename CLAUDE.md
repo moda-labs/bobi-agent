@@ -1,6 +1,6 @@
 # agent-dispatch
 
-Cron-based agent dispatch loop. Scans Linear + Slack for work, spawns coding agents, reports results.
+Cron-based agent dispatch loop. Scans Linear for work, spawns coding agents, reports results via Linear comments.
 
 ## Setup
 
@@ -15,8 +15,7 @@ dispatch init --non-interactive
 ## First-time setup (agent guidance)
 
 When setting up dispatch for a user, you MUST ask them for information.
-Do NOT guess or skip these steps. Do NOT ask about Slack — it's not
-configured yet. Linear is the only interaction channel.
+Do NOT guess or skip these steps.
 
 ### Step 1: Install
 
@@ -59,14 +58,13 @@ test command and skills look correct.
 ### Important
 
 - NEVER guess the Linear project key — always ask
-- Do NOT ask about Slack — it is not supported yet
 - The `dispatch setup` command auto-detects test commands and skills, but
   the Linear project key MUST come from the user
 
 ## Commands
 
 ```bash
-dispatch init              # configure Linear API key + Slack bot token
+dispatch init              # configure Linear API key
 dispatch register <path>   # register a repo for automated dispatch
 dispatch repos             # list registered repos
 dispatch cycle             # run one scan/dispatch cycle
@@ -91,11 +89,11 @@ dispatch status            # show in-flight work
 dispatch/
 ├── cli.py          # Click CLI entrypoint
 ├── config.py       # Global (~/.dispatch/config.yaml) + per-repo (.dispatch.yaml)
-├── scanner.py      # Linear GraphQL + Slack API scanning
+├── scanner.py      # Linear GraphQL scanning
 ├── state.py        # JSON state with CAS, status machine
 ├── dispatcher.py   # Prompt assembly + agent spawning
 ├── engine.py       # Main loop: scan → classify → dispatch → check → report
-└── reporter.py     # Post results to Linear + Slack
+└── reporter.py     # Post results to Linear
 ```
 
 ## State machine
