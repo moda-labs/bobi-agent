@@ -1,0 +1,34 @@
+# .dispatch.yaml — drop this in any repo to wire it up
+#
+# The dispatch engine scans all registered repos for this file.
+# No file = invisible to the engine. Add file = automated.
+
+# Which credential set to use (from ~/.dispatch/credentials.yaml)
+# Allows different repos to use different Linear teams / Slack workspaces.
+# Omit or set "default" to use the default credentials.
+credentials: "default"
+
+linear:
+  project: "PROJ"                      # Your Linear project key
+  team: "My Team"                      # Optional: Linear team name (for display)
+  trigger_labels: ["agent", "auto"]    # Issues with these labels get picked up
+  skip_labels: ["blocked", "human-only", "wontfix"]
+
+complexity:
+  # Rules for classifying work. Syntax: "label:X OR label:Y OR estimate>N"
+  trivial: "label:typo OR label:docs OR label:config"
+  medium: "default"                    # Anything not trivial or heavy
+  heavy: "label:feature OR label:refactor OR estimate>3"
+
+agent:
+  tool: "claude"                       # "claude" or "codex"
+  skills: ["review", "ship"]           # gstack skills to make available
+  max_parallel: 2                      # Max concurrent agents on this repo
+
+verify:
+  test_command: "pytest"               # How to run tests (read from CLAUDE.md if empty)
+  review_required: true                # Agent can't close its own issue
+  auto_merge: false                    # Human approves the PR
+
+notify:
+  slack_channel: "#eng-agents"         # Where to post completions/failures
