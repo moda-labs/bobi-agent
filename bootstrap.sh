@@ -8,17 +8,26 @@ set -euo pipefail
 # 3. Run `dispatch init` (if no config exists)
 # 4. Run `dispatch setup` in the current repo (if called from a repo)
 
-INSTALL_DIR="${AGENT_DISPATCH_DIR:-$HOME/dev/agent-dispatch}"
 REPO_URL="https://github.com/underminedsk/agent-dispatch.git"
 
 echo "==> agent-dispatch bootstrap"
 
-# 1. Clone if needed
-if [ ! -d "$INSTALL_DIR" ]; then
+# 1. Detect install location — if we're inside the repo already, use it
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+if [ -f "$SCRIPT_DIR/dispatch/__init__.py" ]; then
+    INSTALL_DIR="$SCRIPT_DIR"
+elif [ -f "./dispatch/__init__.py" ]; then
+    INSTALL_DIR="$(pwd)"
+else
+    INSTALL_DIR="${AGENT_DISPATCH_DIR:-$HOME/dev/agent-dispatch}"
+fi
+
+# Clone only if truly not present
+if [ ! -f "$INSTALL_DIR/dispatch/__init__.py" ]; then
     echo "    Cloning to $INSTALL_DIR..."
     git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
 else
-    echo "    Already installed at $INSTALL_DIR"
+    echo "    Found at $INSTALL_DIR (skipping clone)"
 fi
 
 # 2. Create venv + install if needed
