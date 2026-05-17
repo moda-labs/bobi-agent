@@ -50,18 +50,145 @@ def cycle():
 @main.command()
 def status():
     """Show current in-flight work."""
-    state = StateStore()
-    items = state.get_in_flight()
+    import os
+    import time as time_mod
 
-    if not items:
-        click.echo("No in-flight work.")
+    state = StateStore()
+
+    # Show all items, not just in-flight
+    if not state._items:
+        click.echo("No tracked work.")
         return
 
-    for item in items:
-        click.echo(
-            f"  [{item.status.value:>10}] {item.id}: {item.title}"
-            f" (repo: {Path(item.repo_path).name})"
-        )
+    for item in state._items.values():
+        elapsed = time_mod.time() - item.dispatched_at
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+
+        # Check if process is alive
+        alive = False
+        if item.agent_pid:
+            try:
+                os.kill(item.agent_pid, 0)
+                alive = True
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        proc_status = "running" if alive else "exited"
+        phase = getattr(item, "phase", "?")
+
+        # Check for progress file
+        from .dispatcher import _get_worktree_path
+        progress = ""
+        worktree = _get_worktree_path(item)
+        if worktree:
+            progress_file = worktree / ".dispatch-progress.md"
+            if progress_file.exists():
+                lines = progress_file.read_text().strip().splitlines()
+                progress = lines[-1] if lines else ""
+
+            # Count commits on the branch
+            import subprocess
+            result = subprocess.run(
+                ["git", "log", "--oneline", "main..HEAD"],
+                cwd=str(worktree), capture_output=True, text=True,
+            )
+            commits = len(result.stdout.strip().splitlines()) if result.returncode == 0 else 0
+        else:
+            commits = 0
+
+        click.echo(f"  {item.id:10s} [{item.status.value:>12}] [{phase:>10}] {item.title}")
+        click.echo(f"             {proc_status}, {mins}m{secs}s, {commits} commits")
+        if progress:
+            click.echo(f"             {progress}")
+        if item.pr_url:
+            click.echo(f"             PR: {item.pr_url}")
+        if item.error:
+            click.echo(f"             Error: {item.error[:100]}")
+        click.echo()
+
+
+@main.command()
+@click.option("--interval", default=5, help="Refresh interval in seconds")
+def watch(interval: int):
+    """Live dashboard — refreshes every N seconds. Ctrl+C to stop."""
+    import os
+    import time as time_mod
+    import subprocess
+
+    from .dispatcher import _get_worktree_path
+
+    try:
+        while True:
+            os.system("clear")
+            state = StateStore()
+            now = time_mod.time()
+
+            click.echo("agent-dispatch | Ctrl+C to stop")
+            click.echo(f"{'─' * 70}")
+
+            if not state._items:
+                click.echo("\n  No tracked work.\n")
+            else:
+                for item in state._items.values():
+                    elapsed = now - item.dispatched_at
+                    mins = int(elapsed // 60)
+                    secs = int(elapsed % 60)
+
+                    alive = False
+                    if item.agent_pid:
+                        try:
+                            os.kill(item.agent_pid, 0)
+                            alive = True
+                        except (ProcessLookupError, PermissionError):
+                            pass
+
+                    phase = getattr(item, "phase", "?")
+                    status_icon = {
+                        "dispatched": "⏳", "working": "🔨", "blocked": "🚫",
+                        "auditing": "🔍", "done": "✅", "failed": "❌", "stuck": "⚠️",
+                    }.get(item.status.value, "?")
+
+                    # Commits and progress
+                    commits = 0
+                    progress_lines = []
+                    worktree = _get_worktree_path(item)
+                    if worktree:
+                        result = subprocess.run(
+                            ["git", "log", "--oneline", "main..HEAD"],
+                            cwd=str(worktree), capture_output=True, text=True,
+                        )
+                        if result.returncode == 0:
+                            commits = len(result.stdout.strip().splitlines())
+
+                        progress_file = worktree / ".dispatch-progress.md"
+                        if progress_file.exists():
+                            progress_lines = [
+                                l.strip() for l in progress_file.read_text().splitlines()
+                                if l.strip() and l.strip().startswith("- [")
+                            ]
+
+                    proc_label = "●" if alive else "○"
+                    click.echo(
+                        f"\n  {status_icon} {item.id:10s} {item.title}"
+                    )
+                    click.echo(
+                        f"    {proc_label} {item.status.value} | {phase} phase | "
+                        f"{mins}m{secs}s | {commits} commits"
+                    )
+                    if item.pr_url:
+                        click.echo(f"    PR: {item.pr_url}")
+                    if item.error:
+                        click.echo(f"    Error: {item.error[:80]}")
+                    if progress_lines:
+                        for line in progress_lines[-5:]:
+                            click.echo(f"    {line}")
+
+            click.echo(f"\n{'─' * 70}")
+            click.echo(f"  Refreshing every {interval}s...")
+            time_mod.sleep(interval)
+    except KeyboardInterrupt:
+        click.echo("\nStopped.")
 
 
 @main.command()
