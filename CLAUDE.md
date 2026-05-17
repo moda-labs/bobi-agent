@@ -15,7 +15,8 @@ dispatch init --non-interactive
 ## First-time setup (agent guidance)
 
 When setting up dispatch for a user, you MUST ask them for information.
-Do NOT guess or skip these steps.
+Do NOT guess or skip these steps. Do NOT ask about Slack — it's not
+configured yet. Linear is the only interaction channel.
 
 ### Step 1: Install
 
@@ -36,38 +37,17 @@ Then run:
 dispatch init --non-interactive --linear-key <THEIR_KEY>
 ```
 
-### Step 3: Ask about Slack
-
-Ask the user: "Do you want Slack notifications when agents finish work?"
-
-If yes, ask: "Do you already have a Slack bot token (starts with xoxb-)?"
-
-- If they have one: collect it
-- If not: walk them through creating one. The short version:
-  1. Go to https://api.slack.com/apps → Create New App → From scratch
-  2. OAuth & Permissions → add scopes: channels:history, channels:read,
-     chat:write, im:history, im:read, users:read
-  3. Install to Workspace → copy the Bot User OAuth Token (xoxb-...)
-  4. /invite @YourBot in the target channel
-
-Then ask: "What Slack channel should agent updates go to? (e.g., #eng-agents)"
-
-Store the token:
-```bash
-dispatch init --non-interactive --linear-key <KEY> --slack-token <TOKEN>
-```
-
-### Step 4: Setup the repo
+### Step 3: Setup the repo
 
 Ask the user: "What's your Linear project key? This is the prefix on
 your issue IDs (e.g., if issues look like ENG-42, the key is ENG)."
 
-Then run (include --slack-channel only if they provided one in step 3):
+Then run:
 ```bash
-dispatch setup --linear-project <KEY> --slack-channel '#channel'
+dispatch setup --linear-project <KEY>
 ```
 
-### Step 5: Verify
+### Step 4: Verify
 
 Show the user the generated `.dispatch.yaml` and ask if the detected
 test command and skills look correct.
@@ -75,19 +55,9 @@ test command and skills look correct.
 ### Important
 
 - NEVER guess the Linear project key — always ask
-- NEVER skip the Slack question — always ask (user can say "skip" or "later")
+- Do NOT ask about Slack — it is not supported yet
 - The `dispatch setup` command auto-detects test commands and skills, but
-  Linear project and Slack channel MUST come from the user
-
-For multi-workspace setups, edit `~/.dispatch/credentials.yaml` directly:
-
-```yaml
-workspace-name:
-  linear_api_key: "lin_api_..."
-  slack_bot_token: "xoxb-..."
-```
-
-Then set `credentials: "workspace-name"` in the repo's `.dispatch.yaml`.
+  the Linear project key MUST come from the user
 
 ## Commands
 
