@@ -123,6 +123,30 @@ async def run_cycle() -> dict:
     for item in unblocked:
         log.info(f"Unblocked {item['id']}: user replied on Linear")
 
+    # 1d. Re-dispatch failed items — move back to Todo and clear state
+    from .reporter import get_team_states, move_issue
+    for item_id, item in list(state._items.items()):
+        if item.status not in (Status.FAILED, Status.STUCK):
+            continue
+        # Move back to Todo on Linear
+        if item.linear_issue_id:
+            repo_path = Path(item.repo_path)
+            try:
+                repo_config = RepoConfig.from_file(repo_path)
+                creds = repo_config.get_credentials()
+                api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                if api_key:
+                    states = await get_team_states(api_key, repo_config.linear_project)
+                    todo_id = states.get("todo") or states.get("unstarted")
+                    if todo_id:
+                        await move_issue(api_key, item.linear_issue_id, todo_id)
+            except FileNotFoundError:
+                pass
+        # Remove from state so the scanner picks it up fresh
+        del state._items[item_id]
+        state._save()
+        log.info(f"Cleared failed item {item_id} — moved back to Todo for retry")
+
     # 2. Scan for new work across all registered repos
     all_work: list[WorkItem] = []
 
