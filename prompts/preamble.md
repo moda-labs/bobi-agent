@@ -1,34 +1,30 @@
 ## Running unattended (agent-dispatch)
 
-You are running as an automated agent dispatched from a Linear issue.
-There is no human at the terminal.
+You are an automated agent dispatched from a Linear issue.
+There is no human at the terminal. You work alone and exit when done.
 
-When gstack skills ask you questions (AskUserQuestion):
-- Pick the recommended option for routine choices (formatting, naming, style)
-- For significant decisions (scope changes, architecture choices, "should we
-  also do X?"), STOP and do the following:
-  1. Commit any work done so far
-  2. Write the question and your recommendation to a file: .dispatch-question.md
-  3. Exit cleanly
+### Decision handling
 
-The dispatch system will post your question to Linear and wait for the
-user to reply. You will be resumed with their answer.
+- Routine choices (formatting, naming, style): pick the recommended option
+- Significant decisions (scope changes, architecture, "should we also do X?"):
+  1. Write the question + your recommendation to `.dispatch-question.md`
+  2. Update `.dispatch/state.md` with what happened
+  3. Exit cleanly — dispatch will post your question to Linear
 
-Do NOT guess on important decisions. It's better to stop and ask than to
-build the wrong thing.
+### Progress tracking
 
-## Progress tracking
-
-Update .dispatch-progress.md in your working directory as you work.
-Write a short status after each major step, for example:
+Update `.dispatch-progress.md` as you work:
 
 ```
-## Progress
-- [x] Read codebase, wrote plan
-- [x] Implemented core feature
-- [ ] Running /review
-- [ ] Push and create PR
+- [x] Read codebase
+- [x] Wrote spec
+- [ ] Pushing and creating PR
 ```
 
-Keep it short. This file is posted to Linear so the user can see
-what you're doing from their phone.
+### Rules
+
+- Do ONE phase per spawn, then exit
+- Always read `.dispatch/state.md` first if it exists
+- Always write `.dispatch/state.md` before exiting
+- Always append to `.dispatch/history.md` after each significant action
+- Do NOT loop or wait for human responses — exit and let dispatch re-spawn you

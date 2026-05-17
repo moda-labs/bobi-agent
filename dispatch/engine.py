@@ -1,394 +1,144 @@
-"""Main dispatch engine — the cron entrypoint."""
+"""Main dispatch engine — simplified.
+
+The engine's job is minimal:
+1. Scan Linear for Todo issues with the trigger label
+2. Spawn an agent for each (if not already tracked)
+3. Check if running agents have exited
+4. Re-spawn agents that completed a phase (if user replied on Linear)
+5. Clean up done/failed items
+
+The AGENT handles its own Linear state transitions, PR creation, and
+commenting — guided by the lifecycle prompt. The engine just watches
+processes and detects when to re-spawn.
+"""
 
 import asyncio
 import logging
 from pathlib import Path
 
 from .config import GlobalConfig, RepoConfig
-from .conversation import poll_blocked_sessions
-from .dispatcher import spawn_agent, check_in_flight, respawn_for_review, respawn_for_spec_revision, read_agent_output, _get_worktree_path, find_spec_file
-from .pr_monitor import poll_pr_reviews, poll_merged_prs
+from .conversation import get_latest_human_comment
+from .dispatcher import spawn_agent, check_processes, _get_worktree_path
 from .scanner import scan_linear, WorkItem, WorkSource
 from .state import StateStore, Status
-from .reporter import (
-    move_to_in_review, move_to_done, move_to_blocked,
-    move_to_planning, move_to_design_review, move_to_implementing,
-    add_comment,
-)
 
 log = logging.getLogger(__name__)
 
 
-def _resolve_linear_credentials(
-    repo_path: str | Path,
-    global_config: GlobalConfig,
-) -> tuple[RepoConfig | None, str | None]:
-    """Resolve repo config and Linear API key for a tracked item's repo.
-
-    Returns (repo_config, api_key). Either or both may be None if the
-    repo config is missing or no API key is available.
-    """
-    try:
-        repo_config = RepoConfig.from_file(Path(repo_path))
-        creds = repo_config.get_credentials()
-        api_key = creds.get("linear_api_key") or global_config.linear_api_key
-        return repo_config, api_key
-    except FileNotFoundError:
-        return None, None
-
-
 async def run_cycle() -> dict:
-    """Run one dispatch cycle. Called by cron every N minutes.
-
-    Returns a summary dict of what happened this cycle.
-    """
+    """Run one dispatch cycle."""
     global_config = GlobalConfig.load()
     state = StateStore()
     summary = {"scanned": 0, "dispatched": 0, "completed": 0, "failed": 0, "skipped": 0, "unblocked": 0}
 
-    # 1. Check in-flight work first
-    updates = await check_in_flight(state)
+    # 1. Check running processes
+    updates = check_processes(state)
     for update in updates:
-        item_id = update["id"]
-
-        if update["status"] == "progress":
-            tracked = state._items.get(item_id)
-            if tracked and tracked.linear_issue_id:
-                _, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
-                if api_key:
-                    await add_comment(api_key, tracked.linear_issue_id,
-                        f"🤖 **Progress update:**\n\n{update['progress']}")
-
-        elif update["status"] == "done":
-            tracked = state._items.get(item_id)
-            if not tracked:
-                continue
-
-            repo_config, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
-            if not repo_config:
-                continue
-
-            if tracked.phase == "spec":
-                # Spec phase done — post SPEC.md to Linear, enter Design Review
-                worktree = _get_worktree_path(tracked)
-                spec_content = ""
-                if worktree:
-                    spec_file = find_spec_file(worktree)
-                    if spec_file:
-                        spec_content = spec_file.read_text().strip()
-
-                if api_key and tracked.linear_issue_id:
-                    await move_to_design_review(api_key, tracked.linear_issue_id, repo_config.linear_project)
-
-                    # Push the spec and open a draft PR for review
-                    import subprocess, shutil
-                    gh_path = shutil.which("gh") or "/opt/homebrew/bin/gh"
-                    git_path = shutil.which("git") or "/usr/bin/git"
-
-                    pr_url = None
-                    if worktree:
-                        subprocess.run([git_path, "add", "specs/"], cwd=str(worktree), capture_output=True)
-                        subprocess.run([git_path, "commit", "-m", f"spec: {tracked.title}"], cwd=str(worktree), capture_output=True)
-                        subprocess.run([git_path, "push", "-u", "origin", tracked.branch], cwd=str(worktree), capture_output=True)
-                        result = subprocess.run(
-                            [gh_path, "pr", "create", "--draft",
-                             "--title", f"[SPEC] {tracked.title}",
-                             "--body", f"## Design Review for {item_id}\n\nSPEC.md contains the full implementation plan.\n\n"
-                                       f"**Review the spec, then reply 'approved' on the Linear issue to start implementation.**"],
-                            cwd=str(worktree), capture_output=True, text=True,
-                        )
-                        if result.returncode == 0:
-                            pr_url = result.stdout.strip()
-
-                    # Post link to Linear
-                    if pr_url:
-                        await add_comment(api_key, tracked.linear_issue_id,
-                            f"🤖 **Spec ready for review.**\n\n"
-                            f"Draft PR: {pr_url}\n\n"
-                            f"**Reply 'approved' to proceed with implementation, or provide feedback.**")
-                    else:
-                        await add_comment(api_key, tracked.linear_issue_id,
-                            f"🤖 **Spec ready for review.** (SPEC.md in worktree — draft PR failed)\n\n"
-                            f"**Reply 'approved' to proceed with implementation, or provide feedback.**")
-
-                # Enter BLOCKED waiting for approval — store spec PR URL
-                state.update_status(item_id, Status.BLOCKED,
-                    pending_question_id=None, phase="spec", pr_url=pr_url)
-                log.info(f"Spec ready for {item_id} — waiting for design review")
-
-            else:
-                # Implementation phase done — move to In Review
-                summary["completed"] += 1
-                if api_key and tracked.linear_issue_id:
-                    await move_to_in_review(api_key, tracked.linear_issue_id, repo_config.linear_project)
-                    result = read_agent_output(item_id)
-                    summary_text = result.get("output", "")[:1000] if result else ""
-                    pr_text = f"\n\nPR: {tracked.pr_url}" if tracked.pr_url else ""
-                    comment = f"🤖 **Done.** Ready for review.{pr_text}"
-                    if summary_text:
-                        comment += f"\n\n**Summary:**\n{summary_text}"
-                    await add_comment(api_key, tracked.linear_issue_id, comment)
-
-        elif update["status"] == "blocked":
-            # Agent has a question — post it to Linear and move to Blocked
-            tracked = state._items.get(item_id)
-            if tracked and tracked.linear_issue_id:
-                repo_config, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
-                if api_key and repo_config:
-                    from .conversation import post_question
-                    question_text = update.get("question", "Agent needs input")
-                    comment_id = await post_question(api_key, tracked.linear_issue_id, question_text)
-                    if comment_id:
-                        state.update_status(item_id, Status.BLOCKED,
-                            pending_question_id=comment_id)
-                    await move_to_blocked(api_key, tracked.linear_issue_id, repo_config.linear_project)
-                    log.info(f"Blocked {item_id}: question posted to Linear")
-
+        if update["status"] == "done":
+            summary["completed"] += 1
+            log.info(f"Completed {update['id']}")
         elif update["status"] == "failed":
             summary["failed"] += 1
-            tracked = state._items.get(item_id)
-            if tracked and tracked.linear_issue_id:
-                _, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
-                if api_key:
-                    error_text = f"\n\nError: {tracked.error}" if tracked.error else ""
-                    await add_comment(api_key, tracked.linear_issue_id,
-                        f"🤖 **Failed/stuck.** Needs human attention.{error_text}")
+            log.info(f"Failed {update['id']}")
 
-    # 1b. Poll PRs for review feedback — re-dispatch if changes requested
-    pr_reviews = await poll_pr_reviews(global_config, state)
-    for review_item in pr_reviews:
-        item_id = review_item["id"]
-        tracked = state._items.get(item_id)
-        if not tracked or not tracked.linear_issue_id:
-            continue
-
-        repo_config, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
-        if not repo_config:
-            continue
-
-        if review_item.get("phase") == "spec":
-            # Spec review feedback — revise the spec
-            if api_key:
-                await move_to_planning(api_key, tracked.linear_issue_id, repo_config.linear_project)
-                await add_comment(api_key, tracked.linear_issue_id,
-                    f"🤖 **Revising spec based on review feedback.**")
-
-            result = respawn_for_spec_revision(item_id, review_item["feedback"], state)
-            if result:
-                log.info(f"Re-dispatched {item_id} for spec revision (PID {result['pid']})")
-        else:
-            # Implementation review feedback
-            if api_key:
-                await move_to_implementing(api_key, tracked.linear_issue_id, repo_config.linear_project)
-                await add_comment(api_key, tracked.linear_issue_id,
-                    f"🤖 **Addressing PR feedback.**\n\n{review_item['feedback'][:500]}")
-
-            result = respawn_for_review(item_id, review_item["feedback"], state)
-            if result:
-                log.info(f"Re-dispatched {item_id} for implementation feedback (PID {result['pid']})")
-
-    # 1c. Poll blocked sessions for user replies on Linear
-    unblocked = await poll_blocked_sessions(global_config, state)
-    summary["unblocked"] = len(unblocked)
-    for unblocked_item in unblocked:
-        item_id = unblocked_item["id"]
-        reply = unblocked_item.get("reply", "")
-        tracked = state._items.get(item_id)
-        if not tracked:
-            continue
-
-        log.info(f"Unblocked {item_id}: user replied on Linear")
-
-        repo_config, api_key = _resolve_linear_credentials(tracked.repo_path, global_config)
-        if not repo_config:
-            continue
-
-        if tracked.phase == "spec":
-            # Check if the reply is approval or feedback
-            approval_words = ["approved", "approve", "lgtm", "looks good", "go ahead", "ship it", "proceed"]
-            is_approved = any(word in reply.lower() for word in approval_words)
-
-            if is_approved:
-                # Read the approved spec
-                worktree = _get_worktree_path(tracked)
-                spec = ""
-                if worktree:
-                    spec_file = find_spec_file(worktree)
-                    if spec_file:
-                        spec = spec_file.read_text()
-
-                # Check if spec recommends splitting into sub-tickets
-                from .ticket_splitter import parse_split_from_spec, create_sub_tickets
-                split_info = parse_split_from_spec(spec)
-
-                if split_info and split_info.get("split") is True and split_info.get("tickets"):
-                    # Create sub-tickets in Linear
-                    sub_tickets = await create_sub_tickets(
-                        api_key,
-                        tracked.linear_issue_id,
-                        repo_config.linear_project,
-                        split_info["tickets"],
-                        repo_config.trigger_labels,
-                    )
-
-                    if sub_tickets and api_key:
-                        ticket_list = "\n".join(
-                            f"- **{t['identifier']}**: {t['title']}" for t in sub_tickets
-                        )
-                        await add_comment(api_key, tracked.linear_issue_id,
-                            f"🤖 **Spec approved. Created {len(sub_tickets)} sub-tickets:**\n\n{ticket_list}\n\n"
-                            f"Each sub-ticket will go through its own spec → design review → implement cycle.\n"
-                            f"This parent ticket will close when all children are complete.")
-
-                    # Remove parent from state — children will be dispatched individually
-                    del state._items[item_id]
-                    state._save()
-                    log.info(f"Spec approved for {item_id}, created {len(sub_tickets)} sub-tickets")
-                else:
-                    # Single ticket — spawn implementation phase
-                    from .scanner import WorkItem, WorkSource, Complexity
-                    work_item = WorkItem(
-                        id=item_id,
-                        source=WorkSource.LINEAR,
-                        title=tracked.title,
-                        body="",
-                        repo_config=repo_config,
-                        complexity=Complexity.MEDIUM,
-                        labels=[],
-                        linear_issue_id=tracked.linear_issue_id,
-                    )
-
-                    # Remove from state so spawn_agent can re-add it
-                    del state._items[item_id]
-                    state._save()
-
-                    result = spawn_agent(work_item, state, phase="implement", spec=spec)
-                    if result and api_key:
-                        await move_to_implementing(api_key, tracked.linear_issue_id, repo_config.linear_project)
-                        await add_comment(api_key, tracked.linear_issue_id,
-                            f"🤖 **Spec approved.** Starting implementation.")
-                        log.info(f"Spec approved for {item_id}, starting implementation (PID {result['pid']})")
-            else:
-                # Feedback — re-spawn spec phase with the feedback
-                if api_key:
-                    await move_to_planning(api_key, tracked.linear_issue_id, repo_config.linear_project)
-                    await add_comment(api_key, tracked.linear_issue_id,
-                        f"🤖 **Revising spec based on feedback.**")
-                # TODO: re-spawn spec agent with feedback context
-                log.info(f"Spec feedback for {item_id}, needs revision")
-        else:
-            # Implementation phase unblocked
-            if api_key:
-                await move_to_implementing(api_key, tracked.linear_issue_id, repo_config.linear_project)
-
-    # 1d. Re-dispatch failed items — move back to Todo and clear state (max 3 retries)
-    from .reporter import get_team_states, move_issue
+    # 2. Check done items for user replies (triggers re-spawn for next phase)
     for item_id, item in list(state._items.items()):
-        if item.status not in (Status.FAILED, Status.STUCK):
+        if item.status != Status.DONE:
+            continue
+        if not item.linear_issue_id:
             continue
 
+        # Resolve credentials
+        try:
+            repo_config = RepoConfig.from_file(Path(item.repo_path))
+            creds = repo_config.get_credentials()
+            api_key = creds.get("linear_api_key") or global_config.linear_api_key
+        except FileNotFoundError:
+            continue
+
+        if not api_key:
+            continue
+
+        # Check for a human reply since the agent last ran
+        reply = await get_latest_human_comment(api_key, item.linear_issue_id)
+        if not reply:
+            continue
+
+        # Don't re-spawn if the reply is old (already acted on)
+        if item.last_reply == reply:
+            continue
+
+        # Re-spawn with the reply as context
+        log.info(f"Re-spawning {item_id}: user replied")
+
+        # Build a WorkItem for re-spawning
+        work_item = WorkItem(
+            id=item_id,
+            source=WorkSource.LINEAR,
+            title=item.title,
+            body="",
+            repo_config=repo_config,
+            labels=[],
+            linear_issue_id=item.linear_issue_id,
+        )
+
+        # Remove from state so spawn_agent can re-add
+        del state._items[item_id]
+        state._save()
+
+        result = spawn_agent(work_item, state, user_reply=reply)
+        if result:
+            summary["unblocked"] += 1
+            log.info(f"Re-dispatched {item_id} (PID {result['pid']})")
+
+    # 3. Clear failed items (max 3 retries)
+    for item_id, item in list(state._items.items()):
+        if item.status != Status.FAILED:
+            continue
         if item.attempts >= 3:
             log.warning(f"Giving up on {item_id} after {item.attempts} attempts")
-            # Leave in failed state, post to Linear
-            if item.linear_issue_id:
-                repo_config, api_key = _resolve_linear_credentials(item.repo_path, global_config)
-                if api_key and repo_config:
-                    await move_to_blocked(api_key, item.linear_issue_id, repo_config.linear_project)
-                    await add_comment(api_key, item.linear_issue_id,
-                        f"🤖 **Giving up after {item.attempts} attempts.** Needs human intervention.\n\nLast error: {item.error or 'unknown'}")
-            # Remove from state so we stop retrying
             del state._items[item_id]
             state._save()
             continue
-
-        # Move back to Todo on Linear for retry
-        if item.linear_issue_id:
-            repo_config, api_key = _resolve_linear_credentials(item.repo_path, global_config)
-            if api_key and repo_config:
-                states = await get_team_states(api_key, repo_config.linear_project)
-                todo_id = states.get("todo") or states.get("unstarted")
-                if todo_id:
-                    await move_issue(api_key, item.linear_issue_id, todo_id)
-        # Track attempt count in meta, then remove from state
+        # Clear for retry — scanner will pick it up again
         meta_path = Path.home() / ".dispatch" / "runs" / item_id
         meta_path.mkdir(parents=True, exist_ok=True)
-        attempts_file = meta_path / "attempts"
-        attempts_file.write_text(str(item.attempts))
-
+        (meta_path / "attempts").write_text(str(item.attempts))
         del state._items[item_id]
         state._save()
-        log.info(f"Cleared failed item {item_id} — moved back to Todo for retry (attempt {item.attempts})")
+        log.info(f"Cleared {item_id} for retry (attempt {item.attempts})")
 
-    # 2. Scan for new work across all registered repos
-    all_work: list[WorkItem] = []
-
+    # 4. Scan for new work
     for repo_path in global_config.repos:
         if not repo_path.exists():
-            log.warning(f"Repo path does not exist: {repo_path}")
             continue
 
         try:
             repo_config = RepoConfig.from_file(repo_path)
         except FileNotFoundError:
-            log.debug(f"No .dispatch.yaml in {repo_path}, skipping")
             continue
 
-        # Scan Linear for this repo's project
         linear_items = await scan_linear(global_config, repo_config)
-        all_work.extend(linear_items)
         summary["scanned"] += len(linear_items)
 
-    # 3. Filter and dispatch
-    for item in all_work:
-        # Skip if already in flight
-        if state.is_tracked(item.id):
-            summary["skipped"] += 1
-            continue
+        for item in linear_items:
+            if state.is_tracked(item.id):
+                summary["skipped"] += 1
+                continue
 
-        # Dispatch — always starts in spec phase
-        result = spawn_agent(item, state, phase="spec")
-        if result:
-            summary["dispatched"] += 1
-            log.info(f"Dispatched {item.id}: {item.title} (spec phase, PID {result['pid']})")
+            result = spawn_agent(item, state)
+            if result:
+                summary["dispatched"] += 1
+                log.info(f"Dispatched {item.id}: {item.title} (PID {result['pid']})")
+            else:
+                summary["skipped"] += 1
 
-            # Move to Planning and comment on the issue
-            if item.linear_issue_id:
-                creds = item.repo_config.get_credentials()
-                api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                if api_key:
-                    await move_to_planning(api_key, item.linear_issue_id, item.repo_config.linear_project)
-                    await add_comment(api_key, item.linear_issue_id,
-                        f"🤖 **Picked up by agent-dispatch.** Writing implementation spec.\n\n"
-                        f"Worktree: `{result['worktree']}`\n"
-                        f"Branch: `{result['branch']}`")
-        else:
-            summary["skipped"] += 1
-            log.debug(f"Skipped {item.id}: at parallel limit")
-
-    # 4. Check for merged PRs — close the Linear issue
-    merged = await poll_merged_prs(state)
-    for merged_item in merged:
-        item_id = merged_item["id"]
-        linear_issue_id = merged_item.get("linear_issue_id")
-        if linear_issue_id:
-            repo_config, api_key = _resolve_linear_credentials(merged_item["repo_path"], global_config)
-            if api_key and repo_config:
-                await move_to_done(api_key, linear_issue_id, repo_config.linear_project)
-                await add_comment(api_key, linear_issue_id,
-                    f"🤖 **PR merged.** Issue complete.")
-
-        # Remove from state — fully done
-        if item_id in state._items:
-            del state._items[item_id]
-            state._save()
-        log.info(f"Closed {item_id}: PR merged")
-
-    # 5. Cleanup old entries
+    # 5. Cleanup
     state.cleanup_old()
 
     return summary
 
 
 def run() -> dict:
-    """Synchronous entrypoint for cron."""
+    """Synchronous entrypoint."""
     return asyncio.run(run_cycle())

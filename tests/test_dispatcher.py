@@ -27,57 +27,76 @@ def _make_item(complexity: Complexity = Complexity.MEDIUM, **kwargs) -> WorkItem
     return WorkItem(**defaults)
 
 
-# Spec phase tests
-
-def test_spec_prompt_does_not_implement():
+def test_prompt_includes_preamble():
     item = _make_item()
-    prompt = build_prompt(item, BRANCH, phase="spec")
+    prompt = build_prompt(item, BRANCH)
 
-    assert "specs/" in prompt
-    assert "Do NOT write any implementation code" in prompt
-    assert "principal" in prompt.lower()
+    assert "Running unattended" in prompt
+    assert ".dispatch/state.md" in prompt
 
 
-def test_spec_prompt_includes_task():
+def test_prompt_includes_lifecycle():
     item = _make_item()
-    prompt = build_prompt(item, BRANCH, phase="spec")
+    prompt = build_prompt(item, BRANCH)
 
-    assert "Add user avatars" in prompt
-    assert "Gravatar" in prompt
+    assert "Phase 1: Spec" in prompt
+    assert "Phase 2: Implement" in prompt
+    assert "Exit cleanly" in prompt
 
 
-def test_spec_prompt_has_scope_and_sizing():
+def test_prompt_includes_tools():
     item = _make_item()
-    prompt = build_prompt(item, BRANCH, phase="spec")
+    prompt = build_prompt(item, BRANCH)
 
+    assert "LINEAR_API_KEY" in prompt
+    assert "gh pr create" in prompt
+
+
+def test_prompt_includes_spec_methodology():
+    item = _make_item()
+    prompt = build_prompt(item, BRANCH)
+
+    assert "Scope guards" in prompt
     assert "Size verdict" in prompt
-    assert "split" in prompt.lower()
     assert "Verification Plan" in prompt
 
 
-# Implementation phase tests
-
-def test_implement_prompt_has_branch_and_pr():
+def test_prompt_includes_implement_methodology():
     item = _make_item()
-    prompt = build_prompt(item, BRANCH, phase="implement", spec="The approved spec here.")
+    prompt = build_prompt(item, BRANCH)
 
-    assert BRANCH in prompt
-    assert "gh pr create" in prompt
-    assert "git push" in prompt
-    assert "The approved spec here." in prompt
+    assert "staff engineer" in prompt.lower()
+    assert "Tests are not optional" in prompt
 
 
-def test_implement_prompt_has_review():
+def test_prompt_includes_issue_context():
     item = _make_item()
-    prompt = build_prompt(item, BRANCH, phase="implement", spec="spec")
+    prompt = build_prompt(item, BRANCH)
 
-    assert "/review" in prompt
     assert "PROJ-1" in prompt
+    assert "Add user avatars" in prompt
+    assert "Gravatar" in prompt
+    assert BRANCH in prompt
 
 
-def test_implement_prompt_has_test_command():
+def test_prompt_includes_user_reply_when_provided():
     item = _make_item()
-    prompt = build_prompt(item, BRANCH, phase="implement", spec="spec")
+    prompt = build_prompt(item, BRANCH, user_reply="approved, go ahead")
+
+    assert "approved, go ahead" in prompt
+    assert "User reply" in prompt
+
+
+def test_prompt_without_reply_has_no_reply_section():
+    item = _make_item()
+    prompt = build_prompt(item, BRANCH)
+
+    assert "User reply" not in prompt
+
+
+def test_prompt_includes_test_command():
+    item = _make_item()
+    prompt = build_prompt(item, BRANCH)
 
     assert "pytest -x" in prompt
 
@@ -85,6 +104,6 @@ def test_implement_prompt_has_test_command():
 def test_no_test_command_shows_placeholder():
     item = _make_item()
     item.repo_config.test_command = ""
-    prompt = build_prompt(item, BRANCH, phase="implement", spec="spec")
+    prompt = build_prompt(item, BRANCH)
 
-    assert "no test command configured" in prompt
+    assert "none configured" in prompt
