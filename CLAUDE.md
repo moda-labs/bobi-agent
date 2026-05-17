@@ -9,8 +9,31 @@ cd ~/dev/agent-dispatch
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-dispatch init
+dispatch init --non-interactive
 ```
+
+## First-time setup (agent guidance)
+
+When setting up dispatch for a user, guide them through credentials:
+
+1. Run `dispatch init --non-interactive` to create the config skeleton
+2. Ask the user for their **Linear API key** (get it at https://linear.app/settings/api → Create key)
+3. Ask the user for their **Slack bot token** (see docs/SLACK_SETUP.md for the 5-minute walkthrough)
+4. Run `dispatch init --linear-key <KEY> --slack-token <TOKEN>` to store them
+5. Run `dispatch setup` in the target repo to auto-generate `.dispatch.yaml`
+6. Ask the user to confirm the detected Linear project key and Slack channel
+
+Credentials can also be set via env vars: `LINEAR_API_KEY`, `SLACK_BOT_TOKEN`.
+
+For multi-workspace setups, edit `~/.dispatch/credentials.yaml` directly:
+
+```yaml
+workspace-name:
+  linear_api_key: "lin_api_..."
+  slack_bot_token: "xoxb-..."
+```
+
+Then set `credentials: "workspace-name"` in the repo's `.dispatch.yaml`.
 
 ## Commands
 

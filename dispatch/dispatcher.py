@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import RepoConfig
 from .scanner import Complexity, WorkItem
+from .skills import discover_skill_packs, get_relevant_skills, format_skills_for_prompt
 from .state import StateStore, Status
 
 
@@ -73,11 +74,18 @@ def build_prompt(item: WorkItem) -> str:
     config = item.repo_config
     template = PROMPT_TEMPLATES[item.complexity]
 
-    skills_text = ""
+    # Discover installed skills and filter to relevant ones
+    packs = discover_skill_packs()
+    relevant = get_relevant_skills(packs, item.labels)
+    discovered_skills = format_skills_for_prompt(relevant)
+
+    # Also include explicitly configured skills from .dispatch.yaml
+    explicit_skills = ""
     if config.skills:
-        skills_text = "Run these gstack skills as appropriate:\n" + "\n".join(
-            f"  - /{s}" for s in config.skills
-        )
+        explicit_skills = "\n".join(f"  - /{s}" for s in config.skills)
+
+    # Merge: discovered skills take priority, explicit fills gaps
+    skills_text = discovered_skills or explicit_skills
 
     return template.format(
         repo_path=config.path,

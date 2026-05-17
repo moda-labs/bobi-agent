@@ -35,8 +35,10 @@ DISPATCH="$INSTALL_DIR/.venv/bin/dispatch"
 
 # 3. Init global config if it doesn't exist
 if [ ! -f "$HOME/.dispatch/config.yaml" ]; then
-    echo "    Running dispatch init..."
-    "$DISPATCH" init
+    echo "    Initializing config (non-interactive)..."
+    "$DISPATCH" init --non-interactive
+    echo "    Config created at ~/.dispatch/config.yaml"
+    echo "    Add credentials later: dispatch init --linear-key KEY --slack-token TOKEN"
 fi
 
 # 4. Setup current repo if we're in one

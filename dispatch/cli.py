@@ -69,20 +69,37 @@ def register(repo_path: str):
 
 
 @main.command()
-def init():
-    """Initialize global config at ~/.dispatch/."""
+@click.option("--linear-key", envvar="LINEAR_API_KEY", default=None, help="Linear API key")
+@click.option("--slack-token", envvar="SLACK_BOT_TOKEN", default=None, help="Slack bot token")
+@click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip prompts (use flags/env vars only)")
+def init(linear_key, slack_token, non_interactive):
+    """Initialize global config at ~/.dispatch/.
+
+    In non-interactive mode (--non-interactive, or CI=1), skips prompts and
+    only uses values from flags or env vars. Safe to run from agents/scripts.
+    """
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config = GlobalConfig.load()
 
-    if not config.linear_api_key:
-        key = click.prompt("Linear API key (or press Enter to skip)", default="", show_default=False)
-        if key:
-            config.linear_api_key = key
+    if linear_key:
+        config.linear_api_key = linear_key
+    elif not config.linear_api_key and not non_interactive:
+        try:
+            key = click.prompt("Linear API key (or press Enter to skip)", default="", show_default=False)
+            if key:
+                config.linear_api_key = key
+        except (EOFError, click.Abort):
+            pass
 
-    if not config.slack_bot_token:
-        token = click.prompt("Slack bot token (or press Enter to skip)", default="", show_default=False)
-        if token:
-            config.slack_bot_token = token
+    if slack_token:
+        config.slack_bot_token = slack_token
+    elif not config.slack_bot_token and not non_interactive:
+        try:
+            token = click.prompt("Slack bot token (or press Enter to skip)", default="", show_default=False)
+            if token:
+                config.slack_bot_token = token
+        except (EOFError, click.Abort):
+            pass
 
     config.save()
     click.echo(f"Config saved to {GLOBAL_CONFIG_DIR}/config.yaml")

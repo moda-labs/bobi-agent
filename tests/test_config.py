@@ -72,7 +72,8 @@ def test_repo_config_missing_file(tmp_path):
         pass
 
 
-def test_global_config_missing_file():
+def test_global_config_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("dispatch.config.GLOBAL_CONFIG_PATH", tmp_path / "nonexistent.yaml")
     config = GlobalConfig.load()
     assert config.linear_api_key == ""
     assert config.repos == []
