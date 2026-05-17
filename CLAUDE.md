@@ -102,7 +102,7 @@ dispatch status            # show in-flight work
 ## Cron
 
 ```bash
-*/5 * * * * ~/dev/agent-dispatch/.venv/bin/python -m dispatch.cli cycle >> ~/.dispatch/dispatch.log 2>&1
+* * * * * ~/dev/agent-dispatch/.venv/bin/python -m dispatch.cli cycle >> ~/.dispatch/dispatch.log 2>&1
 ```
 
 ## Adding a repo to dispatch

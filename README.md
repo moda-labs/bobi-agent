@@ -87,7 +87,7 @@ notify:
 
 ```bash
 # Run every 5 minutes
-*/5 * * * * cd ~/dev/agent-dispatch && python -m dispatch.cli cycle >> ~/.dispatch/dispatch.log 2>&1
+* * * * * cd ~/dev/agent-dispatch && python -m dispatch.cli cycle >> ~/.dispatch/dispatch.log 2>&1
 ```
 
 ## State machine

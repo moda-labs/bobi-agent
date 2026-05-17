@@ -114,7 +114,7 @@ class GlobalConfig:
     linear_api_key: str = ""
     slack_bot_token: str = ""
     repos: list[Path] = field(default_factory=list)
-    poll_interval_minutes: int = 5
+    poll_interval_minutes: int = 1
     default_agent: str = "claude"
 
     @classmethod
