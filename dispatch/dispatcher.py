@@ -76,17 +76,34 @@ Read CLAUDE.md first if it exists.
 
 {body}
 
-## Lifecycle: Plan → Implement → Review → Ship
+## Lifecycle: Think → Plan → Implement → Review → Ship
+
+**Step 1: Decide if this needs product thinking.**
+
+If the task is vague, ambitious, or describes a new feature/system without
+a clear spec (e.g., "build notifications", "add social features", "create
+an onboarding flow"), then START with:
+
+1. Run /office-hours — this will challenge your assumptions, reframe the
+   problem, and produce a design doc
+2. Run /plan-ceo-review — this will pressure-test the scope and find the
+   10-star version
+
+Post the resulting plan as a commit (PLAN.md) so it's reviewable.
+
+If the task already has a clear spec (specific files to change, defined
+acceptance criteria, obvious implementation), skip to Step 2.
+
+**Step 2: Engineering plan and implementation.**
 
 1. git checkout -b {branch}
-2. Read CLAUDE.md and understand the architecture
-3. Run /plan-eng-review or write a detailed plan: architecture, data flow,
-   edge cases, test strategy. Think before you code.
-4. Implement incrementally — commit after each logical step
-5. Run tests after each step: {test_command}
-6. Run /review to catch bugs, security issues, and completeness gaps
-7. Fix anything /review finds
-8. Run /ship to push and create the PR (or manually):
+2. Run /plan-eng-review or write a detailed plan: architecture, data flow,
+   edge cases, test strategy
+3. Implement incrementally — commit after each logical step
+4. Run tests after each step: {test_command}
+5. Run /review to catch bugs, security issues, and completeness gaps
+6. Fix anything /review finds
+7. Run /ship to push and create the PR (or manually):
    git push -u origin {branch}
    gh pr create --title "{title}" --body "Fixes {issue_id}\\n\\n<description>"
 
