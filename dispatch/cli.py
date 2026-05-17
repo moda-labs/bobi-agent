@@ -30,13 +30,21 @@ def _get_cron_line() -> str:
     return CRON_JOB.format(dispatch=dispatch_bin, log=log_path, path=current_path, home=home)
 
 
+LOG_PATH = GLOBAL_CONFIG_DIR / "dispatch.log"
+
+
 @click.group()
 def main():
     """Agent dispatch engine — scan Linear, spawn coding agents."""
+    GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(LOG_PATH),
+        ],
     )
 
 
@@ -54,18 +62,21 @@ def daemon(interval):
         tmux new -d -s dispatch 'dispatch daemon'  # background in tmux
     """
     import time as time_mod
+    log = logging.getLogger(__name__)
+    log.info(f"Daemon starting. Polling every {interval}s.")
     click.echo(f"Dispatch daemon starting. Polling every {interval}s. Ctrl+C to stop.")
+    click.echo(f"Logs: {LOG_PATH}")
     try:
         while True:
             try:
                 summary = run()
-                # Only log if something happened
                 if any(v > 0 for k, v in summary.items() if k != "skipped"):
-                    click.echo(f"{time_mod.strftime('%H:%M:%S')} {json.dumps(summary)}")
+                    log.info(f"Cycle: {json.dumps(summary)}")
             except Exception as e:
-                click.echo(f"{time_mod.strftime('%H:%M:%S')} ERROR: {e}", err=True)
+                log.error(f"Cycle failed: {e}")
             time_mod.sleep(interval)
     except KeyboardInterrupt:
+        log.info("Daemon stopped.")
         click.echo("\nDaemon stopped.")
 
 
