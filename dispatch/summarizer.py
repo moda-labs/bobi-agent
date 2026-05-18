@@ -52,12 +52,15 @@ def detect_phase(worktree: str) -> dict:
 
     # Check for PR
     pr_url = None
+    pr_merged = False
     pr_raw = _gh(worktree, "pr", "view", "--json", "url,state")
     if pr_raw:
         try:
             pr_data = json.loads(pr_raw)
             if pr_data.get("state") in ("OPEN", "MERGED"):
                 pr_url = pr_data.get("url")
+            if pr_data.get("state") == "MERGED":
+                pr_merged = True
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -87,6 +90,15 @@ def detect_phase(worktree: str) -> dict:
     is_pushed = bool(push_status)
 
     # Determine phase
+    if pr_merged:
+        return {
+            "phase": "done",
+            "pr_url": pr_url,
+            "spec_path": spec_path,
+            "has_commits": has_commits,
+            "summary": f"PR merged: {pr_url}",
+        }
+
     if pr_url:
         return {
             "phase": "in_review",

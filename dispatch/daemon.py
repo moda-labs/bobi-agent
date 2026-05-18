@@ -45,6 +45,7 @@ PHASE_LINEAR_STATE = {
     "implementation_complete":  "In Progress",
     "feedback_addressed":       "In Review",
     "in_review":                "In Review",
+    "done":                     "Done",
 }
 
 
@@ -238,6 +239,15 @@ async def run_cycle() -> dict:
                 if phase == "in_review" and linear_id:
                     pr_url = phase_info.get("pr_url", "")
                     await add_comment(api_key, linear_id, f"Ready for review. PR: {pr_url}")
+
+                if phase == "done":
+                    if linear_id:
+                        await add_comment(api_key, linear_id, "PR merged. Issue complete.")
+                    kill_session(iid)
+                    state.remove(iid)
+                    summary["done"] += 1
+                    log.info(f"{iid} → Done (PR merged)")
+                    continue
 
                 # Route to next skill — inject into SAME session
                 router = PHASE_ROUTES.get(phase)
