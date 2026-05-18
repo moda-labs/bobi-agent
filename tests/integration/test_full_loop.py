@@ -209,37 +209,33 @@ class TestFullLoop:
         # Wait for it to leave Todo (picked up by dispatch)
         state = wait_for_state(
             api_key, test_issue["id"],
-            ["Planning", "Design Review", "Implementing"],
+            ["In Progress", "In Review"],
             timeout=MAX_WAIT_SPEC,
-            label="spec pickup",
+            label="pickup",
         )
 
-        assert state in ["Planning", "Design Review", "Implementing"]
+        assert state in ["In Progress", "In Review"]
 
     @pytest.mark.timeout(600)
     def test_full_cycle(self, api_key, test_issue):
         """Test the full spec → approve → implement cycle."""
         print(f"\nWaiting for spec phase on {test_issue['identifier']}...")
 
-        # Wait for Design Review (spec complete)
+        # Wait for In Progress (picked up, working)
         wait_for_state(
             api_key, test_issue["id"],
-            ["Design Review"],
+            ["In Progress"],
             timeout=MAX_WAIT_SPEC,
-            label="spec complete",
+            label="in progress",
         )
 
-        # Approve the spec
-        time.sleep(5)  # Let the comment post settle
-        approve_spec(api_key, test_issue["id"])
-
-        # Wait for implementation to start
-        print("  Waiting for implementation...")
+        # Wait for In Review (PR created)
+        print("  Waiting for PR...")
         wait_for_state(
             api_key, test_issue["id"],
-            ["Implementing", "In Review"],
+            ["In Review"],
             timeout=MAX_WAIT_IMPL,
-            label="implementation",
+            label="in review",
         )
 
         print(f"  ✓ Full cycle completed for {test_issue['identifier']}")

@@ -5,11 +5,9 @@ import httpx
 LINEAR_API = "https://api.linear.app/graphql"
 
 REQUIRED_STATES = [
-    ("Planning", "started", "#6366f1", 0),
-    ("Design Review", "started", "#8b5cf6", 1),
-    ("Implementing", "started", "#f59e0b", 2),
-    ("Blocked", "started", "#eb5757", 3),
-    ("In Review", "started", "#10b981", 4),
+    ("In Progress", "started", "#f59e0b", 0),
+    ("Blocked", "started", "#eb5757", 1),
+    ("In Review", "started", "#10b981", 2),
 ]
 
 

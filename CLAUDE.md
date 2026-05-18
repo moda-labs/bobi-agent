@@ -1,6 +1,6 @@
 # agentd
 
-Dispatch loop for coding agents. Scans Linear for work, spawns Claude Code to implement, reports results via Linear comments.
+Skills-first dispatch daemon. Scans Linear for work, spawns Claude Code with the right skill for each phase, reports results via Linear.
 
 ## Setup
 
@@ -70,58 +70,75 @@ dispatch status            # show in-flight work
 dispatch watch             # live dashboard (refreshes every 5s)
 ```
 
-## Running the daemon
+## Architecture
 
-```bash
-dispatch init              # creates config + starts daemon in tmux
-dispatch daemon            # or run in foreground
-```
-
-Or via cron:
-
-```bash
-* * * * * ~/dev/agentd/.venv/bin/dispatch cycle >> ~/.dispatch/dispatch.log 2>&1
-```
-
-## Adding a repo to dispatch
-
-1. Run `dispatch setup ~/path/to/repo` (auto-generates `.dispatch.yaml`)
-2. Or drop `.dispatch.yaml` manually and run `dispatch register ~/path/to/repo`
-3. Label issues in Linear with your trigger label (default: "agent")
-
-## Project structure
+Skills-first: each phase of work is a self-contained skill. The daemon
+just polls Linear and spawns the right skill. Sub-agents within each
+skill keep context isolated.
 
 ```
+skills/
+├── pickup/SKILL.md      # take ticket, create worktree, triage complexity
+├── spec/SKILL.md        # write implementation spec (non-trivial work)
+├── implement/SKILL.md   # build from spec, TDD, create PR
+├── ship-pr/SKILL.md     # create/update PR, move to In Review
+└── feedback/SKILL.md    # address review comments
+
 dispatch/
-├── cli.py           # Click CLI entrypoint
-├── config.py        # Global (~/.dispatch/) + per-repo (.dispatch.yaml)
-├── scanner.py       # Linear GraphQL scanning + complexity classification
-├── state.py         # Running agent tracking (PID, worktree, activity)
-├── dispatcher.py    # Prompt assembly + agent spawning (loads prompts/, discovers skills)
-├── engine.py        # Main loop: scan → reconcile → read handoff docs → transitions → dispatch
-├── linear_state.py  # Linear API: state transitions, comments, handoff doc checks
+├── daemon.py        # Poll → route → spawn (~170 lines)
+├── scanner.py       # Linear GraphQL polling + complexity classification
+├── linear_api.py    # Minimal Linear helpers (state IDs, move, comment)
 ├── conversation.py  # Detect human replies on Linear issues
-├── skills.py        # Skill pack discovery across ~/.claude, ~/.codex, ~/.cursor
+├── state.py         # Running agent PID tracking
+├── config.py        # Global (~/.dispatch/) + per-repo (.dispatch.yaml)
 ├── setup.py         # Auto-generate .dispatch.yaml from repo inspection
-└── board_setup.py   # Bootstrap Linear board with required workflow states
+├── board_setup.py   # Bootstrap Linear board with required workflow states
+└── cli.py           # Click CLI entrypoint
 ```
 
 ## Issue lifecycle
 
-Skills-first, atomic handoffs. Each agent does one phase (spec, implement, or feedback), writes handoff documents (`.dispatch/state.md`, `specs/*.md`, `.dispatch-question.md`), and exits. The engine reads those documents to determine the next state transition. Agents never touch Linear directly.
+Linear states: Todo → In Progress → In Review → Done (+ Blocked)
 
-- **Todo** → engine moves to Planning, spawns agent
-- **Planning** → agent writes spec to `specs/`, creates draft PR, writes `.dispatch/state.md`, exits
-- **Design Review** → human reviews spec, replies "approved" → engine re-spawns to implement
-- **Implementing** → agent reads spec, implements, runs `/review`, creates PR, exits
-- **In Review** → human reviews PR → re-spawn for feedback; auto-detect merge → Done
-- **Blocked** → agent wrote `.dispatch-question.md` → wait for human reply → re-spawn
-- **Done / Canceled** → kill agent, stop tracking
+The daemon routes based on Linear state:
+
+| Linear state | Trigger | Action |
+|---|---|---|
+| Todo + agent label | new issue | spawn `/pickup`, move to In Progress |
+| In Review | PR merged | move to Done |
+| In Review | changes requested | spawn `/feedback` |
+| Blocked | human replied | spawn `/feedback` |
+
+Internal phases (triage, spec, implement) happen within "In Progress".
+The handoff file (`.dispatch/handoff.md`) tracks which sub-phase the
+agent is in. Linear doesn't need to know.
+
+## Handoff contract
+
+Agents communicate between phases via `.dispatch/handoff.md` in the worktree:
+
+```yaml
+---
+issue_id: AGD-12
+title: Add rate limiting
+worktree: /path/to/worktree
+branch: agent/agd-12
+phase: spec_complete
+spec_path: specs/agd-12-rate-limiting.md
+complexity: medium
+---
+
+Summary for next agent.
+```
+
+Each agent reads the handoff, does its work, updates the handoff, exits.
 
 ## Tests
 
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
-pytest
+pytest tests/ --ignore=tests/integration/
 ```
+
+Do NOT run `tests/integration/` — they create real Linear issues.

@@ -11,7 +11,7 @@ truststore.inject_into_ssl()
 import click
 
 from .config import GlobalConfig, GLOBAL_CONFIG_DIR
-from .engine import run
+from .daemon import run
 from .setup import generate_dispatch_yaml
 from .state import StateStore
 
