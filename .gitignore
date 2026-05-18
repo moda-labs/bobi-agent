@@ -6,4 +6,5 @@ dist/
 *.pyc
 .env
 worktrees/
+.dispatch/
 .dispatch.yaml
