@@ -34,7 +34,7 @@ def main():
 
 
 @main.command()
-@click.option("--interval", default=30, help="Seconds between cycles")
+@click.option("--interval", default=5, help="Seconds between cycles")
 def daemon(interval):
     """Run dispatch as a long-running daemon. Best run in tmux.
 
