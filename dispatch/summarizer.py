@@ -61,22 +61,25 @@ def detect_phase(worktree: str) -> dict:
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Check for spec files
-    spec_path = None
-    specs_dir = wt / "specs"
-    if specs_dir.exists():
-        specs = [f for f in specs_dir.iterdir() if f.suffix == ".md"]
-        if specs:
-            spec_path = str(specs[0].relative_to(wt))
-
-    # Check for commits beyond main
+    # Check for commits beyond main and what changed
     commit_log = _git(worktree, "log", "--oneline", "main..HEAD")
     has_commits = bool(commit_log)
 
-    # Check what files changed
     changed_files = _git(worktree, "diff", "--name-only", "main..HEAD").splitlines()
-    non_spec_changes = [f for f in changed_files
+
+    # Also check uncommitted changes (agent may have edited but not committed)
+    uncommitted = _git(worktree, "diff", "--name-only").splitlines()
+    unstaged = _git(worktree, "diff", "--name-only", "--cached").splitlines()
+    all_changed = list(set(changed_files + uncommitted + unstaged))
+
+    non_spec_changes = [f for f in all_changed
                         if not f.startswith("specs/") and not f.startswith(".dispatch")]
+
+    # Check for spec files created on this branch (not inherited from main)
+    spec_path = None
+    spec_files_in_diff = [f for f in all_changed if f.startswith("specs/") and f.endswith(".md")]
+    if spec_files_in_diff:
+        spec_path = spec_files_in_diff[0]
 
     # Check for pushed branch
     branch = _git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
