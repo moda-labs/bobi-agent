@@ -82,6 +82,31 @@ Within each phase, the skill uses sub-agents to keep context isolated:
 
 Each sub-agent gets only the context it needs. The implement sub-agent never sees the test-writing process. The reviewer only sees the diff.
 
+### gstack integration
+
+Every dispatch phase uses [gstack](https://github.com/garrytan/gstack) skills to enforce a real engineering lifecycle. No phase ships without quality gates.
+
+| Dispatch phase | gstack skills used | What they do |
+|---|---|---|
+| `/pickup` (triage) | `/frontdoor` | Classify: update / inquiry / bug |
+| | `/office-hours` | Complex/ambiguous issues → structured design doc |
+| `/spec` (design) | `/plan-eng-review` | Architecture, edge cases, test coverage |
+| | `/plan-design-review` | UX review, design dimensions scored 0-10 |
+| | `/plan-ceo-review` | Scope review: too narrow? too wide? |
+| `/implement` (build) | `/investigate` | Bugs only — root cause analysis before any fix |
+| | `/build` | Staff engineer coding methodology |
+| | `/review` | **Mandatory** pre-landing code review |
+| | `/qa` | Browser-based QA (web frontends only) |
+| `/ship-pr` (ship) | `/ship` | Full ship workflow: test, review, create PR |
+| `/feedback` (iterate) | `/investigate` | If feedback points to a bug |
+| | `/review` | **Mandatory** review of fixes before pushing |
+
+Key enforcement points:
+- **`/review` is mandatory** in both `/implement` and `/feedback`. Code cannot advance to PR without passing code review.
+- **`/investigate` before fixing bugs.** No guessing at fixes — root cause first (Iron Law).
+- **Triple review on specs.** Non-trivial specs get engineering, design, and CEO-level scope review before implementation starts.
+- **`/ship` handles PR creation.** Agents don't use raw `gh pr create` — `/ship` runs tests, reviews the diff, and creates a proper PR.
+
 ## Setup
 
 ### One-liner
