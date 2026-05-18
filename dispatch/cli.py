@@ -352,6 +352,26 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
         for action in actions:
             click.echo(f"  {action}")
 
+    # Install dispatch skills into the repo's .claude/skills/
+    click.echo("")
+    click.echo("Installing dispatch skills...")
+    agentd_skills = Path(__file__).parent.parent / "skills"
+    target_skills = path / ".claude" / "skills"
+    target_skills.mkdir(parents=True, exist_ok=True)
+    installed = []
+    for skill_dir in agentd_skills.iterdir():
+        if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
+            link = target_skills / skill_dir.name
+            if link.exists() or link.is_symlink():
+                continue
+            link.symlink_to(skill_dir.resolve())
+            installed.append(skill_dir.name)
+    if installed:
+        for name in sorted(installed):
+            click.echo(f"  Linked /{name}")
+    else:
+        click.echo("  Skills already installed.")
+
 
 if __name__ == "__main__":
     main()
