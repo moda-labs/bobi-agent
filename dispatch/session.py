@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 TMUX = shutil.which("tmux") or "tmux"
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
 LOG_DIR = Path.home() / ".dispatch" / "logs"
+SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 
 def _session_name(issue_id: str) -> str:
@@ -65,11 +66,17 @@ def spawn_session(issue_id: str, cwd: str) -> bool:
 
 
 def inject(issue_id: str, text: str) -> None:
-    """Send text into the session as if a human typed it."""
+    """Send text into the session as if a human typed it.
+
+    Claude Code's input is single-line — multiline pastes get held in
+    the editor buffer and don't auto-submit. We collapse newlines to
+    spaces so the text arrives as one message and submits on Enter.
+    """
     name = _session_name(issue_id)
-    subprocess.run([TMUX, "send-keys", "-t", name, "-l", text])
+    collapsed = " ".join(text.splitlines())
+    subprocess.run([TMUX, "send-keys", "-t", name, "-l", collapsed])
     subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
-    log.info(f"{issue_id}: injected {len(text)} chars")
+    log.info(f"{issue_id}: injected {len(collapsed)} chars")
 
 
 def capture(issue_id: str, lines: int = 80) -> str:
@@ -185,6 +192,23 @@ def kill_session(issue_id: str) -> None:
     name = _session_name(issue_id)
     subprocess.run([TMUX, "kill-session", "-t", name], capture_output=True)
     log.info(f"Session {name} killed")
+
+
+def load_skill(skill_name: str) -> str:
+    """Load a SKILL.md file content."""
+    skill_path = SKILLS_DIR / skill_name / "SKILL.md"
+    if skill_path.exists():
+        return skill_path.read_text()
+    return ""
+
+
+def inject_skill(issue_id: str, skill_name: str, context: str = "") -> None:
+    """Invoke a skill by name. Skills must be installed in .claude/skills/."""
+    msg = f"/{skill_name}"
+    if context:
+        msg += f" {context}"
+    inject(issue_id, msg)
+    log.info(f"{issue_id}: invoked /{skill_name}")
 
 
 def list_sessions() -> list[str]:
