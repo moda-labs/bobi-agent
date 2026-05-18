@@ -338,13 +338,8 @@ async def run_cycle() -> dict:
                 if not reply:
                     continue
 
-                agent = state.get(iid)
-                if not agent or agent.last_phase != "_question_posted":
-                    continue
-
                 sess_state = detect_state(iid)
                 if sess_state["state"] == "asking_question":
-                    # Try to match reply to an option
                     options = sess_state.get("options", [])
                     matched = False
                     for i, opt in enumerate(options, 1):
@@ -355,8 +350,10 @@ async def run_cycle() -> dict:
                     if not matched:
                         answer_question(iid, text=reply)
                 elif sess_state["state"] == "waiting_input":
-                    # Session is at prompt — inject the reply directly
-                    inject(iid, reply)
+                    inject(iid, f"Human feedback from Linear: {reply}")
+                else:
+                    # Agent is working — queue the reply for next idle
+                    continue
 
                 state.set_phase(iid, "")  # clear question_posted flag
                 state.touch(iid)
