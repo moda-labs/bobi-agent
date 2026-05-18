@@ -43,7 +43,7 @@ def daemon(interval):
     OAuth. No cron or launchd needed.
 
     Usage:
-        dispatch daemon              # foreground, 60s interval
+        dispatch daemon              # foreground, 5s interval
         tmux new -d -s dispatch 'dispatch daemon'  # background in tmux
     """
     import time as time_mod
