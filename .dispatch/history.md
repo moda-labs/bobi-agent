@@ -1,1 +1,1 @@
-2026-05-17 — Phase 1 (Spec): Wrote implementation spec for AGD-5. Classified as trivial Update. Spec at specs/agd-5-add-timestamp-comment-to-readme.md.
+2026-05-17 — Phase 1 (Spec): Wrote implementation spec for AGD-6. Classified as trivial Update. Spec at specs/agd-6-add-timestamp-comment-to-readme.md. Draft PR: https://github.com/underminedsk/agentd/pull/4. Moved issue to Design Review. Posted Linear comment.
