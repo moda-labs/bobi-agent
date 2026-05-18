@@ -23,7 +23,7 @@ from .state import StateStore
 
 log = logging.getLogger(__name__)
 
-STALL_TIMEOUT_SECONDS = 300  # 5 minutes without activity → kill
+STALL_TIMEOUT_SECONDS = 600  # 5 minutes without activity → kill
 MAX_ATTEMPTS = 3
 
 
