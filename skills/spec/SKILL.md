@@ -95,7 +95,7 @@ git add specs/ .dispatch/ .context/
 git commit -m "spec: <issue-id> <title>"
 git push -u origin HEAD
 gh pr create --draft \
-  --title "[SPEC] <title>" \
+  --title "[<ISSUE_ID>] spec: <title>" \
   --body "Design spec for <issue-id>. Review specs/ and reply 'approved' on Linear."
 ```
 

@@ -88,5 +88,6 @@ Follow the EXIT CONTRACT above. Include the PR URL from `/ship`'s output.
 
 ## Rules
 
+- **PR title format**: `[AGD-XX] type: description` — e.g., `[AGD-22] feat: add LOG_DIR constant to config.py`. Always include the issue ID in brackets.
 - Never merge. `/ship` creates the PR, humans merge it.
 - `/ship` handles test running, review, and PR creation — let it do its job.

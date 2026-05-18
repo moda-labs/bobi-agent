@@ -125,6 +125,6 @@ Follow the EXIT CONTRACT above. Push first, then write the handoff, then exit.
 
 - Follow the approved spec. Don't deviate without good reason.
 - Tests first. Write tests before implementation.
-- One logical change per commit.
+- One logical change per commit. Prefix commit messages with the issue ID: `[AGD-XX] type: description`.
 - Do NOT create a PR. The `/ship-pr` skill handles that.
 - `/review` is mandatory. Do not skip it.
