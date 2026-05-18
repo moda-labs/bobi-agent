@@ -182,6 +182,31 @@ async def run_cycle() -> dict:
                 )
                 phase = phase_info["phase"]
 
+                # If we routed a skill and the summarizer still sees the
+                # same pre-routing phase, skip (agent is still working).
+                # But if the phase ADVANCED past what we routed, proceed.
+                if agent.last_phase.startswith("_working_"):
+                    # Extract the pre-routing phase from what triggered the route
+                    # e.g., _working_implement was routed from triage_complete
+                    # If summarizer now sees implementation_complete, that's progress
+                    prev_phases = {
+                        "_working_spec": "triage_complete",
+                        "_working_implement": "triage_complete",
+                        "_working_ship-pr": "implementation_complete",
+                        "_working_feedback": "in_review",
+                    }
+                    pre_route = prev_phases.get(agent.last_phase, "")
+                    if phase == pre_route or phase == "triage_complete":
+                        # Same phase as before routing — still working
+                        elapsed = time.time() - agent.last_activity_at
+                        if elapsed > STALL_TIMEOUT:
+                            kill_session(iid)
+                            state.remove(iid)
+                            summary["killed"] += 1
+                            log.warning(f"{iid}: stalled ({int(elapsed)}s)")
+                        continue
+                    # Phase advanced past the routing — fall through to handle it
+
                 if phase == agent.last_phase:
                     elapsed = time.time() - agent.last_activity_at
                     if elapsed > STALL_TIMEOUT:
@@ -223,6 +248,7 @@ async def run_cycle() -> dict:
                     next_skill = router(handoff)
                     if next_skill:
                         inject_skill(iid, next_skill, f"Issue: {iid}\nContinuing from phase: {phase}")
+                        state.set_phase(iid, f"_working_{next_skill}")
                         summary["continued"] += 1
                         log.info(f"{iid}: phase '{phase}' → /{next_skill} (same session)")
 
