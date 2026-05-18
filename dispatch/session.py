@@ -12,11 +12,12 @@ import subprocess
 import time
 from pathlib import Path
 
+from dispatch.config import LOG_DIR
+
 log = logging.getLogger(__name__)
 
 TMUX = shutil.which("tmux") or "tmux"
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
-LOG_DIR = Path.home() / ".dispatch" / "logs"
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 
