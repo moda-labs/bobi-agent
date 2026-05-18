@@ -1,5 +1,6 @@
 """Spawn coding agents. Minimal — the agent handles its own lifecycle."""
 
+import json
 import os
 import re
 import shutil
