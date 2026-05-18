@@ -1,8 +1,8 @@
-"""Thin daemon: poll Linear, route to skills, track PIDs.
+"""Daemon: poll Linear, manage tmux sessions, bridge questions to humans.
 
-Each skill is an atomic phase. When an agent exits, the daemon reads
-.dispatch/handoff.md to determine the next skill to spawn. Skills never
-chain themselves — the daemon is the state machine.
+Each issue gets one persistent interactive Claude Code session in tmux.
+The daemon monitors sessions, detects questions, injects replies, and
+routes phases — all within the same session so context is preserved.
 """
 
 import asyncio
@@ -10,7 +10,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 import time
 from pathlib import Path
@@ -19,26 +18,28 @@ from .config import GlobalConfig, RepoConfig
 from .conversation import get_latest_human_reply_after_agent
 from .linear_api import get_state_ids, move_issue, add_comment
 from .scanner import scan_linear_all_active
+from .session import (
+    session_exists, spawn_session, inject, capture,
+    detect_state, answer_question, kill_session,
+)
 from .state import StateStore
 
 log = logging.getLogger(__name__)
 
 STALL_TIMEOUT = 600  # 10 minutes
 
-# Handoff phase → next skill to spawn
 PHASE_ROUTES = {
     "triage_complete":          lambda h: "spec" if h.get("needs_spec") == "true" else "implement",
-    "spec_complete":            lambda h: None,  # wait for human approval
-    "blocked":                  lambda h: None,  # wait for human reply
+    "spec_complete":            lambda h: None,
+    "blocked":                  lambda h: None,
     "implementation_complete":  lambda h: "ship-pr",
     "feedback_addressed":       lambda h: "ship-pr",
-    "in_review":                lambda h: None,  # wait for human
+    "in_review":                lambda h: None,
 }
 
-# Handoff phase → Linear state the issue should be in
 PHASE_LINEAR_STATE = {
     "triage_complete":          "In Progress",
-    "spec_complete":            "In Progress",  # still in progress, waiting for review
+    "spec_complete":            "In Progress",
     "blocked":                  "Blocked",
     "implementation_complete":  "In Progress",
     "feedback_addressed":       "In Review",
@@ -47,7 +48,6 @@ PHASE_LINEAR_STATE = {
 
 
 def _read_handoff(worktree: str) -> dict | None:
-    """Read .dispatch/handoff.md YAML frontmatter. Returns dict or None."""
     hf = Path(worktree) / ".dispatch" / "handoff.md"
     if not hf.exists():
         return None
@@ -62,25 +62,6 @@ def _read_handoff(worktree: str) -> dict | None:
         return None
 
 
-def _spawn_skill(skill: str, issue_id: str, worktree: str | None,
-                 repo_path: Path, env: dict, context: str = "") -> int:
-    """Spawn claude with a skill invocation. Returns PID."""
-    claude = shutil.which("claude") or "/opt/homebrew/bin/claude"
-    cwd = worktree or str(repo_path)
-
-    prompt = f"Invoke /{skill} for issue {issue_id}."
-    if context:
-        prompt += f"\n\n{context}"
-
-    proc = subprocess.Popen(
-        [claude, "-p", prompt, "--max-turns", "200", "--dangerously-skip-permissions"],
-        cwd=cwd, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
-    )
-    log.info(f"Spawned /{skill} for {issue_id} (PID {proc.pid}) in {cwd}")
-    return proc.pid
-
-
 def _find_worktree(repo_path: Path, issue_id: str) -> str | None:
     wt_dir = repo_path / "worktrees"
     if not wt_dir.exists():
@@ -92,44 +73,7 @@ def _find_worktree(repo_path: Path, issue_id: str) -> str | None:
     return None
 
 
-def _has_commits(worktree: str) -> bool:
-    """Check if the worktree branch has commits beyond main."""
-    result = subprocess.run(
-        ["git", "log", "--oneline", "main..HEAD"],
-        cwd=worktree, capture_output=True, text=True,
-    )
-    return result.returncode == 0 and bool(result.stdout.strip())
-
-
-def _has_open_pr(worktree: str) -> str | None:
-    """Check if the branch has an open PR. Returns URL or None."""
-    gh = shutil.which("gh") or "gh"
-    result = subprocess.run(
-        [gh, "pr", "view", "--json", "url,state"],
-        cwd=worktree, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return None
-    import json
-    try:
-        data = json.loads(result.stdout)
-        if data.get("state") in ("OPEN", "MERGED"):
-            return data.get("url")
-    except (json.JSONDecodeError, ValueError):
-        pass
-    return None
-
-
-def _has_spec(worktree: str) -> bool:
-    """Check if a spec file exists."""
-    specs = Path(worktree) / "specs"
-    if specs.exists():
-        return any(f.suffix == ".md" for f in specs.iterdir())
-    return False
-
-
 def _patch_handoff_phase(worktree: str, new_phase: str) -> None:
-    """Update just the phase field in the handoff file."""
     hf = Path(worktree) / ".dispatch" / "handoff.md"
     if not hf.exists():
         return
@@ -139,23 +83,26 @@ def _patch_handoff_phase(worktree: str, new_phase: str) -> None:
 
 
 def _infer_phase(worktree: str, handoff_phase: str) -> str:
-    """Infer the actual phase from worktree state when the handoff is stale.
+    gh = shutil.which("gh") or "gh"
+    pr_result = subprocess.run(
+        [gh, "pr", "view", "--json", "url,state"],
+        cwd=worktree, capture_output=True, text=True,
+    )
+    pr_url = None
+    if pr_result.returncode == 0:
+        import json
+        try:
+            data = json.loads(pr_result.stdout)
+            if data.get("state") in ("OPEN", "MERGED"):
+                pr_url = data.get("url")
+        except (json.JSONDecodeError, ValueError):
+            pass
 
-    The agent may have done work but failed to update the handoff.
-    Check the worktree for evidence of progress and return the real phase.
-    """
-    pr_url = _has_open_pr(worktree)
-    has_code = _has_commits(worktree)
-    has_spec_file = _has_spec(worktree)
-
-    # If there's already an open PR, we're past implementation
     if pr_url and handoff_phase in ("triage_complete", "implementation_complete"):
-        log.info(f"Inferred phase: in_review (PR exists but handoff says {handoff_phase})")
+        log.info(f"Inferred: in_review (PR exists, handoff says {handoff_phase})")
         return "in_review"
 
-    # If there are commits with non-spec code and handoff still says triage
-    if has_code and handoff_phase == "triage_complete":
-        # Check if commits are spec-only or include implementation
+    if handoff_phase == "triage_complete":
         result = subprocess.run(
             ["git", "diff", "--name-only", "main..HEAD"],
             cwd=worktree, capture_output=True, text=True,
@@ -163,27 +110,21 @@ def _infer_phase(worktree: str, handoff_phase: str) -> str:
         changed = result.stdout.strip().splitlines() if result.returncode == 0 else []
         non_spec = [f for f in changed if not f.startswith("specs/") and not f.startswith(".dispatch")]
         if non_spec:
-            log.info(f"Inferred phase: implementation_complete (code committed but handoff says {handoff_phase})")
+            log.info(f"Inferred: implementation_complete (code committed, handoff says {handoff_phase})")
             return "implementation_complete"
-        elif has_spec_file:
-            log.info(f"Inferred phase: spec_complete (spec committed but handoff says {handoff_phase})")
+
+        specs_dir = Path(worktree) / "specs"
+        if specs_dir.exists() and any(f.suffix == ".md" for f in specs_dir.iterdir()):
+            log.info(f"Inferred: spec_complete (spec exists, handoff says {handoff_phase})")
             return "spec_complete"
 
     return handoff_phase
 
 
-def _is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-
-
 async def run_cycle() -> dict:
     global_config = GlobalConfig.load()
     state = StateStore()
-    summary = {"dispatched": 0, "killed": 0, "done": 0, "continued": 0}
+    summary = {"dispatched": 0, "killed": 0, "done": 0, "continued": 0, "questions": 0}
 
     for repo_path in global_config.repos:
         if not repo_path.exists():
@@ -204,101 +145,148 @@ async def run_cycle() -> dict:
         issues_by_state = await scan_linear_all_active(api_key, repo_config)
         state_ids = await get_state_ids(api_key, repo_config.linear_project)
 
-        # Build lookup: issue identifier → Linear data
         linear_lookup = {}
         for state_name, issues in issues_by_state.items():
             for issue in issues:
                 linear_lookup[issue["identifier"]] = (state_name, issue)
 
-        # --- Phase 1: Handle exited agents (read handoff, route next skill) ---
+        # --- Monitor active sessions ---
         for agent in list(state.agents_for_repo(str(repo_path))):
-            if _is_alive(agent.pid):
-                # Update activity timestamp from worktree changes
-                wt = Path(agent.worktree)
-                for f in [wt / ".dispatch" / "handoff.md", wt / ".dispatch" / "state.md"]:
-                    if f.exists() and f.stat().st_mtime > agent.last_activity_at:
-                        state.touch(agent.issue_id)
-                        break
-
-                # Kill if stalled
-                elapsed = time.time() - agent.last_activity_at
-                if elapsed > STALL_TIMEOUT:
-                    try:
-                        os.kill(agent.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    state.remove(agent.issue_id)
-                    summary["killed"] += 1
-                    log.warning(f"Killed stalled agent {agent.issue_id} ({int(elapsed)}s)")
-                continue
-
-            # Agent exited — read handoff to decide next step
-            state.remove(agent.issue_id)
-            wt = _find_worktree(repo_path, agent.issue_id)
-            if not wt:
-                continue
-
-            handoff = _read_handoff(wt)
-            if not handoff:
-                log.info(f"{agent.issue_id}: exited with no handoff")
-                continue
-
-            phase = handoff.get("phase", "")
-
-            # Resilience: if the agent did work but didn't update the handoff,
-            # infer the correct phase from worktree state
-            inferred = _infer_phase(wt, phase)
-            if inferred != phase:
-                # Write the corrected phase back so we don't re-infer next cycle
-                _patch_handoff_phase(wt, inferred)
-                phase = inferred
-            linear_info = linear_lookup.get(agent.issue_id)
+            iid = agent.issue_id
+            linear_info = linear_lookup.get(iid)
             linear_id = linear_info[1]["id"] if linear_info else agent.linear_issue_id
 
-            # Move Linear state if needed
-            target_state = PHASE_LINEAR_STATE.get(phase)
-            if target_state and target_state in state_ids and linear_id:
-                current = linear_info[0] if linear_info else ""
-                if current != target_state:
-                    await move_issue(api_key, linear_id, state_ids[target_state])
-                    log.info(f"{agent.issue_id}: {current} → {target_state}")
-
-            # Post to Linear on key transitions
-            if phase == "spec_complete" and linear_id:
-                pr_url = handoff.get("pr_url", "")
-                msg = f"Spec ready for review."
-                if pr_url:
-                    msg += f" PR: {pr_url}"
-                msg += "\n\nReply **approved** to start implementation."
-                await add_comment(api_key, linear_id, msg)
-
-            if phase == "blocked" and linear_id:
-                question = handoff.get("question", "Agent is blocked and needs input.")
-                await add_comment(api_key, linear_id, f"**Question:**\n\n{question}")
-
-            if phase == "in_review" and linear_id:
-                pr_url = handoff.get("pr_url", "")
-                await add_comment(api_key, linear_id, f"Ready for review. PR: {pr_url}")
-
-            # Route to next skill
-            router = PHASE_ROUTES.get(phase)
-            if not router:
-                log.info(f"{agent.issue_id}: phase '{phase}' — waiting")
+            # Terminal state — kill session
+            if linear_info and linear_info[0] in ("Done", "Canceled", "Cancelled"):
+                if session_exists(iid):
+                    kill_session(iid)
+                    summary["killed"] += 1
+                state.remove(iid)
                 continue
 
-            next_skill = router(handoff)
-            if not next_skill:
-                log.info(f"{agent.issue_id}: phase '{phase}' — waiting for human")
+            sess_state = detect_state(iid)
+
+            if sess_state["state"] == "exited":
+                # Session died — handle handoff
+                state.remove(iid)
+                wt = _find_worktree(repo_path, iid)
+                if not wt:
+                    continue
+                handoff = _read_handoff(wt)
+                if not handoff:
+                    log.info(f"{iid}: session exited with no handoff")
+                    continue
+
+                phase = handoff.get("phase", "")
+                inferred = _infer_phase(wt, phase)
+                if inferred != phase:
+                    _patch_handoff_phase(wt, inferred)
+                    phase = inferred
+
+                # Update Linear
+                target = PHASE_LINEAR_STATE.get(phase)
+                if target and target in state_ids and linear_id:
+                    current = linear_info[0] if linear_info else ""
+                    if current != target:
+                        await move_issue(api_key, linear_id, state_ids[target])
+
+                if phase == "spec_complete" and linear_id:
+                    pr_url = handoff.get("pr_url", "")
+                    msg = "Spec ready for review."
+                    if pr_url:
+                        msg += f" PR: {pr_url}"
+                    msg += "\n\nReply **approved** to start implementation."
+                    await add_comment(api_key, linear_id, msg)
+
+                if phase == "blocked" and linear_id:
+                    question = handoff.get("question", "Agent is blocked.")
+                    await add_comment(api_key, linear_id, f"**Question:**\n\n{question}")
+
+                if phase == "in_review" and linear_id:
+                    pr_url = handoff.get("pr_url", "")
+                    await add_comment(api_key, linear_id, f"Ready for review. PR: {pr_url}")
+
+                log.info(f"{iid}: session exited, phase={phase}")
                 continue
 
-            pid = _spawn_skill(next_skill, agent.issue_id, wt, repo_path, env)
-            state.track(issue_id=agent.issue_id, pid=pid, repo_path=str(repo_path),
-                        title=agent.title, worktree=wt,
-                        linear_issue_id=linear_id)
-            summary["continued"] += 1
-            log.info(f"{agent.issue_id}: phase '{phase}' → /{next_skill}")
+            if sess_state["state"] == "asking_question":
+                # Agent is asking a question — post to Linear
+                question = sess_state.get("question", "Agent has a question")
+                options = sess_state.get("options", [])
+                options_text = "\n".join(f"- {o}" for o in options)
+                msg = f"**Agent question:**\n\n{question}\n\n{options_text}\n\nReply with your choice."
 
-        # --- Phase 2: Check for merged PRs (no agent needed) ---
+                if linear_id and agent.last_phase != "_question_posted":
+                    await add_comment(api_key, linear_id, msg)
+                    state.set_phase(iid, "_question_posted")
+                    if "Blocked" in state_ids:
+                        current = linear_info[0] if linear_info else ""
+                        if current != "Blocked":
+                            await move_issue(api_key, linear_id, state_ids["Blocked"])
+                    summary["questions"] += 1
+                    log.info(f"{iid}: posted question to Linear")
+                continue
+
+            if sess_state["state"] == "waiting_input":
+                # Agent is idle — check if handoff was updated
+                wt = _find_worktree(repo_path, iid)
+                if not wt:
+                    continue
+
+                handoff = _read_handoff(wt)
+                if not handoff:
+                    continue
+
+                phase = handoff.get("phase", "")
+                if phase == agent.last_phase:
+                    # No phase change — check for stall
+                    elapsed = time.time() - agent.last_activity_at
+                    if elapsed > STALL_TIMEOUT:
+                        kill_session(iid)
+                        state.remove(iid)
+                        summary["killed"] += 1
+                        log.warning(f"{iid}: stalled ({int(elapsed)}s)")
+                    continue
+
+                # Phase changed — update tracking and route
+                state.touch(iid)
+                state.set_phase(iid, phase)
+
+                # Update Linear
+                target = PHASE_LINEAR_STATE.get(phase)
+                if target and target in state_ids and linear_id:
+                    current = linear_info[0] if linear_info else ""
+                    if current != target:
+                        await move_issue(api_key, linear_id, state_ids[target])
+
+                if phase == "spec_complete" and linear_id:
+                    pr_url = handoff.get("pr_url", "")
+                    msg = "Spec ready for review."
+                    if pr_url:
+                        msg += f" PR: {pr_url}"
+                    msg += "\n\nReply **approved** to start implementation."
+                    await add_comment(api_key, linear_id, msg)
+
+                if phase == "in_review" and linear_id:
+                    pr_url = handoff.get("pr_url", "")
+                    await add_comment(api_key, linear_id, f"Ready for review. PR: {pr_url}")
+
+                # Route to next skill — inject into SAME session
+                router = PHASE_ROUTES.get(phase)
+                if router:
+                    next_skill = router(handoff)
+                    if next_skill:
+                        inject(iid, f"/invoke /{next_skill} for issue {iid}")
+                        summary["continued"] += 1
+                        log.info(f"{iid}: phase '{phase}' → /{next_skill} (same session)")
+
+                continue
+
+            # Working — update activity
+            if sess_state["state"] == "working":
+                state.touch(iid)
+
+        # --- Check for merged PRs ---
         for issue in issues_by_state.get("In Review", []):
             iid = issue["identifier"]
             if state.is_tracked(iid):
@@ -314,10 +302,12 @@ async def run_cycle() -> dict:
                 if "Done" in state_ids:
                     await move_issue(api_key, issue["id"], state_ids["Done"])
                     await add_comment(api_key, issue["id"], "PR merged. Issue complete.")
+                if session_exists(iid):
+                    kill_session(iid)
                 log.info(f"{iid} → Done (PR merged)")
                 summary["done"] += 1
 
-        # --- Phase 3: Dispatch new Todo issues → /pickup ---
+        # --- Dispatch new Todo issues ---
         for issue in issues_by_state.get("Todo", []):
             iid = issue["identifier"]
             labels = [l["name"] for l in issue.get("labels", {}).get("nodes", [])]
@@ -328,25 +318,35 @@ async def run_cycle() -> dict:
             if len(state.agents_for_repo(str(repo_path))) >= repo_config.max_parallel:
                 break
 
-            # Move to In Progress before spawning
+            # Move to In Progress
             if "In Progress" in state_ids:
                 await move_issue(api_key, issue["id"], state_ids["In Progress"])
-            await add_comment(api_key, issue["id"],
-                f"Picked up by agentd. Starting triage.")
+            await add_comment(api_key, issue["id"], "Picked up by agentd.")
 
-            pid = _spawn_skill("pickup", iid, None, repo_path, env,
-                               context=f"Title: {issue['title']}\n\n{issue.get('description', '')}")
-            state.track(issue_id=iid, pid=pid, repo_path=str(repo_path),
+            # Spawn tmux session
+            ok = spawn_session(iid, cwd=str(repo_path))
+            if not ok:
+                continue
+
+            # Inject the pickup task
+            context = f"Title: {issue['title']}\n\n{issue.get('description', '')}"
+            inject(iid, f"/pickup {iid}\n\n{context}")
+
+            state.track(issue_id=iid, repo_path=str(repo_path),
                         title=issue["title"], worktree=str(repo_path),
                         linear_issue_id=issue["id"])
             summary["dispatched"] += 1
+            log.info(f"Dispatched {iid} (tmux session agentd-{iid.lower()})")
 
-        # --- Phase 4: Re-spawn for human replies (Blocked, In Review, In Progress) ---
+        # --- Inject human replies into active sessions ---
         for linear_state in ["Blocked", "In Review", "In Progress"]:
             for issue in issues_by_state.get(linear_state, []):
                 iid = issue["identifier"]
-                if state.is_tracked(iid):
+                if not state.is_tracked(iid):
                     continue
+                if not session_exists(iid):
+                    continue
+
                 labels = [l["name"] for l in issue.get("labels", {}).get("nodes", [])]
                 if not any(t in labels for t in repo_config.trigger_labels):
                     continue
@@ -355,29 +355,33 @@ async def run_cycle() -> dict:
                 if not reply:
                     continue
 
-                wt = _find_worktree(repo_path, iid)
-                if not wt:
+                agent = state.get(iid)
+                if not agent or agent.last_phase != "_question_posted":
                     continue
 
-                # Read handoff to determine the right skill
-                handoff = _read_handoff(wt)
-                phase = handoff.get("phase", "") if handoff else ""
+                sess_state = detect_state(iid)
+                if sess_state["state"] == "asking_question":
+                    # Try to match reply to an option
+                    options = sess_state.get("options", [])
+                    matched = False
+                    for i, opt in enumerate(options, 1):
+                        if reply.strip().lower() in opt.lower():
+                            answer_question(iid, choice=i)
+                            matched = True
+                            break
+                    if not matched:
+                        answer_question(iid, text=reply)
+                elif sess_state["state"] == "waiting_input":
+                    # Session is at prompt — inject the reply directly
+                    inject(iid, reply)
 
-                if phase == "spec_complete" and "approved" in reply.lower():
-                    skill = "implement"
-                    if "In Progress" in state_ids:
-                        await move_issue(api_key, issue["id"], state_ids["In Progress"])
-                    await add_comment(api_key, issue["id"], "Spec approved. Starting implementation.")
-                else:
-                    skill = "feedback"
+                state.set_phase(iid, "")  # clear question_posted flag
+                state.touch(iid)
 
-                pid = _spawn_skill(skill, iid, wt, repo_path, env,
-                                   context=f"Human reply:\n\n{reply}")
-                state.track(issue_id=iid, pid=pid, repo_path=str(repo_path),
-                            title=issue["title"], worktree=wt,
-                            linear_issue_id=issue["id"])
-                summary["dispatched"] += 1
-                log.info(f"{iid}: human replied in {linear_state} → /{skill}")
+                if "In Progress" in state_ids:
+                    await move_issue(api_key, issue["id"], state_ids["In Progress"])
+
+                log.info(f"{iid}: injected human reply into session")
 
     return summary
 

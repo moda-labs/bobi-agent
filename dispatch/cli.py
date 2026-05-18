@@ -75,9 +75,9 @@ def cycle():
 @main.command()
 def status():
     """Show current in-flight work."""
-    import os
     import time as time_mod
-    import subprocess
+
+    from .session import session_exists, detect_state
 
     state = StateStore()
     agents = state.all_agents()
@@ -91,40 +91,21 @@ def status():
         mins = int(elapsed // 60)
         secs = int(elapsed % 60)
 
-        alive = False
-        try:
-            os.kill(agent.pid, 0)
-            alive = True
-        except (ProcessLookupError, PermissionError):
-            pass
+        alive = session_exists(agent.issue_id)
+        sess = detect_state(agent.issue_id) if alive else {"state": "exited"}
+        sess_label = sess["state"]
 
-        proc_label = "running" if alive else "exited"
         stall_elapsed = time_mod.time() - agent.last_activity_at
         stall_mins = int(stall_elapsed // 60)
 
-        # Count commits
-        worktree = Path(agent.worktree)
-        commits = 0
-        progress = ""
-        if worktree.exists():
-            result = subprocess.run(
-                ["git", "log", "--oneline", "main..HEAD"],
-                cwd=str(worktree), capture_output=True, text=True,
-            )
-            if result.returncode == 0:
-                commits = len(result.stdout.strip().splitlines())
-
-            pf = worktree / ".dispatch-progress.md"
-            if pf.exists():
-                lines = pf.read_text().strip().splitlines()
-                progress = lines[-1] if lines else ""
-
         click.echo(f"  {agent.issue_id:10s} {agent.title}")
-        click.echo(f"             {proc_label}, {mins}m{secs}s, {commits} commits, attempt {agent.attempts}")
-        if stall_mins > 0:
+        click.echo(f"             {sess_label}, {mins}m{secs}s, phase={agent.last_phase or 'starting'}")
+        if alive:
+            click.echo(f"             tmux attach -t agentd-{agent.issue_id.lower()}")
+        if stall_mins > 0 and alive:
             click.echo(f"             last activity: {stall_mins}m ago")
-        if progress:
-            click.echo(f"             {progress}")
+        if sess.get("question"):
+            click.echo(f"             Q: {sess['question'][:80]}")
         click.echo()
 
 
@@ -134,13 +115,14 @@ def watch(interval: int):
     """Live dashboard — refreshes every N seconds. Ctrl+C to stop."""
     import os
     import time as time_mod
-    import subprocess
+
+    from .session import session_exists, detect_state
 
     try:
         while True:
             os.system("clear")
-            state = StateStore()
-            agents = state.all_agents()
+            store = StateStore()
+            agents = store.all_agents()
             now = time_mod.time()
 
             click.echo("agentd | Ctrl+C to stop")
@@ -154,42 +136,22 @@ def watch(interval: int):
                     mins = int(elapsed // 60)
                     secs = int(elapsed % 60)
 
-                    alive = False
-                    try:
-                        os.kill(agent.pid, 0)
-                        alive = True
-                    except (ProcessLookupError, PermissionError):
-                        pass
-
+                    alive = session_exists(agent.issue_id)
+                    sess = detect_state(agent.issue_id) if alive else {"state": "exited"}
                     icon = "●" if alive else "○"
                     stall = int((now - agent.last_activity_at) // 60)
 
-                    # Commits and progress
-                    commits = 0
-                    progress_lines = []
-                    worktree = Path(agent.worktree)
-                    if worktree.exists():
-                        result = subprocess.run(
-                            ["git", "log", "--oneline", "main..HEAD"],
-                            cwd=str(worktree), capture_output=True, text=True,
-                        )
-                        if result.returncode == 0:
-                            commits = len(result.stdout.strip().splitlines())
-
-                        pf = worktree / ".dispatch-progress.md"
-                        if pf.exists():
-                            progress_lines = [
-                                l.strip() for l in pf.read_text().splitlines()
-                                if l.strip() and l.strip().startswith("- [")
-                            ]
-
                     click.echo(f"\n  {icon} {agent.issue_id:10s} {agent.title}")
-                    click.echo(f"    {'running' if alive else 'exited'} | {mins}m{secs}s | {commits} commits | attempt {agent.attempts}")
+                    click.echo(f"    {sess['state']} | {mins}m{secs}s | phase={agent.last_phase or 'starting'}")
+                    if alive:
+                        click.echo(f"    tmux attach -t agentd-{agent.issue_id.lower()}")
                     if stall > 0 and alive:
-                        click.echo(f"    ⚠ last activity {stall}m ago")
-                    if progress_lines:
-                        for line in progress_lines[-5:]:
-                            click.echo(f"    {line}")
+                        click.echo(f"    last activity {stall}m ago")
+                    if sess.get("question"):
+                        click.echo(f"    Q: {sess['question'][:60]}")
+                    if sess.get("options"):
+                        for opt in sess["options"][:4]:
+                            click.echo(f"       {opt}")
 
             click.echo(f"\n{'─' * 70}")
             click.echo(f"  Refreshing every {interval}s...")
