@@ -166,43 +166,21 @@ async def run_cycle() -> dict:
                 continue
 
             if sess_state["state"] == "waiting_input":
-                # Agent is idle — ask if it's done, then summarize
-                if agent.last_phase == "_asked_if_done":
-                    # We already asked — read the response from the pane
-                    pane = capture(iid, lines=10)
-                    pane_lower = pane.lower()
-
-                    if "done" not in pane_lower and "complete" not in pane_lower and "finished" not in pane_lower:
-                        # Agent said it's not done — let it keep working
-                        state.set_phase(iid, "")
-                        state.touch(iid)
-                        log.info(f"{iid}: agent says not done yet, continuing")
-                        continue
-
-                    # Agent confirmed done — summarizer writes handoff
-                    wt = _find_worktree(repo_path, iid)
-                    if not wt:
-                        continue
-
-                    branch = subprocess.run(
-                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                        cwd=wt, capture_output=True, text=True,
-                    ).stdout.strip() or f"agent/{iid.lower()}"
-
-                    phase_info = write_handoff(
-                        worktree=wt, issue_id=iid, title=agent.title,
-                        linear_id=linear_id or "", branch=branch,
-                    )
-                    phase = phase_info["phase"]
-                else:
-                    # First time seeing idle — ask the agent
-                    inject(iid,
-                        "Are you done with the current task? If yes, say DONE. "
-                        "If not, describe what's left and keep working.")
-                    state.set_phase(iid, "_asked_if_done")
-                    state.touch(iid)
-                    log.info(f"{iid}: asked agent if done")
+                # Agent is idle — summarizer inspects worktree and writes handoff
+                wt = _find_worktree(repo_path, iid)
+                if not wt:
                     continue
+
+                branch = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=wt, capture_output=True, text=True,
+                ).stdout.strip() or f"agent/{iid.lower()}"
+
+                phase_info = write_handoff(
+                    worktree=wt, issue_id=iid, title=agent.title,
+                    linear_id=linear_id or "", branch=branch,
+                )
+                phase = phase_info["phase"]
 
                 if phase == agent.last_phase:
                     elapsed = time.time() - agent.last_activity_at
