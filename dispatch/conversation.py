@@ -2,20 +2,22 @@
 
 import httpx
 
-from .config import GlobalConfig
-
 LINEAR_API = "https://api.linear.app/graphql"
 
 AGENT_PREFIXES = ("🤖",)
 
 
-async def get_latest_human_comment(api_key: str, linear_issue_id: str) -> str | None:
-    """Get the most recent non-agent comment on an issue."""
+async def get_latest_human_reply_after_agent(api_key: str, linear_issue_id: str) -> str | None:
+    """Get the most recent human comment that came AFTER the last agent comment.
+
+    Returns None if the latest comment is from the agent (no new human reply).
+    This prevents re-spawning on the same reply repeatedly.
+    """
     query = """
     query($issueId: String!) {
         issue(id: $issueId) {
             comments(orderBy: createdAt) {
-                nodes { id body createdAt }
+                nodes { body createdAt }
             }
         }
     }
@@ -32,11 +34,30 @@ async def get_latest_human_comment(api_key: str, linear_issue_id: str) -> str | 
         data = resp.json()
 
     comments = data.get("data", {}).get("issue", {}).get("comments", {}).get("nodes", [])
+    if not comments:
+        return None
 
-    for comment in reversed(comments):
+    # Find the last agent comment and the last human comment
+    last_agent_at = None
+    last_human_body = None
+    last_human_at = None
+
+    for comment in comments:
         body = comment.get("body", "")
-        if any(body.startswith(p) for p in AGENT_PREFIXES):
-            continue
-        return body
+        created = comment.get("createdAt", "")
+        is_agent = any(body.startswith(p) for p in AGENT_PREFIXES)
+
+        if is_agent:
+            last_agent_at = created
+        else:
+            last_human_body = body
+            last_human_at = created
+
+    if not last_human_body:
+        return None
+
+    # Human replied after agent's last comment → actionable
+    if last_human_at and (not last_agent_at or last_human_at > last_agent_at):
+        return last_human_body
 
     return None

@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from .config import GlobalConfig, RepoConfig
-from .conversation import get_latest_human_comment
+from .conversation import get_latest_human_reply_after_agent
 from .dispatcher import spawn_agent, read_agent_output
 from .scanner import scan_linear_all_active, WorkItem, WorkSource
 from .state import StateStore
@@ -119,39 +119,50 @@ async def run_cycle() -> dict:
                             break
                 continue
 
-            # Agent exited — check output
+            # Agent exited — check output for failure
             result = read_agent_output(agent.issue_id)
             if result.get("status") == "failed" and agent.attempts < MAX_ATTEMPTS:
                 log.info(f"Agent {agent.issue_id} failed (attempt {agent.attempts}), will retry")
                 state.remove(agent.issue_id)
                 continue
 
-            # Check for user reply on Linear (triggers re-spawn)
-            if agent.linear_issue_id:
-                reply = await get_latest_human_comment(api_key, agent.linear_issue_id)
-                if reply:
-                    # Re-spawn with reply as context
-                    work_item = WorkItem(
-                        id=agent.issue_id,
-                        source=WorkSource.LINEAR,
-                        title=agent.title,
-                        body="",
-                        repo_config=repo_config,
-                        labels=[],
-                        linear_issue_id=agent.linear_issue_id,
-                    )
-                    spawned = spawn_agent(work_item, state, user_reply=reply)
-                    if spawned:
-                        summary["respawned"] += 1
-                        log.info(f"Re-spawned {agent.issue_id}: user replied")
-                    continue
-
-            # No reply — just mark completed
+            # Completed — remove from state. Step 5 will detect
+            # replies from Linear and re-spawn if needed.
             summary["completed"] += 1
             state.remove(agent.issue_id)
             log.info(f"Completed {agent.issue_id}")
 
-        # 5. Dispatch new agents for Todo issues with trigger label
+        # 5. Re-spawn for issues in Design Review / In Review with user replies
+        for review_state in ["Design Review", "In Review", "Blocked"]:
+            for issue_data in issues_by_state.get(review_state, []):
+                issue_id = issue_data["identifier"]
+                if state.is_tracked(issue_id):
+                    continue  # Already has a running agent
+
+                labels = [l["name"] for l in issue_data.get("labels", {}).get("nodes", [])]
+                if not any(t in labels for t in repo_config.trigger_labels):
+                    continue
+
+                # Check for a human reply AFTER the last agent comment
+                reply = await get_latest_human_reply_after_agent(api_key, issue_data["id"])
+                if not reply:
+                    continue
+
+                work_item = WorkItem(
+                    id=issue_id,
+                    source=WorkSource.LINEAR,
+                    title=issue_data["title"],
+                    body=issue_data.get("description") or "",
+                    repo_config=repo_config,
+                    labels=labels,
+                    linear_issue_id=issue_data["id"],
+                )
+                spawned = spawn_agent(work_item, state, user_reply=reply)
+                if spawned:
+                    summary["respawned"] += 1
+                    log.info(f"Re-spawned {issue_id} from {review_state}: user replied")
+
+        # 6. Dispatch new agents for Todo issues with trigger label
         todo_issues = issues_by_state.get("Todo", [])
         for issue_data in todo_issues:
             issue_id = issue_data["identifier"]
