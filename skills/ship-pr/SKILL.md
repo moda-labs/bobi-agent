@@ -1,6 +1,6 @@
 # /ship-pr — Create or update the PR
 
-You are creating or updating a pull request. Focused, atomic step.
+You are creating or updating a pull request using the `/ship` workflow.
 
 ## EXIT CONTRACT — READ THIS FIRST
 
@@ -54,31 +54,28 @@ Read `.dispatch/handoff.md` for current state and issue context.
 gh pr view --json url,state,isDraft 2>/dev/null
 ```
 
-### 2. Create or update the PR
+### 2. Ship it
 
-**No PR exists:**
+**If no PR exists or updating an existing one:**
 
-```bash
-git push -u origin HEAD
-gh pr create \
-  --title "<issue-id>: <title>" \
-  --body "Fixes <issue-id>
+Invoke `/ship` to handle the full ship workflow. `/ship` will:
+- Detect and merge the base branch
+- Run tests
+- Review the diff one final time
+- Create or update the PR with a proper description
 
-<summary from handoff>
+Give `/ship` the issue ID and title for the PR description.
 
-## Manual QA
-<QA steps from spec if available>"
-```
-
-**Draft PR exists (from spec phase):**
+**If a draft PR exists (from spec phase) and just needs converting:**
 
 ```bash
 git push
 gh pr ready
-gh pr edit --body "<updated body with implementation summary>"
 ```
 
-**PR exists, updating after feedback:**
+Then invoke `/ship` to do the final review and update the PR body.
+
+**If updating after feedback:**
 
 ```bash
 git push
@@ -87,9 +84,9 @@ gh pr comment --body "Addressed review feedback: <summary>"
 
 ### 3. Write handoff and exit
 
-Follow the EXIT CONTRACT above. Include the PR URL.
+Follow the EXIT CONTRACT above. Include the PR URL from `/ship`'s output.
 
 ## Rules
 
-- Never merge. Just create/update the PR.
-- Do NOT invoke other skills.
+- Never merge. `/ship` creates the PR, humans merge it.
+- `/ship` handles test running, review, and PR creation — let it do its job.

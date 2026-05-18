@@ -1,7 +1,7 @@
 # /implement — Build from the approved spec
 
 You are a staff engineer implementing approved work. Build it, test it,
-commit it, push it. Another agent will handle the PR.
+review it, commit it, push it. Another agent will handle the PR.
 
 ## EXIT CONTRACT — READ THIS FIRST
 
@@ -57,6 +57,9 @@ Read `.dispatch/handoff.md` for issue context and spec path.
 
 If `spec_path` exists, read the spec. Otherwise use the issue description.
 
+Check the handoff body for notes from triage — if it says "use /investigate
+for root cause", this is a bug and you should start with `/investigate`.
+
 ## Steps
 
 ### 1. Read the plan
@@ -64,26 +67,57 @@ If `spec_path` exists, read the spec. Otherwise use the issue description.
 Read the spec (if it exists) or the issue description from the handoff.
 Understand what files to change, what tests to write, and the implementation order.
 
-### 2. Write tests first
+### 2. For bugs: /investigate first
+
+If the handoff indicates this is a bug (from `/frontdoor` classification),
+invoke `/investigate` to do root cause analysis before writing any code.
+`/investigate` follows the Iron Law: no fixes without root cause.
+
+Give it the bug description and relevant files. It will:
+- Investigate the issue systematically
+- Identify the root cause
+- Propose a fix
+
+Use its findings to guide your implementation.
+
+### 3. Write tests first
 
 Spawn a sub-agent for test writing. Give it the verification plan (or issue
 description) and relevant source files. It writes test files and commits them.
 
-### 3. Implement
+### 4. Build with /build methodology
 
-Spawn a sub-agent for implementation. Give it the technical approach, the test
-files, and relevant source files. It implements, runs tests, and commits.
+Invoke `/build` for the implementation. `/build` is staff engineer mode:
+- Reads the plan, understands the architecture
+- Writes simple, elegant, production-quality code
+- Tests first, matches codebase conventions
+- Ships the whole thing — no TODOs, no stubs
 
-### 4. Review
+Give it the spec, the test files, and relevant source files.
 
-Spawn a sub-agent to review. Give it ONLY the git diff (`git diff main...HEAD`)
-and CLAUDE.md if it exists. Fix any issues it finds.
+### 5. Review with /review
 
-### 5. Final test run
+Invoke `/review` to do a pre-landing code review of your changes. `/review`
+checks the diff against the base branch for:
+- SQL safety
+- LLM trust boundary violations
+- Conditional side effects
+- Security issues
+- Structural problems
 
-Run the project's test command.
+Fix everything `/review` finds before continuing. This is not optional.
 
-### 6. Push, write handoff, exit
+### 6. QA (if applicable)
+
+If the project has a web frontend (check for index.html, App.tsx, etc.),
+invoke `/qa` to do browser-based QA testing on the changes.
+
+### 7. Final test run
+
+Run the project's test command (from `.dispatch.yaml` or detected from
+package.json / pyproject.toml / Makefile).
+
+### 8. Push, write handoff, exit
 
 Follow the EXIT CONTRACT above. Push first, then write the handoff, then exit.
 
@@ -92,5 +126,5 @@ Follow the EXIT CONTRACT above. Push first, then write the handoff, then exit.
 - Follow the approved spec. Don't deviate without good reason.
 - Tests first. Write tests before implementation.
 - One logical change per commit.
-- Do NOT create a PR. The next skill handles that.
-- Do NOT invoke other skills.
+- Do NOT create a PR. The `/ship-pr` skill handles that.
+- `/review` is mandatory. Do not skip it.
