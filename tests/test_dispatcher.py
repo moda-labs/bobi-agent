@@ -33,7 +33,7 @@ def test_load_prompts_includes_all_sections():
     assert "Lifecycle" in prompts
     assert "Spec Phase" in prompts
     assert "Implementation Phase" in prompts
-    assert "LINEAR_API_KEY" in prompts
+    # Linear tools removed — agent no longer calls Linear API
     assert "gh pr create" in prompts
 
 
