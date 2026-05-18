@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .scanner import WorkItem
 from .skills import discover_skill_packs, get_all_skills, format_skills_for_prompt
-from .state import StateStore, Status
+from .state import StateStore
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
@@ -106,7 +106,7 @@ def spawn_agent(item: WorkItem, state: StateStore, user_reply: str = "") -> dict
     config = item.repo_config
 
     # Parallel limit
-    if len(state.get_by_repo(str(config.path))) >= config.max_parallel:
+    if len(state.agents_for_repo(str(config.path))) >= config.max_parallel:
         return None
 
     # Worktree
@@ -145,18 +145,16 @@ def spawn_agent(item: WorkItem, state: StateStore, user_reply: str = "") -> dict
         )
 
     # Track
-    state.dispatch(
-        item_id=item.id,
+    state.track(
+        issue_id=item.id,
+        pid=proc.pid,
         repo_path=str(config.path),
         title=item.title,
-        agent_pid=proc.pid,
-        branch=worktree.name,
+        worktree=str(worktree),
+        linear_issue_id=item.linear_issue_id,
     )
-    if item.linear_issue_id:
-        state.update_status(item.id, Status.DISPATCHED,
-            linear_issue_id=item.linear_issue_id)
 
-    # Persist output path for later
+    # Persist output path for later reading
     meta_dir = Path.home() / ".dispatch" / "runs" / item.id
     meta_dir.mkdir(parents=True, exist_ok=True)
     (meta_dir / "output_file").write_text(str(output_file))
@@ -164,38 +162,24 @@ def spawn_agent(item: WorkItem, state: StateStore, user_reply: str = "") -> dict
     return {"pid": proc.pid, "worktree": str(worktree)}
 
 
-def check_processes(state: StateStore) -> list[dict]:
-    """Check if processes are alive. Mark done/failed when they exit."""
-    updates = []
-    for item in state.get_in_flight():
-        if not item.agent_pid:
-            continue
-        try:
-            os.kill(item.agent_pid, 0)
-        except ProcessLookupError:
-            # Read output to check for errors
-            meta_dir = Path.home() / ".dispatch" / "runs" / item.id
-            output_path = meta_dir / "output_file"
-            failed = False
+def read_agent_output(issue_id: str) -> dict:
+    """Read output from a completed agent. Returns {status, output}."""
+    meta_dir = Path.home() / ".dispatch" / "runs" / issue_id
+    output_path = meta_dir / "output_file"
 
-            if output_path.exists():
-                import json
-                output_file = Path(output_path.read_text().strip())
-                if output_file.exists():
-                    content = output_file.read_text().strip()
-                    if content:
-                        try:
-                            data = json.loads(content)
-                            if data.get("is_error"):
-                                failed = True
-                                error = "; ".join(data.get("errors", []))
-                                state.mark_failed(item.id, error=error[:500])
-                        except (json.JSONDecodeError, ValueError):
-                            pass
+    if not output_path.exists():
+        return {"status": "unknown"}
 
-            if not failed:
-                state.update_status(item.id, Status.DONE)
+    output_file = Path(output_path.read_text().strip())
+    if not output_file.exists() or output_file.stat().st_size == 0:
+        return {"status": "no_output"}
 
-            updates.append({"id": item.id, "status": "failed" if failed else "done"})
+    try:
+        data = json.loads(output_file.read_text())
+        if data.get("is_error"):
+            return {"status": "failed", "output": "; ".join(data.get("errors", []))}
+        return {"status": "completed", "output": data.get("result", "")[:500]}
+    except (json.JSONDecodeError, ValueError):
+        return {"status": "completed"}
 
-    return updates
+

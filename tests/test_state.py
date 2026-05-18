@@ -2,90 +2,64 @@
 
 import time
 
-from dispatch.state import StateStore, Status
+from dispatch.state import StateStore
 
 
-def test_dispatch_and_track(tmp_path):
+def test_track_and_check(tmp_path):
     store = StateStore(path=tmp_path / "state.json")
+    assert not store.is_tracked("AGD-1")
 
-    assert not store.is_tracked("PROJ-1")
-
-    result = store.dispatch("PROJ-1", "/tmp/repo", "Fix the bug", agent_pid=1234)
-    assert result is True
-    assert store.is_tracked("PROJ-1")
+    store.track("AGD-1", pid=1234, repo_path="/tmp/repo", title="Test",
+                worktree="/tmp/worktree")
+    assert store.is_tracked("AGD-1")
 
 
-def test_cas_prevents_double_dispatch(tmp_path):
+def test_remove(tmp_path):
     store = StateStore(path=tmp_path / "state.json")
+    store.track("AGD-1", pid=1234, repo_path="/tmp/repo", title="Test",
+                worktree="/tmp/worktree")
+    store.remove("AGD-1")
+    assert not store.is_tracked("AGD-1")
 
-    store.dispatch("PROJ-1", "/tmp/repo", "Fix the bug")
-    result = store.dispatch("PROJ-1", "/tmp/repo", "Fix the bug again")
 
-    assert result is False
-
-
-def test_status_transitions(tmp_path):
+def test_agents_for_repo(tmp_path):
     store = StateStore(path=tmp_path / "state.json")
-    store.dispatch("PROJ-1", "/tmp/repo", "Build feature")
+    store.track("AGD-1", pid=1, repo_path="/tmp/repo-a", title="A", worktree="/tmp/wt-a")
+    store.track("AGD-2", pid=2, repo_path="/tmp/repo-b", title="B", worktree="/tmp/wt-b")
+    store.track("AGD-3", pid=3, repo_path="/tmp/repo-a", title="C", worktree="/tmp/wt-c")
 
-    store.update_status("PROJ-1", Status.WORKING)
-    items = store.get_in_flight()
-    assert items[0].status == Status.WORKING
-
-    store.update_status("PROJ-1", Status.AUDITING)
-    items = store.get_in_flight()
-    assert items[0].status == Status.AUDITING
-
-    store.mark_done("PROJ-1", pr_url="https://github.com/org/repo/pull/42")
-    items = store.get_in_flight()
-    assert len(items) == 0
+    assert len(store.agents_for_repo("/tmp/repo-a")) == 2
+    assert len(store.agents_for_repo("/tmp/repo-b")) == 1
 
 
-def test_mark_failed(tmp_path):
+def test_touch_updates_activity(tmp_path):
     store = StateStore(path=tmp_path / "state.json")
-    store.dispatch("PROJ-2", "/tmp/repo", "Broken thing")
+    store.track("AGD-1", pid=1234, repo_path="/tmp", title="Test", worktree="/tmp/wt")
 
-    store.mark_failed("PROJ-2", error="Tests failed")
-    items = store.get_in_flight()
-    assert len(items) == 0
+    before = store.get("AGD-1").last_activity_at
+    time.sleep(0.01)
+    store.touch("AGD-1")
+    after = store.get("AGD-1").last_activity_at
+    assert after > before
 
 
-def test_get_by_repo(tmp_path):
+def test_attempts_increment(tmp_path):
     store = StateStore(path=tmp_path / "state.json")
-    store.dispatch("PROJ-1", "/tmp/repo-a", "Task A")
-    store.dispatch("PROJ-2", "/tmp/repo-b", "Task B")
-    store.dispatch("PROJ-3", "/tmp/repo-a", "Task C")
+    store.track("AGD-1", pid=1, repo_path="/tmp", title="Test", worktree="/tmp/wt")
+    assert store.get("AGD-1").attempts == 1
 
-    repo_a_items = store.get_by_repo("/tmp/repo-a")
-    assert len(repo_a_items) == 2
-
-    repo_b_items = store.get_by_repo("/tmp/repo-b")
-    assert len(repo_b_items) == 1
+    store.track("AGD-1", pid=2, repo_path="/tmp", title="Test", worktree="/tmp/wt")
+    assert store.get("AGD-1").attempts == 2
 
 
-def test_cleanup_old(tmp_path):
-    store = StateStore(path=tmp_path / "state.json")
-    store.dispatch("PROJ-old", "/tmp/repo", "Old task")
-    store.mark_done("PROJ-old")
-
-    # Manually backdate
-    store._items["PROJ-old"].dispatched_at = time.time() - (100 * 3600)
-    store._save()
-
-    store.cleanup_old(max_age_hours=72)
-
-    # Should be cleaned up
-    assert "PROJ-old" not in store._items
-
-
-def test_persistence_across_loads(tmp_path):
+def test_persistence(tmp_path):
     state_path = tmp_path / "state.json"
-
     store1 = StateStore(path=state_path)
-    store1.dispatch("PROJ-1", "/tmp/repo", "Persistent task", agent_pid=999)
+    store1.track("AGD-1", pid=999, repo_path="/tmp", title="Test",
+                 worktree="/tmp/wt", linear_issue_id="abc")
 
-    # Load fresh from disk
     store2 = StateStore(path=state_path)
-    assert store2.is_tracked("PROJ-1")
-    items = store2.get_in_flight()
-    assert items[0].agent_pid == 999
+    assert store2.is_tracked("AGD-1")
+    agent = store2.get("AGD-1")
+    assert agent.pid == 999
+    assert agent.linear_issue_id == "abc"

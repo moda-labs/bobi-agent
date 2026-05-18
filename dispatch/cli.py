@@ -77,59 +77,54 @@ def status():
     """Show current in-flight work."""
     import os
     import time as time_mod
+    import subprocess
 
     state = StateStore()
+    agents = state.all_agents()
 
-    # Show all items, not just in-flight
-    if not state._items:
+    if not agents:
         click.echo("No tracked work.")
         return
 
-    for item in state._items.values():
-        elapsed = time_mod.time() - item.dispatched_at
+    for agent in agents:
+        elapsed = time_mod.time() - agent.started_at
         mins = int(elapsed // 60)
         secs = int(elapsed % 60)
 
-        # Check if process is alive
         alive = False
-        if item.agent_pid:
-            try:
-                os.kill(item.agent_pid, 0)
-                alive = True
-            except (ProcessLookupError, PermissionError):
-                pass
+        try:
+            os.kill(agent.pid, 0)
+            alive = True
+        except (ProcessLookupError, PermissionError):
+            pass
 
-        proc_status = "running" if alive else "exited"
-        phase = getattr(item, "phase", "?")
+        proc_label = "running" if alive else "exited"
+        stall_elapsed = time_mod.time() - agent.last_activity_at
+        stall_mins = int(stall_elapsed // 60)
 
-        # Check for progress file
-        from .dispatcher import get_worktree_path
+        # Count commits
+        worktree = Path(agent.worktree)
+        commits = 0
         progress = ""
-        worktree = get_worktree_path(item)
-        if worktree:
-            progress_file = worktree / ".dispatch-progress.md"
-            if progress_file.exists():
-                lines = progress_file.read_text().strip().splitlines()
-                progress = lines[-1] if lines else ""
-
-            # Count commits on the branch
-            import subprocess
+        if worktree.exists():
             result = subprocess.run(
                 ["git", "log", "--oneline", "main..HEAD"],
                 cwd=str(worktree), capture_output=True, text=True,
             )
-            commits = len(result.stdout.strip().splitlines()) if result.returncode == 0 else 0
-        else:
-            commits = 0
+            if result.returncode == 0:
+                commits = len(result.stdout.strip().splitlines())
 
-        click.echo(f"  {item.id:10s} [{item.status.value:>12}] [{phase:>10}] {item.title}")
-        click.echo(f"             {proc_status}, {mins}m{secs}s, {commits} commits")
+            pf = worktree / ".dispatch-progress.md"
+            if pf.exists():
+                lines = pf.read_text().strip().splitlines()
+                progress = lines[-1] if lines else ""
+
+        click.echo(f"  {agent.issue_id:10s} {agent.title}")
+        click.echo(f"             {proc_label}, {mins}m{secs}s, {commits} commits, attempt {agent.attempts}")
+        if stall_mins > 0:
+            click.echo(f"             last activity: {stall_mins}m ago")
         if progress:
             click.echo(f"             {progress}")
-        if item.pr_url:
-            click.echo(f"             PR: {item.pr_url}")
-        if item.error:
-            click.echo(f"             Error: {item.error[:100]}")
         click.echo()
 
 
@@ -141,44 +136,39 @@ def watch(interval: int):
     import time as time_mod
     import subprocess
 
-    from .dispatcher import get_worktree_path
-
     try:
         while True:
             os.system("clear")
             state = StateStore()
+            agents = state.all_agents()
             now = time_mod.time()
 
             click.echo("agentd | Ctrl+C to stop")
             click.echo(f"{'─' * 70}")
 
-            if not state._items:
+            if not agents:
                 click.echo("\n  No tracked work.\n")
             else:
-                for item in state._items.values():
-                    elapsed = now - item.dispatched_at
+                for agent in agents:
+                    elapsed = now - agent.started_at
                     mins = int(elapsed // 60)
                     secs = int(elapsed % 60)
 
                     alive = False
-                    if item.agent_pid:
-                        try:
-                            os.kill(item.agent_pid, 0)
-                            alive = True
-                        except (ProcessLookupError, PermissionError):
-                            pass
+                    try:
+                        os.kill(agent.pid, 0)
+                        alive = True
+                    except (ProcessLookupError, PermissionError):
+                        pass
 
-                    phase = getattr(item, "phase", "?")
-                    status_icon = {
-                        "dispatched": "⏳", "working": "🔨", "blocked": "🚫",
-                        "auditing": "🔍", "done": "✅", "failed": "❌", "stuck": "⚠️",
-                    }.get(item.status.value, "?")
+                    icon = "●" if alive else "○"
+                    stall = int((now - agent.last_activity_at) // 60)
 
                     # Commits and progress
                     commits = 0
                     progress_lines = []
-                    worktree = get_worktree_path(item)
-                    if worktree:
+                    worktree = Path(agent.worktree)
+                    if worktree.exists():
                         result = subprocess.run(
                             ["git", "log", "--oneline", "main..HEAD"],
                             cwd=str(worktree), capture_output=True, text=True,
@@ -186,25 +176,17 @@ def watch(interval: int):
                         if result.returncode == 0:
                             commits = len(result.stdout.strip().splitlines())
 
-                        progress_file = worktree / ".dispatch-progress.md"
-                        if progress_file.exists():
+                        pf = worktree / ".dispatch-progress.md"
+                        if pf.exists():
                             progress_lines = [
-                                l.strip() for l in progress_file.read_text().splitlines()
+                                l.strip() for l in pf.read_text().splitlines()
                                 if l.strip() and l.strip().startswith("- [")
                             ]
 
-                    proc_label = "●" if alive else "○"
-                    click.echo(
-                        f"\n  {status_icon} {item.id:10s} {item.title}"
-                    )
-                    click.echo(
-                        f"    {proc_label} {item.status.value} | {phase} phase | "
-                        f"{mins}m{secs}s | {commits} commits"
-                    )
-                    if item.pr_url:
-                        click.echo(f"    PR: {item.pr_url}")
-                    if item.error:
-                        click.echo(f"    Error: {item.error[:80]}")
+                    click.echo(f"\n  {icon} {agent.issue_id:10s} {agent.title}")
+                    click.echo(f"    {'running' if alive else 'exited'} | {mins}m{secs}s | {commits} commits | attempt {agent.attempts}")
+                    if stall > 0 and alive:
+                        click.echo(f"    ⚠ last activity {stall}m ago")
                     if progress_lines:
                         for line in progress_lines[-5:]:
                             click.echo(f"    {line}")

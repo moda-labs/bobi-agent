@@ -22,7 +22,7 @@ import httpx
 import pytest
 
 # Test configuration
-TEAM_KEY = "BET"  # Use existing team
+TEAM_KEY = "AGD"  # agentd's own Linear team
 TRIGGER_LABEL = "agent"  # Same label dispatch watches
 LINEAR_API = "https://api.linear.app/graphql"
 POLL_INTERVAL = 10  # seconds between checks
@@ -57,12 +57,17 @@ def linear_request(api_key: str, query: str, variables: dict = None) -> dict:
     if variables:
         payload["variables"] = variables
 
-    resp = httpx.post(
-        LINEAR_API,
-        headers={"Authorization": api_key, "Content-Type": "application/json"},
-        json=payload,
-    )
-    return resp.json()
+    async def _req():
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                LINEAR_API,
+                headers={"Authorization": api_key, "Content-Type": "application/json"},
+                json=payload,
+            )
+            return resp.json()
+
+    import asyncio
+    return asyncio.run(_req())
 
 
 @pytest.fixture
@@ -114,6 +119,21 @@ def test_issue(api_key):
 
     issue = data["data"]["issueCreate"]["issue"]
     print(f"\nCreated test issue: {issue['identifier']}")
+
+    # Move to Todo (Linear defaults to Backlog)
+    states_data = linear_request(api_key, f'''{{
+        teams(filter: {{ key: {{ eq: "{TEAM_KEY}" }} }}) {{
+            nodes {{ states {{ nodes {{ id type }} }} }}
+        }}
+    }}''')
+    todo_id = next(
+        s["id"] for s in states_data["data"]["teams"]["nodes"][0]["states"]["nodes"]
+        if s["type"] == "unstarted"
+    )
+    linear_request(api_key, f'''
+        mutation {{ issueUpdate(id: "{issue['id']}", input: {{ stateId: "{todo_id}" }}) {{ success }} }}
+    ''')
+    print(f"  Moved to Todo")
 
     yield {
         "id": issue["id"],
