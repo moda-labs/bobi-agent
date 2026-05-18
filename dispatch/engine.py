@@ -90,16 +90,40 @@ async def run_cycle() -> dict:
                     summary["killed"] += 1
                 state.remove(agent.issue_id)
 
-        # 3. Stall detection
+        # 3. Stall detection + live state updates for running agents
         for agent in list(state.agents_for_repo(str(repo_path))):
             if not _is_alive(agent.pid):
                 continue
-            # Update activity from worktree file changes
+
             wt = Path(agent.worktree)
+            linear_info = linear_state.get(agent.issue_id)
+            if not linear_info:
+                continue
+            current_state = linear_info[0]
+            linear_id = linear_info[1]["id"]
+
+            # Update activity from worktree file changes
             for f in [wt / ".dispatch-progress.md", wt / ".dispatch" / "state.md"]:
                 if f.exists() and f.stat().st_mtime > agent.last_activity_at:
                     state.touch(agent.issue_id)
                     break
+
+            # Live state: detect if agent is planning or implementing
+            import subprocess
+            diff_result = subprocess.run(
+                ["git", "diff", "--name-only"],
+                cwd=str(wt), capture_output=True, text=True,
+            )
+            changed_files = diff_result.stdout.strip().splitlines() if diff_result.returncode == 0 else []
+            has_code_changes = any(
+                not f.startswith("specs/") and not f.startswith(".dispatch")
+                for f in changed_files
+            )
+
+            if has_code_changes and current_state == "Planning" and "Implementing" in state_ids:
+                await move_issue(api_key, linear_id, state_ids["Implementing"])
+                log.info(f"{agent.issue_id}: Planning → Implementing (code changes detected)")
+
             # Kill if stalled
             elapsed = time.time() - state.get(agent.issue_id).last_activity_at
             if elapsed > STALL_TIMEOUT_SECONDS:

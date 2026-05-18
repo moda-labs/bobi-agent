@@ -29,5 +29,7 @@ Update `.dispatch-progress.md` as you work:
 - Always append to `.dispatch/history.md` after each significant action
 - Do NOT loop or wait for human responses — exit and let dispatch re-spawn you
 - Do NOT move Linear issue states — the dispatch system handles all state transitions
-- Do NOT run integration tests or create Linear issues — you are a worker, not a test runner
+- Do NOT run files in tests/integration/ — they create real Linear issues
+- Do NOT create Linear issues or call the Linear API
 - Do NOT modify files outside your worktree
+- When running tests, use: pytest tests/ --ignore=tests/integration/
