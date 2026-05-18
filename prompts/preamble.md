@@ -28,3 +28,6 @@ Update `.dispatch-progress.md` as you work:
 - Always write `.dispatch/state.md` before exiting
 - Always append to `.dispatch/history.md` after each significant action
 - Do NOT loop or wait for human responses — exit and let dispatch re-spawn you
+- Do NOT move Linear issue states — the dispatch system handles all state transitions
+- Do NOT run integration tests or create Linear issues — you are a worker, not a test runner
+- Do NOT modify files outside your worktree

@@ -1,11 +1,14 @@
 """Main dispatch engine.
 
-Linear is the source of truth. Each cycle:
-1. Poll Linear for all issues in active states
-2. Reconcile: kill agents for issues that moved to terminal states
-3. Stall detection: kill agents with no activity for 5 minutes
-4. Detect completed agents and check for user replies to re-spawn
-5. Dispatch new agents for Todo issues with the trigger label
+ALL Linear state transitions happen here. The agent just does work and exits.
+
+Each cycle:
+1. Poll Linear for all issues
+2. Reconcile: kill agents for terminal issues
+3. Stall detection: kill agents with no activity
+4. State transitions: move issues based on worktree state
+5. Re-spawn: detect human replies and re-dispatch
+6. Dispatch: pick up new Todo issues
 """
 
 import asyncio
@@ -18,12 +21,16 @@ from pathlib import Path
 from .config import GlobalConfig, RepoConfig
 from .conversation import get_latest_human_reply_after_agent
 from .dispatcher import spawn_agent, read_agent_output
+from .linear_state import (
+    get_state_ids, move_issue, add_comment,
+    has_spec, has_pr, is_pr_merged, has_question,
+)
 from .scanner import scan_linear_all_active, WorkItem, WorkSource
 from .state import StateStore
 
 log = logging.getLogger(__name__)
 
-STALL_TIMEOUT_SECONDS = 600  # 5 minutes without activity → kill
+STALL_TIMEOUT_SECONDS = 600  # 10 minutes
 MAX_ATTEMPTS = 3
 
 
@@ -61,92 +68,139 @@ async def run_cycle() -> dict:
         if not api_key:
             continue
 
-        # 1. Poll Linear for ALL issues in active + terminal states
+        # Cache state IDs for this team
+        state_ids = await get_state_ids(api_key, repo_config.linear_project)
+
+        # 1. Poll Linear
         issues_by_state = await scan_linear_all_active(api_key, repo_config)
 
-        # Build lookup: issue_id → (state_name, issue_data)
         linear_state = {}
         for state_name, issues in issues_by_state.items():
             for issue in issues:
                 linear_state[issue["identifier"]] = (state_name, issue)
                 summary["scanned"] += 1
 
-        # 2. Reconcile running agents against Linear
-        for agent in state.agents_for_repo(str(repo_path)):
-            linear_info = linear_state.get(agent.issue_id)
-
-            if linear_info is None:
-                # Issue no longer visible (deleted or moved out of scope)
+        # 2. Reconcile — kill agents for terminal issues
+        terminal = {"Done", "Canceled", "Cancelled", "Duplicate"}
+        for agent in list(state.agents_for_repo(str(repo_path))):
+            info = linear_state.get(agent.issue_id)
+            if info is None or info[0] in terminal:
                 if _is_alive(agent.pid):
                     _kill_agent(agent.pid)
-                    log.info(f"Killed {agent.issue_id}: issue no longer in scope")
                     summary["killed"] += 1
                 state.remove(agent.issue_id)
-                continue
-
-            issue_state, _ = linear_info
-            terminal = {"Done", "Canceled", "Cancelled", "Duplicate"}
-            if issue_state in terminal:
-                if _is_alive(agent.pid):
-                    _kill_agent(agent.pid)
-                    log.info(f"Killed {agent.issue_id}: issue moved to {issue_state}")
-                    summary["killed"] += 1
-                state.remove(agent.issue_id)
-                continue
 
         # 3. Stall detection
-        for agent in state.agents_for_repo(str(repo_path)):
+        for agent in list(state.agents_for_repo(str(repo_path))):
             if not _is_alive(agent.pid):
                 continue
-            elapsed = time.time() - agent.last_activity_at
+            # Update activity from worktree file changes
+            wt = Path(agent.worktree)
+            for f in [wt / ".dispatch-progress.md", wt / ".dispatch" / "state.md"]:
+                if f.exists() and f.stat().st_mtime > agent.last_activity_at:
+                    state.touch(agent.issue_id)
+                    break
+            # Kill if stalled
+            elapsed = time.time() - state.get(agent.issue_id).last_activity_at
             if elapsed > STALL_TIMEOUT_SECONDS:
                 _kill_agent(agent.pid)
-                log.warning(f"Killed stalled agent {agent.issue_id} ({int(elapsed)}s without activity)")
+                log.warning(f"Stalled {agent.issue_id} ({int(elapsed)}s)")
                 state.remove(agent.issue_id)
                 summary["killed"] += 1
 
-        # 4. Detect completed agents — check for user replies to re-spawn
+        # 4. State transitions for exited agents
         for agent in list(state.agents_for_repo(str(repo_path))):
             if _is_alive(agent.pid):
-                # Update activity if worktree has recent changes
-                worktree = Path(agent.worktree)
-                if worktree.exists():
-                    progress = worktree / ".dispatch-progress.md"
-                    dispatch_state = worktree / ".dispatch" / "state.md"
-                    for f in [progress, dispatch_state]:
-                        if f.exists() and f.stat().st_mtime > agent.last_activity_at:
-                            state.touch(agent.issue_id)
-                            break
                 continue
 
-            # Agent exited — check output for failure
-            result = read_agent_output(agent.issue_id)
-            if result.get("status") == "failed" and agent.attempts < MAX_ATTEMPTS:
-                log.info(f"Agent {agent.issue_id} failed (attempt {agent.attempts}), will retry")
+            linear_info = linear_state.get(agent.issue_id)
+            if not linear_info:
                 state.remove(agent.issue_id)
                 continue
 
-            # Completed — remove from state. Step 5 will detect
-            # replies from Linear and re-spawn if needed.
+            current_state, issue_data = linear_info
+            linear_id = issue_data["id"]
+            wt = agent.worktree
+
+            # Check for failure
+            result = read_agent_output(agent.issue_id)
+            if result.get("status") == "failed":
+                if agent.attempts < MAX_ATTEMPTS:
+                    log.info(f"Failed {agent.issue_id} (attempt {agent.attempts}), retrying")
+                    state.remove(agent.issue_id)
+                    # Move back to Todo for retry
+                    if "Todo" in state_ids:
+                        await move_issue(api_key, linear_id, state_ids["Todo"])
+                    continue
+                else:
+                    log.warning(f"Giving up on {agent.issue_id}")
+                    if "Blocked" in state_ids:
+                        await move_issue(api_key, linear_id, state_ids["Blocked"])
+                        await add_comment(api_key, linear_id,
+                            f"🤖 **Failed after {agent.attempts} attempts.** Needs human help.")
+                    state.remove(agent.issue_id)
+                    continue
+
+            # Agent succeeded — determine the right state transition
+            question = has_question(wt)
+            spec_exists = has_spec(wt)
+            pr_url = has_pr(wt)
+            merged = is_pr_merged(wt) if pr_url else False
+
+            if question:
+                # Agent has a question → Blocked
+                if "Blocked" in state_ids and current_state != "Blocked":
+                    await move_issue(api_key, linear_id, state_ids["Blocked"])
+                    await add_comment(api_key, linear_id, f"🤖 **Question:**\n\n{question}")
+                    log.info(f"{agent.issue_id} → Blocked (question)")
+
+            elif merged:
+                # PR merged → Done
+                if "Done" in state_ids and current_state != "Done":
+                    await move_issue(api_key, linear_id, state_ids["Done"])
+                    await add_comment(api_key, linear_id, "🤖 **PR merged.** Issue complete.")
+                    log.info(f"{agent.issue_id} → Done (merged)")
+
+            elif pr_url:
+                # PR exists → In Review
+                if "In Review" in state_ids and current_state != "In Review":
+                    await move_issue(api_key, linear_id, state_ids["In Review"])
+                    await add_comment(api_key, linear_id, f"🤖 **Ready for review.**\n\nPR: {pr_url}")
+                    log.info(f"{agent.issue_id} → In Review (PR: {pr_url})")
+
+            elif spec_exists and current_state in ("Todo", "Planning"):
+                # Spec written but no PR yet → Design Review
+                if "Design Review" in state_ids:
+                    await move_issue(api_key, linear_id, state_ids["Design Review"])
+                    await add_comment(api_key, linear_id,
+                        "🤖 **Spec ready for review.** Check the draft PR or worktree specs/ directory.\n\n"
+                        "**Reply 'approved' to start implementation.**")
+                    log.info(f"{agent.issue_id} → Design Review (spec ready)")
+
+            # Clean up from state
             summary["completed"] += 1
             state.remove(agent.issue_id)
-            log.info(f"Completed {agent.issue_id}")
 
-        # 5. Re-spawn for issues in Design Review / In Review with user replies
+        # 5. Re-spawn for issues awaiting action
         for review_state in ["Design Review", "In Review", "Blocked"]:
             for issue_data in issues_by_state.get(review_state, []):
                 issue_id = issue_data["identifier"]
                 if state.is_tracked(issue_id):
-                    continue  # Already has a running agent
+                    continue
 
                 labels = [l["name"] for l in issue_data.get("labels", {}).get("nodes", [])]
                 if not any(t in labels for t in repo_config.trigger_labels):
                     continue
 
-                # Check for a human reply AFTER the last agent comment
                 reply = await get_latest_human_reply_after_agent(api_key, issue_data["id"])
                 if not reply:
                     continue
+
+                # Move to appropriate active state before spawning
+                if review_state == "Design Review" and "Implementing" in state_ids:
+                    await move_issue(api_key, issue_data["id"], state_ids["Implementing"])
+                elif review_state in ("In Review", "Blocked") and "Implementing" in state_ids:
+                    await move_issue(api_key, issue_data["id"], state_ids["Implementing"])
 
                 work_item = WorkItem(
                     id=issue_id,
@@ -160,11 +214,28 @@ async def run_cycle() -> dict:
                 spawned = spawn_agent(work_item, state, user_reply=reply)
                 if spawned:
                     summary["respawned"] += 1
-                    log.info(f"Re-spawned {issue_id} from {review_state}: user replied")
+                    log.info(f"Re-spawned {issue_id}: user replied in {review_state}")
 
-        # 6. Dispatch new agents for Todo issues with trigger label
-        todo_issues = issues_by_state.get("Todo", [])
-        for issue_data in todo_issues:
+        # 6. Check In Review issues for merged PRs (no agent needed)
+        for issue_data in issues_by_state.get("In Review", []):
+            issue_id = issue_data["identifier"]
+            if state.is_tracked(issue_id):
+                continue
+            # Find the worktree for this issue
+            worktrees_dir = repo_path / "worktrees"
+            if not worktrees_dir.exists():
+                continue
+            for wt in worktrees_dir.iterdir():
+                if wt.is_dir() and wt.name.startswith(issue_id.lower()):
+                    if is_pr_merged(str(wt)):
+                        if "Done" in state_ids:
+                            await move_issue(api_key, issue_data["id"], state_ids["Done"])
+                            await add_comment(api_key, issue_data["id"], "🤖 **PR merged.** Issue complete.")
+                            log.info(f"{issue_id} → Done (PR merged)")
+                    break
+
+        # 7. Dispatch new Todo issues
+        for issue_data in issues_by_state.get("Todo", []):
             issue_id = issue_data["identifier"]
             labels = [l["name"] for l in issue_data.get("labels", {}).get("nodes", [])]
 
@@ -174,10 +245,12 @@ async def run_cycle() -> dict:
                 continue
             if state.is_tracked(issue_id):
                 continue
-
-            # Check parallel limit
             if len(state.agents_for_repo(str(repo_path))) >= repo_config.max_parallel:
                 break
+
+            # Move to Planning before dispatching
+            if "Planning" in state_ids:
+                await move_issue(api_key, issue_data["id"], state_ids["Planning"])
 
             work_item = WorkItem(
                 id=issue_id,
