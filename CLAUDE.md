@@ -97,25 +97,25 @@ dispatch/
 ├── config.py        # Global (~/.dispatch/) + per-repo (.dispatch.yaml)
 ├── scanner.py       # Linear GraphQL scanning + complexity classification
 ├── state.py         # Running agent tracking (PID, worktree, activity)
-├── dispatcher.py    # Prompt assembly + agent spawning
-├── engine.py        # Main loop: scan → reconcile → transitions → dispatch
-├── linear_state.py  # Linear API: state transitions, comments, worktree checks
+├── dispatcher.py    # Prompt assembly + agent spawning (loads prompts/, discovers skills)
+├── engine.py        # Main loop: scan → reconcile → read handoff docs → transitions → dispatch
+├── linear_state.py  # Linear API: state transitions, comments, handoff doc checks
 ├── conversation.py  # Detect human replies on Linear issues
-├── skills.py        # gstack skill discovery for prompt injection
+├── skills.py        # Skill pack discovery across ~/.claude, ~/.codex, ~/.cursor
 ├── setup.py         # Auto-generate .dispatch.yaml from repo inspection
 └── board_setup.py   # Bootstrap Linear board with required workflow states
 ```
 
 ## Issue lifecycle
 
-Linear is the source of truth. The engine owns all state transitions — agents just do work and exit. Running processes are tracked in `~/.dispatch/state.json` (atomic writes prevent corruption).
+Skills-first, atomic handoffs. Each agent does one phase (spec, implement, or feedback), writes handoff documents (`.dispatch/state.md`, `specs/*.md`, `.dispatch-question.md`), and exits. The engine reads those documents to determine the next state transition. Agents never touch Linear directly.
 
-- **Todo** → move to Planning, dispatch new agent
-- **Planning** → agent working on spec
-- **Design Review** → spec ready, wait for human approval → re-spawn to implement
-- **Implementing** → agent working on implementation
-- **In Review** → PR created, wait for human review → re-spawn for feedback; auto-detect merge → Done
-- **Blocked** → agent had a question, wait for human reply → re-spawn to continue
+- **Todo** → engine moves to Planning, spawns agent
+- **Planning** → agent writes spec to `specs/`, creates draft PR, writes `.dispatch/state.md`, exits
+- **Design Review** → human reviews spec, replies "approved" → engine re-spawns to implement
+- **Implementing** → agent reads spec, implements, runs `/review`, creates PR, exits
+- **In Review** → human reviews PR → re-spawn for feedback; auto-detect merge → Done
+- **Blocked** → agent wrote `.dispatch-question.md` → wait for human reply → re-spawn
 - **Done / Canceled** → kill agent, stop tracking
 
 ## Tests

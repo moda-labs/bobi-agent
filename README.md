@@ -2,9 +2,32 @@
 
 Dispatch loop for coding agents. Scans Linear for work, spawns Claude Code to implement, reports results via Linear comments.
 
-Requires [gstack](https://github.com/garrytan/gstack) — agents use `/review`, `/ship`, `/office-hours`, and `/plan-eng-review` to enforce a real engineering lifecycle instead of vibe coding.
+Skills-first: agents use [gstack](https://github.com/garrytan/gstack) skills (`/review`, `/ship`, `/office-hours`, `/plan-eng-review`) to enforce a real engineering lifecycle instead of vibe coding. The dispatch engine auto-discovers installed skills and injects them into every agent prompt.
 
 ## Architecture
+
+Agentd has two core principles:
+
+1. **Skills first** — agents are prompted with a structured methodology (spec → implement → review → ship) and use gstack skills for each step. The engine discovers skills from `~/.claude/skills`, `~/.codex/skills`, and `~/.cursor/skills`, then injects them into every spawn.
+
+2. **Atomic handoffs** — each agent does exactly one phase (spec, implement, or address feedback) then exits. It writes handoff documents to the worktree before exiting. The engine reads those documents to determine the next state transition. No agent ever runs two phases.
+
+### Handoff documents
+
+Agents communicate with the engine through files in the worktree:
+
+| Document | Purpose | Triggers |
+|----------|---------|----------|
+| `.dispatch/state.md` | Carries phase, context, and next-step instructions between spawns | Read on spawn, written before exit |
+| `.dispatch/history.md` | Append-only audit trail of actions taken | Appended after each action |
+| `.dispatch-progress.md` | Live progress checklist (stall detection reads mtime) | Updated during work |
+| `.dispatch-question.md` | Agent has a question for a human | Engine moves issue → Blocked |
+| `specs/*.md` | Implementation spec from the planning phase | Engine moves issue → Design Review |
+| PR (via `gh pr create`) | Implementation complete | Engine moves issue → In Review |
+
+The engine never parses agent stdout. All state transitions are driven by the presence or absence of these files.
+
+### Engine cycle
 
 ```
 Every N seconds (daemon loop):
@@ -14,22 +37,37 @@ Every N seconds (daemon loop):
   RECONCILE         →  Kill agents whose issues moved to Done/Canceled
                               │
   STALL DETECTION   →  Kill agents with no activity for 10 min
+                       Detect code changes to auto-transition Planning → Implementing
                               │
-  STATE TRANSITIONS →  Exited agents: check worktree for spec/PR/question
+  STATE TRANSITIONS →  Exited agents: read handoff documents from worktree
                        Move Linear issue to the appropriate state
                        Post 🤖 comments (spec ready, PR link, questions)
                               │
   RE-SPAWN          →  Design Review / In Review / Blocked:
-                       check for human replies → re-spawn agent
+                       check for human replies → re-spawn agent with reply context
                               │
   MERGE DETECTION   →  In Review issues: check if PR merged → move to Done
                               │
   DISPATCH          →  Todo issues with trigger label:
-                       move to Planning, spawn `claude -p`
+                       move to Planning, spawn `claude -p` in a git worktree
                        track PID + worktree in state.json
 ```
 
-Linear is the source of truth for issue state. The engine owns all state transitions and posts status comments (🤖 prefix) — agents just do work and exit. The engine only tracks running processes (PID, worktree, activity timestamp) in `state.json`.
+Linear is the source of truth for issue state. The engine owns all state transitions and posts status comments (🤖 prefix). Agents just do work, write handoff documents, and exit. The engine only tracks running processes (PID, worktree, activity timestamp) in `state.json`.
+
+### Agent prompt assembly
+
+Each agent receives a single prompt built from layered templates:
+
+```
+prompts/preamble.md     — unattended agent rules, decision handling, progress tracking
+prompts/lifecycle.md    — phase definitions, state file format, one-phase-per-spawn rule
+prompts/spec.md         — spec methodology (classify → scope → verify → plan)
+prompts/implement.md    — implementation methodology (tests first, /review before ship)
+prompts/tools/github.md — gh CLI recipes (draft PRs, implementation PRs, push updates)
+```
+
+Plus issue-specific context (title, description, branch, test command) and auto-discovered skills.
 
 ## Setup
 
@@ -124,27 +162,42 @@ You can also use cron for one-shot cycles:
 
 ## Issue lifecycle
 
-Linear states drive the lifecycle. The engine moves issues between states automatically:
+Each issue moves through phases. At every phase boundary, the agent exits and writes handoff documents. The engine reads those documents and moves the Linear issue to the next state.
 
 ```
-Todo              →  Move to Planning, dispatch agent (writes spec)
-Planning          →  Agent working on spec
-Design Review     →  Spec ready — wait for human to reply "approved"
-                     → re-spawn to implement (moves to Implementing)
-Implementing      →  Agent working on implementation
-In Review         →  PR created — wait for human review
-                     → re-spawn to address feedback (moves to Implementing)
-                     → auto-detect PR merge → move to Done
-Blocked           →  Agent had a question — wait for human reply
-                     → re-spawn to continue (moves to Implementing)
-Done / Canceled / Duplicate →  Kill agent, stop tracking
+Todo
+  │  Engine moves to Planning, spawns agent
+  ▼
+Planning (Phase 1: Spec)
+  │  Agent writes spec to specs/, creates draft PR
+  │  Writes .dispatch/state.md with phase=spec, status=complete
+  │  Exits → engine reads handoff docs → moves to Design Review
+  ▼
+Design Review
+  │  Human reviews spec, replies "approved" on Linear
+  │  Engine detects reply → re-spawns agent with approval context
+  │  Moves to Implementing
+  ▼
+Implementing (Phase 2: Implement)
+  │  Agent reads spec from specs/, implements, runs /review
+  │  Creates PR via gh pr create
+  │  Writes .dispatch/state.md with phase=implement, status=complete
+  │  Exits → engine reads handoff docs → moves to In Review
+  ▼
+In Review
+  │  Human reviews PR
+  │  ├─ Changes requested → engine re-spawns agent (Phase 3: Feedback)
+  │  ├─ PR merged → engine auto-detects → moves to Done
+  │  └─ Agent pushes fixes → back to In Review
+  ▼
+Done
 ```
 
-When an agent exits, the engine inspects its worktree (spec files, PR status, question file) and moves the Linear issue to the correct state. The engine posts all 🤖 comments — agents don't interact with Linear directly.
+**Blocked** — at any point, if an agent writes `.dispatch-question.md` and exits, the engine moves the issue to Blocked and posts the question as a 🤖 comment. When a human replies, the agent is re-spawned with the answer.
 
-Each daemon cycle polls for human replies on Design Review, In Review, and Blocked issues. When you respond, the agent is re-spawned with your reply in context.
+**Stall detection** — agents with no file activity for 10 minutes are killed. Failed agents retry up to 3 times before moving to Blocked.
 
-Stall detection: agents with no activity for 10 minutes are killed. Failed agents retry up to 3 times automatically.
+**Live state detection** — while an agent runs, the engine checks `git diff` in its worktree. If code changes appear during Planning, the engine auto-transitions to Implementing.
 
 ## Project structure
 
@@ -154,24 +207,33 @@ dispatch/
 ├── config.py        # Global (~/.dispatch/) + per-repo (.dispatch.yaml)
 ├── scanner.py       # Linear GraphQL scanning + complexity classification
 ├── state.py         # Running agent tracking (PID, worktree, activity)
-├── dispatcher.py    # Prompt assembly + agent spawning
-├── engine.py        # Main loop: scan → reconcile → transitions → dispatch
-├── linear_state.py  # Linear API: state transitions, comments, worktree checks
+├── dispatcher.py    # Prompt assembly + agent spawning (loads prompts/, discovers skills)
+├── engine.py        # Main loop: scan → reconcile → read handoff docs → transitions → dispatch
+├── linear_state.py  # Linear API: state transitions, comments, handoff doc checks
 ├── conversation.py  # Detect human replies on Linear issues
-├── skills.py        # gstack skill discovery for prompt injection
+├── skills.py        # Skill pack discovery across ~/.claude, ~/.codex, ~/.cursor
 ├── setup.py         # Auto-generate .dispatch.yaml from repo inspection
 └── board_setup.py   # Bootstrap Linear board with required workflow states
+
+prompts/
+├── preamble.md      # Unattended agent rules
+├── lifecycle.md     # Phase definitions + handoff document format
+├── spec.md          # Spec methodology (classify, scope, verify, plan)
+├── implement.md     # Implementation methodology (tests first, /review)
+└── tools/
+    └── github.md    # gh CLI recipes for PRs
 ```
 
 ## Design decisions
 
 | Decision | Rationale |
 |----------|-----------|
+| Skills first | Agents use gstack skills (`/review`, `/ship`) instead of raw commands — enforces engineering process |
+| One phase per spawn | Agent does spec OR implement OR feedback, then exits. Simpler, more predictable, easier to debug |
+| Handoff documents | `.dispatch/state.md` carries context between spawns — no coupling between agent process and engine |
+| Engine owns all transitions | One place for all Linear moves and comments — agents never touch Linear |
 | Daemon with short poll interval | Inherits full shell environment (Keychain, OAuth); no cron env issues |
 | Linear as source of truth | No internal state machine — issue state in Linear drives all behavior |
 | State file with atomic writes | Prevents double-dispatch across overlapping cycles |
 | Per-repo manifest | Engine is global, config is local. Repo opts in via `.dispatch.yaml` |
-| Tiered prompts | Trivial work gets minimal context, heavy gets full methodology |
-| Worker can't self-close | `review_required: true` means independent verification before closing |
 | Complexity from labels + estimates | Uses data already in Linear, no separate classification step |
-| Engine owns state transitions | One place for all Linear moves and comments — agents just do work and exit |
