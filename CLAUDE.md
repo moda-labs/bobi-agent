@@ -73,23 +73,26 @@ dispatch watch             # live dashboard (refreshes every 5s)
 ## Architecture
 
 Skills-first: each phase of work is a self-contained skill. The daemon
-just polls Linear and spawns the right skill. Sub-agents within each
-skill keep context isolated.
+polls Linear, manages persistent tmux sessions, and injects skills into
+them. A dedicated summarizer inspects worktree state to write handoffs.
 
 ```
 skills/
 ├── pickup/SKILL.md      # take ticket, create worktree, triage complexity
 ├── spec/SKILL.md        # write implementation spec (non-trivial work)
-├── implement/SKILL.md   # build from spec, TDD, create PR
-├── ship-pr/SKILL.md     # create/update PR, move to In Review
-└── feedback/SKILL.md    # address review comments
+├── implement/SKILL.md   # build from spec, TDD, sub-agents for tests/code/review
+├── ship-pr/SKILL.md     # create/update PR
+├── feedback/SKILL.md    # address review comments
+└── e2e-test/SKILL.md    # integration test tiers and instructions
 
 dispatch/
-├── daemon.py        # Poll → route → spawn (~170 lines)
+├── daemon.py        # Poll → monitor tmux sessions → route phases → bridge questions
 ├── scanner.py       # Linear GraphQL polling + complexity classification
 ├── linear_api.py    # Minimal Linear helpers (state IDs, move, comment)
 ├── conversation.py  # Detect human replies on Linear issues
-├── state.py         # Running agent PID tracking
+├── session.py       # Tmux session management (spawn, inject, capture, detect state)
+├── summarizer.py    # Inspect worktree + tmux pane → determine phase → write handoff
+├── state.py         # Running agent tracking
 ├── config.py        # Global (~/.dispatch/) + per-repo (.dispatch.yaml)
 ├── setup.py         # Auto-generate .dispatch.yaml from repo inspection
 ├── board_setup.py   # Bootstrap Linear board with required workflow states
@@ -104,10 +107,11 @@ The daemon routes based on Linear state:
 
 | Linear state | Trigger | Action |
 |---|---|---|
-| Todo + agent label | new issue | spawn `/pickup`, move to In Progress |
+| Todo + agent label | new issue | spawn tmux session + inject `/pickup`, move to In Progress |
+| In Progress | session idle/exited | summarizer writes handoff, daemon injects next skill |
 | In Review | PR merged | move to Done |
-| In Review | changes requested | spawn `/feedback` |
-| Blocked | human replied | spawn `/feedback` |
+| In Review | changes requested | inject `/feedback` into session |
+| Blocked | human replied | inject answer into tmux session |
 
 Internal phases (triage, spec, implement) happen within "In Progress".
 The handoff file (`.dispatch/handoff.md`) tracks which sub-phase the
@@ -115,7 +119,8 @@ agent is in. Linear doesn't need to know.
 
 ## Handoff contract
 
-Agents communicate between phases via `.dispatch/handoff.md` in the worktree:
+The summarizer writes `.dispatch/handoff.md` in the worktree by
+inspecting git state (commits, PRs, specs) and tmux pane output:
 
 ```yaml
 ---
@@ -128,10 +133,16 @@ spec_path: specs/agd-12-rate-limiting.md
 complexity: medium
 ---
 
-Summary for next agent.
+## Status
+Spec written: specs/agd-12-rate-limiting.md
+
+## Agent activity
+(captured from tmux pane)
 ```
 
-Each agent reads the handoff, does its work, updates the handoff, exits.
+Each agent reads the handoff, does its work, then goes idle. The
+summarizer detects the idle state, inspects what changed, and writes
+the updated handoff for the daemon to route.
 
 ## Tests
 
