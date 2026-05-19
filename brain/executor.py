@@ -11,6 +11,7 @@ from pathlib import Path
 
 from dispatch.config import GlobalConfig, RepoConfig
 from dispatch.linear_api import get_state_ids, move_issue, add_comment
+from dispatch.scanner import scan_linear_all_active
 from dispatch.session import (
     spawn_session, inject, inject_skill, answer_question,
     kill_session, session_exists,
@@ -28,8 +29,9 @@ async def execute_actions(actions: list[dict]) -> dict:
     state = StateStore()
     global_config = GlobalConfig.load()
 
-    # Build API key lookup by project
+    # Build API key + repo config lookup by project
     api_keys = {}
+    repo_configs = {}
     state_id_cache = {}
     for repo_path in global_config.repos:
         if not repo_path.exists():
@@ -43,6 +45,7 @@ async def execute_actions(actions: list[dict]) -> dict:
         if key:
             api_keys[rc.linear_project] = key
             api_keys[str(repo_path)] = key
+            repo_configs[rc.linear_project] = rc
 
     async def get_states(project_or_repo: str) -> dict:
         if project_or_repo not in state_id_cache:
@@ -146,30 +149,41 @@ async def execute_actions(actions: list[dict]) -> dict:
                 target = action.get("state", "")
                 project = iid.split("-")[0]
                 api_key = api_keys.get(project, "")
-                if api_key and target:
-                    states = await get_states(project)
-                    agent = state.get(iid)
-                    linear_id = agent.linear_issue_id if agent else action.get("linear_id")
-                    if target in states and linear_id:
-                        await move_issue(api_key, linear_id, states[target])
-                        log.info(f"Brain: moved {iid} → {target}")
-                        summary["executed"] += 1
-                        if target == "Done":
-                            if session_exists(iid):
-                                kill_session(iid)
-                            state.remove(iid)
+                linear_id = action.get("linear_id") or (state.get(iid).linear_issue_id if state.get(iid) else None)
+                if not api_key:
+                    log.warning(f"Brain: no API key for project {project}")
+                    summary["errors"] += 1
+                    continue
+                if not linear_id:
+                    log.warning(f"Brain: no linear_id for {iid}")
+                    summary["errors"] += 1
+                    continue
+                states = await get_states(project)
+                if target not in states:
+                    log.warning(f"Brain: state '{target}' not found for {project}")
+                    summary["errors"] += 1
+                    continue
+                await move_issue(api_key, linear_id, states[target])
+                log.info(f"Brain: moved {iid} → {target}")
+                summary["executed"] += 1
+                if target == "Done":
+                    if session_exists(iid):
+                        kill_session(iid)
+                    state.remove(iid)
 
             elif action_type == "comment_linear":
                 iid = action["issue_id"]
                 body = action.get("body", "")
                 project = iid.split("-")[0]
                 api_key = api_keys.get(project, "")
-                agent = state.get(iid)
-                linear_id = agent.linear_issue_id if agent else action.get("linear_id")
+                linear_id = action.get("linear_id") or (state.get(iid).linear_issue_id if state.get(iid) else None)
                 if api_key and body and linear_id:
                     await add_comment(api_key, linear_id, body)
                     log.info(f"Brain: commented on {iid}")
                     summary["executed"] += 1
+                else:
+                    log.warning(f"Brain: comment_linear failed for {iid} (key={bool(api_key)}, id={bool(linear_id)}, body={bool(body)})")
+                    summary["errors"] += 1
 
             elif action_type == "send_slack":
                 channel = action.get("channel", "")
