@@ -28,10 +28,15 @@ log = logging.getLogger(__name__)
 
 BRAIN_PROMPT = Path(__file__).parent / "prompt.md"
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
+DECISIONS_LOG = Path.home() / ".dispatch" / "brain" / "decisions.jsonl"
 
 
-def call_brain(context: dict) -> list[dict]:
-    """Call claude -p with the brain prompt + context. Returns parsed actions."""
+def call_brain(context: dict) -> tuple[list[dict], str]:
+    """Call claude -p with the brain prompt + context.
+
+    Returns (actions, reasoning) — the parsed actions and the brain's
+    full response text including any reasoning before the JSON.
+    """
     prompt_template = BRAIN_PROMPT.read_text()
     context_text = write_context_prompt(context)
     full_prompt = prompt_template + context_text
@@ -48,18 +53,23 @@ def call_brain(context: dict) -> list[dict]:
     try:
         response = json.loads(result.stdout)
         text = response.get("result", "")
+        cost = response.get("total_cost_usd", 0)
         if not text and result.returncode != 0:
             log.error(f"Brain call failed (exit {result.returncode}): {result.stdout[:300]}")
-            return []
+            return [], ""
     except (json.JSONDecodeError, ValueError):
         if result.returncode != 0:
             log.error(f"Brain call failed: {result.stderr[:200]}")
-            return []
+            return [], ""
         text = result.stdout
+        cost = 0
+
+    if cost:
+        log.info(f"Brain tick cost: ${cost:.4f}")
 
     # Extract JSON array from the response
     actions = _extract_json_actions(text)
-    return actions
+    return actions, text
 
 
 def _extract_json_actions(text: str) -> list[dict]:
@@ -90,15 +100,28 @@ def _extract_json_actions(text: str) -> list[dict]:
 async def tick() -> dict:
     """Run one brain tick. Returns summary of actions taken."""
     context = await gather_all()
-    actions = call_brain(context)
+    actions, reasoning = call_brain(context)
 
-    if not actions:
-        return {"actions": 0}
+    # Execute actions
+    summary = await execute_actions(actions) if actions else {"executed": 0, "skipped": 0, "errors": 0}
 
-    log.info(f"Brain decided {len(actions)} actions: "
-             + ", ".join(a.get("type", "?") for a in actions))
+    # Log everything: reasoning, decisions, and outcomes
+    DECISIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "timestamp": context["timestamp"],
+        "issues_seen": len(context["issues"]),
+        "workers_seen": len(context["workers"]),
+        "reasoning": reasoning,
+        "actions": actions,
+        "outcome": summary,
+    }
+    with open(DECISIONS_LOG, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
-    summary = await execute_actions(actions)
+    if actions:
+        log.info(f"Brain decided {len(actions)} actions: "
+                 + ", ".join(a.get("type", "?") for a in actions))
+
     return summary
 
 
