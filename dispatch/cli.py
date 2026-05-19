@@ -352,14 +352,15 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
         for action in actions:
             click.echo(f"  {action}")
 
-    # Install engineer + methodology skills into the repo's .claude/skills/
+    # Install skills into the repo's .claude/skills/
+    # Domains, engineer workflows, and methodology skills are all installed
     click.echo("")
-    click.echo("Installing engineer skills...")
+    click.echo("Installing skills...")
     skills_root = Path(__file__).parent.parent / "skills"
     target_skills = path / ".claude" / "skills"
     target_skills.mkdir(parents=True, exist_ok=True)
     installed = []
-    for category in ["engineer", "methodology"]:
+    for category in ["domains", "engineer", "methodology"]:
         category_dir = skills_root / category
         if not category_dir.exists():
             continue

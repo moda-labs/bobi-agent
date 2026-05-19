@@ -1,59 +1,10 @@
 # /feedback — Address review comments
 
 You are addressing feedback from a human reviewer. Fix what they asked for,
-then review your fixes before pushing.
+review your fixes, push.
 
-## EXIT CONTRACT — READ THIS FIRST
-
-Your task is NOT complete until you do ALL THREE of these, in order:
-
-```bash
-# 1. Push your fixes
-git push
-
-# 2. Update the handoff
-cat > .dispatch/handoff.md << 'HANDOFF_EOF'
----
-issue_id: <ISSUE_ID>
-title: <TITLE>
-linear_id: <LINEAR_UUID>
-worktree: <ABSOLUTE_WORKTREE_PATH>
-branch: <BRANCH_NAME>
-phase: feedback_addressed
-pr_url: <PR_URL_FROM_PREVIOUS_HANDOFF>
----
-
-Feedback addressed. Ready for re-review.
-HANDOFF_EOF
-
-# 3. Verify
-cat .dispatch/handoff.md
-```
-
-If blocked (can't understand feedback, need clarification):
-
-```bash
-cat > .dispatch/handoff.md << 'HANDOFF_EOF'
----
-issue_id: <ISSUE_ID>
-title: <TITLE>
-linear_id: <LINEAR_UUID>
-worktree: <ABSOLUTE_WORKTREE_PATH>
-branch: <BRANCH_NAME>
-phase: blocked
-question: <SPECIFIC_QUESTIONS>
----
-
-<BODY>
-HANDOFF_EOF
-```
-
-Write the handoff BEFORE exiting. The pipeline stalls without it.
-
-## Inputs
-
-Read `.dispatch/handoff.md` for context. You will also receive the human's
-reply text as additional context from the daemon.
+Refer to `domains/source-control` for commit/push conventions,
+`domains/code-review` for mandatory review of fixes.
 
 ## Steps
 
@@ -61,13 +12,14 @@ reply text as additional context from the daemon.
 
 Read the human's reply. Categorize:
 - **Fix**: something wrong → change it
-- **Question**: needs clarification → set `phase: blocked`
+- **Question**: needs clarification → ask the manager (just explain what
+  you need, the manager will see you're idle and check on you)
 - **Suggestion**: nice-to-have → use judgment
 
-### 2. For bugs in existing code: /investigate
+### 2. For bugs: /investigate
 
-If the feedback points to a bug (not just a style issue), invoke `/investigate`
-to find the root cause before attempting a fix. Don't guess at fixes.
+If the feedback points to a bug, follow the bug workflow in
+`domains/code-review` — invoke `/investigate` for root cause.
 
 ### 3. Make changes
 
@@ -76,21 +28,22 @@ It makes fixes and commits them.
 
 ### 4. Review fixes with /review
 
-Invoke `/review` on the new changes. Give it just the diff since the last
-push (`git diff origin/HEAD..HEAD`). Fix anything it finds.
-
-This catches regressions introduced while addressing feedback.
+Follow mandatory review in `domains/code-review`. Give `/review` just
+the diff since the last push. Fix anything it finds.
 
 ### 5. Run tests
 
 Run the project's test command.
 
-### 6. Push, write handoff, exit
+### 6. Push
 
-Follow the EXIT CONTRACT above. Push first, then write the handoff, then exit.
+```bash
+git push
+```
 
 ## Rules
 
 - Only change what was requested. Don't refactor unrelated code.
 - If feedback contradicts the spec, follow the feedback (human overrides spec).
-- `/review` on your fixes is mandatory. Don't skip it.
+- `/review` on fixes is mandatory per `domains/code-review`.
+- Commit format per `domains/source-control`: `[ISSUE-ID] type: description`

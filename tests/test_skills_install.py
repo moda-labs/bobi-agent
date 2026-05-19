@@ -7,13 +7,16 @@ and discoverable by Claude Code.
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
-ENGINEER_SKILLS_SRC = REPO_ROOT / "skills" / "engineer"
-METHODOLOGY_SKILLS_SRC = REPO_ROOT / "skills" / "methodology"
+SKILLS_ROOT = REPO_ROOT / "skills"
+ENGINEER_SKILLS_SRC = SKILLS_ROOT / "engineer"
+METHODOLOGY_SKILLS_SRC = SKILLS_ROOT / "methodology"
+DOMAIN_SKILLS_SRC = SKILLS_ROOT / "domains"
 SKILLS_INSTALLED = REPO_ROOT / ".claude" / "skills"
 
 EXPECTED_ENGINEER_SKILLS = ["pickup", "spec", "implement", "ship-pr", "feedback"]
 EXPECTED_METHODOLOGY_SKILLS = ["frontdoor", "build", "brand-identity", "office-helper"]
-EXPECTED_SKILLS = EXPECTED_ENGINEER_SKILLS + EXPECTED_METHODOLOGY_SKILLS
+EXPECTED_DOMAIN_SKILLS = ["ticketing", "source-control", "code-review", "knowledge-base", "messaging"]
+EXPECTED_SKILLS = EXPECTED_ENGINEER_SKILLS + EXPECTED_METHODOLOGY_SKILLS + EXPECTED_DOMAIN_SKILLS
 
 
 class TestSkillsExist:
@@ -21,6 +24,7 @@ class TestSkillsExist:
     def test_source_skills_directory_exists(self):
         assert ENGINEER_SKILLS_SRC.exists()
         assert METHODOLOGY_SKILLS_SRC.exists()
+        assert DOMAIN_SKILLS_SRC.exists()
 
     def test_all_source_skills_have_skill_md(self):
         for name in EXPECTED_ENGINEER_SKILLS:
@@ -28,6 +32,9 @@ class TestSkillsExist:
             assert skill_md.exists(), f"Missing {skill_md}"
         for name in EXPECTED_METHODOLOGY_SKILLS:
             skill_md = METHODOLOGY_SKILLS_SRC / name / "SKILL.md"
+            assert skill_md.exists(), f"Missing {skill_md}"
+        for name in EXPECTED_DOMAIN_SKILLS:
+            skill_md = DOMAIN_SKILLS_SRC / name / "SKILL.md"
             assert skill_md.exists(), f"Missing {skill_md}"
 
     def test_installed_skills_directory_exists(self):
@@ -50,21 +57,12 @@ class TestSkillsExist:
             )
 
     def test_symlinks_resolve_to_source(self):
-        for name in EXPECTED_ENGINEER_SKILLS:
+        for name in EXPECTED_SKILLS:
             installed = SKILLS_INSTALLED / name
             if not installed.exists():
                 continue
             resolved = installed.resolve()
-            expected = (ENGINEER_SKILLS_SRC / name).resolve()
-            assert resolved == expected, (
-                f".claude/skills/{name} points to {resolved}, expected {expected}"
-            )
-        for name in EXPECTED_METHODOLOGY_SKILLS:
-            installed = SKILLS_INSTALLED / name
-            if not installed.exists():
-                continue
-            resolved = installed.resolve()
-            expected = (METHODOLOGY_SKILLS_SRC / name).resolve()
+            expected = _skill_path(name).parent.resolve()
             assert resolved == expected, (
                 f".claude/skills/{name} points to {resolved}, expected {expected}"
             )
@@ -81,6 +79,8 @@ def _skill_path(name: str) -> Path:
     """Resolve a skill name to its source path."""
     if name in EXPECTED_ENGINEER_SKILLS:
         return ENGINEER_SKILLS_SRC / name / "SKILL.md"
+    if name in EXPECTED_DOMAIN_SKILLS:
+        return DOMAIN_SKILLS_SRC / name / "SKILL.md"
     return METHODOLOGY_SKILLS_SRC / name / "SKILL.md"
 
 
@@ -100,11 +100,12 @@ class TestSkillContent:
             has_frontmatter = lines[0].strip() == "---"
             assert has_title or has_frontmatter, f"{name}/SKILL.md missing # title or frontmatter"
 
-    def test_engineer_skills_have_exit_contract(self):
+    def test_engineer_skills_reference_domains(self):
+        """Engineer workflow skills should reference domain skills, not hardcode platform details."""
         for name in EXPECTED_ENGINEER_SKILLS:
             content = _skill_path(name).read_text()
-            assert "EXIT CONTRACT" in content, (
-                f"{name}/SKILL.md missing EXIT CONTRACT section"
+            assert "domains/" in content, (
+                f"{name}/SKILL.md should reference domains/ for platform-specific knowledge"
             )
 
     def test_pickup_creates_worktree(self):
