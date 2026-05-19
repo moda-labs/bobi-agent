@@ -7,20 +7,27 @@ and discoverable by Claude Code.
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
-SKILLS_SRC = REPO_ROOT / "skills"
+ENGINEER_SKILLS_SRC = REPO_ROOT / "skills" / "engineer"
+METHODOLOGY_SKILLS_SRC = REPO_ROOT / "skills" / "methodology"
 SKILLS_INSTALLED = REPO_ROOT / ".claude" / "skills"
 
-EXPECTED_SKILLS = ["pickup", "spec", "implement", "ship-pr", "feedback"]
+EXPECTED_ENGINEER_SKILLS = ["pickup", "spec", "implement", "ship-pr", "feedback"]
+EXPECTED_METHODOLOGY_SKILLS = ["frontdoor", "build", "brand-identity", "office-helper"]
+EXPECTED_SKILLS = EXPECTED_ENGINEER_SKILLS + EXPECTED_METHODOLOGY_SKILLS
 
 
 class TestSkillsExist:
 
     def test_source_skills_directory_exists(self):
-        assert SKILLS_SRC.exists()
+        assert ENGINEER_SKILLS_SRC.exists()
+        assert METHODOLOGY_SKILLS_SRC.exists()
 
     def test_all_source_skills_have_skill_md(self):
-        for name in EXPECTED_SKILLS:
-            skill_md = SKILLS_SRC / name / "SKILL.md"
+        for name in EXPECTED_ENGINEER_SKILLS:
+            skill_md = ENGINEER_SKILLS_SRC / name / "SKILL.md"
+            assert skill_md.exists(), f"Missing {skill_md}"
+        for name in EXPECTED_METHODOLOGY_SKILLS:
+            skill_md = METHODOLOGY_SKILLS_SRC / name / "SKILL.md"
             assert skill_md.exists(), f"Missing {skill_md}"
 
     def test_installed_skills_directory_exists(self):
@@ -43,12 +50,21 @@ class TestSkillsExist:
             )
 
     def test_symlinks_resolve_to_source(self):
-        for name in EXPECTED_SKILLS:
+        for name in EXPECTED_ENGINEER_SKILLS:
             installed = SKILLS_INSTALLED / name
             if not installed.exists():
                 continue
             resolved = installed.resolve()
-            expected = (SKILLS_SRC / name).resolve()
+            expected = (ENGINEER_SKILLS_SRC / name).resolve()
+            assert resolved == expected, (
+                f".claude/skills/{name} points to {resolved}, expected {expected}"
+            )
+        for name in EXPECTED_METHODOLOGY_SKILLS:
+            installed = SKILLS_INSTALLED / name
+            if not installed.exists():
+                continue
+            resolved = installed.resolve()
+            expected = (METHODOLOGY_SKILLS_SRC / name).resolve()
             assert resolved == expected, (
                 f".claude/skills/{name} points to {resolved}, expected {expected}"
             )
@@ -61,48 +77,59 @@ class TestSkillsExist:
             )
 
 
+def _skill_path(name: str) -> Path:
+    """Resolve a skill name to its source path."""
+    if name in EXPECTED_ENGINEER_SKILLS:
+        return ENGINEER_SKILLS_SRC / name / "SKILL.md"
+    return METHODOLOGY_SKILLS_SRC / name / "SKILL.md"
+
+
 class TestSkillContent:
 
     def test_skill_md_not_empty(self):
         for name in EXPECTED_SKILLS:
-            skill_md = SKILLS_SRC / name / "SKILL.md"
-            content = skill_md.read_text()
+            content = _skill_path(name).read_text()
             assert len(content) > 50, f"{name}/SKILL.md is too short ({len(content)} chars)"
 
     def test_skill_md_has_title(self):
         for name in EXPECTED_SKILLS:
-            skill_md = SKILLS_SRC / name / "SKILL.md"
-            first_line = skill_md.read_text().splitlines()[0]
-            assert first_line.startswith("# "), f"{name}/SKILL.md missing # title"
+            content = _skill_path(name).read_text()
+            # Skip YAML frontmatter if present
+            lines = content.splitlines()
+            has_title = any(l.startswith("# ") for l in lines[:30])
+            has_frontmatter = lines[0].strip() == "---"
+            assert has_title or has_frontmatter, f"{name}/SKILL.md missing # title or frontmatter"
 
-    def test_skill_md_has_exit_contract(self):
-        """Every skill except pickup should have an EXIT CONTRACT."""
-        for name in EXPECTED_SKILLS:
-            skill_md = SKILLS_SRC / name / "SKILL.md"
-            content = skill_md.read_text()
+    def test_engineer_skills_have_exit_contract(self):
+        for name in EXPECTED_ENGINEER_SKILLS:
+            content = _skill_path(name).read_text()
             assert "EXIT CONTRACT" in content, (
                 f"{name}/SKILL.md missing EXIT CONTRACT section"
             )
 
     def test_pickup_creates_worktree(self):
-        content = (SKILLS_SRC / "pickup" / "SKILL.md").read_text()
+        content = _skill_path("pickup").read_text()
         assert "worktree" in content.lower()
 
     def test_implement_references_review(self):
-        content = (SKILLS_SRC / "implement" / "SKILL.md").read_text()
+        content = _skill_path("implement").read_text()
         assert "/review" in content
 
     def test_ship_pr_references_ship(self):
-        content = (SKILLS_SRC / "ship-pr" / "SKILL.md").read_text()
+        content = _skill_path("ship-pr").read_text()
         assert "/ship" in content
 
-    def test_no_skill_invokes_another_skill_directly(self):
-        """Skills should not chain — the daemon routes between phases."""
-        for name in EXPECTED_SKILLS:
-            content = (SKILLS_SRC / name / "SKILL.md").read_text()
-            for other in EXPECTED_SKILLS:
+    def test_ship_pr_moves_to_in_review(self):
+        content = _skill_path("ship-pr").read_text()
+        assert "In Review" in content
+
+    def test_no_engineer_skill_invokes_another_engineer_skill(self):
+        """Engineer skills should not chain — the manager routes between phases."""
+        for name in EXPECTED_ENGINEER_SKILLS:
+            content = _skill_path(name).read_text()
+            for other in EXPECTED_ENGINEER_SKILLS:
                 if other == name:
                     continue
                 assert f"invoke /{other}" not in content.lower(), (
-                    f"{name}/SKILL.md invokes /{other} — skills should not chain"
+                    f"{name}/SKILL.md invokes /{other} — engineer skills should not chain"
                 )
