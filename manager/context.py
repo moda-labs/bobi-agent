@@ -1,7 +1,7 @@
-"""Gather all context for the brain's tick.
+"""Gather all context for the manager's tick.
 
 Reads events from Linear, Slack, GitHub, and worker tmux sessions.
-Writes a single context file that the brain reads to make decisions.
+Writes a single context file that the manager reads to make decisions.
 """
 
 import json
@@ -19,9 +19,9 @@ from dispatch.summarizer import detect_phase
 
 log = logging.getLogger(__name__)
 
-BRAIN_DIR = Path.home() / ".dispatch" / "brain"
-CONTEXT_PATH = BRAIN_DIR / "context.json"
-MEMORY_PATH = BRAIN_DIR / "memory.md"
+MANAGER_DIR = Path.home() / ".dispatch" / "manager"
+CONTEXT_PATH = MANAGER_DIR / "context.json"
+MEMORY_PATH = MANAGER_DIR / "memory.md"
 
 
 async def gather_linear(api_key: str, repo_config: RepoConfig) -> list[dict]:
@@ -99,7 +99,7 @@ def gather_worktree_phases(repos: list[Path]) -> dict:
 
 
 async def gather_all() -> dict:
-    """Gather full context for the brain. Returns the context dict."""
+    """Gather full context for the manager. Returns the context dict."""
     global_config = GlobalConfig.load()
     all_issues = []
     repos = []
@@ -139,16 +139,16 @@ async def gather_all() -> dict:
     }
 
     # Write context file
-    BRAIN_DIR.mkdir(parents=True, exist_ok=True)
+    MANAGER_DIR.mkdir(parents=True, exist_ok=True)
     CONTEXT_PATH.write_text(json.dumps(context, indent=2, default=str))
     log.info(f"Context gathered: {len(all_issues)} issues, {len(workers)} workers")
     return context
 
 
 def write_context_prompt(context: dict) -> str:
-    """Format the context dict into a prompt the brain can read."""
+    """Format the context dict into a prompt the manager can read."""
 
-    lines = [f"# Modabot Brain Tick — {context['timestamp']}", ""]
+    lines = [f"# Modabot Manager Tick — {context['timestamp']}", ""]
 
     # Repos
     lines.append("## Repos")

@@ -1,7 +1,7 @@
-"""Fast event loop that polls for changes and wakes the brain when needed.
+"""Fast event loop that polls for changes and wakes the manager when needed.
 
 Polls every 5 seconds (cheap — just Linear API + tmux checks).
-Only calls the brain (expensive — claude -p) when something changed.
+Only calls the manager (expensive — claude -p) when something changed.
 """
 
 import asyncio
@@ -14,13 +14,13 @@ from pathlib import Path
 import truststore
 truststore.inject_into_ssl()
 
-from brain.context import gather_all, write_context_prompt, BRAIN_DIR
-from brain.loop import call_brain, DECISIONS_LOG
-from brain.executor import execute_actions
+from manager.context import gather_all, write_context_prompt, MANAGER_DIR
+from manager.loop import call_manager, DECISIONS_LOG
+from manager.executor import execute_actions
 
 log = logging.getLogger(__name__)
 
-LAST_HASH_PATH = BRAIN_DIR / "last_context_hash"
+LAST_HASH_PATH = MANAGER_DIR / "last_context_hash"
 
 
 def _context_hash(context: dict) -> str:
@@ -34,7 +34,7 @@ def _context_hash(context: dict) -> str:
 
 
 async def poll_and_maybe_think() -> dict | None:
-    """Poll for changes. If something changed, run the brain. Returns tick result or None."""
+    """Poll for changes. If something changed, run the manager. Returns tick result or None."""
     context = await gather_all()
     current_hash = _context_hash(context)
 
@@ -46,13 +46,13 @@ async def poll_and_maybe_think() -> dict | None:
     if current_hash == last_hash:
         return None
 
-    # Something changed — wake the brain
-    log.info(f"Change detected — waking brain ({len(context['issues'])} issues, {len(context['workers'])} workers)")
+    # Something changed — wake the manager
+    log.info(f"Change detected — waking manager ({len(context['issues'])} issues, {len(context['workers'])} workers)")
 
     LAST_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
     LAST_HASH_PATH.write_text(current_hash)
 
-    actions, reasoning = call_brain(context)
+    actions, reasoning = call_manager(context)
 
     summary = await execute_actions(actions) if actions else {"executed": 0, "skipped": 0, "errors": 0}
 
@@ -70,7 +70,7 @@ async def poll_and_maybe_think() -> dict | None:
         f.write(json.dumps(entry) + "\n")
 
     if actions:
-        log.info(f"Brain decided {len(actions)} actions: "
+        log.info(f"Manager decided {len(actions)} actions: "
                  + ", ".join(a.get("type", "?") for a in actions))
 
     return summary
@@ -78,23 +78,23 @@ async def poll_and_maybe_think() -> dict | None:
 
 def run(poll_interval: int = 5):
     """Run the watcher loop. Polls every N seconds, thinks only when needed."""
-    log.info(f"Modabot watcher starting. Polling every {poll_interval}s, brain wakes on changes.")
+    log.info(f"Modabot watcher starting. Polling every {poll_interval}s, manager wakes on changes.")
     tick_count = 0
-    last_brain_time = 0
+    last_manager_time = 0
 
     while True:
         try:
             result = asyncio.run(poll_and_maybe_think())
             if result is not None:
-                last_brain_time = time.time()
+                last_manager_time = time.time()
                 tick_count += 1
                 if result.get("executed", 0) > 0 or result.get("errors", 0) > 0:
-                    log.info(f"Brain tick #{tick_count}: {json.dumps(result)}")
+                    log.info(f"Manager tick #{tick_count}: {json.dumps(result)}")
             else:
                 # Nothing changed — periodic heartbeat log
-                elapsed = int(time.time() - last_brain_time) if last_brain_time else 0
+                elapsed = int(time.time() - last_manager_time) if last_manager_time else 0
                 if elapsed > 0 and elapsed % 60 < poll_interval:
-                    log.info(f"Watching... ({elapsed}s since last brain tick)")
+                    log.info(f"Watching... ({elapsed}s since last manager tick)")
         except Exception as e:
             log.error(f"Poll failed: {e}")
 
@@ -109,7 +109,7 @@ if __name__ == "__main__":
         datefmt="%H:%M:%S",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(Path.home() / ".dispatch" / "brain.log"),
+            logging.FileHandler(Path.home() / ".dispatch" / "manager.log"),
         ],
     )
 

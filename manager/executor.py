@@ -1,6 +1,6 @@
-"""Execute actions output by the brain.
+"""Execute actions output by the manager.
 
-The brain outputs a JSON array of actions. This module parses them
+The manager outputs a JSON array of actions. This module parses them
 and calls the appropriate dispatch/session functions.
 """
 
@@ -20,11 +20,11 @@ from dispatch.state import StateStore
 
 log = logging.getLogger(__name__)
 
-MEMORY_PATH = Path.home() / ".dispatch" / "brain" / "memory.md"
+MEMORY_PATH = Path.home() / ".dispatch" / "manager" / "memory.md"
 
 
 async def execute_actions(actions: list[dict]) -> dict:
-    """Execute a list of brain actions. Returns summary."""
+    """Execute a list of manager actions. Returns summary."""
     summary = {"executed": 0, "skipped": 0, "errors": 0}
     state = StateStore()
     global_config = GlobalConfig.load()
@@ -61,18 +61,18 @@ async def execute_actions(actions: list[dict]) -> dict:
         action_type = action.get("type", "")
         try:
             if action_type == "no_action":
-                log.info(f"Brain: no action — {action.get('reason', '')}")
+                log.info(f"Manager: no action — {action.get('reason', '')}")
                 continue
 
             elif action_type == "spawn_worker":
                 iid = action["issue_id"]
                 repo = action.get("repo", "")
                 if state.is_tracked(iid):
-                    log.info(f"Brain: {iid} already tracked, skipping spawn")
+                    log.info(f"Manager: {iid} already tracked, skipping spawn")
                     summary["skipped"] += 1
                     continue
                 if not repo:
-                    log.warning(f"Brain: spawn_worker missing repo for {iid}")
+                    log.warning(f"Manager: spawn_worker missing repo for {iid}")
                     summary["errors"] += 1
                     continue
 
@@ -96,7 +96,7 @@ async def execute_actions(actions: list[dict]) -> dict:
                         if action.get("linear_id"):
                             await add_comment(api_key, action["linear_id"], "Picked up by modabot.")
 
-                    log.info(f"Brain: spawned worker for {iid}")
+                    log.info(f"Manager: spawned worker for {iid}")
                     summary["executed"] += 1
 
             elif action_type == "inject_into_worker":
@@ -105,7 +105,7 @@ async def execute_actions(actions: list[dict]) -> dict:
                 if session_exists(iid) and msg:
                     inject(iid, msg)
                     state.touch(iid)
-                    log.info(f"Brain: injected into {iid}")
+                    log.info(f"Manager: injected into {iid}")
                     summary["executed"] += 1
                 else:
                     summary["skipped"] += 1
@@ -117,7 +117,7 @@ async def execute_actions(actions: list[dict]) -> dict:
                                     choice=action.get("choice"),
                                     text=action.get("text"))
                     state.touch(iid)
-                    log.info(f"Brain: answered question for {iid}")
+                    log.info(f"Manager: answered question for {iid}")
                     summary["executed"] += 1
                 else:
                     summary["skipped"] += 1
@@ -127,7 +127,7 @@ async def execute_actions(actions: list[dict]) -> dict:
                 if session_exists(iid):
                     kill_session(iid)
                 state.remove(iid)
-                log.info(f"Brain: killed worker {iid}")
+                log.info(f"Manager: killed worker {iid}")
                 summary["executed"] += 1
 
             elif action_type == "route_skill":
@@ -139,7 +139,7 @@ async def execute_actions(actions: list[dict]) -> dict:
                     if agent:
                         state.set_phase(iid, f"_working_{skill}")
                     state.touch(iid)
-                    log.info(f"Brain: routed /{skill} to {iid}")
+                    log.info(f"Manager: routed /{skill} to {iid}")
                     summary["executed"] += 1
                 else:
                     summary["skipped"] += 1
@@ -151,20 +151,20 @@ async def execute_actions(actions: list[dict]) -> dict:
                 api_key = api_keys.get(project, "")
                 linear_id = action.get("linear_id") or (state.get(iid).linear_issue_id if state.get(iid) else None)
                 if not api_key:
-                    log.warning(f"Brain: no API key for project {project}")
+                    log.warning(f"Manager: no API key for project {project}")
                     summary["errors"] += 1
                     continue
                 if not linear_id:
-                    log.warning(f"Brain: no linear_id for {iid}")
+                    log.warning(f"Manager: no linear_id for {iid}")
                     summary["errors"] += 1
                     continue
                 states = await get_states(project)
                 if target not in states:
-                    log.warning(f"Brain: state '{target}' not found for {project}")
+                    log.warning(f"Manager: state '{target}' not found for {project}")
                     summary["errors"] += 1
                     continue
                 await move_issue(api_key, linear_id, states[target])
-                log.info(f"Brain: moved {iid} → {target}")
+                log.info(f"Manager: moved {iid} → {target}")
                 summary["executed"] += 1
                 if target == "Done":
                     if session_exists(iid):
@@ -179,16 +179,16 @@ async def execute_actions(actions: list[dict]) -> dict:
                 linear_id = action.get("linear_id") or (state.get(iid).linear_issue_id if state.get(iid) else None)
                 if api_key and body and linear_id:
                     await add_comment(api_key, linear_id, body)
-                    log.info(f"Brain: commented on {iid}")
+                    log.info(f"Manager: commented on {iid}")
                     summary["executed"] += 1
                 else:
-                    log.warning(f"Brain: comment_linear failed for {iid} (key={bool(api_key)}, id={bool(linear_id)}, body={bool(body)})")
+                    log.warning(f"Manager: comment_linear failed for {iid} (key={bool(api_key)}, id={bool(linear_id)}, body={bool(body)})")
                     summary["errors"] += 1
 
             elif action_type == "send_slack":
                 channel = action.get("channel", "")
                 msg = action.get("message", "")
-                log.info(f"Brain: [SLACK {channel}] {msg}")
+                log.info(f"Manager: [SLACK {channel}] {msg}")
                 summary["executed"] += 1
 
             elif action_type == "update_memory":
@@ -196,15 +196,15 @@ async def execute_actions(actions: list[dict]) -> dict:
                 if memory:
                     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
                     MEMORY_PATH.write_text(memory)
-                    log.info(f"Brain: memory updated ({len(memory)} chars)")
+                    log.info(f"Manager: memory updated ({len(memory)} chars)")
                     summary["executed"] += 1
 
             else:
-                log.warning(f"Brain: unknown action type '{action_type}'")
+                log.warning(f"Manager: unknown action type '{action_type}'")
                 summary["errors"] += 1
 
         except Exception as e:
-            log.error(f"Brain: action {action_type} failed: {e}")
+            log.error(f"Manager: action {action_type} failed: {e}")
             summary["errors"] += 1
 
     return summary
