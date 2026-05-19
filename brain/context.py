@@ -169,7 +169,7 @@ def write_context_prompt(context: dict) -> str:
         lines.append(f"\n### {state}")
         for i in issues:
             labels = ", ".join(i["labels"]) if i["labels"] else "no labels"
-            lines.append(f"- **{i['id']}**: {i['title']} [{i['project']}] ({labels})")
+            lines.append(f"- **{i['id']}** (linear_id: {i['linear_id']}): {i['title']} [{i['project']}] ({labels}) repo: {i['repo']}")
             if i["description"]:
                 lines.append(f"  {i['description'][:200]}")
 

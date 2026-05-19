@@ -29,9 +29,9 @@ Think like a human engineer checking their notifications:
 Output a JSON array. Each action is an object with a "type" field:
 
 ### spawn_worker
-Start a new Claude Code session for an issue.
+Start a new Claude Code session for an issue. You MUST include all fields.
 ```json
-{"type": "spawn_worker", "issue_id": "BET-11", "repo": "/Users/zkozick/dev/bettertab"}
+{"type": "spawn_worker", "issue_id": "BET-11", "title": "Add rate limiting", "linear_id": "uuid-from-context", "repo": "/Users/zkozick/dev/bettertab"}
 ```
 
 ### inject_into_worker
@@ -57,15 +57,15 @@ Kill a stuck or stalled worker session.
 ```
 
 ### move_linear_issue
-Move an issue to a different state on Linear.
+Move an issue to a different state on Linear. Always include linear_id from context.
 ```json
-{"type": "move_linear_issue", "issue_id": "BET-11", "state": "In Progress"}
+{"type": "move_linear_issue", "issue_id": "BET-11", "linear_id": "uuid-from-context", "state": "In Progress"}
 ```
 
 ### comment_linear
-Post a comment on a Linear issue.
+Post a comment on a Linear issue. Always include linear_id from context.
 ```json
-{"type": "comment_linear", "issue_id": "BET-11", "body": "Started working on this. Should have a PR in ~20 min."}
+{"type": "comment_linear", "issue_id": "BET-11", "linear_id": "uuid-from-context", "body": "Started working on this. Should have a PR in ~20 min."}
 ```
 
 ### send_slack
