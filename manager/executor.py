@@ -11,7 +11,6 @@ from pathlib import Path
 
 from dispatch.config import GlobalConfig, RepoConfig
 from dispatch.linear_api import get_state_ids, move_issue, add_comment
-from dispatch.scanner import scan_linear_all_active
 from dispatch.session import (
     spawn_session, inject, inject_skill, answer_question,
     kill_session, session_exists,

@@ -10,8 +10,6 @@ import time
 from pathlib import Path
 
 from dispatch.config import GlobalConfig, RepoConfig
-from dispatch.conversation import get_latest_human_reply_after_agent
-from dispatch.linear_api import get_state_ids
 from dispatch.scanner import scan_linear_all_active
 from dispatch.session import detect_state, capture, session_exists, list_sessions
 from dispatch.state import StateStore
