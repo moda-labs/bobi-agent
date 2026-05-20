@@ -4,13 +4,15 @@ Skills-first dispatch daemon for coding agents. Scans Linear for work, spawns Cl
 
 ## How it works
 
-agentd has three core principles:
+agentd has four core principles:
 
 1. **Skills first** — each phase of work (triage, spec, implement, ship, feedback) is a self-contained skill. Skills are portable — they work both unattended via the daemon and manually in Claude Code.
 
 2. **Persistent tmux sessions** — each issue gets one interactive Claude Code session in tmux that persists across phases. The daemon injects skill invocations into the same session instead of spawning new processes. Context carries forward naturally.
 
 3. **Summarizer-driven handoffs** — agents don't write handoffs. A dedicated summarizer inspects the worktree (git status, commits, PRs, specs) and captures tmux pane output to determine what phase the agent reached, then writes `.dispatch/handoff.md`. The daemon reads the handoff to route to the next skill.
+
+4. **Manager-driven orchestration** — a Claude-powered manager reads full context (Linear issues, GitHub PRs, worker sessions, Slack messages) every tick and decides what to do next. Instead of hard-coded routing rules, the manager reasons about the whole picture — assigning work, routing phases, answering questions, and escalating to humans when needed.
 
 ### Handoff contract
 
@@ -93,9 +95,61 @@ Within each phase, the skill uses sub-agents to keep context isolated:
 
 Each sub-agent gets only the context it needs. The implement sub-agent never sees the test-writing process. The reviewer only sees the diff.
 
+### Manager (outer agent loop)
+
+The manager is a reasoning layer above the dispatch daemon. Instead of hard-coded routing rules, it gathers full context each tick, calls Claude to decide what actions to take, and executes them. Think of it as an engineering manager checking their dashboard every 60 seconds.
+
+```
+Every 60 seconds (or on change via watcher):
+
+  GATHER       →  Poll all channels:
+  CONTEXT           Linear issues (state, comments, assignee)
+                    GitHub PRs (status, review comments)
+                    Workers (tmux sessions — state, activity, questions)
+                    Slack DMs (new messages)
+                          │
+  HASH CHECK   →  Compare context hash to last tick.
+                    No change → sleep. Changed → continue.
+                          │
+  CALL CLAUDE  →  claude -p with manager prompt + full context.
+                    Returns a JSON array of actions.
+                          │
+  EXECUTE      →  Run each action:
+                    spawn_worker    — assign a ticket to a new engineer session
+                    spawn_task      — ad-hoc work without a ticket
+                    route_skill     — inject the next phase (/implement, /ship-pr, etc.)
+                    inject_into_worker — send guidance to an engineer
+                    answer_worker_question — respond to an AskUserQuestion prompt
+                    move_linear_issue — transition tickets (assign/close)
+                    comment_linear  — post status updates
+                    send_slack      — notify humans
+                    update_memory   — persist state across ticks
+                    kill_worker     — kill stuck sessions
+                          │
+  LOG          →  Write reasoning + actions + outcomes to decisions.jsonl
+```
+
+The manager is stateless between ticks — all persistent state lives in gathered context and `~/.dispatch/manager/memory.md`. The watcher (`manager/watcher.py`) provides cheap 5-second polling with hash-based change detection, only invoking the expensive Claude call when something actually changed.
+
+#### Running the manager
+
+```bash
+dispatch start             # start the watcher (5s poll, manager wakes on changes)
+dispatch tick              # run one manager tick (debugging)
+dispatch decisions         # show recent manager decisions
+```
+
+Or directly:
+
+```bash
+python -m manager.watcher         # fast poll mode (default)
+python -m manager.loop             # fixed 60s interval mode
+python -m manager.loop --once      # single tick (debugging)
+```
+
 ### Question bridging
 
-When an agent asks a question (via `AskUserQuestion`), the daemon detects it from the tmux pane, posts the question and options as a Linear comment, and moves the issue to Blocked. When a human replies on Linear, the daemon matches the reply to an option and injects the answer back into the tmux session.
+When an agent asks a question (via `AskUserQuestion`), the manager detects it from the tmux session, reasons about whether it can answer from context, and either answers directly or posts the question to Linear and moves the issue to Blocked. When a human replies on Linear, the manager injects the answer back into the tmux session.
 
 ### gstack integration
 
@@ -215,6 +269,18 @@ Done
 ## Project structure
 
 ```
+manager/
+├── loop.py          # Gather context → call claude -p → execute actions
+├── context.py       # Aggregate context from all channels, hash for change detection
+├── executor.py      # Parse and execute manager action JSON (spawn, route, move, etc.)
+├── watcher.py       # Fast 5s poll loop, wakes manager only on context changes
+├── prompt.md        # Manager personality, decision rules, available actions
+└── channels/        # Pluggable context sources
+    ├── linear.py    # Linear issues (state, comments, assignee)
+    ├── github.py    # GitHub PRs (status, review comments)
+    ├── workers.py   # Tmux sessions (state, activity, questions)
+    └── slack.py     # Slack DMs
+
 skills/
 ├── pickup/SKILL.md      # take ticket, create worktree, triage complexity
 ├── spec/SKILL.md        # write implementation spec (non-trivial work)
@@ -250,3 +316,6 @@ dispatch/
 | Simple Linear states | 4 states (Todo, In Progress, In Review, Done + Blocked). Internal phases are invisible to humans |
 | Daemon, not cron | Inherits full shell environment (Keychain, OAuth). No cron env issues |
 | Per-repo config | Daemon is global, config is local. Repo opts in via `.dispatch.yaml` |
+| Manager over rules | Claude reasons about full context each tick instead of hard-coded routing. Handles edge cases (conflicting files, stuck workers, ambiguous comments) that rules can't |
+| Cheap poll, expensive think | Watcher polls every 5s (API calls + tmux checks). Only calls Claude when context hash changes. Avoids burning tokens on idle ticks |
+| Channel architecture | Each input source (Linear, GitHub, workers, Slack) is a pluggable channel module. Adding a new source means adding one file — no changes to the manager loop |
