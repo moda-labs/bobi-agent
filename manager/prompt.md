@@ -88,10 +88,21 @@ Output a JSON array. Each action is an object with a "type" field.
 Always include linear_id (from context) for any Linear operation.
 
 ### spawn_worker
-Assign a task to a new engineer. Include ALL fields from context.
+Assign a Linear ticket to a new engineer. Include ALL fields from context.
 ```json
 {"type": "spawn_worker", "issue_id": "BET-11", "title": "Add rate limiting", "linear_id": "uuid-from-context", "repo": "/path/to/repo"}
 ```
+
+### spawn_task
+Spin up an engineer for ad-hoc work that doesn't have a ticket. Give it
+a short task_id, the repo, and direct instructions. No ticket required.
+```json
+{"type": "spawn_task", "task_id": "fix-ci-main", "title": "Fix failing tests on main", "repo": "/path/to/repo", "instructions": "The tests on main are failing. Run pytest, find the failure, and fix it. Push directly to main."}
+```
+
+Use this for things like: fixing CI, investigating a production issue,
+answering a Slack question that requires looking at code, quick cleanups,
+or anything where creating a ticket would be overhead.
 
 ### inject_into_worker
 Send guidance to an engineer's session.

@@ -7,6 +7,7 @@ and calls the appropriate dispatch/session functions.
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 
 from dispatch.config import GlobalConfig, RepoConfig
@@ -91,40 +92,49 @@ async def execute_actions(actions: list[dict]) -> dict:
                 log.info(f"Manager: no action — {action.get('reason', '')}")
                 continue
 
-            elif action_type == "spawn_worker":
-                iid = action["issue_id"]
+            elif action_type in ("spawn_worker", "spawn_task"):
+                iid = action.get("issue_id") or action.get("task_id", f"task-{int(time.time())}")
                 repo = action.get("repo", "")
+                title = action.get("title", iid)
                 if state.is_tracked(iid):
                     log.info(f"Manager: {iid} already tracked, skipping spawn")
                     summary["skipped"] += 1
                     continue
                 if not repo:
-                    log.warning(f"Manager: spawn_worker missing repo for {iid}")
+                    log.warning(f"Manager: spawn missing repo for {iid}")
                     summary["errors"] += 1
                     continue
 
                 ok = spawn_session(iid, cwd=repo)
-                if ok:
-                    inject_skill(iid, "pickup",
-                                 f"{iid} -- {action.get('title', '')} "
-                                 f"Linear UUID: {action.get('linear_id', '')}")
-                    state.track(issue_id=iid, repo_path=repo,
-                                title=action.get("title", iid),
-                                worktree=repo,
-                                linear_issue_id=action.get("linear_id"))
+                if not ok:
+                    summary["errors"] += 1
+                    continue
 
-                    # Move to In Progress
+                # Inject task — use /pickup for tickets, direct instructions for ad-hoc
+                instructions = action.get("instructions", "")
+                if action_type == "spawn_worker" and not instructions:
+                    inject_skill(iid, "pickup",
+                                 f"{iid} -- {title} "
+                                 f"Linear UUID: {action.get('linear_id', '')}")
+                else:
+                    inject(iid, instructions or title)
+
+                state.track(issue_id=iid, repo_path=repo,
+                            title=title, worktree=repo,
+                            linear_issue_id=action.get("linear_id"))
+
+                # Move Linear ticket if this is a tracked issue
+                if action.get("linear_id"):
                     project = iid.split("-")[0]
                     api_key = api_keys.get(project, "")
                     if api_key:
                         states = await get_states(project)
-                        if "In Progress" in states and action.get("linear_id"):
+                        if "In Progress" in states:
                             await move_issue(api_key, action["linear_id"], states["In Progress"])
-                        if action.get("linear_id"):
-                            await add_comment(api_key, action["linear_id"], "Picked up by modabot.")
+                        await add_comment(api_key, action["linear_id"], "Picked up by modabot.")
 
-                    log.info(f"Manager: spawned worker for {iid}")
-                    summary["executed"] += 1
+                log.info(f"Manager: spawned {'task' if action_type == 'spawn_task' else 'worker'} for {iid}: {title[:60]}")
+                summary["executed"] += 1
 
             elif action_type == "inject_into_worker":
                 iid = action["issue_id"]
