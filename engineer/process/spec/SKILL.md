@@ -36,7 +36,7 @@ Follow the spec review process in `domains/code-review`:
 Follow PR conventions in `domains/source-control`. Use draft PR format.
 
 ```bash
-git add specs/ .dispatch/ .context/
+git add specs/ .context/
 git commit -m "[<ISSUE-ID>] spec: <title>"
 git push -u origin HEAD
 gh pr create --draft \
