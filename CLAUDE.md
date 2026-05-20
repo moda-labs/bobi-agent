@@ -77,19 +77,26 @@ polls Linear, manages persistent tmux sessions, and injects skills into
 them. A dedicated summarizer inspects worktree state to write handoffs.
 
 ```
-skills/
-├── pickup/SKILL.md      # take ticket, create worktree, triage complexity
-├── spec/SKILL.md        # write implementation spec (non-trivial work)
-├── implement/SKILL.md   # build from spec, TDD, sub-agents for tests/code/review
-├── ship-pr/SKILL.md     # create/update PR
-├── feedback/SKILL.md    # address review comments
-└── e2e-test/SKILL.md    # integration test tiers and instructions
+engineer/
+├── process/                          # daemon-routed lifecycle
+│   ├── pickup/SKILL.md               # take ticket, create worktree, triage
+│   ├── spec/SKILL.md                 # write implementation spec
+│   ├── implement/SKILL.md            # build from spec, TDD, sub-agents
+│   ├── prepare-pr/SKILL.md           # create/update PR
+│   └── feedback/SKILL.md             # address review comments
+├── practices/                        # org-specific "how we work here"
+│   ├── triage/SKILL.md               # task intake & classification
+│   ├── build/SKILL.md                # staff engineer coding methodology
+│   ├── design-critic/SKILL.md        # adversarial design doc reviewer
+│   ├── code-review/SKILL.md          # mandatory quality gates
+│   └── brand-identity/SKILL.md       # design system enforcement
+└── tools/                            # mechanical API reference
+    ├── slack/SKILL.md                # Slack setup & API
+    └── notion/SKILL.md               # Notion integration (placeholder)
 
 dispatch/
-├── daemon.py        # Poll → monitor tmux sessions → route phases → bridge questions
 ├── scanner.py       # Linear GraphQL polling + complexity classification
 ├── linear_api.py    # Minimal Linear helpers (state IDs, move, comment)
-├── conversation.py  # Detect human replies on Linear issues
 ├── session.py       # Tmux session management (spawn, inject, capture, detect state)
 ├── summarizer.py    # Inspect worktree + tmux pane → determine phase → write handoff
 ├── state.py         # Running agent tracking
@@ -97,6 +104,18 @@ dispatch/
 ├── setup.py         # Auto-generate .dispatch.yaml from repo inspection
 ├── board_setup.py   # Bootstrap Linear board with required workflow states
 └── cli.py           # Click CLI entrypoint
+
+manager/
+├── loop.py          # Gather context → call claude -p → execute actions
+├── context.py       # Aggregate context from all channels, hash for change detection
+├── executor.py      # Parse and execute manager action JSON (spawn, route, move, etc.)
+├── watcher.py       # Fast 5s poll loop, wakes manager only on context changes
+├── prompt.md        # Manager personality, decision rules, available actions
+└── channels/        # Pluggable context sources
+    ├── linear.py    # Linear issues (state, comments, assignee)
+    ├── github.py    # GitHub PRs (status, review comments)
+    ├── workers.py   # Tmux sessions (state, activity, questions)
+    └── slack.py     # Slack DMs
 ```
 
 ## Issue lifecycle
