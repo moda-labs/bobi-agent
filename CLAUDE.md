@@ -60,14 +60,14 @@ test command and skills look correct.
 ## Commands
 
 ```bash
-dispatch init              # initialize config + start daemon in tmux
+dispatch start             # start modabot (foreground, 5s poll)
+dispatch tick              # run one manager tick (debugging)
+dispatch status            # show active engineer sessions
+dispatch decisions         # show recent manager decisions
+dispatch init              # initialize global config
 dispatch setup [path]      # auto-generate .dispatch.yaml and register a repo
 dispatch register <path>   # register a repo (if .dispatch.yaml already exists)
 dispatch repos             # list registered repos
-dispatch daemon            # run as a long-running daemon (default: 5s poll)
-dispatch cycle             # run one dispatch cycle (manual/debugging)
-dispatch status            # show in-flight work
-dispatch watch             # live dashboard (refreshes every 5s)
 ```
 
 ## Architecture
