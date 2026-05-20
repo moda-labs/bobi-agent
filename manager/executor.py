@@ -21,6 +21,34 @@ log = logging.getLogger(__name__)
 
 MEMORY_PATH = Path.home() / ".dispatch" / "manager" / "memory.md"
 
+# Tracks "Thinking..." placeholders: channel_id → message ts
+_pending_placeholders: dict[str, str] = {}
+
+
+def _get_slack_token() -> str:
+    from dispatch.config import Credentials
+    for name in Credentials.load().list_names():
+        t = Credentials.load().get(name).get("slack_bot_token", "")
+        if t:
+            return t
+    return GlobalConfig.load().slack_bot_token or ""
+
+
+async def post_thinking_placeholder(channel_id: str) -> None:
+    """Post a 'Thinking...' message and track it for later update."""
+    token = _get_slack_token()
+    if not token or not channel_id:
+        return
+    import httpx
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"channel": channel_id, "text": "_Thinking..._"},
+        )
+        if resp.status_code == 200 and resp.json().get("ok"):
+            _pending_placeholders[channel_id] = resp.json()["ts"]
+
 
 async def execute_actions(actions: list[dict]) -> dict:
     """Execute a list of manager actions. Returns summary."""
@@ -188,26 +216,26 @@ async def execute_actions(actions: list[dict]) -> dict:
                 channel = action.get("channel", "")
                 channel_id = action.get("channel_id", "")
                 msg = action.get("message", "")
+                target = channel_id or channel
 
-                from dispatch.config import Credentials
-                slack_token = ""
-                for name in Credentials.load().list_names():
-                    t = Credentials.load().get(name).get("slack_bot_token", "")
-                    if t:
-                        slack_token = t
-                        break
-                if not slack_token:
-                    slack_token = GlobalConfig.load().slack_bot_token or ""
-
-                if slack_token and (channel or channel_id):
+                slack_token = _get_slack_token()
+                if slack_token and target:
                     import httpx
-                    target = channel_id or channel
                     async with httpx.AsyncClient() as client:
-                        resp = await client.post(
-                            "https://slack.com/api/chat.postMessage",
-                            headers={"Authorization": f"Bearer {slack_token}"},
-                            json={"channel": target, "text": msg},
-                        )
+                        # Check for a pending "Thinking..." placeholder to update
+                        placeholder_ts = _pending_placeholders.pop(target, None)
+                        if placeholder_ts:
+                            resp = await client.post(
+                                "https://slack.com/api/chat.update",
+                                headers={"Authorization": f"Bearer {slack_token}"},
+                                json={"channel": target, "ts": placeholder_ts, "text": msg},
+                            )
+                        else:
+                            resp = await client.post(
+                                "https://slack.com/api/chat.postMessage",
+                                headers={"Authorization": f"Bearer {slack_token}"},
+                                json={"channel": target, "text": msg},
+                            )
                         if resp.status_code == 200 and resp.json().get("ok"):
                             log.info(f"Manager: sent to Slack {target}: {msg[:80]}")
                             summary["executed"] += 1

@@ -15,7 +15,7 @@ truststore.inject_into_ssl()
 
 from manager.context import gather_all, context_hash, write_context_prompt, MANAGER_DIR
 from manager.loop import call_manager, DECISIONS_LOG
-from manager.executor import execute_actions
+from manager.executor import execute_actions, post_thinking_placeholder
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +38,12 @@ async def poll_and_maybe_think() -> dict | None:
 
     LAST_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
     LAST_HASH_PATH.write_text(current_hash)
+
+    # Post "Thinking..." placeholder for any new Slack DMs
+    slack_items = context.get("channels", {}).get("slack", [])
+    for item in slack_items:
+        if item.get("channel_id"):
+            await post_thinking_placeholder(item["channel_id"])
 
     actions, reasoning = call_manager(context)
     summary = await execute_actions(actions) if actions else {"executed": 0, "skipped": 0, "errors": 0}
