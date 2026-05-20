@@ -1,11 +1,10 @@
-"""Fast event loop that polls for changes and wakes the manager when needed.
+"""Fast event loop — polls channels for changes, wakes manager when needed.
 
-Polls every 5 seconds (cheap — just Linear API + tmux checks).
+Polls every N seconds (cheap — just API calls + tmux checks).
 Only calls the manager (expensive — claude -p) when something changed.
 """
 
 import asyncio
-import hashlib
 import json
 import logging
 import time
@@ -14,7 +13,7 @@ from pathlib import Path
 import truststore
 truststore.inject_into_ssl()
 
-from manager.context import gather_all, write_context_prompt, MANAGER_DIR
+from manager.context import gather_all, context_hash, write_context_prompt, MANAGER_DIR
 from manager.loop import call_manager, DECISIONS_LOG
 from manager.executor import execute_actions
 
@@ -23,36 +22,11 @@ log = logging.getLogger(__name__)
 LAST_HASH_PATH = MANAGER_DIR / "last_context_hash"
 
 
-def _context_hash(context: dict) -> str:
-    """Hash everything that could require manager attention.
-
-    Triggers on: issue state changes, new comments (Linear + GitHub PR),
-    worker state changes (idle, asking, exited), worker phase changes.
-    """
-    relevant = {
-        "issues": [
-            (i["id"], i["state"],
-             # Latest comment body — changes when someone comments
-             i.get("recent_comments", [{}])[-1].get("body", "")[:50] if i.get("recent_comments") else "",
-             # Latest PR comment
-             i.get("pr_comments", [{}])[-1].get("body", "")[:50] if i.get("pr_comments") else "",
-            )
-            for i in context["issues"]
-        ],
-        "workers": [
-            (w["issue_id"], w["session_state"], w["phase"])
-            for w in context["workers"]
-        ],
-    }
-    return hashlib.md5(json.dumps(relevant, sort_keys=True).encode()).hexdigest()
-
-
 async def poll_and_maybe_think() -> dict | None:
-    """Poll for changes. If something changed, run the manager. Returns tick result or None."""
+    """Poll all channels. If anything changed, wake the manager."""
     context = await gather_all()
-    current_hash = _context_hash(context)
+    current_hash = context_hash(context)
 
-    # Check if anything changed
     last_hash = ""
     if LAST_HASH_PATH.exists():
         last_hash = LAST_HASH_PATH.read_text().strip()
@@ -60,22 +34,18 @@ async def poll_and_maybe_think() -> dict | None:
     if current_hash == last_hash:
         return None
 
-    # Something changed — wake the manager
-    log.info(f"Change detected — waking manager ({len(context['issues'])} issues, {len(context['workers'])} workers)")
+    log.info("Change detected — waking manager")
 
     LAST_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
     LAST_HASH_PATH.write_text(current_hash)
 
     actions, reasoning = call_manager(context)
-
     summary = await execute_actions(actions) if actions else {"executed": 0, "skipped": 0, "errors": 0}
 
-    # Log decisions
     DECISIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "timestamp": context["timestamp"],
-        "issues_seen": len(context["issues"]),
-        "workers_seen": len(context["workers"]),
+        "channels": {k: len(v) for k, v in context.get("channels", {}).items()},
         "reasoning": reasoning,
         "actions": actions,
         "outcome": summary,
@@ -91,24 +61,23 @@ async def poll_and_maybe_think() -> dict | None:
 
 
 def run(poll_interval: int = 5):
-    """Run the watcher loop. Polls every N seconds, thinks only when needed."""
-    log.info(f"Modabot watcher starting. Polling every {poll_interval}s, manager wakes on changes.")
+    """Run the watcher loop."""
+    log.info(f"Modabot starting. Polling every {poll_interval}s.")
     tick_count = 0
-    last_manager_time = 0
+    last_tick = 0
 
     while True:
         try:
             result = asyncio.run(poll_and_maybe_think())
             if result is not None:
-                last_manager_time = time.time()
+                last_tick = time.time()
                 tick_count += 1
                 if result.get("executed", 0) > 0 or result.get("errors", 0) > 0:
-                    log.info(f"Manager tick #{tick_count}: {json.dumps(result)}")
+                    log.info(f"Tick #{tick_count}: {json.dumps(result)}")
             else:
-                # Nothing changed — periodic heartbeat log
-                elapsed = int(time.time() - last_manager_time) if last_manager_time else 0
+                elapsed = int(time.time() - last_tick) if last_tick else 0
                 if elapsed > 0 and elapsed % 60 < poll_interval:
-                    log.info(f"Watching... ({elapsed}s since last manager tick)")
+                    log.info(f"Watching... ({elapsed}s since last tick)")
         except Exception as e:
             log.error(f"Poll failed: {e}")
 
