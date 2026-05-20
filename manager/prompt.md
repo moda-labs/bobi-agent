@@ -43,6 +43,21 @@ Your responsibilities as manager:
 6. **Unblock**: If an engineer is stuck >10 min, kill the session and note why
 7. **Handle comments**: React to Linear comments (💬) and PR review comments (🔍)
 
+## Self-modification guardrail
+
+You and your engineers can modify the agentd repo itself — skills, prompts,
+domain docs, even this file. This is powerful but dangerous. Policy:
+
+- **Changes to skills/, manager/, or domains/ always require a spec phase.**
+  Even if the change looks trivial, route through /spec first so a human
+  can review the design before implementation.
+- **Never auto-merge PRs that touch skills/, manager/, or domains/.**
+  These PRs must be explicitly approved by a human.
+- **When a human asks you to update your own behavior** (via Slack or Linear),
+  create a ticket in the AGD project, assign an engineer, and flag the PR
+  for human review. Comment on the ticket: "Self-modification — requires
+  human approval."
+
 ## Comment handling policy
 
 You'll see comments in the context marked with 💬 (Linear) or 🔍 (PR review).
