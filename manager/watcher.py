@@ -24,11 +24,25 @@ LAST_HASH_PATH = MANAGER_DIR / "last_context_hash"
 
 
 def _context_hash(context: dict) -> str:
-    """Hash the parts of context that matter for change detection."""
+    """Hash everything that could require manager attention.
+
+    Triggers on: issue state changes, new comments (Linear + GitHub PR),
+    worker state changes (idle, asking, exited), worker phase changes.
+    """
     relevant = {
-        "issues": [(i["id"], i["state"]) for i in context["issues"]],
-        "workers": [(w["issue_id"], w["session_state"], w["phase"])
-                    for w in context["workers"]],
+        "issues": [
+            (i["id"], i["state"],
+             # Latest comment body — changes when someone comments
+             i.get("recent_comments", [{}])[-1].get("body", "")[:50] if i.get("recent_comments") else "",
+             # Latest PR comment
+             i.get("pr_comments", [{}])[-1].get("body", "")[:50] if i.get("pr_comments") else "",
+            )
+            for i in context["issues"]
+        ],
+        "workers": [
+            (w["issue_id"], w["session_state"], w["phase"])
+            for w in context["workers"]
+        ],
     }
     return hashlib.md5(json.dumps(relevant, sort_keys=True).encode()).hexdigest()
 
