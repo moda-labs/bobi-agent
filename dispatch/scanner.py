@@ -26,6 +26,7 @@ async def scan_linear_all_active(api_key: str, repo_config: RepoConfig) -> dict[
                 id identifier title description
                 labels { nodes { name } }
                 state { name type }
+                comments(last: 3) { nodes { body createdAt user { name email } } }
             }
         }
     }

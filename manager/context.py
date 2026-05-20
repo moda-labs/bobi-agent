@@ -6,6 +6,7 @@ Writes a single context file that the manager reads to make decisions.
 
 import json
 import logging
+import subprocess
 import time
 from pathlib import Path
 
@@ -29,6 +30,14 @@ async def gather_linear(api_key: str, repo_config: RepoConfig) -> list[dict]:
     for state_name, issues in issues_by_state.items():
         for issue in issues:
             labels = [l["name"] for l in issue.get("labels", {}).get("nodes", [])]
+            comments = []
+            for c in issue.get("comments", {}).get("nodes", []):
+                comments.append({
+                    "author": c.get("user", {}).get("name", "unknown"),
+                    "body": c.get("body", "")[:300],
+                    "created": c.get("createdAt", ""),
+                })
+
             result.append({
                 "id": issue["identifier"],
                 "linear_id": issue["id"],
@@ -38,6 +47,7 @@ async def gather_linear(api_key: str, repo_config: RepoConfig) -> list[dict]:
                 "labels": labels,
                 "repo": str(repo_config.path),
                 "project": repo_config.linear_project,
+                "recent_comments": comments,
             })
     return result
 
@@ -76,6 +86,53 @@ def gather_workers() -> list[dict]:
 
         workers.append(worker)
     return workers
+
+
+def gather_pr_comments(repos: list[Path]) -> dict[str, list[dict]]:
+    """Fetch recent PR review comments for issues with open PRs.
+
+    Returns: {"AGD-25": [{"author": "...", "body": "..."}], ...}
+    """
+    import json as _json
+    import shutil
+    gh = shutil.which("gh") or "gh"
+    result = {}
+
+    for repo_path in repos:
+        wt_dir = repo_path / "worktrees"
+        if not wt_dir.exists():
+            continue
+        for child in wt_dir.iterdir():
+            if not child.is_dir():
+                continue
+            issue_id = child.name.upper()
+            pr_result = subprocess.run(
+                [gh, "pr", "view", "--json", "comments,reviews"],
+                cwd=str(child), capture_output=True, text=True,
+            )
+            if pr_result.returncode != 0:
+                continue
+            try:
+                pr_data = _json.loads(pr_result.stdout)
+            except (_json.JSONDecodeError, ValueError):
+                continue
+
+            comments = []
+            for c in pr_data.get("comments", [])[-3:]:
+                comments.append({
+                    "author": c.get("author", {}).get("login", "unknown"),
+                    "body": c.get("body", "")[:300],
+                })
+            for r in pr_data.get("reviews", [])[-3:]:
+                if r.get("body"):
+                    comments.append({
+                        "author": r.get("author", {}).get("login", "unknown"),
+                        "body": r.get("body", "")[:300],
+                    })
+            if comments:
+                result[issue_id] = comments
+
+    return result
 
 
 def gather_worktree_phases(repos: list[Path]) -> dict:
@@ -121,6 +178,15 @@ async def gather_all() -> dict:
 
     workers = gather_workers()
     worktree_phases = gather_worktree_phases(repos)
+    pr_comments = gather_pr_comments(repos)
+
+    # Attach PR comments to their issues
+    for issue in all_issues:
+        issue_key = issue["id"].lower().replace("-", "-")
+        if issue_key in pr_comments:
+            issue["pr_comments"] = pr_comments[issue_key]
+        elif issue["id"] in pr_comments:
+            issue["pr_comments"] = pr_comments[issue["id"]]
 
     # Load persistent memory
     memory = ""
@@ -160,7 +226,7 @@ def write_context_prompt(context: dict) -> str:
     for issue in context["issues"]:
         by_state.setdefault(issue["state"], []).append(issue)
 
-    for state in ["Todo", "In Progress", "Blocked", "In Review", "Done"]:
+    for state in ["Todo", "In Progress", "Blocked", "In Review"]:
         issues = by_state.get(state, [])
         if not issues:
             continue
@@ -170,6 +236,10 @@ def write_context_prompt(context: dict) -> str:
             lines.append(f"- **{i['id']}** (linear_id: {i['linear_id']}): {i['title']} [{i['project']}] ({labels}) repo: {i['repo']}")
             if i["description"]:
                 lines.append(f"  {i['description'][:200]}")
+            for c in i.get("recent_comments", []):
+                lines.append(f"  💬 [{c['author']}]: {c['body'][:150]}")
+            for c in i.get("pr_comments", []):
+                lines.append(f"  🔍 PR [{c['author']}]: {c['body'][:150]}")
 
     # Workers
     lines.append("\n## Active Workers")
