@@ -21,7 +21,7 @@ dev = [
 dispatch = "dispatch.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["dispatch"]
+packages = ["dispatch", "manager"]
 
 [build-system]
 requires = ["hatchling"]
