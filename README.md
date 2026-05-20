@@ -287,8 +287,7 @@ engineer/
 │   ├── spec/SKILL.md                 # write implementation spec
 │   ├── implement/SKILL.md            # build from spec, TDD, sub-agents
 │   ├── prepare-pr/SKILL.md           # create/update PR
-│   ├── feedback/SKILL.md             # address review comments
-│   └── e2e-test/SKILL.md             # integration test tiers
+│   └── feedback/SKILL.md             # address review comments
 ├── practices/                        # org-specific "how we work here"
 │   ├── triage/SKILL.md               # task intake & classification
 │   ├── build/SKILL.md                # staff engineer coding methodology
