@@ -89,14 +89,21 @@ engineer/
 │   ├── build/SKILL.md                # staff engineer coding methodology
 │   ├── design-critic/SKILL.md        # adversarial design doc reviewer
 │   ├── code-review/SKILL.md          # mandatory quality gates
+│   ├── ticketing-policy/SKILL.md     # who moves tickets when
+│   ├── source-control-conventions/SKILL.md  # branching, commit, PR format
 │   └── brand-identity/SKILL.md       # design system enforcement
 └── tools/                            # mechanical API reference
+    ├── linear/SKILL.md               # Linear GraphQL API
+    ├── git/SKILL.md                  # git CLI commands
+    ├── github/SKILL.md               # gh CLI commands
     ├── slack/SKILL.md                # Slack setup & API
     └── notion/SKILL.md               # Notion integration (placeholder)
 
 dispatch/
+├── daemon.py        # Poll → monitor tmux sessions → route phases → bridge questions
 ├── scanner.py       # Linear GraphQL polling + complexity classification
 ├── linear_api.py    # Minimal Linear helpers (state IDs, move, comment)
+├── conversation.py  # Detect human replies on Linear issues
 ├── session.py       # Tmux session management (spawn, inject, capture, detect state)
 ├── summarizer.py    # Inspect worktree + tmux pane → determine phase → write handoff
 ├── state.py         # Running agent tracking
@@ -104,18 +111,6 @@ dispatch/
 ├── setup.py         # Auto-generate .dispatch.yaml from repo inspection
 ├── board_setup.py   # Bootstrap Linear board with required workflow states
 └── cli.py           # Click CLI entrypoint
-
-manager/
-├── loop.py          # Gather context → call claude -p → execute actions
-├── context.py       # Aggregate context from all channels, hash for change detection
-├── executor.py      # Parse and execute manager action JSON (spawn, route, move, etc.)
-├── watcher.py       # Fast 5s poll loop, wakes manager only on context changes
-├── prompt.md        # Manager personality, decision rules, available actions
-└── channels/        # Pluggable context sources
-    ├── linear.py    # Linear issues (state, comments, assignee)
-    ├── github.py    # GitHub PRs (status, review comments)
-    ├── workers.py   # Tmux sessions (state, activity, questions)
-    └── slack.py     # Slack DMs
 ```
 
 ## Issue lifecycle

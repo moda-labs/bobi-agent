@@ -208,14 +208,14 @@ This generates `.dispatch.yaml` and stores credentials in `~/.dispatch/credentia
 ### Commands
 
 ```bash
-dispatch start             # start modabot (foreground, 5s poll)
-dispatch tick              # run one manager tick (debugging)
-dispatch status            # show active engineer sessions
-dispatch decisions         # show recent manager decisions
-dispatch init              # initialize global config
+dispatch init              # initialize config + start daemon in tmux
 dispatch setup [path]      # auto-generate .dispatch.yaml and register a repo
 dispatch register <path>   # register a repo (if .dispatch.yaml already exists)
 dispatch repos             # list registered repos
+dispatch daemon            # run as a long-running daemon (default: 5s poll)
+dispatch cycle             # run one dispatch cycle (manual/debugging)
+dispatch status            # show in-flight work
+dispatch watch             # live dashboard (refreshes every 5s)
 ```
 
 ## Per-repo config
@@ -293,14 +293,21 @@ engineer/
 │   ├── build/SKILL.md                # staff engineer coding methodology
 │   ├── design-critic/SKILL.md        # adversarial design doc reviewer
 │   ├── code-review/SKILL.md          # mandatory quality gates
+│   ├── ticketing-policy/SKILL.md     # who moves tickets when
+│   ├── source-control-conventions/SKILL.md  # branching, commit, PR format
 │   └── brand-identity/SKILL.md       # design system enforcement
 └── tools/                            # mechanical API reference
+    ├── linear/SKILL.md               # Linear GraphQL API
+    ├── git/SKILL.md                  # git CLI commands
+    ├── github/SKILL.md               # gh CLI commands
     ├── slack/SKILL.md                # Slack setup & API
     └── notion/SKILL.md               # Notion integration (placeholder)
 
 dispatch/
+├── daemon.py        # Poll → monitor tmux sessions → route phases → bridge questions
 ├── scanner.py       # Linear GraphQL polling + complexity classification
 ├── linear_api.py    # Minimal Linear helpers (state IDs, move, comment)
+├── conversation.py  # Detect human replies on Linear issues
 ├── session.py       # Tmux session management (spawn, inject, capture, detect state)
 ├── summarizer.py    # Inspect worktree + tmux pane → determine phase → write handoff
 ├── state.py         # Running agent tracking

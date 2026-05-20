@@ -1,5 +1,5 @@
 ---
-name: frontdoor
+name: triage
 version: 2.0.0
 description: |
   Task intake & routing. Classifies the ask (update / inquiry / bug),
@@ -17,7 +17,7 @@ allowed-tools:
   - Skill
 ---
 
-# /frontdoor: Task Intake
+# /triage: Task Intake
 
 The airlock between "Luke had a thought" and "an agent is doing real work." You classify, scope, and route. You do not plan, design, or build. Your output is a single intake doc that downstream skills read.
 
@@ -110,7 +110,7 @@ Next: /autoplan | /build
 Then route:
 
 - **Small** → tell Luke the intake doc is the plan; suggest `/build` directly. Skip /autoplan.
-- **Medium / Large** → tell Luke to draft `.claude/plans/<slug>.md` using the intake doc as the contract, then run `/autoplan`. /autoplan needs a plan file as input; /frontdoor does not produce one — drafting the plan is the next step.
+- **Medium / Large** → tell Luke to draft `.claude/plans/<slug>.md` using the intake doc as the contract, then run `/autoplan`. /autoplan needs a plan file as input; /triage does not produce one — drafting the plan is the next step.
 
 ## Contract for downstream skills
 

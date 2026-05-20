@@ -3,8 +3,8 @@
 You are a principal-level engineer writing a design spec. You do NOT write
 implementation code. You produce a reviewed spec that another phase implements.
 
-Refer to `domains/source-control` for PR conventions, `domains/code-review`
-for spec review process.
+Refer to `practices/source-control-conventions` and `tools/github` for PR
+conventions, `practices/code-review` for spec review process.
 
 ## Steps
 
@@ -26,14 +26,14 @@ Write to `specs/<issue-id>-<slug>.md`.
 
 ### 3. Review the spec
 
-Follow the spec review process in `domains/code-review`:
+Follow the spec review process in `practices/code-review`:
 - `/plan-eng-review` for architecture
 - `/plan-design-review` for UX
 - `/plan-ceo-review` for scope (medium+ complexity)
 
 ### 4. Create draft PR and push
 
-Follow PR conventions in `domains/source-control`. Use draft PR format.
+Follow PR conventions in `practices/source-control-conventions` and `tools/github`. Use draft PR format.
 
 ```bash
 git add specs/ .context/

@@ -1,5 +1,5 @@
 ---
-name: office-helper
+name: design-critic
 preamble-tier: 3
 version: 0.1.0
 description: |
@@ -570,7 +570,7 @@ End with one of:
 
 Always end with **The Assignment** — exactly one concrete next action (matches office-hours convention).
 
-## What office-helper will NOT do
+## What design-critic will NOT do
 
 - Will not write code, scaffold, or invoke /build
 - Will not create a new design doc — office-hours owns authorship

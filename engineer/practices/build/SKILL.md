@@ -56,7 +56,7 @@ craft of someone who will be on-call for what they ship.
 
 ### Step 0 (precedes 0a): Read intake doc if present
 
-If `.context/intake.md` exists, read it first. It is the contract written by `/frontdoor` and captures the problem, locked scope, size verdict, UX decision, and scope-guard answers.
+If `.context/intake.md` exists, read it first. It is the contract written by `/triage` and captures the problem, locked scope, size verdict, UX decision, and scope-guard answers.
 
 Any scope-guard answer recorded there (billing primitive, user journey, schema-change plan) satisfies the corresponding HARD STOP in Step 0a — do NOT re-ask Luke for that guard. State in one line which guards were pre-resolved, then proceed.
 

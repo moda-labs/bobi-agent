@@ -7,34 +7,34 @@ and discoverable by Claude Code.
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
-SKILLS_ROOT = REPO_ROOT / "skills"
-ENGINEER_SKILLS_SRC = SKILLS_ROOT / "engineer"
-METHODOLOGY_SKILLS_SRC = SKILLS_ROOT / "methodology"
-DOMAIN_SKILLS_SRC = SKILLS_ROOT / "domains"
+ENGINEER_ROOT = REPO_ROOT / "engineer"
+PROCESS_SKILLS_SRC = ENGINEER_ROOT / "process"
+PRACTICES_SKILLS_SRC = ENGINEER_ROOT / "practices"
+TOOLS_SKILLS_SRC = ENGINEER_ROOT / "tools"
 SKILLS_INSTALLED = REPO_ROOT / ".claude" / "skills"
 
-EXPECTED_ENGINEER_SKILLS = ["pickup", "spec", "implement", "ship-pr", "feedback"]
-EXPECTED_METHODOLOGY_SKILLS = ["frontdoor", "build", "brand-identity", "office-helper"]
-EXPECTED_DOMAIN_SKILLS = ["ticketing", "source-control", "code-review", "knowledge-base", "messaging"]
-EXPECTED_SKILLS = EXPECTED_ENGINEER_SKILLS + EXPECTED_METHODOLOGY_SKILLS + EXPECTED_DOMAIN_SKILLS
+EXPECTED_PROCESS_SKILLS = ["pickup", "spec", "implement", "prepare-pr", "feedback"]
+EXPECTED_PRACTICES_SKILLS = ["triage", "build", "design-critic", "code-review", "ticketing-policy", "source-control-conventions", "brand-identity"]
+EXPECTED_TOOLS_SKILLS = ["linear", "git", "github", "slack", "notion"]
+EXPECTED_SKILLS = EXPECTED_PROCESS_SKILLS + EXPECTED_PRACTICES_SKILLS + EXPECTED_TOOLS_SKILLS
 
 
 class TestSkillsExist:
 
     def test_source_skills_directory_exists(self):
-        assert ENGINEER_SKILLS_SRC.exists()
-        assert METHODOLOGY_SKILLS_SRC.exists()
-        assert DOMAIN_SKILLS_SRC.exists()
+        assert PROCESS_SKILLS_SRC.exists()
+        assert PRACTICES_SKILLS_SRC.exists()
+        assert TOOLS_SKILLS_SRC.exists()
 
     def test_all_source_skills_have_skill_md(self):
-        for name in EXPECTED_ENGINEER_SKILLS:
-            skill_md = ENGINEER_SKILLS_SRC / name / "SKILL.md"
+        for name in EXPECTED_PROCESS_SKILLS:
+            skill_md = PROCESS_SKILLS_SRC / name / "SKILL.md"
             assert skill_md.exists(), f"Missing {skill_md}"
-        for name in EXPECTED_METHODOLOGY_SKILLS:
-            skill_md = METHODOLOGY_SKILLS_SRC / name / "SKILL.md"
+        for name in EXPECTED_PRACTICES_SKILLS:
+            skill_md = PRACTICES_SKILLS_SRC / name / "SKILL.md"
             assert skill_md.exists(), f"Missing {skill_md}"
-        for name in EXPECTED_DOMAIN_SKILLS:
-            skill_md = DOMAIN_SKILLS_SRC / name / "SKILL.md"
+        for name in EXPECTED_TOOLS_SKILLS:
+            skill_md = TOOLS_SKILLS_SRC / name / "SKILL.md"
             assert skill_md.exists(), f"Missing {skill_md}"
 
     def test_installed_skills_directory_exists(self):
@@ -77,11 +77,11 @@ class TestSkillsExist:
 
 def _skill_path(name: str) -> Path:
     """Resolve a skill name to its source path."""
-    if name in EXPECTED_ENGINEER_SKILLS:
-        return ENGINEER_SKILLS_SRC / name / "SKILL.md"
-    if name in EXPECTED_DOMAIN_SKILLS:
-        return DOMAIN_SKILLS_SRC / name / "SKILL.md"
-    return METHODOLOGY_SKILLS_SRC / name / "SKILL.md"
+    if name in EXPECTED_PROCESS_SKILLS:
+        return PROCESS_SKILLS_SRC / name / "SKILL.md"
+    if name in EXPECTED_PRACTICES_SKILLS:
+        return PRACTICES_SKILLS_SRC / name / "SKILL.md"
+    return TOOLS_SKILLS_SRC / name / "SKILL.md"
 
 
 class TestSkillContent:
@@ -94,18 +94,17 @@ class TestSkillContent:
     def test_skill_md_has_title(self):
         for name in EXPECTED_SKILLS:
             content = _skill_path(name).read_text()
-            # Skip YAML frontmatter if present
             lines = content.splitlines()
             has_title = any(l.startswith("# ") for l in lines[:30])
             has_frontmatter = lines[0].strip() == "---"
             assert has_title or has_frontmatter, f"{name}/SKILL.md missing # title or frontmatter"
 
-    def test_engineer_skills_reference_domains(self):
-        """Engineer workflow skills should reference domain skills, not hardcode platform details."""
-        for name in EXPECTED_ENGINEER_SKILLS:
+    def test_process_skills_reference_practices_or_tools(self):
+        """Process skills should reference practices/ or tools/ for platform-specific knowledge."""
+        for name in EXPECTED_PROCESS_SKILLS:
             content = _skill_path(name).read_text()
-            assert "domains/" in content, (
-                f"{name}/SKILL.md should reference domains/ for platform-specific knowledge"
+            assert "practices/" in content or "tools/" in content, (
+                f"{name}/SKILL.md should reference practices/ or tools/"
             )
 
     def test_pickup_creates_worktree(self):
@@ -116,21 +115,21 @@ class TestSkillContent:
         content = _skill_path("implement").read_text()
         assert "/review" in content
 
-    def test_ship_pr_references_ship(self):
-        content = _skill_path("ship-pr").read_text()
+    def test_prepare_pr_references_ship(self):
+        content = _skill_path("prepare-pr").read_text()
         assert "/ship" in content
 
-    def test_ship_pr_moves_to_in_review(self):
-        content = _skill_path("ship-pr").read_text()
+    def test_prepare_pr_moves_to_in_review(self):
+        content = _skill_path("prepare-pr").read_text()
         assert "In Review" in content
 
-    def test_no_engineer_skill_invokes_another_engineer_skill(self):
-        """Engineer skills should not chain — the manager routes between phases."""
-        for name in EXPECTED_ENGINEER_SKILLS:
+    def test_no_process_skill_invokes_another_process_skill(self):
+        """Process skills should not chain — the manager routes between phases."""
+        for name in EXPECTED_PROCESS_SKILLS:
             content = _skill_path(name).read_text()
-            for other in EXPECTED_ENGINEER_SKILLS:
+            for other in EXPECTED_PROCESS_SKILLS:
                 if other == name:
                     continue
                 assert f"invoke /{other}" not in content.lower(), (
-                    f"{name}/SKILL.md invokes /{other} — engineer skills should not chain"
+                    f"{name}/SKILL.md invokes /{other} — process skills should not chain"
                 )

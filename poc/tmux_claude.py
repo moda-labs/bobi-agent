@@ -237,7 +237,7 @@ def demo():
         return
 
     print("\n=== Step 3: Send a simple task ===")
-    inject_text(session, "What files are in the skills/ directory? Just list them, nothing else.")
+    inject_text(session, "What files are in the engineer/ directory? Just list them, nothing else.")
 
     print("\n=== Step 4: Wait for claude to finish and show prompt ===")
     state = wait_for_prompt(session, timeout=60)

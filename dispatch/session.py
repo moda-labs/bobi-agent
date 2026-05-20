@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 TMUX = shutil.which("tmux") or "tmux"
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
-SKILLS_DIR = Path(__file__).parent.parent / "skills" / "engineer"
+SKILLS_DIR = Path(__file__).parent.parent / "engineer" / "process"
 
 
 def _session_name(issue_id: str) -> str:

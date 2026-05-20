@@ -74,11 +74,11 @@ class TestInjectAndRespond:
     @pytest.mark.timeout(90)
     def test_inject_tool_use_task(self, claude_session):
         """Send a task that requires tool use and verify it executed."""
-        inject_text(claude_session, "How many SKILL.md files are in skills/? Just say the number.")
+        inject_text(claude_session, "How many SKILL.md files are in engineer/process/? Just say the number.")
         state = wait_for_prompt(claude_session, timeout=60, require_change=True)
         assert state["state"] == "waiting_input"
         output = capture_pane(claude_session)
-        assert "5" in output
+        assert "6" in output
 
     @pytest.mark.timeout(90)
     def test_context_preserved_across_turns(self, claude_session):

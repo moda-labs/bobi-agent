@@ -28,19 +28,20 @@ async def gather(config: dict) -> list[dict]:
                     items.append(pr | {"issue_id": issue_id})
                     seen.add(issue_id)
 
-        # Also check for agent branches without worktrees (session killed but PR still open)
-        result = subprocess.run(
-            [gh, "pr", "list", "--json", "headRefName,url,state", "--state", "all", "--limit", "20"],
-            cwd=str(repo_path), capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            continue
-        try:
-            prs = json.loads(result.stdout)
-        except (json.JSONDecodeError, ValueError):
-            continue
+        # Check agent branches — open PRs and merged PRs (not closed/abandoned)
+        all_prs = []
+        for pr_state in ["open", "merged"]:
+            result = subprocess.run(
+                [gh, "pr", "list", "--json", "headRefName,url,state", "--state", pr_state, "--limit", "20"],
+                cwd=str(repo_path), capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                try:
+                    all_prs.extend(json.loads(result.stdout))
+                except (json.JSONDecodeError, ValueError):
+                    pass
 
-        for pr in prs:
+        for pr in all_prs:
             branch = pr.get("headRefName", "")
             if not branch.startswith("agent/"):
                 continue

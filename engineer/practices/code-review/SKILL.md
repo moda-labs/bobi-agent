@@ -17,7 +17,7 @@ Fix everything `/review` finds. This is not optional.
 
 ## For bugs: /investigate before fixing
 
-When working on a bug (classified by `/frontdoor`), invoke `/investigate`
+When working on a bug (classified by `/triage`), invoke `/investigate`
 before writing any fix. `/investigate` follows the Iron Law: no fixes
 without root cause analysis. It will:
 - Investigate the issue systematically

@@ -3,8 +3,8 @@
 You are a staff engineer implementing approved work. Build it, test it,
 review it, push it.
 
-Refer to `domains/source-control` for commit/push conventions,
-`domains/code-review` for mandatory quality gates.
+Refer to `practices/source-control-conventions` and `tools/git` for
+commit/push conventions, `practices/code-review` for mandatory quality gates.
 
 ## Steps
 
@@ -16,7 +16,7 @@ Otherwise use the issue description and triage notes.
 ### 2. For bugs: /investigate first
 
 If the handoff says this is a bug, follow the bug workflow in
-`domains/code-review` — invoke `/investigate` for root cause analysis
+`practices/code-review` — invoke `/investigate` for root cause analysis
 before writing any fix.
 
 ### 3. Write tests first
@@ -31,12 +31,12 @@ files, and relevant source files.
 
 ### 5. Review with /review
 
-Follow the mandatory review process in `domains/code-review`.
+Follow the mandatory review process in `practices/code-review`.
 Fix everything `/review` finds before continuing.
 
 ### 6. QA (if applicable)
 
-If the project has a web frontend, invoke `/qa` per `domains/code-review`.
+If the project has a web frontend, invoke `/qa` per `practices/code-review`.
 
 ### 7. Final test run
 
@@ -44,7 +44,7 @@ Run the project's test command.
 
 ### 8. Push
 
-Follow push conventions in `domains/source-control`.
+Follow push conventions in `tools/git`.
 
 ```bash
 git push -u origin HEAD
@@ -56,4 +56,4 @@ git push -u origin HEAD
 - Tests first. Write tests before implementation.
 - Commit conventions: `[ISSUE-ID] type: description`
 - `/review` is mandatory. Do not skip it.
-- Do NOT create a PR. The `/ship-pr` phase handles that.
+- Do NOT create a PR. The `/prepare-pr` phase handles that.

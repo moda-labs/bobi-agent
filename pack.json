@@ -7,7 +7,7 @@
   },
   "skills": [
     {
-      "name": "frontdoor",
+      "name": "triage",
       "version": "2.0.0",
       "role": "task intake & routing (the airlock)",
       "lineage": "lean-custom",
@@ -28,7 +28,7 @@
       "routesTo": ["review", "qa", "ship"]
     },
     {
-      "name": "office-helper",
+      "name": "design-critic",
       "version": "0.1.0",
       "role": "adversarial design-doc reviewer",
       "lineage": "gstack-template",
