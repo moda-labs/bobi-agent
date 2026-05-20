@@ -74,9 +74,15 @@ def call_manager(context: dict) -> tuple[list[dict], str]:
 
 def _extract_json_actions(text: str) -> list[dict]:
     """Extract a JSON array from the manager's response text."""
-    # Try parsing the whole thing as JSON first
+    import re
+
+    # Strip markdown code fences
+    stripped = re.sub(r'```json\s*', '', text)
+    stripped = re.sub(r'```\s*', '', stripped).strip()
+
+    # Try parsing the stripped text as JSON
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(stripped)
         if isinstance(parsed, list):
             return parsed
         if isinstance(parsed, dict):
@@ -84,9 +90,8 @@ def _extract_json_actions(text: str) -> list[dict]:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Look for a JSON array in the text
-    import re
-    match = re.search(r'\[[\s\S]*?\]', text)
+    # Find the outermost JSON array (greedy match from first [ to last ])
+    match = re.search(r'\[[\s\S]*\]', stripped)
     if match:
         try:
             return json.loads(match.group())
