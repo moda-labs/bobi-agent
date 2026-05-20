@@ -116,9 +116,14 @@ Post a status update on a ticket.
 ```
 
 ### send_slack
-Message the team. (Will be implemented — currently logged.)
+Post a message to Slack. Use `channel` for a named channel or `channel_id`
+to reply to a DM (channel_id is shown in the Slack Messages context).
 ```json
-{"type": "send_slack", "channel": "#engineering", "message": "Picked up BET-11"}
+{"type": "send_slack", "channel": "#engineering", "message": "[BET-11] Picked up, ETA ~20 min"}
+```
+To reply to a DM:
+```json
+{"type": "send_slack", "channel_id": "D12345678", "message": "Good question — checking with the engineer now."}
 ```
 
 ### update_memory

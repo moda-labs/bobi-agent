@@ -186,9 +186,37 @@ async def execute_actions(actions: list[dict]) -> dict:
 
             elif action_type == "send_slack":
                 channel = action.get("channel", "")
+                channel_id = action.get("channel_id", "")
                 msg = action.get("message", "")
-                log.info(f"Manager: [SLACK {channel}] {msg}")
-                summary["executed"] += 1
+
+                from dispatch.config import Credentials
+                slack_token = ""
+                for name in Credentials.load().list_names():
+                    t = Credentials.load().get(name).get("slack_bot_token", "")
+                    if t:
+                        slack_token = t
+                        break
+                if not slack_token:
+                    slack_token = GlobalConfig.load().slack_bot_token or ""
+
+                if slack_token and (channel or channel_id):
+                    import httpx
+                    target = channel_id or channel
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post(
+                            "https://slack.com/api/chat.postMessage",
+                            headers={"Authorization": f"Bearer {slack_token}"},
+                            json={"channel": target, "text": msg},
+                        )
+                        if resp.status_code == 200 and resp.json().get("ok"):
+                            log.info(f"Manager: sent to Slack {target}: {msg[:80]}")
+                            summary["executed"] += 1
+                        else:
+                            log.warning(f"Manager: Slack send failed: {resp.json().get('error', 'unknown')}")
+                            summary["errors"] += 1
+                else:
+                    log.info(f"Manager: [SLACK {channel}] {msg} (no token, logged only)")
+                    summary["executed"] += 1
 
             elif action_type == "update_memory":
                 memory = action.get("memory", "")

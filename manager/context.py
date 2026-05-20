@@ -11,7 +11,7 @@ import logging
 import time
 from pathlib import Path
 
-from manager.channels import linear, github, workers
+from manager.channels import linear, github, workers, slack
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ CONTEXT_PATH = MANAGER_DIR / "context.json"
 MEMORY_PATH = MANAGER_DIR / "memory.md"
 
 # Register channels — add new ones here
-CHANNELS = [linear, github, workers]
+CHANNELS = [linear, github, workers, slack]
 
 
 async def gather_all() -> dict:
