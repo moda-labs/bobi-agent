@@ -25,6 +25,17 @@ async def gather(config: dict) -> list[dict]:
 
         issues_by_state = await scan_linear_all_active(api_key, repo_config)
         for state_name, issues in issues_by_state.items():
+            # Load repo-specific context from .dispatch.yaml
+            import yaml
+            dispatch_yaml = repo_config.path / ".dispatch.yaml"
+            repo_context = ""
+            if dispatch_yaml.exists():
+                raw = yaml.safe_load(dispatch_yaml.read_text()) or {}
+                ctx = raw.get("context", {})
+                if ctx:
+                    notes = ctx.get("notes", "")
+                    repo_context = notes.strip() if isinstance(notes, str) else ""
+
             for issue in issues:
                 labels = [l["name"] for l in issue.get("labels", {}).get("nodes", [])]
                 comments = []
@@ -45,6 +56,7 @@ async def gather(config: dict) -> list[dict]:
                     "repo": str(repo_config.path),
                     "project": repo_config.linear_project,
                     "recent_comments": comments,
+                    "repo_context": repo_context,
                 })
     return items
 
@@ -77,4 +89,6 @@ def format_context(items: list[dict]) -> str:
                 lines.append(f"  {i['description'][:200]}")
             for c in i.get("recent_comments", []):
                 lines.append(f"  💬 [{c['author']}]: {c['body'][:150]}")
+            if i.get("repo_context"):
+                lines.append(f"  ⚙️ Repo notes: {i['repo_context'][:200]}")
     return "\n".join(lines)
