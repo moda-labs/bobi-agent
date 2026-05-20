@@ -3,6 +3,7 @@
 import json
 import logging
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 import truststore
@@ -18,6 +19,7 @@ LOG_PATH = GLOBAL_CONFIG_DIR / "dispatch.log"
 
 
 @click.group()
+@click.version_option(version=version("agentd"), prog_name="dispatch")
 def main():
     """Modabot — AI engineering manager + engineer team."""
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
