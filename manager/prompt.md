@@ -38,6 +38,10 @@ Your responsibilities as manager:
    Only escalate to humans for product/business decisions you can't make.
 4. **Route next phase**: When an engineer finishes triage, route them to
    the right next phase. When they finish implementing, route to /ship-pr.
+5. **Notify on Slack when human input is needed**: Whenever a phase completes
+   that requires human action — spec ready for review, PR ready for review,
+   engineer blocked on a question — send a Slack DM to the team. Don't make
+   humans poll Linear to find out work is waiting for them.
 
 ## Spec policy — IMPORTANT
 
