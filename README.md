@@ -72,8 +72,8 @@ The daemon maps handoff phases to skills:
 | `triage_complete` | `/spec` | `needs_spec: true` |
 | `triage_complete` | `/implement` | `needs_spec: false` |
 | `spec_complete` | (wait) | human must reply "approved" |
-| `implementation_complete` | `/ship-pr` | |
-| `feedback_addressed` | `/ship-pr` | |
+| `implementation_complete` | `/prepare-pr` | |
+| `feedback_addressed` | `/prepare-pr` | |
 | `in_review` | (wait) | human reviews PR |
 | `blocked` | (wait) | human must reply |
 
@@ -117,7 +117,7 @@ Every 60 seconds (or on change via watcher):
   EXECUTE      →  Run each action:
                     spawn_worker    — assign a ticket to a new engineer session
                     spawn_task      — ad-hoc work without a ticket
-                    route_skill     — inject the next phase (/implement, /ship-pr, etc.)
+                    route_skill     — inject the next phase (/implement, /prepare-pr, etc.)
                     inject_into_worker — send guidance to an engineer
                     answer_worker_question — respond to an AskUserQuestion prompt
                     move_linear_issue — transition tickets (assign/close)
@@ -157,7 +157,7 @@ Every dispatch phase uses [gstack](https://github.com/garrytan/gstack) skills to
 
 | Dispatch phase | gstack skills used | What they do |
 |---|---|---|
-| `/pickup` (triage) | `/frontdoor` | Classify: update / inquiry / bug |
+| `/pickup` (triage) | `/triage` | Classify: update / inquiry / bug |
 | | `/office-hours` | Complex/ambiguous issues → structured design doc |
 | `/spec` (design) | `/plan-eng-review` | Architecture, edge cases, test coverage |
 | | `/plan-design-review` | UX review, design dimensions scored 0-10 |
@@ -166,7 +166,7 @@ Every dispatch phase uses [gstack](https://github.com/garrytan/gstack) skills to
 | | `/build` | Staff engineer coding methodology |
 | | `/review` | **Mandatory** pre-landing code review |
 | | `/qa` | Browser-based QA (web frontends only) |
-| `/ship-pr` (ship) | `/ship` | Full ship workflow: test, review, create PR |
+| `/prepare-pr` (ship) | `/ship` | Full ship workflow: test, review, create PR |
 | `/feedback` (iterate) | `/investigate` | If feedback points to a bug |
 | | `/review` | **Mandatory** review of fixes before pushing |
 
@@ -208,14 +208,14 @@ This generates `.dispatch.yaml` and stores credentials in `~/.dispatch/credentia
 ### Commands
 
 ```bash
-dispatch init              # initialize config + start daemon in tmux
+dispatch start             # start modabot (foreground, 5s poll)
+dispatch tick              # run one manager tick (debugging)
+dispatch status            # show active engineer sessions
+dispatch decisions         # show recent manager decisions
+dispatch init              # initialize global config
 dispatch setup [path]      # auto-generate .dispatch.yaml and register a repo
 dispatch register <path>   # register a repo (if .dispatch.yaml already exists)
 dispatch repos             # list registered repos
-dispatch daemon            # run as a long-running daemon (default: 5s poll)
-dispatch cycle             # run one dispatch cycle (manual/debugging)
-dispatch status            # show in-flight work
-dispatch watch             # live dashboard (refreshes every 5s)
 ```
 
 ## Per-repo config
@@ -254,7 +254,7 @@ In Progress
   │  /spec writes spec → waits for approval
   │  Human replies "approved" → daemon injects /implement
   │  /implement builds, tests, pushes → summarizer writes handoff
-  │  Daemon injects /ship-pr → creates PR → moves to In Review
+  │  Daemon injects /prepare-pr → creates PR → moves to In Review
   ▼
 In Review
   │  Human reviews PR
@@ -281,19 +281,27 @@ manager/
     ├── workers.py   # Tmux sessions (state, activity, questions)
     └── slack.py     # Slack DMs
 
-skills/
-├── pickup/SKILL.md      # take ticket, create worktree, triage complexity
-├── spec/SKILL.md        # write implementation spec (non-trivial work)
-├── implement/SKILL.md   # build from spec, TDD, sub-agents for tests/code/review
-├── ship-pr/SKILL.md     # create/update PR
-├── feedback/SKILL.md    # address review comments
-└── e2e-test/SKILL.md    # integration test tiers and instructions
+engineer/
+├── process/                          # daemon-routed lifecycle
+│   ├── pickup/SKILL.md               # take ticket, create worktree, triage
+│   ├── spec/SKILL.md                 # write implementation spec
+│   ├── implement/SKILL.md            # build from spec, TDD, sub-agents
+│   ├── prepare-pr/SKILL.md           # create/update PR
+│   ├── feedback/SKILL.md             # address review comments
+│   └── e2e-test/SKILL.md             # integration test tiers
+├── practices/                        # org-specific "how we work here"
+│   ├── triage/SKILL.md               # task intake & classification
+│   ├── build/SKILL.md                # staff engineer coding methodology
+│   ├── design-critic/SKILL.md        # adversarial design doc reviewer
+│   ├── code-review/SKILL.md          # mandatory quality gates
+│   └── brand-identity/SKILL.md       # design system enforcement
+└── tools/                            # mechanical API reference
+    ├── slack/SKILL.md                # Slack setup & API
+    └── notion/SKILL.md               # Notion integration (placeholder)
 
 dispatch/
-├── daemon.py        # Poll → monitor tmux sessions → route phases → bridge questions
 ├── scanner.py       # Linear GraphQL polling + complexity classification
 ├── linear_api.py    # Minimal Linear helpers (state IDs, move, comment)
-├── conversation.py  # Detect human replies on Linear issues
 ├── session.py       # Tmux session management (spawn, inject, capture, detect state)
 ├── summarizer.py    # Inspect worktree + tmux pane → determine phase → write handoff
 ├── state.py         # Running agent tracking
