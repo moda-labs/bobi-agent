@@ -1,17 +1,16 @@
-"""Execute actions output by the manager.
+"""Execute tmux actions output by the manager.
 
-The manager outputs a JSON array of actions. This module parses them
-and calls the appropriate dispatch/session functions.
+The manager handles Linear, GitHub, and Slack directly via tools.
+This executor only handles tmux operations the manager can't do from
+inside its own session: spawning engineers, injecting into sessions,
+answering questions, killing sessions.
 """
 
-import asyncio
-import json
 import logging
 import time
 from pathlib import Path
 
-from modastack.config import GlobalConfig, RepoConfig
-from modastack.linear_api import get_state_ids, move_issue, add_comment
+from modastack.config import GlobalConfig
 from modastack.session import (
     spawn_session, inject, inject_skill, answer_question,
     kill_session, session_exists,
@@ -47,38 +46,9 @@ async def post_thinking_placeholder(channel_id: str) -> None:
 
 
 async def execute_actions(actions: list[dict]) -> dict:
-    """Execute a list of manager actions. Returns summary."""
+    """Execute tmux actions. Returns summary."""
     summary = {"executed": 0, "skipped": 0, "errors": 0}
     state = StateStore()
-    global_config = GlobalConfig.load()
-
-    # Build API key + repo config lookup by project
-    api_keys = {}
-    repo_configs = {}
-    state_id_cache = {}
-    for repo_path in global_config.repos:
-        if not repo_path.exists():
-            continue
-        try:
-            rc = RepoConfig.from_file(repo_path)
-        except FileNotFoundError:
-            continue
-        creds = rc.get_credentials()
-        key = creds.get("linear_api_key") or global_config.linear_api_key
-        if key:
-            api_keys[rc.linear_project] = key
-            api_keys[str(repo_path)] = key
-            repo_configs[rc.linear_project] = rc
-
-    async def get_states(project_or_repo: str) -> dict:
-        if project_or_repo not in state_id_cache:
-            key = api_keys.get(project_or_repo, "")
-            if not key:
-                return {}
-            # Guess the team key from the issue ID prefix or use the project
-            team_key = project_or_repo.split("/")[-1].upper() if "/" in project_or_repo else project_or_repo
-            state_id_cache[project_or_repo] = await get_state_ids(key, team_key)
-        return state_id_cache[project_or_repo]
 
     for action in actions:
         action_type = action.get("type", "")
@@ -105,7 +75,6 @@ async def execute_actions(actions: list[dict]) -> dict:
                     summary["errors"] += 1
                     continue
 
-                # Inject task — use /pickup for tickets, direct instructions for ad-hoc
                 instructions = action.get("instructions", "")
                 if action_type == "spawn_worker" and not instructions:
                     inject_skill(iid, "pickup",
@@ -117,16 +86,6 @@ async def execute_actions(actions: list[dict]) -> dict:
                 state.track(issue_id=iid, repo_path=repo,
                             title=title, worktree=repo,
                             linear_issue_id=action.get("linear_id"))
-
-                # Move Linear ticket if this is a tracked issue
-                if action.get("linear_id"):
-                    project = iid.split("-")[0]
-                    api_key = api_keys.get(project, "")
-                    if api_key:
-                        states = await get_states(project)
-                        if "In Progress" in states:
-                            await move_issue(api_key, action["linear_id"], states["In Progress"])
-                        await add_comment(api_key, action["linear_id"], "Picked up by modabot.")
 
                 log.info(f"Manager: spawned {'task' if action_type == 'spawn_task' else 'worker'} for {iid}: {title[:60]}")
                 summary["executed"] += 1
@@ -176,81 +135,6 @@ async def execute_actions(actions: list[dict]) -> dict:
                 else:
                     summary["skipped"] += 1
 
-            elif action_type == "move_linear_issue":
-                iid = action["issue_id"]
-                target = action.get("state", "")
-                project = iid.split("-")[0]
-                api_key = api_keys.get(project, "")
-                linear_id = action.get("linear_id") or (state.get(iid).linear_issue_id if state.get(iid) else None)
-                if not api_key:
-                    log.warning(f"Manager: no API key for project {project}")
-                    summary["errors"] += 1
-                    continue
-                if not linear_id:
-                    log.warning(f"Manager: no linear_id for {iid}")
-                    summary["errors"] += 1
-                    continue
-                states = await get_states(project)
-                if target not in states:
-                    log.warning(f"Manager: state '{target}' not found for {project}")
-                    summary["errors"] += 1
-                    continue
-                await move_issue(api_key, linear_id, states[target])
-                log.info(f"Manager: moved {iid} → {target}")
-                summary["executed"] += 1
-                if target == "Done":
-                    if session_exists(iid):
-                        kill_session(iid)
-                    state.remove(iid)
-
-            elif action_type == "comment_linear":
-                iid = action["issue_id"]
-                body = action.get("body", "")
-                project = iid.split("-")[0]
-                api_key = api_keys.get(project, "")
-                linear_id = action.get("linear_id") or (state.get(iid).linear_issue_id if state.get(iid) else None)
-                if api_key and body and linear_id:
-                    await add_comment(api_key, linear_id, body)
-                    log.info(f"Manager: commented on {iid}")
-                    summary["executed"] += 1
-                else:
-                    log.warning(f"Manager: comment_linear failed for {iid} (key={bool(api_key)}, id={bool(linear_id)}, body={bool(body)})")
-                    summary["errors"] += 1
-
-            elif action_type == "send_slack":
-                channel = action.get("channel", "")
-                channel_id = action.get("channel_id", "")
-                msg = action.get("message", "")
-                target = channel_id or channel
-
-                slack_token = _get_slack_token()
-                if slack_token and target:
-                    import httpx
-                    async with httpx.AsyncClient() as client:
-                        # Check for a pending "Thinking..." placeholder to update
-                        placeholder_ts = _pending_placeholders.pop(target, None)
-                        if placeholder_ts:
-                            resp = await client.post(
-                                "https://slack.com/api/chat.update",
-                                headers={"Authorization": f"Bearer {slack_token}"},
-                                json={"channel": target, "ts": placeholder_ts, "text": msg},
-                            )
-                        else:
-                            resp = await client.post(
-                                "https://slack.com/api/chat.postMessage",
-                                headers={"Authorization": f"Bearer {slack_token}"},
-                                json={"channel": target, "text": msg},
-                            )
-                        if resp.status_code == 200 and resp.json().get("ok"):
-                            log.info(f"Manager: sent to Slack {target}: {msg[:80]}")
-                            summary["executed"] += 1
-                        else:
-                            log.warning(f"Manager: Slack send failed: {resp.json().get('error', 'unknown')}")
-                            summary["errors"] += 1
-                else:
-                    log.info(f"Manager: [SLACK {channel}] {msg} (no token, logged only)")
-                    summary["executed"] += 1
-
             elif action_type == "update_memory":
                 memory = action.get("memory", "")
                 if memory:
@@ -258,6 +142,11 @@ async def execute_actions(actions: list[dict]) -> dict:
                     MEMORY_PATH.write_text(memory)
                     log.info(f"Manager: memory updated ({len(memory)} chars)")
                     summary["executed"] += 1
+
+            elif action_type in ("move_linear_issue", "comment_linear", "send_slack"):
+                # Manager handles these directly via tools now
+                log.info(f"Manager: {action_type} — handled by manager session directly")
+                continue
 
             else:
                 log.warning(f"Manager: unknown action type '{action_type}'")
