@@ -35,16 +35,19 @@ def main():
 
 
 @main.command()
-@click.option("--interval", default=5, help="Poll interval in seconds")
-def start(interval):
-    """Start modabot. Polls for changes, wakes the manager when needed.
+@click.option("--webhooks", is_flag=True, help="Enable webhook server for GitHub/Linear")
+@click.option("--port", default=8080, help="Webhook server port")
+@click.option("--batch-window", default=5.0, help="Seconds to batch events before processing")
+def start(webhooks, port, batch_window):
+    """Start modabot. Event-driven — reacts to webhooks and polls.
 
     Usage:
-        dispatch start              # foreground, 5s poll
-        dispatch start --interval 10
+        dispatch start                    # polling mode (default)
+        dispatch start --webhooks         # webhook + polling mode
+        dispatch start --webhooks --port 9090
     """
-    from manager.watcher import run
-    run(poll_interval=interval)
+    from manager.events.consumer import run
+    run(webhook_port=port, use_webhooks=webhooks, batch_window=batch_window)
 
 
 @main.command()

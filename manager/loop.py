@@ -31,15 +31,21 @@ CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
 DECISIONS_LOG = Path.home() / ".dispatch" / "manager" / "decisions.jsonl"
 
 
-def call_manager(context: dict) -> tuple[list[dict], str]:
+def call_manager(context: dict, prompt_override: str = None) -> tuple[list[dict], str]:
     """Call claude -p with the manager prompt + context.
 
     Returns (actions, reasoning) — the parsed actions and the manager's
     full response text including any reasoning before the JSON.
+
+    prompt_override: if provided, appended to the manager prompt instead
+    of the default context formatting. Used by the event-driven consumer.
     """
     prompt_template = MANAGER_PROMPT.read_text()
-    context_text = write_context_prompt(context)
-    full_prompt = prompt_template + context_text
+    if prompt_override:
+        full_prompt = prompt_template + prompt_override
+    else:
+        context_text = write_context_prompt(context)
+        full_prompt = prompt_template + context_text
 
     result = subprocess.run(
         [CLAUDE, "-p", "--output-format", "json", "--max-turns", "10"],
