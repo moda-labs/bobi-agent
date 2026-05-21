@@ -1,6 +1,6 @@
 # modastack
 
-Skills-first dispatch daemon. Scans Linear for work, spawns Claude Code with the right skill for each phase, reports results via Linear.
+Event-driven AI engineering team. A persistent Claude Code manager monitors Linear, GitHub, Slack, and engineer sessions — assigning work, routing phases, answering questions, and communicating with humans.
 
 ## Setup
 
@@ -60,72 +60,84 @@ test command and skills look correct.
 ## Commands
 
 ```bash
-modastack start             # start modabot (foreground, 5s poll)
-modastack tick              # run one manager tick (debugging)
-modastack status            # show active engineer sessions
-modastack decisions         # show recent manager decisions
-modastack init              # initialize global config
-modastack setup [path]      # auto-generate .modastack.yaml and register a repo
-modastack register <path>   # register a repo (if .modastack.yaml already exists)
-modastack repos             # list registered repos
+modastack start                # start event loop (polling mode)
+modastack start --webhooks     # start with webhook server + polling
+modastack tick                 # check manager session state
+modastack tick "message"       # inject a message into the manager session
+modastack status               # show active engineer sessions
+modastack events               # show recent events from the bus
+modastack decisions            # show recent manager decisions
+modastack init                 # initialize global config
+modastack setup [path]         # auto-generate .modastack.yaml and register a repo
+modastack register <path>      # register a repo (if .modastack.yaml already exists)
+modastack repos                # list registered repos
 ```
 
 ## Architecture
 
-Skills-first: each phase of work is a self-contained skill. The daemon
-polls Linear, manages persistent tmux sessions, and injects skills into
-them. A dedicated summarizer inspects worktree state to write handoffs.
+Event-driven: events from Linear, GitHub, Slack, and engineer sessions
+flow through an in-process bus to a persistent Claude Code manager session
+in tmux. The manager reasons about events and acts directly.
 
 ```
-engineer/
-├── process/                          # daemon-routed lifecycle
-│   ├── pickup/SKILL.md               # take ticket, create worktree, triage
-│   ├── spec/SKILL.md                 # write implementation spec
-│   ├── implement/SKILL.md            # build from spec, TDD, sub-agents
-│   ├── prepare-pr/SKILL.md           # create/update PR
-│   └── feedback/SKILL.md             # address review comments
-├── practices/                        # org-specific "how we work here"
-│   ├── triage/SKILL.md               # task intake & classification
-│   ├── build/SKILL.md                # staff engineer coding methodology
-│   ├── design-critic/SKILL.md        # adversarial design doc reviewer
-│   ├── code-review/SKILL.md          # mandatory quality gates
-│   ├── ticketing-policy/SKILL.md     # who moves tickets when
-│   ├── source-control-conventions/SKILL.md  # branching, commit, PR format
-│   └── brand-identity/SKILL.md       # design system enforcement
-└── tools/                            # mechanical API reference
-    ├── linear/SKILL.md               # Linear GraphQL API
-    ├── git/SKILL.md                  # git CLI commands
-    ├── github/SKILL.md               # gh CLI commands
-    ├── slack/SKILL.md                # Slack setup & API
-    └── notion/SKILL.md               # Notion integration (placeholder)
+modastack/                        # CLI + infrastructure
+├── cli.py                        # Click CLI entrypoint
+├── config.py                     # Global (~/.modastack/) + per-repo (.modastack.yaml)
+├── state.py                      # Active engineer session tracking
+├── scanner.py                    # Linear GraphQL polling
+├── session.py                    # Engineer tmux session management
+├── setup.py                      # Auto-generate .modastack.yaml from repo inspection
+└── board_setup.py                # Bootstrap Linear board with workflow states
 
-dispatch/
-├── daemon.py        # Poll → monitor tmux sessions → route phases → bridge questions
-├── scanner.py       # Linear GraphQL polling + complexity classification
-├── linear_api.py    # Minimal Linear helpers (state IDs, move, comment)
-├── conversation.py  # Detect human replies on Linear issues
-├── session.py       # Tmux session management (spawn, inject, capture, detect state)
-├── summarizer.py    # Inspect worktree + tmux pane → determine phase → write handoff
-├── state.py         # Running agent tracking
-├── config.py        # Global (~/.modastack/) + per-repo (.modastack.yaml)
-├── setup.py         # Auto-generate .modastack.yaml from repo inspection
-├── board_setup.py   # Bootstrap Linear board with required workflow states
-└── cli.py           # Click CLI entrypoint
+manager/                          # Persistent manager + event system
+├── session.py                    # Manager tmux session (start, resume, inject, capture)
+├── executor.py                   # Execute tmux actions (spawn, inject, answer, kill)
+├── prompt.md                     # Manager personality, decision rules
+└── events/
+    ├── bus.py                    # Thread-safe in-process event queue
+    ├── consumer.py               # Drain bus → format → inject into manager session
+    ├── pollers.py                # Background threads: workers (5s), Linear (30s), Slack (10s)
+    ├── webhook_server.py         # HTTP endpoints: /webhooks/github, /linear, /slack
+    └── slack_socket.py           # Slack Socket Mode WebSocket client
+
+engineer/
+├── process/                      # Manager-routed lifecycle phases
+│   ├── pickup/SKILL.md           # Take ticket, create worktree, triage
+│   ├── spec/SKILL.md             # Write implementation spec
+│   ├── implement/SKILL.md        # Build from spec, TDD, sub-agents
+│   ├── prepare-pr/SKILL.md       # Create/update PR
+│   └── feedback/SKILL.md         # Address review comments
+└── practices/                    # Org-specific "how we work here"
+    ├── triage/SKILL.md           # Task intake & classification
+    ├── build/SKILL.md            # Staff engineer coding methodology
+    ├── design-critic/SKILL.md    # Adversarial design doc reviewer
+    ├── code-review/SKILL.md      # Mandatory quality gates
+    ├── ticketing-policy/SKILL.md # Who moves tickets when
+    ├── source-control-conventions/SKILL.md
+    └── brand-identity/SKILL.md   # Design system enforcement
+
+tools/                            # Shared tool reference (manager + engineers)
+├── git/SKILL.md                  # Git CLI commands
+├── github/SKILL.md               # gh CLI commands
+├── linear/SKILL.md               # Linear GraphQL API
+├── slack/SKILL.md                # Slack setup & API
+├── webhooks/SKILL.md             # Webhook setup guide
+└── notion/SKILL.md               # Notion integration (placeholder)
 ```
 
 ## Issue lifecycle
 
 Linear states: Todo → In Progress → In Review → Done (+ Blocked)
 
-The daemon routes based on Linear state:
+The manager routes based on events:
 
-| Linear state | Trigger | Action |
-|---|---|---|
-| Todo + agent label | new issue | spawn tmux session + inject `/pickup`, move to In Progress |
-| In Progress | session idle/exited | summarizer writes handoff, daemon injects next skill |
-| In Review | PR merged | move to Done |
-| In Review | changes requested | inject `/feedback` into session |
-| Blocked | human replied | inject answer into tmux session |
+| Event | Action |
+|---|---|
+| New issue with agent label | spawn tmux session + inject `/pickup`, move to In Progress |
+| Worker state change | read handoff, inject next skill |
+| PR merged | move to Done |
+| Changes requested | inject `/feedback` into session |
+| Human replied | inject answer into tmux session |
 
 Internal phases (triage, spec, implement) happen within "In Progress".
 The handoff file (`.modastack/handoff.md`) tracks which sub-phase the
@@ -133,8 +145,7 @@ agent is in. Linear doesn't need to know.
 
 ## Handoff contract
 
-The summarizer writes `.modastack/handoff.md` in the worktree by
-inspecting git state (commits, PRs, specs) and tmux pane output:
+Engineers write `.modastack/handoff.md` in their worktree:
 
 ```yaml
 ---
@@ -149,14 +160,11 @@ complexity: medium
 
 ## Status
 Spec written: specs/agd-12-rate-limiting.md
-
-## Agent activity
-(captured from tmux pane)
 ```
 
 Each agent reads the handoff, does its work, then goes idle. The
-summarizer detects the idle state, inspects what changed, and writes
-the updated handoff for the daemon to route.
+manager detects state changes via the worker poller and routes to
+the next skill.
 
 ## Tests
 
