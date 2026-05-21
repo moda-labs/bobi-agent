@@ -80,11 +80,22 @@ def start_or_resume(cwd: str = None) -> bool:
             # If new session, inject the manager prompt
             if not saved_id:
                 prompt = MANAGER_PROMPT_PATH.read_text()
-                inject(f"Read and internalize these instructions. You are the Modastack manager. "
-                       f"From now on, I will send you batches of events. For each batch, respond "
-                       f"with a JSON array of actions.\n\n{prompt}")
+                config = GlobalConfig.load()
+                repos = ", ".join(p.name for p in config.repos)
+
+                inject(
+                    f"Read and internalize these instructions. You are the Modastack manager. "
+                    f"Slack is your primary communication channel — post status updates, ask "
+                    f"questions, and reply to DMs there. Use send_slack actions or call the "
+                    f"Slack API directly. Your Slack DM channel with Zach is D0B51JP1N4C. "
+                    f"You are managing these repos: {repos}. "
+                    f"From now on, I will send you batches of events. For each batch, "
+                    f"respond with a JSON array of actions, or use tools directly. "
+                    f"Start by posting a brief startup message to Slack saying you're online "
+                    f"and summarizing the current state.\n\n{prompt}"
+                )
                 # Wait for it to process the prompt
-                for _ in range(30):
+                for _ in range(60):
                     time.sleep(2)
                     if detect_state() == "waiting_input":
                         break
