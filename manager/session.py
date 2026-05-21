@@ -131,6 +131,9 @@ def inject(text: str) -> None:
     """Send text into the manager session."""
     collapsed = " ".join(text.splitlines())
     subprocess.run([TMUX, "send-keys", "-t", SESSION_NAME, "-l", collapsed])
+    time.sleep(0.5)
+    subprocess.run([TMUX, "send-keys", "-t", SESSION_NAME, "Enter"])
+    time.sleep(0.5)
     subprocess.run([TMUX, "send-keys", "-t", SESSION_NAME, "Enter"])
     log.debug(f"Manager: injected {len(collapsed)} chars")
 
