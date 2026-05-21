@@ -91,11 +91,10 @@ modastack/                        # CLI + infrastructure
 
 manager/                          # Persistent manager + event system
 ├── session.py                    # Manager tmux session (start, resume, inject, capture)
-├── executor.py                   # Execute tmux actions (spawn, inject, answer, kill)
 ├── prompt.md                     # Manager personality, decision rules
 └── events/
     ├── bus.py                    # Thread-safe in-process event queue
-    ├── consumer.py               # Drain bus → format → inject into manager session
+    ├── consumer.py               # Drain bus → write events file → trigger manager
     ├── pollers.py                # Background threads: workers (5s), Linear (30s), Slack (10s)
     ├── webhook_server.py         # HTTP endpoints: /webhooks/github, /linear, /slack
     └── slack_socket.py           # Slack Socket Mode WebSocket client

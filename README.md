@@ -12,7 +12,7 @@ modastack has four core principles:
 
 3. **Event-driven architecture** — events from Linear, GitHub, Slack, and engineer sessions flow through an in-process bus. The consumer batches events and feeds them to the persistent manager session, which reasons about what to do next.
 
-4. **Manager-driven orchestration** — the manager is a long-lived interactive Claude Code session that reads event batches and acts directly. It uses curl for external APIs (Linear, Slack, GitHub) and structured actions for tmux operations (spawning engineers, injecting messages, answering questions). No hard-coded routing rules — the manager reasons about the full picture.
+4. **Manager-driven orchestration** — the manager is a long-lived interactive Claude Code session that reads event files and acts directly. It uses curl for external APIs (Linear, Slack, GitHub) and tmux commands for engineer sessions. No hard-coded routing rules, no executor — the manager reasons about the full picture and handles everything via tools.
 
 ### Event flow
 
@@ -22,34 +22,19 @@ Event producers (threads)          Event bus          Consumer          Manager 
 
 Worker poller (5s)    ──┐
 Linear poller (30s)   ──┤
-Slack poller (10s)    ──┼──→  thread-safe  ──→  drain + batch  ──→  inject into tmux
-Webhook server (HTTP) ──┤      queue            format events       persistent claude
-Slack Socket Mode     ──┘                                           session
+Slack poller (10s)    ──┼──→  thread-safe  ──→  drain + batch  ──→  write to file
+Webhook server (HTTP) ──┤      queue            format events       + inject trigger
+Slack Socket Mode     ──┘                                           into manager tmux
 
-                                                                    Manager responds:
-                                                                    ├─ Direct tool use
-                                                                    │  (curl for APIs)
-                                                                    └─ JSON actions
-                                                                       (tmux operations
-                                                                        via executor)
+                                                                    Manager reads file,
+                                                                    acts directly:
+                                                                    ├─ curl for APIs
+                                                                    │  (Slack, Linear, GitHub)
+                                                                    └─ tmux for engineers
+                                                                       (spawn, inject, kill)
 ```
 
-Events arrive from multiple sources — pollers run in background threads, webhooks via an HTTP server, and Slack via Socket Mode WebSocket. All push to the same in-process bus. The consumer drains the bus every few seconds, formats events into a compact message, and injects it into the manager's tmux session. The manager reads the events and either acts directly using tools or outputs structured JSON actions for the executor.
-
-### Executor
-
-The executor handles tmux-level operations the manager can't do from inside its own session:
-
-| Action | What it does |
-|--------|-------------|
-| `spawn_worker` / `spawn_task` | Start a new engineer tmux session, inject `/pickup` |
-| `route_skill` | Inject the next skill (`/implement`, `/prepare-pr`, etc.) into an engineer session |
-| `inject_into_worker` | Send guidance or context to an engineer |
-| `answer_worker_question` | Respond to an `AskUserQuestion` prompt in an engineer session |
-| `kill_worker` | Kill a stuck engineer session |
-| `update_memory` | Persist state to `~/.modastack/manager/memory.md` |
-
-The manager handles Linear, GitHub, and Slack operations directly via curl — no executor involvement.
+Events arrive from multiple sources — pollers run in background threads, webhooks via an HTTP server, and Slack via Socket Mode WebSocket. All push to the same in-process bus. The consumer drains the bus every few seconds, writes events to `~/.modastack/manager/pending_events.md`, and injects a short trigger message into the manager's tmux session. The manager reads the event file and acts directly — no intermediate executor or JSON action protocol.
 
 ### Handoff contract
 
@@ -232,11 +217,10 @@ modastack/                        # CLI + infrastructure
 
 manager/                          # Persistent manager + event system
 ├── session.py                    # Manager tmux session (start, resume, inject, capture)
-├── executor.py                   # Execute tmux actions (spawn, inject, answer, kill)
 ├── prompt.md                     # Manager personality, decision rules, available actions
 └── events/
     ├── bus.py                    # Thread-safe in-process event queue
-    ├── consumer.py               # Drain bus → format → inject into manager session
+    ├── consumer.py               # Drain bus → write events file → trigger manager
     ├── pollers.py                # Background threads: workers (5s), Linear (30s), Slack (10s)
     ├── webhook_server.py         # HTTP endpoints: /webhooks/github, /linear, /slack
     └── slack_socket.py           # Slack Socket Mode WebSocket client
@@ -273,9 +257,10 @@ tools/                            # Shared tool reference (used by both manager 
 | Skills first | Each phase is a self-contained skill — portable, testable, works manually or via the manager |
 | Persistent tmux sessions | One session per issue, reused across phases. Context carries forward, no cold starts |
 | Event-driven bus | Decouples event sources from the manager. Adding a new source means writing one poller or webhook handler — push to the bus |
-| Persistent manager session | Long-lived interactive Claude Code in tmux. Survives restarts via `--resume`. Reads event batches and acts directly using tools |
+| Persistent manager session | Long-lived interactive Claude Code in tmux. Survives restarts via `--resume`. Reads event files and acts directly using tools |
+| File-based event delivery | Consumer writes events to a file instead of injecting long text into tmux (paste buffer is unreliable). Manager reads the file reliably |
 | Manager uses curl | MCP tools have built-in write confirmations that block automation. The manager calls APIs directly via curl for Linear, Slack, and GitHub |
-| Executor for tmux only | The manager can't spawn/kill other tmux sessions from inside its own. The executor handles only tmux operations; everything else is direct |
+| No executor | The manager handles everything directly — curl for APIs, tmux commands for engineer sessions, bash for everything else. No intermediate action protocol |
 | Handoff contract | `.modastack/handoff.md` is the interface between phases — minimal, structured |
 | Sub-agents | Context isolation within phases. Reviewer only sees the diff, not the spec |
 | Question bridging | Agent questions detected via worker poller, manager decides how to answer — directly or escalate to human |
