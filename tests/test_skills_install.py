@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).parent.parent
 ENGINEER_ROOT = REPO_ROOT / "engineer"
 PROCESS_SKILLS_SRC = ENGINEER_ROOT / "process"
 PRACTICES_SKILLS_SRC = ENGINEER_ROOT / "practices"
-TOOLS_SKILLS_SRC = ENGINEER_ROOT / "tools"
+TOOLS_SKILLS_SRC = REPO_ROOT / "tools"  # shared, top-level
 SKILLS_INSTALLED = REPO_ROOT / ".claude" / "skills"
 
 EXPECTED_PROCESS_SKILLS = ["pickup", "spec", "implement", "prepare-pr", "feedback"]

@@ -48,7 +48,8 @@ def call_manager(context: dict, prompt_override: str = None) -> tuple[list[dict]
         full_prompt = prompt_template + context_text
 
     result = subprocess.run(
-        [CLAUDE, "-p", "--output-format", "json", "--max-turns", "1"],
+        [CLAUDE, "-p", "--output-format", "json", "--max-turns", "10",
+         "--dangerously-skip-permissions"],
         input=full_prompt,
         capture_output=True, text=True,
         env={**os.environ, "HOME": str(Path.home())},

@@ -239,12 +239,17 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
 
     # Install skills
     click.echo("Installing skills...")
-    skills_root = Path(__file__).parent.parent / "engineer"
+    repo_root = Path(__file__).parent.parent
     target_skills = path / ".claude" / "skills"
     target_skills.mkdir(parents=True, exist_ok=True)
     installed = []
-    for category in ["process", "practices", "tools"]:
-        category_dir = skills_root / category
+    # Engineer skills + shared tools
+    skill_dirs = [
+        repo_root / "engineer" / "process",
+        repo_root / "engineer" / "practices",
+        repo_root / "tools",
+    ]
+    for category_dir in skill_dirs:
         if not category_dir.exists():
             continue
         for skill_dir in category_dir.iterdir():

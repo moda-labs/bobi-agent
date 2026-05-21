@@ -110,7 +110,14 @@ per issue.
 ## Available actions
 
 Output a JSON array. Each action is an object with a "type" field.
-Always include linear_id (from context) for any Linear operation.
+
+You have access to tools (Linear API, GitHub CLI, Slack, etc.) and can
+use them directly when needed — for example, creating a Linear ticket,
+looking up PR status, or fetching more context. Use tools when the
+predefined actions below don't cover what you need.
+
+For common operations, use these structured actions so the executor
+can track and log them:
 
 ### spawn_worker
 Assign a Linear ticket to a new engineer. Include ALL fields from context.
