@@ -1,6 +1,6 @@
 # Skill Packs
 
-agentd auto-discovers installed skills and incorporates them into agent prompts. No configuration needed — if skills are installed, they're used.
+modastack auto-discovers installed skills and incorporates them into agent prompts. No configuration needed — if skills are installed, they're used.
 
 ## How discovery works
 
@@ -75,14 +75,14 @@ For **heavy** tasks: relevant skills listed with explicit guidance to use them w
 
 ## Adding relevance rules
 
-Edit `dispatch/skills.py` → `get_relevant_skills()` to add mappings from your labels to your skill names. Or override per-repo in `.dispatch.yaml`:
+Edit `dispatch/skills.py` → `get_relevant_skills()` to add mappings from your labels to your skill names. Or override per-repo in `.modastack.yaml`:
 
 ```yaml
 agent:
   skills: ["db-migrate", "api-test"]  # always available for this repo
 ```
 
-Explicit skills from `.dispatch.yaml` are a fallback — if auto-discovery finds matching skills, those take priority (they have descriptions and richer context).
+Explicit skills from `.modastack.yaml` are a fallback — if auto-discovery finds matching skills, those take priority (they have descriptions and richer context).
 
 ## Examples
 

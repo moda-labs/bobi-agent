@@ -3,11 +3,11 @@
 from pathlib import Path
 from textwrap import dedent
 
-from dispatch.config import RepoConfig, GlobalConfig
+from modastack.config import RepoConfig, GlobalConfig
 
 
 def test_repo_config_from_file(tmp_path):
-    config_file = tmp_path / ".dispatch.yaml"
+    config_file = tmp_path / ".modastack.yaml"
     config_file.write_text(dedent("""
         linear:
           project: "MYPROJ"
@@ -44,7 +44,7 @@ def test_repo_config_from_file(tmp_path):
 
 
 def test_repo_config_defaults(tmp_path):
-    config_file = tmp_path / ".dispatch.yaml"
+    config_file = tmp_path / ".modastack.yaml"
     config_file.write_text("linear:\n  project: X\n")
 
     config = RepoConfig.from_file(tmp_path)
@@ -67,15 +67,15 @@ def test_repo_config_missing_file(tmp_path):
 
 
 def test_global_config_missing_file(tmp_path, monkeypatch):
-    monkeypatch.setattr("dispatch.config.GLOBAL_CONFIG_PATH", tmp_path / "nonexistent.yaml")
+    monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_PATH", tmp_path / "nonexistent.yaml")
     config = GlobalConfig.load()
     assert config.slack_bot_token == ""
     assert config.repos == []
 
 
 def test_global_config_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setattr("dispatch.config.GLOBAL_CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("dispatch.config.GLOBAL_CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_PATH", tmp_path / "config.yaml")
 
     config = GlobalConfig(
         slack_bot_token="xoxb-test",

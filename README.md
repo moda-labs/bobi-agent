@@ -1,22 +1,22 @@
-# agentd
+# modastack
 
 Skills-first dispatch daemon for coding agents. Scans Linear for work, spawns Claude Code with the right skill for each phase, reports results via Linear.
 
 ## How it works
 
-agentd has four core principles:
+modastack has four core principles:
 
 1. **Skills first** — each phase of work (triage, spec, implement, ship, feedback) is a self-contained skill. Skills are portable — they work both unattended via the daemon and manually in Claude Code.
 
 2. **Persistent tmux sessions** — each issue gets one interactive Claude Code session in tmux that persists across phases. The daemon injects skill invocations into the same session instead of spawning new processes. Context carries forward naturally.
 
-3. **Summarizer-driven handoffs** — agents don't write handoffs. A dedicated summarizer inspects the worktree (git status, commits, PRs, specs) and captures tmux pane output to determine what phase the agent reached, then writes `.dispatch/handoff.md`. The daemon reads the handoff to route to the next skill.
+3. **Summarizer-driven handoffs** — agents don't write handoffs. A dedicated summarizer inspects the worktree (git status, commits, PRs, specs) and captures tmux pane output to determine what phase the agent reached, then writes `.modastack/handoff.md`. The daemon reads the handoff to route to the next skill.
 
 4. **Manager-driven orchestration** — a Claude-powered manager reads full context (Linear issues, GitHub PRs, worker sessions, Slack messages) every tick and decides what to do next. Instead of hard-coded routing rules, the manager reasons about the whole picture — assigning work, routing phases, answering questions, and escalating to humans when needed.
 
 ### Handoff contract
 
-The summarizer writes `.dispatch/handoff.md` after each phase:
+The summarizer writes `.modastack/handoff.md` after each phase:
 
 ```yaml
 ---
@@ -129,14 +129,14 @@ Every 60 seconds (or on change via watcher):
   LOG          →  Write reasoning + actions + outcomes to decisions.jsonl
 ```
 
-The manager is stateless between ticks — all persistent state lives in gathered context and `~/.dispatch/manager/memory.md`. The watcher (`manager/watcher.py`) provides cheap 5-second polling with hash-based change detection, only invoking the expensive Claude call when something actually changed.
+The manager is stateless between ticks — all persistent state lives in gathered context and `~/.modastack/manager/memory.md`. The watcher (`manager/watcher.py`) provides cheap 5-second polling with hash-based change detection, only invoking the expensive Claude call when something actually changed.
 
 #### Running the manager
 
 ```bash
-dispatch start             # start the watcher (5s poll, manager wakes on changes)
-dispatch tick              # run one manager tick (debugging)
-dispatch decisions         # show recent manager decisions
+modastack start             # start the watcher (5s poll, manager wakes on changes)
+modastack tick              # run one manager tick (debugging)
+modastack decisions         # show recent manager decisions
 ```
 
 Or directly:
@@ -183,47 +183,47 @@ Key enforcement points:
 From inside any repo:
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/underminedsk/agentd/main/bootstrap.sh)
+bash <(curl -sL https://raw.githubusercontent.com/underminedsk/modastack/main/bootstrap.sh)
 ```
 
 ### Manual
 
 ```bash
-git clone https://github.com/underminedsk/agentd.git ~/dev/agentd
-cd ~/dev/agentd
+git clone https://github.com/underminedsk/modastack.git ~/dev/modastack
+cd ~/dev/modastack
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-dispatch init
+modastack init
 ```
 
 ### Per-repo setup
 
 ```bash
-dispatch setup ~/path/to/repo --linear-key <KEY> --linear-project <PROJECT>
+modastack setup ~/path/to/repo --linear-key <KEY> --linear-project <PROJECT>
 ```
 
-This generates `.dispatch.yaml` and stores credentials in `~/.dispatch/credentials.yaml`.
+This generates `.modastack.yaml` and stores credentials in `~/.modastack/credentials.yaml`.
 
 ### Commands
 
 ```bash
-dispatch init              # initialize config + start daemon in tmux
-dispatch setup [path]      # auto-generate .dispatch.yaml and register a repo
-dispatch register <path>   # register a repo (if .dispatch.yaml already exists)
-dispatch repos             # list registered repos
+modastack init              # initialize config + start daemon in tmux
+modastack setup [path]      # auto-generate .modastack.yaml and register a repo
+modastack register <path>   # register a repo (if .modastack.yaml already exists)
+modastack repos             # list registered repos
 dispatch daemon            # run as a long-running daemon (default: 5s poll)
 dispatch cycle             # run one dispatch cycle (manual/debugging)
-dispatch status            # show in-flight work
+modastack status            # show in-flight work
 dispatch watch             # live dashboard (refreshes every 5s)
 ```
 
 ## Per-repo config
 
-Drop `.dispatch.yaml` in any repo, or run `dispatch setup` to auto-generate:
+Drop `.modastack.yaml` in any repo, or run `modastack setup` to auto-generate:
 
 ```yaml
-credentials: "default"          # credential set from ~/.dispatch/credentials.yaml
+credentials: "default"          # credential set from ~/.modastack/credentials.yaml
 
 linear:
   project: "PROJ"               # Linear project key (e.g., ENG)
@@ -311,8 +311,8 @@ dispatch/
 ├── session.py       # Tmux session management (spawn, inject, capture, detect state)
 ├── summarizer.py    # Inspect worktree + tmux pane → determine phase → write handoff
 ├── state.py         # Running agent tracking
-├── config.py        # Global (~/.dispatch/) + per-repo (.dispatch.yaml)
-├── setup.py         # Auto-generate .dispatch.yaml from repo inspection
+├── config.py        # Global (~/.modastack/) + per-repo (.modastack.yaml)
+├── setup.py         # Auto-generate .modastack.yaml from repo inspection
 ├── board_setup.py   # Bootstrap Linear board with required workflow states
 └── cli.py           # Click CLI entrypoint
 ```
@@ -324,12 +324,12 @@ dispatch/
 | Skills first | Each phase is a self-contained skill — portable, testable, works manually or via daemon |
 | Persistent tmux sessions | One session per issue, reused across phases. Context carries forward, no cold starts |
 | Summarizer writes handoffs | Agents don't write handoffs — the summarizer inspects worktree state + tmux output to determine phase. Decouples agents from the dispatch protocol |
-| Handoff contract | `.dispatch/handoff.md` is the interface between phases — minimal, structured |
+| Handoff contract | `.modastack/handoff.md` is the interface between phases — minimal, structured |
 | Sub-agents | Context isolation within phases. Reviewer only sees the diff, not the spec |
 | Question bridging | Agent questions are posted to Linear, human replies injected back into tmux. Humans interact on Linear, never in tmux |
 | Simple Linear states | 4 states (Todo, In Progress, In Review, Done + Blocked). Internal phases are invisible to humans |
 | Daemon, not cron | Inherits full shell environment (Keychain, OAuth). No cron env issues |
-| Per-repo config | Daemon is global, config is local. Repo opts in via `.dispatch.yaml` |
+| Per-repo config | Daemon is global, config is local. Repo opts in via `.modastack.yaml` |
 | Manager over rules | Claude reasons about full context each tick instead of hard-coded routing. Handles edge cases (conflicting files, stuck workers, ambiguous comments) that rules can't |
 | Cheap poll, expensive think | Watcher polls every 5s (API calls + tmux checks). Only calls Claude when context hash changes. Avoids burning tokens on idle ticks |
 | Channel architecture | Each input source (Linear, GitHub, workers, Slack) is a pluggable channel module. Adding a new source means adding one file — no changes to the manager loop |

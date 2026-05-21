@@ -15,11 +15,11 @@ from .config import GlobalConfig, GLOBAL_CONFIG_DIR
 from .setup import generate_dispatch_yaml
 from .state import StateStore
 
-LOG_PATH = GLOBAL_CONFIG_DIR / "dispatch.log"
+LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
 
 
 @click.group()
-@click.version_option(version=version("agentd"), prog_name="dispatch")
+@click.version_option(version=version("modastack"), prog_name="modastack")
 def main():
     """Modabot — AI engineering manager + engineer team."""
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -42,9 +42,9 @@ def start(webhooks, port, batch_window):
     """Start modabot. Event-driven — reacts to webhooks and polls.
 
     Usage:
-        dispatch start                    # polling mode (default)
-        dispatch start --webhooks         # webhook + polling mode
-        dispatch start --webhooks --port 9090
+        modastack start                    # polling mode (default)
+        modastack start --webhooks         # webhook + polling mode
+        modastack start --webhooks --port 9090
     """
     from manager.events.consumer import run
     run(webhook_port=port, use_webhooks=webhooks, batch_window=batch_window)
@@ -84,7 +84,7 @@ def status():
         click.echo(f"  {agent.issue_id:10s} {agent.title}")
         click.echo(f"             {sess['state']}, {mins}m{secs}s, phase={agent.last_phase or 'starting'}")
         if alive:
-            click.echo(f"             tmux attach -t agentd-{agent.issue_id.lower()}")
+            click.echo(f"             tmux attach -t moda-{agent.issue_id.lower()}")
         if stall > 0 and alive:
             click.echo(f"             last activity: {stall}m ago")
         if sess.get("question"):
@@ -95,7 +95,7 @@ def status():
 @main.command()
 def decisions():
     """Show recent manager decisions."""
-    decisions_path = Path.home() / ".dispatch" / "manager" / "decisions.jsonl"
+    decisions_path = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
     if not decisions_path.exists():
         click.echo("No decisions yet.")
         return
@@ -123,8 +123,8 @@ def register(repo_path: str):
         click.echo(f"Already registered: {path}")
         return
 
-    if not (path / ".dispatch.yaml").exists():
-        click.echo(f"Warning: No .dispatch.yaml in {path}")
+    if not (path / ".modastack.yaml").exists():
+        click.echo(f"Warning: No .modastack.yaml in {path}")
 
     config.repos.append(path)
     config.save()
@@ -139,7 +139,7 @@ def init(non_interactive):
     config = GlobalConfig.load()
     config.save()
     click.echo(f"Config initialized at {GLOBAL_CONFIG_DIR / 'config.yaml'}")
-    click.echo("Run `dispatch setup <repo>` to add a repo.")
+    click.echo("Run `modastack setup <repo>` to add a repo.")
 
 
 @main.command()
@@ -150,7 +150,7 @@ def repos():
         click.echo("No repos registered.")
         return
     for path in config.repos:
-        has_config = (path / ".dispatch.yaml").exists()
+        has_config = (path / ".modastack.yaml").exists()
         click.echo(f"  {path.name:30s} [{'ready' if has_config else 'no config'}] {path}")
 
 
@@ -164,12 +164,12 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
     import yaml
 
     path = Path(repo_path).resolve()
-    config_path = path / ".dispatch.yaml"
+    config_path = path / ".modastack.yaml"
     credential_name = path.name
 
     if config_path.exists() and not non_interactive:
         try:
-            if not click.confirm(f".dispatch.yaml exists in {path}. Overwrite?"):
+            if not click.confirm(f".modastack.yaml exists in {path}. Overwrite?"):
                 return
         except (EOFError, click.Abort):
             pass

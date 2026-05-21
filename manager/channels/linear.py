@@ -1,8 +1,8 @@
 """Linear ticketing channel."""
 
 import asyncio
-from dispatch.config import GlobalConfig, RepoConfig
-from dispatch.scanner import scan_linear_all_active
+from modastack.config import GlobalConfig, RepoConfig
+from modastack.scanner import scan_linear_all_active
 
 
 async def gather(config: dict) -> list[dict]:
@@ -25,9 +25,9 @@ async def gather(config: dict) -> list[dict]:
 
         issues_by_state = await scan_linear_all_active(api_key, repo_config)
         for state_name, issues in issues_by_state.items():
-            # Load repo-specific context from .dispatch.yaml
+            # Load repo-specific context from .modastack.yaml
             import yaml
-            dispatch_yaml = repo_config.path / ".dispatch.yaml"
+            dispatch_yaml = repo_config.path / ".modastack.yaml"
             repo_context = ""
             if dispatch_yaml.exists():
                 raw = yaml.safe_load(dispatch_yaml.read_text()) or {}

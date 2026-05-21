@@ -10,17 +10,17 @@ import logging
 import time
 from pathlib import Path
 
-from dispatch.config import GlobalConfig, RepoConfig
-from dispatch.linear_api import get_state_ids, move_issue, add_comment
-from dispatch.session import (
+from modastack.config import GlobalConfig, RepoConfig
+from modastack.linear_api import get_state_ids, move_issue, add_comment
+from modastack.session import (
     spawn_session, inject, inject_skill, answer_question,
     kill_session, session_exists,
 )
-from dispatch.state import StateStore
+from modastack.state import StateStore
 
 log = logging.getLogger(__name__)
 
-MEMORY_PATH = Path.home() / ".dispatch" / "manager" / "memory.md"
+MEMORY_PATH = Path.home() / ".modastack" / "manager" / "memory.md"
 
 # Tracks "Thinking..." placeholders: channel_id → message ts
 _pending_placeholders: dict[str, str] = {}

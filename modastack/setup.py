@@ -1,4 +1,4 @@
-"""Auto-generate .dispatch.yaml by inspecting a repo."""
+"""Auto-generate .modastack.yaml by inspecting a repo."""
 
 import json
 import re
@@ -101,7 +101,7 @@ def detect_skills(repo_path: Path) -> list[str]:
 
 
 def generate_dispatch_yaml(repo_path: Path) -> dict:
-    """Generate a .dispatch.yaml config for the repo."""
+    """Generate a .modastack.yaml config for the repo."""
     test_cmd = detect_test_command(repo_path)
     linear_project = detect_linear_project(repo_path)
     skills = detect_skills(repo_path)
@@ -131,8 +131,8 @@ def generate_dispatch_yaml(repo_path: Path) -> dict:
 
 
 def setup_repo(repo_path: Path) -> Path:
-    """Generate .dispatch.yaml and return the path."""
+    """Generate .modastack.yaml and return the path."""
     config = generate_dispatch_yaml(repo_path)
-    output_path = repo_path / ".dispatch.yaml"
+    output_path = repo_path / ".modastack.yaml"
     output_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
     return output_path

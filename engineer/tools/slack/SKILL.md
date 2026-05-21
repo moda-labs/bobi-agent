@@ -29,13 +29,13 @@ Go to **OAuth & Permissions** → **Bot Token Scopes** and add:
 Click **Install to Workspace** at the top of OAuth & Permissions.
 Copy the **Bot User OAuth Token** (starts with `xoxb-`).
 
-### 4. Configure in agentd
+### 4. Configure in modastack
 
 ```bash
-dispatch setup --slack-token xoxb-your-token-here
+modastack setup --slack-token xoxb-your-token-here
 ```
 
-Or manually add to `~/.dispatch/credentials.yaml`:
+Or manually add to `~/.modastack/credentials.yaml`:
 
 ```yaml
 your-project:
@@ -52,7 +52,7 @@ In Slack, invite @Modabot to `#engineering` (or whatever channel you use):
 
 ## Channels
 
-Configure in `.dispatch.yaml`:
+Configure in `.modastack.yaml`:
 
 ```yaml
 messaging:

@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from dispatch.config import GlobalConfig
+from modastack.config import GlobalConfig
 
 
 async def gather(config: dict) -> list[dict]:

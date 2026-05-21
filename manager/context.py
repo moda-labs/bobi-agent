@@ -15,7 +15,7 @@ from manager.channels import linear, github, workers, slack
 
 log = logging.getLogger(__name__)
 
-MANAGER_DIR = Path.home() / ".dispatch" / "manager"
+MANAGER_DIR = Path.home() / ".modastack" / "manager"
 CONTEXT_PATH = MANAGER_DIR / "context.json"
 MEMORY_PATH = MANAGER_DIR / "memory.md"
 

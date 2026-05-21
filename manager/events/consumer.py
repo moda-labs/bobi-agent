@@ -22,7 +22,7 @@ from manager.executor import execute_actions, post_thinking_placeholder
 
 log = logging.getLogger(__name__)
 
-MEMORY_PATH = Path.home() / ".dispatch" / "manager" / "memory.md"
+MEMORY_PATH = Path.home() / ".modastack" / "manager" / "memory.md"
 
 
 def _format_events_for_prompt(events: list[dict]) -> str:

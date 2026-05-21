@@ -13,7 +13,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-EVENT_LOG = Path.home() / ".dispatch" / "manager" / "events.jsonl"
+EVENT_LOG = Path.home() / ".modastack" / "manager" / "events.jsonl"
 
 
 class EventBus:

@@ -1,6 +1,6 @@
 # Linear Setup
 
-Get a Linear API key for agentd to scan issues and post comments.
+Get a Linear API key for modastack to scan issues and post comments.
 
 **Time:** ~2 minutes.
 
@@ -8,29 +8,29 @@ Get a Linear API key for agentd to scan issues and post comments.
 
 1. Go to https://linear.app/settings/api
 2. Click **Create key**
-3. Name it `agentd`
+3. Name it `modastack`
 4. Copy the key (starts with `lin_api_`)
 
 That's it. Personal API keys have access to all teams/projects your account can see.
 
-## 2. Add the key to agentd
+## 2. Add the key to modastack
 
 ```bash
-dispatch init
+modastack init
 # Paste the lin_api_ key when prompted for Linear API key
 ```
 
 Or for named credentials:
 
 ```yaml
-# ~/.dispatch/credentials.yaml
+# ~/.modastack/credentials.yaml
 default:
   linear_api_key: "lin_api_..."
 ```
 
 ## 3. Configure your repo
 
-In your repo's `.dispatch.yaml`, set the Linear project key:
+In your repo's `.modastack.yaml`, set the Linear project key:
 
 ```yaml
 linear:
@@ -55,7 +55,7 @@ Dispatch only picks up issues in `Triage` or `Unstarted` states. Once it starts 
 If you work across different Linear organizations, create separate API keys for each and store them as named credentials:
 
 ```yaml
-# ~/.dispatch/credentials.yaml
+# ~/.modastack/credentials.yaml
 work:
   linear_api_key: "lin_api_work_org_key"
 
@@ -66,12 +66,12 @@ personal:
 Each repo references its credential set:
 
 ```yaml
-# work-repo/.dispatch.yaml
+# work-repo/.modastack.yaml
 credentials: "work"
 linear:
   project: "ENG"
 
-# side-project/.dispatch.yaml
+# side-project/.modastack.yaml
 credentials: "personal"
 linear:
   project: "SIDE"

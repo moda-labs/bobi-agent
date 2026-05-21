@@ -1,6 +1,6 @@
 # Slack Setup
 
-Create a Slack bot that agentd uses to scan for work requests and post status updates.
+Create a Slack bot that modastack uses to scan for work requests and post status updates.
 
 **Time:** ~5 minutes. No code, no server, no OAuth redirect URI.
 
@@ -36,10 +36,10 @@ That's it. No user scopes needed.
 3. Review and **Allow**
 4. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
 
-## 4. Add the token to agentd
+## 4. Add the token to modastack
 
 ```bash
-dispatch init
+modastack init
 # Paste the xoxb- token when prompted for Slack bot token
 ```
 
@@ -47,7 +47,7 @@ Or for named credentials (multiple workspaces):
 
 ```bash
 # Edit directly
-cat >> ~/.dispatch/credentials.yaml << 'EOF'
+cat >> ~/.modastack/credentials.yaml << 'EOF'
 my-workspace:
   linear_api_key: "lin_api_..."
   slack_bot_token: "xoxb-..."
@@ -83,7 +83,7 @@ No OAuth redirect server. No ngrok. No callback URL. The bot token is a static c
 If you have repos across different Slack workspaces, create one app per workspace and store each token as a named credential:
 
 ```yaml
-# ~/.dispatch/credentials.yaml
+# ~/.modastack/credentials.yaml
 workspace-a:
   slack_bot_token: "xoxb-workspace-a-token"
   linear_api_key: "lin_api_team_a"
@@ -96,7 +96,7 @@ workspace-b:
 Then each repo references its credential set:
 
 ```yaml
-# repo/.dispatch.yaml
+# repo/.modastack.yaml
 credentials: "workspace-a"
 ```
 
@@ -107,4 +107,4 @@ credentials: "workspace-a"
 | Bot can't post to channel | `/invite @Agent Dispatch` in that channel |
 | Bot can't read DMs | Enable Messages Tab in App Home settings |
 | `not_authed` error | Token expired or wrong — regenerate in OAuth & Permissions |
-| Bot posts but no one sees it | Check `slack_channel` in `.dispatch.yaml` matches the actual channel name |
+| Bot posts but no one sees it | Check `slack_channel` in `.modastack.yaml` matches the actual channel name |

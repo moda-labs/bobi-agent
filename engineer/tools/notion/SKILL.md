@@ -27,7 +27,7 @@ provide the following capabilities.
 
 ## Configuration
 
-When implemented, configure in `.dispatch.yaml`:
+When implemented, configure in `.modastack.yaml`:
 
 ```yaml
 knowledge_base:

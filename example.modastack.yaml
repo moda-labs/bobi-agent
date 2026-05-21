@@ -1,9 +1,9 @@
-# .dispatch.yaml — drop this in any repo to wire it up
+# .modastack.yaml — drop this in any repo to wire it up
 #
 # The dispatch engine scans all registered repos for this file.
 # No file = invisible to the engine. Add file = automated.
 
-# Which credential set to use (from ~/.dispatch/credentials.yaml)
+# Which credential set to use (from ~/.modastack/credentials.yaml)
 # Allows different repos to use different Linear teams.
 # Omit or set "default" to use the default credentials.
 credentials: "default"

@@ -56,7 +56,7 @@ def detect_phase(worktree: str) -> dict:
     all_changed = list(set(changed_files + uncommitted + unstaged))
 
     non_spec = [f for f in all_changed
-                if not f.startswith("specs/") and not f.startswith(".dispatch")]
+                if not f.startswith("specs/") and not f.startswith(".modastack")]
     spec_files = [f for f in all_changed if f.startswith("specs/") and f.endswith(".md")]
     spec_path = spec_files[0] if spec_files else None
 
@@ -78,7 +78,7 @@ def detect_phase(worktree: str) -> dict:
     if spec_path:
         return {"phase": "spec_complete", "pr_url": None, "spec_path": spec_path,
                 "has_commits": has_commits, "summary": f"Spec: {spec_path}"}
-    if has_commits or (wt / ".dispatch").exists():
+    if has_commits or (wt / ".modastack").exists():
         return {"phase": "triage_complete", "pr_url": None, "spec_path": None,
                 "has_commits": has_commits, "summary": "Triage complete."}
     return {"phase": "starting", "pr_url": None, "spec_path": None,

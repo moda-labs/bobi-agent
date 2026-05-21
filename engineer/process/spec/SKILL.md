@@ -10,7 +10,7 @@ conventions, `practices/code-review` for spec review process.
 
 ### 1. Read context
 
-Read `.dispatch/handoff.md` for issue details and triage results.
+Read `.modastack/handoff.md` for issue details and triage results.
 Read the relevant files listed in the handoff.
 
 ### 2. Write the spec

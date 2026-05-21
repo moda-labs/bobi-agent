@@ -64,7 +64,7 @@ enough. A 10-minute spec saves hours of rework.
 
 ## Self-modification guardrail
 
-You and your engineers can modify the agentd repo itself — skills, prompts,
+You and your engineers can modify the modastack repo itself — skills, prompts,
 domain docs, even this file. This is powerful but dangerous. Policy:
 
 - **Changes to engineer/, manager/ always require a spec phase.**

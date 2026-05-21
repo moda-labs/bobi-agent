@@ -10,7 +10,7 @@ commit/push conventions, `practices/code-review` for mandatory quality gates.
 
 ### 1. Read the plan
 
-Read `.dispatch/handoff.md`. If `spec_path` exists, read the spec.
+Read `.modastack/handoff.md`. If `spec_path` exists, read the spec.
 Otherwise use the issue description and triage notes.
 
 ### 2. For bugs: /investigate first

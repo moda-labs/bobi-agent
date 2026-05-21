@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from dispatch.config import LOG_DIR
+from modastack.config import LOG_DIR
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ SKILLS_DIR = Path(__file__).parent.parent / "engineer" / "process"
 
 
 def _session_name(issue_id: str) -> str:
-    return f"agentd-{issue_id.lower()}"
+    return f"moda-{issue_id.lower()}"
 
 
 def session_exists(issue_id: str) -> bool:
@@ -213,7 +213,7 @@ def inject_skill(issue_id: str, skill_name: str, context: str = "") -> None:
 
 
 def list_sessions() -> list[str]:
-    """List all agentd tmux sessions. Returns issue IDs."""
+    """List all modastack tmux sessions. Returns issue IDs."""
     result = subprocess.run(
         [TMUX, "list-sessions", "-F", "#{session_name}"],
         capture_output=True, text=True,
@@ -221,7 +221,7 @@ def list_sessions() -> list[str]:
     if result.returncode != 0:
         return []
     return [
-        name.replace("agentd-", "").upper()
+        name.replace("moda-", "").upper()
         for name in result.stdout.strip().splitlines()
-        if name.startswith("agentd-")
+        if name.startswith("moda-")
     ]

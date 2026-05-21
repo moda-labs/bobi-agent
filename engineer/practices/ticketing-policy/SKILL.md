@@ -24,7 +24,7 @@ Our workflow uses these states, in order:
 
 ## Where to find ticket info
 
-The handoff file (`.dispatch/handoff.md`) contains:
+The handoff file (`.modastack/handoff.md`) contains:
 - `issue_id`: the ticket identifier (e.g., BET-10)
 - `linear_id`: the UUID needed for API calls
 - `title`: the ticket title

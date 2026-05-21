@@ -34,7 +34,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 @pytest.fixture
 def claude_session():
     """Spawn a claude session and clean up after the test."""
-    name = f"agentd-test-{int(time.time())}"
+    name = f"moda-test-{int(time.time())}"
     spawn_session(name, cwd=REPO_ROOT)
     state = wait_for_prompt(name, timeout=30)
     assert state["state"] == "waiting_input", f"Claude didn't start: {state['state']}"
@@ -141,7 +141,7 @@ class TestSessionLifecycle:
     @pytest.mark.timeout(30)
     def test_kill_session(self):
         """Verify we can kill a session cleanly."""
-        name = f"agentd-kill-test-{int(time.time())}"
+        name = f"moda-kill-test-{int(time.time())}"
         spawn_session(name, cwd=REPO_ROOT)
         wait_for_prompt(name, timeout=20)
         assert session_exists(name)
@@ -153,7 +153,7 @@ class TestSessionLifecycle:
     @pytest.mark.timeout(30)
     def test_detect_exited_session(self):
         """If the tmux session is gone, detect it as exited."""
-        name = f"agentd-exit-test-{int(time.time())}"
+        name = f"moda-exit-test-{int(time.time())}"
         subprocess.run([
             TMUX, "new-session", "-d", "-s", name,
             "-x", "200", "-y", "50",

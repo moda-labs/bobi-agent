@@ -2,8 +2,8 @@
 
 import time
 
-from dispatch.session import detect_state, capture, session_exists
-from dispatch.state import StateStore
+from modastack.session import detect_state, capture, session_exists
+from modastack.state import StateStore
 
 
 async def gather(config: dict) -> list[dict]:
@@ -25,7 +25,7 @@ async def gather(config: dict) -> list[dict]:
             "alive": alive,
             "started_minutes_ago": int((time.time() - agent.started_at) / 60),
             "idle_minutes": int((time.time() - agent.last_activity_at) / 60),
-            "tmux_session": f"agentd-{iid.lower()}",
+            "tmux_session": f"moda-{iid.lower()}",
         }
 
         if sess_state.get("question"):

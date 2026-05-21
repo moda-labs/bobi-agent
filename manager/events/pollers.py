@@ -18,9 +18,9 @@ import threading
 import time
 from pathlib import Path
 
-from dispatch.config import GlobalConfig, RepoConfig
-from dispatch.session import detect_state, capture, session_exists
-from dispatch.state import StateStore
+from modastack.config import GlobalConfig, RepoConfig
+from modastack.session import detect_state, capture, session_exists
+from modastack.state import StateStore
 from .bus import get_bus
 
 log = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ def _poll_linear(interval: int = 30):
     """Poll Linear for issue changes. Fallback when webhooks aren't set up."""
     import truststore
     truststore.inject_into_ssl()
-    from dispatch.scanner import scan_linear_all_active
+    from modastack.scanner import scan_linear_all_active
 
     bus = get_bus()
     last_states = {}

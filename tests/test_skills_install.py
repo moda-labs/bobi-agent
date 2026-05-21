@@ -1,6 +1,6 @@
 """Tests for skill installation and discovery.
 
-Verifies that agentd skills are properly installed in .claude/skills/
+Verifies that modastack skills are properly installed in .claude/skills/
 and discoverable by Claude Code.
 """
 

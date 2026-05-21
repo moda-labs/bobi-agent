@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from dispatch.setup import (
+from modastack.setup import (
     detect_test_command,
     detect_package_manager,
     detect_skills,
@@ -91,6 +91,6 @@ def test_setup_repo_writes_file(tmp_path):
     output = setup_repo(tmp_path)
 
     assert output.exists()
-    assert output.name == ".dispatch.yaml"
+    assert output.name == ".modastack.yaml"
     content = output.read_text()
     assert "npm test" in content

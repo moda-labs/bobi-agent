@@ -6,7 +6,7 @@ Webhooks deliver real-time events to the modabot event bus via an HTTP endpoint.
 ## Prerequisites
 
 - **ngrok** (local dev) or a public IP (EC2): the webhook server needs a reachable URL
-- **Webhook server running**: `dispatch start --webhooks --port 8080`
+- **Webhook server running**: `modastack start --webhooks --port 8080`
 
 ## Start the tunnel (local dev only)
 
@@ -161,7 +161,7 @@ Slack uses Socket Mode instead of webhooks. No public URL required.
    - `message.channels` — public channel messages
    - `message.groups` — private channel messages
    - `app_mention` — @mentions
-4. Save the `xapp-` token in `~/.dispatch/credentials.yaml`:
+4. Save the `xapp-` token in `~/.modastack/credentials.yaml`:
 
 ```yaml
 your-project:
@@ -187,8 +187,8 @@ Run this to set up all webhooks for all registered repos:
 # Get ngrok URL
 NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
 
-# GitHub — for each repo in ~/.dispatch/config.yaml
-for repo in underminedsk/agentd underminedsk/bettertab; do
+# GitHub — for each repo in ~/.modastack/config.yaml
+for repo in underminedsk/modastack underminedsk/bettertab; do
   gh api repos/$repo/hooks --method POST \
     -f "config[url]=${NGROK_URL}/webhooks/github" \
     -f "config[content_type]=json" \
@@ -198,7 +198,7 @@ for repo in underminedsk/agentd underminedsk/bettertab; do
     -f "events[]=issue_comment"
 done
 
-# Linear — for each unique API key in ~/.dispatch/credentials.yaml
+# Linear — for each unique API key in ~/.modastack/credentials.yaml
 python3 -c "
 import yaml, httpx
 from pathlib import Path
@@ -225,7 +225,7 @@ When tearing down (e.g., ngrok URL changed), delete old webhooks:
 
 ```bash
 # GitHub
-for repo in underminedsk/agentd underminedsk/bettertab; do
+for repo in underminedsk/modastack underminedsk/bettertab; do
   HOOK_IDS=$(gh api repos/$repo/hooks --jq '.[].id')
   for id in $HOOK_IDS; do
     gh api repos/$repo/hooks/$id --method DELETE

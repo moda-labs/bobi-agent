@@ -7,7 +7,7 @@ correctly identifies worktree state.
 import subprocess
 from pathlib import Path
 
-from dispatch.summarizer import detect_phase
+from modastack.summarizer import detect_phase
 
 
 def _git(cwd, *args):
@@ -39,8 +39,8 @@ class TestDetectPhase:
 
     def test_dispatch_dir_only_is_triage_complete(self, tmp_path):
         _, wt = _init_repo_with_worktree(tmp_path)
-        (wt / ".dispatch").mkdir()
-        (wt / ".dispatch" / "handoff.md").write_text("test")
+        (wt / ".modastack").mkdir()
+        (wt / ".modastack" / "handoff.md").write_text("test")
         result = detect_phase(str(wt))
         assert result["phase"] == "triage_complete"
 
@@ -79,11 +79,11 @@ class TestDetectPhase:
         assert result["spec_path"] == "specs/test-1.md"
 
     def test_dispatch_only_commits_is_triage(self, tmp_path):
-        """Commits that only touch .dispatch/ should be triage, not implementation."""
+        """Commits that only touch .modastack/ should be triage, not implementation."""
         _, wt = _init_repo_with_worktree(tmp_path)
-        (wt / ".dispatch").mkdir()
-        (wt / ".dispatch" / "handoff.md").write_text("test")
-        _git(wt, "add", ".dispatch/")
+        (wt / ".modastack").mkdir()
+        (wt / ".modastack" / "handoff.md").write_text("test")
+        _git(wt, "add", ".modastack/")
         _git(wt, "commit", "-m", "triage handoff")
         result = detect_phase(str(wt))
         # No non-spec, non-dispatch changes = triage

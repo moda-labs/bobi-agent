@@ -44,7 +44,7 @@ of implementing the wrong thing is hours of wasted work and a rejected PR.
 
 ### 5. Write the handoff
 
-Write `.dispatch/handoff.md` with the triage results:
+Write `.modastack/handoff.md` with the triage results:
 
 ```markdown
 ---

@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 MANAGER_PROMPT = Path(__file__).parent / "prompt.md"
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
-DECISIONS_LOG = Path.home() / ".dispatch" / "manager" / "decisions.jsonl"
+DECISIONS_LOG = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
 
 
 def call_manager(context: dict, prompt_override: str = None) -> tuple[list[dict], str]:

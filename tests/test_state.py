@@ -2,7 +2,7 @@
 
 import time
 
-from dispatch.state import StateStore
+from modastack.state import StateStore
 
 
 def test_track_and_check(tmp_path):

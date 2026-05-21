@@ -13,7 +13,7 @@ import time
 import httpx
 import websocket
 
-from dispatch.config import GlobalConfig
+from modastack.config import GlobalConfig
 from .bus import get_bus
 
 log = logging.getLogger(__name__)

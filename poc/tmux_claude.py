@@ -58,7 +58,7 @@ def spawn_session(name: str, cwd: str = ".", skip_permissions: bool = True) -> b
     if session_exists(name):
         print(f"Session '{name}' spawned")
         # Enable logging
-        log_path = f"/tmp/agentd-{name}.log"
+        log_path = f"/tmp/moda-{name}.log"
         subprocess.run([
             TMUX, "pipe-pane", "-t", name, "-o", f"cat >> {log_path}",
         ])
@@ -219,14 +219,14 @@ def list_sessions() -> None:
 
 def demo():
     """Full demo: spawn claude, send a task, capture the result."""
-    session = "agentd-poc"
+    session = "moda-poc"
 
     if session_exists(session):
         kill_session(session)
         time.sleep(1)
 
     print("=== Step 1: Spawn claude in tmux ===")
-    spawn_session(session, cwd="/Users/zkozick/dev/agentd")
+    spawn_session(session, cwd="/Users/zkozick/dev/modastack")
 
     print("\n=== Step 2: Wait for claude to be ready ===")
     state = wait_for_prompt(session, timeout=30)
@@ -260,12 +260,12 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
 
     if cmd == "spawn":
-        name = sys.argv[2] if len(sys.argv) > 2 else "agentd-test"
-        cwd = sys.argv[3] if len(sys.argv) > 3 else "/Users/zkozick/dev/agentd"
+        name = sys.argv[2] if len(sys.argv) > 2 else "moda-test"
+        cwd = sys.argv[3] if len(sys.argv) > 3 else "/Users/zkozick/dev/modastack"
         spawn_session(name, cwd=cwd)
 
     elif cmd == "capture":
-        name = sys.argv[2] if len(sys.argv) > 2 else "agentd-test"
+        name = sys.argv[2] if len(sys.argv) > 2 else "moda-test"
         print(capture_pane(name))
 
     elif cmd == "inject":
@@ -274,13 +274,13 @@ if __name__ == "__main__":
         inject_text(name, text)
 
     elif cmd == "state":
-        name = sys.argv[2] if len(sys.argv) > 2 else "agentd-test"
+        name = sys.argv[2] if len(sys.argv) > 2 else "moda-test"
         import json
         state = detect_prompt_state(name)
         print(json.dumps(state, indent=2))
 
     elif cmd == "wait-for-prompt":
-        name = sys.argv[2] if len(sys.argv) > 2 else "agentd-test"
+        name = sys.argv[2] if len(sys.argv) > 2 else "moda-test"
         state = wait_for_prompt(name)
         import json
         print(json.dumps(state, indent=2))
@@ -294,7 +294,7 @@ if __name__ == "__main__":
         print(json.dumps(state, indent=2))
 
     elif cmd == "kill":
-        name = sys.argv[2] if len(sys.argv) > 2 else "agentd-test"
+        name = sys.argv[2] if len(sys.argv) > 2 else "moda-test"
         kill_session(name)
 
     elif cmd == "list":

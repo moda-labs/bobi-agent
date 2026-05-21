@@ -1,15 +1,15 @@
 """Global and per-repo configuration.
 
-Global config (~/.dispatch/config.yaml): instance-level settings
+Global config (~/.modastack/config.yaml): instance-level settings
   - Slack tokens (one bot per modabot instance)
   - Webhook server config
   - GitHub accounts
   - Registered repos
 
-Credentials (~/.dispatch/credentials.yaml): Linear API keys per workspace
-  - Referenced by .dispatch.yaml "credentials:" field in each repo
+Credentials (~/.modastack/credentials.yaml): Linear API keys per workspace
+  - Referenced by .modastack.yaml "credentials:" field in each repo
 
-Per-repo config (.dispatch.yaml): repo-specific settings
+Per-repo config (.modastack.yaml): repo-specific settings
   - Linear project, trigger labels
   - Test command, review policy
   - Repo-specific context for engineers
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-GLOBAL_CONFIG_DIR = Path.home() / ".dispatch"
+GLOBAL_CONFIG_DIR = Path.home() / ".modastack"
 GLOBAL_CONFIG_PATH = GLOBAL_CONFIG_DIR / "config.yaml"
 STATE_PATH = GLOBAL_CONFIG_DIR / "state.json"
 CREDENTIALS_PATH = GLOBAL_CONFIG_DIR / "credentials.yaml"
@@ -61,7 +61,7 @@ class Credentials:
 
 @dataclass
 class GlobalConfig:
-    """Instance-level config from ~/.dispatch/config.yaml."""
+    """Instance-level config from ~/.modastack/config.yaml."""
 
     repos: list[Path] = field(default_factory=list)
 
@@ -121,7 +121,7 @@ class GlobalConfig:
 
 @dataclass
 class RepoConfig:
-    """Per-repo config from .dispatch.yaml."""
+    """Per-repo config from .modastack.yaml."""
 
     path: Path
     linear_project: str = ""
@@ -136,9 +136,9 @@ class RepoConfig:
 
     @classmethod
     def from_file(cls, repo_path: Path) -> "RepoConfig":
-        config_path = repo_path / ".dispatch.yaml"
+        config_path = repo_path / ".modastack.yaml"
         if not config_path.exists():
-            raise FileNotFoundError(f"No .dispatch.yaml in {repo_path}")
+            raise FileNotFoundError(f"No .modastack.yaml in {repo_path}")
 
         raw = yaml.safe_load(config_path.read_text()) or {}
         linear = raw.get("linear", {})

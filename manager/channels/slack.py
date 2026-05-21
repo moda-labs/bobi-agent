@@ -11,12 +11,12 @@ from pathlib import Path
 
 import httpx
 
-from dispatch.config import GlobalConfig, Credentials
+from modastack.config import GlobalConfig, Credentials
 
 log = logging.getLogger(__name__)
 
 SLACK_API = "https://slack.com/api"
-STATE_PATH = Path.home() / ".dispatch" / "manager" / "slack_state.json"
+STATE_PATH = Path.home() / ".modastack" / "manager" / "slack_state.json"
 
 
 def _get_token() -> str:

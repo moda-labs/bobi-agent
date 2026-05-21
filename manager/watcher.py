@@ -98,7 +98,7 @@ if __name__ == "__main__":
         datefmt="%H:%M:%S",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(Path.home() / ".dispatch" / "manager.log"),
+            logging.FileHandler(Path.home() / ".modastack" / "manager.log"),
         ],
     )
 

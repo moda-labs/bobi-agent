@@ -1,4 +1,4 @@
-"""Bootstrap Linear workflow states for agentd lifecycle."""
+"""Bootstrap Linear workflow states for modastack lifecycle."""
 
 import httpx
 

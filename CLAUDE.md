@@ -1,15 +1,15 @@
-# agentd
+# modastack
 
 Skills-first dispatch daemon. Scans Linear for work, spawns Claude Code with the right skill for each phase, reports results via Linear.
 
 ## Setup
 
 ```bash
-cd ~/dev/agentd
+cd ~/dev/modastack
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-dispatch init --non-interactive
+modastack init --non-interactive
 ```
 
 ## First-time setup (agent guidance)
@@ -20,11 +20,11 @@ Do NOT guess or skip these steps.
 ### Step 1: Install
 
 ```bash
-cd ~/dev/agentd
+cd ~/dev/modastack
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-dispatch init --non-interactive
+modastack init --non-interactive
 ```
 
 ### Step 2: Setup the repo
@@ -39,35 +39,35 @@ Ask the user TWO things:
 
 Then run:
 ```bash
-dispatch setup --linear-key <API_KEY> --linear-project <PROJECT_KEY>
+modastack setup --linear-key <API_KEY> --linear-project <PROJECT_KEY>
 ```
 
-This stores the API key per-project (in ~/.dispatch/credentials.yaml,
-not in the repo) and generates `.dispatch.yaml`.
+This stores the API key per-project (in ~/.modastack/credentials.yaml,
+not in the repo) and generates `.modastack.yaml`.
 
 ### Step 3: Verify
 
-Show the user the generated `.dispatch.yaml` and ask if the detected
+Show the user the generated `.modastack.yaml` and ask if the detected
 test command and skills look correct.
 
 ### Important
 
 - NEVER guess the Linear project key — always ask
 - NEVER guess the Linear API key — always ask
-- Credentials are per-project, stored in ~/.dispatch/credentials.yaml
-- `.dispatch.yaml` is safe to commit (no secrets, just references a credential name)
+- Credentials are per-project, stored in ~/.modastack/credentials.yaml
+- `.modastack.yaml` is safe to commit (no secrets, just references a credential name)
 
 ## Commands
 
 ```bash
-dispatch start             # start modabot (foreground, 5s poll)
-dispatch tick              # run one manager tick (debugging)
-dispatch status            # show active engineer sessions
-dispatch decisions         # show recent manager decisions
-dispatch init              # initialize global config
-dispatch setup [path]      # auto-generate .dispatch.yaml and register a repo
-dispatch register <path>   # register a repo (if .dispatch.yaml already exists)
-dispatch repos             # list registered repos
+modastack start             # start modabot (foreground, 5s poll)
+modastack tick              # run one manager tick (debugging)
+modastack status            # show active engineer sessions
+modastack decisions         # show recent manager decisions
+modastack init              # initialize global config
+modastack setup [path]      # auto-generate .modastack.yaml and register a repo
+modastack register <path>   # register a repo (if .modastack.yaml already exists)
+modastack repos             # list registered repos
 ```
 
 ## Architecture
@@ -107,8 +107,8 @@ dispatch/
 ├── session.py       # Tmux session management (spawn, inject, capture, detect state)
 ├── summarizer.py    # Inspect worktree + tmux pane → determine phase → write handoff
 ├── state.py         # Running agent tracking
-├── config.py        # Global (~/.dispatch/) + per-repo (.dispatch.yaml)
-├── setup.py         # Auto-generate .dispatch.yaml from repo inspection
+├── config.py        # Global (~/.modastack/) + per-repo (.modastack.yaml)
+├── setup.py         # Auto-generate .modastack.yaml from repo inspection
 ├── board_setup.py   # Bootstrap Linear board with required workflow states
 └── cli.py           # Click CLI entrypoint
 ```
@@ -128,12 +128,12 @@ The daemon routes based on Linear state:
 | Blocked | human replied | inject answer into tmux session |
 
 Internal phases (triage, spec, implement) happen within "In Progress".
-The handoff file (`.dispatch/handoff.md`) tracks which sub-phase the
+The handoff file (`.modastack/handoff.md`) tracks which sub-phase the
 agent is in. Linear doesn't need to know.
 
 ## Handoff contract
 
-The summarizer writes `.dispatch/handoff.md` in the worktree by
+The summarizer writes `.modastack/handoff.md` in the worktree by
 inspecting git state (commits, PRs, specs) and tmux pane output:
 
 ```yaml
