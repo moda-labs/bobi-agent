@@ -51,11 +51,30 @@ def start(webhooks, port, batch_window):
 
 
 @main.command()
-def tick():
-    """Run one manager tick (for debugging)."""
-    from manager.loop import run_once
-    result = run_once()
-    click.echo(json.dumps(result, indent=2))
+@click.argument("message", required=False)
+def tick(message):
+    """Inject a message into the manager session (for debugging).
+
+    Usage:
+        modastack tick                          # check if manager is alive
+        modastack tick "what are you working on?"  # ask the manager something
+    """
+    from manager.session import is_alive, inject, capture, detect_state
+    if not is_alive():
+        click.echo("Manager session not running. Start with: modastack start")
+        return
+
+    state = detect_state()
+    click.echo(f"Manager state: {state}")
+
+    if message:
+        inject(message)
+        click.echo(f"Injected: {message}")
+    else:
+        pane = capture(lines=10)
+        content = [l.strip() for l in pane.splitlines() if l.strip() and "─" not in l and "bypass" not in l]
+        for line in content[-5:]:
+            click.echo(f"  {line}")
 
 
 @main.command()
