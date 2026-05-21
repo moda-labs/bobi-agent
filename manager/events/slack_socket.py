@@ -1,0 +1,185 @@
+"""Slack Socket Mode client — real-time events without webhooks.
+
+Connects to Slack via WebSocket. No public URL needed.
+Receives events and pushes them to the event bus.
+Filters channel messages to only those in threads Modabot participated in.
+"""
+
+import json
+import logging
+import threading
+import time
+
+import httpx
+import websocket
+
+from dispatch.config import Credentials, GlobalConfig
+from .bus import get_bus
+
+log = logging.getLogger(__name__)
+
+
+def _get_tokens() -> tuple[str, str]:
+    """Get (app_token, bot_token) from credentials."""
+    creds = Credentials.load()
+    app_token = ""
+    bot_token = ""
+    for name in creds.list_names():
+        entry = creds.get(name)
+        if not app_token and entry.get("slack_app_token"):
+            app_token = entry["slack_app_token"]
+        if not bot_token and entry.get("slack_bot_token"):
+            bot_token = entry["slack_bot_token"]
+    return app_token, bot_token
+
+
+def _get_bot_user_id(bot_token: str) -> str:
+    """Get the bot's own user ID."""
+    with httpx.Client() as c:
+        r = c.post("https://slack.com/api/auth.test",
+                    headers={"Authorization": f"Bearer {bot_token}"})
+        if r.status_code == 200 and r.json().get("ok"):
+            return r.json()["user_id"]
+    return ""
+
+
+def _resolve_user(bot_token: str, user_id: str, cache: dict) -> str:
+    """Resolve a user ID to a display name, with caching."""
+    if user_id in cache:
+        return cache[user_id]
+    with httpx.Client() as c:
+        r = c.get("https://slack.com/api/users.info",
+                   headers={"Authorization": f"Bearer {bot_token}"},
+                   params={"user": user_id})
+        if r.status_code == 200 and r.json().get("ok"):
+            name = r.json()["user"].get("real_name", user_id)
+            cache[user_id] = name
+            return name
+    cache[user_id] = user_id
+    return user_id
+
+
+def _open_socket_url(app_token: str) -> str:
+    """Get a WebSocket URL from Slack's apps.connections.open API."""
+    with httpx.Client() as c:
+        r = c.post("https://slack.com/api/apps.connections.open",
+                    headers={"Authorization": f"Bearer {app_token}"})
+        data = r.json()
+        if data.get("ok"):
+            return data["url"]
+        else:
+            log.error(f"Socket Mode connection failed: {data.get('error')}")
+            return ""
+
+
+def _run_socket(app_token: str, bot_token: str):
+    """Main socket loop — connect, receive events, push to bus."""
+    bus = get_bus()
+    bot_user_id = _get_bot_user_id(bot_token)
+    user_cache = {}
+    # Track threads modabot has participated in
+    our_threads: set[str] = set()
+
+    while True:
+        url = _open_socket_url(app_token)
+        if not url:
+            log.warning("Failed to get Socket Mode URL, retrying in 10s")
+            time.sleep(10)
+            continue
+
+        log.info("Slack Socket Mode connected")
+
+        def on_message(ws, raw):
+            try:
+                envelope = json.loads(raw)
+            except json.JSONDecodeError:
+                return
+
+            # Acknowledge immediately
+            envelope_id = envelope.get("envelope_id")
+            if envelope_id:
+                ws.send(json.dumps({"envelope_id": envelope_id}))
+
+            payload = envelope.get("payload", {})
+            event = payload.get("event", {})
+            event_type = event.get("type", "")
+
+            # Skip bot's own messages
+            if event.get("user") == bot_user_id or event.get("bot_id"):
+                # But track threads we participate in
+                thread_ts = event.get("thread_ts") or event.get("ts", "")
+                channel = event.get("channel", "")
+                if thread_ts and channel:
+                    our_threads.add(f"{channel}:{thread_ts}")
+                return
+
+            user_name = _resolve_user(bot_token, event.get("user", ""), user_cache)
+            channel = event.get("channel", "")
+            text = event.get("text", "")[:500]
+            thread_ts = event.get("thread_ts", "")
+
+            if event_type == "app_mention":
+                bus.push("slack.mention", "slack", {
+                    "channel_id": channel,
+                    "from": user_name,
+                    "from_id": event.get("user", ""),
+                    "text": text,
+                    "ts": event.get("ts", ""),
+                    "thread_ts": thread_ts,
+                })
+
+            elif event_type == "message":
+                channel_type = event.get("channel_type", "")
+
+                if channel_type == "im":
+                    # All DMs come through
+                    bus.push("slack.dm", "slack", {
+                        "channel_id": channel,
+                        "from": user_name,
+                        "from_id": event.get("user", ""),
+                        "text": text,
+                        "ts": event.get("ts", ""),
+                        "thread_ts": thread_ts,
+                    })
+
+                elif thread_ts and f"{channel}:{thread_ts}" in our_threads:
+                    # Thread reply in a channel where modabot participated
+                    bus.push("slack.thread_reply", "slack", {
+                        "channel_id": channel,
+                        "from": user_name,
+                        "from_id": event.get("user", ""),
+                        "text": text,
+                        "ts": event.get("ts", ""),
+                        "thread_ts": thread_ts,
+                    })
+
+                # Ignore other channel messages (noise)
+
+        def on_error(ws, error):
+            log.warning(f"Socket Mode error: {error}")
+
+        def on_close(ws, code, msg):
+            log.info(f"Socket Mode closed ({code}), reconnecting...")
+
+        ws = websocket.WebSocketApp(
+            url,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+        )
+        ws.run_forever(ping_interval=30, ping_timeout=10)
+        time.sleep(2)  # Brief pause before reconnect
+
+
+def start_socket_mode() -> threading.Thread | None:
+    """Start Slack Socket Mode in a background thread. Returns None if not configured."""
+    app_token, bot_token = _get_tokens()
+    if not app_token or not bot_token:
+        log.info("Slack Socket Mode not configured (missing app_token or bot_token)")
+        return None
+
+    thread = threading.Thread(target=_run_socket, args=(app_token, bot_token),
+                              daemon=True, name="slack-socket")
+    thread.start()
+    log.info("Slack Socket Mode started")
+    return thread

@@ -15,6 +15,7 @@ truststore.inject_into_ssl()
 
 from .bus import get_bus
 from .pollers import start_pollers
+from .slack_socket import start_socket_mode
 from .webhook_server import start_server
 from manager.loop import call_manager, DECISIONS_LOG
 from manager.executor import execute_actions, post_thinking_placeholder
@@ -124,10 +125,15 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
                      linear_secret=linear_secret,
                      slack_signing_secret=slack_signing_secret)
 
-    # Start pollers (exclude sources that have webhooks)
+    # Start Slack Socket Mode (real-time, no public URL needed)
+    slack_thread = start_socket_mode()
+
+    # Start pollers (exclude sources that have real-time connections)
     exclude = []
     if use_webhooks:
-        exclude = ["linear"]  # Workers always need polling, Slack depends on Events API setup
+        exclude.append("linear")
+    if slack_thread:
+        exclude.append("slack")  # Socket Mode replaces Slack poller
     start_pollers(exclude=exclude)
 
     log.info(f"Listening for events (batch window: {batch_window}s)")
