@@ -93,6 +93,27 @@ def status():
 
 
 @main.command()
+@click.option("--tail", default=20, help="Number of recent events to show")
+def events(tail):
+    """Show recent events from the event bus."""
+    events_path = Path.home() / ".modastack" / "manager" / "events.jsonl"
+    if not events_path.exists():
+        click.echo("No events yet.")
+        return
+
+    lines = events_path.read_text().strip().splitlines()
+    for line in lines[-tail:]:
+        entry = json.loads(line)
+        data = entry.get("data", {})
+        detail = data.get("text", "") or data.get("title", "") or data.get("issue_id", "")
+        if len(detail) > 80:
+            detail = detail[:80] + "..."
+        click.echo(f"  {entry['timestamp']}  {entry['source']:8s}  {entry['type']}")
+        if detail:
+            click.echo(f"    {detail}")
+
+
+@main.command()
 def decisions():
     """Show recent manager decisions."""
     decisions_path = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
