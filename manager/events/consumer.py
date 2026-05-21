@@ -1,12 +1,14 @@
-"""Event consumer — batches events and wakes the manager.
+"""Event consumer — batches events and feeds them to the persistent manager session.
 
-Replaces the old polling watcher. Instead of hashing context every 5s,
-it blocks until events arrive, batches them, and calls the manager once.
-The manager only runs when there's something to reason about.
+Events arrive from the bus. The consumer formats them and injects them
+into the manager's tmux session. The manager responds with actions
+(captured from the pane) or handles things directly via tools.
 """
 
+import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -17,103 +19,97 @@ from .bus import get_bus
 from .pollers import start_pollers
 from .slack_socket import start_socket_mode
 from .webhook_server import start_server
-from manager.loop import call_manager, DECISIONS_LOG
+from manager.session import start_or_resume, inject, capture, detect_state, is_alive
 from manager.executor import execute_actions, post_thinking_placeholder
 
 log = logging.getLogger(__name__)
 
-MEMORY_PATH = Path.home() / ".modastack" / "manager" / "memory.md"
+DECISIONS_LOG = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
 
 
-def _format_events_for_prompt(events: list[dict]) -> str:
-    """Format batched events into text the manager can read."""
-    lines = [f"# Modabot — {len(events)} new events", ""]
+def _format_events(events: list[dict]) -> str:
+    """Format batched events into a compact message for the manager session."""
+    lines = [f"[{len(events)} new events at {time.strftime('%H:%M:%S')}]"]
 
-    by_source = {}
     for e in events:
-        by_source.setdefault(e["source"], []).append(e)
+        data = e.get("data", {})
+        detail = data.get("text", "") or data.get("title", "") or data.get("body", "") or ""
+        if len(detail) > 200:
+            detail = detail[:200] + "..."
 
-    for source, source_events in by_source.items():
-        lines.append(f"## {source.title()} Events")
-        for e in source_events:
-            lines.append(f"- **{e['type']}** ({e['timestamp']})")
-            data = e.get("data", {})
-            for k, v in data.items():
-                if v and k != "recent_comments":
-                    lines.append(f"  {k}: {str(v)[:200]}")
-            if "recent_comments" in data:
-                for c in data["recent_comments"][-2:]:
-                    lines.append(f"  💬 [{c.get('author', '?')}]: {c.get('body', '')[:150]}")
-        lines.append("")
+        line = f"  {e['source']}/{e['type']}"
+        if data.get("issue_id"):
+            line += f" {data['issue_id']}"
+        if data.get("from"):
+            line += f" from {data['from']}"
+        if detail:
+            line += f": {detail}"
 
-    memory = ""
-    if MEMORY_PATH.exists():
-        memory = MEMORY_PATH.read_text()
-    if memory:
-        lines.append(f"## Memory\n{memory}")
+        # Include IDs the manager might need
+        if data.get("linear_id"):
+            line += f" (linear_id: {data['linear_id']})"
+        if data.get("channel_id"):
+            line += f" (channel_id: {data['channel_id']})"
+        if data.get("repo"):
+            line += f" (repo: {data['repo']})"
 
+        lines.append(line)
+
+    lines.append("")
+    lines.append("Respond with a JSON array of actions, or use tools directly.")
     return "\n".join(lines)
 
 
-def _format_context_with_events(events: list[dict]) -> dict:
-    """Build context dict compatible with the manager's call interface."""
-    return {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "events": events,
-        "channels": {},  # Legacy compat
-    }
+def _extract_actions_from_pane(pane_text: str) -> list[dict]:
+    """Try to extract JSON actions from the manager's pane output."""
+    # Strip markdown code fences
+    stripped = re.sub(r'```json\s*', '', pane_text)
+    stripped = re.sub(r'```\s*', '', stripped).strip()
+
+    # Find JSON array
+    match = re.search(r'\[[\s\S]*\]', stripped)
+    if match:
+        try:
+            parsed = json.loads(match.group())
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return []
 
 
-async def process_batch(events: list[dict]) -> dict:
-    """Process a batch of events through the manager."""
-    import asyncio
-    from manager.context import gather_all, write_context_prompt
+def _wait_for_response(timeout: int = 120) -> tuple[list[dict], str]:
+    """Wait for the manager to finish processing and return actions + reasoning."""
+    start = time.time()
+    last_content = ""
 
-    # Gather full context (Linear issues, workers, etc.) + append events
-    context = await gather_all()
-    full_prompt = write_context_prompt(context)
-    events_prompt = _format_events_for_prompt(events)
-    combined = full_prompt + "\n\n" + events_prompt
+    while time.time() - start < timeout:
+        state = detect_state()
+        if state == "waiting_input":
+            # Manager is done — capture the response
+            pane = capture(lines=40)
+            actions = _extract_actions_from_pane(pane)
+            return actions, pane
+        time.sleep(2)
 
-    # Call manager with full context + events
-    actions, reasoning = call_manager(context, prompt_override=combined)
-
-    # Execute actions
-    summary = await execute_actions(actions) if actions else {"executed": 0, "skipped": 0, "errors": 0}
-
-    # Log decisions
-    DECISIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
-    entry = {
-        "timestamp": context["timestamp"],
-        "events": len(events),
-        "event_types": list(set(e["type"] for e in events)),
-        "reasoning": reasoning,
-        "actions": actions,
-        "outcome": summary,
-    }
-    with open(DECISIONS_LOG, "a") as f:
-        f.write(json.dumps(entry) + "\n")
-
-    if actions:
-        log.info(f"Manager decided {len(actions)} actions: "
-                 + ", ".join(a.get("type", "?") for a in actions))
-
-    return summary
+    # Timeout
+    pane = capture(lines=40)
+    return [], pane
 
 
 def run(webhook_port: int = 8080, use_webhooks: bool = False,
         batch_window: float = 5.0, github_secret: str = "",
         linear_secret: str = "", slack_signing_secret: str = ""):
-    """Main event loop.
+    """Main event loop with persistent manager session."""
 
-    batch_window: seconds to wait for events to accumulate before processing.
-    use_webhooks: if True, start webhook server and skip Linear poller.
-    """
-    import asyncio
-
-    log.info("Modabot starting (event-driven mode)")
+    log.info("Modastack starting (event-driven, persistent manager)")
 
     bus = get_bus()
+
+    # Start the persistent manager session
+    if not start_or_resume():
+        log.error("Failed to start manager session")
+        return
 
     # Start webhook server if configured
     if use_webhooks:
@@ -121,31 +117,33 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
                      linear_secret=linear_secret,
                      slack_signing_secret=slack_signing_secret)
 
-    # Start Slack Socket Mode (real-time, no public URL needed)
+    # Start Slack Socket Mode
     slack_thread = start_socket_mode()
 
-    # Start pollers (exclude sources that have real-time connections)
+    # Start pollers
     exclude = []
     if use_webhooks:
         exclude.append("linear")
     if slack_thread:
-        exclude.append("slack")  # Socket Mode replaces Slack poller
+        exclude.append("slack")
     start_pollers(exclude=exclude)
 
     log.info(f"Listening for events (batch window: {batch_window}s)")
     tick_count = 0
 
     while True:
-        # Wait for at least one event
-        bus.wait(timeout=batch_window)
+        # Check if manager session is alive
+        if not is_alive():
+            log.warning("Manager session died — restarting")
+            start_or_resume()
 
-        # Drain all pending events
+        # Wait for events
+        bus.wait(timeout=batch_window)
         events = bus.drain()
         if not events:
             continue
 
-        # Immediately post "Thinking..." for any Slack messages
-        # This happens BEFORE context gathering or manager reasoning
+        # Immediately post "Thinking..." for Slack messages
         for e in events:
             if e["source"] == "slack" and e.get("type", "").startswith("slack."):
                 ch_id = e.get("data", {}).get("channel_id", "")
@@ -153,12 +151,40 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
                     asyncio.run(post_thinking_placeholder(ch_id))
 
         tick_count += 1
-        log.info(f"Batch #{tick_count}: {len(events)} events — "
-                 + ", ".join(set(e["type"] for e in events)))
+        event_types = ", ".join(set(e["type"] for e in events))
+        log.info(f"Batch #{tick_count}: {len(events)} events — {event_types}")
 
-        try:
-            summary = asyncio.run(process_batch(events))
-            if summary.get("executed", 0) > 0 or summary.get("errors", 0) > 0:
-                log.info(f"Result: {json.dumps(summary)}")
-        except Exception as e:
-            log.error(f"Batch processing failed: {e}")
+        # Wait for manager to be ready (not mid-thought from a previous batch)
+        for _ in range(30):
+            if detect_state() == "waiting_input":
+                break
+            time.sleep(2)
+
+        # Inject events into the manager session
+        event_text = _format_events(events)
+        inject(event_text)
+
+        # Wait for the manager to process and respond
+        actions, reasoning = _wait_for_response(timeout=120)
+
+        # Execute any structured actions the manager output
+        summary = {"executed": 0, "skipped": 0, "errors": 0}
+        if actions:
+            summary = asyncio.run(execute_actions(actions))
+
+        # Log
+        DECISIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "events": len(events),
+            "event_types": list(set(e["type"] for e in events)),
+            "actions": actions,
+            "outcome": summary,
+        }
+        with open(DECISIONS_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+        if actions:
+            log.info(f"Manager actions: {', '.join(a.get('type', '?') for a in actions)}")
+        if summary.get("executed", 0) > 0 or summary.get("errors", 0) > 0:
+            log.info(f"Result: {json.dumps(summary)}")

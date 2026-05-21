@@ -34,19 +34,30 @@ def session_exists(issue_id: str) -> bool:
     return result.returncode == 0
 
 
+SESSION_IDS_DIR = Path.home() / ".modastack" / "sessions"
+
+
 def spawn_session(issue_id: str, cwd: str) -> bool:
-    """Spawn an interactive claude session for an issue."""
+    """Spawn an interactive claude session for an issue, or resume a previous one."""
     name = _session_name(issue_id)
     if session_exists(issue_id):
         log.info(f"Session {name} already exists")
         return True
 
+    # Check for a saved session ID to resume
+    saved_id_path = SESSION_IDS_DIR / f"{issue_id}.id"
+    cmd = [CLAUDE, "--dangerously-skip-permissions", "--name", f"moda-{issue_id.lower()}"]
+    if saved_id_path.exists():
+        saved_id = saved_id_path.read_text().strip()
+        if saved_id:
+            cmd = [CLAUDE, "--resume", saved_id, "--dangerously-skip-permissions"]
+            log.info(f"Resuming session {saved_id} for {issue_id}")
+
     subprocess.run([
         TMUX, "new-session",
         "-d", "-s", name,
         "-x", "200", "-y", "50",
-        CLAUDE, "--dangerously-skip-permissions",
-    ], cwd=cwd)
+    ] + cmd, cwd=cwd)
 
     # Wait for claude to start
     for _ in range(15):
