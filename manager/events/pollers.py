@@ -18,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-from dispatch.config import GlobalConfig, RepoConfig, Credentials
+from dispatch.config import GlobalConfig, RepoConfig
 from dispatch.session import detect_state, capture, session_exists
 from dispatch.state import StateStore
 from .bus import get_bus
@@ -129,12 +129,7 @@ def _poll_slack(interval: int = 10):
     while True:
         try:
             if not token:
-                creds = Credentials.load()
-                for name in creds.list_names():
-                    t = creds.get(name).get("slack_bot_token", "")
-                    if t:
-                        token = t
-                        break
+                token = GlobalConfig.load().slack_bot_token
             if not token:
                 time.sleep(interval)
                 continue

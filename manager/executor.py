@@ -27,12 +27,7 @@ _pending_placeholders: dict[str, str] = {}
 
 
 def _get_slack_token() -> str:
-    from dispatch.config import Credentials
-    for name in Credentials.load().list_names():
-        t = Credentials.load().get(name).get("slack_bot_token", "")
-        if t:
-            return t
-    return GlobalConfig.load().slack_bot_token or ""
+    return GlobalConfig.load().slack_bot_token
 
 
 async def post_thinking_placeholder(channel_id: str) -> None:

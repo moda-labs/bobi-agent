@@ -13,24 +13,16 @@ import time
 import httpx
 import websocket
 
-from dispatch.config import Credentials, GlobalConfig
+from dispatch.config import GlobalConfig
 from .bus import get_bus
 
 log = logging.getLogger(__name__)
 
 
 def _get_tokens() -> tuple[str, str]:
-    """Get (app_token, bot_token) from credentials."""
-    creds = Credentials.load()
-    app_token = ""
-    bot_token = ""
-    for name in creds.list_names():
-        entry = creds.get(name)
-        if not app_token and entry.get("slack_app_token"):
-            app_token = entry["slack_app_token"]
-        if not bot_token and entry.get("slack_bot_token"):
-            bot_token = entry["slack_bot_token"]
-    return app_token, bot_token
+    """Get (app_token, bot_token) from global config."""
+    config = GlobalConfig.load()
+    return config.slack_app_token, config.slack_bot_token
 
 
 def _get_bot_user_id(bot_token: str) -> str:
