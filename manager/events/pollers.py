@@ -183,11 +183,84 @@ def _poll_slack(interval: int = 10):
         time.sleep(interval)
 
 
+def _poll_orphans(interval: int = 60):
+    """Detect orphaned issues — In Progress on Linear but no tmux session running.
+
+    This catches cases where an engineer session died (restart, crash, stall kill)
+    but the Linear ticket is still In Progress. Pushes an event so the manager
+    can decide whether to respawn or ask the human.
+    """
+    import truststore
+    truststore.inject_into_ssl()
+    from modastack.scanner import scan_linear_all_active
+
+    bus = get_bus()
+    alerted = set()
+
+    while True:
+        try:
+            global_config = GlobalConfig.load()
+            for repo_path in global_config.repos:
+                if not repo_path.exists():
+                    continue
+                try:
+                    rc = RepoConfig.from_file(repo_path)
+                except FileNotFoundError:
+                    continue
+                creds = rc.get_credentials()
+                api_key = creds.get("linear_api_key")
+                if not api_key:
+                    continue
+
+                issues_by_state = asyncio.run(scan_linear_all_active(api_key, rc))
+
+                for issue in issues_by_state.get("In Progress", []):
+                    iid = issue["identifier"]
+                    # Check if there's a tmux session for this issue
+                    session_name = f"moda-{iid.lower()}"
+                    has_session = subprocess.run(
+                        ["tmux", "has-session", "-t", session_name],
+                        capture_output=True,
+                    ).returncode == 0
+
+                    # Also check the older naming format
+                    if not has_session:
+                        alt_name = iid.lower()
+                        has_session = subprocess.run(
+                            ["tmux", "has-session", "-t", alt_name],
+                            capture_output=True,
+                        ).returncode == 0
+
+                    if not has_session and iid not in alerted:
+                        alerted.add(iid)
+                        labels = [l["name"] for l in issue.get("labels", {}).get("nodes", [])]
+                        bus.push("orphan.detected", "system", {
+                            "issue_id": iid,
+                            "linear_id": issue["id"],
+                            "title": issue["title"],
+                            "state": "In Progress",
+                            "labels": labels,
+                            "repo": str(rc.path),
+                            "project": rc.linear_project,
+                            "reason": "Issue is In Progress but no engineer session is running.",
+                        })
+                        log.info(f"Orphan detected: {iid} — In Progress, no session")
+
+                    elif has_session and iid in alerted:
+                        alerted.discard(iid)
+
+        except Exception as e:
+            log.error(f"Orphan poller error: {e}")
+
+        time.sleep(interval)
+
+
 # Registry of pollers — each runs in its own thread
 POLLERS = {
     "workers": (_poll_workers, 5),
     "linear": (_poll_linear, 30),
     "slack": (_poll_slack, 10),
+    "orphans": (_poll_orphans, 60),
 }
 
 
