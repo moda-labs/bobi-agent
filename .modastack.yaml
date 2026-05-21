@@ -1,5 +1,5 @@
 linear:
-  project: AGD
+  project: MDS
   trigger_labels:
   - agent
   skip_labels:
@@ -19,4 +19,4 @@ verify:
   test_command: pytest
   review_required: true
   auto_merge: false
-credentials: agentd
+credentials: modastack
