@@ -69,13 +69,6 @@ async def process_batch(events: list[dict]) -> dict:
     import asyncio
     from manager.context import gather_all, write_context_prompt
 
-    # Post thinking indicator for Slack DMs
-    for e in events:
-        if e["source"] == "slack" and e.get("type", "").startswith("slack."):
-            ch_id = e.get("data", {}).get("channel_id", "")
-            if ch_id:
-                await post_thinking_placeholder(ch_id)
-
     # Gather full context (Linear issues, workers, etc.) + append events
     context = await gather_all()
     full_prompt = write_context_prompt(context)
@@ -150,6 +143,14 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         events = bus.drain()
         if not events:
             continue
+
+        # Immediately post "Thinking..." for any Slack messages
+        # This happens BEFORE context gathering or manager reasoning
+        for e in events:
+            if e["source"] == "slack" and e.get("type", "").startswith("slack."):
+                ch_id = e.get("data", {}).get("channel_id", "")
+                if ch_id:
+                    asyncio.run(post_thinking_placeholder(ch_id))
 
         tick_count += 1
         log.info(f"Batch #{tick_count}: {len(events)} events — "
