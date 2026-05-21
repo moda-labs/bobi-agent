@@ -67,20 +67,23 @@ def _format_context_with_events(events: list[dict]) -> dict:
 async def process_batch(events: list[dict]) -> dict:
     """Process a batch of events through the manager."""
     import asyncio
+    from manager.context import gather_all, write_context_prompt
 
     # Post thinking indicator for Slack DMs
     for e in events:
-        if e["source"] == "slack" and e["type"] == "slack.message":
+        if e["source"] == "slack" and e.get("type", "").startswith("slack."):
             ch_id = e.get("data", {}).get("channel_id", "")
             if ch_id:
                 await post_thinking_placeholder(ch_id)
 
-    # Build context with events
-    context = _format_context_with_events(events)
-    prompt_text = _format_events_for_prompt(events)
+    # Gather full context (Linear issues, workers, etc.) + append events
+    context = await gather_all()
+    full_prompt = write_context_prompt(context)
+    events_prompt = _format_events_for_prompt(events)
+    combined = full_prompt + "\n\n" + events_prompt
 
-    # Call manager with events as the context
-    actions, reasoning = call_manager(context, prompt_override=prompt_text)
+    # Call manager with full context + events
+    actions, reasoning = call_manager(context, prompt_override=combined)
 
     # Execute actions
     summary = await execute_actions(actions) if actions else {"executed": 0, "skipped": 0, "errors": 0}
