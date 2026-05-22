@@ -32,17 +32,20 @@ DECISIONS_LOG = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
 _pending_placeholders: dict[str, str] = {}
 
 
-async def _post_thinking(channel_id: str) -> None:
-    """Post a 'Thinking...' message to Slack."""
+async def _post_thinking(channel_id: str, thread_ts: str = "") -> None:
+    """Post a 'Thinking...' message to Slack, in the right thread."""
     token = GlobalConfig.load().slack_bot_token
     if not token or not channel_id:
         return
     import httpx
+    payload = {"channel": channel_id, "text": "_Thinking..._"}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             "https://slack.com/api/chat.postMessage",
             headers={"Authorization": f"Bearer {token}"},
-            json={"channel": channel_id, "text": "_Thinking..._"},
+            json=payload,
         )
         if resp.status_code == 200 and resp.json().get("ok"):
             _pending_placeholders[channel_id] = resp.json()["ts"]
@@ -144,12 +147,13 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         if not events:
             continue
 
-        # Immediately post "Thinking..." for Slack messages
+        # Immediately post "Thinking..." for Slack messages — in the human's thread
         for e in events:
             if e["source"] == "slack" and e.get("type", "").startswith("slack."):
                 ch_id = e.get("data", {}).get("channel_id", "")
+                msg_ts = e.get("data", {}).get("ts", "")
                 if ch_id:
-                    asyncio.run(_post_thinking(ch_id))
+                    asyncio.run(_post_thinking(ch_id, thread_ts=msg_ts))
 
         tick_count += 1
         event_types = ", ".join(set(e["type"] for e in events))
