@@ -122,6 +122,28 @@ class WebhookHandler(BaseHTTPRequestHandler):
         data = payload.get("data", {})
         bus = get_bus()
 
+        # Filter to configured projects only
+        issue_id = ""
+        if event_type == "Issue":
+            issue_id = data.get("identifier", "")
+        elif event_type == "Comment":
+            issue_id = data.get("issue", {}).get("identifier", "")
+
+        if issue_id:
+            prefix = issue_id.split("-")[0]
+            from modastack.config import GlobalConfig, RepoConfig
+            configured_projects = set()
+            for repo_path in GlobalConfig.load().repos:
+                try:
+                    rc = RepoConfig.from_file(repo_path)
+                    configured_projects.add(rc.linear_project)
+                except FileNotFoundError:
+                    pass
+            if prefix not in configured_projects:
+                self.send_response(200)
+                self.end_headers()
+                return
+
         if event_type == "Issue":
             issue_id = data.get("identifier", "")
             bus.push(f"linear.issue.{action}", "linear", {
