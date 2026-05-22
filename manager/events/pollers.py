@@ -19,39 +19,73 @@ import time
 from pathlib import Path
 
 from modastack.config import GlobalConfig, RepoConfig
-from modastack.session import detect_state, capture, session_exists
-from modastack.state import StateStore
 from .bus import get_bus
 
 log = logging.getLogger(__name__)
 
 
 def _poll_workers(interval: int = 5):
-    """Poll tmux worker sessions for state changes."""
+    """Poll ALL tmux worker sessions for state changes.
+
+    Discovers sessions by scanning tmux ls, not just state.json.
+    This catches sessions the manager spawned directly via bash.
+    """
     bus = get_bus()
     last_states = {}
 
     while True:
         try:
-            store = StateStore()
-            for agent in store.all_agents():
-                iid = agent.issue_id
-                alive = session_exists(iid)
-                sess = detect_state(iid) if alive else {"state": "exited"}
-                state_key = f"{iid}:{sess['state']}"
+            # Discover all non-manager tmux sessions
+            result = subprocess.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True, text=True,
+            )
+            session_names = []
+            if result.returncode == 0:
+                session_names = [
+                    s.strip() for s in result.stdout.strip().splitlines()
+                    if s.strip() and s.strip() != "moda-manager"
+                ]
 
+            for session_name in session_names:
+                # Derive issue ID from session name
+                iid = session_name.upper().replace("WORKER-", "").replace("MODA-", "")
+
+                # Check session state by capturing pane
+                pane_result = subprocess.run(
+                    ["tmux", "capture-pane", "-t", session_name, "-p", "-S", "-5"],
+                    capture_output=True, text=True,
+                )
+                pane_lines = [l for l in (pane_result.stdout or "").splitlines() if l.strip()]
+
+                sess_state = "working"
+                for line in reversed(pane_lines[-5:]):
+                    if "❯" in line and "bypass" not in line:
+                        if any("bypass" in l or "⏵⏵" in l for l in pane_lines[-3:]):
+                            sess_state = "waiting_input"
+                        break
+
+                state_key = f"{iid}:{sess_state}"
                 if state_key != last_states.get(iid):
                     last_states[iid] = state_key
-                    bus.push(f"worker.{sess['state']}", "worker", {
+                    bus.push(f"worker.{sess_state}", "worker", {
                         "issue_id": iid,
-                        "title": agent.title,
-                        "phase": agent.last_phase,
-                        "session_state": sess["state"],
-                        "alive": alive,
-                        "idle_minutes": int((time.time() - agent.last_activity_at) / 60),
-                        "question": sess.get("question", ""),
-                        "options": sess.get("options", []),
+                        "session_name": session_name,
+                        "session_state": sess_state,
+                        "alive": True,
                     })
+
+            # Detect sessions that disappeared
+            current_ids = {s.upper().replace("WORKER-", "").replace("MODA-", "") for s in session_names}
+            for old_id in list(last_states.keys()):
+                if old_id not in current_ids:
+                    bus.push("worker.exited", "worker", {
+                        "issue_id": old_id,
+                        "session_state": "exited",
+                        "alive": False,
+                    })
+                    del last_states[old_id]
+
         except Exception as e:
             log.error(f"Worker poller error: {e}")
 

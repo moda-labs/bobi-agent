@@ -13,7 +13,6 @@ import click
 
 from .config import GlobalConfig, GLOBAL_CONFIG_DIR
 from .setup import generate_dispatch_yaml
-from .state import StateStore
 
 LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
 
@@ -79,36 +78,54 @@ def tick(message):
 
 @main.command()
 def status():
-    """Show active engineer sessions."""
-    from .session import session_exists, detect_state
+    """Show active sessions — discovered from tmux, not state files."""
+    import subprocess
+    import shutil
 
-    state = StateStore()
-    agents = state.all_agents()
-
-    if not agents:
-        click.echo("No active engineers.")
+    tmux = shutil.which("tmux") or "tmux"
+    result = subprocess.run(
+        [tmux, "list-sessions", "-F", "#{session_name} #{session_created}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo("No tmux sessions running.")
         return
 
-    import time as time_mod
-    for agent in agents:
-        elapsed = time_mod.time() - agent.started_at
-        mins = int(elapsed // 60)
-        secs = int(elapsed % 60)
+    sessions = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.strip().split(" ", 1)
+        if parts[0] != "moda-manager":
+            sessions.append(parts[0])
 
-        alive = session_exists(agent.issue_id)
-        sess = detect_state(agent.issue_id) if alive else {"state": "exited"}
+    if not sessions:
+        click.echo("No active engineers.")
+        click.echo("")
+        # Check manager
+        if any("moda-manager" in l for l in result.stdout.splitlines()):
+            click.echo("  Manager: running (tmux attach -t moda-manager)")
+        return
 
-        stall = int((time_mod.time() - agent.last_activity_at) / 60)
+    for name in sessions:
+        # Capture last few lines to show what it's doing
+        pane = subprocess.run(
+            [tmux, "capture-pane", "-t", name, "-p", "-S", "-3"],
+            capture_output=True, text=True,
+        ).stdout
+        last_line = ""
+        for l in reversed(pane.splitlines()):
+            l = l.strip()
+            if l and "─" not in l and "bypass" not in l and "⏵⏵" not in l:
+                last_line = l[:80]
+                break
 
-        click.echo(f"  {agent.issue_id:10s} {agent.title}")
-        click.echo(f"             {sess['state']}, {mins}m{secs}s, phase={agent.last_phase or 'starting'}")
-        if alive:
-            click.echo(f"             tmux attach -t moda-{agent.issue_id.lower()}")
-        if stall > 0 and alive:
-            click.echo(f"             last activity: {stall}m ago")
-        if sess.get("question"):
-            click.echo(f"             Q: {sess['question'][:80]}")
+        click.echo(f"  {name}")
+        click.echo(f"    tmux attach -t {name}")
+        if last_line:
+            click.echo(f"    {last_line}")
         click.echo()
+
+    if any("moda-manager" in l for l in result.stdout.splitlines()):
+        click.echo(f"  Manager: running (tmux attach -t moda-manager)")
 
 
 @main.command()
