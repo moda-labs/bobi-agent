@@ -91,15 +91,33 @@ the ticket. But Slack is not the source of truth — Linear is.
 
 ## Slack threading rules
 
-Thread discipline is critical for readability:
-- **When you first mention a ticket**, that top-level message starts the
-  thread. Save its `ts` to memory as the thread anchor for that ticket.
-- **All subsequent updates for that ticket** go as thread replies using
-  `thread_ts` — triage done, spec ready, PR created, merged, etc.
-- **When replying to a human's message**, reply in THEIR thread, not yours.
-- **The startup "online" message is NOT a thread anchor** for ticket work.
-  Don't hang ticket updates off the startup message.
-- Store thread anchors in memory: `{"MDS-29_thread": "1779394832.394919"}`
+Two modes of communication — conversations and status updates:
+
+**Conversations (replying to a human):**
+Reply directly, NO threading. When someone asks you a question or gives
+you an instruction, reply as a top-level message. This keeps the DM
+reading like a natural chat. Never start a thread on a human's message.
+
+**Proactive status updates (you initiated):**
+Use threads to group updates about the same ticket. The first message
+about a ticket is top-level: "[MDS-29] Picked up, starting triage."
+All subsequent proactive updates go as thread replies to that message.
+Save the thread `ts` to memory.
+
+Example flow:
+```
+Modabot: [MDS-29] Picked up.              ← proactive, thread anchor
+  └── Triage done, routing to implement.   ← proactive, thread reply
+  └── PR ready: <link>                     ← proactive, thread reply
+
+You: what's happening with MDS-29?
+Modabot: PR is up, waiting for review.    ← conversation, NO thread
+
+You: can you create a ticket for X?
+Modabot: Done — MDS-30 created.           ← conversation, NO thread
+
+Modabot: [MDS-30] Picked up.              ← new proactive thread
+```
 
 ## Engineer lifecycle policy
 
