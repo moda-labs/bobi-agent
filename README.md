@@ -225,23 +225,34 @@ manager/                          # Persistent manager + event system
     ├── webhook_server.py         # HTTP endpoints: /webhooks/github, /linear, /slack
     └── slack_socket.py           # Slack Socket Mode WebSocket client
 
-engineer/                         # Skills
+engineer/                         # Engineer skills
 ├── process/                      # Daemon-routed lifecycle phases
 │   ├── pickup/SKILL.md           # Take ticket, create worktree, triage
 │   ├── spec/SKILL.md             # Write implementation spec
 │   ├── implement/SKILL.md        # Build from spec, TDD, sub-agents
 │   ├── prepare-pr/SKILL.md       # Create/update PR
 │   └── feedback/SKILL.md         # Address review comments
-└── practices/                    # Org-specific "how we work here"
+└── practices/                    # Methodology skills
     ├── triage/SKILL.md           # Task intake & classification
     ├── build/SKILL.md            # Staff engineer coding methodology
-    ├── design-critic/SKILL.md    # Adversarial design doc reviewer
     ├── code-review/SKILL.md      # Mandatory quality gates
     ├── ticketing-policy/SKILL.md # Who moves tickets when
     ├── source-control-conventions/SKILL.md
-    └── brand-identity/SKILL.md   # Design system enforcement
+    ├── review/SKILL.md           # Pre-merge code review *
+    ├── investigate/SKILL.md      # Root cause debugging *
+    ├── ship/SKILL.md             # Ship workflow: test, review, PR *
+    ├── autoplan/SKILL.md         # Review pipeline: CEO → design → eng *
+    ├── plan-eng-review/SKILL.md  # Architecture review *
+    ├── plan-design-review/SKILL.md # UX review *
+    ├── plan-ceo-review/SKILL.md  # Scope review *
+    ├── office-hours/SKILL.md     # Structured design doc / brainstorm *
+    └── qa/SKILL.md               # Browser-based QA * (see note below)
 
-tools/                            # Shared tool reference (used by both manager and engineers)
+product_manager/                  # Product manager skills (standalone, not part of ticket pipeline)
+├── brand-identity/SKILL.md       # Brand discovery & visual identity
+└── design-critic/SKILL.md        # Adversarial design doc reviewer
+
+tools/                            # Shared tool reference (used by manager + engineers)
 ├── git/SKILL.md                  # Git CLI commands
 ├── github/SKILL.md               # gh CLI commands
 ├── linear/SKILL.md               # Linear GraphQL API
@@ -269,3 +280,25 @@ tools/                            # Shared tool reference (used by both manager 
 | Per-repo config | Instance is global, config is local. Repo opts in via `.modastack.yaml` |
 | Webhooks + polling | Webhooks for real-time events when available, pollers as fallback. Both push to the same bus |
 | Slack Socket Mode | WebSocket connection to Slack — no public URL needed, real-time DMs and mentions |
+
+## Skills marked with * — adapted from gstack
+
+Skills marked `*` in the project structure above were adapted from
+[gstack](https://github.com/garrytan/gstack) (MIT license). They provide
+battle-tested prompt engineering for code review, architecture review,
+shipping workflows, and more.
+
+**What works out of the box:** `/review`, `/investigate`, `/ship`, `/autoplan`,
+`/plan-eng-review`, `/plan-design-review`, `/plan-ceo-review`, `/office-hours` —
+these are self-contained prompt skills with no external dependencies.
+
+**What needs extra setup:**
+
+- **`/qa`** — requires the gstack `browse` binary (a compiled Playwright wrapper
+  for headless browser testing). Without it, the skill can't take snapshots or
+  interact with web pages. Install gstack separately or skip `/qa` and have
+  engineers do browser testing manually.
+
+- **`brand-identity`** (in `product_manager/`) — references gstack's `design`
+  binary, `gstack-slug`, and `~/.gstack/projects/` paths. Needs rewriting to
+  work standalone. Not part of the automated ticket pipeline.
