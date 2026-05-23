@@ -11,8 +11,10 @@ then register it in POLLERS.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -23,6 +25,16 @@ from modastack.config import GlobalConfig, RepoConfig
 from .bus import get_bus
 
 log = logging.getLogger(__name__)
+
+
+STALL_THRESHOLD_SECS = 300   # 5 min — emit worker.stalled
+STUCK_THRESHOLD_SECS = 600   # 10 min — emit worker.stuck
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 def _find_handoff(issue_id: str) -> dict:
@@ -51,15 +63,18 @@ def _poll_workers(interval: int = 5):
     """Poll ALL tmux worker sessions for state changes.
 
     Discovers sessions by scanning tmux ls, not just state.json.
-    When a session is waiting_input, reads the handoff file to include
-    the current phase in the event — so the manager can auto-route.
+    Uses detect_state from session.py for canonical state detection,
+    tracks output hashes to detect stalls, and reads handoff files
+    to include the current phase in events for auto-routing.
     """
+    from modastack.session import detect_state as detect_session_state
+
     bus = get_bus()
-    last_states = {}
+    last_states: dict[str, str] = {}
+    heartbeats: dict[str, dict] = {}
 
     while True:
         try:
-            # Discover all non-manager tmux sessions
             result = subprocess.run(
                 ["tmux", "list-sessions", "-F", "#{session_name}"],
                 capture_output=True, text=True,
@@ -72,33 +87,34 @@ def _poll_workers(interval: int = 5):
                 ]
 
             for session_name in session_names:
-                # Derive issue ID from session name
                 iid = session_name.upper().replace("WORKER-", "").replace("MODA-", "")
 
-                # Check session state by capturing pane
-                pane_result = subprocess.run(
-                    ["tmux", "capture-pane", "-t", session_name, "-p", "-S", "-5"],
-                    capture_output=True, text=True,
-                )
-                pane_lines = [l for l in (pane_result.stdout or "").splitlines() if l.strip()]
+                state_info = detect_session_state(iid)
+                sess_state = state_info["state"]
 
-                sess_state = "working"
-                for line in reversed(pane_lines[-5:]):
-                    if "❯" in line and "bypass" not in line:
-                        if any("bypass" in l or "⏵⏵" in l for l in pane_lines[-3:]):
-                            sess_state = "waiting_input"
-                        break
+                # Process liveness: tmux session exists but claude process died
+                if sess_state == "exited":
+                    bus.push("worker.process_dead", "worker", {
+                        "issue_id": iid,
+                        "session_name": session_name,
+                        "reason": "tmux session exists but claude process is not running",
+                    })
+                    last_states.pop(iid, None)
+                    heartbeats.pop(iid, None)
+                    continue
 
+                # Emit state change events
                 state_key = f"{iid}:{sess_state}"
                 if state_key != last_states.get(iid):
                     last_states[iid] = state_key
-
                     event_data = {
                         "issue_id": iid,
                         "session_name": session_name,
                         "session_state": sess_state,
                         "alive": True,
                     }
+                    if sess_state == "permission_blocked":
+                        event_data["prompt_line"] = state_info.get("prompt_line", "")
 
                     # When idle, read the handoff to include phase info
                     if sess_state == "waiting_input":
@@ -111,6 +127,44 @@ def _poll_workers(interval: int = 5):
 
                     bus.push(f"worker.{sess_state}", "worker", event_data)
 
+                # Heartbeat: hash pane output to detect stalls
+                pane_result = subprocess.run(
+                    ["tmux", "capture-pane", "-t", session_name, "-p", "-S", "-30"],
+                    capture_output=True, text=True,
+                )
+                pane_content = _strip_ansi(pane_result.stdout or "")
+                content_hash = hashlib.md5(pane_content.encode()).hexdigest()
+
+                now = time.monotonic()
+                hb = heartbeats.get(iid)
+                if hb is None or hb["hash"] != content_hash:
+                    heartbeats[iid] = {
+                        "hash": content_hash,
+                        "last_change": now,
+                        "alerted_stall": False,
+                        "alerted_stuck": False,
+                    }
+                elif sess_state not in ("waiting_input", "permission_blocked"):
+                    idle_secs = now - hb["last_change"]
+                    snippet = pane_content.strip().splitlines()[-3:] if pane_content.strip() else []
+
+                    if idle_secs > STUCK_THRESHOLD_SECS and not hb["alerted_stuck"]:
+                        hb["alerted_stuck"] = True
+                        bus.push("worker.stuck", "worker", {
+                            "issue_id": iid,
+                            "session_name": session_name,
+                            "idle_seconds": int(idle_secs),
+                            "last_output_snippet": "\n".join(snippet),
+                        })
+                    elif idle_secs > STALL_THRESHOLD_SECS and not hb["alerted_stall"]:
+                        hb["alerted_stall"] = True
+                        bus.push("worker.stalled", "worker", {
+                            "issue_id": iid,
+                            "session_name": session_name,
+                            "idle_seconds": int(idle_secs),
+                            "last_output_snippet": "\n".join(snippet),
+                        })
+
             # Detect sessions that disappeared
             current_ids = {s.upper().replace("WORKER-", "").replace("MODA-", "") for s in session_names}
             for old_id in list(last_states.keys()):
@@ -121,6 +175,7 @@ def _poll_workers(interval: int = 5):
                         "alive": False,
                     })
                     del last_states[old_id]
+                    heartbeats.pop(old_id, None)
 
         except Exception as e:
             log.error(f"Worker poller error: {e}")
@@ -328,12 +383,98 @@ def _poll_orphans(interval: int = 60):
         time.sleep(interval)
 
 
+def _get_modastack_root() -> Path:
+    return Path(__file__).parent.parent.parent
+
+
+def _extract_changelog_entries(changelog_text: str, from_version: str, to_version: str) -> str:
+    """Extract changelog entries between two versions."""
+    lines = changelog_text.splitlines()
+    capturing = False
+    entries = []
+
+    for line in lines:
+        if line.startswith("## ") and to_version in line:
+            capturing = True
+            continue
+        if line.startswith("## ") and from_version in line:
+            break
+        if capturing and line.strip():
+            entries.append(line)
+
+    return "\n".join(entries)
+
+
+def _check_version(bus, root: Path, last_announced: str) -> str:
+    """Check for a new version on origin/main. Returns the announced version (or last_announced)."""
+    result = subprocess.run(
+        ["git", "fetch", "origin", "main", "--quiet"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        log.debug(f"Version check: fetch failed — {result.stderr.strip()}")
+        return last_announced
+
+    result = subprocess.run(
+        ["git", "show", "origin/main:VERSION"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return last_announced
+    remote_version = result.stdout.strip()
+
+    version_file = root / "VERSION"
+    local_version = version_file.read_text().strip() if version_file.exists() else "0.0.0"
+
+    if remote_version == local_version or remote_version == last_announced:
+        return last_announced
+
+    changelog = ""
+    result = subprocess.run(
+        ["git", "show", "origin/main:CHANGELOG.md"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        changelog = _extract_changelog_entries(
+            result.stdout, local_version, remote_version
+        )
+
+    bus.push("system.update_available", "system", {
+        "current_version": local_version,
+        "new_version": remote_version,
+        "changelog": changelog,
+    })
+    log.info(f"Update available: {local_version} → {remote_version}")
+    return remote_version
+
+
+def _poll_version(interval: int = 3600):
+    """Check for new versions on origin/main.
+
+    Pass interval=0 for a one-shot check (used at startup).
+    """
+    bus = get_bus()
+    last_announced = ""
+    root = _get_modastack_root()
+
+    while True:
+        try:
+            last_announced = _check_version(bus, root, last_announced)
+        except Exception as e:
+            log.error(f"Version poller error: {e}")
+
+        if interval == 0:
+            return
+        time.sleep(interval)
+
+
 # Registry of pollers — each runs in its own thread
 POLLERS = {
     "workers": (_poll_workers, 5),
     "tasks": (_poll_tasks, 30),
     "slack": (_poll_slack, 10),
     "orphans": (_poll_orphans, 60),
+    "version": (_poll_version, 3600),
 }
 
 

@@ -284,6 +284,20 @@ when a PR is created or marked ready for review:
 
 Don't ask which repos are on Vercel — infer it from the repo.
 
+## Handling stall events
+
+| Event                      | Response                                           |
+|----------------------------|----------------------------------------------------|
+| `worker.stalled` (5 min)   | Check handoff for next step. If found, inject it.  |
+|                            | If no handoff or unclear, send Enter to nudge.      |
+|                            | Post to Slack: "{issue} engineer idle for 5 min"   |
+| `worker.stuck` (10 min)    | Kill session. Post to Slack with context.           |
+|                            | If work is incomplete, respawn with /pickup.        |
+| `worker.permission_blocked`| Kill session, respawn with --dangerously-skip-permissions. |
+|                            | Post to Slack: "{issue} was permission-blocked"    |
+| `worker.process_dead`      | Clean up tmux session. Check handoff for state.    |
+|                            | If work incomplete, respawn. Post to Slack.        |
+
 ## Available actions
 
 Output a JSON array. Each action is an object with a "type" field.
@@ -377,6 +391,16 @@ Nothing to do this tick.
 
 Output ONLY a JSON array of actions. No explanation, no markdown, no commentary.
 If nothing to do: `[{"type": "no_action", "reason": "..."}]`
+
+## Update events
+
+When you see `system.update_available`:
+1. Post a Slack DM to the operator summarizing what's new:
+   "Modastack v{new_version} is available (you're on v{current_version}).
+   What's new:\n{changelog}\n\nReply 'update' to apply."
+2. Do NOT auto-update. Wait for the human to reply "update" (or similar).
+3. When the human replies with approval, run: `modastack self-update`
+4. After the command completes, post a confirmation message.
 
 ## Context
 

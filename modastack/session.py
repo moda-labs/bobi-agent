@@ -144,6 +144,17 @@ def detect_state(issue_id: str) -> dict:
             "options": options,
         }
 
+    # Detect permission prompts (blocked waiting for interactive approval)
+    permission_patterns = [
+        r"Allow .+ \(y/n\)",
+        r"Do you want to proceed",
+        r"Yes, allow once",
+        r"Allow all",
+    ]
+    for line in last_lines:
+        if any(re.search(p, line) for p in permission_patterns):
+            return {"state": "permission_blocked", "prompt_line": line.strip()}
+
     # Detect waiting for input: ❯ prompt + permissions indicator
     for line in reversed(lines[-5:]):
         if "❯" in line and "bypass permissions" not in line:

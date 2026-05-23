@@ -2,8 +2,8 @@
 
 import json
 import logging
+import subprocess
 import sys
-from importlib.metadata import version
 from pathlib import Path
 
 import truststore
@@ -13,12 +13,15 @@ import click
 
 from .config import GlobalConfig, GLOBAL_CONFIG_DIR
 from .setup import generate_dispatch_yaml
+from .__version__ import __version__
 
 LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
+UPDATE_STATE_PATH = GLOBAL_CONFIG_DIR / "update_state.json"
+REPO_ROOT = Path(__file__).parent.parent
 
 
 @click.group()
-@click.version_option(version=version("modastack"), prog_name="modastack")
+@click.version_option(version=__version__, prog_name="modastack")
 def main():
     """Modabot — AI engineering manager + engineer team."""
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -331,6 +334,135 @@ def setup(repo_path: str, task_tracking: str | None, project: str | None,
             click.echo(f"  Linked /{name}")
     else:
         click.echo("  Skills already installed.")
+
+
+@main.command("self-update")
+def self_update():
+    """Pull latest from origin/main and reinstall modastack."""
+    log = logging.getLogger(__name__)
+
+    old_version = (REPO_ROOT / "VERSION").read_text().strip()
+    click.echo(f"Current version: {old_version}")
+
+    # Fetch latest
+    click.echo("Fetching origin/main...")
+    result = subprocess.run(
+        ["git", "fetch", "origin", "main", "--quiet"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo(f"Failed to fetch: {result.stderr.strip()}", err=True)
+        sys.exit(1)
+
+    # Check remote version
+    result = subprocess.run(
+        ["git", "show", "origin/main:VERSION"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo("Failed to read remote VERSION", err=True)
+        sys.exit(1)
+    remote_version = result.stdout.strip()
+
+    if remote_version == old_version:
+        click.echo("Already up to date.")
+        return
+
+    # Check for dirty working tree
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    ).stdout.strip()
+
+    stashed = False
+    if dirty:
+        click.echo("Working tree has uncommitted changes — stashing...")
+        subprocess.run(
+            ["git", "stash", "push", "-m", "modastack-self-update-backup"],
+            cwd=REPO_ROOT, check=True,
+        )
+        stashed = True
+
+    # Save rollback state
+    pre_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    ).stdout.strip()
+
+    import datetime
+    UPDATE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UPDATE_STATE_PATH.write_text(json.dumps({
+        "pre_update_head": pre_head,
+        "pre_update_version": old_version,
+        "updated_at": datetime.datetime.now().isoformat(),
+        "stashed": stashed,
+    }))
+
+    # Pull
+    click.echo(f"Updating {old_version} → {remote_version}...")
+    result = subprocess.run(
+        ["git", "pull", "--ff-only", "origin", "main"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo(f"Pull failed (history diverged?): {result.stderr.strip()}", err=True)
+        click.echo("Run `modastack rollback` to restore, or reconcile manually.")
+        if stashed:
+            subprocess.run(["git", "stash", "pop"], cwd=REPO_ROOT)
+        sys.exit(1)
+
+    # Reinstall
+    click.echo("Reinstalling...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo(f"pip install failed: {result.stderr.strip()}", err=True)
+        click.echo("Run `modastack rollback` to restore.")
+        sys.exit(1)
+
+    # Pop stash if needed
+    if stashed:
+        click.echo("Restoring stashed changes...")
+        subprocess.run(["git", "stash", "pop"], cwd=REPO_ROOT)
+
+    new_version = (REPO_ROOT / "VERSION").read_text().strip()
+    click.echo(f"Updated to v{new_version}")
+    log.info(f"Self-update complete: {old_version} → {new_version}")
+
+
+@main.command()
+def rollback():
+    """Roll back the last self-update."""
+    if not UPDATE_STATE_PATH.exists():
+        click.echo("No update state found — nothing to roll back.")
+        sys.exit(1)
+
+    state = json.loads(UPDATE_STATE_PATH.read_text())
+    pre_head = state["pre_update_head"]
+    pre_version = state["pre_update_version"]
+
+    click.echo(f"Rolling back to v{pre_version} (commit {pre_head[:8]})...")
+
+    result = subprocess.run(
+        ["git", "reset", "--hard", pre_head],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo(f"Reset failed: {result.stderr.strip()}", err=True)
+        sys.exit(1)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo(f"pip install failed: {result.stderr.strip()}", err=True)
+        sys.exit(1)
+
+    UPDATE_STATE_PATH.unlink(missing_ok=True)
+    click.echo(f"Rolled back to v{pre_version}")
 
 
 if __name__ == "__main__":
