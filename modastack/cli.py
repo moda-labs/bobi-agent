@@ -216,10 +216,13 @@ def repos():
 
 @main.command()
 @click.argument("repo_path", type=click.Path(exists=True), default=".")
-@click.option("--linear-project", default=None)
-@click.option("--linear-key", envvar="LINEAR_API_KEY", default=None)
+@click.option("--task-tracking", type=click.Choice(["github-issues", "linear"]), default=None,
+              help="Task tracking system (default: github-issues)")
+@click.option("--project", default=None, help="Project prefix (e.g., BET, TESS)")
+@click.option("--linear-key", envvar="LINEAR_API_KEY", default=None, help="Linear API key (only for --task-tracking linear)")
 @click.option("--non-interactive", is_flag=True, envvar="CI")
-def setup(repo_path: str, linear_project: str | None, linear_key: str | None, non_interactive: bool):
+def setup(repo_path: str, task_tracking: str | None, project: str | None,
+          linear_key: str | None, non_interactive: bool):
     """Set up a repo for modabot."""
     import yaml
 
@@ -234,28 +237,46 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
         except (EOFError, click.Abort):
             pass
 
-    from .config import Credentials
-    creds = Credentials.load()
-    existing_cred = creds.get(credential_name)
-    has_key = bool(existing_cred.get("linear_api_key"))
+    # Default to github-issues
+    if not task_tracking:
+        if linear_key:
+            task_tracking = "linear"
+        elif not non_interactive:
+            try:
+                task_tracking = click.prompt(
+                    "Task tracking system",
+                    type=click.Choice(["github-issues", "linear"]),
+                    default="github-issues",
+                )
+            except (EOFError, click.Abort):
+                task_tracking = "github-issues"
+        else:
+            task_tracking = "github-issues"
 
-    if linear_key:
-        creds.add(credential_name, linear_api_key=linear_key)
-        click.echo(f"Linear API key stored for '{credential_name}'")
-    elif not has_key and not non_interactive:
-        try:
-            key = click.prompt("Linear API key", default="", show_default=False)
-            if key:
-                creds.add(credential_name, linear_api_key=key)
-        except (EOFError, click.Abort):
-            pass
-    elif has_key:
-        click.echo(f"Linear API key already configured for '{credential_name}'")
+    # Handle credentials for Linear
+    if task_tracking == "linear":
+        from .config import Credentials
+        creds = Credentials.load()
+        existing_cred = creds.get(credential_name)
+        has_key = bool(existing_cred.get("linear_api_key"))
 
-    config = generate_dispatch_yaml(path)
+        if linear_key:
+            creds.add(credential_name, linear_api_key=linear_key)
+            click.echo(f"Linear API key stored for '{credential_name}'")
+        elif not has_key and not non_interactive:
+            try:
+                key = click.prompt("Linear API key", default="", show_default=False)
+                if key:
+                    creds.add(credential_name, linear_api_key=key)
+            except (EOFError, click.Abort):
+                pass
+        elif has_key:
+            click.echo(f"Linear API key already configured for '{credential_name}'")
+
+    config = generate_dispatch_yaml(path, task_tracking=task_tracking)
     config["credentials"] = credential_name
-    if linear_project:
-        config["linear"]["project"] = linear_project
+    if project:
+        config["task_tracking"]["project"] = project
 
     config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
     click.echo(f"Generated: {config_path}")
@@ -267,13 +288,22 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
         global_config.save()
         click.echo("Registered.")
 
-    # Bootstrap Linear board
-    resolved_key = linear_key or (creds.get(credential_name) or {}).get("linear_api_key")
-    resolved_project = linear_project or config["linear"]["project"]
-    if resolved_key and resolved_project:
-        click.echo("Bootstrapping Linear board...")
-        from .board_setup import bootstrap_board
-        for action in bootstrap_board(resolved_key, resolved_project):
+    # Bootstrap task tracker
+    if task_tracking == "linear":
+        resolved_key = linear_key
+        if not resolved_key:
+            from .config import Credentials
+            resolved_key = (Credentials.load().get(credential_name) or {}).get("linear_api_key")
+        resolved_project = project or config["task_tracking"]["project"]
+        if resolved_key and resolved_project:
+            click.echo("Bootstrapping Linear board...")
+            from .board_setup import bootstrap_board
+            for action in bootstrap_board(resolved_key, resolved_project):
+                click.echo(f"  {action}")
+    elif task_tracking == "github-issues":
+        click.echo("Bootstrapping GitHub Issues labels...")
+        from .github_issues import bootstrap_labels
+        for action in bootstrap_labels(path):
             click.echo(f"  {action}")
 
     # Install skills
@@ -282,10 +312,11 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
     target_skills = path / ".claude" / "skills"
     target_skills.mkdir(parents=True, exist_ok=True)
     installed = []
-    # Engineer skills + shared tools
+    # Engineer skills + product manager skills + shared tools
     skill_dirs = [
         repo_root / "engineer" / "process",
         repo_root / "engineer" / "practices",
+        repo_root / "product_manager",
         repo_root / "tools",
     ]
     for category_dir in skill_dirs:

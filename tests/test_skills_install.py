@@ -10,13 +10,20 @@ REPO_ROOT = Path(__file__).parent.parent
 ENGINEER_ROOT = REPO_ROOT / "engineer"
 PROCESS_SKILLS_SRC = ENGINEER_ROOT / "process"
 PRACTICES_SKILLS_SRC = ENGINEER_ROOT / "practices"
+PRODUCT_MANAGER_SKILLS_SRC = REPO_ROOT / "product_manager"
 TOOLS_SKILLS_SRC = REPO_ROOT / "tools"  # shared, top-level
 SKILLS_INSTALLED = REPO_ROOT / ".claude" / "skills"
 
 EXPECTED_PROCESS_SKILLS = ["pickup", "spec", "implement", "prepare-pr", "feedback"]
-EXPECTED_PRACTICES_SKILLS = ["triage", "build", "design-critic", "code-review", "ticketing-policy", "source-control-conventions", "brand-identity"]
-EXPECTED_TOOLS_SKILLS = ["linear", "git", "github", "slack", "notion"]
-EXPECTED_SKILLS = EXPECTED_PROCESS_SKILLS + EXPECTED_PRACTICES_SKILLS + EXPECTED_TOOLS_SKILLS
+EXPECTED_PRACTICES_SKILLS = [
+    "triage", "build", "code-review", "ticketing-policy", "source-control-conventions",
+    "review", "investigate", "ship", "autoplan",
+    "plan-eng-review", "plan-design-review", "plan-ceo-review",
+    "office-hours", "qa",
+]
+EXPECTED_PRODUCT_MANAGER_SKILLS = ["brand-identity", "design-critic"]
+EXPECTED_TOOLS_SKILLS = ["linear", "github-issues", "git", "github", "slack", "notion"]
+EXPECTED_SKILLS = EXPECTED_PROCESS_SKILLS + EXPECTED_PRACTICES_SKILLS + EXPECTED_PRODUCT_MANAGER_SKILLS + EXPECTED_TOOLS_SKILLS
 
 
 class TestSkillsExist:
@@ -24,6 +31,7 @@ class TestSkillsExist:
     def test_source_skills_directory_exists(self):
         assert PROCESS_SKILLS_SRC.exists()
         assert PRACTICES_SKILLS_SRC.exists()
+        assert PRODUCT_MANAGER_SKILLS_SRC.exists()
         assert TOOLS_SKILLS_SRC.exists()
 
     def test_all_source_skills_have_skill_md(self):
@@ -32,6 +40,9 @@ class TestSkillsExist:
             assert skill_md.exists(), f"Missing {skill_md}"
         for name in EXPECTED_PRACTICES_SKILLS:
             skill_md = PRACTICES_SKILLS_SRC / name / "SKILL.md"
+            assert skill_md.exists(), f"Missing {skill_md}"
+        for name in EXPECTED_PRODUCT_MANAGER_SKILLS:
+            skill_md = PRODUCT_MANAGER_SKILLS_SRC / name / "SKILL.md"
             assert skill_md.exists(), f"Missing {skill_md}"
         for name in EXPECTED_TOOLS_SKILLS:
             skill_md = TOOLS_SKILLS_SRC / name / "SKILL.md"
@@ -81,6 +92,8 @@ def _skill_path(name: str) -> Path:
         return PROCESS_SKILLS_SRC / name / "SKILL.md"
     if name in EXPECTED_PRACTICES_SKILLS:
         return PRACTICES_SKILLS_SRC / name / "SKILL.md"
+    if name in EXPECTED_PRODUCT_MANAGER_SKILLS:
+        return PRODUCT_MANAGER_SKILLS_SRC / name / "SKILL.md"
     return TOOLS_SKILLS_SRC / name / "SKILL.md"
 
 

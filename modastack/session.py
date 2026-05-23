@@ -83,10 +83,15 @@ def inject(issue_id: str, text: str) -> None:
     Claude Code's input is single-line — multiline pastes get held in
     the editor buffer and don't auto-submit. We collapse newlines to
     spaces so the text arrives as one message and submits on Enter.
+    The sleep between text and Enter is critical — without it, Enter
+    arrives before Claude Code has buffered the text and gets swallowed.
     """
     name = _session_name(issue_id)
     collapsed = " ".join(text.splitlines())
     subprocess.run([TMUX, "send-keys", "-t", name, "-l", collapsed])
+    time.sleep(1)
+    subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
+    time.sleep(0.5)
     subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
     log.info(f"{issue_id}: injected {len(collapsed)} chars")
 

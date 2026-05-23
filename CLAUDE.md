@@ -106,14 +106,25 @@ engineer/
 │   ├── implement/SKILL.md        # Build from spec, TDD, sub-agents
 │   ├── prepare-pr/SKILL.md       # Create/update PR
 │   └── feedback/SKILL.md         # Address review comments
-└── practices/                    # Org-specific "how we work here"
+└── practices/                    # Methodology skills
     ├── triage/SKILL.md           # Task intake & classification
     ├── build/SKILL.md            # Staff engineer coding methodology
-    ├── design-critic/SKILL.md    # Adversarial design doc reviewer
     ├── code-review/SKILL.md      # Mandatory quality gates
     ├── ticketing-policy/SKILL.md # Who moves tickets when
     ├── source-control-conventions/SKILL.md
-    └── brand-identity/SKILL.md   # Design system enforcement
+    ├── review/SKILL.md           # Pre-merge code review (from gstack)
+    ├── investigate/SKILL.md      # Root cause debugging (from gstack)
+    ├── ship/SKILL.md             # Ship workflow (from gstack)
+    ├── autoplan/SKILL.md         # Review pipeline (from gstack)
+    ├── plan-eng-review/SKILL.md  # Architecture review (from gstack)
+    ├── plan-design-review/SKILL.md # UX review (from gstack)
+    ├── plan-ceo-review/SKILL.md  # Scope review (from gstack)
+    ├── office-hours/SKILL.md     # Structured brainstorm (from gstack)
+    └── qa/SKILL.md               # Browser QA (from gstack, needs browse binary)
+
+product_manager/                  # Product manager skills (standalone)
+├── brand-identity/SKILL.md       # Brand discovery & visual identity
+└── design-critic/SKILL.md        # Adversarial design doc reviewer
 
 tools/                            # Shared tool reference (manager + engineers)
 ├── git/SKILL.md                  # Git CLI commands

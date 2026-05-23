@@ -6,11 +6,14 @@ Global config (~/.modastack/config.yaml): instance-level settings
   - GitHub accounts
   - Registered repos
 
-Credentials (~/.modastack/credentials.yaml): Linear API keys per workspace
+Credentials (~/.modastack/credentials.yaml): API keys per workspace
   - Referenced by .modastack.yaml "credentials:" field in each repo
+  - Keys depend on task tracker: linear_api_key for Linear, etc.
+  - GitHub Issues uses gh CLI auth (no key needed)
 
 Per-repo config (.modastack.yaml): repo-specific settings
-  - Linear project, trigger labels
+  - Task tracking system (github-issues or linear)
+  - Project prefix, trigger labels
   - Test command, review policy
   - Repo-specific context for engineers
 """
@@ -29,7 +32,7 @@ LOG_DIR = GLOBAL_CONFIG_DIR / "logs"
 
 @dataclass
 class Credentials:
-    """Linear API keys per workspace."""
+    """API keys per workspace (Linear, etc.). GitHub Issues needs no key."""
 
     entries: dict[str, dict[str, str]] = field(default_factory=dict)
 
@@ -49,10 +52,11 @@ class Credentials:
             return self.entries[name]
         return self.entries.get("default", {})
 
-    def add(self, name: str, linear_api_key: str = "") -> None:
+    def add(self, name: str, **kwargs: str) -> None:
         self.entries.setdefault(name, {})
-        if linear_api_key:
-            self.entries[name]["linear_api_key"] = linear_api_key
+        for key, value in kwargs.items():
+            if value:
+                self.entries[name][key] = value
         self.save()
 
     def list_names(self) -> list[str]:
@@ -124,7 +128,8 @@ class RepoConfig:
     """Per-repo config from .modastack.yaml."""
 
     path: Path
-    linear_project: str = ""
+    task_tracking: str = "github-issues"  # "github-issues" or "linear"
+    project: str = ""  # project prefix (e.g., BET, TESS) — used for both GitHub labels and Linear teams
     trigger_labels: list[str] = field(default_factory=lambda: ["agent"])
     skip_labels: list[str] = field(default_factory=lambda: ["blocked", "human-only"])
     max_parallel: int = 2
@@ -141,15 +146,33 @@ class RepoConfig:
             raise FileNotFoundError(f"No .modastack.yaml in {repo_path}")
 
         raw = yaml.safe_load(config_path.read_text()) or {}
-        linear = raw.get("linear", {})
+        task_tracking_config = raw.get("task_tracking", {})
         agent = raw.get("agent", {})
         verify = raw.get("verify", {})
 
+        # Backwards compat: old configs use "linear:" section
+        if "linear" in raw and "task_tracking" not in raw:
+            linear = raw["linear"]
+            return cls(
+                path=repo_path,
+                task_tracking="linear",
+                project=linear.get("project", ""),
+                trigger_labels=linear.get("trigger_labels", ["agent"]),
+                skip_labels=linear.get("skip_labels", ["blocked", "human-only"]),
+                max_parallel=agent.get("max_parallel", 2),
+                test_command=verify.get("test_command", ""),
+                review_required=verify.get("review_required", True),
+                auto_merge=verify.get("auto_merge", False),
+                credentials=raw.get("credentials", "default"),
+                context=raw.get("context", {}),
+            )
+
         return cls(
             path=repo_path,
-            linear_project=linear.get("project", ""),
-            trigger_labels=linear.get("trigger_labels", ["agent"]),
-            skip_labels=linear.get("skip_labels", ["blocked", "human-only"]),
+            task_tracking=task_tracking_config.get("system", "github-issues"),
+            project=task_tracking_config.get("project", ""),
+            trigger_labels=task_tracking_config.get("trigger_labels", ["agent"]),
+            skip_labels=task_tracking_config.get("skip_labels", ["blocked", "human-only"]),
             max_parallel=agent.get("max_parallel", 2),
             test_command=verify.get("test_command", ""),
             review_required=verify.get("review_required", True),
@@ -161,3 +184,8 @@ class RepoConfig:
     def get_credentials(self) -> dict[str, str]:
         creds = Credentials.load()
         return creds.get(self.credentials)
+
+    @property
+    def linear_project(self) -> str:
+        """Backwards compat for code that still references linear_project."""
+        return self.project if self.task_tracking == "linear" else ""

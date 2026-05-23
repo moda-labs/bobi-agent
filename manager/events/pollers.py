@@ -3,7 +3,8 @@
 Each poller runs in a background thread, polls periodically, and pushes
 events to the bus when something changes. Used for:
 - Worker tmux sessions (no webhook possible)
-- Linear/GitHub/Slack when webhooks aren't configured (fallback mode)
+- Task tracker (GitHub Issues or Linear) when webhooks aren't configured
+- Slack when Socket Mode isn't configured
 
 Adding a new poller: write a function that polls and pushes to the bus,
 then register it in POLLERS.
@@ -29,20 +30,42 @@ log = logging.getLogger(__name__)
 STALL_THRESHOLD_SECS = 300   # 5 min — emit worker.stalled
 STUCK_THRESHOLD_SECS = 600   # 10 min — emit worker.stuck
 
-_ANSI_RE = re.compile(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+def _find_handoff(issue_id: str) -> dict:
+    """Find and parse the handoff file for an issue across all registered repos.
+
+    Returns the YAML frontmatter as a dict, or {} if not found.
+    """
+    import yaml
+    global_config = GlobalConfig.load()
+    iid_lower = issue_id.lower()
+
+    for repo_path in global_config.repos:
+        handoff_path = repo_path / "worktrees" / iid_lower / ".modastack" / "handoff.md"
+        if handoff_path.exists():
+            try:
+                content = handoff_path.read_text()
+                if content.startswith("---"):
+                    end = content.index("---", 3)
+                    return yaml.safe_load(content[3:end]) or {}
+            except Exception:
+                pass
+    return {}
+
+
 def _poll_workers(interval: int = 5):
     """Poll ALL tmux worker sessions for state changes.
 
     Discovers sessions by scanning tmux ls, not just state.json.
-    This catches sessions the manager spawned directly via bash.
     Uses detect_state from session.py for canonical state detection,
-    and tracks output hashes over time to detect stalls.
+    tracks output hashes to detect stalls, and reads handoff files
+    to include the current phase in events for auto-routing.
     """
     from modastack.session import detect_state as detect_session_state
 
@@ -71,13 +94,12 @@ def _poll_workers(interval: int = 5):
 
                 # Process liveness: tmux session exists but claude process died
                 if sess_state == "exited":
-                    if last_states.get(iid) != f"{iid}:process_dead":
-                        last_states[iid] = f"{iid}:process_dead"
-                        bus.push("worker.process_dead", "worker", {
-                            "issue_id": iid,
-                            "session_name": session_name,
-                            "reason": "tmux session exists but claude process is not running",
-                        })
+                    bus.push("worker.process_dead", "worker", {
+                        "issue_id": iid,
+                        "session_name": session_name,
+                        "reason": "tmux session exists but claude process is not running",
+                    })
+                    last_states.pop(iid, None)
                     heartbeats.pop(iid, None)
                     continue
 
@@ -93,6 +115,16 @@ def _poll_workers(interval: int = 5):
                     }
                     if sess_state == "permission_blocked":
                         event_data["prompt_line"] = state_info.get("prompt_line", "")
+
+                    # When idle, read the handoff to include phase info
+                    if sess_state == "waiting_input":
+                        handoff = _find_handoff(iid)
+                        if handoff:
+                            event_data["phase"] = handoff.get("phase", "")
+                            event_data["title"] = handoff.get("title", "")
+                            if handoff.get("spec_pr"):
+                                event_data["spec_pr"] = handoff["spec_pr"]
+
                     bus.push(f"worker.{sess_state}", "worker", event_data)
 
                 # Heartbeat: hash pane output to detect stalls
@@ -151,12 +183,25 @@ def _poll_workers(interval: int = 5):
         time.sleep(interval)
 
 
-def _poll_linear(interval: int = 30):
-    """Poll Linear for issue changes. Fallback when webhooks aren't set up."""
-    import truststore
-    truststore.inject_into_ssl()
-    from modastack.scanner import scan_linear_all_active
+def _scan_repo_tasks(rc: RepoConfig) -> dict[str, list[dict]]:
+    """Scan tasks for a repo using the configured task tracker."""
+    if rc.task_tracking == "github-issues":
+        from modastack.github_issues import scan_github_issues
+        return scan_github_issues(rc)
+    elif rc.task_tracking == "linear":
+        import truststore
+        truststore.inject_into_ssl()
+        from modastack.scanner import scan_linear_all_active
+        creds = rc.get_credentials()
+        api_key = creds.get("linear_api_key")
+        if not api_key:
+            return {}
+        return asyncio.run(scan_linear_all_active(api_key, rc))
+    return {}
 
+
+def _poll_tasks(interval: int = 30):
+    """Poll the task tracker for issue changes. Works with both GitHub Issues and Linear."""
     bus = get_bus()
     last_states = {}
 
@@ -170,12 +215,10 @@ def _poll_linear(interval: int = 30):
                     rc = RepoConfig.from_file(repo_path)
                 except FileNotFoundError:
                     continue
-                creds = rc.get_credentials()
-                api_key = creds.get("linear_api_key") or global_config.linear_api_key
-                if not api_key:
-                    continue
 
-                issues_by_state = asyncio.run(scan_linear_all_active(api_key, rc))
+                issues_by_state = _scan_repo_tasks(rc)
+                source = rc.task_tracking  # "github-issues" or "linear"
+
                 for state_name, issues in issues_by_state.items():
                     for issue in issues:
                         iid = issue["identifier"]
@@ -187,26 +230,26 @@ def _poll_linear(interval: int = 30):
                         if state_key != last_states.get(iid):
                             last_states[iid] = state_key
 
-                            event_type = "linear.issue.updated"
+                            event_type = "task.updated"
                             if iid not in last_states or state_name == "Todo":
-                                event_type = "linear.issue.created" if state_name == "Todo" else "linear.issue.updated"
+                                event_type = "task.created" if state_name == "Todo" else "task.updated"
 
-                            bus.push(event_type, "linear", {
+                            bus.push(event_type, source, {
                                 "issue_id": iid,
-                                "linear_id": issue["id"],
+                                "task_id": issue["id"],
                                 "title": issue["title"],
                                 "description": (issue.get("description") or "")[:500],
                                 "state": state_name,
                                 "labels": labels,
                                 "repo": str(rc.path),
-                                "project": rc.linear_project,
+                                "project": rc.project,
                                 "recent_comments": [
                                     {"author": c.get("user", {}).get("name", ""), "body": c.get("body", "")[:300]}
                                     for c in comments[-3:]
                                 ],
                             })
         except Exception as e:
-            log.error(f"Linear poller error: {e}")
+            log.error(f"Task poller error: {e}")
 
         time.sleep(interval)
 
@@ -277,16 +320,12 @@ def _poll_slack(interval: int = 10):
 
 
 def _poll_orphans(interval: int = 60):
-    """Detect orphaned issues — In Progress on Linear but no tmux session running.
+    """Detect orphaned issues — In Progress in the task tracker but no tmux session running.
 
     This catches cases where an engineer session died (restart, crash, stall kill)
-    but the Linear ticket is still In Progress. Pushes an event so the manager
+    but the task is still In Progress. Pushes an event so the manager
     can decide whether to respawn or ask the human.
     """
-    import truststore
-    truststore.inject_into_ssl()
-    from modastack.scanner import scan_linear_all_active
-
     bus = get_bus()
     alerted = set()
 
@@ -300,12 +339,8 @@ def _poll_orphans(interval: int = 60):
                     rc = RepoConfig.from_file(repo_path)
                 except FileNotFoundError:
                     continue
-                creds = rc.get_credentials()
-                api_key = creds.get("linear_api_key")
-                if not api_key:
-                    continue
 
-                issues_by_state = asyncio.run(scan_linear_all_active(api_key, rc))
+                issues_by_state = _scan_repo_tasks(rc)
 
                 for issue in issues_by_state.get("In Progress", []):
                     iid = issue["identifier"]
@@ -329,13 +364,13 @@ def _poll_orphans(interval: int = 60):
                         labels = [l["name"] for l in issue.get("labels", {}).get("nodes", [])]
                         bus.push("orphan.detected", "system", {
                             "issue_id": iid,
-                            "linear_id": issue["id"],
+                            "task_id": issue["id"],
                             "title": issue["title"],
                             "state": "In Progress",
                             "labels": labels,
                             "repo": str(rc.path),
-                            "project": rc.linear_project,
-                            "reason": "Issue is In Progress but no engineer session is running.",
+                            "project": rc.project,
+                            "reason": "Task is In Progress but no engineer session is running.",
                         })
                         log.info(f"Orphan detected: {iid} — In Progress, no session")
 
@@ -436,7 +471,7 @@ def _poll_version(interval: int = 3600):
 # Registry of pollers — each runs in its own thread
 POLLERS = {
     "workers": (_poll_workers, 5),
-    "linear": (_poll_linear, 30),
+    "tasks": (_poll_tasks, 30),
     "slack": (_poll_slack, 10),
     "orphans": (_poll_orphans, 60),
     "version": (_poll_version, 3600),
@@ -446,7 +481,7 @@ POLLERS = {
 def start_pollers(exclude: list[str] = None) -> list[threading.Thread]:
     """Start all pollers in background threads.
 
-    exclude: list of poller names to skip (e.g., ["linear"] if using webhooks).
+    exclude: list of poller names to skip (e.g., ["tasks"] if using webhooks).
     """
     exclude = exclude or []
     threads = []
