@@ -93,11 +93,12 @@ workspace-b:
   linear_api_key: "lin_api_team_b"
 ```
 
-Then each repo references its credential set:
+Then each repo entry in `~/.modastack/config.yaml` references its credential set:
 
 ```yaml
-# repo/.modastack.yaml
-credentials: "workspace-a"
+repos:
+  - path: /path/to/repo
+    credentials: workspace-a
 ```
 
 ## Troubleshooting
@@ -107,4 +108,4 @@ credentials: "workspace-a"
 | Bot can't post to channel | `/invite @Agent Dispatch` in that channel |
 | Bot can't read DMs | Enable Messages Tab in App Home settings |
 | `not_authed` error | Token expired or wrong — regenerate in OAuth & Permissions |
-| Bot posts but no one sees it | Check `slack_channel` in `.modastack.yaml` matches the actual channel name |
+| Bot posts but no one sees it | Check the channel name in your Slack config |

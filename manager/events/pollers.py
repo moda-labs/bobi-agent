@@ -18,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-from modastack.config import GlobalConfig, RepoConfig
+from modastack.config import GlobalConfig
 from .bus import get_bus
 
 log = logging.getLogger(__name__)
@@ -104,19 +104,15 @@ def _poll_linear(interval: int = 30):
     while True:
         try:
             global_config = GlobalConfig.load()
-            for repo_path in global_config.repos:
-                if not repo_path.exists():
+            for entry in global_config.repos:
+                if not entry.path.exists():
                     continue
-                try:
-                    rc = RepoConfig.from_file(repo_path)
-                except FileNotFoundError:
-                    continue
-                creds = rc.get_credentials()
-                api_key = creds.get("linear_api_key") or global_config.linear_api_key
+                creds = entry.get_credentials()
+                api_key = creds.get("linear_api_key")
                 if not api_key:
                     continue
 
-                issues_by_state = asyncio.run(scan_linear_all_active(api_key, rc))
+                issues_by_state = asyncio.run(scan_linear_all_active(api_key, entry.linear_project))
                 for state_name, issues in issues_by_state.items():
                     for issue in issues:
                         iid = issue["identifier"]
@@ -139,8 +135,8 @@ def _poll_linear(interval: int = 30):
                                 "description": (issue.get("description") or "")[:500],
                                 "state": state_name,
                                 "labels": labels,
-                                "repo": str(rc.path),
-                                "project": rc.linear_project,
+                                "repo": str(entry.path),
+                                "project": entry.linear_project,
                                 "recent_comments": [
                                     {"author": c.get("user", {}).get("name", ""), "body": c.get("body", "")[:300]}
                                     for c in comments[-3:]
@@ -234,30 +230,24 @@ def _poll_orphans(interval: int = 60):
     while True:
         try:
             global_config = GlobalConfig.load()
-            for repo_path in global_config.repos:
-                if not repo_path.exists():
+            for entry in global_config.repos:
+                if not entry.path.exists():
                     continue
-                try:
-                    rc = RepoConfig.from_file(repo_path)
-                except FileNotFoundError:
-                    continue
-                creds = rc.get_credentials()
+                creds = entry.get_credentials()
                 api_key = creds.get("linear_api_key")
                 if not api_key:
                     continue
 
-                issues_by_state = asyncio.run(scan_linear_all_active(api_key, rc))
+                issues_by_state = asyncio.run(scan_linear_all_active(api_key, entry.linear_project))
 
                 for issue in issues_by_state.get("In Progress", []):
                     iid = issue["identifier"]
-                    # Check if there's a tmux session for this issue
                     session_name = f"moda-{iid.lower()}"
                     has_session = subprocess.run(
                         ["tmux", "has-session", "-t", session_name],
                         capture_output=True,
                     ).returncode == 0
 
-                    # Also check the older naming format
                     if not has_session:
                         alt_name = iid.lower()
                         has_session = subprocess.run(
@@ -274,8 +264,8 @@ def _poll_orphans(interval: int = 60):
                             "title": issue["title"],
                             "state": "In Progress",
                             "labels": labels,
-                            "repo": str(rc.path),
-                            "project": rc.linear_project,
+                            "repo": str(entry.path),
+                            "project": entry.linear_project,
                             "reason": "Issue is In Progress but no engineer session is running.",
                         })
                         log.info(f"Orphan detected: {iid} — In Progress, no session")

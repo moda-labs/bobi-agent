@@ -10,6 +10,7 @@ Instead of injecting long text into tmux (unreliable paste buffer), we:
 import asyncio
 import json
 import logging
+import subprocess
 import time
 from pathlib import Path
 
@@ -101,12 +102,37 @@ def _log_batch(events: list[dict]) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
+def _ensure_repos():
+    """Clone any registered repos that are missing from disk."""
+    config = GlobalConfig.load()
+    for entry in config.repos:
+        if entry.path.exists():
+            continue
+        if not entry.remote:
+            log.warning(f"Repo missing and no remote configured: {entry.path}")
+            continue
+        log.info(f"Cloning {entry.remote} -> {entry.path}")
+        entry.path.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["gh", "repo", "clone", entry.remote, str(entry.path)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            log.error(f"Clone failed: {result.stderr}")
+            continue
+        from modastack.setup import install_skill_symlinks
+        install_skill_symlinks(entry.path)
+        log.info(f"Cloned and set up: {entry.remote}")
+
+
 def run(webhook_port: int = 8080, use_webhooks: bool = False,
         batch_window: float = 5.0, github_secret: str = "",
         linear_secret: str = "", slack_signing_secret: str = ""):
     """Main event loop with persistent manager session."""
 
     log.info("Modastack starting (event-driven, persistent manager)")
+
+    _ensure_repos()
 
     bus = get_bus()
 

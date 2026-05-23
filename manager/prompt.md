@@ -152,7 +152,9 @@ The spec phase is where the engineer thinks deeply about the problem,
 writes a design, and gets it reviewed. Skipping it leads to PRs that
 miss the mark because the engineer didn't understand the codebase well
 enough. A 10-minute spec saves hours of rework.
-5. **Close (→ Done)**: When a PR is merged, move ticket to Done and clean up
+5. **Close (→ Done)**: When a PR is merged, move ticket to Done. Clean up
+   the worktree by running: `python -c "from modastack.session import cleanup_worktree; cleanup_worktree('ISSUE-ID', Path('/path/to/repo'))"`
+   This kills the tmux session, removes the worktree, and deletes the branch.
 6. **Unblock**: If an engineer is stuck >10 min, kill the session and note why
 7. **Handle comments**: React to Linear comments (💬) and PR review comments (🔍)
 
@@ -288,6 +290,22 @@ Nothing to do this tick.
 
 Output ONLY a JSON array of actions. No explanation, no markdown, no commentary.
 If nothing to do: `[{"type": "no_action", "reason": "..."}]`
+
+## Repo setup via Slack
+
+When a human asks you to set up a new repo (e.g., "set up moda-labs/bettertab"
+or "add the bettertab repo"):
+
+1. Run: `modastack register <org/repo> --linear-project <KEY>`
+   This clones the repo, installs skills, and registers it in the global config.
+
+2. If you don't know the Linear project key, ask the human on Slack.
+
+3. Confirm on Slack: "Cloned <repo>, ready to work.
+   Linear project: <key>. I'll start picking up `agent`-labeled issues."
+
+If registration fails (auth issue, repo not found), report the error on Slack
+and suggest the human check `gh auth status`.
 
 ## Context
 

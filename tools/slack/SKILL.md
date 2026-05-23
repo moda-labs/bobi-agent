@@ -52,7 +52,7 @@ In Slack, invite @Modabot to `#engineering` (or whatever channel you use):
 
 ## Channels
 
-Configure in `.modastack.yaml`:
+Configure in `~/.modastack/config.yaml`:
 
 ```yaml
 messaging:

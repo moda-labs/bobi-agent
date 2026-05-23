@@ -7,8 +7,7 @@ from modastack.setup import (
     detect_test_command,
     detect_package_manager,
     detect_skills,
-    generate_dispatch_yaml,
-    setup_repo,
+    install_skill_symlinks,
 )
 
 
@@ -77,20 +76,13 @@ def test_detect_skills_with_deploy(tmp_path):
     assert "land-and-deploy" in skills
 
 
-def test_generate_dispatch_yaml(tmp_path):
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'foo'\n")
-    config = generate_dispatch_yaml(tmp_path)
+def test_install_skill_symlinks_creates_links(tmp_path):
+    installed = install_skill_symlinks(tmp_path)
+    skills_dir = tmp_path / ".claude" / "skills"
 
-    assert config["verify"]["test_command"] == "pytest"
-    assert config["agent"]["tool"] == "claude"
-    assert "review" in config["agent"]["skills"]
-
-
-def test_setup_repo_writes_file(tmp_path):
-    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": "jest"}}))
-    output = setup_repo(tmp_path)
-
-    assert output.exists()
-    assert output.name == ".modastack.yaml"
-    content = output.read_text()
-    assert "npm test" in content
+    assert skills_dir.exists()
+    if installed:
+        for name in installed:
+            link = skills_dir / name
+            assert link.is_symlink()
+            assert (link / "SKILL.md").exists()

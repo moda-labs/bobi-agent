@@ -2,17 +2,15 @@
 
 import httpx
 
-from .config import RepoConfig
-
 LINEAR_API = "https://api.linear.app/graphql"
 
 
-async def scan_linear_all_active(api_key: str, repo_config: RepoConfig) -> dict[str, list[dict]]:
+async def scan_linear_all_active(api_key: str, linear_project: str) -> dict[str, list[dict]]:
     """Fetch all issues grouped by state name.
 
     Returns: {"Todo": [issue_data, ...], "In Progress": [...], ...}
     """
-    if not repo_config.linear_project:
+    if not linear_project:
         return {}
 
     query = """
@@ -36,7 +34,7 @@ async def scan_linear_all_active(api_key: str, repo_config: RepoConfig) -> dict[
         resp = await client.post(
             LINEAR_API,
             headers={"Authorization": api_key, "Content-Type": "application/json"},
-            json={"query": query, "variables": {"team": repo_config.linear_project}},
+            json={"query": query, "variables": {"team": linear_project}},
         )
         if resp.status_code != 200:
             return {}

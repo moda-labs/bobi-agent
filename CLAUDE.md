@@ -43,19 +43,20 @@ modastack setup --linear-key <API_KEY> --linear-project <PROJECT_KEY>
 ```
 
 This stores the API key per-project (in ~/.modastack/credentials.yaml,
-not in the repo) and generates `.modastack.yaml`.
+not in the repo), registers the repo in ~/.modastack/config.yaml, and
+installs engineer skills.
 
 ### Step 3: Verify
 
-Show the user the generated `.modastack.yaml` and ask if the detected
-test command and skills look correct.
+Show the user the registered repo entry and ask if the detected
+Linear project and skills look correct.
 
 ### Important
 
 - NEVER guess the Linear project key — always ask
 - NEVER guess the Linear API key — always ask
 - Credentials are per-project, stored in ~/.modastack/credentials.yaml
-- `.modastack.yaml` is safe to commit (no secrets, just references a credential name)
+- All repo config lives in ~/.modastack/config.yaml (nothing in the target repo)
 
 ## Commands
 
@@ -68,8 +69,8 @@ modastack status               # show active engineer sessions
 modastack events               # show recent events from the bus
 modastack decisions            # show recent manager decisions
 modastack init                 # initialize global config
-modastack setup [path]         # auto-generate .modastack.yaml and register a repo
-modastack register <path>      # register a repo (if .modastack.yaml already exists)
+modastack setup [path]         # set up a repo — install skills, store credentials, register
+modastack register <target>    # register a repo (local path or org/repo)
 modastack repos                # list registered repos
 ```
 
@@ -82,11 +83,10 @@ in tmux. The manager reasons about events and acts directly.
 ```
 modastack/                        # CLI + infrastructure
 ├── cli.py                        # Click CLI entrypoint
-├── config.py                     # Global (~/.modastack/) + per-repo (.modastack.yaml)
-├── state.py                      # Active engineer session tracking
+├── config.py                     # Global config (~/.modastack/config.yaml)
 ├── scanner.py                    # Linear GraphQL polling
 ├── session.py                    # Engineer tmux session management
-├── setup.py                      # Auto-generate .modastack.yaml from repo inspection
+├── setup.py                      # Repo setup — skill install, auto-detection
 └── board_setup.py                # Bootstrap Linear board with workflow states
 
 manager/                          # Persistent manager + event system
@@ -139,12 +139,12 @@ The manager routes based on events:
 | Human replied | inject answer into tmux session |
 
 Internal phases (triage, spec, implement) happen within "In Progress".
-The handoff file (`.modastack/handoff.md`) tracks which sub-phase the
-agent is in. Linear doesn't need to know.
+The handoff file (`~/.modastack/handoffs/<issue_id>.md`) tracks which
+sub-phase the agent is in. Linear doesn't need to know.
 
 ## Handoff contract
 
-Engineers write `.modastack/handoff.md` in their worktree:
+Engineers write `~/.modastack/handoffs/<issue_id>.md`:
 
 ```yaml
 ---

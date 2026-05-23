@@ -1,18 +1,12 @@
-"""Global and per-repo configuration.
+"""Global configuration.
 
 Global config (~/.modastack/config.yaml): instance-level settings
   - Slack tokens (one bot per modabot instance)
   - Webhook server config
   - GitHub accounts
-  - Registered repos
+  - Registered repos (with Linear project, credentials, labels)
 
 Credentials (~/.modastack/credentials.yaml): Linear API keys per workspace
-  - Referenced by .modastack.yaml "credentials:" field in each repo
-
-Per-repo config (.modastack.yaml): repo-specific settings
-  - Linear project, trigger labels
-  - Test command, review policy
-  - Repo-specific context for engineers
 """
 
 from dataclasses import dataclass, field
@@ -60,10 +54,26 @@ class Credentials:
 
 
 @dataclass
+class RepoEntry:
+    """A registered repo with its settings."""
+
+    path: Path
+    remote: str = ""
+    linear_project: str = ""
+    credentials: str = "default"
+    trigger_labels: list[str] = field(default_factory=lambda: ["agent"])
+    skip_labels: list[str] = field(default_factory=lambda: ["blocked", "human-only"])
+
+    def get_credentials(self) -> dict[str, str]:
+        creds = Credentials.load()
+        return creds.get(self.credentials)
+
+
+@dataclass
 class GlobalConfig:
     """Instance-level config from ~/.modastack/config.yaml."""
 
-    repos: list[Path] = field(default_factory=list)
+    repos: list[RepoEntry] = field(default_factory=list)
 
     # Slack — one bot per modabot instance
     slack_bot_token: str = ""
@@ -77,13 +87,38 @@ class GlobalConfig:
     github_default_account: str = ""
     github_accounts: dict[str, str] = field(default_factory=dict)
 
+    @property
+    def repo_paths(self) -> list[Path]:
+        return [e.path for e in self.repos]
+
+    def get_repo(self, path: Path) -> RepoEntry | None:
+        resolved = path.resolve()
+        for entry in self.repos:
+            if entry.path.resolve() == resolved:
+                return entry
+        return None
+
     @classmethod
     def load(cls) -> "GlobalConfig":
         if not GLOBAL_CONFIG_PATH.exists():
             return cls()
 
         raw = yaml.safe_load(GLOBAL_CONFIG_PATH.read_text()) or {}
-        repos = [Path(p).expanduser() for p in raw.get("repos", [])]
+
+        repos = []
+        for entry in raw.get("repos", []):
+            if isinstance(entry, dict):
+                repos.append(RepoEntry(
+                    path=Path(entry["path"]).expanduser(),
+                    remote=entry.get("remote", ""),
+                    linear_project=entry.get("linear_project", ""),
+                    credentials=entry.get("credentials", "default"),
+                    trigger_labels=entry.get("trigger_labels", ["agent"]),
+                    skip_labels=entry.get("skip_labels", ["blocked", "human-only"]),
+                ))
+            elif isinstance(entry, str):
+                repos.append(RepoEntry(path=Path(entry).expanduser()))
+
         slack = raw.get("slack", {})
         webhooks = raw.get("webhooks", {})
         github = raw.get("github", {})
@@ -100,6 +135,22 @@ class GlobalConfig:
 
     def save(self) -> None:
         GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+        repo_dicts = []
+        for entry in self.repos:
+            d: dict = {"path": str(entry.path)}
+            if entry.remote:
+                d["remote"] = entry.remote
+            if entry.linear_project:
+                d["linear_project"] = entry.linear_project
+            if entry.credentials != "default":
+                d["credentials"] = entry.credentials
+            if entry.trigger_labels != ["agent"]:
+                d["trigger_labels"] = entry.trigger_labels
+            if entry.skip_labels != ["blocked", "human-only"]:
+                d["skip_labels"] = entry.skip_labels
+            repo_dicts.append(d)
+
         data = {
             "slack": {
                 "bot_token": self.slack_bot_token,
@@ -112,52 +163,8 @@ class GlobalConfig:
                 "default_account": self.github_default_account,
                 "accounts": self.github_accounts,
             },
-            "repos": [str(p) for p in self.repos],
+            "repos": repo_dicts,
         }
         if self.public_url:
             data["webhooks"]["public_url"] = self.public_url
         GLOBAL_CONFIG_PATH.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
-
-
-@dataclass
-class RepoConfig:
-    """Per-repo config from .modastack.yaml."""
-
-    path: Path
-    linear_project: str = ""
-    trigger_labels: list[str] = field(default_factory=lambda: ["agent"])
-    skip_labels: list[str] = field(default_factory=lambda: ["blocked", "human-only"])
-    max_parallel: int = 2
-    test_command: str = ""
-    review_required: bool = True
-    auto_merge: bool = False
-    credentials: str = "default"
-    context: dict = field(default_factory=dict)
-
-    @classmethod
-    def from_file(cls, repo_path: Path) -> "RepoConfig":
-        config_path = repo_path / ".modastack.yaml"
-        if not config_path.exists():
-            raise FileNotFoundError(f"No .modastack.yaml in {repo_path}")
-
-        raw = yaml.safe_load(config_path.read_text()) or {}
-        linear = raw.get("linear", {})
-        agent = raw.get("agent", {})
-        verify = raw.get("verify", {})
-
-        return cls(
-            path=repo_path,
-            linear_project=linear.get("project", ""),
-            trigger_labels=linear.get("trigger_labels", ["agent"]),
-            skip_labels=linear.get("skip_labels", ["blocked", "human-only"]),
-            max_parallel=agent.get("max_parallel", 2),
-            test_command=verify.get("test_command", ""),
-            review_required=verify.get("review_required", True),
-            auto_merge=verify.get("auto_merge", False),
-            credentials=raw.get("credentials", "default"),
-            context=raw.get("context", {}),
-        )
-
-    def get_credentials(self) -> dict[str, str]:
-        creds = Credentials.load()
-        return creds.get(self.credentials)
