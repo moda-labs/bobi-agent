@@ -170,32 +170,33 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         event_types = ", ".join(set(e["type"] for e in events))
         log.info(f"Batch #{tick_count}: {len(events)} events — {event_types}")
 
-        # Wait for manager to be ready (up to 2 min)
-        state = "unknown"
-        for _ in range(60):
-            state = detect_state()
-            if state == "waiting_input":
-                break
-            time.sleep(2)
-        else:
-            log.warning(f"Manager not ready after 2 min (state={state}) — injecting anyway")
-
-        # Write events to file
+        # Write events to file (always, even if manager is busy)
         _write_events_file(events)
 
-        # Inject trigger with retry — verify it actually landed
+        # Only inject trigger if manager is waiting for input.
+        # If busy, it will see queued messages when it finishes.
+        state = detect_state()
+        if state == "working":
+            log.info(f"Batch #{tick_count}: manager is busy — events written, trigger deferred")
+            _log_batch(events)
+            continue
+
+        # Wait briefly for manager to be ready if in unknown state
+        if state != "waiting_input":
+            for _ in range(30):
+                state = detect_state()
+                if state in ("waiting_input", "working"):
+                    break
+                time.sleep(2)
+
+        if state == "working":
+            log.info(f"Batch #{tick_count}: manager started working — trigger deferred")
+            _log_batch(events)
+            continue
+
+        # Inject once — no retry flooding
         trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
-        for attempt in range(3):
-            inject(trigger)
-            time.sleep(1)
-            # Verify the trigger appears in the pane (manager received it)
-            from manager.session import capture
-            pane = capture(lines=5)
-            if "pending_events" in pane or detect_state() == "working":
-                break
-            log.warning(f"Inject attempt {attempt + 1} may not have landed — retrying")
-        else:
-            log.error("Failed to deliver trigger after 3 attempts")
+        inject(trigger)
 
         # Log
         _log_batch(events)
