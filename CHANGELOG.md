@@ -1,26 +1,12 @@
 # Changelog
 
-## 0.3.0 — 2026-05-23
+## 0.2.2 — 2026-05-23
 
 ### Added
-- Remote deployment: `modastack register org/repo` clones repos via `gh`, auto-detects settings
-- Auto-clone missing repos on startup — restart/redeploy just works
-- Main branch sync (fetch + reset) before engineer spawn keeps worktrees current
-- Worktree + branch cleanup when tasks move to Done
-- Git identity config during `modastack init` for headless remote boxes
-- Manager can set up repos via Slack DM — no SSH needed after initial auth
-- Handoff docs moved to `~/.modastack/handoffs/` — target repos stay clean
-
-### Changed
-- All repo config consolidated into `~/.modastack/config.yaml` — eliminated per-repo `.modastack.yaml`
-- `RepoConfig` replaced by `RepoEntry` in `GlobalConfig` — one config layer instead of two
-- `modastack register` accepts both local paths and `org/repo` format
-- Deploy script simplified — repos managed via Slack after one-time SSH setup
-
-### Removed
-- `.modastack.yaml` per-repo config files — no longer needed
-- `RepoConfig` class and `generate_dispatch_yaml()` / `setup_repo()` functions
-- `example.modastack.yaml`
+- Stall detection: heartbeat tracking via output hashing detects sessions idle >5 min (nudge) or >10 min (kill)
+- Permission prompt detection: sessions blocked on interactive approval are identified and reported
+- Process liveness checks: dead claude processes inside live tmux sessions emit `worker.process_dead`
+- Auto-routing: manager prompt now routes engineers to the next phase based on handoff state
 
 ## 0.2.1 — 2026-05-23
 

@@ -145,10 +145,15 @@ def inject(issue_id: str, text: str) -> None:
     Claude Code's input is single-line — multiline pastes get held in
     the editor buffer and don't auto-submit. We collapse newlines to
     spaces so the text arrives as one message and submits on Enter.
+    The sleep between text and Enter is critical — without it, Enter
+    arrives before Claude Code has buffered the text and gets swallowed.
     """
     name = _session_name(issue_id)
     collapsed = " ".join(text.splitlines())
     subprocess.run([TMUX, "send-keys", "-t", name, "-l", collapsed])
+    time.sleep(1)
+    subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
+    time.sleep(0.5)
     subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
     log.info(f"{issue_id}: injected {len(collapsed)} chars")
 
@@ -167,9 +172,10 @@ def detect_state(issue_id: str) -> dict:
     """Analyze the pane to determine session state.
 
     Returns:
-        state: 'waiting_input' | 'working' | 'asking_question' | 'exited' | 'unknown'
+        state: 'waiting_input' | 'working' | 'asking_question' | 'permission_blocked' | 'exited' | 'unknown'
         question: str (if asking_question)
         options: list[str] (if asking_question)
+        prompt_line: str (if permission_blocked)
     """
     if not session_exists(issue_id):
         return {"state": "exited"}
@@ -200,6 +206,17 @@ def detect_state(issue_id: str) -> dict:
             "question": " ".join(question_lines),
             "options": options,
         }
+
+    # Detect permission prompts (blocked waiting for interactive approval)
+    permission_patterns = [
+        r"Allow .+ \(y/n\)",
+        r"Do you want to proceed",
+        r"Yes, allow once",
+        r"Allow all",
+    ]
+    for line in last_lines:
+        if any(re.search(p, line) for p in permission_patterns):
+            return {"state": "permission_blocked", "prompt_line": line.strip()}
 
     # Detect waiting for input: ❯ prompt + permissions indicator
     for line in reversed(lines[-5:]):

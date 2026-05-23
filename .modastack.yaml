@@ -1,4 +1,5 @@
-linear:
+task_tracking:
+  system: github-issues
   project: MDS
   trigger_labels:
   - agent

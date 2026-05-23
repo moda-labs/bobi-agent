@@ -68,8 +68,8 @@ def _write_events_file(events: list[dict]) -> None:
 
         if data.get("issue_id"):
             lines.append(f"- issue_id: {data['issue_id']}")
-        if data.get("linear_id"):
-            lines.append(f"- linear_id: {data['linear_id']}")
+        if data.get("task_id"):
+            lines.append(f"- task_id: {data['task_id']}")
         if data.get("from"):
             lines.append(f"- from: {data['from']}")
         if data.get("channel_id"):
@@ -80,6 +80,10 @@ def _write_events_file(events: list[dict]) -> None:
             lines.append(f"- state: {data['state']}")
         if data.get("labels"):
             lines.append(f"- labels: {', '.join(data['labels'])}")
+        if data.get("phase"):
+            lines.append(f"- phase: {data['phase']}")
+        if data.get("spec_pr"):
+            lines.append(f"- spec_pr: {data['spec_pr']}")
         if data.get("pr_url") or data.get("url"):
             lines.append(f"- url: {data.get('pr_url') or data.get('url')}")
         if data.get("current_version"):
@@ -160,7 +164,7 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
     # Start pollers
     exclude = []
     if use_webhooks:
-        exclude.append("linear")
+        exclude.append("tasks")
     if slack_thread:
         exclude.append("slack")
     start_pollers(exclude=exclude)
@@ -192,19 +196,33 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         event_types = ", ".join(set(e["type"] for e in events))
         log.info(f"Batch #{tick_count}: {len(events)} events — {event_types}")
 
-        # Wait for manager to be ready
-        for _ in range(60):
-            if detect_state() == "waiting_input":
-                break
-            time.sleep(2)
-        else:
-            log.warning("Manager not ready after 2 min — injecting anyway")
-
-        # Write events to file
+        # Write events to file (always, even if manager is busy)
         _write_events_file(events)
 
-        # Inject a short trigger (always submits reliably)
-        inject(f"New events. Read {PENDING_EVENTS_PATH} and act on them.")
+        # Only inject trigger if manager is waiting for input.
+        # If busy, it will see queued messages when it finishes.
+        state = detect_state()
+        if state == "working":
+            log.info(f"Batch #{tick_count}: manager is busy — events written, trigger deferred")
+            _log_batch(events)
+            continue
+
+        # Wait briefly for manager to be ready if in unknown state
+        if state != "waiting_input":
+            for _ in range(30):
+                state = detect_state()
+                if state in ("waiting_input", "working"):
+                    break
+                time.sleep(2)
+
+        if state == "working":
+            log.info(f"Batch #{tick_count}: manager started working — trigger deferred")
+            _log_batch(events)
+            continue
+
+        # Inject once — no retry flooding
+        trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
+        inject(trigger)
 
         # Log
         _log_batch(events)
