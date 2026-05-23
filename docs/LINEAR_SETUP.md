@@ -30,12 +30,18 @@ default:
 
 ## 3. Configure your repo
 
-In your repo's `.modastack.yaml`, set the Linear project key:
+Register the repo with its Linear project key:
+
+```bash
+modastack register /path/to/repo --linear-project PROJ
+```
+
+This adds an entry to `~/.modastack/config.yaml`:
 
 ```yaml
-linear:
-  project: "PROJ"              # The short key (visible in issue IDs like PROJ-42)
-  trigger_labels: ["agent"]    # Issues with this label get dispatched
+repos:
+  - path: /path/to/repo
+    linear_project: PROJ        # The short key (visible in issue IDs like PROJ-42)
 ```
 
 ## Finding your project key
@@ -63,18 +69,16 @@ personal:
   linear_api_key: "lin_api_personal_org_key"
 ```
 
-Each repo references its credential set:
+Each repo entry in `~/.modastack/config.yaml` references its credential set:
 
 ```yaml
-# work-repo/.modastack.yaml
-credentials: "work"
-linear:
-  project: "ENG"
-
-# side-project/.modastack.yaml
-credentials: "personal"
-linear:
-  project: "SIDE"
+repos:
+  - path: /path/to/work-repo
+    linear_project: ENG
+    credentials: work
+  - path: /path/to/side-project
+    linear_project: SIDE
+    credentials: personal
 ```
 
 ## Troubleshooting

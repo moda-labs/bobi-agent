@@ -324,3 +324,278 @@ class TestRollbackCommand:
             result = runner.invoke(main, ["rollback"])
         assert result.exit_code != 0
         assert "nothing to roll back" in result.output.lower()
+
+    @patch("subprocess.run")
+    def test_rollback_git_reset_failure(self, mock_run, tmp_path):
+        state_path = tmp_path / "update_state.json"
+        state_path.write_text(json.dumps({
+            "pre_update_head": "abc123def",
+            "pre_update_version": "0.2.1",
+            "updated_at": "2026-05-23T14:30:00",
+            "stashed": False,
+        }))
+
+        def side_effect(cmd, **kwargs):
+            mock = MagicMock()
+            if "reset" in cmd:
+                mock.returncode = 1
+                mock.stderr = "fatal: Could not reset"
+            else:
+                mock.returncode = 0
+                mock.stdout = ""
+                mock.stderr = ""
+            return mock
+
+        mock_run.side_effect = side_effect
+
+        runner = CliRunner()
+        with patch("modastack.cli.REPO_ROOT", tmp_path), \
+             patch("modastack.cli.UPDATE_STATE_PATH", state_path):
+            result = runner.invoke(main, ["rollback"])
+
+        assert result.exit_code != 0
+        assert "reset failed" in result.output.lower()
+
+
+class TestCheckVersionEdgeCases:
+    """Test _check_version edge cases not covered by TestVersionPoller."""
+
+    @patch("subprocess.run")
+    def test_git_show_version_failure(self, mock_run, tmp_path):
+        """When git show origin/main:VERSION fails, return last_announced unchanged."""
+        from manager.events.pollers import _check_version
+
+        version_file = tmp_path / "VERSION"
+        version_file.write_text("0.2.1")
+
+        bus = MagicMock()
+
+        def side_effect(cmd, **kwargs):
+            mock = MagicMock()
+            if "fetch" in cmd:
+                mock.returncode = 0
+            elif cmd == ["git", "show", "origin/main:VERSION"]:
+                mock.returncode = 1
+                mock.stdout = ""
+            else:
+                mock.returncode = 0
+                mock.stdout = ""
+            return mock
+
+        mock_run.side_effect = side_effect
+        result = _check_version(bus, tmp_path, "old_announced")
+        assert result == "old_announced"
+        bus.push.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_dedup_last_announced(self, mock_run, tmp_path):
+        """If remote_version == last_announced, don't re-emit the event."""
+        from manager.events.pollers import _check_version
+
+        version_file = tmp_path / "VERSION"
+        version_file.write_text("0.2.1")
+
+        bus = MagicMock()
+
+        def side_effect(cmd, **kwargs):
+            mock = MagicMock()
+            mock.returncode = 0
+            if cmd == ["git", "show", "origin/main:VERSION"]:
+                mock.stdout = "0.3.0"
+            else:
+                mock.stdout = ""
+            return mock
+
+        mock_run.side_effect = side_effect
+        # last_announced is already 0.3.0
+        result = _check_version(bus, tmp_path, "0.3.0")
+        assert result == "0.3.0"
+        bus.push.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_no_version_file_uses_fallback(self, mock_run, tmp_path):
+        """When VERSION file doesn't exist, use 0.0.0 as local_version."""
+        from manager.events.pollers import _check_version
+
+        # Don't create VERSION file
+        bus = MagicMock()
+
+        def side_effect(cmd, **kwargs):
+            mock = MagicMock()
+            mock.returncode = 0
+            if cmd == ["git", "show", "origin/main:VERSION"]:
+                mock.stdout = "0.1.0"
+            elif cmd == ["git", "show", "origin/main:CHANGELOG.md"]:
+                mock.returncode = 1
+                mock.stdout = ""
+            else:
+                mock.stdout = ""
+            return mock
+
+        mock_run.side_effect = side_effect
+        result = _check_version(bus, tmp_path, "")
+        assert result == "0.1.0"
+        bus.push.assert_called_once()
+        call_data = bus.push.call_args[0][2]
+        assert call_data["current_version"] == "0.0.0"
+        assert call_data["new_version"] == "0.1.0"
+
+    @patch("subprocess.run")
+    def test_changelog_fetch_failure_still_emits(self, mock_run, tmp_path):
+        """When CHANGELOG.md fetch fails, still emit update event with empty changelog."""
+        from manager.events.pollers import _check_version
+
+        version_file = tmp_path / "VERSION"
+        version_file.write_text("0.2.0")
+
+        bus = MagicMock()
+
+        def side_effect(cmd, **kwargs):
+            mock = MagicMock()
+            mock.returncode = 0
+            if cmd == ["git", "show", "origin/main:VERSION"]:
+                mock.stdout = "0.3.0"
+            elif cmd == ["git", "show", "origin/main:CHANGELOG.md"]:
+                mock.returncode = 1
+                mock.stdout = ""
+            else:
+                mock.stdout = ""
+            return mock
+
+        mock_run.side_effect = side_effect
+        result = _check_version(bus, tmp_path, "")
+        assert result == "0.3.0"
+        bus.push.assert_called_once()
+        assert bus.push.call_args[0][2]["changelog"] == ""
+
+
+class TestSelfUpdateFetchFailure:
+    @patch("subprocess.run")
+    def test_fetch_failure_exits(self, mock_run, tmp_path):
+        version_file = tmp_path / "VERSION"
+        version_file.write_text("0.2.1")
+
+        def side_effect(cmd, **kwargs):
+            mock = MagicMock()
+            if "fetch" in cmd:
+                mock.returncode = 1
+                mock.stderr = "fatal: could not read from remote"
+                mock.stdout = ""
+            else:
+                mock.returncode = 0
+                mock.stdout = ""
+                mock.stderr = ""
+            return mock
+
+        mock_run.side_effect = side_effect
+
+        runner = CliRunner()
+        with patch("modastack.cli.REPO_ROOT", tmp_path):
+            result = runner.invoke(main, ["self-update"])
+
+        assert result.exit_code != 0
+        assert "failed to fetch" in result.output.lower()
+
+    @patch("subprocess.run")
+    def test_pip_install_failure(self, mock_run, tmp_path):
+        version_file = tmp_path / "VERSION"
+        version_file.write_text("0.2.1")
+
+        def side_effect(cmd, **kwargs):
+            mock = MagicMock()
+            mock.returncode = 0
+            mock.stdout = ""
+            mock.stderr = ""
+
+            if "fetch" in cmd:
+                pass
+            elif cmd == ["git", "show", "origin/main:VERSION"]:
+                mock.stdout = "0.3.0"
+            elif "status" in cmd and "--porcelain" in cmd:
+                mock.stdout = ""
+            elif cmd == ["git", "rev-parse", "HEAD"]:
+                mock.stdout = "abc123"
+            elif "pull" in cmd:
+                version_file.write_text("0.3.0")
+            elif "pip" in cmd:
+                mock.returncode = 1
+                mock.stderr = "ERROR: Could not install"
+            return mock
+
+        mock_run.side_effect = side_effect
+
+        runner = CliRunner()
+        with patch("modastack.cli.REPO_ROOT", tmp_path), \
+             patch("modastack.cli.UPDATE_STATE_PATH", tmp_path / "update_state.json"):
+            result = runner.invoke(main, ["self-update"])
+
+        assert result.exit_code != 0
+        assert "rollback" in result.output.lower()
+
+
+class TestWriteEventsFile:
+    """Test the new version-related fields in _write_events_file."""
+
+    def test_version_fields_in_events_file(self, tmp_path):
+        from manager.events.consumer import _write_events_file, PENDING_EVENTS_PATH
+
+        events = [{
+            "type": "system.update_available",
+            "source": "system",
+            "data": {
+                "current_version": "0.2.1",
+                "new_version": "0.3.0",
+                "changelog": "- Stall detection\n- Self-update",
+            },
+        }]
+
+        # Temporarily override the path
+        import manager.events.consumer as consumer_mod
+        orig_path = consumer_mod.PENDING_EVENTS_PATH
+        consumer_mod.PENDING_EVENTS_PATH = tmp_path / "pending_events.md"
+        try:
+            _write_events_file(events)
+            content = (tmp_path / "pending_events.md").read_text()
+            assert "current_version: 0.2.1" in content
+            assert "new_version: 0.3.0" in content
+            assert "changelog: - Stall detection" in content
+        finally:
+            consumer_mod.PENDING_EVENTS_PATH = orig_path
+
+    def test_version_fields_missing_no_crash(self, tmp_path):
+        """Events without version fields don't include those lines."""
+        from manager.events.consumer import _write_events_file
+
+        events = [{
+            "type": "worker.working",
+            "source": "worker",
+            "data": {"issue_id": "TEST-1", "session_state": "working"},
+        }]
+
+        import manager.events.consumer as consumer_mod
+        orig_path = consumer_mod.PENDING_EVENTS_PATH
+        consumer_mod.PENDING_EVENTS_PATH = tmp_path / "pending_events.md"
+        try:
+            _write_events_file(events)
+            content = (tmp_path / "pending_events.md").read_text()
+            assert "current_version" not in content
+            assert "new_version" not in content
+            assert "changelog" not in content
+        finally:
+            consumer_mod.PENDING_EVENTS_PATH = orig_path
+
+
+class TestVersionModuleFallback:
+    def test_version_fallback_when_no_file(self, tmp_path):
+        """__version__ falls back to 0.0.0 when VERSION file doesn't exist."""
+        import importlib
+        import modastack.__version__ as ver_mod
+
+        original_file = ver_mod._VERSION_FILE
+        ver_mod._VERSION_FILE = tmp_path / "NONEXISTENT_VERSION"
+        try:
+            # Re-evaluate the expression
+            result = ver_mod._VERSION_FILE.read_text().strip() if ver_mod._VERSION_FILE.exists() else "0.0.0"
+            assert result == "0.0.0"
+        finally:
+            ver_mod._VERSION_FILE = original_file

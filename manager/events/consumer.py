@@ -10,6 +10,7 @@ Instead of injecting long text into tmux (unreliable paste buffer), we:
 import asyncio
 import json
 import logging
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -112,12 +113,37 @@ def _log_batch(events: list[dict]) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
+def _ensure_repos():
+    """Clone any registered repos that are missing from disk."""
+    config = GlobalConfig.load()
+    for entry in config.repos:
+        if entry.path.exists():
+            continue
+        if not entry.remote:
+            log.warning(f"Repo missing and no remote configured: {entry.path}")
+            continue
+        log.info(f"Cloning {entry.remote} -> {entry.path}")
+        entry.path.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["gh", "repo", "clone", entry.remote, str(entry.path)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            log.error(f"Clone failed: {result.stderr}")
+            continue
+        from modastack.setup import install_skill_symlinks
+        install_skill_symlinks(entry.path)
+        log.info(f"Cloned and set up: {entry.remote}")
+
+
 def run(webhook_port: int = 8080, use_webhooks: bool = False,
         batch_window: float = 5.0, github_secret: str = "",
         linear_secret: str = "", slack_signing_secret: str = ""):
     """Main event loop with persistent manager session."""
 
     log.info("Modastack starting (event-driven, persistent manager)")
+
+    _ensure_repos()
 
     bus = get_bus()
 
@@ -170,32 +196,33 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         event_types = ", ".join(set(e["type"] for e in events))
         log.info(f"Batch #{tick_count}: {len(events)} events — {event_types}")
 
-        # Wait for manager to be ready (up to 2 min)
-        state = "unknown"
-        for _ in range(60):
-            state = detect_state()
-            if state == "waiting_input":
-                break
-            time.sleep(2)
-        else:
-            log.warning(f"Manager not ready after 2 min (state={state}) — injecting anyway")
-
-        # Write events to file
+        # Write events to file (always, even if manager is busy)
         _write_events_file(events)
 
-        # Inject trigger with retry — verify it actually landed
+        # Only inject trigger if manager is waiting for input.
+        # If busy, it will see queued messages when it finishes.
+        state = detect_state()
+        if state == "working":
+            log.info(f"Batch #{tick_count}: manager is busy — events written, trigger deferred")
+            _log_batch(events)
+            continue
+
+        # Wait briefly for manager to be ready if in unknown state
+        if state != "waiting_input":
+            for _ in range(30):
+                state = detect_state()
+                if state in ("waiting_input", "working"):
+                    break
+                time.sleep(2)
+
+        if state == "working":
+            log.info(f"Batch #{tick_count}: manager started working — trigger deferred")
+            _log_batch(events)
+            continue
+
+        # Inject once — no retry flooding
         trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
-        for attempt in range(3):
-            inject(trigger)
-            time.sleep(1)
-            # Verify the trigger appears in the pane (manager received it)
-            from manager.session import capture
-            pane = capture(lines=5)
-            if "pending_events" in pane or detect_state() == "working":
-                break
-            log.warning(f"Inject attempt {attempt + 1} may not have landed — retrying")
-        else:
-            log.error("Failed to deliver trigger after 3 attempts")
+        inject(trigger)
 
         # Log
         _log_batch(events)

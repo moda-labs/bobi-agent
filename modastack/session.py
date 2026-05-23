@@ -37,12 +37,74 @@ def session_exists(issue_id: str) -> bool:
 SESSION_IDS_DIR = Path.home() / ".modastack" / "sessions"
 
 
+def sync_main_branch(repo_path: Path) -> bool:
+    """Fetch origin and reset main to match. Safe on remote boxes where main isn't edited directly."""
+    ref_result = subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+        capture_output=True, text=True, cwd=repo_path,
+    )
+    if ref_result.returncode == 0:
+        default_branch = ref_result.stdout.strip().split("/")[-1]
+    else:
+        default_branch = "main"
+
+    result = subprocess.run(
+        ["git", "fetch", "origin"],
+        capture_output=True, text=True, cwd=repo_path,
+    )
+    if result.returncode != 0:
+        log.warning(f"git fetch failed in {repo_path}: {result.stderr}")
+        return False
+
+    result = subprocess.run(
+        ["git", "reset", "--hard", f"origin/{default_branch}"],
+        capture_output=True, text=True, cwd=repo_path,
+    )
+    if result.returncode != 0:
+        log.warning(f"git reset failed in {repo_path}: {result.stderr}")
+        return False
+
+    log.info(f"Synced {repo_path.name} to origin/{default_branch}")
+    return True
+
+
+def cleanup_worktree(issue_id: str, repo_path: Path) -> None:
+    """Remove worktree, branch, and session for a completed issue."""
+    branch = f"agent/{issue_id.lower()}"
+    worktree_path = repo_path / "worktrees" / issue_id.lower()
+
+    if session_exists(issue_id):
+        kill_session(issue_id)
+        time.sleep(1)
+
+    if worktree_path.exists():
+        result = subprocess.run(
+            ["git", "worktree", "remove", str(worktree_path), "--force"],
+            capture_output=True, text=True, cwd=repo_path,
+        )
+        if result.returncode != 0:
+            log.warning(f"Worktree removal failed: {result.stderr}")
+        else:
+            log.info(f"Removed worktree: {worktree_path}")
+
+    subprocess.run(
+        ["git", "branch", "-D", branch],
+        capture_output=True, text=True, cwd=repo_path,
+    )
+
+    saved_id_path = SESSION_IDS_DIR / f"{issue_id}.id"
+    if saved_id_path.exists():
+        saved_id_path.unlink()
+
+
 def spawn_session(issue_id: str, cwd: str) -> bool:
     """Spawn an interactive claude session for an issue, or resume a previous one."""
     name = _session_name(issue_id)
     if session_exists(issue_id):
         log.info(f"Session {name} already exists")
         return True
+
+    sync_main_branch(Path(cwd))
 
     # Check for a saved session ID to resume
     saved_id_path = SESSION_IDS_DIR / f"{issue_id}.id"
@@ -110,9 +172,10 @@ def detect_state(issue_id: str) -> dict:
     """Analyze the pane to determine session state.
 
     Returns:
-        state: 'waiting_input' | 'working' | 'asking_question' | 'exited' | 'unknown'
+        state: 'waiting_input' | 'working' | 'asking_question' | 'permission_blocked' | 'exited' | 'unknown'
         question: str (if asking_question)
         options: list[str] (if asking_question)
+        prompt_line: str (if permission_blocked)
     """
     if not session_exists(issue_id):
         return {"state": "exited"}

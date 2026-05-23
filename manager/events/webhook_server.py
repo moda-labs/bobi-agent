@@ -164,14 +164,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         if issue_id:
             prefix = issue_id.split("-")[0]
-            from modastack.config import GlobalConfig, RepoConfig
-            configured_projects = set()
-            for repo_path in GlobalConfig.load().repos:
-                try:
-                    rc = RepoConfig.from_file(repo_path)
-                    configured_projects.add(rc.linear_project)
-                except FileNotFoundError:
-                    pass
+            from modastack.config import GlobalConfig
+            configured_projects = {
+                entry.linear_project
+                for entry in GlobalConfig.load().repos
+                if entry.linear_project
+            }
             if prefix not in configured_projects:
                 self.send_response(200)
                 self.end_headers()
