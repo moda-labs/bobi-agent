@@ -9,3 +9,6 @@ worktrees/
 .dispatch/
 .dispatch.yaml
 .gstack/
+.modastack/
+.context/
+worktrees/
