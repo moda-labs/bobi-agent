@@ -306,6 +306,21 @@ def setup(repo_path: str, task_tracking: str | None, project: str | None,
         for action in bootstrap_labels(path):
             click.echo(f"  {action}")
 
+    # Add .modastack/ to .gitignore
+    gitignore_path = path / ".gitignore"
+    gitignore_entries = [".modastack/", "worktrees/"]
+    existing = gitignore_path.read_text() if gitignore_path.exists() else ""
+    added = []
+    for entry in gitignore_entries:
+        if entry not in existing:
+            added.append(entry)
+    if added:
+        with open(gitignore_path, "a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write("\n".join(added) + "\n")
+        click.echo(f"Added to .gitignore: {', '.join(added)}")
+
     # Install skills
     click.echo("Installing skills...")
     repo_root = Path(__file__).parent.parent

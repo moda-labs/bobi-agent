@@ -4,7 +4,7 @@ version: 2.0.0
 description: |
   Task intake & routing. Classifies the ask (update / inquiry / bug),
   captures problem + scope + UX decision into a single intake doc at
-  `.context/intake.md`, then hands off to the right downstream skill
+  `.modastack/intake.md`, then hands off to the right downstream skill
   (/investigate, /office-hours, /autoplan, or /build). Use on the first
   task-shaped message of a session before any other planning or build
   skill. Proactively suggest it if no skill has been invoked yet.
@@ -88,7 +88,7 @@ Does this scope change something the user sees or interacts with?
 
 ## Step 7 — Write intake & hand off
 
-Write `.context/intake.md` (overwrite if present):
+Write `.modastack/intake.md` (overwrite if present):
 
 ```md
 # Intake — YYYY-MM-DD — <branch>
@@ -114,4 +114,4 @@ Then route:
 
 ## Contract for downstream skills
 
-When `.context/intake.md` exists, `/investigate`, `/autoplan`, and `/build` should read it first. Scope-guard answers recorded there satisfy the CLAUDE.md HARD STOPs — do not re-ask. `/build`'s Step 0 is wired for this; gstack-owned skills will follow once they grow an integration hook.
+When `.modastack/intake.md` exists, `/investigate`, `/autoplan`, and `/build` should read it first. Scope-guard answers recorded there satisfy the CLAUDE.md HARD STOPs — do not re-ask. `/build`'s Step 0 is wired for this; gstack-owned skills will follow once they grow an integration hook.
