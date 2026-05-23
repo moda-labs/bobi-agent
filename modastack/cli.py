@@ -237,19 +237,10 @@ def setup(repo_path: str, task_tracking: str | None, project: str | None,
         except (EOFError, click.Abort):
             pass
 
-    # Default to github-issues
+    # Default to github-issues — no prompt needed
     if not task_tracking:
         if linear_key:
             task_tracking = "linear"
-        elif not non_interactive:
-            try:
-                task_tracking = click.prompt(
-                    "Task tracking system",
-                    type=click.Choice(["github-issues", "linear"]),
-                    default="github-issues",
-                )
-            except (EOFError, click.Abort):
-                task_tracking = "github-issues"
         else:
             task_tracking = "github-issues"
 
