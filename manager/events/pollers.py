@@ -10,8 +10,10 @@ then register it in POLLERS.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -24,18 +26,32 @@ from .bus import get_bus
 log = logging.getLogger(__name__)
 
 
+STALL_THRESHOLD_SECS = 300   # 5 min — emit worker.stalled
+STUCK_THRESHOLD_SECS = 600   # 10 min — emit worker.stuck
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
 def _poll_workers(interval: int = 5):
     """Poll ALL tmux worker sessions for state changes.
 
     Discovers sessions by scanning tmux ls, not just state.json.
     This catches sessions the manager spawned directly via bash.
+    Uses detect_state from session.py for canonical state detection,
+    and tracks output hashes over time to detect stalls.
     """
+    from modastack.session import detect_state as detect_session_state
+
     bus = get_bus()
-    last_states = {}
+    last_states: dict[str, str] = {}
+    heartbeats: dict[str, dict] = {}
 
     while True:
         try:
-            # Discover all non-manager tmux sessions
             result = subprocess.run(
                 ["tmux", "list-sessions", "-F", "#{session_name}"],
                 capture_output=True, text=True,
@@ -48,32 +64,73 @@ def _poll_workers(interval: int = 5):
                 ]
 
             for session_name in session_names:
-                # Derive issue ID from session name
                 iid = session_name.upper().replace("WORKER-", "").replace("MODA-", "")
 
-                # Check session state by capturing pane
-                pane_result = subprocess.run(
-                    ["tmux", "capture-pane", "-t", session_name, "-p", "-S", "-5"],
-                    capture_output=True, text=True,
-                )
-                pane_lines = [l for l in (pane_result.stdout or "").splitlines() if l.strip()]
+                state_info = detect_session_state(iid)
+                sess_state = state_info["state"]
 
-                sess_state = "working"
-                for line in reversed(pane_lines[-5:]):
-                    if "❯" in line and "bypass" not in line:
-                        if any("bypass" in l or "⏵⏵" in l for l in pane_lines[-3:]):
-                            sess_state = "waiting_input"
-                        break
+                # Process liveness: tmux session exists but claude process died
+                if sess_state == "exited":
+                    bus.push("worker.process_dead", "worker", {
+                        "issue_id": iid,
+                        "session_name": session_name,
+                        "reason": "tmux session exists but claude process is not running",
+                    })
+                    last_states.pop(iid, None)
+                    heartbeats.pop(iid, None)
+                    continue
 
+                # Emit state change events
                 state_key = f"{iid}:{sess_state}"
                 if state_key != last_states.get(iid):
                     last_states[iid] = state_key
-                    bus.push(f"worker.{sess_state}", "worker", {
+                    event_data = {
                         "issue_id": iid,
                         "session_name": session_name,
                         "session_state": sess_state,
                         "alive": True,
-                    })
+                    }
+                    if sess_state == "permission_blocked":
+                        event_data["prompt_line"] = state_info.get("prompt_line", "")
+                    bus.push(f"worker.{sess_state}", "worker", event_data)
+
+                # Heartbeat: hash pane output to detect stalls
+                pane_result = subprocess.run(
+                    ["tmux", "capture-pane", "-t", session_name, "-p", "-S", "-30"],
+                    capture_output=True, text=True,
+                )
+                pane_content = _strip_ansi(pane_result.stdout or "")
+                content_hash = hashlib.md5(pane_content.encode()).hexdigest()
+
+                now = time.monotonic()
+                hb = heartbeats.get(iid)
+                if hb is None or hb["hash"] != content_hash:
+                    heartbeats[iid] = {
+                        "hash": content_hash,
+                        "last_change": now,
+                        "alerted_stall": False,
+                        "alerted_stuck": False,
+                    }
+                elif sess_state not in ("waiting_input", "permission_blocked"):
+                    idle_secs = now - hb["last_change"]
+                    snippet = pane_content.strip().splitlines()[-3:] if pane_content.strip() else []
+
+                    if idle_secs > STUCK_THRESHOLD_SECS and not hb["alerted_stuck"]:
+                        hb["alerted_stuck"] = True
+                        bus.push("worker.stuck", "worker", {
+                            "issue_id": iid,
+                            "session_name": session_name,
+                            "idle_seconds": int(idle_secs),
+                            "last_output_snippet": "\n".join(snippet),
+                        })
+                    elif idle_secs > STALL_THRESHOLD_SECS and not hb["alerted_stall"]:
+                        hb["alerted_stall"] = True
+                        bus.push("worker.stalled", "worker", {
+                            "issue_id": iid,
+                            "session_name": session_name,
+                            "idle_seconds": int(idle_secs),
+                            "last_output_snippet": "\n".join(snippet),
+                        })
 
             # Detect sessions that disappeared
             current_ids = {s.upper().replace("WORKER-", "").replace("MODA-", "") for s in session_names}
@@ -85,6 +142,7 @@ def _poll_workers(interval: int = 5):
                         "alive": False,
                     })
                     del last_states[old_id]
+                    heartbeats.pop(old_id, None)
 
         except Exception as e:
             log.error(f"Worker poller error: {e}")

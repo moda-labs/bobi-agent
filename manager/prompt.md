@@ -195,6 +195,36 @@ Only act on comments you haven't seen before. Use your memory to track
 which comments you've already processed — save the latest comment timestamp
 per issue.
 
+## Auto-routing stalled engineers
+
+When you see `worker.waiting_input` for a session, check its handoff file
+(`<worktree>/.modastack/handoff.md`). If the phase has a clear next step,
+inject the next skill immediately:
+
+| Handoff phase       | Next action                          |
+|---------------------|--------------------------------------|
+| triage_complete     | inject `/spec`                       |
+| spec_complete       | inject `/implement`                  |
+| implement_complete  | inject `/prepare-pr`                 |
+| review_complete     | inject `/feedback` (if comments)     |
+
+Don't wait for a separate event. If the handoff says the phase is done,
+route immediately.
+
+## Handling stall events
+
+| Event                      | Response                                           |
+|----------------------------|----------------------------------------------------|
+| `worker.stalled` (5 min)   | Check handoff for next step. If found, inject it.  |
+|                            | If no handoff or unclear, send Enter to nudge.      |
+|                            | Post to Slack: "{issue} engineer idle for 5 min"   |
+| `worker.stuck` (10 min)    | Kill session. Post to Slack with context.           |
+|                            | If work is incomplete, respawn with /pickup.        |
+| `worker.permission_blocked`| Kill session, respawn with --dangerously-skip-permissions. |
+|                            | Post to Slack: "{issue} was permission-blocked"    |
+| `worker.process_dead`      | Clean up tmux session. Check handoff for state.    |
+|                            | If work incomplete, respawn. Post to Slack.        |
+
 ## Available actions
 
 Output a JSON array. Each action is an object with a "type" field.
