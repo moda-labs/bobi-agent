@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>modastack</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --orange: #db6d28;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  header h1 { font-size: 18px; font-weight: 600; }
+  .manager-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .dot.alive { background: var(--green); }
+  .dot.dead { background: var(--red); }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    grid-template-rows: 1fr auto;
+    height: calc(100vh - 49px);
+  }
+
+  .panel {
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+  }
+  .panel-header {
+    padding: 12px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+  }
+
+  .session {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .session-name {
+    font-weight: 600;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .session-state {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-weight: 500;
+  }
+  .state-working { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .state-waiting_input { background: rgba(63,185,80,0.15); color: var(--green); }
+  .state-asking_question { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .state-exited { background: rgba(248,81,73,0.15); color: var(--red); }
+  .session-detail {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .empty-state {
+    padding: 24px 16px;
+    color: var(--text-muted);
+    font-size: 13px;
+    text-align: center;
+  }
+
+  .main {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .filters {
+    display: flex;
+    gap: 8px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    align-items: center;
+  }
+  .filters select, .filters input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .filters select:focus, .filters input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .filters label {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .event-count {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .event-log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0;
+  }
+  .event-row {
+    display: grid;
+    grid-template-columns: 140px 90px 1fr;
+    gap: 12px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    align-items: start;
+  }
+  .event-row:hover { background: var(--surface); }
+  .event-time { color: var(--text-muted); font-family: monospace; font-size: 12px; }
+  .event-source {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    text-align: center;
+    font-weight: 500;
+  }
+  .source-slack { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .source-github { background: rgba(248,81,73,0.15); color: var(--red); }
+  .source-github-issues { background: rgba(219,109,40,0.15); color: var(--orange); }
+  .source-linear { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .source-worker { background: rgba(63,185,80,0.15); color: var(--green); }
+  .source-system { background: rgba(139,148,158,0.15); color: var(--text-muted); }
+  .event-body { min-width: 0; }
+  .event-type { font-weight: 600; }
+  .event-detail {
+    color: var(--text-muted);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 2px;
+  }
+
+  .pagination {
+    display: flex;
+    gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+    justify-content: center;
+    background: var(--surface);
+  }
+  .pagination button {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .pagination button:hover { border-color: var(--accent); }
+  .pagination button:disabled { opacity: 0.4; cursor: default; }
+
+  .decisions {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--border);
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  .decision-row {
+    display: grid;
+    grid-template-columns: 140px 1fr auto;
+    gap: 12px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .decision-types {
+    font-family: monospace;
+    font-size: 12px;
+    color: var(--accent);
+  }
+  .decision-count {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>modastack</h1>
+  <div class="manager-status">
+    <span>Manager:</span>
+    <span class="dot" id="mgr-dot"></span>
+    <span id="mgr-state">--</span>
+  </div>
+</header>
+
+<div class="layout">
+  <div class="panel">
+    <div class="panel-header">Active Sessions</div>
+    <div id="sessions"></div>
+  </div>
+
+  <div class="main">
+    <div class="filters">
+      <label>Source</label>
+      <select id="filter-source"><option value="">All</option></select>
+      <label>Type</label>
+      <input id="filter-type" type="text" placeholder="e.g. slack.dm" size="16">
+      <span class="event-count" id="event-count"></span>
+    </div>
+    <div class="event-log" id="event-log"></div>
+    <div class="pagination">
+      <button id="btn-newer" disabled>&larr; Newer</button>
+      <span id="page-info" style="font-size:12px;color:var(--text-muted);padding:4px 8px"></span>
+      <button id="btn-older">Older &rarr;</button>
+    </div>
+  </div>
+
+  <div class="decisions">
+    <div class="panel-header">Recent Decisions</div>
+    <div id="decisions-list"></div>
+  </div>
+</div>
+
+<script>
+const PAGE_SIZE = 50;
+let offset = 0;
+let totalEvents = 0;
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function sourceClass(s) {
+  return 'source-' + (s || '').replace(/[^a-z-]/g, '');
+}
+
+function stateClass(s) {
+  return 'state-' + (s || 'unknown');
+}
+
+function eventDetail(data) {
+  const parts = [];
+  if (data.issue_id) parts.push(data.issue_id);
+  if (data.title) parts.push(data.title);
+  if (data.text) parts.push(data.text);
+  if (data.body) parts.push(data.body);
+  if (data.from) parts.push('from: ' + data.from);
+  if (data.state) parts.push('state: ' + data.state);
+  const detail = parts.join(' — ');
+  return detail.length > 120 ? detail.slice(0, 120) + '...' : detail;
+}
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  return res.json();
+}
+
+async function loadStatus() {
+  try {
+    const d = await fetchJSON('/api/status');
+    const dot = document.getElementById('mgr-dot');
+    const state = document.getElementById('mgr-state');
+    dot.className = 'dot ' + (d.manager.alive ? 'alive' : 'dead');
+    state.textContent = d.manager.alive ? d.manager.state : 'offline';
+
+    const el = document.getElementById('sessions');
+    if (!d.sessions.length) {
+      el.innerHTML = '<div class="empty-state">No active sessions</div>';
+    } else {
+      el.innerHTML = d.sessions.map(s =>
+        `<div class="session">
+          <div class="session-name">
+            <span class="dot ${s.state === 'exited' ? 'dead' : 'alive'}"></span>
+            ${esc(s.name)}
+            <span class="session-state ${stateClass(s.state)}">${esc(s.state)}</span>
+          </div>
+          ${s.last_line ? `<div class="session-detail">${esc(s.last_line)}</div>` : ''}
+        </div>`
+      ).join('');
+    }
+  } catch (e) {
+    document.getElementById('mgr-state').textContent = 'fetch error';
+  }
+}
+
+async function loadEvents() {
+  const source = document.getElementById('filter-source').value;
+  const type = document.getElementById('filter-type').value;
+  let url = `/api/events?limit=${PAGE_SIZE}&offset=${offset}`;
+  if (source) url += `&source=${encodeURIComponent(source)}`;
+  if (type) url += `&type=${encodeURIComponent(type)}`;
+
+  try {
+    const d = await fetchJSON(url);
+    totalEvents = d.total;
+
+    document.getElementById('event-count').textContent =
+      `${d.total} event${d.total !== 1 ? 's' : ''}`;
+
+    const el = document.getElementById('event-log');
+    if (!d.events.length) {
+      el.innerHTML = '<div class="empty-state">No events</div>';
+    } else {
+      el.innerHTML = d.events.map(e =>
+        `<div class="event-row">
+          <span class="event-time">${esc(e.timestamp)}</span>
+          <span class="event-source ${sourceClass(e.source)}">${esc(e.source)}</span>
+          <div class="event-body">
+            <span class="event-type">${esc(e.type)}</span>
+            <div class="event-detail">${esc(eventDetail(e.data || {}))}</div>
+          </div>
+        </div>`
+      ).join('');
+    }
+
+    document.getElementById('btn-newer').disabled = offset === 0;
+    document.getElementById('btn-older').disabled = offset + PAGE_SIZE >= totalEvents;
+    const page = Math.floor(offset / PAGE_SIZE) + 1;
+    const pages = Math.max(1, Math.ceil(totalEvents / PAGE_SIZE));
+    document.getElementById('page-info').textContent = `${page} / ${pages}`;
+  } catch (e) {
+    document.getElementById('event-log').innerHTML =
+      '<div class="empty-state">Failed to load events</div>';
+  }
+}
+
+async function loadDecisions() {
+  try {
+    const d = await fetchJSON('/api/decisions?limit=5');
+    const el = document.getElementById('decisions-list');
+    if (!d.decisions.length) {
+      el.innerHTML = '<div class="empty-state">No decisions yet</div>';
+    } else {
+      el.innerHTML = d.decisions.map(dec =>
+        `<div class="decision-row">
+          <span class="event-time">${esc(dec.timestamp)}</span>
+          <span class="decision-types">${esc((dec.event_types || []).join(', '))}</span>
+          <span class="decision-count">${dec.events} event${dec.events !== 1 ? 's' : ''}</span>
+        </div>`
+      ).join('');
+    }
+  } catch (e) {}
+}
+
+async function loadSources() {
+  try {
+    const d = await fetchJSON('/api/sources');
+    const sel = document.getElementById('filter-source');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">All</option>';
+    (d.sources || []).forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s;
+      opt.textContent = s;
+      if (s === current) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  } catch (e) {}
+}
+
+document.getElementById('btn-newer').addEventListener('click', () => {
+  offset = Math.max(0, offset - PAGE_SIZE);
+  loadEvents();
+});
+document.getElementById('btn-older').addEventListener('click', () => {
+  if (offset + PAGE_SIZE < totalEvents) { offset += PAGE_SIZE; loadEvents(); }
+});
+document.getElementById('filter-source').addEventListener('change', () => { offset = 0; loadEvents(); });
+document.getElementById('filter-type').addEventListener('input', () => { offset = 0; loadEvents(); });
+
+function refreshAll() { loadStatus(); loadEvents(); loadDecisions(); }
+
+loadSources();
+refreshAll();
+setInterval(refreshAll, 5000);
+setInterval(loadSources, 30000);
+</script>
+</body>
+</html>

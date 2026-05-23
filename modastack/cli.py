@@ -302,5 +302,13 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
         click.echo("  Skills already installed.")
 
 
+@main.command()
+@click.option("--port", default=8095, help="Dashboard server port")
+def dashboard(port):
+    """Start the web dashboard."""
+    from dashboard.app import run_dashboard
+    run_dashboard(port=port)
+
+
 if __name__ == "__main__":
     main()
