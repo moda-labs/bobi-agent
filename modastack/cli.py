@@ -2,8 +2,8 @@
 
 import json
 import logging
+import subprocess
 import sys
-from importlib.metadata import version
 from pathlib import Path
 
 import truststore
@@ -13,12 +13,15 @@ import click
 
 from .config import GlobalConfig, GLOBAL_CONFIG_DIR
 from .setup import generate_dispatch_yaml
+from .__version__ import __version__
 
 LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
+UPDATE_STATE_PATH = GLOBAL_CONFIG_DIR / "update_state.json"
+REPO_ROOT = Path(__file__).parent.parent
 
 
 @click.group()
-@click.version_option(version=version("modastack"), prog_name="modastack")
+@click.version_option(version=__version__, prog_name="modastack")
 def main():
     """Modabot — AI engineering manager + engineer team."""
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -213,10 +216,13 @@ def repos():
 
 @main.command()
 @click.argument("repo_path", type=click.Path(exists=True), default=".")
-@click.option("--linear-project", default=None)
-@click.option("--linear-key", envvar="LINEAR_API_KEY", default=None)
+@click.option("--task-tracking", type=click.Choice(["github-issues", "linear"]), default=None,
+              help="Task tracking system (default: github-issues)")
+@click.option("--project", default=None, help="Project prefix (e.g., BET, TESS)")
+@click.option("--linear-key", envvar="LINEAR_API_KEY", default=None, help="Linear API key (only for --task-tracking linear)")
 @click.option("--non-interactive", is_flag=True, envvar="CI")
-def setup(repo_path: str, linear_project: str | None, linear_key: str | None, non_interactive: bool):
+def setup(repo_path: str, task_tracking: str | None, project: str | None,
+          linear_key: str | None, non_interactive: bool):
     """Set up a repo for modabot."""
     import yaml
 
@@ -231,28 +237,46 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
         except (EOFError, click.Abort):
             pass
 
-    from .config import Credentials
-    creds = Credentials.load()
-    existing_cred = creds.get(credential_name)
-    has_key = bool(existing_cred.get("linear_api_key"))
+    # Default to github-issues
+    if not task_tracking:
+        if linear_key:
+            task_tracking = "linear"
+        elif not non_interactive:
+            try:
+                task_tracking = click.prompt(
+                    "Task tracking system",
+                    type=click.Choice(["github-issues", "linear"]),
+                    default="github-issues",
+                )
+            except (EOFError, click.Abort):
+                task_tracking = "github-issues"
+        else:
+            task_tracking = "github-issues"
 
-    if linear_key:
-        creds.add(credential_name, linear_api_key=linear_key)
-        click.echo(f"Linear API key stored for '{credential_name}'")
-    elif not has_key and not non_interactive:
-        try:
-            key = click.prompt("Linear API key", default="", show_default=False)
-            if key:
-                creds.add(credential_name, linear_api_key=key)
-        except (EOFError, click.Abort):
-            pass
-    elif has_key:
-        click.echo(f"Linear API key already configured for '{credential_name}'")
+    # Handle credentials for Linear
+    if task_tracking == "linear":
+        from .config import Credentials
+        creds = Credentials.load()
+        existing_cred = creds.get(credential_name)
+        has_key = bool(existing_cred.get("linear_api_key"))
 
-    config = generate_dispatch_yaml(path)
+        if linear_key:
+            creds.add(credential_name, linear_api_key=linear_key)
+            click.echo(f"Linear API key stored for '{credential_name}'")
+        elif not has_key and not non_interactive:
+            try:
+                key = click.prompt("Linear API key", default="", show_default=False)
+                if key:
+                    creds.add(credential_name, linear_api_key=key)
+            except (EOFError, click.Abort):
+                pass
+        elif has_key:
+            click.echo(f"Linear API key already configured for '{credential_name}'")
+
+    config = generate_dispatch_yaml(path, task_tracking=task_tracking)
     config["credentials"] = credential_name
-    if linear_project:
-        config["linear"]["project"] = linear_project
+    if project:
+        config["task_tracking"]["project"] = project
 
     config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
     click.echo(f"Generated: {config_path}")
@@ -264,13 +288,22 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
         global_config.save()
         click.echo("Registered.")
 
-    # Bootstrap Linear board
-    resolved_key = linear_key or (creds.get(credential_name) or {}).get("linear_api_key")
-    resolved_project = linear_project or config["linear"]["project"]
-    if resolved_key and resolved_project:
-        click.echo("Bootstrapping Linear board...")
-        from .board_setup import bootstrap_board
-        for action in bootstrap_board(resolved_key, resolved_project):
+    # Bootstrap task tracker
+    if task_tracking == "linear":
+        resolved_key = linear_key
+        if not resolved_key:
+            from .config import Credentials
+            resolved_key = (Credentials.load().get(credential_name) or {}).get("linear_api_key")
+        resolved_project = project or config["task_tracking"]["project"]
+        if resolved_key and resolved_project:
+            click.echo("Bootstrapping Linear board...")
+            from .board_setup import bootstrap_board
+            for action in bootstrap_board(resolved_key, resolved_project):
+                click.echo(f"  {action}")
+    elif task_tracking == "github-issues":
+        click.echo("Bootstrapping GitHub Issues labels...")
+        from .github_issues import bootstrap_labels
+        for action in bootstrap_labels(path):
             click.echo(f"  {action}")
 
     # Install skills
@@ -279,10 +312,11 @@ def setup(repo_path: str, linear_project: str | None, linear_key: str | None, no
     target_skills = path / ".claude" / "skills"
     target_skills.mkdir(parents=True, exist_ok=True)
     installed = []
-    # Engineer skills + shared tools
+    # Engineer skills + product manager skills + shared tools
     skill_dirs = [
         repo_root / "engineer" / "process",
         repo_root / "engineer" / "practices",
+        repo_root / "product_manager",
         repo_root / "tools",
     ]
     for category_dir in skill_dirs:
@@ -308,6 +342,135 @@ def dashboard(port):
     """Start the web dashboard."""
     from dashboard.app import run_dashboard
     run_dashboard(port=port)
+
+
+@main.command("self-update")
+def self_update():
+    """Pull latest from origin/main and reinstall modastack."""
+    log = logging.getLogger(__name__)
+
+    old_version = (REPO_ROOT / "VERSION").read_text().strip()
+    click.echo(f"Current version: {old_version}")
+
+    # Fetch latest
+    click.echo("Fetching origin/main...")
+    result = subprocess.run(
+        ["git", "fetch", "origin", "main", "--quiet"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo(f"Failed to fetch: {result.stderr.strip()}", err=True)
+        sys.exit(1)
+
+    # Check remote version
+    result = subprocess.run(
+        ["git", "show", "origin/main:VERSION"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo("Failed to read remote VERSION", err=True)
+        sys.exit(1)
+    remote_version = result.stdout.strip()
+
+    if remote_version == old_version:
+        click.echo("Already up to date.")
+        return
+
+    # Check for dirty working tree
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    ).stdout.strip()
+
+    stashed = False
+    if dirty:
+        click.echo("Working tree has uncommitted changes — stashing...")
+        subprocess.run(
+            ["git", "stash", "push", "-m", "modastack-self-update-backup"],
+            cwd=REPO_ROOT, check=True,
+        )
+        stashed = True
+
+    # Save rollback state
+    pre_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    ).stdout.strip()
+
+    import datetime
+    UPDATE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UPDATE_STATE_PATH.write_text(json.dumps({
+        "pre_update_head": pre_head,
+        "pre_update_version": old_version,
+        "updated_at": datetime.datetime.now().isoformat(),
+        "stashed": stashed,
+    }))
+
+    # Pull
+    click.echo(f"Updating {old_version} → {remote_version}...")
+    result = subprocess.run(
+        ["git", "pull", "--ff-only", "origin", "main"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo(f"Pull failed (history diverged?): {result.stderr.strip()}", err=True)
+        click.echo("Run `modastack rollback` to restore, or reconcile manually.")
+        if stashed:
+            subprocess.run(["git", "stash", "pop"], cwd=REPO_ROOT)
+        sys.exit(1)
+
+    # Reinstall
+    click.echo("Reinstalling...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo(f"pip install failed: {result.stderr.strip()}", err=True)
+        click.echo("Run `modastack rollback` to restore.")
+        sys.exit(1)
+
+    # Pop stash if needed
+    if stashed:
+        click.echo("Restoring stashed changes...")
+        subprocess.run(["git", "stash", "pop"], cwd=REPO_ROOT)
+
+    new_version = (REPO_ROOT / "VERSION").read_text().strip()
+    click.echo(f"Updated to v{new_version}")
+    log.info(f"Self-update complete: {old_version} → {new_version}")
+
+
+@main.command()
+def rollback():
+    """Roll back the last self-update."""
+    if not UPDATE_STATE_PATH.exists():
+        click.echo("No update state found — nothing to roll back.")
+        sys.exit(1)
+
+    state = json.loads(UPDATE_STATE_PATH.read_text())
+    pre_head = state["pre_update_head"]
+    pre_version = state["pre_update_version"]
+
+    click.echo(f"Rolling back to v{pre_version} (commit {pre_head[:8]})...")
+
+    result = subprocess.run(
+        ["git", "reset", "--hard", pre_head],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo(f"Reset failed: {result.stderr.strip()}", err=True)
+        sys.exit(1)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        click.echo(f"pip install failed: {result.stderr.strip()}", err=True)
+        sys.exit(1)
+
+    UPDATE_STATE_PATH.unlink(missing_ok=True)
+    click.echo(f"Rolled back to v{pre_version}")
 
 
 if __name__ == "__main__":

@@ -6,10 +6,11 @@ from textwrap import dedent
 from modastack.config import RepoConfig, GlobalConfig
 
 
-def test_repo_config_from_file(tmp_path):
+def test_repo_config_new_format(tmp_path):
     config_file = tmp_path / ".modastack.yaml"
     config_file.write_text(dedent("""
-        linear:
+        task_tracking:
+          system: "github-issues"
           project: "MYPROJ"
           trigger_labels: ["agent", "auto"]
           skip_labels: ["blocked"]
@@ -32,7 +33,8 @@ def test_repo_config_from_file(tmp_path):
     config = RepoConfig.from_file(tmp_path)
 
     assert config.path == tmp_path
-    assert config.linear_project == "MYPROJ"
+    assert config.task_tracking == "github-issues"
+    assert config.project == "MYPROJ"
     assert config.trigger_labels == ["agent", "auto"]
     assert config.skip_labels == ["blocked"]
     assert config.max_parallel == 3
@@ -43,13 +45,42 @@ def test_repo_config_from_file(tmp_path):
     assert config.context["github_org"] == "myorg"
 
 
-def test_repo_config_defaults(tmp_path):
+def test_repo_config_backwards_compat_linear(tmp_path):
+    """Old configs with 'linear:' section still work."""
     config_file = tmp_path / ".modastack.yaml"
-    config_file.write_text("linear:\n  project: X\n")
+    config_file.write_text(dedent("""
+        linear:
+          project: "BET"
+          trigger_labels: ["agent", "auto"]
+          skip_labels: ["blocked"]
+
+        agent:
+          max_parallel: 3
+
+        verify:
+          test_command: "pytest -x"
+          review_required: false
+          auto_merge: true
+
+        credentials: myproject
+    """))
 
     config = RepoConfig.from_file(tmp_path)
 
-    assert config.linear_project == "X"
+    assert config.task_tracking == "linear"
+    assert config.project == "BET"
+    assert config.linear_project == "BET"
+    assert config.trigger_labels == ["agent", "auto"]
+
+
+def test_repo_config_defaults(tmp_path):
+    config_file = tmp_path / ".modastack.yaml"
+    config_file.write_text("task_tracking:\n  project: X\n")
+
+    config = RepoConfig.from_file(tmp_path)
+
+    assert config.task_tracking == "github-issues"
+    assert config.project == "X"
     assert config.trigger_labels == ["agent"]
     assert config.skip_labels == ["blocked", "human-only"]
     assert config.max_parallel == 2

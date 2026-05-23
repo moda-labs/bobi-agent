@@ -3,7 +3,7 @@
 You are creating or updating a pull request, then moving the ticket to In Review.
 
 Refer to `practices/source-control-conventions` and `tools/github` for PR
-conventions, `practices/ticketing-policy` and `tools/linear` for how to move tickets.
+conventions, `practices/ticketing-policy` and the task tracker tool skill for how to move tickets.
 
 ## Steps
 
@@ -33,9 +33,12 @@ gh pr comment --body "Addressed review feedback: <summary>"
 
 ### 3. Move ticket to In Review
 
-After the PR is created, follow `practices/ticketing-policy` and `tools/linear` to:
+After the PR is created, follow `practices/ticketing-policy` and the task tracker tool skill to:
 1. Move the ticket to "In Review"
-2. Comment on the ticket with the PR link
+2. Comment on the issue with the PR link:
+   ```bash
+   gh issue comment <NUMBER> --body "**PR:** <PR URL>"
+   ```
 
 This is YOUR responsibility as the engineer — the manager does not do this.
 
@@ -43,5 +46,7 @@ This is YOUR responsibility as the engineer — the manager does not do this.
 
 - PR title format per `practices/source-control-conventions`: `[ISSUE-ID] type: description`
 - **Move ticket to In Review** after creating the PR.
-- Never merge. Humans merge PRs.
+- **NEVER merge PRs.** Do NOT run `gh pr merge`, `git merge main`, or any
+  merge operation. Humans merge PRs after review. Your job ends at creating
+  the PR and moving the ticket to In Review. STOP there.
 - `/ship` handles test running, review, and PR creation — let it do its job.

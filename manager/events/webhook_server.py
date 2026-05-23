@@ -20,6 +20,20 @@ from .bus import get_bus
 log = logging.getLogger(__name__)
 
 
+def _github_issue_state(labels: list[str], gh_state: str) -> str:
+    """Map GitHub Issue labels to workflow state names."""
+    label_map = {
+        "status:in-progress": "In Progress",
+        "status:blocked": "Blocked",
+        "status:in-review": "In Review",
+        "status:todo": "Todo",
+    }
+    for label, state in label_map.items():
+        if label in labels:
+            return state
+    return "Done" if gh_state == "closed" else "Todo"
+
+
 class WebhookHandler(BaseHTTPRequestHandler):
     # Set by start_server
     github_secret: str = ""
@@ -100,11 +114,30 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "body": review.get("body", ""),
             })
 
+        elif event_type == "issues":
+            action = payload.get("action", "")
+            issue = payload.get("issue", {})
+            label_names = [l["name"] for l in issue.get("labels", [])]
+            if action in ("opened", "labeled", "unlabeled", "closed", "reopened", "assigned"):
+                bus.push(f"task.{action}", "github-issues", {
+                    "action": action,
+                    "issue_id": f"#{issue.get('number', '')}",
+                    "task_id": str(issue.get("number", "")),
+                    "title": issue.get("title", ""),
+                    "state": _github_issue_state(label_names, issue.get("state", "")),
+                    "labels": label_names,
+                    "repo": payload.get("repository", {}).get("full_name", ""),
+                    "url": issue.get("html_url", ""),
+                })
+
         elif event_type == "issue_comment":
             comment = payload.get("comment", {})
-            bus.push("github.comment", "github", {
+            issue = payload.get("issue", {})
+            is_pr = "pull_request" in issue
+            bus.push("github.comment" if is_pr else "task.comment", "github", {
                 "repo": payload.get("repository", {}).get("full_name", ""),
-                "issue_number": payload.get("issue", {}).get("number"),
+                "issue_number": issue.get("number"),
+                "issue_id": f"#{issue.get('number', '')}",
                 "author": comment.get("user", {}).get("login", ""),
                 "body": comment.get("body", "")[:500],
             })
