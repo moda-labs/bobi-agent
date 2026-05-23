@@ -38,7 +38,7 @@ Events arrive from multiple sources — pollers run in background threads, webho
 
 ### Handoff contract
 
-Engineers write `.modastack/handoff.md` in their worktree to track phase state:
+Engineers write `~/.modastack/handoffs/<issue_id>.md` to track phase state:
 
 ```yaml
 ---
@@ -136,7 +136,7 @@ modastack init
 modastack setup ~/path/to/repo --linear-key <KEY> --linear-project <PROJECT>
 ```
 
-This generates `.modastack.yaml`, stores credentials in `~/.modastack/credentials.yaml`, bootstraps the Linear board with required workflow states, and installs engineer skills as symlinks in `.claude/skills/`.
+This stores credentials in `~/.modastack/credentials.yaml`, registers the repo in `~/.modastack/config.yaml`, bootstraps the Linear board with required workflow states, and installs engineer skills as symlinks in `.claude/skills/`.
 
 ### Commands
 
@@ -150,32 +150,25 @@ modastack status               # show active engineer sessions
 modastack events               # show recent events from the bus
 modastack decisions            # show recent manager decisions
 modastack init                 # initialize global config
-modastack setup [path]         # auto-generate .modastack.yaml and register a repo
-modastack register <path>      # register a repo (if .modastack.yaml already exists)
+modastack setup [path]         # set up a repo — install skills, store credentials, register
+modastack register <target>    # register a repo (local path or org/repo)
 modastack repos                # list registered repos
 ```
 
 ## Per-repo config
 
-Drop `.modastack.yaml` in any repo, or run `modastack setup` to auto-generate:
+All repo config lives in `~/.modastack/config.yaml` under the `repos` list.
+Run `modastack register <target>` or `modastack setup <path>` to add a repo:
 
 ```yaml
-credentials: "default"          # credential set from ~/.modastack/credentials.yaml
-
-linear:
-  project: "PROJ"               # Linear project key (e.g., ENG)
-  trigger_labels: ["agent"]     # issues with these labels get picked up
-  skip_labels: ["blocked", "human-only"]
-
-agent:
-  tool: "claude"
-  max_parallel: 2               # max concurrent agents on this repo
-
-verify:
-  test_command: "pytest"
-  review_required: true
-  auto_merge: false
+repos:
+  - path: /Users/zach/dev/bettertab
+    remote: moda-labs/bettertab     # optional — enables auto-clone
+    linear_project: BT
+    credentials: default            # key into credentials.yaml
 ```
+
+Settings like `test_command` and `skills` are auto-detected from the repo at runtime.
 
 ## Issue lifecycle
 
@@ -208,11 +201,10 @@ Done
 ```
 modastack/                        # CLI + infrastructure
 ├── cli.py                        # Click CLI entrypoint
-├── config.py                     # Global (~/.modastack/) + per-repo (.modastack.yaml)
-├── state.py                      # Active engineer session tracking
+├── config.py                     # Global config (~/.modastack/config.yaml)
 ├── scanner.py                    # Linear GraphQL polling
 ├── session.py                    # Engineer tmux session management (spawn, inject, capture)
-├── setup.py                      # Auto-generate .modastack.yaml from repo inspection
+├── setup.py                      # Repo setup — skill install, auto-detection
 └── board_setup.py                # Bootstrap Linear board with workflow states
 
 manager/                          # Persistent manager + event system
@@ -272,12 +264,12 @@ tools/                            # Shared tool reference (used by manager + eng
 | File-based event delivery | Consumer writes events to a file instead of injecting long text into tmux (paste buffer is unreliable). Manager reads the file reliably |
 | Manager uses curl | MCP tools have built-in write confirmations that block automation. The manager calls APIs directly via curl for Linear, Slack, and GitHub |
 | No executor | The manager handles everything directly — curl for APIs, tmux commands for engineer sessions, bash for everything else. No intermediate action protocol |
-| Handoff contract | `.modastack/handoff.md` is the interface between phases — minimal, structured |
+| Handoff contract | `~/.modastack/handoffs/<id>.md` is the interface between phases — minimal, structured |
 | Sub-agents | Context isolation within phases. Reviewer only sees the diff, not the spec |
 | Question bridging | Agent questions detected via worker poller, manager decides how to answer — directly or escalate to human |
 | Simple Linear states | 4 states (Todo, In Progress, In Review, Done + Blocked). Internal phases are invisible to humans |
 | Daemon, not cron | Inherits full shell environment (Keychain, OAuth). No cron env issues |
-| Per-repo config | Instance is global, config is local. Repo opts in via `.modastack.yaml` |
+| Centralized config | All repo settings in `~/.modastack/config.yaml`. No modastack files in target repos |
 | Webhooks + polling | Webhooks for real-time events when available, pollers as fallback. Both push to the same bus |
 | Slack Socket Mode | WebSocket connection to Slack — no public URL needed, real-time DMs and mentions |
 

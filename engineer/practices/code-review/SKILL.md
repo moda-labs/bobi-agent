@@ -42,5 +42,4 @@ Incorporate review feedback into the spec before shipping.
 
 - Write tests BEFORE implementation (TDD)
 - Run the project's test command before every PR
-- The test command is in `.modastack.yaml` under `verify.test_command`,
-  or detect it from package.json / pyproject.toml / Makefile
+- The test command is auto-detected from package.json / pyproject.toml / Makefile

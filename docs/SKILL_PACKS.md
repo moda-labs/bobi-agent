@@ -75,14 +75,7 @@ For **heavy** tasks: relevant skills listed with explicit guidance to use them w
 
 ## Adding relevance rules
 
-Edit `dispatch/skills.py` → `get_relevant_skills()` to add mappings from your labels to your skill names. Or override per-repo in `.modastack.yaml`:
-
-```yaml
-agent:
-  skills: ["db-migrate", "api-test"]  # always available for this repo
-```
-
-Explicit skills from `.modastack.yaml` are a fallback — if auto-discovery finds matching skills, those take priority (they have descriptions and richer context).
+Skills are auto-detected from the repo structure at runtime (see `modastack/setup.py`). Auto-discovery finds matching skills based on project files (e.g., `package.json` → `qa`, `fly.toml` → `land-and-deploy`).
 
 ## Examples
 
