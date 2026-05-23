@@ -336,6 +336,14 @@ def setup(repo_path: str, task_tracking: str | None, project: str | None,
         click.echo("  Skills already installed.")
 
 
+@main.command()
+@click.option("--port", default=8095, help="Dashboard server port")
+def dashboard(port):
+    """Start the web dashboard."""
+    from dashboard.app import run_dashboard
+    run_dashboard(port=port)
+
+
 @main.command("self-update")
 def self_update():
     """Pull latest from origin/main and reinstall modastack."""

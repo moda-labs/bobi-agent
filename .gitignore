@@ -8,3 +8,4 @@ dist/
 worktrees/
 .dispatch/
 .dispatch.yaml
+.gstack/
