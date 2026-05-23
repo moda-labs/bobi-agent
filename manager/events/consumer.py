@@ -10,6 +10,7 @@ Instead of injecting long text into tmux (unreliable paste buffer), we:
 import asyncio
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -17,7 +18,7 @@ import truststore
 truststore.inject_into_ssl()
 
 from .bus import get_bus
-from .pollers import start_pollers
+from .pollers import start_pollers, _poll_version
 from .slack_socket import start_socket_mode
 from .webhook_server import start_server
 from modastack.config import GlobalConfig
@@ -80,6 +81,12 @@ def _write_events_file(events: list[dict]) -> None:
             lines.append(f"- labels: {', '.join(data['labels'])}")
         if data.get("pr_url") or data.get("url"):
             lines.append(f"- url: {data.get('pr_url') or data.get('url')}")
+        if data.get("current_version"):
+            lines.append(f"- current_version: {data['current_version']}")
+        if data.get("new_version"):
+            lines.append(f"- new_version: {data['new_version']}")
+        if data.get("changelog"):
+            lines.append(f"- changelog: {data['changelog']}")
         if detail:
             lines.append(f"- detail: {detail}")
 
@@ -131,6 +138,14 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
     if slack_thread:
         exclude.append("slack")
     start_pollers(exclude=exclude)
+
+    # Run an immediate version check on startup (doesn't wait for the 1h poller)
+    def _one_shot_version_check():
+        try:
+            _poll_version(interval=0)
+        except Exception as e:
+            log.debug(f"Startup version check failed: {e}")
+    threading.Thread(target=_one_shot_version_check, daemon=True).start()
 
     log.info(f"Listening for events (batch window: {batch_window}s)")
     tick_count = 0
