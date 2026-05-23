@@ -371,3 +371,95 @@ def test_permission_blocked_event_includes_prompt_line():
     perm_events = bus.get_events("worker.permission_blocked")
     assert len(perm_events) == 1
     assert "Allow Write" in perm_events[0]["data"]["prompt_line"]
+
+
+# ---------------------------------------------------------------------------
+# detect_state: "Allow all" standalone (not as numbered option)
+# ---------------------------------------------------------------------------
+
+@patch("modastack.session.subprocess.run")
+def test_permission_blocked_allow_all_standalone(mock_run):
+    """'Allow all' on its own (not a numbered option) triggers permission_blocked."""
+    pane = "\n".join([
+        "Reading configuration...",
+        "Allow all",
+    ])
+    mock_run.side_effect = _make_run_side_effect(pane)
+
+    from modastack.session import detect_state
+    result = detect_state("TEST-1")
+
+    assert result["state"] == "permission_blocked"
+    assert "Allow all" in result["prompt_line"]
+
+
+# ---------------------------------------------------------------------------
+# _poll_workers: exited state clears last_states and heartbeats
+# ---------------------------------------------------------------------------
+
+def test_process_dead_clears_heartbeats_and_state():
+    """When a session reports exited, both last_states and heartbeats are cleaned."""
+    bus = FakeBus()
+    last_states = {"TEST-9": "TEST-9:working"}
+    heartbeats = {"TEST-9": {"hash": "abc", "last_change": 0, "alerted_stall": False, "alerted_stuck": False}}
+
+    detect = lambda iid: {"state": "exited"}
+
+    _run_poll_cycle(["moda-test-9"], detect, "", bus, last_states, heartbeats)
+
+    assert "TEST-9" not in last_states
+    assert "TEST-9" not in heartbeats
+    assert len(bus.get_events("worker.process_dead")) == 1
+
+
+# ---------------------------------------------------------------------------
+# _poll_workers: empty pane content produces empty snippet
+# ---------------------------------------------------------------------------
+
+def test_stall_with_empty_pane_content():
+    """Stall detection works even when pane content is empty/whitespace."""
+    bus = FakeBus()
+    last_states = {}
+    heartbeats = {}
+
+    detect = lambda iid: {"state": "working"}
+
+    # First cycle: establish baseline with empty content
+    _run_poll_cycle(["moda-test-10"], detect, "   \n  \n  ", bus, last_states, heartbeats)
+
+    # Push past stall threshold
+    heartbeats["TEST-10"]["last_change"] = time.monotonic() - STALL_THRESHOLD_SECS - 1
+
+    # Second cycle: same content (still empty), should trigger stall
+    _run_poll_cycle(["moda-test-10"], detect, "   \n  \n  ", bus, last_states, heartbeats)
+
+    stall_events = bus.get_events("worker.stalled")
+    assert len(stall_events) == 1
+    # snippet should be empty since content is whitespace
+    assert stall_events[0]["data"]["last_output_snippet"] == ""
+
+
+# ---------------------------------------------------------------------------
+# _poll_workers: state change dedup (same state doesn't re-emit)
+# ---------------------------------------------------------------------------
+
+def test_state_change_dedup():
+    """Same state on consecutive cycles doesn't re-emit the event."""
+    bus = FakeBus()
+    last_states = {}
+    heartbeats = {}
+
+    detect = lambda iid: {"state": "working"}
+
+    _run_poll_cycle(["moda-test-11"], detect, "output", bus, last_states, heartbeats)
+    _run_poll_cycle(["moda-test-11"], detect, "output changed", bus, last_states, heartbeats)
+
+    working_events = bus.get_events("worker.working")
+    assert len(working_events) == 1  # Only emitted once
+
+    # But a state change DOES emit
+    detect2 = lambda iid: {"state": "waiting_input"}
+    _run_poll_cycle(["moda-test-11"], detect2, "output changed 2", bus, last_states, heartbeats)
+
+    waiting_events = bus.get_events("worker.waiting_input")
+    assert len(waiting_events) == 1
