@@ -8,8 +8,8 @@
 
 **Solution:** Eight changes that collectively make modastack deployable and self-maintaining on remote boxes:
 
-1. Config supports `{remote, path}` repo entries (backward-compat with bare paths)
-2. `modastack register` accepts `org/repo` — clones, sets up, and registers
+1. Consolidate all config into `~/.modastack/config.yaml` — eliminate per-repo `.modastack.yaml`
+2. `modastack register` accepts `org/repo` — clones, detects settings, registers
 3. Auto-clone missing repos on startup
 4. Main branch sync before engineer spawn
 5. Worktree + branch cleanup when task moves to Done
@@ -20,12 +20,14 @@
 ## Scope
 
 **In:**
-- Config format: `{remote, path}` repo entries with backward compatibility
+- Config consolidation: merge `RepoConfig` fields into `RepoEntry` in `GlobalConfig`
+- Delete `RepoConfig` class and `.modastack.yaml` generation
 - CLI: `register` accepts `org/repo`, `init` sets git identity
 - Consumer: auto-clone on startup
 - Session: main-branch sync before spawn, worktree cleanup
 - Manager prompt: repo setup instructions
 - Deploy script: simplified post-install
+- Migrate all consumers (pollers, webhooks, scanner) from `RepoConfig` to `RepoEntry`
 - Tests for config and CLI changes
 
 **Out:**
@@ -35,40 +37,78 @@
 - Custom deploy pipelines
 - Automated `gh auth login` (interactive, one-time)
 
+## Analysis: eliminating per-repo config files
+
+The current system has two config layers:
+- `~/.modastack/config.yaml` (global) — Slack tokens, webhook config, registered repo paths
+- `<repo>/.modastack.yaml` (per-repo) — Linear project key, credentials ref, test command, trigger labels, etc.
+
+**What `.modastack.yaml` contains and where it's actually consumed:**
+
+| Field | Python consumer | Auto-detectable? |
+|---|---|---|
+| `linear.project` | `scanner.py`, `pollers.py`, `webhook_server.py` | No — must be provided |
+| `credentials` | `pollers.py` via `get_credentials()` | No — must be provided |
+| `linear.trigger_labels` | Manager prompt only (not Python code) | Defaults work (`["agent"]`) |
+| `linear.skip_labels` | Manager prompt only | Defaults work |
+| `verify.test_command` | Engineer skill docs only | Yes — `setup.py` already detects it |
+| `agent.max_parallel` | Not consumed in code | Default works (`2`) |
+| `verify.review_required` | Not consumed in code | Default works (`true`) |
+| `verify.auto_merge` | Not consumed in code | Default works (`false`) |
+| `agent.skills` | Not consumed in code | Yes — `setup.py` already detects it |
+| `context` | Not consumed anywhere | N/A |
+
+**Only 2 fields require human input:** `linear_project` and `credentials`. Everything else is either auto-detected or uses sensible defaults.
+
+**Decision: eliminate `.modastack.yaml`.** Move `linear_project` and `credentials` into `RepoEntry` in the global config. Auto-detected values (test command, skills) are computed at runtime when needed, not stored. Benefits:
+
+1. No modastack-specific files pollute target repos
+2. One config file instead of two — simpler mental model
+3. `modastack setup` doesn't need write access to the target repo
+4. Remote deployment becomes: register + done
+5. No backward compatibility concern — there's only one format
+
+The skill symlinks (`.claude/skills/`) still get installed into target repos — those are Claude Code's native mechanism, not modastack config.
+
 ## Technical Approach
 
-### 1. Config format — `modastack/config.py`
+### 1. Config consolidation — `modastack/config.py`
 
-Add a `RepoEntry` dataclass alongside the existing config:
+Replace `list[Path]` repos with `list[RepoEntry]`. Absorb the fields from `RepoConfig` that are actually used. Delete `RepoConfig`.
 
 ```python
 @dataclass
 class RepoEntry:
     path: Path
-    remote: str = ""  # e.g. "moda-labs/bettertab"
+    remote: str = ""                            # e.g. "moda-labs/bettertab"
+    linear_project: str = ""                    # e.g. "BT"
+    credentials: str = "default"                # key into credentials.yaml
+    trigger_labels: list[str] = field(default_factory=lambda: ["agent"])
+    skip_labels: list[str] = field(default_factory=lambda: ["blocked", "human-only"])
+
+    def get_credentials(self) -> dict[str, str]:
+        creds = Credentials.load()
+        return creds.get(self.credentials)
 ```
 
 Change `GlobalConfig.repos` from `list[Path]` to `list[RepoEntry]`.
 
-**Parsing (backward compat):** In `GlobalConfig.load()`, handle both formats:
+**Parsing:** Always dict format:
 ```yaml
-# Old format — still works
-repos:
-  - /Users/zach/dev/bettertab
-
-# New format
 repos:
   - remote: moda-labs/bettertab
     path: ~/.modastack/repos/bettertab
+    linear_project: BT
+    credentials: default
 ```
 
-Parsing logic:
-- If entry is a string → `RepoEntry(path=Path(entry).expanduser())`
-- If entry is a dict → `RepoEntry(path=Path(entry["path"]).expanduser(), remote=entry.get("remote", ""))`
+**Serialization:** `GlobalConfig.save()` writes all entries as dicts.
 
-**Serialization:** `GlobalConfig.save()` writes the dict format for entries with a remote, bare strings for local-only entries. This preserves readability for existing local-dev configs.
+**Convenience property:** `GlobalConfig.repo_paths` -> `list[Path]` for code that only needs paths.
 
-**Downstream consumers:** Add a convenience property `GlobalConfig.repo_paths` → `list[Path]` that returns `[e.path for e in self.repos]`. Existing code that only needs paths uses `config.repo_paths` — zero call-site churn. Only new code that needs the remote (register, auto-clone) accesses `config.repos` directly.
+**Lookup helper:** `GlobalConfig.get_repo(path: Path) -> RepoEntry | None` for code that needs the full entry for a given repo path.
+
+**Delete:** `RepoConfig` class, `RepoConfig.from_file()`, all references to `.modastack.yaml` in config.py.
 
 ### 2. `modastack register` accepts GitHub remote — `modastack/cli.py`
 
@@ -76,7 +116,9 @@ Change the `register` command signature:
 ```python
 @main.command()
 @click.argument("target")  # path OR org/repo
-def register(target: str):
+@click.option("--linear-project", default="", help="Linear project key (e.g. BT)")
+@click.option("--credentials", default="default", help="Credential set name")
+def register(target: str, linear_project: str, credentials: str):
 ```
 
 Detection: use a regex `^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$` — exactly one slash, alphanumeric segments. This correctly distinguishes `moda-labs/bettertab` from relative paths like `../my-repo` or `./my-repo`.
@@ -84,10 +126,15 @@ Detection: use a regex `^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$` — exactly one slash
 For `org/repo` format:
 1. Determine clone path: `~/.modastack/repos/<repo-name>/`
 2. Clone: `gh repo clone <org/repo> <clone-path>`
-3. Run full setup (call shared `full_setup(repo_path)` — see below)
-4. Add `RepoEntry(path=clone_path, remote=target)` to global config
+3. Auto-detect `linear_project` if not provided (call `detect_linear_project()`)
+4. Install skill symlinks
+5. Add `RepoEntry(path=clone_path, remote=target, linear_project=..., credentials=...)` to global config
 
-For local paths: existing behavior, but wrap in `RepoEntry(path=resolved)`.
+For local paths:
+1. Resolve to absolute path
+2. Auto-detect `linear_project` if not provided
+3. Install skill symlinks
+4. Add `RepoEntry(path=resolved, linear_project=..., credentials=...)` to global config
 
 **Why `gh repo clone` instead of `git clone`?** `gh` handles auth automatically — it uses the stored OAuth token, handles SSH vs HTTPS transparently, and works with private repos the user has access to.
 
@@ -104,7 +151,7 @@ def _ensure_repos():
         if not entry.remote:
             log.warning(f"Repo missing and no remote configured: {entry.path}")
             continue
-        log.info(f"Cloning {entry.remote} → {entry.path}")
+        log.info(f"Cloning {entry.remote} -> {entry.path}")
         entry.path.parent.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
             ["gh", "repo", "clone", entry.remote, str(entry.path)],
@@ -113,15 +160,13 @@ def _ensure_repos():
         if result.returncode != 0:
             log.error(f"Clone failed: {result.stderr}")
             continue
-        # Run full setup (config, skills, Linear bootstrap)
-        from modastack.setup import full_setup
-        full_setup(entry.path)
+        install_skill_symlinks(entry.path)
         log.info(f"Cloned and set up: {entry.remote}")
 ```
 
 This makes `modastack start` idempotent — restart/redeploy just works.
 
-**Shared setup function:** Extract the setup logic from `cli.py`'s `setup` command into `modastack/setup.py` as `full_setup(repo_path: Path, credential_name: str = None)`. This function: generates `.modastack.yaml`, installs skill symlinks, and bootstraps the Linear board (if credentials exist). Both the CLI `setup` command and `_ensure_repos()` call it.
+**Shared setup function:** `full_setup()` in `modastack/setup.py` is simplified — it installs skill symlinks and bootstraps the Linear board (if credentials exist). It no longer generates `.modastack.yaml`. Both the CLI `register` command and `_ensure_repos()` call it.
 
 ### 4. Main branch sync before engineer spawn — `modastack/session.py`
 
@@ -129,7 +174,6 @@ Add a function `sync_main_branch(repo_path: Path)`:
 
 ```python
 def sync_main_branch(repo_path: Path) -> bool:
-    # Get the remote's default branch (main, master, develop, etc.)
     ref_result = subprocess.run(
         ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
         capture_output=True, text=True, cwd=repo_path,
@@ -159,14 +203,13 @@ def sync_main_branch(repo_path: Path) -> bool:
     return True
 ```
 
-Call this from `spawn_session()` before creating the worktree. The `cwd` parameter already points to the repo root.
+Call this from `spawn_session()` before creating the worktree.
 
 **Safety:** `git reset --hard` on the main branch in the repo root is safe because:
 - On remote boxes, nobody works on main directly — all work is in worktrees
-- On local dev, the repo root is also the worktree, but engineers shouldn't have uncommitted work on main
 - Worktrees are isolated — `reset --hard` on main doesn't affect them
 
-**Default branch detection:** Use `git symbolic-ref refs/remotes/origin/HEAD` to get the actual default branch name (main vs master vs develop). Fall back to "main".
+**Default branch detection:** Use `git symbolic-ref refs/remotes/origin/HEAD` to get the actual default branch name. Fall back to "main".
 
 ### 5. Worktree cleanup on Done — `modastack/session.py`
 
@@ -177,12 +220,10 @@ def cleanup_worktree(issue_id: str, repo_path: Path) -> None:
     branch = f"agent/{issue_id.lower()}"
     worktree_path = repo_path / "worktrees" / issue_id.lower()
 
-    # Kill tmux session first if still running
     if session_exists(issue_id):
         kill_session(issue_id)
         time.sleep(1)
 
-    # Remove worktree
     if worktree_path.exists():
         result = subprocess.run(
             ["git", "worktree", "remove", str(worktree_path), "--force"],
@@ -193,21 +234,17 @@ def cleanup_worktree(issue_id: str, repo_path: Path) -> None:
         else:
             log.info(f"Removed worktree: {worktree_path}")
 
-    # Delete the branch
     subprocess.run(
         ["git", "branch", "-D", branch],
         capture_output=True, text=True, cwd=repo_path,
     )
 
-    # Clean up session ID file
     saved_id_path = SESSION_IDS_DIR / f"{issue_id}.id"
     if saved_id_path.exists():
         saved_id_path.unlink()
 ```
 
-**When to call it:** The manager calls this when moving a task to Done (after PR merge). This is triggered by the manager's decision logic — the manager already handles `move_linear_issue` actions. We add cleanup as part of the "close" flow.
-
-The manager prompt already describes what to do when a PR is merged — we add instructions to call `cleanup_worktree()` directly as part of the "close" flow. No wrapper needed.
+**When to call it:** The manager calls this when moving a task to Done (after PR merge). The manager prompt gets updated with cleanup instructions.
 
 ### 6. Git identity on init — `modastack/cli.py`
 
@@ -221,7 +258,6 @@ Extend the `init` command to configure git identity:
 def init(non_interactive, git_name, git_email):
     # ... existing init logic ...
 
-    # Configure git identity
     current_name = subprocess.run(
         ["git", "config", "--global", "user.name"],
         capture_output=True, text=True,
@@ -248,13 +284,12 @@ Add a new section to the manager prompt:
 When a human asks you to set up a new repo (e.g., "set up moda-labs/bettertab"
 or "add the bettertab repo"):
 
-1. Run: `modastack register <org/repo>`
-   This clones the repo, generates .modastack.yaml, installs skills,
-   and registers it in the global config.
+1. Run: `modastack register <org/repo> --linear-project <KEY>`
+   This clones the repo, installs skills, and registers it in the global config.
 
-2. If it needs a Linear project key, ask the human on Slack.
+2. If you don't know the Linear project key, ask the human on Slack.
 
-3. Confirm on Slack: "Cloned <repo>, bootstrapped config, ready to work.
+3. Confirm on Slack: "Cloned <repo>, ready to work.
    Linear project: <key>. I'll start picking up `agent`-labeled issues."
 
 If registration fails (auth issue, repo not found), report the error on Slack
@@ -277,27 +312,46 @@ Simplify the "Next steps" section. Steps 1-3 stay (auth is interactive). Replace
      DM Modabot: "set up advisor360/DATS-Tesseract"
 ```
 
+### 9. Migrate consumers from `RepoConfig` to `RepoEntry`
+
+**`manager/events/pollers.py`** — `_poll_linear()` and `_poll_orphans()`:
+- Replace `RepoConfig.from_file(repo_path)` with `config.get_repo(repo_path)`
+- Access `entry.linear_project`, `entry.get_credentials()` directly
+- Remove `FileNotFoundError` try/catch (no file to be missing)
+
+**`manager/events/webhook_server.py`** — Linear webhook handler:
+- Replace `RepoConfig.from_file(repo_path)` with `config.get_repo(repo_path)`
+- Build `configured_projects` from `entry.linear_project` for each repo entry
+
+**`modastack/scanner.py`**:
+- Change signature from `scan_linear_all_active(api_key, repo_config: RepoConfig)` to `scan_linear_all_active(api_key, linear_project: str)`
+- Only uses `repo_config.linear_project` anyway — pass the string directly
+
 ## Design Decisions
 
 | Decision | Choice | Alternative | Why |
 |---|---|---|---|
+| Per-repo config | Eliminate `.modastack.yaml`, centralize in global config | Keep per-repo files | Only 2 fields need human input; everything else auto-detected or defaults. No modastack files in target repos. |
+| Config format | Dict entries only, no bare-path support | Bare-path fallback | Clean break — no backward compat needed. One format, no ambiguity. |
 | Clone tool | `gh repo clone` | `git clone` | `gh` handles auth (OAuth, SSH) transparently for private repos |
-| Config format | Dict entries with bare-path fallback | Always dict | Backward compat — existing configs just work |
 | Main sync method | `git fetch + reset --hard` | `git pull` | Pull can fail on merge conflicts; reset is idempotent |
 | Worktree cleanup trigger | Manager decision on Done | Automatic on PR merge webhook | Manager already handles Done transitions; keep logic centralized |
 | Default clone path | `~/.modastack/repos/<name>/` | Configurable | Simple, predictable. User can override via `path:` in config |
 | Git identity scope | `--global` | Per-repo | Remote boxes run one identity; local dev already has git configured |
+| Auto-detected settings | Compute at runtime, don't store | Store in config on register | Test command and skills change as repos evolve; runtime detection stays current |
 
 ## Verification Plan
 
 ### Level 1 — Unit tests
 
 **`tests/test_config.py`:**
-- `test_repo_entry_from_string` — bare path string → `RepoEntry(path=Path(...))`
-- `test_repo_entry_from_dict` — `{remote, path}` dict → `RepoEntry(path=..., remote=...)`
-- `test_global_config_mixed_repos` — config with both bare paths and dict entries loads correctly
-- `test_global_config_roundtrip_with_remotes` — save + load preserves remote info
+- `test_repo_entry_from_dict` — `{remote, path, linear_project}` dict -> `RepoEntry`
+- `test_repo_entry_defaults` — missing optional fields get defaults
+- `test_global_config_repos_roundtrip` — save + load preserves all RepoEntry fields
 - `test_repo_paths_property` — `GlobalConfig.repo_paths` returns `list[Path]`
+- `test_get_repo_found` — `GlobalConfig.get_repo(path)` returns matching entry
+- `test_get_repo_not_found` — returns None for unknown path
+- `test_repo_config_deleted` — verify `RepoConfig` class no longer exists
 
 **`tests/test_cli.py`:**
 - `test_register_detects_remote` — `org/repo` format is detected vs local path
@@ -310,7 +364,7 @@ Simplify the "Next steps" section. Steps 1-3 stay (auth is interactive). Replace
 
 ### Level 2 — Integration (manual, not in CI)
 
-- Register a real repo via `modastack register org/repo` on a test machine
+- Register a real repo via `modastack register org/repo --linear-project KEY` on a test machine
 - Verify auto-clone on `modastack start` with a missing repo path
 - Verify worktree cleanup after manually moving a task to Done
 
@@ -326,39 +380,45 @@ Simplify the "Next steps" section. Steps 1-3 stay (auth is interactive). Replace
 
 Ordered by dependency — each step builds on the previous:
 
-### Step 1: Config format (`modastack/config.py`)
-- Add `RepoEntry` dataclass
+### Step 1: Config consolidation (`modastack/config.py`)
+- Add `RepoEntry` dataclass with `path`, `remote`, `linear_project`, `credentials`, `trigger_labels`, `skip_labels`
+- Move `get_credentials()` method onto `RepoEntry`
 - Update `GlobalConfig.repos` type to `list[RepoEntry]`
-- Update `load()` parsing for backward compat
+- Update `load()` parsing — dict entries only
 - Update `save()` serialization
 - Add `repo_paths` convenience property
-- Update tests in `tests/test_config.py`
+- Add `get_repo(path)` lookup helper
+- Delete `RepoConfig` class entirely
 
-### Step 2: Downstream consumers use `repo_paths`
-- `manager/events/pollers.py`: use `config.repo_paths` in `_poll_linear()` and `_poll_orphans()`
-- `manager/session.py`: use `config.repo_paths[0]` in `start_or_resume()`
-- `modastack/cli.py`: use `config.repo_paths` in `repos` and `setup` commands
+### Step 2: Migrate consumers from `RepoConfig` to `RepoEntry`
+- `manager/events/pollers.py`: replace `RepoConfig.from_file()` with `config.get_repo()`
+- `manager/events/webhook_server.py`: same replacement
+- `modastack/scanner.py`: change signature to accept `linear_project: str` instead of `RepoConfig`
+- Remove all `from modastack.config import RepoConfig` imports
 
-### Step 3: Extract `full_setup()` into `modastack/setup.py`
-- Move setup logic (generate config, install skills, bootstrap Linear) from `cli.py` into `full_setup(repo_path)`
-- CLI `setup` command calls `full_setup()` instead of inline logic
+### Step 3: Simplify `modastack/setup.py`
+- Remove `generate_dispatch_yaml()` and `setup_repo()` (no more `.modastack.yaml` generation)
+- Keep detection functions (`detect_test_command`, `detect_linear_project`, `detect_skills`, `detect_package_manager`) — used at register-time and by engineer skills
+- Add `install_skill_symlinks(repo_path)` function (extracted from CLI)
+- Add `full_setup(repo_path)` that installs skills + bootstraps Linear board
 
 ### Step 4: CLI `register` accepts org/repo (`modastack/cli.py`)
 - Change `register` to accept `target` string (not `Path(exists=True)`)
-- Add `org/repo` detection via regex `^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$`
-- Clone via `gh repo clone`, call `full_setup()`, register in config
+- Add `--linear-project` and `--credentials` options
+- Add `org/repo` detection via regex
+- Clone via `gh repo clone`, auto-detect settings, call `full_setup()`, register in config
 - Add tests
 
 ### Step 5: Auto-clone on startup (`manager/events/consumer.py`)
-- Add `_ensure_repos()` function calling `full_setup()` after clone
+- Add `_ensure_repos()` function calling `install_skill_symlinks()` after clone
 - Call it at top of `run()`
 
 ### Step 6: Main branch sync (`modastack/session.py`)
 - Add `sync_main_branch()` using `git symbolic-ref refs/remotes/origin/HEAD`
-- Call from `spawn_session()` before creating the tmux session
+- Call from `spawn_session()` before creating the worktree
 
 ### Step 7: Worktree cleanup (`modastack/session.py`)
-- Add `cleanup_worktree()` function (no wrapper)
+- Add `cleanup_worktree()` function
 
 ### Step 8: Git identity on init (`modastack/cli.py`)
 - Add `--git-name` and `--git-email` options to `init`
@@ -368,14 +428,20 @@ Ordered by dependency — each step builds on the previous:
 - Add repo setup instructions to `manager/prompt.md`
 - Simplify `deploy/setup-ec2.sh` post-install steps
 
-### Step 10: Tests (alongside each step, listed here for tracking)
+### Step 10: Delete stale artifacts
+- Delete `example.modastack.yaml`
+- Remove `.modastack.yaml` references from CLAUDE.md, README.md, skill docs
+- Update tests that referenced `RepoConfig` or `.modastack.yaml`
+
+### Step 11: Tests
 
 **`tests/test_config.py`:**
-- `test_repo_entry_from_string` — bare path string → RepoEntry
-- `test_repo_entry_from_dict` — {remote, path} dict → RepoEntry
-- `test_global_config_mixed_repos` — both formats load correctly
-- `test_global_config_roundtrip_with_remotes` — save + load preserves remote
+- `test_repo_entry_from_dict` — dict -> RepoEntry with all fields
+- `test_repo_entry_defaults` — missing optional fields get defaults
+- `test_global_config_repos_roundtrip` — save + load preserves all fields
 - `test_repo_paths_property` — returns list[Path]
+- `test_get_repo_found` — lookup by path works
+- `test_get_repo_not_found` — returns None for unknown path
 
 **`tests/test_cli.py`:**
 - `test_register_detects_remote` — org/repo format detected
@@ -409,14 +475,13 @@ Ordered by dependency — each step builds on the previous:
 - S3/remote artifact storage for worktree contents
 - Automated SSH key management or PAT rotation
 - Repo-level access control (who can register what) — trust-based
-- Configurable clone paths per repo (deferred — `~/.modastack/repos/<name>/` is sufficient)
 
 ## What already exists
 
-- `modastack setup` handles the full setup flow (config, skills, Linear, credentials) — we extract into `full_setup()` for reuse
+- `modastack setup` handles the full setup flow — we simplify it (no more `.modastack.yaml` gen)
 - `kill_session()` already handles tmux cleanup — `cleanup_worktree()` extends it with git cleanup
-- `GlobalConfig.load()/save()` already round-trips YAML — we extend the parser, not replace it
-- `generate_dispatch_yaml()` in `setup.py` already generates `.modastack.yaml` from repo inspection
+- `GlobalConfig.load()/save()` already round-trips YAML — we extend the repo entries
+- Detection functions in `setup.py` (`detect_test_command`, `detect_linear_project`, `detect_skills`) — kept, used at register-time
 
 ## Failure modes
 
