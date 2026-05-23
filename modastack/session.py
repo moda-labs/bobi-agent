@@ -105,9 +105,10 @@ def detect_state(issue_id: str) -> dict:
     """Analyze the pane to determine session state.
 
     Returns:
-        state: 'waiting_input' | 'working' | 'asking_question' | 'exited' | 'unknown'
+        state: 'waiting_input' | 'working' | 'asking_question' | 'permission_blocked' | 'exited' | 'unknown'
         question: str (if asking_question)
         options: list[str] (if asking_question)
+        prompt_line: str (if permission_blocked)
     """
     if not session_exists(issue_id):
         return {"state": "exited"}

@@ -170,12 +170,13 @@ def _run_poll_cycle(session_names, detect_fn, pane_content, bus, last_states, he
         sess_state = state_info["state"]
 
         if sess_state == "exited":
-            bus.push("worker.process_dead", "worker", {
-                "issue_id": iid,
-                "session_name": session_name,
-                "reason": "tmux session exists but claude process is not running",
-            })
-            last_states.pop(iid, None)
+            if last_states.get(iid) != f"{iid}:process_dead":
+                last_states[iid] = f"{iid}:process_dead"
+                bus.push("worker.process_dead", "worker", {
+                    "issue_id": iid,
+                    "session_name": session_name,
+                    "reason": "tmux session exists but claude process is not running",
+                })
             heartbeats.pop(iid, None)
             continue
 
@@ -397,8 +398,8 @@ def test_permission_blocked_allow_all_standalone(mock_run):
 # _poll_workers: exited state clears last_states and heartbeats
 # ---------------------------------------------------------------------------
 
-def test_process_dead_clears_heartbeats_and_state():
-    """When a session reports exited, both last_states and heartbeats are cleaned."""
+def test_process_dead_clears_heartbeats_and_marks_state():
+    """When a session reports exited, heartbeats are cleaned and last_states marks it dead."""
     bus = FakeBus()
     last_states = {"TEST-9": "TEST-9:working"}
     heartbeats = {"TEST-9": {"hash": "abc", "last_change": 0, "alerted_stall": False, "alerted_stuck": False}}
@@ -407,7 +408,7 @@ def test_process_dead_clears_heartbeats_and_state():
 
     _run_poll_cycle(["moda-test-9"], detect, "", bus, last_states, heartbeats)
 
-    assert "TEST-9" not in last_states
+    assert last_states["TEST-9"] == "TEST-9:process_dead"
     assert "TEST-9" not in heartbeats
     assert len(bus.get_events("worker.process_dead")) == 1
 
@@ -463,3 +464,24 @@ def test_state_change_dedup():
 
     waiting_events = bus.get_events("worker.waiting_input")
     assert len(waiting_events) == 1
+
+
+def test_process_dead_dedup():
+    """process_dead only fires once per dead session, not every poll cycle."""
+    bus = FakeBus()
+    last_states = {}
+    heartbeats = {}
+
+    detect = lambda iid: {"state": "exited"}
+
+    # Three cycles with same dead session
+    for _ in range(3):
+        _run_poll_cycle(["moda-test-12"], detect, "", bus, last_states, heartbeats)
+
+    dead_events = bus.get_events("worker.process_dead")
+    assert len(dead_events) == 1
+
+
+def test_strip_ansi_dec_private_modes():
+    """ANSI regex strips DEC private mode sequences like cursor show/hide."""
+    assert _strip_ansi("\x1b[?25hvisible\x1b[?25l") == "visible"

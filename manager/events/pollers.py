@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 STALL_THRESHOLD_SECS = 300   # 5 min — emit worker.stalled
 STUCK_THRESHOLD_SECS = 600   # 10 min — emit worker.stuck
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+_ANSI_RE = re.compile(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]")
 
 
 def _strip_ansi(text: str) -> str:
@@ -71,12 +71,13 @@ def _poll_workers(interval: int = 5):
 
                 # Process liveness: tmux session exists but claude process died
                 if sess_state == "exited":
-                    bus.push("worker.process_dead", "worker", {
-                        "issue_id": iid,
-                        "session_name": session_name,
-                        "reason": "tmux session exists but claude process is not running",
-                    })
-                    last_states.pop(iid, None)
+                    if last_states.get(iid) != f"{iid}:process_dead":
+                        last_states[iid] = f"{iid}:process_dead"
+                        bus.push("worker.process_dead", "worker", {
+                            "issue_id": iid,
+                            "session_name": session_name,
+                            "reason": "tmux session exists but claude process is not running",
+                        })
                     heartbeats.pop(iid, None)
                     continue
 
