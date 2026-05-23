@@ -100,15 +100,16 @@ def detect_skills(repo_path: Path) -> list[str]:
     return skills
 
 
-def generate_dispatch_yaml(repo_path: Path) -> dict:
+def generate_dispatch_yaml(repo_path: Path, task_tracking: str = "github-issues") -> dict:
     """Generate a .modastack.yaml config for the repo."""
     test_cmd = detect_test_command(repo_path)
-    linear_project = detect_linear_project(repo_path)
+    project = detect_linear_project(repo_path)
     skills = detect_skills(repo_path)
 
     return {
-        "linear": {
-            "project": linear_project,
+        "task_tracking": {
+            "system": task_tracking,
+            "project": project,
             "trigger_labels": ["agent"],
             "skip_labels": ["blocked", "human-only"],
         },

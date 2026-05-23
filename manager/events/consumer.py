@@ -66,8 +66,8 @@ def _write_events_file(events: list[dict]) -> None:
 
         if data.get("issue_id"):
             lines.append(f"- issue_id: {data['issue_id']}")
-        if data.get("linear_id"):
-            lines.append(f"- linear_id: {data['linear_id']}")
+        if data.get("task_id"):
+            lines.append(f"- task_id: {data['task_id']}")
         if data.get("from"):
             lines.append(f"- from: {data['from']}")
         if data.get("channel_id"):
@@ -78,6 +78,10 @@ def _write_events_file(events: list[dict]) -> None:
             lines.append(f"- state: {data['state']}")
         if data.get("labels"):
             lines.append(f"- labels: {', '.join(data['labels'])}")
+        if data.get("phase"):
+            lines.append(f"- phase: {data['phase']}")
+        if data.get("spec_pr"):
+            lines.append(f"- spec_pr: {data['spec_pr']}")
         if data.get("pr_url") or data.get("url"):
             lines.append(f"- url: {data.get('pr_url') or data.get('url')}")
         if detail:
@@ -127,7 +131,7 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
     # Start pollers
     exclude = []
     if use_webhooks:
-        exclude.append("linear")
+        exclude.append("tasks")
     if slack_thread:
         exclude.append("slack")
     start_pollers(exclude=exclude)
@@ -151,19 +155,32 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         event_types = ", ".join(set(e["type"] for e in events))
         log.info(f"Batch #{tick_count}: {len(events)} events — {event_types}")
 
-        # Wait for manager to be ready
+        # Wait for manager to be ready (up to 2 min)
+        state = "unknown"
         for _ in range(60):
-            if detect_state() == "waiting_input":
+            state = detect_state()
+            if state == "waiting_input":
                 break
             time.sleep(2)
         else:
-            log.warning("Manager not ready after 2 min — injecting anyway")
+            log.warning(f"Manager not ready after 2 min (state={state}) — injecting anyway")
 
         # Write events to file
         _write_events_file(events)
 
-        # Inject a short trigger (always submits reliably)
-        inject(f"New events. Read {PENDING_EVENTS_PATH} and act on them.")
+        # Inject trigger with retry — verify it actually landed
+        trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
+        for attempt in range(3):
+            inject(trigger)
+            time.sleep(1)
+            # Verify the trigger appears in the pane (manager received it)
+            from manager.session import capture
+            pane = capture(lines=5)
+            if "pending_events" in pane or detect_state() == "working":
+                break
+            log.warning(f"Inject attempt {attempt + 1} may not have landed — retrying")
+        else:
+            log.error("Failed to deliver trigger after 3 attempts")
 
         # Log
         _log_batch(events)

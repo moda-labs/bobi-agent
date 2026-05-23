@@ -1,7 +1,7 @@
 # Ticketing Policy
 
 This documents our ticketing workflow and responsibilities. For the
-mechanical API calls, see `tools/linear`.
+mechanical API calls, see the task tracker tool skill (e.g., `tools/github-issues` or `tools/linear`).
 
 ## Ticket states
 
@@ -26,7 +26,7 @@ Our workflow uses these states, in order:
 
 The handoff file (`.modastack/handoff.md`) contains:
 - `issue_id`: the ticket identifier (e.g., BET-10)
-- `linear_id`: the UUID needed for API calls
+- `task_id`: the unique identifier needed for API calls
 - `title`: the ticket title
 
-The team key is the prefix of the issue ID (BET-10 → BET).
+The team key is the project prefix of the issue ID (BET-10 → BET).

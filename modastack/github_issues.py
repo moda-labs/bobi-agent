@@ -1,0 +1,103 @@
+"""GitHub Issues adapter — scan issues and bootstrap labels via gh CLI.
+
+Used when task_tracking.system == "github-issues" in .modastack.yaml.
+No API key needed — uses gh CLI's existing authentication.
+"""
+
+import json
+import subprocess
+from pathlib import Path
+
+from .config import RepoConfig
+
+WORKFLOW_LABELS = [
+    ("status:todo", "Ready to be picked up", "0e8a16"),
+    ("status:in-progress", "Engineer actively working", "fbca04"),
+    ("status:blocked", "Waiting for human input", "d93f0b"),
+    ("status:in-review", "PR created, awaiting review", "0075ca"),
+    ("agent", "Modastack-managed issue", "6366f1"),
+]
+
+
+def bootstrap_labels(repo_path: Path) -> list[str]:
+    """Ensure all workflow labels exist in the GitHub repo."""
+    actions = []
+
+    existing = subprocess.run(
+        ["gh", "label", "list", "--json", "name", "--limit", "200"],
+        capture_output=True, text=True, cwd=repo_path,
+    )
+    if existing.returncode != 0:
+        return [f"Failed to list labels: {existing.stderr.strip()}"]
+
+    existing_names = {l["name"] for l in json.loads(existing.stdout)}
+
+    for name, description, color in WORKFLOW_LABELS:
+        if name in existing_names:
+            continue
+        result = subprocess.run(
+            ["gh", "label", "create", name, "--description", description, "--color", color],
+            capture_output=True, text=True, cwd=repo_path,
+        )
+        if result.returncode == 0:
+            actions.append(f"Created label '{name}'")
+        else:
+            actions.append(f"Failed to create '{name}': {result.stderr.strip()}")
+
+    if not actions:
+        actions.append("Labels already configured")
+
+    return actions
+
+
+def scan_github_issues(repo_config: RepoConfig) -> dict[str, list[dict]]:
+    """Fetch open issues grouped by workflow state label.
+
+    Returns: {"Todo": [issue_data, ...], "In Progress": [...], ...}
+    """
+    result = subprocess.run(
+        ["gh", "issue", "list", "--state", "open", "--json",
+         "number,title,body,labels,comments,assignees,url", "--limit", "50"],
+        capture_output=True, text=True, cwd=repo_config.path,
+    )
+    if result.returncode != 0:
+        return {}
+
+    issues = json.loads(result.stdout)
+    label_to_state = {
+        "status:todo": "Todo",
+        "status:in-progress": "In Progress",
+        "status:blocked": "Blocked",
+        "status:in-review": "In Review",
+    }
+
+    grouped: dict[str, list[dict]] = {}
+    for issue in issues:
+        label_names = [l["name"] for l in issue.get("labels", [])]
+
+        state = "Todo"
+        for label_name, state_name in label_to_state.items():
+            if label_name in label_names:
+                state = state_name
+                break
+
+        project = repo_config.project or repo_config.path.name.upper()[:6]
+        identifier = f"{project}-{issue['number']}"
+
+        normalized = {
+            "id": str(issue["number"]),
+            "identifier": identifier,
+            "title": issue["title"],
+            "description": issue.get("body") or "",
+            "labels": {"nodes": [{"name": n} for n in label_names]},
+            "state": {"name": state},
+            "comments": {
+                "nodes": [
+                    {"body": c.get("body", ""), "user": {"name": c.get("author", {}).get("login", "")}}
+                    for c in (issue.get("comments") or [])[-3:]
+                ]
+            },
+        }
+        grouped.setdefault(state, []).append(normalized)
+
+    return grouped
