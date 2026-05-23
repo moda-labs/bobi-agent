@@ -3,18 +3,20 @@ issue_id: MDS-25
 title: Self-updating — versioning, changelog, and Slack-driven updates
 worktree: /Users/zkozick/dev/modastack/worktrees/mds-25
 branch: agent/mds-25
-phase: spec_complete
+phase: implement_complete
 spec_path: specs/mds-25-self-updating.md
 complexity: medium
 ---
 
 ## Status
-Spec written: specs/mds-25-self-updating.md
+Implementation complete. All tests passing (15/15 new, 34/34 existing).
 
-Adds version-check poller (hourly, compares local VERSION vs origin/main),
-Slack notification with changelog summary, user-approved self-update via
-`modastack self-update` CLI command, and rollback support.
-
-Key files to change: pollers.py (new poller), cli.py (new commands),
-prompt.md (update event handling), consumer.py (startup check),
-plus new CHANGELOG.md and __version__.py.
+### What was built
+- `modastack/__version__.py` — reads VERSION file as runtime source of truth
+- `CHANGELOG.md` — initial changelog
+- `_poll_version` + `_check_version` in pollers.py — hourly version check poller
+- `modastack self-update` — fetch, stash, pull --ff-only, pip install, pop stash
+- `modastack rollback` — reset to pre-update HEAD from saved state
+- Manager prompt update — handles `system.update_available` events via Slack DM
+- Startup one-shot version check in consumer.py
+- `tests/test_self_update.py` — 13 unit tests
