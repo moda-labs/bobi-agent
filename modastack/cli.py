@@ -174,21 +174,92 @@ def decisions():
 
 @main.command()
 @click.argument("repo_path", type=click.Path(exists=True))
-def register(repo_path: str):
-    """Register a repo with modabot."""
-    config = GlobalConfig.load()
+@click.option("--task-tracking", type=click.Choice(["github-issues", "linear"]), default=None)
+@click.option("--project", default=None, help="Project prefix (e.g., BET, TESS)")
+@click.option("--linear-key", envvar="LINEAR_API_KEY", default=None)
+def register(repo_path: str, task_tracking: str | None, project: str | None, linear_key: str | None):
+    """Register a repo with modabot — runs full setup (config, labels, skills)."""
+    import yaml
+
     path = Path(repo_path).resolve()
+    config = GlobalConfig.load()
 
     if path in config.repos:
         click.echo(f"Already registered: {path}")
-        return
+        if not (path / ".modastack.yaml").exists():
+            click.echo("But missing .modastack.yaml — running setup...")
+        else:
+            return
 
-    if not (path / ".modastack.yaml").exists():
-        click.echo(f"Warning: No .modastack.yaml in {path}")
+    # Default to github-issues
+    if not task_tracking:
+        task_tracking = "linear" if linear_key else "github-issues"
 
-    config.repos.append(path)
-    config.save()
-    click.echo(f"Registered: {path}")
+    # Generate .modastack.yaml
+    repo_config = generate_dispatch_yaml(path, task_tracking=task_tracking)
+    if project:
+        repo_config["task_tracking"]["project"] = project
+
+    config_path = path / ".modastack.yaml"
+    config_path.write_text(yaml.dump(repo_config, default_flow_style=False, sort_keys=False))
+    click.echo(f"Generated: {config_path}")
+
+    # Register in global config
+    if path not in config.repos:
+        config.repos.append(path)
+        config.save()
+        click.echo("Registered.")
+
+    # Bootstrap task tracker labels
+    if task_tracking == "github-issues":
+        from .github_issues import bootstrap_labels
+        for action in bootstrap_labels(path):
+            click.echo(f"  {action}")
+
+    # Add .modastack/ to .gitignore
+    gitignore_path = path / ".gitignore"
+    gitignore_entries = [".modastack/", "worktrees/"]
+    existing = gitignore_path.read_text() if gitignore_path.exists() else ""
+    added = []
+    for entry in gitignore_entries:
+        if entry not in existing:
+            added.append(entry)
+    if added:
+        with open(gitignore_path, "a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write("\n".join(added) + "\n")
+        click.echo(f"Added to .gitignore: {', '.join(added)}")
+
+    # Install skills
+    click.echo("Installing skills...")
+    repo_root = Path(__file__).parent.parent
+    target_skills = path / ".claude" / "skills"
+    target_skills.mkdir(parents=True, exist_ok=True)
+    installed = []
+    skill_dirs = [
+        repo_root / "engineer" / "process",
+        repo_root / "engineer" / "practices",
+        repo_root / "product_manager",
+        repo_root / "tools",
+    ]
+    for category_dir in skill_dirs:
+        if not category_dir.exists():
+            continue
+        for skill_dir in category_dir.iterdir():
+            if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
+                link = target_skills / skill_dir.name
+                if link.exists() or link.is_symlink():
+                    continue
+                link.symlink_to(skill_dir.resolve())
+                installed.append(skill_dir.name)
+    if installed:
+        for name in sorted(installed):
+            click.echo(f"  Linked /{name}")
+    else:
+        click.echo("  Skills already installed.")
+
+    click.echo(f"Ready — {path.name} is set up for modastack.")
 
 
 @main.command()
