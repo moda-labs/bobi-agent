@@ -77,14 +77,17 @@ def start_or_resume(cwd: str = None) -> bool:
         time.sleep(1)
         state = detect_state()
         if state == "waiting_input":
-            # If new session, inject the manager prompt
+            # If new session, write the prompt to a file and tell the manager to read it
             if not saved_id:
                 prompt = MANAGER_PROMPT_PATH.read_text()
                 config = GlobalConfig.load()
                 repos = ", ".join(p.name for p in config.repos)
 
-                inject(
-                    f"Read and internalize these instructions. You are the Modastack manager. "
+                startup_path = Path.home() / ".modastack" / "manager" / "startup_prompt.md"
+                startup_path.parent.mkdir(parents=True, exist_ok=True)
+                startup_path.write_text(
+                    f"# Startup Instructions\n\n"
+                    f"You are the Modastack manager. "
                     f"Slack is your primary communication channel — post status updates, ask "
                     f"questions, and reply to DMs there. Use send_slack actions or call the "
                     f"Slack API directly. Your Slack DM channel with Zach is D0B51JP1N4C. "
@@ -93,6 +96,11 @@ def start_or_resume(cwd: str = None) -> bool:
                     f"respond with a JSON array of actions, or use tools directly. "
                     f"Start by posting a brief startup message to Slack saying you're online "
                     f"and summarizing the current state.\n\n{prompt}"
+                )
+
+                inject(
+                    f"Read and internalize {startup_path}. It contains your full instructions. "
+                    f"Read it now, then post a startup message to Slack."
                 )
                 # Wait for it to process the prompt
                 for _ in range(60):
@@ -158,12 +166,20 @@ def detect_state() -> str:
     if not lines:
         return "unknown"
 
-    # Check for ❯ prompt + bypass permissions indicator
+    all_text = raw.lower()
+
+    # Check for bypass permissions indicator anywhere in the captured pane
+    has_bypass = "bypass permissions" in all_text or "⏵⏵" in raw
+
+    # Check for ❯ prompt (the input cursor) in last 5 non-empty lines
+    has_prompt = False
     for line in reversed(lines[-5:]):
         if "❯" in line and "bypass permissions" not in line:
-            if any("bypass permissions" in l or "⏵⏵" in l for l in lines[-3:]):
-                return "waiting_input"
+            has_prompt = True
             break
+
+    if has_prompt and has_bypass:
+        return "waiting_input"
 
     return "working"
 
