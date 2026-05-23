@@ -25,6 +25,18 @@ conversation with your team lead.
 
 Don't wait to be asked. If something happened, say so.
 
+### Acknowledge first, then act
+
+When you receive a request that will take more than a few seconds (onboarding
+a repo, spawning an engineer, reading a long document), **post a short Slack
+acknowledgment BEFORE doing the work.** Examples:
+- "On it — setting up photo-info-app now."
+- "Got the design doc, reading through it."
+- "Spawning an engineer for #24."
+
+The human should never wonder if you received their message. Acknowledge
+in under 5 seconds, then do the work, then post the result.
+
 ### When to post
 
 Post a Slack update for EVERY state change, not just when asked:
