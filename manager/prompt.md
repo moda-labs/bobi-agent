@@ -307,6 +307,16 @@ or "add the bettertab repo"):
 If registration fails (auth issue, repo not found), report the error on Slack
 and suggest the human check `gh auth status`.
 
+## Update events
+
+When you see `system.update_available`:
+1. Post a Slack DM to the operator summarizing what's new:
+   "Modastack v{new_version} is available (you're on v{current_version}).
+   What's new:\n{changelog}\n\nReply 'update' to apply."
+2. Do NOT auto-update. Wait for the human to reply "update" (or similar).
+3. When the human replies with approval, run: `modastack self-update`
+4. After the command completes, post a confirmation message.
+
 ## Context
 
 The following is your current context — all the information you need to decide:

@@ -279,12 +279,98 @@ def _poll_orphans(interval: int = 60):
         time.sleep(interval)
 
 
+def _get_modastack_root() -> Path:
+    return Path(__file__).parent.parent.parent
+
+
+def _extract_changelog_entries(changelog_text: str, from_version: str, to_version: str) -> str:
+    """Extract changelog entries between two versions."""
+    lines = changelog_text.splitlines()
+    capturing = False
+    entries = []
+
+    for line in lines:
+        if line.startswith("## ") and to_version in line:
+            capturing = True
+            continue
+        if line.startswith("## ") and from_version in line:
+            break
+        if capturing and line.strip():
+            entries.append(line)
+
+    return "\n".join(entries)
+
+
+def _check_version(bus, root: Path, last_announced: str) -> str:
+    """Check for a new version on origin/main. Returns the announced version (or last_announced)."""
+    result = subprocess.run(
+        ["git", "fetch", "origin", "main", "--quiet"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        log.debug(f"Version check: fetch failed — {result.stderr.strip()}")
+        return last_announced
+
+    result = subprocess.run(
+        ["git", "show", "origin/main:VERSION"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return last_announced
+    remote_version = result.stdout.strip()
+
+    version_file = root / "VERSION"
+    local_version = version_file.read_text().strip() if version_file.exists() else "0.0.0"
+
+    if remote_version == local_version or remote_version == last_announced:
+        return last_announced
+
+    changelog = ""
+    result = subprocess.run(
+        ["git", "show", "origin/main:CHANGELOG.md"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        changelog = _extract_changelog_entries(
+            result.stdout, local_version, remote_version
+        )
+
+    bus.push("system.update_available", "system", {
+        "current_version": local_version,
+        "new_version": remote_version,
+        "changelog": changelog,
+    })
+    log.info(f"Update available: {local_version} → {remote_version}")
+    return remote_version
+
+
+def _poll_version(interval: int = 3600):
+    """Check for new versions on origin/main.
+
+    Pass interval=0 for a one-shot check (used at startup).
+    """
+    bus = get_bus()
+    last_announced = ""
+    root = _get_modastack_root()
+
+    while True:
+        try:
+            last_announced = _check_version(bus, root, last_announced)
+        except Exception as e:
+            log.error(f"Version poller error: {e}")
+
+        if interval == 0:
+            return
+        time.sleep(interval)
+
+
 # Registry of pollers — each runs in its own thread
 POLLERS = {
     "workers": (_poll_workers, 5),
     "linear": (_poll_linear, 30),
     "slack": (_poll_slack, 10),
     "orphans": (_poll_orphans, 60),
+    "version": (_poll_version, 3600),
 }
 
 
