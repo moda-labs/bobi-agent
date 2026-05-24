@@ -7,7 +7,6 @@ Instead of injecting long text into tmux (unreliable paste buffer), we:
 4. No executor needed — the manager handles everything via tools
 """
 
-import asyncio
 import json
 import logging
 import threading
@@ -28,28 +27,6 @@ log = logging.getLogger(__name__)
 
 PENDING_EVENTS_PATH = Path.home() / ".modastack" / "manager" / "pending_events.md"
 DECISIONS_LOG = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
-
-# Tracks "Thinking..." placeholders: channel_id → message ts
-_pending_placeholders: dict[str, str] = {}
-
-
-async def _post_thinking(channel_id: str, thread_ts: str = "") -> None:
-    """Post a 'Thinking...' message to Slack, in the right thread."""
-    token = GlobalConfig.load().slack_bot_token
-    if not token or not channel_id:
-        return
-    import httpx
-    payload = {"channel": channel_id, "text": "_Thinking..._"}
-    if thread_ts:
-        payload["thread_ts"] = thread_ts
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://slack.com/api/chat.postMessage",
-            headers={"Authorization": f"Bearer {token}"},
-            json=payload,
-        )
-        if resp.status_code == 200 and resp.json().get("ok"):
-            _pending_placeholders[channel_id] = resp.json()["ts"]
 
 
 def _write_events_file(events: list[dict]) -> None:

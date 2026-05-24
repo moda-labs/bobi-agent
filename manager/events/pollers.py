@@ -12,10 +12,8 @@ then register it in POLLERS.
 
 import asyncio
 import hashlib
-import json
 import logging
 import re
-import shutil
 import subprocess
 import threading
 import time
@@ -258,8 +256,6 @@ def _poll_tasks(interval: int = 30):
 
 def _poll_slack(interval: int = 10):
     """Poll Slack DMs. Fallback when Events API isn't set up."""
-    import httpx
-
     bus = get_bus()
     last_seen = {}
     token = ""
