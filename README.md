@@ -1,6 +1,6 @@
 # modastack
 
-Event-driven AI engineering team. A persistent Claude Code manager monitors Linear, GitHub, Slack, and engineer sessions — assigning work, routing phases, answering questions, and communicating with humans. Engineers are Claude Code sessions in tmux that execute skills for each phase of the development lifecycle.
+Event-driven AI engineering team. A persistent Claude Code manager monitors GitHub, Slack, and engineer sessions — assigning work, routing phases, answering questions, and communicating with humans. Engineers are Claude Code sessions in tmux that execute skills for each phase of the development lifecycle.
 
 ## How it works
 
@@ -10,9 +10,9 @@ modastack has four core principles:
 
 2. **Persistent tmux sessions** — each issue gets one interactive Claude Code session in tmux that persists across phases. The manager injects skill invocations into the same session instead of spawning new processes. Context carries forward naturally.
 
-3. **Event-driven architecture** — events from Linear, GitHub, Slack, and engineer sessions flow through an in-process bus. The consumer batches events and feeds them to the persistent manager session, which reasons about what to do next.
+3. **Event-driven architecture** — events from GitHub, Slack, and engineer sessions flow through an in-process bus. The consumer batches events and feeds them to the persistent manager session, which reasons about what to do next.
 
-4. **Manager-driven orchestration** — the manager is a long-lived interactive Claude Code session that reads event files and acts directly. It uses curl for external APIs (Linear, Slack, GitHub) and tmux commands for engineer sessions. No hard-coded routing rules, no executor — the manager reasons about the full picture and handles everything via tools.
+4. **Manager-driven orchestration** — the manager is a long-lived interactive Claude Code session that reads event files and acts directly. It uses curl for external APIs (Slack, GitHub) and tmux commands for engineer sessions. No hard-coded routing rules, no executor — the manager reasons about the full picture and handles everything via tools.
 
 ### Event flow
 
@@ -21,20 +21,29 @@ Event producers (threads)          Event bus          Consumer          Manager 
 ─────────────────────────          ─────────          ────────          ───────────────
 
 Worker poller (5s)    ──┐
-Linear poller (30s)   ──┤
+GitHub poller (30s)   ──┤
 Slack poller (10s)    ──┼──→  thread-safe  ──→  drain + batch  ──→  write to file
 Webhook server (HTTP) ──┤      queue            format events       + inject trigger
-Slack Socket Mode     ──┘                                           into manager tmux
-
+Slack Socket Mode     ──┤                                           into manager tmux
+Version checker (1h)  ──┘
                                                                     Manager reads file,
                                                                     acts directly:
                                                                     ├─ curl for APIs
-                                                                    │  (Slack, Linear, GitHub)
+                                                                    │  (Slack, GitHub)
                                                                     └─ tmux for engineers
                                                                        (spawn, inject, kill)
 ```
 
 Events arrive from multiple sources — pollers run in background threads, webhooks via an HTTP server, and Slack via Socket Mode WebSocket. All push to the same in-process bus. The consumer drains the bus every few seconds, writes events to `~/.modastack/manager/pending_events.md`, and injects a short trigger message into the manager's tmux session. The manager reads the event file and acts directly — no intermediate executor or JSON action protocol.
+
+### Task tracking
+
+modastack supports pluggable task tracking systems:
+
+- **GitHub Issues (default)** — uses `gh` CLI for authentication. Issues are labeled with `status:todo`, `status:in-progress`, `status:blocked`, `status:in-review`. No API key needed.
+- **Linear (optional)** — pass `--linear-key` and `--linear-project` during setup. Uses GraphQL API for polling and mutations.
+
+The system defaults to GitHub Issues without prompting. All pollers and webhooks emit generic `task.*` events regardless of which backend is configured.
 
 ### Handoff contract
 
@@ -72,6 +81,17 @@ The manager maps handoff phases to skills:
 | `in_review` | (wait) | human reviews PR |
 | `blocked` | (wait) | human must reply |
 
+### Stall detection
+
+The worker poller monitors engineer sessions with heartbeat-based output hashing:
+
+| Event | Trigger | Manager action |
+|---|---|---|
+| `worker.stalled` | No output for 5 minutes | Check session, nudge or re-inject |
+| `worker.stuck` | No output for 10 minutes | Kill and respawn |
+| `worker.permission_blocked` | Session stuck on interactive approval | Inject approval or escalate |
+| `worker.process_dead` | Dead Claude process detected | Respawn session |
+
 ### Sub-agents
 
 Within each phase, the skill uses sub-agents to keep context isolated:
@@ -92,13 +112,13 @@ Each sub-agent gets only the context it needs. The implement sub-agent never see
 
 ### Question bridging
 
-When an engineer asks a question (via `AskUserQuestion`), the worker poller detects it from the tmux pane and pushes a `worker.asking_question` event. The manager sees the event, reasons about whether it can answer from context, and either answers directly (via the executor's `answer_worker_question`) or posts the question to Linear/Slack and waits for a human reply.
+When an engineer asks a question (via `AskUserQuestion`), the worker poller detects it from the tmux pane and pushes a `worker.asking_question` event. The manager sees the event, reasons about whether it can answer from context, and either answers directly or posts the question to Slack and waits for a human reply.
 
-### gstack integration
+### Skill integration
 
-Every dispatch phase uses [gstack](https://github.com/garrytan/gstack) skills to enforce a real engineering lifecycle. No phase ships without quality gates.
+Every dispatch phase uses skills to enforce a real engineering lifecycle. No phase ships without quality gates.
 
-| Dispatch phase | gstack skills used | What they do |
+| Dispatch phase | Skills used | What they do |
 |---|---|---|
 | `/pickup` (triage) | `/triage` | Classify: update / inquiry / bug |
 | | `/office-hours` | Complex/ambiguous issues → structured design doc |
@@ -122,7 +142,7 @@ Key enforcement points:
 ## Setup
 
 ```bash
-git clone https://github.com/underminedsk/modastack.git ~/dev/modastack
+git clone https://github.com/moda-labs/modastack.git ~/dev/modastack
 cd ~/dev/modastack
 python3 -m venv .venv
 source .venv/bin/activate
@@ -133,46 +153,89 @@ modastack init
 ### Per-repo setup
 
 ```bash
-modastack setup ~/path/to/repo --linear-key <KEY> --linear-project <PROJECT>
+# GitHub Issues (default — no API key needed)
+modastack register ~/path/to/repo
+
+# Or with Linear
+modastack register ~/path/to/repo --linear-key <KEY> --linear-project <PROJECT>
+
+# Remote repos (auto-clones via gh)
+modastack register org/repo
 ```
 
-This stores credentials in `~/.modastack/credentials.yaml`, registers the repo in `~/.modastack/config.yaml`, bootstraps the Linear board with required workflow states, and installs engineer skills as symlinks in `.claude/skills/`.
+`register` handles the full setup: generates `.modastack.yaml`, bootstraps labels (GitHub) or workflow states (Linear), adds `.modastack/` and `worktrees/` to `.gitignore`, installs engineer skills as symlinks, and registers the repo in `~/.modastack/config.yaml`.
 
 ### Commands
 
 ```bash
-modastack start                # start event loop (polling mode)
-modastack start --webhooks     # start with webhook server + polling
+modastack start                    # start event loop (polling mode)
+modastack start --webhooks         # start with webhook server + polling
 modastack start --webhooks --port 9090
-modastack tick                 # check manager session state
-modastack tick "message"       # inject a message into the manager session
-modastack status               # show active engineer sessions
-modastack events               # show recent events from the bus
-modastack decisions            # show recent manager decisions
-modastack init                 # initialize global config
-modastack setup [path]         # set up a repo — install skills, store credentials, register
-modastack register <target>    # register a repo (local path or org/repo)
-modastack repos                # list registered repos
+modastack tick                     # check manager session state
+modastack tick "message"           # inject a message into the manager session
+modastack status                   # show active engineer sessions
+modastack events                   # show recent events from the bus
+modastack decisions                # show recent manager decisions
+modastack init                     # initialize global config
+modastack register <target>        # register a repo + full setup (local path or org/repo)
+modastack setup [path]             # set up a repo — install skills, store credentials, register
+modastack repos                    # list registered repos
+modastack dashboard                # start web dashboard (default port 8095)
+modastack self-update              # pull from origin/main + reinstall
+modastack rollback                 # restore to pre-update state
 ```
 
-## Per-repo config
+### Web dashboard
 
-All repo config lives in `~/.modastack/config.yaml` under the `repos` list.
-Run `modastack register <target>` or `modastack setup <path>` to add a repo:
+`modastack dashboard` starts a FastAPI web UI with three panels:
+
+- **Active sessions** — live tmux state for all engineer sessions
+- **Event log** — filterable by source/type, paginated
+- **Recent decisions** — manager decision history
+
+No new data stores — reads existing JSONL logs and tmux state.
+
+### Self-updating
+
+modastack checks for updates hourly by comparing against `origin/main`. When a new version is available, the manager posts to Slack for approval. `modastack self-update` pulls, stashes any dirty state, and reinstalls. `modastack rollback` restores the pre-update state if something breaks.
+
+## Configuration
+
+### Global config (`~/.modastack/config.yaml`)
+
+All repo settings live here. Run `modastack register` to add a repo:
 
 ```yaml
+slack:
+  bot_token: xoxb-...
+  app_token: xapp-...
+webhooks:
+  port: 8080
 repos:
-  - path: /Users/zach/dev/bettertab
-    remote: moda-labs/bettertab     # optional — enables auto-clone
-    linear_project: BT
-    credentials: default            # key into credentials.yaml
+  - /home/user/dev/myproject
 ```
 
-Settings like `test_command` and `skills` are auto-detected from the repo at runtime.
+### Per-repo config (`.modastack.yaml`)
+
+Generated by `modastack register`, lives in the repo root:
+
+```yaml
+task_tracking:
+  system: github-issues    # or "linear"
+  project: MY              # label/project prefix
+  trigger_labels:
+    - agent
+```
+
+### Credentials (`~/.modastack/credentials.yaml`)
+
+Per-project API keys (Linear, etc.). GitHub Issues uses `gh` CLI auth — no key needed.
 
 ## Issue lifecycle
 
-Linear states: **Todo → In Progress → In Review → Done** (+ Blocked)
+GitHub Issues labels: **status:todo → status:in-progress → status:in-review → Done** (+ status:blocked)
+
+Linear states (if configured): **Todo → In Progress → In Review → Done** (+ Blocked)
 
 ```
 Todo
@@ -194,7 +257,7 @@ In Review
 Done
 ```
 
-**Blocked** — when an engineer asks a question, the manager detects it via the worker poller, posts it to Linear/Slack, and waits. When a human replies, the event flows through the bus and the manager injects the answer back into the engineer's session.
+**Blocked** — when an engineer asks a question, the manager detects it via the worker poller, posts it to Slack, and waits. When a human replies, the event flows through the bus and the manager injects the answer back into the engineer's session.
 
 ## Project structure
 
@@ -202,10 +265,12 @@ Done
 modastack/                        # CLI + infrastructure
 ├── cli.py                        # Click CLI entrypoint
 ├── config.py                     # Global config (~/.modastack/config.yaml)
+├── github_issues.py              # GitHub Issues scanning + label bootstrap
 ├── scanner.py                    # Linear GraphQL polling
 ├── session.py                    # Engineer tmux session management (spawn, inject, capture)
 ├── setup.py                      # Repo setup — skill install, auto-detection
-└── board_setup.py                # Bootstrap Linear board with workflow states
+├── board_setup.py                # Bootstrap Linear board with workflow states
+└── __version__.py                # Version string from VERSION file
 
 manager/                          # Persistent manager + event system
 ├── session.py                    # Manager tmux session (start, resume, inject, capture)
@@ -213,12 +278,18 @@ manager/                          # Persistent manager + event system
 └── events/
     ├── bus.py                    # Thread-safe in-process event queue
     ├── consumer.py               # Drain bus → write events file → trigger manager
-    ├── pollers.py                # Background threads: workers (5s), Linear (30s), Slack (10s)
+    ├── pollers.py                # Background threads: workers (5s), task tracking (30s),
+    │                             #   Slack (10s), version check (1h)
     ├── webhook_server.py         # HTTP endpoints: /webhooks/github, /linear, /slack
     └── slack_socket.py           # Slack Socket Mode WebSocket client
 
+dashboard/                        # Web dashboard
+├── app.py                        # FastAPI app — sessions, events, decisions panels
+├── data.py                       # Event log parsing + tmux state detection
+└── templates/index.html          # Web UI
+
 engineer/                         # Engineer skills
-├── process/                      # Daemon-routed lifecycle phases
+├── process/                      # Manager-routed lifecycle phases
 │   ├── pickup/SKILL.md           # Take ticket, create worktree, triage
 │   ├── spec/SKILL.md             # Write implementation spec
 │   ├── implement/SKILL.md        # Build from spec, TDD, sub-agents
@@ -230,23 +301,24 @@ engineer/                         # Engineer skills
     ├── code-review/SKILL.md      # Mandatory quality gates
     ├── ticketing-policy/SKILL.md # Who moves tickets when
     ├── source-control-conventions/SKILL.md
-    ├── review/SKILL.md           # Pre-merge code review *
-    ├── investigate/SKILL.md      # Root cause debugging *
-    ├── ship/SKILL.md             # Ship workflow: test, review, PR *
-    ├── autoplan/SKILL.md         # Review pipeline: CEO → design → eng *
-    ├── plan-eng-review/SKILL.md  # Architecture review *
-    ├── plan-design-review/SKILL.md # UX review *
-    ├── plan-ceo-review/SKILL.md  # Scope review *
-    ├── office-hours/SKILL.md     # Structured design doc / brainstorm *
-    └── qa/SKILL.md               # Browser-based QA * (see note below)
+    ├── review/SKILL.md           # Pre-merge code review
+    ├── investigate/SKILL.md      # Root cause debugging
+    ├── ship/SKILL.md             # Ship workflow: test, review, PR
+    ├── autoplan/SKILL.md         # Review pipeline: CEO → design → eng
+    ├── plan-eng-review/SKILL.md  # Architecture review
+    ├── plan-design-review/SKILL.md # UX review
+    ├── plan-ceo-review/SKILL.md  # Scope review
+    ├── office-hours/SKILL.md     # Structured design doc / brainstorm
+    └── qa/SKILL.md               # Browser-based QA (needs browse binary)
 
-product_manager/                  # Product manager skills (standalone, not part of ticket pipeline)
+product_manager/                  # Product manager skills (standalone)
 ├── brand-identity/SKILL.md       # Brand discovery & visual identity
 └── design-critic/SKILL.md        # Adversarial design doc reviewer
 
 tools/                            # Shared tool reference (used by manager + engineers)
 ├── git/SKILL.md                  # Git CLI commands
 ├── github/SKILL.md               # gh CLI commands
+├── github-issues/SKILL.md        # GitHub Issues API reference
 ├── linear/SKILL.md               # Linear GraphQL API
 ├── slack/SKILL.md                # Slack setup & API
 ├── webhooks/SKILL.md             # Webhook setup guide
@@ -262,35 +334,34 @@ tools/                            # Shared tool reference (used by manager + eng
 | Event-driven bus | Decouples event sources from the manager. Adding a new source means writing one poller or webhook handler — push to the bus |
 | Persistent manager session | Long-lived interactive Claude Code in tmux. Survives restarts via `--resume`. Reads event files and acts directly using tools |
 | File-based event delivery | Consumer writes events to a file instead of injecting long text into tmux (paste buffer is unreliable). Manager reads the file reliably |
-| Manager uses curl | MCP tools have built-in write confirmations that block automation. The manager calls APIs directly via curl for Linear, Slack, and GitHub |
+| Manager uses curl | MCP tools have built-in write confirmations that block automation. The manager calls APIs directly via curl for Slack and GitHub |
 | No executor | The manager handles everything directly — curl for APIs, tmux commands for engineer sessions, bash for everything else. No intermediate action protocol |
 | Handoff contract | `~/.modastack/handoffs/<id>.md` is the interface between phases — minimal, structured |
 | Sub-agents | Context isolation within phases. Reviewer only sees the diff, not the spec |
 | Question bridging | Agent questions detected via worker poller, manager decides how to answer — directly or escalate to human |
-| Simple Linear states | 4 states (Todo, In Progress, In Review, Done + Blocked). Internal phases are invisible to humans |
+| Stall detection | Heartbeat-based output hashing detects stuck sessions. Manager auto-routes: nudge, respawn, or escalate |
+| GitHub Issues default | No API key needed — uses `gh` CLI auth. Linear available as an option for teams already using it |
+| Acknowledge first | Manager posts a short Slack ack before starting long-running work, so humans know it's being handled |
 | Daemon, not cron | Inherits full shell environment (Keychain, OAuth). No cron env issues |
-| Centralized config | All repo settings in `~/.modastack/config.yaml`. No modastack files in target repos |
+| Centralized config | All repo settings in `~/.modastack/config.yaml`. No modastack files in target repos except `.modastack.yaml` |
 | Webhooks + polling | Webhooks for real-time events when available, pollers as fallback. Both push to the same bus |
 | Slack Socket Mode | WebSocket connection to Slack — no public URL needed, real-time DMs and mentions |
+| Self-updating | Hourly version check against origin/main. Slack approval before updating. Rollback available if something breaks |
 
-## Skills marked with * — adapted from gstack
+## Tests
 
-Skills marked `*` in the project structure above were adapted from
-[gstack](https://github.com/garrytan/gstack) (MIT license). They provide
-battle-tested prompt engineering for code review, architecture review,
-shipping workflows, and more.
+```bash
+source .venv/bin/activate
+pip install -e ".[dev]"
+pytest tests/ --ignore=tests/integration/
+```
 
-**What works out of the box:** `/review`, `/investigate`, `/ship`, `/autoplan`,
-`/plan-eng-review`, `/plan-design-review`, `/plan-ceo-review`, `/office-hours` —
-these are self-contained prompt skills with no external dependencies.
+Do NOT run `tests/integration/` — they create real tmux sessions and issues.
 
-**What needs extra setup:**
+## Extra setup
 
-- **`/qa`** — requires the gstack `browse` binary (a compiled Playwright wrapper
-  for headless browser testing). Without it, the skill can't take snapshots or
-  interact with web pages. Install gstack separately or skip `/qa` and have
-  engineers do browser testing manually.
+**`/qa`** — requires the gstack `browse` binary (a compiled Playwright wrapper for headless browser testing). Without it, the skill can't take snapshots or interact with web pages. Install gstack separately or skip `/qa` and have engineers do browser testing manually.
 
-- **`brand-identity`** (in `product_manager/`) — references gstack's `design`
-  binary, `gstack-slug`, and `~/.gstack/projects/` paths. Needs rewriting to
-  work standalone. Not part of the automated ticket pipeline.
+**`brand-identity`** (in `product_manager/`) — references gstack's `design` binary and `~/.gstack/projects/` paths. Needs rewriting to work standalone. Not part of the automated ticket pipeline.
+
+Practice skills (`/review`, `/investigate`, `/ship`, `/autoplan`, `/plan-eng-review`, `/plan-design-review`, `/plan-ceo-review`, `/office-hours`) were adapted from [gstack](https://github.com/garrytan/gstack) (MIT license).
