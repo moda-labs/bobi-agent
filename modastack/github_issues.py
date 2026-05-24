@@ -51,27 +51,27 @@ def bootstrap_labels(repo_path: Path) -> list[str]:
 
 
 def scan_github_issues(repo_config: RepoConfig) -> dict[str, list[dict]]:
-    """Fetch open issues grouped by workflow state label.
+    """Fetch open issues assigned to the bot account, grouped by workflow state label.
 
-    Only returns issues that are either labeled with a trigger label
-    (e.g., 'agent') or assigned to the bot account. Skips issues
-    with skip labels (e.g., 'blocked', 'human-only').
+    Only returns issues assigned to the bot (from config github.default_account).
+    Labels are not used for triggering — only assignment matters.
 
     Returns: {"Todo": [issue_data, ...], "In Progress": [...], ...}
     """
     from .config import GlobalConfig
     bot_account = GlobalConfig.load().github_default_account
+    if not bot_account:
+        return {}
 
     result = subprocess.run(
-        ["gh", "issue", "list", "--state", "open", "--json",
-         "number,title,body,labels,comments,assignees,url", "--limit", "50"],
+        ["gh", "issue", "list", "--state", "open", "--assignee", bot_account,
+         "--json", "number,title,body,labels,comments,assignees,url", "--limit", "50"],
         capture_output=True, text=True, cwd=repo_config.path,
     )
     if result.returncode != 0:
         return {}
 
     issues = json.loads(result.stdout)
-    trigger_labels = set(repo_config.trigger_labels)
     skip_labels = set(repo_config.skip_labels)
     label_to_state = {
         "status:todo": "Todo",
@@ -83,12 +83,6 @@ def scan_github_issues(repo_config: RepoConfig) -> dict[str, list[dict]]:
     grouped: dict[str, list[dict]] = {}
     for issue in issues:
         label_names = [l["name"] for l in issue.get("labels", [])]
-        assignee_logins = [a["login"] for a in issue.get("assignees", [])]
-
-        has_trigger_label = bool(trigger_labels & set(label_names))
-        assigned_to_bot = bot_account and bot_account in assignee_logins
-        if not has_trigger_label and not assigned_to_bot:
-            continue
 
         if skip_labels & set(label_names):
             continue
