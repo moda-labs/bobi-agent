@@ -48,7 +48,20 @@ def start_or_resume(cwd: str = None) -> bool:
     Returns True if the session is ready.
     """
     if _session_exists():
-        log.info("Manager session already running")
+        # Session exists — but has it been prompted?
+        # Check if it's still at the default "Try ..." prompt (unprompted)
+        pane = capture(lines=5)
+        if 'Try "' in pane and "bypass permissions" in pane:
+            log.info("Manager session exists but unprompted — injecting startup")
+            _inject_startup_prompt()
+            for _ in range(60):
+                time.sleep(2)
+                if detect_state() == "waiting_input":
+                    break
+            _capture_session_id()
+            log.info("Manager session prompted and ready")
+        else:
+            log.info("Manager session already running")
         return True
 
     if not cwd:
@@ -77,44 +90,46 @@ def start_or_resume(cwd: str = None) -> bool:
         time.sleep(1)
         state = detect_state()
         if state == "waiting_input":
-            # If new session, write the prompt to a file and tell the manager to read it
             if not saved_id:
-                prompt = MANAGER_PROMPT_PATH.read_text()
-                config = GlobalConfig.load()
-                repos = ", ".join(p.name for p in config.repos)
-
-                startup_path = Path.home() / ".modastack" / "manager" / "startup_prompt.md"
-                startup_path.parent.mkdir(parents=True, exist_ok=True)
-                startup_path.write_text(
-                    f"# Startup Instructions\n\n"
-                    f"You are the Modastack manager. "
-                    f"Slack is your primary communication channel — post status updates, ask "
-                    f"questions, and reply to DMs there. Use send_slack actions or call the "
-                    f"Slack API directly. Your Slack DM channel with Zach is D0B51JP1N4C. "
-                    f"You are managing these repos: {repos}. "
-                    f"From now on, I will send you batches of events. For each batch, "
-                    f"respond with a JSON array of actions, or use tools directly. "
-                    f"Start by posting a brief startup message to Slack saying you're online "
-                    f"and summarizing the current state.\n\n{prompt}"
-                )
-
-                inject(
-                    f"Read and internalize {startup_path}. It contains your full instructions. "
-                    f"Read it now, then post a startup message to Slack."
-                )
-                # Wait for it to process the prompt
+                _inject_startup_prompt()
                 for _ in range(60):
                     time.sleep(2)
                     if detect_state() == "waiting_input":
                         break
 
-            # Capture and save the session ID
             _capture_session_id()
             log.info("Manager session ready")
             return True
 
     log.error("Manager session failed to start")
     return False
+
+
+def _inject_startup_prompt() -> None:
+    """Write the startup prompt to a file and inject a read instruction."""
+    prompt = MANAGER_PROMPT_PATH.read_text()
+    config = GlobalConfig.load()
+    repos = ", ".join(p.name for p in config.repos)
+
+    startup_path = Path.home() / ".modastack" / "manager" / "startup_prompt.md"
+    startup_path.parent.mkdir(parents=True, exist_ok=True)
+    startup_path.write_text(
+        f"# Startup Instructions\n\n"
+        f"You are the Modastack manager. "
+        f"Slack is your primary communication channel — post status updates, ask "
+        f"questions, and reply to DMs there. Use send_slack actions or call the "
+        f"Slack API directly. Your Slack DM channel with Zach is D0B51JP1N4C. "
+        f"You are managing these repos: {repos}. "
+        f"From now on, I will send you batches of events. For each batch, "
+        f"respond with a JSON array of actions, or use tools directly. "
+        f"Start by posting a brief startup message to Slack saying you're online "
+        f"and summarizing the current state.\n\n{prompt}"
+    )
+
+    inject(
+        f"Read and internalize {startup_path}. It contains your full instructions. "
+        f"Read it now, then post a startup message to Slack."
+    )
 
 
 def _capture_session_id() -> None:
