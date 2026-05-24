@@ -5,7 +5,6 @@ Events are injected as messages. Responses are captured from the pane.
 Sessions survive restarts via --resume.
 """
 
-import json
 import logging
 import shutil
 import subprocess
@@ -197,11 +196,6 @@ def detect_state() -> str:
         return "waiting_input"
 
     return "working"
-
-
-def kill() -> None:
-    subprocess.run([TMUX, "kill-session", "-t", SESSION_NAME], capture_output=True)
-    log.info("Manager session killed")
 
 
 def is_alive() -> bool:

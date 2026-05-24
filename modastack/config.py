@@ -25,7 +25,6 @@ import yaml
 
 GLOBAL_CONFIG_DIR = Path.home() / ".modastack"
 GLOBAL_CONFIG_PATH = GLOBAL_CONFIG_DIR / "config.yaml"
-STATE_PATH = GLOBAL_CONFIG_DIR / "state.json"
 CREDENTIALS_PATH = GLOBAL_CONFIG_DIR / "credentials.yaml"
 LOG_DIR = GLOBAL_CONFIG_DIR / "logs"
 

@@ -243,42 +243,6 @@ def detect_state(issue_id: str) -> dict:
     return {"state": "working"}
 
 
-def answer_question(issue_id: str, choice: int | None = None, text: str | None = None) -> None:
-    """Answer an AskUserQuestion prompt.
-
-    choice: 1-indexed option number (use arrow keys + Enter)
-    text: free text to type (for "Other" option)
-    """
-    name = _session_name(issue_id)
-    if text:
-        # Select "Other" option (usually last), then type
-        # Navigate to the "Type something" option
-        state = detect_state(issue_id)
-        options = state.get("options", [])
-        # Find the "Type something" or "Other" option
-        for i, opt in enumerate(options):
-            if "type" in opt.lower() or "other" in opt.lower():
-                for _ in range(i):
-                    subprocess.run([TMUX, "send-keys", "-t", name, "Down"])
-                    time.sleep(0.1)
-                break
-        subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
-        time.sleep(0.5)
-        subprocess.run([TMUX, "send-keys", "-t", name, "-l", text])
-        subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
-    elif choice is not None:
-        # Navigate to the right option and press Enter
-        for _ in range(choice - 1):
-            subprocess.run([TMUX, "send-keys", "-t", name, "Down"])
-            time.sleep(0.1)
-        subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
-    else:
-        # Just press Enter on whatever's highlighted
-        subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
-
-    log.info(f"{issue_id}: answered question (choice={choice}, text={text})")
-
-
 def kill_session(issue_id: str) -> None:
     name = _session_name(issue_id)
     subprocess.run([TMUX, "kill-session", "-t", name], capture_output=True)
