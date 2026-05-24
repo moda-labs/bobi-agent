@@ -83,7 +83,9 @@ def _poll_workers(interval: int = 5):
             if result.returncode == 0:
                 session_names = [
                     s.strip() for s in result.stdout.strip().splitlines()
-                    if s.strip() and s.strip() != "moda-manager"
+                    if s.strip()
+                    and s.strip().startswith("moda-")
+                    and s.strip() != "moda-manager"
                 ]
 
             for session_name in session_names:
