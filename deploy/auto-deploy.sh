@@ -41,6 +41,12 @@ sleep 1
 tmux new-session -d -s modastack-consumer \
     "cd $REPO_DIR && source .venv/bin/activate && modastack start --webhooks"
 
+# Restart dashboard
+tmux kill-session -t modastack-dashboard 2>/dev/null || true
+sleep 1
+tmux new-session -d -s modastack-dashboard \
+    "cd $REPO_DIR && source .venv/bin/activate && modastack dashboard"
+
 # Restart manager (kill old, start new with auto-accept)
 tmux kill-session -t moda-manager 2>/dev/null || true
 rm -f "$HOME/.modastack/manager/session_id"
