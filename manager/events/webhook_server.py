@@ -118,17 +118,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
             action = payload.get("action", "")
             issue = payload.get("issue", {})
             label_names = [l["name"] for l in issue.get("labels", [])]
+            assignee_logins = [a["login"] for a in issue.get("assignees", [])]
             if action in ("opened", "labeled", "unlabeled", "closed", "reopened", "assigned"):
-                bus.push(f"task.{action}", "github-issues", {
+                event_data = {
                     "action": action,
                     "issue_id": f"#{issue.get('number', '')}",
                     "task_id": str(issue.get("number", "")),
                     "title": issue.get("title", ""),
                     "state": _github_issue_state(label_names, issue.get("state", "")),
                     "labels": label_names,
+                    "assignees": assignee_logins,
                     "repo": payload.get("repository", {}).get("full_name", ""),
                     "url": issue.get("html_url", ""),
-                })
+                }
+                if action == "assigned":
+                    assignee = payload.get("assignee", {}).get("login", "")
+                    event_data["assigned_to"] = assignee
+                bus.push(f"task.{action}", "github-issues", event_data)
 
         elif event_type == "issue_comment":
             comment = payload.get("comment", {})
