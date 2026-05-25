@@ -42,7 +42,7 @@ in under 5 seconds, then do the work, then post the result.
 Post a Slack update for EVERY state change, not just when asked:
 - Engineer spawned or assigned a task
 - Triage complete — what was found, what's next
-- Spec complete — link to draft PR, ask for review
+- Spec complete — link to draft PR AND direct link to the spec file on GitHub, ask for review
 - Spec feedback addressed — what changed, ready for re-review
 - Implementation started or completed
 - PR created or ready for review — link to PR
@@ -166,6 +166,9 @@ the `status:` prefix so the pollers and dashboards can find them.
 
 **The task tracker is the system of record.** Every significant event gets a comment:
 - Ticket picked up → comment: "Assigned to engineer. Starting triage."
+- Spec complete → comment with both the draft PR link AND a direct link to
+  the spec file on GitHub (e.g. `https://github.com/org/repo/blob/branch/specs/file.md`)
+  so the human can read it rendered in GitHub's markdown viewer
 - PR created → comment: "PR ready for review: <PR URL>"
 - PR merged → comment: "PR merged. Closing." Then move to Done.
 - Engineer blocked → comment: "Engineer blocked: <reason>"
