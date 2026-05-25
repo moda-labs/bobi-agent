@@ -110,9 +110,30 @@ def _ticket_comment(params: dict) -> dict:
     return {"ok": result.returncode == 0}
 
 
+def _resolve_repo_path(repo: str) -> str:
+    """Resolve a repo identifier (org/name or path) to a local path."""
+    from modastack.config import GlobalConfig
+    config = GlobalConfig.load()
+    repo_name = repo.split("/")[-1] if "/" in repo else repo
+    for p in config.repos:
+        if p.name == repo_name:
+            return str(p)
+    return repo
+
+
+def _session_spawn(params: dict) -> dict:
+    from modastack.session import spawn_session
+    issue_id = params.get("issue_id", "").lstrip("#")
+    repo = params.get("repo", "")
+    cwd = _resolve_repo_path(repo)
+    ok = spawn_session(issue_id, cwd)
+    return {"ok": ok, "session_name": f"moda-{issue_id.lower()}"}
+
+
 def build_registry() -> ActionRegistry:
     registry = ActionRegistry()
     registry.register("slack.post", _slack_post)
     registry.register("ticket.move", _ticket_move)
     registry.register("ticket.comment", _ticket_comment)
+    registry.register("session.spawn", _session_spawn)
     return registry

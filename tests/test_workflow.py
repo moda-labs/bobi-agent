@@ -105,7 +105,7 @@ class TestLoadWorkflow:
         assert wf.trigger.event == "task.assigned"
         assert len(wf.nodes) == 23
         assert "spawn_engineer" in wf.nodes
-        assert wf.nodes["spawn_engineer"].type == NodeType.BASH
+        assert wf.nodes["spawn_engineer"].type == NodeType.ACTION
         assert wf.nodes["craft_pickup_message"].type == NodeType.MANAGER
         assert wf.nodes["post_slack_pickup"].type == NodeType.ACTION
         assert wf.nodes["triage"].type == NodeType.PROMPT

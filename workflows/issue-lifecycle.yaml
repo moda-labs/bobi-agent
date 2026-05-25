@@ -6,13 +6,11 @@ trigger:
 nodes:
   # === SPAWN ===
   spawn_engineer:
-    type: bash
-    command: |
-      source ~/.modastack/.venv/bin/activate 2>/dev/null
-      python3 -c "
-      from modastack.session import spawn_session
-      spawn_session('${{event.issue_id | lower}}', '${{event.repo}}')
-      "
+    type: action
+    action: session.spawn
+    params:
+      issue_id: ${{event.issue_id}}
+      repo: ${{event.repo}}
     timeout: 60
 
   # === NOTIFY (LLM crafts, engine posts) ===

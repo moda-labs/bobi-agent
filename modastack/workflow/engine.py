@@ -194,7 +194,7 @@ class WorkflowEngine:
     def _exec_prompt_inject(self, node: NodeDef) -> None:
         from modastack.session import inject, session_exists
 
-        session_id = self.ctx.resolve(node.session)
+        session_id = self.ctx.resolve(node.session).lstrip("#")
         text = self.ctx.resolve(node.inject)
 
         if not session_exists(session_id):
@@ -306,7 +306,7 @@ class WorkflowEngine:
     def _read_handoff(self, issue_id: str) -> dict:
         from modastack.config import GlobalConfig
         config = GlobalConfig.load()
-        iid_lower = issue_id.lower()
+        iid_lower = issue_id.lstrip("#").lower()
 
         for repo_path in config.repos:
             for candidate in [
