@@ -481,6 +481,83 @@ def dashboard(port):
     run_dashboard(port=port)
 
 
+@main.group()
+def history():
+    """Conversation history — index and search Claude Code sessions."""
+    pass
+
+
+@history.command("index")
+@click.option("--project", default=None, help="Filter to project (substring match on path)")
+def history_index(project):
+    """Index conversation JSONL files into searchable SQLite."""
+    from .history import index as do_index
+    click.echo("Indexing conversations...")
+    stats = do_index(project_filter=project)
+    click.echo(f"  Scanned {stats['files_scanned']} files, {stats['files_with_new']} had new data")
+    click.echo(f"  Indexed {stats['new_messages']} new messages")
+    click.echo(f"  Total: {stats['total_conversations']} conversations, {stats['total_messages']} messages")
+
+
+@history.command("search")
+@click.argument("query")
+@click.option("--limit", default=20, help="Max results")
+@click.option("--project", default=None, help="Filter to project")
+def history_search(query, limit, project):
+    """Full-text search across conversation history."""
+    from .history import search as do_search
+    results = do_search(query, limit=limit, project=project)
+    if not results:
+        click.echo("No results. Run `modastack history index` first.")
+        return
+    for r in results:
+        branch = r.get("git_branch") or ""
+        role = r.get("role") or r.get("type") or ""
+        tool = f" [{r['tool_name']}]" if r.get("tool_name") else ""
+        snippet = (r.get("snippet") or "")[:200].replace("\n", " ")
+        click.echo(f"  {r['timestamp'][:19]}  {role:10s}{tool}  {branch}")
+        click.echo(f"    {snippet}")
+        click.echo()
+
+
+@history.command("sessions")
+@click.option("--limit", default=20)
+@click.option("--project", default=None)
+def history_sessions(limit, project):
+    """List indexed conversations."""
+    from .history import conversations
+    convos = conversations(limit=limit, project=project)
+    if not convos:
+        click.echo("No conversations indexed. Run `modastack history index` first.")
+        return
+    for c in convos:
+        branch = c.get("git_branch") or ""
+        click.echo(f"  {c['started_at'][:19]}  {c['session_id'][:8]}  {branch:20s}  {c['message_count']} msgs  {c.get('cwd', '')}")
+
+
+@history.command("show")
+@click.argument("session_id")
+@click.option("--limit", default=50)
+def history_show(session_id, limit):
+    """Show messages from a specific session."""
+    from .history import session_messages, conversations
+    convos = conversations(limit=1000)
+    match = [c for c in convos if c["session_id"].startswith(session_id)]
+    if not match:
+        click.echo(f"No session matching '{session_id}'")
+        return
+    full_id = match[0]["session_id"]
+    msgs = session_messages(full_id)
+    for m in msgs[:limit]:
+        role = m.get("role") or m.get("type") or ""
+        tool = f" [{m['tool_name']}]" if m.get("tool_name") else ""
+        text = (m.get("content") or "")[:300].replace("\n", " ")
+        click.echo(f"  {role:10s}{tool}  {text}")
+
+
+main.add_command(history)
+
+
 @main.command("self-update")
 def self_update():
     """Pull latest from origin/main and reinstall modastack."""

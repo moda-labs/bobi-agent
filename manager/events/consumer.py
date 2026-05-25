@@ -21,6 +21,7 @@ from .pollers import start_pollers, _poll_version
 from .slack_socket import start_socket_mode
 from .webhook_server import start_server
 from modastack.config import GlobalConfig
+from modastack.history import context_for_events, start_background_indexer, index as index_history
 from manager.session import start_or_resume, inject, detect_state, is_alive
 
 log = logging.getLogger(__name__)
@@ -73,6 +74,13 @@ def _write_events_file(events: list[dict]) -> None:
 
         lines.append("")
 
+    try:
+        history_ctx = context_for_events(events)
+        if history_ctx:
+            lines.append(history_ctx)
+    except Exception as e:
+        log.debug(f"History context lookup failed: {e}")
+
     PENDING_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     PENDING_EVENTS_PATH.write_text("\n".join(lines))
 
@@ -106,6 +114,14 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
     log.info("Modastack starting (event-driven, persistent manager)")
 
     _ensure_repos()
+
+    # Initial history index + background re-indexer
+    try:
+        stats = index_history()
+        log.info(f"History: {stats['total_conversations']} conversations, {stats['total_messages']} messages indexed")
+    except Exception as e:
+        log.warning(f"Initial history index failed: {e}")
+    start_background_indexer(interval=120)
 
     bus = get_bus()
 
