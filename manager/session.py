@@ -49,14 +49,11 @@ def start_or_resume(cwd: str = None) -> bool:
     if _session_exists():
         # Session exists — but has it been prompted?
         # Check if it's still at the default "Try ..." prompt (unprompted)
-        pane = capture(lines=5)
-        if 'Try "' in pane and "bypass permissions" in pane:
+        if _is_unprompted():
             log.info("Manager session exists but unprompted — injecting startup")
-            _inject_startup_prompt()
-            for _ in range(60):
-                time.sleep(2)
-                if detect_state() == "waiting_input":
-                    break
+            if not _inject_startup_prompt_with_retry():
+                log.error("Failed to inject startup prompt")
+                return False
             _capture_session_id()
             log.info("Manager session prompted and ready")
         else:
@@ -90,11 +87,9 @@ def start_or_resume(cwd: str = None) -> bool:
         state = detect_state()
         if state == "waiting_input":
             if not saved_id:
-                _inject_startup_prompt()
-                for _ in range(60):
-                    time.sleep(2)
-                    if detect_state() == "waiting_input":
-                        break
+                if not _inject_startup_prompt_with_retry():
+                    log.error("Failed to inject startup prompt into new session")
+                    return False
 
             _capture_session_id()
             log.info("Manager session ready")
@@ -102,6 +97,12 @@ def start_or_resume(cwd: str = None) -> bool:
 
     log.error("Manager session failed to start")
     return False
+
+
+def _is_unprompted() -> bool:
+    """Check if the session is at Claude's default idle prompt (never received input)."""
+    pane = capture(lines=5)
+    return 'Try "' in pane and "bypass permissions" in pane
 
 
 def _inject_startup_prompt() -> None:
@@ -131,6 +132,45 @@ def _inject_startup_prompt() -> None:
     )
 
 
+def _inject_startup_prompt_with_retry(max_attempts: int = 3) -> bool:
+    """Inject the startup prompt, retrying if send-keys fails.
+
+    After injection, waits for the manager to process it and verifies it's
+    no longer at the idle prompt. Returns True if the startup was accepted.
+    """
+    for attempt in range(1, max_attempts + 1):
+        _inject_startup_prompt()
+
+        # Wait for manager to start working or finish
+        for _ in range(60):
+            time.sleep(2)
+            state = detect_state()
+            if state == "working":
+                break
+            if state == "waiting_input" and not _is_unprompted():
+                return True
+        else:
+            # Timed out — check if it's still unprompted (injection never arrived)
+            if _is_unprompted():
+                log.warning(
+                    f"Startup injection attempt {attempt}/{max_attempts} failed "
+                    "— session still at idle prompt, retrying"
+                )
+                time.sleep(2)
+                continue
+            return True
+
+        # Manager is working — wait for it to finish
+        for _ in range(90):
+            time.sleep(2)
+            if detect_state() == "waiting_input":
+                return True
+        return True
+
+    log.error(f"Startup injection failed after {max_attempts} attempts")
+    return False
+
+
 def _capture_session_id() -> None:
     """Try to extract the session ID from the tmux pane."""
     # The session ID appears in the Claude Code banner or can be found via the process
@@ -149,23 +189,32 @@ def _capture_session_id() -> None:
     _save_session_id(SESSION_NAME)
 
 
-def inject(text: str) -> None:
-    """Send text into the manager session."""
+def inject(text: str) -> bool:
+    """Send text into the manager session. Returns True if send-keys succeeded."""
     collapsed = " ".join(text.splitlines())
-    subprocess.run([TMUX, "send-keys", "-t", SESSION_NAME, "-l", collapsed])
+    result = subprocess.run(
+        [TMUX, "send-keys", "-t", SESSION_NAME, "-l", collapsed],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        log.warning(f"send-keys failed: {result.stderr.strip()}")
+        return False
     time.sleep(0.5)
     subprocess.run([TMUX, "send-keys", "-t", SESSION_NAME, "Enter"])
     time.sleep(0.5)
     subprocess.run([TMUX, "send-keys", "-t", SESSION_NAME, "Enter"])
     log.debug(f"Manager: injected {len(collapsed)} chars")
+    return True
 
 
 def capture(lines: int = 50) -> str:
-    """Capture current pane content."""
+    """Capture current pane content. Returns empty string if pane not found."""
     result = subprocess.run(
         [TMUX, "capture-pane", "-t", SESSION_NAME, "-p", "-S", f"-{lines}"],
         capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        return ""
     return result.stdout
 
 

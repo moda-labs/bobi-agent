@@ -83,11 +83,17 @@ class TestCapture:
 
     @patch("manager.session.subprocess.run")
     def test_captures_pane_content(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="line1\nline2\n")
+        mock_run.return_value = MagicMock(returncode=0, stdout="line1\nline2\n")
         result = capture(lines=10)
         assert result == "line1\nline2\n"
         cmd = mock_run.call_args[0][0]
         assert "-10" in cmd
+
+    @patch("manager.session.subprocess.run")
+    def test_returns_empty_on_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stderr="can't find pane")
+        result = capture(lines=10)
+        assert result == ""
 
 
 class TestIsAlive:
