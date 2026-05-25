@@ -396,6 +396,38 @@ It has multiple lines.
         assert "This is the response text." in result
         assert "multiple lines" in result
 
+    def test_real_manager_pane(self):
+        raw = """
+ ▐▛███▜▌   Claude Code v2.1.96
+▝▜█████▛▘  Opus 4.6 (1M context) · Claude Max
+  ▘▘ ▝▝    ~/dev/modastack
+
+❯ Issue #40 "Update README" assigned. Draft a brief Slack pickup message. Output ONLY the message text.
+
+● Bash(tmux list-sessions 2>/dev/null)
+  ⎿  moda-40: 1 windows (created Mon May 25 21:17:19 2026)
+
+● Bash(tmux capture-pane -t moda-40 -p -S -100 2>/dev/null | tail -80)
+  ⎿   ▐▛███▜▌   Claude Code v2.1.96
+     ▝▜█████▛▘  Opus 4.6 (1M context) · Claude Max
+      … +8 lines (ctrl+o to expand)
+
+● The worker session is waiting for input. Let me draft the message:
+
+  Picking up #40 — updating the modastack README to document the workflow engine and conversation history indexer. Quick docs update.
+
+✻ Crunched for 50s
+
+────────────────────────────────────────────────────────────
+❯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+"""
+        result = _extract_manager_response(raw)
+        assert "Picking up #40" in result
+        assert "workflow engine" in result
+        assert "Bash(" not in result
+        assert "Claude Code" not in result
+
     def test_strips_tool_calls(self):
         raw = """
 ❯ prompt

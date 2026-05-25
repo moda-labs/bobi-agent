@@ -47,11 +47,11 @@ class WorkflowEngine:
             from modastack.config import GlobalConfig
             config = GlobalConfig.load()
             self.ctx.set_scope("config", {
-                "slack_dm_channel": getattr(config, "slack_dm_channel", ""),
+                "slack_dm_channel": getattr(config, "slack_dm_channel", "") or "D0B51JP1N4C",
                 "slack_bot_token": getattr(config, "slack_bot_token", ""),
             })
         except Exception:
-            self.ctx.set_scope("config", {})
+            self.ctx.set_scope("config", {"slack_dm_channel": "D0B51JP1N4C"})
 
     def execute(self):
         order = self.workflow.topological_order()
@@ -328,18 +328,25 @@ class WorkflowEngine:
 def _extract_manager_response(raw_pane: str) -> str:
     """Extract the assistant's text response from tmux pane capture.
 
-    Finds content between the last two ❯ prompts, filtering out
-    tool call noise and UI chrome.
+    Strategy: find the response section (between the last input prompt and
+    the waiting prompt), then extract only clean text lines — no tool calls,
+    no reasoning prefixes, no chrome.
     """
     lines = raw_pane.splitlines()
 
-    NOISE = ("●", "·", "⎿", "✻", "✽")
+    NOISE_PREFIXES = ("●", "·", "⎿", "✻", "✽", "▐", "▝", "▘")
     SKIP_CONTAINS = ("ctrl+o", "ctrl+b", "bypass permissions", "⏵⏵",
-                     "Bash(", "Read(", "Write(", "Edit(", "Agent(", "────")
+                     "Bash(", "Read(", "Write(", "Edit(", "Agent(",
+                     "────", "╭", "╰", "│", "Running", "Searched for",
+                     "… +", "Shell cwd", "expand)", "Claude Code v",
+                     "Opus 4", "Claude Max", "Welcome", "Tips for",
+                     "Recent activity", "No recent", "Run /init",
+                     "Crunched", "Baked", "Gallivanting", "thinking")
 
     prompt_positions = []
     for i, line in enumerate(lines):
-        if "❯" in line and "bypass" not in line:
+        stripped = line.strip()
+        if stripped.startswith("❯") and "bypass" not in stripped:
             prompt_positions.append(i)
 
     if len(prompt_positions) < 2:
@@ -353,10 +360,36 @@ def _extract_manager_response(raw_pane: str) -> str:
         stripped = line.strip()
         if not stripped:
             continue
-        if any(stripped.startswith(n) for n in NOISE):
+        if any(stripped.startswith(n) for n in NOISE_PREFIXES):
             continue
         if any(s in stripped for s in SKIP_CONTAINS):
             continue
         response_lines.append(stripped)
 
-    return "\n".join(response_lines).strip()
+    result = "\n".join(response_lines).strip()
+
+    # If we extracted nothing useful, try a fallback: look for the last
+    # paragraph of plain text before the final prompt
+    if not result or len(result) < 10:
+        fallback_lines = []
+        for line in reversed(lines[:prompt_positions[-1]]):
+            stripped = line.strip()
+            if not stripped:
+                if fallback_lines:
+                    break
+                continue
+            if stripped.startswith("❯"):
+                break
+            if any(stripped.startswith(n) for n in NOISE_PREFIXES):
+                if fallback_lines:
+                    break
+                continue
+            if any(s in stripped for s in SKIP_CONTAINS):
+                if fallback_lines:
+                    break
+                continue
+            fallback_lines.insert(0, stripped)
+        if fallback_lines:
+            result = "\n".join(fallback_lines).strip()
+
+    return result
