@@ -19,6 +19,56 @@ LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
 UPDATE_STATE_PATH = GLOBAL_CONFIG_DIR / "update_state.json"
 REPO_ROOT = Path(__file__).parent.parent
 
+HOOK_SETTINGS = {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": ".claude/hooks/session-state.sh", "timeout": 5}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": ".claude/hooks/session-state.sh", "timeout": 5}]}],
+}
+
+
+def install_hooks(target_path: Path) -> list[str]:
+    """Install Claude Code hooks for session state tracking.
+
+    Copies the hook script and merges hook config into .claude/settings.json.
+    Returns list of actions taken.
+    """
+    actions = []
+    repo_root = Path(__file__).parent.parent
+
+    # Copy hook script
+    hooks_dir = target_path / ".claude" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    src_hook = repo_root / ".claude" / "hooks" / "session-state.sh"
+    dst_hook = hooks_dir / "session-state.sh"
+
+    if src_hook.exists():
+        import shutil
+        shutil.copy2(src_hook, dst_hook)
+        dst_hook.chmod(0o755)
+        actions.append("Installed .claude/hooks/session-state.sh")
+
+    # Merge hooks into settings.json
+    settings_path = target_path / ".claude" / "settings.json"
+    settings = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+        except json.JSONDecodeError:
+            pass
+
+    existing_hooks = settings.get("hooks", {})
+    changed = False
+    for event_name, event_config in HOOK_SETTINGS.items():
+        if event_name not in existing_hooks:
+            existing_hooks[event_name] = event_config
+            changed = True
+
+    if changed:
+        settings["hooks"] = existing_hooks
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        actions.append("Configured hooks in .claude/settings.json")
+
+    return actions
+
 
 @click.group()
 @click.version_option(version=__version__, prog_name="modastack")
@@ -259,6 +309,11 @@ def register(repo_path: str, task_tracking: str | None, project: str | None, lin
     else:
         click.echo("  Skills already installed.")
 
+    # Install hooks
+    hook_actions = install_hooks(path)
+    for action in hook_actions:
+        click.echo(f"  {action}")
+
     click.echo(f"Ready — {path.name} is set up for modastack.")
 
 
@@ -411,6 +466,11 @@ def setup(repo_path: str, task_tracking: str | None, project: str | None,
             click.echo(f"  Linked /{name}")
     else:
         click.echo("  Skills already installed.")
+
+    # Install hooks
+    hook_actions = install_hooks(path)
+    for action in hook_actions:
+        click.echo(f"  {action}")
 
 
 @main.command()

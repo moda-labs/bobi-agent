@@ -1,10 +1,13 @@
 """Persistent manager tmux session.
 
 The manager runs as a long-lived interactive Claude Code session.
-Events are injected as messages. Responses are captured from the pane.
+Events are injected as messages via tmux send-keys.
+State is tracked via Claude Code hooks (UserPromptSubmit, Stop)
+that write to ~/.modastack/manager/activity.jsonl.
 Sessions survive restarts via --resume.
 """
 
+import json
 import logging
 import shutil
 import subprocess
@@ -20,6 +23,7 @@ CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
 SESSION_NAME = "moda-manager"
 SESSION_ID_PATH = Path.home() / ".modastack" / "manager" / "session_id"
 MANAGER_PROMPT_PATH = Path(__file__).parent / "prompt.md"
+ACTIVITY_LOG = Path.home() / ".modastack" / "manager" / "activity.jsonl"
 
 
 def _session_exists() -> bool:
@@ -41,23 +45,69 @@ def _save_session_id(session_id: str) -> None:
     SESSION_ID_PATH.write_text(session_id)
 
 
+def _read_last_activity() -> dict | None:
+    """Read the most recent entry from the activity log."""
+    if not ACTIVITY_LOG.exists():
+        return None
+    try:
+        with open(ACTIVITY_LOG, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            if size == 0:
+                return None
+            chunk_size = min(1024, size)
+            f.seek(-chunk_size, 2)
+            lines = f.read().decode().strip().splitlines()
+            if lines:
+                return json.loads(lines[-1])
+    except Exception:
+        return None
+    return None
+
+
+def _activity_line_count() -> int:
+    """Count lines in the activity log."""
+    if not ACTIVITY_LOG.exists():
+        return 0
+    try:
+        with open(ACTIVITY_LOG) as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
+
+
+def _clear_activity_log() -> None:
+    """Truncate the activity log on startup to avoid stale state."""
+    ACTIVITY_LOG.parent.mkdir(parents=True, exist_ok=True)
+    ACTIVITY_LOG.write_text("")
+
+
 def start_or_resume(cwd: str = None) -> bool:
     """Start a new manager session or resume an existing one.
 
     Returns True if the session is ready.
     """
     if _session_exists():
-        # Session exists — but has it been prompted?
-        # Check if it's still at the default "Try ..." prompt (unprompted)
-        if _is_unprompted():
-            log.info("Manager session exists but unprompted — injecting startup")
-            if not _inject_startup_prompt_with_retry():
-                log.error("Failed to inject startup prompt")
-                return False
-            _capture_session_id()
-            log.info("Manager session prompted and ready")
-        else:
-            log.info("Manager session already running")
+        last = _read_last_activity()
+        if last and last.get("event") == "Stop":
+            log.info("Manager session already running and idle")
+            return True
+
+        if last and last.get("event") == "UserPromptSubmit":
+            log.info("Manager session already running and working")
+            return True
+
+        # Session exists but no activity — needs startup prompt
+        log.info("Manager session exists but no activity — injecting startup")
+        _clear_activity_log()
+        _inject_startup_prompt()
+        if not _wait_for_prompt_accepted():
+            log.error("Failed to inject startup prompt")
+            return False
+        if not _wait_for_turn_complete():
+            log.warning("Startup injection accepted but turn didn't complete — continuing anyway")
+        _capture_session_id()
+        log.info("Manager session prompted and ready")
         return True
 
     if not cwd:
@@ -65,13 +115,12 @@ def start_or_resume(cwd: str = None) -> bool:
         cwd = str(config.repos[0]) if config.repos else str(Path.home())
 
     saved_id = _get_saved_session_id()
+    _clear_activity_log()
 
     if saved_id:
-        # Resume existing session
         cmd = [CLAUDE, "--resume", saved_id, "--dangerously-skip-permissions"]
         log.info(f"Resuming manager session {saved_id}")
     else:
-        # Start fresh with the manager prompt as the first message
         cmd = [CLAUDE, "--dangerously-skip-permissions", "--name", "modastack-manager"]
         log.info("Starting new manager session")
 
@@ -81,28 +130,28 @@ def start_or_resume(cwd: str = None) -> bool:
         "-x", "200", "-y", "50",
     ] + cmd, cwd=cwd)
 
-    # Wait for claude to be ready
-    for _ in range(20):
+    # Wait for Claude Code to be ready (tmux pane exists and process is running)
+    for _ in range(30):
         time.sleep(1)
-        state = detect_state()
-        if state == "waiting_input":
-            if not saved_id:
-                if not _inject_startup_prompt_with_retry():
-                    log.error("Failed to inject startup prompt into new session")
-                    return False
+        if _session_exists():
+            break
+    else:
+        log.error("Manager tmux session failed to start")
+        return False
 
-            _capture_session_id()
-            log.info("Manager session ready")
-            return True
+    if not saved_id:
+        # Give Claude Code a moment to initialize before injecting
+        time.sleep(3)
+        _inject_startup_prompt()
+        if not _wait_for_prompt_accepted():
+            log.error("Failed to inject startup prompt into new session")
+            return False
+        if not _wait_for_turn_complete():
+            log.warning("Startup turn didn't complete — continuing anyway")
 
-    log.error("Manager session failed to start")
-    return False
-
-
-def _is_unprompted() -> bool:
-    """Check if the session is at Claude's default idle prompt (never received input)."""
-    pane = capture(lines=5)
-    return 'Try "' in pane and "bypass permissions" in pane
+    _capture_session_id()
+    log.info("Manager session ready")
+    return True
 
 
 def _inject_startup_prompt() -> None:
@@ -126,71 +175,59 @@ def _inject_startup_prompt() -> None:
         f"and summarizing the current state.\n\n{prompt}"
     )
 
-    inject(
+    _send_keys(
         f"Read and internalize {startup_path}. It contains your full instructions. "
         f"Read it now, then post a startup message to Slack."
     )
 
 
-def _inject_startup_prompt_with_retry(max_attempts: int = 3) -> bool:
-    """Inject the startup prompt, retrying if send-keys fails.
+def _wait_for_prompt_accepted(timeout: int = 60, max_retries: int = 3) -> bool:
+    """Wait for a UserPromptSubmit event, retrying send-keys if needed."""
+    for attempt in range(1, max_retries + 1):
+        pre_count = _activity_line_count()
+        deadline = time.monotonic() + timeout
 
-    After injection, waits for the manager to process it and verifies it's
-    no longer at the idle prompt. Returns True if the startup was accepted.
-    """
-    for attempt in range(1, max_attempts + 1):
-        _inject_startup_prompt()
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            last = _read_last_activity()
+            if last and last.get("event") == "UserPromptSubmit":
+                if _activity_line_count() > pre_count:
+                    log.debug(f"Prompt accepted (attempt {attempt})")
+                    return True
 
-        # Wait for manager to start working or finish
-        for _ in range(60):
-            time.sleep(2)
-            state = detect_state()
-            if state == "working":
-                break
-            if state == "waiting_input" and not _is_unprompted():
-                return True
-        else:
-            # Timed out — check if it's still unprompted (injection never arrived)
-            if _is_unprompted():
-                log.warning(
-                    f"Startup injection attempt {attempt}/{max_attempts} failed "
-                    "— session still at idle prompt, retrying"
-                )
-                time.sleep(2)
-                continue
+        log.warning(f"No UserPromptSubmit after {timeout}s (attempt {attempt}/{max_retries})")
+        if attempt < max_retries:
+            _inject_startup_prompt()
+
+    return False
+
+
+def _wait_for_turn_complete(timeout: int = 300) -> bool:
+    """Wait for a Stop event indicating the turn is done."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        last = _read_last_activity()
+        if last and last.get("event") == "Stop":
             return True
-
-        # Manager is working — wait for it to finish
-        for _ in range(90):
-            time.sleep(2)
-            if detect_state() == "waiting_input":
-                return True
-        return True
-
-    log.error(f"Startup injection failed after {max_attempts} attempts")
     return False
 
 
 def _capture_session_id() -> None:
     """Try to extract the session ID from the tmux pane."""
-    # The session ID appears in the Claude Code banner or can be found via the process
-    # For now, use the session name as a stable identifier
-    # Real session ID would come from claude's output
     pane = capture(lines=20)
     for line in pane.splitlines():
         if "session_" in line.lower() or "ses_" in line.lower():
-            # Extract session ID pattern
             import re
             match = re.search(r'(session_[a-zA-Z0-9]+|ses_[a-zA-Z0-9]+)', line)
             if match:
                 _save_session_id(match.group(1))
                 return
-    # Fallback: save the tmux session name so we know we have one running
     _save_session_id(SESSION_NAME)
 
 
-def inject(text: str) -> bool:
-    """Send text into the manager session. Returns True if send-keys succeeded."""
+def _send_keys(text: str) -> bool:
+    """Send text into the tmux pane. Returns True if send-keys succeeded."""
     collapsed = " ".join(text.splitlines())
     result = subprocess.run(
         [TMUX, "send-keys", "-t", SESSION_NAME, "-l", collapsed],
@@ -203,12 +240,34 @@ def inject(text: str) -> bool:
     subprocess.run([TMUX, "send-keys", "-t", SESSION_NAME, "Enter"])
     time.sleep(0.5)
     subprocess.run([TMUX, "send-keys", "-t", SESSION_NAME, "Enter"])
-    log.debug(f"Manager: injected {len(collapsed)} chars")
     return True
 
 
+def inject(text: str) -> bool:
+    """Send text into the manager session and confirm it was accepted.
+
+    Returns True if a UserPromptSubmit event appeared after injection.
+    """
+    pre_count = _activity_line_count()
+
+    if not _send_keys(text):
+        return False
+
+    # Wait for UserPromptSubmit confirmation
+    for _ in range(30):
+        time.sleep(1)
+        last = _read_last_activity()
+        if last and last.get("event") == "UserPromptSubmit":
+            if _activity_line_count() > pre_count:
+                log.debug(f"Injected and confirmed ({len(text)} chars)")
+                return True
+
+    log.warning("Injection not confirmed — no UserPromptSubmit received")
+    return False
+
+
 def capture(lines: int = 50) -> str:
-    """Capture current pane content. Returns empty string if pane not found."""
+    """Capture current pane content (for debugging/CLI only)."""
     result = subprocess.run(
         [TMUX, "capture-pane", "-t", SESSION_NAME, "-p", "-S", f"-{lines}"],
         capture_output=True, text=True,
@@ -219,32 +278,24 @@ def capture(lines: int = 50) -> str:
 
 
 def detect_state() -> str:
-    """Detect if the manager session is waiting for input, working, or asking a question."""
+    """Detect manager state from the activity log.
+
+    Returns: 'waiting_input' | 'working' | 'exited' | 'unknown'
+    """
     if not _session_exists():
         return "exited"
 
-    raw = capture(lines=10)
-    lines = [l for l in raw.splitlines() if l.strip()]
-
-    if not lines:
+    last = _read_last_activity()
+    if last is None:
         return "unknown"
 
-    all_text = raw.lower()
-
-    # Check for bypass permissions indicator anywhere in the captured pane
-    has_bypass = "bypass permissions" in all_text or "⏵⏵" in raw
-
-    # Check for ❯ prompt (the input cursor) in last 5 non-empty lines
-    has_prompt = False
-    for line in reversed(lines[-5:]):
-        if "❯" in line and "bypass permissions" not in line:
-            has_prompt = True
-            break
-
-    if has_prompt and has_bypass:
+    event = last.get("event")
+    if event == "Stop":
         return "waiting_input"
+    if event == "UserPromptSubmit":
+        return "working"
 
-    return "working"
+    return "unknown"
 
 
 def is_alive() -> bool:

@@ -184,9 +184,10 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
 
         # Inject once — no retry flooding
         trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
-        inject(trigger)
+        if not inject(trigger):
+            log.warning(f"Batch #{tick_count}: injection failed — will retry on next batch")
+            _log_batch(events)
+            continue
 
-        # Log
         _log_batch(events)
-
         log.info(f"Batch #{tick_count} delivered to manager")

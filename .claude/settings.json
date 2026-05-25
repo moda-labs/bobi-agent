@@ -3,5 +3,29 @@
     "deny": [
       "mcp__claude_ai_Venn__*"
     ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/session-state.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/session-state.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }
