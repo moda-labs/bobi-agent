@@ -1,0 +1,65 @@
+name: stall-recovery
+version: 1
+trigger:
+  event: worker.stalled
+
+nodes:
+  diagnose:
+    type: manager
+    prompt: |
+      Engineer session for ${{event.issue_id}} has been idle for
+      ${{event.idle_seconds}} seconds.
+      Last output snippet: "${{event.snippet}}"
+
+      Diagnose what's happening. Check the session pane if needed.
+      Then recommend one action:
+      - "nudge" — send Enter to wake it up
+      - "inject:<message>" — send a specific instruction
+      - "kill" — kill and respawn the session
+      Output ONLY your recommendation in the format above.
+    timeout: 120
+
+  route_action:
+    type: gate
+    depends_on: [diagnose]
+    branches:
+      nudge:
+        when: "'nudge' in ${{diagnose.output}}"
+      inject:
+        when: "'inject:' in ${{diagnose.output}}"
+      kill:
+        when: "'kill' in ${{diagnose.output}}"
+    fallback: nudge
+
+  do_nudge:
+    type: bash
+    command: |
+      tmux send-keys -t moda-${{event.issue_id | lower}} Enter
+    timeout: 5
+    depends_on: [route_action]
+    when: "${{route_action.branch}} == 'nudge'"
+
+  do_kill:
+    type: bash
+    command: |
+      tmux kill-session -t moda-${{event.issue_id | lower}} 2>/dev/null || true
+    timeout: 10
+    depends_on: [route_action]
+    when: "${{route_action.branch}} == 'kill'"
+
+  craft_stall_message:
+    type: manager
+    prompt: |
+      Session for ${{event.issue_id}} stalled. Took action: ${{route_action.branch}}.
+      Draft a brief Slack message about the stall and recovery.
+      Output ONLY the message text.
+    timeout: 120
+    depends_on: [do_nudge, do_kill, route_action]
+
+  post_slack_stall:
+    type: action
+    action: slack.post
+    params:
+      channel_id: ${{config.slack_dm_channel}}
+      text: ${{craft_stall_message.output}}
+    depends_on: [craft_stall_message]

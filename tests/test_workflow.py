@@ -453,7 +453,8 @@ class TestWorkflowDispatcher:
         d = WorkflowDispatcher()
         d.load_workflows(Path(__file__).parent.parent / "workflows")
         assert len(d.workflows) >= 1
-        assert d.workflows[0].name == "issue-lifecycle"
+        names = {wf.name for wf in d.workflows}
+        assert "issue-lifecycle" in names
 
     def test_dispatch_matching_event(self, tmp_path, monkeypatch):
         monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)

@@ -207,7 +207,18 @@ class WorkflowEngine:
         from manager.session import detect_state as mgr_detect_state
 
         prompt_text = self.ctx.resolve(node.prompt)
-        mgr_inject(prompt_text)
+        preamble = (
+            "[WORKFLOW ENGINE CONSULTATION] "
+            "The workflow engine is asking for your reasoning. "
+            "You have full freedom to use tools for research — read files, "
+            "search history, check git, browse the web — anything that helps "
+            "you give a better answer. "
+            "But do NOT take orchestration actions: no spawning sessions, "
+            "no injecting into engineers, no posting to Slack, no moving "
+            "tickets, no running modastack commands. The engine handles all "
+            "orchestration. Just output your best answer. --- "
+        )
+        mgr_inject(preamble + prompt_text)
 
         deadline = time.monotonic() + node.timeout
         while time.monotonic() < deadline:
