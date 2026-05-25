@@ -1,0 +1,237 @@
+name: issue-lifecycle
+version: 1
+trigger:
+  event: task.assigned
+
+nodes:
+  # === SPAWN ===
+  spawn_engineer:
+    type: bash
+    command: |
+      source ~/.modastack/.venv/bin/activate 2>/dev/null
+      python3 -c "
+      from modastack.session import spawn_session
+      spawn_session('${{event.issue_id | lower}}', '${{event.repo}}')
+      "
+    timeout: 60
+
+  # === NOTIFY (LLM crafts, engine posts) ===
+  craft_pickup_message:
+    type: manager
+    prompt: |
+      Issue ${{event.issue_id}} "${{event.title}}" has been assigned.
+      Body: ${{event.body}}
+      Repo: ${{event.repo}}
+      Draft a brief Slack pickup message (2-3 sentences max).
+      Output ONLY the message text, nothing else.
+    timeout: 120
+    depends_on: [spawn_engineer]
+
+  post_slack_pickup:
+    type: action
+    action: slack.post
+    params:
+      channel_id: ${{config.slack_dm_channel}}
+      text: ${{craft_pickup_message.output}}
+    depends_on: [craft_pickup_message]
+
+  move_to_in_progress:
+    type: action
+    action: ticket.move
+    params:
+      issue_id: ${{event.issue_id}}
+      state: In Progress
+      repo: ${{event.repo}}
+    depends_on: [spawn_engineer]
+
+  comment_ticket_pickup:
+    type: action
+    action: ticket.comment
+    params:
+      issue_id: ${{event.issue_id}}
+      body: "Assigned to engineer. Starting triage."
+      repo: ${{event.repo}}
+    depends_on: [spawn_engineer]
+
+  # === TRIAGE ===
+  triage:
+    type: prompt
+    session: ${{event.issue_id | lower}}
+    inject: "/pickup Issue #${{event.issue_id}}: ${{event.title}}. Repo: ${{event.repo}}, cwd: ${{event.repo}}"
+    wait_for:
+      phase: triage_complete
+    timeout: 600
+    outputs:
+      complexity: ${{handoff.complexity}}
+      needs_spec: ${{handoff.needs_spec}}
+    depends_on: [spawn_engineer]
+
+  # === ROUTE (LLM recommends, engine enforces) ===
+  craft_triage_message:
+    type: manager
+    prompt: |
+      Triage complete for ${{event.issue_id}} "${{event.title}}".
+      Complexity: ${{triage.complexity}}.
+      Draft a brief Slack update (1-2 sentences). Output ONLY the message text.
+    timeout: 120
+    depends_on: [triage]
+
+  post_slack_triage:
+    type: action
+    action: slack.post
+    params:
+      channel_id: ${{config.slack_dm_channel}}
+      text: ${{craft_triage_message.output}}
+    depends_on: [craft_triage_message]
+
+  assess_route:
+    type: manager
+    prompt: |
+      Triage for ${{event.issue_id}} found complexity=${{triage.complexity}},
+      needs_spec=${{triage.needs_spec}}.
+      Standard routing: medium/large -> spec, trivial/small -> implement.
+      Do you agree with the standard routing? Reply with exactly one word:
+      "spec" or "implement". Nothing else.
+    timeout: 60
+    depends_on: [triage]
+
+  route:
+    type: gate
+    depends_on: [assess_route]
+    branches:
+      needs_spec:
+        when: "'spec' in ${{assess_route.output}}"
+      skip_spec:
+        when: "'implement' in ${{assess_route.output}}"
+    fallback: needs_spec
+
+  # === SPEC (conditional on medium/large) ===
+  spec:
+    type: prompt
+    session: ${{event.issue_id | lower}}
+    inject: >
+      /spec ${{event.issue_id}}. After creating the draft PR and updating
+      the handoff to spec_complete, STOP. Do NOT proceed to implementation.
+      Wait for human approval.
+    wait_for:
+      phase: spec_complete
+    timeout: 1200
+    outputs:
+      spec_pr: ${{handoff.spec_pr}}
+      spec_path: ${{handoff.spec_path}}
+    depends_on: [route]
+    when: "${{route.branch}} == 'needs_spec'"
+
+  craft_spec_message:
+    type: manager
+    prompt: |
+      Spec complete for ${{event.issue_id}} "${{event.title}}".
+      PR: ${{spec.spec_pr}}. Spec file: ${{spec.spec_path}}.
+      Draft a Slack message asking for spec review. Include links.
+      Output ONLY the message text.
+    timeout: 120
+    depends_on: [spec]
+    when: "${{route.branch}} == 'needs_spec'"
+
+  post_slack_spec_ready:
+    type: action
+    action: slack.post
+    params:
+      channel_id: ${{config.slack_dm_channel}}
+      text: ${{craft_spec_message.output}}
+    depends_on: [craft_spec_message]
+    when: "${{route.branch}} == 'needs_spec'"
+
+  comment_ticket_spec:
+    type: action
+    action: ticket.comment
+    params:
+      issue_id: ${{event.issue_id}}
+      body: "Spec ready for review: ${{spec.spec_pr}}"
+      repo: ${{event.repo}}
+    depends_on: [spec]
+    when: "${{route.branch}} == 'needs_spec'"
+
+  spec_approval:
+    type: approval
+    listen_for:
+      source: slack
+      match: "approved"
+      channel_id: ${{config.slack_dm_channel}}
+    timeout: 86400
+    depends_on: [post_slack_spec_ready]
+    when: "${{route.branch}} == 'needs_spec'"
+
+  # === IMPLEMENT ===
+  craft_implement_message:
+    type: manager
+    prompt: |
+      Starting implementation for ${{event.issue_id}} "${{event.title}}".
+      Complexity: ${{triage.complexity}}.
+      Draft a brief Slack update (1-2 sentences). Output ONLY the message text.
+    timeout: 120
+    depends_on: [spec_approval, route]
+    when: "${{spec_approval.approved}} == true or ${{route.branch}} == 'skip_spec'"
+
+  post_slack_implement:
+    type: action
+    action: slack.post
+    params:
+      channel_id: ${{config.slack_dm_channel}}
+      text: ${{craft_implement_message.output}}
+    depends_on: [craft_implement_message]
+
+  implement:
+    type: prompt
+    session: ${{event.issue_id | lower}}
+    inject: "/implement ${{event.issue_id}}"
+    wait_for:
+      phase: implement_complete
+    timeout: 3600
+    depends_on: [post_slack_implement]
+
+  # === PREPARE PR ===
+  prepare_pr:
+    type: prompt
+    session: ${{event.issue_id | lower}}
+    inject: "/prepare-pr"
+    wait_for:
+      phase: pr_ready
+    timeout: 600
+    depends_on: [implement]
+    outputs:
+      pr_url: ${{handoff.pr_url}}
+
+  craft_pr_message:
+    type: manager
+    prompt: |
+      PR created for ${{event.issue_id}} "${{event.title}}": ${{prepare_pr.pr_url}}.
+      Draft a Slack message asking for review. Output ONLY the message text.
+    timeout: 120
+    depends_on: [prepare_pr]
+
+  post_slack_pr_ready:
+    type: action
+    action: slack.post
+    params:
+      channel_id: ${{config.slack_dm_channel}}
+      text: ${{craft_pr_message.output}}
+    depends_on: [craft_pr_message]
+
+  move_to_in_review:
+    type: action
+    action: ticket.move
+    params:
+      issue_id: ${{event.issue_id}}
+      state: In Review
+      repo: ${{event.repo}}
+    depends_on: [prepare_pr]
+
+  comment_ticket_pr:
+    type: action
+    action: ticket.comment
+    params:
+      issue_id: ${{event.issue_id}}
+      body: "PR ready for review: ${{prepare_pr.pr_url}}"
+      repo: ${{event.repo}}
+    depends_on: [prepare_pr]

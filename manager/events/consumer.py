@@ -22,6 +22,7 @@ from .slack_socket import start_socket_mode
 from .webhook_server import start_server
 from modastack.config import GlobalConfig
 from modastack.history import context_for_events, start_background_indexer, index as index_history
+from modastack.workflow.triggers import WorkflowDispatcher
 from manager.session import start_or_resume, inject, detect_state, is_alive
 
 log = logging.getLogger(__name__)
@@ -123,6 +124,10 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         log.warning(f"Initial history index failed: {e}")
     start_background_indexer(interval=120)
 
+    # Load workflow definitions
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_workflows()
+
     bus = get_bus()
 
     # Start the persistent manager session
@@ -174,11 +179,22 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         event_types = ", ".join(set(e["type"] for e in events))
         log.info(f"Batch #{tick_count}: {len(events)} events — {event_types}")
 
-        # Write events to file (always, even if manager is busy)
-        _write_events_file(events)
+        # Dispatch to workflow engine first; feed all events to running approvals
+        for event in events:
+            dispatcher.dispatch(event)
+            dispatcher.feed_event(event)
+
+        # Unhandled events fall through to the manager LLM
+        unhandled = [e for e in events if not dispatcher.was_dispatched(e)]
+        if not unhandled:
+            _log_batch(events)
+            log.info(f"Batch #{tick_count}: all events handled by workflows")
+            continue
+
+        # Write unhandled events to file for the manager
+        _write_events_file(unhandled)
 
         # Only inject trigger if manager is waiting for input.
-        # If busy, it will see queued messages when it finishes.
         state = detect_state()
         if state == "working":
             log.info(f"Batch #{tick_count}: manager is busy — events written, trigger deferred")

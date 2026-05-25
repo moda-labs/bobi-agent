@@ -558,6 +558,63 @@ def history_show(session_id, limit):
 main.add_command(history)
 
 
+@main.group()
+def workflow():
+    """Workflow engine — manage YAML-based DAG workflows."""
+    pass
+
+
+@workflow.command("list")
+def workflow_list():
+    """List available workflow definitions."""
+    from .workflow.schema import load_workflow
+    workflows_dir = REPO_ROOT / "workflows"
+    if not workflows_dir.exists():
+        click.echo("No workflows directory found.")
+        return
+    for f in sorted(workflows_dir.glob("*.yaml")):
+        try:
+            wf = load_workflow(f)
+            click.echo(f"  {wf.name:30s} trigger={wf.trigger.event:20s} "
+                      f"nodes={len(wf.nodes)}")
+        except Exception as e:
+            click.echo(f"  {f.name:30s} ERROR: {e}")
+
+
+@workflow.command("status")
+def workflow_status():
+    """Show active and recent workflow runs."""
+    from .workflow.state import WorkflowRun
+    runs = WorkflowRun.list_runs()
+    if not runs:
+        click.echo("No workflow runs found.")
+        return
+    for run in runs[:20]:
+        event_data = run.trigger_event.get("data", {})
+        issue = event_data.get("issue_id", "?")
+        completed = sum(1 for ns in run.nodes.values() if ns.status == "completed")
+        total = len(run.nodes)
+        click.echo(f"  {run.run_id}  {run.workflow_name:20s} {run.status:10s} "
+                  f"issue={issue}  {completed}/{total} nodes  {run.started_at[:19]}")
+
+
+@workflow.command("validate")
+@click.argument("path", type=click.Path(exists=True))
+def workflow_validate(path):
+    """Validate a workflow YAML file."""
+    from .workflow.schema import load_workflow
+    try:
+        wf = load_workflow(Path(path))
+        order = wf.topological_order()
+        click.echo(f"Valid: {wf.name} ({len(wf.nodes)} nodes)")
+        click.echo(f"Execution order: {' -> '.join(order)}")
+    except Exception as e:
+        click.echo(f"Invalid: {e}")
+
+
+main.add_command(workflow)
+
+
 @main.command("self-update")
 def self_update():
     """Pull latest from origin/main and reinstall modastack."""
