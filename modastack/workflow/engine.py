@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess
@@ -203,7 +204,7 @@ class WorkflowEngine:
         inject(session_id, text)
 
     def _exec_manager(self, node: NodeDef) -> dict:
-        from manager.session import inject as mgr_inject, capture as mgr_capture
+        from manager.session import inject as mgr_inject
         from manager.session import detect_state as mgr_detect_state
 
         prompt_text = self.ctx.resolve(node.prompt)
@@ -216,13 +217,9 @@ class WorkflowEngine:
             "But do NOT take orchestration actions: no spawning sessions, "
             "no injecting into engineers, no posting to Slack, no moving "
             "tickets, no running modastack commands. The engine handles all "
-            "orchestration. "
-            "IMPORTANT: Wrap your final answer in <workflow-response></workflow-response> tags. "
-            "Only the text inside these tags will be used. --- "
+            "orchestration. Just output your best answer as plain text. --- "
         )
-        full_injection = preamble + prompt_text
-        self._last_injection = full_injection
-        mgr_inject(full_injection)
+        mgr_inject(preamble + prompt_text)
 
         deadline = time.monotonic() + node.timeout
         while time.monotonic() < deadline:
@@ -233,12 +230,7 @@ class WorkflowEngine:
         else:
             raise TimeoutError(f"Manager did not respond within {node.timeout}s")
 
-        raw = mgr_capture(lines=200)
-        output = _extract_tagged_response(raw)
-        if not output:
-            output = _extract_manager_response_excluding(raw, full_injection)
-        if not output:
-            output = _extract_manager_response(raw)
+        output = _read_last_assistant_response()
         return {"output": output}
 
     def _exec_gate(self, node: NodeDef) -> dict:
@@ -314,15 +306,10 @@ class WorkflowEngine:
         return None
 
     def _poll_manager(self, node: NodeDef) -> dict | None:
-        from manager.session import detect_state as mgr_detect_state, capture as mgr_capture
+        from manager.session import detect_state as mgr_detect_state
         state = mgr_detect_state()
         if state == "waiting_input":
-            raw = mgr_capture(lines=200)
-            output = _extract_tagged_response(raw)
-            if not output and hasattr(self, '_last_injection'):
-                output = _extract_manager_response_excluding(raw, self._last_injection)
-            if not output:
-                output = _extract_manager_response(raw)
+            output = _read_last_assistant_response()
             return {"output": output}
         return None
 
@@ -346,6 +333,99 @@ class WorkflowEngine:
                     except Exception:
                         continue
         return {}
+
+
+def _read_last_assistant_response(session_name: str | None = None) -> str:
+    """Read the manager's last response from Claude Code's JSONL conversation file.
+
+    This is the reliable extraction method — the JSONL has clean role separation
+    (user vs assistant vs tool calls) with no tmux pane noise.
+    """
+    import subprocess, shutil
+
+    if not session_name:
+        from manager.session import SESSION_NAME
+        session_name = SESSION_NAME
+
+    TMUX = shutil.which("tmux") or "tmux"
+    CLAUDE_DIR = Path.home() / ".claude"
+    SESSIONS_DIR = CLAUDE_DIR / "sessions"
+
+    # Step 1: Find the session's PID via tmux
+    pane_pid_result = subprocess.run(
+        [TMUX, "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
+        capture_output=True, text=True,
+    )
+    if pane_pid_result.returncode != 0:
+        log.warning("Could not find manager pane PID")
+        return ""
+
+    pane_pid = pane_pid_result.stdout.strip()
+
+    # Step 2: Find session ID from ~/.claude/sessions/<pid>.json
+    session_id = ""
+    for session_file in SESSIONS_DIR.glob("*.json"):
+        if session_file.stem == pane_pid:
+            try:
+                data = json.loads(session_file.read_text())
+                session_id = data.get("sessionId", "")
+            except (json.JSONDecodeError, KeyError):
+                pass
+            break
+
+    if not session_id:
+        # Try matching by checking all session files for matching PID
+        for session_file in SESSIONS_DIR.glob("*.json"):
+            try:
+                data = json.loads(session_file.read_text())
+                if str(data.get("pid", "")) == pane_pid:
+                    session_id = data.get("sessionId", "")
+                    break
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+    if not session_id:
+        log.warning(f"Could not find session ID for PID {pane_pid}")
+        return ""
+
+    # Step 3: Find the JSONL file in any project directory
+    jsonl_path = None
+    projects_dir = CLAUDE_DIR / "projects"
+    if projects_dir.exists():
+        for project_dir in projects_dir.iterdir():
+            candidate = project_dir / f"{session_id}.jsonl"
+            if candidate.exists():
+                jsonl_path = candidate
+                break
+
+    if not jsonl_path:
+        log.warning(f"Could not find JSONL for session {session_id}")
+        return ""
+
+    # Step 4: Read the last assistant text blocks (from the end of the file)
+    lines = jsonl_path.read_text().splitlines()
+    text_parts = []
+
+    for line in reversed(lines):
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if msg.get("type") != "assistant":
+            if msg.get("type") == "user":
+                break
+            continue
+
+        content = msg.get("message", {}).get("content", [])
+        if not isinstance(content, list):
+            continue
+
+        for block in content:
+            if block.get("type") == "text" and block.get("text", "").strip():
+                text_parts.insert(0, block["text"].strip())
+
+    return "\n".join(text_parts).strip()
 
 
 def _extract_manager_response_excluding(raw_pane: str, injected_text: str) -> str:
