@@ -14,6 +14,8 @@ modastack has four core principles:
 
 4. **Manager-driven orchestration** — the manager is a long-lived interactive Claude Code session that reads event files and acts directly. It uses curl for external APIs (Slack, GitHub) and tmux commands for engineer sessions. No hard-coded routing rules, no executor — the manager reasons about the full picture and handles everything via tools.
 
+5. **Workflow engine** — deterministic YAML DAGs with hybrid LLM reasoning. Each workflow is a directed acyclic graph of typed nodes (bash, action, prompt, manager, approval, gate) executed in topological order. Deterministic nodes guarantee reliable side effects (Slack posts, ticket moves), while manager nodes consult the LLM session for reasoning. Workflows are event-triggered — the consumer matches incoming events against YAML trigger definitions and dispatches automatically. State persists to disk, so workflows survive restarts and can resume from the last completed node.
+
 ### Event flow
 
 ```
@@ -181,6 +183,13 @@ modastack register <target>        # register a repo + full setup (local path or
 modastack setup [path]             # set up a repo — install skills, store credentials, register
 modastack repos                    # list registered repos
 modastack dashboard                # start web dashboard (default port 8095)
+modastack history index            # index conversation JSONL into searchable SQLite
+modastack history search <query>   # full-text search across conversation history
+modastack history sessions         # list indexed conversations
+modastack history show <id>        # show messages from a specific session
+modastack workflow list            # list available workflow definitions
+modastack workflow status          # show active and recent workflow runs
+modastack workflow validate <path> # validate a workflow YAML file
 modastack self-update              # pull from origin/main + reinstall
 modastack rollback                 # restore to pre-update state
 ```
@@ -270,7 +279,22 @@ modastack/                        # CLI + infrastructure
 ├── session.py                    # Engineer tmux session management (spawn, inject, capture)
 ├── setup.py                      # Repo setup — skill install, auto-detection
 ├── board_setup.py                # Bootstrap Linear board with workflow states
-└── __version__.py                # Version string from VERSION file
+├── history.py                    # Conversation history indexer (SQLite + FTS5)
+├── __version__.py                # Version string from VERSION file
+└── workflow/                     # YAML DAG workflow engine
+    ├── schema.py                 # Workflow/node schema, YAML parsing, topological sort
+    ├── engine.py                 # DAG executor — node dispatch, state polling, resume
+    ├── state.py                  # JSON persistence for workflow runs
+    ├── triggers.py               # Event→workflow matching and dispatch
+    ├── actions.py                # Action registry (slack.post, ticket.move, etc.)
+    └── variables.py              # Variable resolution, safe condition evaluation
+
+workflows/                        # Workflow definitions (YAML DAGs)
+├── issue-lifecycle.yaml          # Full issue pickup → triage → spec → impl → review
+├── pr-feedback.yaml              # PR change-request handling
+├── pr-merged.yaml                # Post-merge cleanup
+├── slack-question.yaml           # Engineer question bridging
+└── stall-recovery.yaml           # Stalled session detection and recovery
 
 manager/                          # Persistent manager + event system
 ├── session.py                    # Manager tmux session (start, resume, inject, capture)
