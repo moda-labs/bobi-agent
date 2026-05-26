@@ -13,7 +13,7 @@ nodes:
       Reviewer: ${{event.reviewer}}
       Draft a brief Slack message informing the team about the review.
       Output ONLY the message text.
-    timeout: 120
+    timeout: 300
 
   post_slack_review:
     type: action
@@ -38,7 +38,7 @@ nodes:
       Engineer addressed PR feedback for ${{event.issue_id}}.
       Draft a brief Slack message saying feedback was addressed.
       Output ONLY the message text.
-    timeout: 120
+    timeout: 300
     depends_on: [inject_feedback]
 
   post_slack_feedback_done:
