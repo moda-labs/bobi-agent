@@ -38,6 +38,40 @@ Version checker (1h)  ──┘
 
 Events arrive from multiple sources — pollers run in background threads, webhooks via an HTTP server, and Slack via Socket Mode WebSocket. All push to the same in-process bus. The consumer drains the bus every few seconds, writes events to `~/.modastack/manager/pending_events.md`, and injects a short trigger message into the manager's tmux session. The manager reads the event file and acts directly — no intermediate executor or JSON action protocol.
 
+```mermaid
+flowchart LR
+    subgraph Producers["Event Producers"]
+        WP["Worker poller\n(5s)"]
+        GH["GitHub poller\n(30s)"]
+        SP["Slack poller\n(10s)"]
+        WH["Webhook server\n(HTTP)"]
+        SM["Slack Socket Mode\n(WebSocket)"]
+        VC["Version checker\n(1h)"]
+    end
+
+    BUS["EventBus\n(thread-safe queue)"]
+
+    subgraph Consumer["Consumer"]
+        DRAIN["Drain + batch\n(every 5s)"]
+        WF["Workflow\nDispatcher"]
+        FILE["Write\npending_events.md"]
+    end
+
+    subgraph Manager["Manager Session (tmux)"]
+        READ["Read event file"]
+        CURL["curl → Slack, GitHub"]
+        TMUX["tmux → engineer sessions"]
+    end
+
+    WP & GH & SP & WH & SM & VC --> BUS
+    BUS --> DRAIN
+    DRAIN --> WF
+    WF -- "matched" --> ENGINE["Workflow Engine\n(DAG executor)"]
+    WF -- "unmatched" --> FILE
+    FILE -- "inject trigger" --> READ
+    READ --> CURL & TMUX
+```
+
 ### Task tracking
 
 modastack supports pluggable task tracking systems:
@@ -141,6 +175,55 @@ Key enforcement points:
 - **Triple review on specs.** Non-trivial specs get engineering, design, and CEO-level scope review before implementation starts.
 - **`/ship` handles PR creation.** Agents don't use raw `gh pr create` — `/ship` runs tests, reviews the diff, and creates a proper PR.
 
+The following diagram shows how modastack-native skills in `roles/` compose with user-level GStack skills from `~/.claude/skills/`, and which skills each lifecycle phase invokes.
+
+```mermaid
+flowchart TB
+    subgraph Lifecycle["Lifecycle Phases (roles/engineer/process/)"]
+        PICKUP["/pickup\ntriage"]
+        SPEC["/spec\ndesign"]
+        IMPL["/implement\nbuild"]
+        PR["/prepare-pr\nship"]
+        FB["/feedback\niterate"]
+    end
+
+    subgraph Native["Modastack Practices (roles/engineer/practices/)"]
+        TRIAGE["/triage"]
+        BUILD["/build"]
+        CODE_REVIEW["/code-review"]
+        TICKET["/ticketing-policy"]
+        SCC["/source-control-conventions"]
+    end
+
+    subgraph GStack["GStack Skills (~/.claude/skills/)"]
+        OH["/office-hours"]
+        INVEST["/investigate"]
+        REVIEW["/review"]
+        QA["/qa"]
+        SHIP["/ship"]
+        AUTOPLAN["/autoplan"]
+        ENG["/plan-eng-review"]
+        DESIGN["/plan-design-review"]
+        CEO["/plan-ceo-review"]
+    end
+
+    subgraph Tools["Shared Tools (roles/tools/)"]
+        GIT["git"]
+        GITHUB["github"]
+        GHI["github-issues"]
+        LINEAR["linear"]
+        SLACK["slack"]
+    end
+
+    PICKUP --> TRIAGE & OH
+    SPEC --> ENG & DESIGN & CEO
+    IMPL --> INVEST & BUILD & REVIEW & QA
+    PR --> SHIP
+    FB --> INVEST & REVIEW
+
+    Native & GStack -.-> Tools
+```
+
 ## Setup
 
 ```bash
@@ -208,6 +291,34 @@ No new data stores — reads existing JSONL logs and tmux state.
 
 modastack checks for updates hourly by comparing against `origin/main`. When a new version is available, the manager posts to Slack for approval. `modastack self-update` pulls, stashes any dirty state, and reinstalls. `modastack rollback` restores the pre-update state if something breaks.
 
+### Deploy pipeline
+
+The deploy pipeline runs via cron (every minute). `check-deploy.sh` compares the local HEAD against `origin/main` and triggers `auto-deploy.sh` when new commits are detected.
+
+```mermaid
+flowchart TD
+    CRON["Cron (every minute)"]
+    CRON --> FETCH["git fetch origin main"]
+    FETCH --> COMPARE{"HEAD ==\norigin/main?"}
+    COMPARE -- "same" --> SKIP["Skip"]
+    COMPARE -- "different" --> LOCK{"Deploy lock\nexists?"}
+    LOCK -- "yes" --> ABORT["Abort\n(deploy in progress)"]
+    LOCK -- "no" --> PULL["git pull origin main\n--ff-only"]
+
+    PULL --> GSTACK{"gstack\ninstalled?"}
+    GSTACK -- "no" --> INSTALL_GS["Clone gstack\n+ bun install\n+ playwright deps\n+ gstack setup"]
+    GSTACK -- "yes" --> UPDATE_GS["git pull gstack"]
+    INSTALL_GS --> PIP
+    UPDATE_GS --> PIP
+
+    PIP["pip install -e ."]
+    PIP --> SYMLINKS["Refresh skill symlinks\n(roles/ → .claude/skills/)"]
+    SYMLINKS --> RESTART_CONSUMER["Restart consumer\n(modastack start --webhooks)"]
+    RESTART_CONSUMER --> RESTART_DASH["Restart dashboard\n(modastack dashboard)"]
+    RESTART_DASH --> RESTART_MGR["Restart manager\n(claude --dangerously-skip-permissions)"]
+    RESTART_MGR --> DONE["Deploy complete\n✓ log new version"]
+```
+
 ## Configuration
 
 ### Global config (`~/.modastack/config.yaml`)
@@ -267,6 +378,38 @@ Done
 ```
 
 **Blocked** — when an engineer asks a question, the manager detects it via the worker poller, posts it to Slack, and waits. When a human replies, the event flows through the bus and the manager injects the answer back into the engineer's session.
+
+The following diagram shows the full issue lifecycle including internal sub-phases within "In Progress" and the skills that fire at each stage.
+
+```mermaid
+flowchart TD
+    TODO["Todo"]
+    TODO -- "task.assigned event" --> SPAWN["Manager spawns\ntmux session"]
+    SPAWN --> PICKUP["/pickup\n(triage)"]
+    PICKUP --> ROUTE{needs_spec?}
+
+    subgraph IN_PROGRESS["In Progress"]
+        PICKUP
+        ROUTE
+        ROUTE -- "yes" --> SPECPHASE["/spec\n(write spec + PR)"]
+        SPECPHASE --> WAIT_APPROVAL["Wait for\nhuman approval"]
+        WAIT_APPROVAL -- "approved" --> IMPLEMENT["/implement\n(build + test + review)"]
+        ROUTE -- "no" --> IMPLEMENT
+        IMPLEMENT --> PREPPR["/prepare-pr\n(create PR)"]
+    end
+
+    PREPPR --> IN_REVIEW["In Review"]
+
+    IN_REVIEW -- "changes requested" --> FEEDBACK["/feedback\n(address comments)"]
+    FEEDBACK --> PREPPR2["/prepare-pr\n(update PR)"]
+    PREPPR2 --> IN_REVIEW
+
+    IN_REVIEW -- "PR merged" --> DONE["Done"]
+
+    BLOCKED["Blocked"]
+    IN_PROGRESS -. "engineer asks question" .-> BLOCKED
+    BLOCKED -. "human replies" .-> IN_PROGRESS
+```
 
 ## Project structure
 
