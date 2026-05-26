@@ -217,8 +217,7 @@ class WorkflowEngine:
             "no injecting into engineers, no posting to Slack, no moving "
             "tickets, no running modastack commands. The engine handles all "
             "orchestration. "
-            "IMPORTANT: Wrap your final answer in <workflow-response> tags. "
-            "Example: <workflow-response>Your answer here</workflow-response> "
+            "IMPORTANT: Wrap your final answer in <workflow-response></workflow-response> tags. "
             "Only the text inside these tags will be used. --- "
         )
         mgr_inject(preamble + prompt_text)
