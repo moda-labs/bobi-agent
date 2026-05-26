@@ -220,7 +220,9 @@ class WorkflowEngine:
             "IMPORTANT: Wrap your final answer in <workflow-response></workflow-response> tags. "
             "Only the text inside these tags will be used. --- "
         )
-        mgr_inject(preamble + prompt_text)
+        full_injection = preamble + prompt_text
+        self._last_injection = full_injection
+        mgr_inject(full_injection)
 
         deadline = time.monotonic() + node.timeout
         while time.monotonic() < deadline:
@@ -233,6 +235,8 @@ class WorkflowEngine:
 
         raw = mgr_capture(lines=200)
         output = _extract_tagged_response(raw)
+        if not output:
+            output = _extract_manager_response_excluding(raw, full_injection)
         if not output:
             output = _extract_manager_response(raw)
         return {"output": output}
@@ -315,6 +319,8 @@ class WorkflowEngine:
         if state == "waiting_input":
             raw = mgr_capture(lines=200)
             output = _extract_tagged_response(raw)
+            if not output and hasattr(self, '_last_injection'):
+                output = _extract_manager_response_excluding(raw, self._last_injection)
             if not output:
                 output = _extract_manager_response(raw)
             return {"output": output}
@@ -340,6 +346,61 @@ class WorkflowEngine:
                     except Exception:
                         continue
         return {}
+
+
+def _extract_manager_response_excluding(raw_pane: str, injected_text: str) -> str:
+    """Extract manager response by finding text NOT from the injected prompt.
+
+    Splits the injected text into fragments and filters out any pane line
+    that substantially overlaps with the injection.
+    """
+    injection_fragments = set()
+    for word in injected_text.split():
+        if len(word) > 5:
+            injection_fragments.add(word.lower().strip(".,;:!?\"'"))
+
+    lines = raw_pane.splitlines()
+
+    NOISE_PREFIXES = ("●", "·", "⎿", "✻", "✽", "▐", "▝", "▘")
+    SKIP_CONTAINS = ("ctrl+o", "ctrl+b", "bypass permissions", "⏵⏵",
+                     "Bash(", "Read(", "Write(", "Edit(", "Agent(",
+                     "────", "╭", "╰", "│", "Searched for",
+                     "Claude Code v", "Opus 4", "Claude Max",
+                     "Crunched", "Baked", "Gallivanting", "thinking",
+                     "WORKFLOW ENGINE", "workflow-response",
+                     "orchestration", "do NOT take", "-H \"Authorization")
+
+    prompt_positions = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("❯") and "bypass" not in stripped:
+            prompt_positions.append(i)
+
+    if len(prompt_positions) < 2:
+        return ""
+
+    start = prompt_positions[-2] + 1
+    end = prompt_positions[-1]
+
+    response_lines = []
+    for line in lines[start:end]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if any(stripped.startswith(n) for n in NOISE_PREFIXES):
+            continue
+        if any(s in stripped for s in SKIP_CONTAINS):
+            continue
+
+        words = [w.lower().strip(".,;:!?\"'") for w in stripped.split() if len(w) > 5]
+        if words:
+            overlap = sum(1 for w in words if w in injection_fragments)
+            if overlap > len(words) * 0.5:
+                continue
+
+        response_lines.append(stripped)
+
+    return "\n".join(response_lines).strip()
 
 
 def _extract_tagged_response(raw_pane: str) -> str:
