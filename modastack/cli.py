@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -301,7 +302,7 @@ def register(repo_path: str, task_tracking: str | None, project: str | None, lin
                 link = target_skills / skill_dir.name
                 if link.exists() or link.is_symlink():
                     continue
-                link.symlink_to(skill_dir.resolve())
+                link.symlink_to(os.path.relpath(skill_dir.resolve(), target_skills))
                 installed.append(skill_dir.name)
     if installed:
         for name in sorted(installed):
@@ -459,7 +460,7 @@ def setup(repo_path: str, task_tracking: str | None, project: str | None,
                 link = target_skills / skill_dir.name
                 if link.exists() or link.is_symlink():
                     continue
-                link.symlink_to(skill_dir.resolve())
+                link.symlink_to(os.path.relpath(skill_dir.resolve(), target_skills))
                 installed.append(skill_dir.name)
     if installed:
         for name in sorted(installed):
