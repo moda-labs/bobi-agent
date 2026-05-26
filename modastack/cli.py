@@ -491,7 +491,15 @@ def history():
 @history.command("index")
 @click.option("--project", default=None, help="Filter to project (substring match on path)")
 def history_index(project):
-    """Index conversation JSONL files into searchable SQLite."""
+    """Index conversation JSONL files into searchable SQLite.
+
+    Scans ~/.claude/projects/*/conversations/ for JSONL files and indexes
+    messages into a local SQLite database for fast searching.
+
+    Usage:
+        modastack history index                # index all projects
+        modastack history index --project foo   # index only projects matching "foo"
+    """
     from .history import index as do_index
     click.echo("Indexing conversations...")
     stats = do_index(project_filter=project)
@@ -505,7 +513,15 @@ def history_index(project):
 @click.option("--limit", default=20, help="Max results")
 @click.option("--project", default=None, help="Filter to project")
 def history_search(query, limit, project):
-    """Full-text search across conversation history."""
+    """Full-text search across indexed conversation history.
+
+    Searches message content using SQLite FTS. Requires `modastack history index`
+    to have been run first.
+
+    Usage:
+        modastack history search "error handling"
+        modastack history search "deploy" --project modastack --limit 5
+    """
     from .history import search as do_search
     results = do_search(query, limit=limit, project=project)
     if not results:
@@ -525,7 +541,15 @@ def history_search(query, limit, project):
 @click.option("--limit", default=20)
 @click.option("--project", default=None)
 def history_sessions(limit, project):
-    """List indexed conversations."""
+    """List indexed conversations with metadata.
+
+    Shows session ID, git branch, message count, and working directory for
+    each indexed conversation. Use session IDs with `modastack history show`.
+
+    Usage:
+        modastack history sessions
+        modastack history sessions --limit 5 --project modastack
+    """
     from .history import conversations
     convos = conversations(limit=limit, project=project)
     if not convos:
@@ -540,7 +564,15 @@ def history_sessions(limit, project):
 @click.argument("session_id")
 @click.option("--limit", default=50)
 def history_show(session_id, limit):
-    """Show messages from a specific session."""
+    """Show messages from a specific session.
+
+    Accepts a full or partial session ID (prefix match). Use
+    `modastack history sessions` to find session IDs.
+
+    Usage:
+        modastack history show abc12345
+        modastack history show abc12345 --limit 10
+    """
     from .history import session_messages, conversations
     convos = conversations(limit=1000)
     match = [c for c in convos if c["session_id"].startswith(session_id)]
@@ -567,7 +599,14 @@ def workflow():
 
 @workflow.command("list")
 def workflow_list():
-    """List available workflow definitions."""
+    """List available workflow definitions.
+
+    Scans the workflows/ directory for YAML files and shows each workflow's
+    name, trigger event, and node count.
+
+    Usage:
+        modastack workflow list
+    """
     from .workflow.schema import load_workflow
     workflows_dir = REPO_ROOT / "workflows"
     if not workflows_dir.exists():
@@ -584,7 +623,14 @@ def workflow_list():
 
 @workflow.command("status")
 def workflow_status():
-    """Show active and recent workflow runs."""
+    """Show active and recent workflow runs.
+
+    Displays up to 20 recent runs with their status, trigger issue,
+    node completion progress, and start time.
+
+    Usage:
+        modastack workflow status
+    """
     from .workflow.state import WorkflowRun
     runs = WorkflowRun.list_runs()
     if not runs:
@@ -602,7 +648,14 @@ def workflow_status():
 @workflow.command("validate")
 @click.argument("path", type=click.Path(exists=True))
 def workflow_validate(path):
-    """Validate a workflow YAML file."""
+    """Validate a workflow YAML file.
+
+    Parses the YAML, checks the DAG structure, and prints the topological
+    execution order if valid.
+
+    Usage:
+        modastack workflow validate workflows/deploy.yaml
+    """
     from .workflow.schema import load_workflow
     try:
         wf = load_workflow(Path(path))
