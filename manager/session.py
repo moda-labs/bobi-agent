@@ -111,8 +111,13 @@ def start_or_resume(cwd: str = None) -> bool:
         return True
 
     if not cwd:
-        config = GlobalConfig.load()
-        cwd = str(config.repos[0]) if config.repos else str(Path.home())
+        # Always start in the modastack repo — hooks are installed there
+        repo_root = Path(__file__).parent.parent
+        if repo_root.exists():
+            cwd = str(repo_root)
+        else:
+            config = GlobalConfig.load()
+            cwd = str(config.repos[0]) if config.repos else str(Path.home())
 
     saved_id = _get_saved_session_id()
     _clear_activity_log()
