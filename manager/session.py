@@ -189,14 +189,15 @@ def _inject_startup_prompt() -> None:
 def _wait_for_prompt_accepted(timeout: int = 60, max_retries: int = 3) -> bool:
     """Wait for a UserPromptSubmit event, retrying send-keys if needed."""
     for attempt in range(1, max_retries + 1):
-        pre_count = _activity_line_count()
+        inject_time = time.time()
         deadline = time.monotonic() + timeout
 
         while time.monotonic() < deadline:
             time.sleep(1)
             last = _read_last_activity()
             if last and last.get("event") == "UserPromptSubmit":
-                if _activity_line_count() > pre_count:
+                event_ts = last.get("ts", 0)
+                if event_ts >= inject_time - 5:
                     log.debug(f"Prompt accepted (attempt {attempt})")
                     return True
 
@@ -253,7 +254,7 @@ def inject(text: str) -> bool:
 
     Returns True if a UserPromptSubmit event appeared after injection.
     """
-    pre_count = _activity_line_count()
+    inject_time = time.time()
 
     if not _send_keys(text):
         return False
@@ -263,7 +264,7 @@ def inject(text: str) -> bool:
         time.sleep(1)
         last = _read_last_activity()
         if last and last.get("event") == "UserPromptSubmit":
-            if _activity_line_count() > pre_count:
+            if last.get("ts", 0) >= inject_time - 5:
                 log.debug(f"Injected and confirmed ({len(text)} chars)")
                 return True
 
