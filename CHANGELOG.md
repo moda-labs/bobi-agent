@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 — 2026-05-26
+
+### Added
+- Documentation for workflow engine: YAML DAG executor, workflow definitions, CLI commands
+- Documentation for conversation history indexer: SQLite + FTS5 search, CLI commands
+- Updated project structure trees in README and CLAUDE.md with workflow/ and workflows/ directories
+
 ## 0.2.2 — 2026-05-23
 
 ### Added
