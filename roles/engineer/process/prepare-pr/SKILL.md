@@ -42,11 +42,21 @@ After the PR is created, follow `practices/ticketing-policy` and the task tracke
 
 This is YOUR responsibility as the engineer — the manager does not do this.
 
+### 4. Update handoff and STOP
+
+After the PR is created and the ticket is moved, update `~/.modastack/handoffs/<ISSUE_ID>.md`:
+- Set `phase: pr_ready` (use this exact string)
+- Add `pr_url: <PR URL>`
+
+Then **STOP completely.** Your work is done. Do NOT proceed to any next step.
+
 ## Rules
 
 - PR title format per `practices/source-control-conventions`: `[ISSUE-ID] type: description`
 - **Move ticket to In Review** after creating the PR.
 - **NEVER merge PRs.** Do NOT run `gh pr merge`, `git merge main`, or any
   merge operation. Humans merge PRs after review. Your job ends at creating
-  the PR and moving the ticket to In Review. STOP there.
+  the PR and moving the ticket to In Review.
+- **NEVER run `/land-and-deploy`.** That skill merges and deploys — humans decide when to merge.
 - `/ship` handles test running, review, and PR creation — let it do its job.
+- After `/ship` creates the PR, **STOP.** Do not chain into any follow-up skill.

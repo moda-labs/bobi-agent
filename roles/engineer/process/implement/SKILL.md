@@ -50,6 +50,12 @@ Follow push conventions in `tools/git`.
 git push -u origin HEAD
 ```
 
+### 9. Update handoff
+
+After pushing, update `~/.modastack/handoffs/<ISSUE_ID>.md`:
+- Set `phase: implement_complete` (use this exact string)
+- Summarize what was implemented
+
 ## Rules
 
 - Follow the approved spec. Don't deviate without good reason.
@@ -57,3 +63,4 @@ git push -u origin HEAD
 - Commit conventions: `[ISSUE-ID] type: description`
 - `/review` is mandatory. Do not skip it.
 - Do NOT create a PR. The `/prepare-pr` phase handles that.
+- Do NOT run `/land-and-deploy` or merge anything.
