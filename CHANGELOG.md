@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 — 2026-05-26
+
+### Changed
+- CLI help text for `workflow` and `history` subcommands now includes descriptions and usage examples
+
 ## 0.2.2 — 2026-05-23
 
 ### Added
