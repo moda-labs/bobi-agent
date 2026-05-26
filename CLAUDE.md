@@ -81,52 +81,56 @@ flow through an in-process bus to a persistent Claude Code manager session
 in tmux. The manager reasons about events and acts directly.
 
 ```
-modastack/                        # CLI + infrastructure
+modastack/                        # All Python code
 ├── cli.py                        # Click CLI entrypoint
 ├── config.py                     # Global config (~/.modastack/config.yaml)
 ├── scanner.py                    # Linear GraphQL polling
 ├── session.py                    # Engineer tmux session management
 ├── setup.py                      # Repo setup — skill install, auto-detection
-└── board_setup.py                # Bootstrap Linear board with workflow states
+├── board_setup.py                # Bootstrap Linear board with workflow states
+├── manager/                      # Persistent manager + event system
+│   ├── session.py                # Manager tmux session (start, resume, inject, capture)
+│   └── events/
+│       ├── bus.py                # Thread-safe in-process event queue
+│       ├── consumer.py           # Drain bus → write events file → trigger manager
+│       ├── pollers.py            # Background threads: workers (5s), Linear (30s), Slack (10s)
+│       ├── webhook_server.py     # HTTP endpoints: /webhooks/github, /linear, /slack
+│       └── slack_socket.py       # Slack Socket Mode WebSocket client
+└── workflow/
+    ├── engine.py                 # DAG executor with hybrid LLM + deterministic nodes
+    ├── triggers.py               # Event → workflow matching, resolution chain
+    └── schema.py                 # WorkflowDef, NodeDef, YAML parsing
 
-manager/                          # Persistent manager + event system
-├── session.py                    # Manager tmux session (start, resume, inject, capture)
-├── prompt.md                     # Manager personality, decision rules
-└── events/
-    ├── bus.py                    # Thread-safe in-process event queue
-    ├── consumer.py               # Drain bus → write events file → trigger manager
-    ├── pollers.py                # Background threads: workers (5s), Linear (30s), Slack (10s)
-    ├── webhook_server.py         # HTTP endpoints: /webhooks/github, /linear, /slack
-    └── slack_socket.py           # Slack Socket Mode WebSocket client
+roles/                            # All skill/prompt content (no Python)
+├── manager/
+│   └── prompt.md                 # Manager personality, decision rules
+├── engineer/
+│   ├── process/                  # Manager-routed lifecycle phases
+│   │   ├── pickup/SKILL.md       # Take ticket, create worktree, triage
+│   │   ├── spec/SKILL.md         # Write implementation spec
+│   │   ├── implement/SKILL.md    # Build from spec, TDD, sub-agents
+│   │   ├── prepare-pr/SKILL.md   # Create/update PR
+│   │   └── feedback/SKILL.md     # Address review comments
+│   └── practices/                # Modastack-native methodology skills
+│       ├── triage/SKILL.md       # Task intake & classification
+│       ├── build/SKILL.md        # Staff engineer coding methodology
+│       ├── code-review/SKILL.md  # Mandatory quality gates
+│       ├── ticketing-policy/SKILL.md
+│       └── source-control-conventions/SKILL.md
+├── product_manager/
+│   ├── brand-identity/SKILL.md   # Brand discovery & visual identity
+│   └── design-critic/SKILL.md    # Adversarial design doc reviewer
+└── tools/                        # Shared tool reference (manager + engineers)
+    ├── git/SKILL.md              # Git CLI commands
+    ├── github/SKILL.md           # gh CLI commands
+    ├── linear/SKILL.md           # Linear GraphQL API
+    ├── slack/SKILL.md            # Slack setup & API
+    ├── webhooks/SKILL.md         # Webhook setup guide
+    └── notion/SKILL.md           # Notion integration (placeholder)
 
-engineer/
-├── process/                      # Manager-routed lifecycle phases
-│   ├── pickup/SKILL.md           # Take ticket, create worktree, triage
-│   ├── spec/SKILL.md             # Write implementation spec
-│   ├── implement/SKILL.md        # Build from spec, TDD, sub-agents
-│   ├── prepare-pr/SKILL.md       # Create/update PR
-│   └── feedback/SKILL.md         # Address review comments
-└── practices/                    # Modastack-native methodology skills
-    ├── triage/SKILL.md           # Task intake & classification
-    ├── build/SKILL.md            # Staff engineer coding methodology
-    ├── code-review/SKILL.md      # Mandatory quality gates
-    ├── ticketing-policy/SKILL.md # Who moves tickets when
-    └── source-control-conventions/SKILL.md
-    # GStack skills (review, ship, autoplan, investigate, office-hours,
-    # qa, plan-*-review) come from user-level ~/.claude/skills/ via
-    # gstack setup — not copied into this repo.
-
-product_manager/                  # Product manager skills (standalone)
-├── brand-identity/SKILL.md       # Brand discovery & visual identity
-└── design-critic/SKILL.md        # Adversarial design doc reviewer
-
-tools/                            # Shared tool reference (manager + engineers)
-├── git/SKILL.md                  # Git CLI commands
-├── github/SKILL.md               # gh CLI commands
-├── linear/SKILL.md               # Linear GraphQL API
-├── slack/SKILL.md                # Slack setup & API
-├── webhooks/SKILL.md             # Webhook setup guide
-└── notion/SKILL.md               # Notion integration (placeholder)
+# GStack skills (review, ship, autoplan, investigate, office-hours,
+# qa, plan-*-review) come from user-level ~/.claude/skills/ via
+# gstack setup — not copied into this repo.
 ```
 
 ## Issue lifecycle

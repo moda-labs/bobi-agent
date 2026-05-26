@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from manager.events.pollers import (
+from modastack.manager.events.pollers import (
     STALL_THRESHOLD_SECS,
     STUCK_THRESHOLD_SECS,
     _strip_ansi,
@@ -161,7 +161,7 @@ class FakeBus:
 
 def _run_poll_cycle(session_names, detect_fn, pane_content, bus, last_states, heartbeats):
     """Simulate one cycle of _poll_workers logic (extracted for testability)."""
-    from manager.events.pollers import _strip_ansi, STALL_THRESHOLD_SECS, STUCK_THRESHOLD_SECS
+    from modastack.manager.events.pollers import _strip_ansi, STALL_THRESHOLD_SECS, STUCK_THRESHOLD_SECS
 
     for session_name in session_names:
         iid = session_name.upper().replace("WORKER-", "").replace("MODA-", "")

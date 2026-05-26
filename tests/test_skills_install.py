@@ -7,11 +7,12 @@ and discoverable by Claude Code.
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
-ENGINEER_ROOT = REPO_ROOT / "engineer"
+ROLES_ROOT = REPO_ROOT / "roles"
+ENGINEER_ROOT = ROLES_ROOT / "engineer"
 PROCESS_SKILLS_SRC = ENGINEER_ROOT / "process"
 PRACTICES_SKILLS_SRC = ENGINEER_ROOT / "practices"
-PRODUCT_MANAGER_SKILLS_SRC = REPO_ROOT / "product_manager"
-TOOLS_SKILLS_SRC = REPO_ROOT / "tools"  # shared, top-level
+PRODUCT_MANAGER_SKILLS_SRC = ROLES_ROOT / "product_manager"
+TOOLS_SKILLS_SRC = ROLES_ROOT / "tools"
 SKILLS_INSTALLED = REPO_ROOT / ".claude" / "skills"
 
 EXPECTED_PROCESS_SKILLS = ["pickup", "spec", "implement", "prepare-pr", "feedback"]

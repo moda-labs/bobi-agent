@@ -4,7 +4,7 @@ import json
 from io import BytesIO
 from unittest.mock import patch, MagicMock
 
-from manager.events.webhook_server import (
+from modastack.manager.events.webhook_server import (
     _github_issue_state, _normalize_linear_action, WebhookHandler,
 )
 
@@ -74,7 +74,7 @@ def _make_handler(path, body, headers=None):
 
 class TestGithubWebhook:
 
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_pr_opened(self, mock_get_bus):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -104,7 +104,7 @@ class TestGithubWebhook:
         assert call_args[0][2]["number"] == 42
         assert call_args[0][2]["branch"] == "feature-branch"
 
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_pr_review(self, mock_get_bus):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -124,7 +124,7 @@ class TestGithubWebhook:
         assert data["reviewer"] == "reviewer"
         assert data["state"] == "changes_requested"
 
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_issue_opened(self, mock_get_bus):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -152,7 +152,7 @@ class TestGithubWebhook:
         assert data["state"] == "Todo"
         assert "agent" in data["labels"]
 
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_issue_comment_on_pr(self, mock_get_bus):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -169,7 +169,7 @@ class TestGithubWebhook:
 
         assert bus.push.call_args[0][0] == "github.comment"
 
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_issue_comment_on_issue(self, mock_get_bus):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -186,7 +186,7 @@ class TestGithubWebhook:
 
         assert bus.push.call_args[0][0] == "task.comment"
 
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_ping_event(self, mock_get_bus):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -203,7 +203,7 @@ class TestGithubWebhook:
 
 class TestSlackWebhook:
 
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_url_verification(self, mock_get_bus):
         payload = {"type": "url_verification", "challenge": "test-challenge-123"}
         body = json.dumps(payload).encode()
@@ -215,7 +215,7 @@ class TestSlackWebhook:
         response = handler.wfile.getvalue()
         assert b"test-challenge-123" in response
 
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_message_event(self, mock_get_bus):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -240,7 +240,7 @@ class TestSlackWebhook:
         assert data["channel_id"] == "C123"
         assert data["text"] == "Hello bot"
 
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_ignores_bot_messages(self, mock_get_bus):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -289,8 +289,8 @@ class TestNormalizeLinearAction:
 
 class TestLinearWebhook:
 
-    @patch("manager.events.webhook_server._resolve_linear_repo", return_value="/home/ubuntu/dev/myrepo")
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server._resolve_linear_repo", return_value="/home/ubuntu/dev/myrepo")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_issue_assigned(self, mock_get_bus, mock_resolve):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -321,8 +321,8 @@ class TestLinearWebhook:
         assert data["repo"] == "/home/ubuntu/dev/myrepo"
         assert data["assigned_to"] == "Zach"
 
-    @patch("manager.events.webhook_server._resolve_linear_repo", return_value="/home/ubuntu/dev/myrepo")
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server._resolve_linear_repo", return_value="/home/ubuntu/dev/myrepo")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_issue_created(self, mock_get_bus, mock_resolve):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -345,8 +345,8 @@ class TestLinearWebhook:
 
         assert bus.push.call_args[0][0] == "task.created"
 
-    @patch("manager.events.webhook_server._resolve_linear_repo", return_value="")
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server._resolve_linear_repo", return_value="")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_unconfigured_project_ignored(self, mock_get_bus, mock_resolve):
         bus = MagicMock()
         mock_get_bus.return_value = bus
@@ -363,8 +363,8 @@ class TestLinearWebhook:
 
         bus.push.assert_not_called()
 
-    @patch("manager.events.webhook_server._resolve_linear_repo", return_value="/repo")
-    @patch("manager.events.webhook_server.get_bus")
+    @patch("modastack.manager.events.webhook_server._resolve_linear_repo", return_value="/repo")
+    @patch("modastack.manager.events.webhook_server.get_bus")
     def test_comment_includes_repo(self, mock_get_bus, mock_resolve):
         bus = MagicMock()
         mock_get_bus.return_value = bus

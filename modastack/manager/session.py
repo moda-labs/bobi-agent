@@ -22,7 +22,7 @@ TMUX = shutil.which("tmux") or "tmux"
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
 SESSION_NAME = "moda-manager"
 SESSION_ID_PATH = Path.home() / ".modastack" / "manager" / "session_id"
-MANAGER_PROMPT_PATH = Path(__file__).parent / "prompt.md"
+MANAGER_PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "roles" / "manager" / "prompt.md"
 ACTIVITY_LOG = Path.home() / ".modastack" / "manager" / "activity.jsonl"
 
 

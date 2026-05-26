@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock, call
 
 import pytest
 
-from manager.session import (
+from modastack.manager.session import (
     _session_exists,
     _get_saved_session_id,
     _save_session_id,
@@ -37,7 +37,7 @@ from manager.session import (
 def activity_log(tmp_path, monkeypatch):
     """Point ACTIVITY_LOG at a temp file."""
     log_path = tmp_path / "activity.jsonl"
-    monkeypatch.setattr("manager.session.ACTIVITY_LOG", log_path)
+    monkeypatch.setattr("modastack.manager.session.ACTIVITY_LOG", log_path)
     return log_path
 
 
@@ -54,12 +54,12 @@ def _write_activity(log_path: Path, event: str, ts: float = None, session_id: st
 
 class TestSessionExists:
 
-    @patch("manager.session.subprocess.run")
+    @patch("modastack.manager.session.subprocess.run")
     def test_returns_true_when_session_exists(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         assert _session_exists() is True
 
-    @patch("manager.session.subprocess.run")
+    @patch("modastack.manager.session.subprocess.run")
     def test_returns_false_when_no_session(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1)
         assert _session_exists() is False
@@ -73,12 +73,12 @@ class TestSessionId:
 
     def test_save_and_load(self, tmp_path, monkeypatch):
         id_path = tmp_path / "session_id"
-        monkeypatch.setattr("manager.session.SESSION_ID_PATH", id_path)
+        monkeypatch.setattr("modastack.manager.session.SESSION_ID_PATH", id_path)
         _save_session_id("ses_abc123")
         assert _get_saved_session_id() == "ses_abc123"
 
     def test_load_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("manager.session.SESSION_ID_PATH", tmp_path / "nonexistent")
+        monkeypatch.setattr("modastack.manager.session.SESSION_ID_PATH", tmp_path / "nonexistent")
         assert _get_saved_session_id() == ""
 
 
@@ -144,7 +144,7 @@ class TestClearActivityLog:
 
     def test_creates_parent_dirs(self, tmp_path, monkeypatch):
         log_path = tmp_path / "deep" / "nested" / "activity.jsonl"
-        monkeypatch.setattr("manager.session.ACTIVITY_LOG", log_path)
+        monkeypatch.setattr("modastack.manager.session.ACTIVITY_LOG", log_path)
         _clear_activity_log()
         assert log_path.exists()
         assert log_path.read_text() == ""
@@ -164,36 +164,36 @@ class TestClearActivityLog:
 
 class TestDetectState:
 
-    @patch("manager.session._session_exists", return_value=False)
+    @patch("modastack.manager.session._session_exists", return_value=False)
     def test_exited_when_no_session(self, _):
         assert detect_state() == "exited"
 
-    @patch("manager.session._session_exists", return_value=True)
+    @patch("modastack.manager.session._session_exists", return_value=True)
     def test_waiting_input_on_stop(self, _, activity_log):
         _write_activity(activity_log, "UserPromptSubmit")
         _write_activity(activity_log, "Stop")
         assert detect_state() == "waiting_input"
 
-    @patch("manager.session._session_exists", return_value=True)
+    @patch("modastack.manager.session._session_exists", return_value=True)
     def test_working_on_prompt_submit(self, _, activity_log):
         _write_activity(activity_log, "UserPromptSubmit")
         assert detect_state() == "working"
 
-    @patch("manager.session._session_exists", return_value=True)
+    @patch("modastack.manager.session._session_exists", return_value=True)
     def test_unknown_when_no_activity(self, _, activity_log):
         assert detect_state() == "unknown"
 
-    @patch("manager.session._session_exists", return_value=True)
+    @patch("modastack.manager.session._session_exists", return_value=True)
     def test_unknown_on_empty_file(self, _, activity_log):
         activity_log.write_text("")
         assert detect_state() == "unknown"
 
-    @patch("manager.session._session_exists", return_value=True)
+    @patch("modastack.manager.session._session_exists", return_value=True)
     def test_unknown_on_unrecognized_event(self, _, activity_log):
         _write_activity(activity_log, "SessionStart")
         assert detect_state() == "unknown"
 
-    @patch("manager.session._session_exists", return_value=True)
+    @patch("modastack.manager.session._session_exists", return_value=True)
     def test_state_reflects_most_recent(self, _, activity_log):
         _write_activity(activity_log, "Stop")
         assert detect_state() == "waiting_input"
@@ -209,14 +209,14 @@ class TestDetectState:
 
 class TestSendKeys:
 
-    @patch("manager.session.time.sleep")
-    @patch("manager.session.subprocess.run")
+    @patch("modastack.manager.session.time.sleep")
+    @patch("modastack.manager.session.subprocess.run")
     def test_success(self, mock_run, _):
         mock_run.return_value = MagicMock(returncode=0)
         assert _send_keys("hello world") is True
 
-    @patch("manager.session.time.sleep")
-    @patch("manager.session.subprocess.run")
+    @patch("modastack.manager.session.time.sleep")
+    @patch("modastack.manager.session.subprocess.run")
     def test_collapses_newlines(self, mock_run, _):
         mock_run.return_value = MagicMock(returncode=0)
         _send_keys("line one\nline two\nline three")
@@ -224,22 +224,22 @@ class TestSendKeys:
         cmd = first_call[0][0]
         assert "line one line two line three" in cmd[-1]
 
-    @patch("manager.session.time.sleep")
-    @patch("manager.session.subprocess.run")
+    @patch("modastack.manager.session.time.sleep")
+    @patch("modastack.manager.session.subprocess.run")
     def test_sends_two_enters(self, mock_run, _):
         mock_run.return_value = MagicMock(returncode=0)
         _send_keys("test")
         enter_calls = [c for c in mock_run.call_args_list if "Enter" in str(c)]
         assert len(enter_calls) == 2
 
-    @patch("manager.session.time.sleep")
-    @patch("manager.session.subprocess.run")
+    @patch("modastack.manager.session.time.sleep")
+    @patch("modastack.manager.session.subprocess.run")
     def test_returns_false_on_failure(self, mock_run, _):
         mock_run.return_value = MagicMock(returncode=1, stderr="can't find pane: moda-manager")
         assert _send_keys("hello") is False
 
-    @patch("manager.session.time.sleep")
-    @patch("manager.session.subprocess.run")
+    @patch("modastack.manager.session.time.sleep")
+    @patch("modastack.manager.session.subprocess.run")
     def test_no_enter_on_failure(self, mock_run, _):
         mock_run.return_value = MagicMock(returncode=1, stderr="can't find pane")
         _send_keys("hello")
@@ -252,13 +252,13 @@ class TestSendKeys:
 
 class TestInject:
 
-    @patch("manager.session.time.sleep")
-    @patch("manager.session._send_keys", return_value=False)
+    @patch("modastack.manager.session.time.sleep")
+    @patch("modastack.manager.session._send_keys", return_value=False)
     def test_returns_false_when_send_keys_fails(self, _, __, activity_log):
         assert inject("test") is False
 
-    @patch("manager.session.time.sleep")
-    @patch("manager.session._send_keys")
+    @patch("modastack.manager.session.time.sleep")
+    @patch("modastack.manager.session._send_keys")
     def test_returns_true_when_confirmed(self, mock_send, _, activity_log):
         # Simulate hook writing UserPromptSubmit when send-keys fires
         def send_side_effect(text):
@@ -267,8 +267,8 @@ class TestInject:
         mock_send.side_effect = send_side_effect
         assert inject("test") is True
 
-    @patch("manager.session.time.sleep")
-    @patch("manager.session._send_keys", return_value=True)
+    @patch("modastack.manager.session.time.sleep")
+    @patch("modastack.manager.session._send_keys", return_value=True)
     def test_returns_false_when_no_confirmation(self, mock_send, mock_sleep, activity_log):
         # No activity written — inject should time out
         # Override sleep to not actually wait
@@ -276,8 +276,8 @@ class TestInject:
         assert result is False
         assert mock_sleep.call_count == 30  # waited all 30 iterations
 
-    @patch("manager.session.time.sleep")
-    @patch("manager.session._send_keys", return_value=True)
+    @patch("modastack.manager.session.time.sleep")
+    @patch("modastack.manager.session._send_keys", return_value=True)
     def test_ignores_stale_activity(self, _, __, activity_log):
         # Pre-existing Stop entry from before injection
         _write_activity(activity_log, "Stop")
@@ -286,8 +286,8 @@ class TestInject:
         # (the Stop is stale, not a response to our injection)
         assert inject("test") is False
 
-    @patch("manager.session.time.sleep")
-    @patch("manager.session._send_keys")
+    @patch("modastack.manager.session.time.sleep")
+    @patch("modastack.manager.session._send_keys")
     def test_detects_new_activity_after_stale(self, mock_send, _, activity_log):
         # Pre-existing entry
         _write_activity(activity_log, "Stop")
@@ -306,7 +306,7 @@ class TestInject:
 
 class TestCapture:
 
-    @patch("manager.session.subprocess.run")
+    @patch("modastack.manager.session.subprocess.run")
     def test_captures_pane_content(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="line1\nline2\n")
         result = capture(lines=10)
@@ -314,7 +314,7 @@ class TestCapture:
         cmd = mock_run.call_args[0][0]
         assert "-10" in cmd
 
-    @patch("manager.session.subprocess.run")
+    @patch("modastack.manager.session.subprocess.run")
     def test_returns_empty_on_failure(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stderr="can't find pane")
         result = capture(lines=10)
@@ -327,11 +327,11 @@ class TestCapture:
 
 class TestIsAlive:
 
-    @patch("manager.session._session_exists", return_value=True)
+    @patch("modastack.manager.session._session_exists", return_value=True)
     def test_alive(self, _):
         assert is_alive() is True
 
-    @patch("manager.session._session_exists", return_value=False)
+    @patch("modastack.manager.session._session_exists", return_value=False)
     def test_not_alive(self, _):
         assert is_alive() is False
 
@@ -648,8 +648,8 @@ class TestHookPipelineIntegration:
         import subprocess
 
         activity_log = tmp_path / ".modastack" / "manager" / "activity.jsonl"
-        monkeypatch.setattr("manager.session.ACTIVITY_LOG", activity_log)
-        monkeypatch.setattr("manager.session.SESSION_NAME", self.TEST_SESSION)
+        monkeypatch.setattr("modastack.manager.session.ACTIVITY_LOG", activity_log)
+        monkeypatch.setattr("modastack.manager.session.SESSION_NAME", self.TEST_SESSION)
         monkeypatch.setenv("HOME", str(tmp_path))
 
         hook_script = Path(__file__).parent.parent / ".claude" / "hooks" / "session-state.sh"
@@ -679,7 +679,7 @@ done
         subprocess.run(["tmux", "kill-session", "-t", self.TEST_SESSION], capture_output=True)
 
     def test_inject_triggers_hooks(self, pipeline):
-        from manager.session import _send_keys
+        from modastack.manager.session import _send_keys
         activity_log = pipeline["activity_log"]
 
         assert not activity_log.exists() or activity_log.stat().st_size == 0
@@ -696,7 +696,7 @@ done
         assert "Stop" in events
 
     def test_detect_state_reflects_hook_events(self, pipeline):
-        from manager.session import _send_keys, detect_state
+        from modastack.manager.session import _send_keys, detect_state
 
         # Before any injection — no activity
         assert detect_state() == "unknown"
@@ -711,7 +711,7 @@ done
         assert detect_state() == "waiting_input"
 
     def test_multiple_inject_cycles(self, pipeline):
-        from manager.session import _send_keys, detect_state
+        from modastack.manager.session import _send_keys, detect_state
         activity_log = pipeline["activity_log"]
 
         for i in range(3):

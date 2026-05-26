@@ -99,7 +99,7 @@ def start(webhooks, port, batch_window):
         modastack start --webhooks         # webhook + polling mode
         modastack start --webhooks --port 9090
     """
-    from manager.events.consumer import run
+    from modastack.manager.events.consumer import run
     run(webhook_port=port, use_webhooks=webhooks, batch_window=batch_window)
 
 
@@ -112,7 +112,7 @@ def tick(message):
         modastack tick                          # check if manager is alive
         modastack tick "what are you working on?"  # ask the manager something
     """
-    from manager.session import is_alive, inject, capture, detect_state
+    from modastack.manager.session import is_alive, inject, capture, detect_state
     if not is_alive():
         click.echo("Manager session not running. Start with: modastack start")
         return
@@ -289,10 +289,10 @@ def register(repo_path: str, task_tracking: str | None, project: str | None, lin
     target_skills.mkdir(parents=True, exist_ok=True)
     installed = []
     skill_dirs = [
-        repo_root / "engineer" / "process",
-        repo_root / "engineer" / "practices",
-        repo_root / "product_manager",
-        repo_root / "tools",
+        repo_root / "roles" / "engineer" / "process",
+        repo_root / "roles" / "engineer" / "practices",
+        repo_root / "roles" / "product_manager",
+        repo_root / "roles" / "tools",
     ]
     for category_dir in skill_dirs:
         if not category_dir.exists():
@@ -447,10 +447,10 @@ def setup(repo_path: str, task_tracking: str | None, project: str | None,
     installed = []
     # Engineer skills + product manager skills + shared tools
     skill_dirs = [
-        repo_root / "engineer" / "process",
-        repo_root / "engineer" / "practices",
-        repo_root / "product_manager",
-        repo_root / "tools",
+        repo_root / "roles" / "engineer" / "process",
+        repo_root / "roles" / "engineer" / "practices",
+        repo_root / "roles" / "product_manager",
+        repo_root / "roles" / "tools",
     ]
     for category_dir in skill_dirs:
         if not category_dir.exists():

@@ -3,13 +3,13 @@
 import json
 import time
 
-from manager.events.consumer import _write_events_file, _log_batch
+from modastack.manager.events.consumer import _write_events_file, _log_batch
 
 
 class TestWriteEventsFile:
 
     def test_writes_event_summary(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("manager.events.consumer.PENDING_EVENTS_PATH", tmp_path / "pending.md")
+        monkeypatch.setattr("modastack.manager.events.consumer.PENDING_EVENTS_PATH", tmp_path / "pending.md")
 
         events = [
             {
@@ -34,7 +34,7 @@ class TestWriteEventsFile:
         assert "agent, backend" in content
 
     def test_truncates_long_detail(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("manager.events.consumer.PENDING_EVENTS_PATH", tmp_path / "pending.md")
+        monkeypatch.setattr("modastack.manager.events.consumer.PENDING_EVENTS_PATH", tmp_path / "pending.md")
 
         events = [
             {
@@ -53,7 +53,7 @@ class TestWriteEventsFile:
         assert len(detail_line) < 400
 
     def test_multiple_events(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("manager.events.consumer.PENDING_EVENTS_PATH", tmp_path / "pending.md")
+        monkeypatch.setattr("modastack.manager.events.consumer.PENDING_EVENTS_PATH", tmp_path / "pending.md")
 
         events = [
             {"type": "a", "source": "s1", "data": {"issue_id": "X-1"}},
@@ -67,7 +67,7 @@ class TestWriteEventsFile:
         assert "## s2/b" in content
 
     def test_all_optional_fields(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("manager.events.consumer.PENDING_EVENTS_PATH", tmp_path / "pending.md")
+        monkeypatch.setattr("modastack.manager.events.consumer.PENDING_EVENTS_PATH", tmp_path / "pending.md")
 
         events = [
             {
@@ -103,7 +103,7 @@ class TestWriteEventsFile:
 class TestLogBatch:
 
     def test_logs_batch_to_decisions(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("manager.events.consumer.DECISIONS_LOG", tmp_path / "decisions.jsonl")
+        monkeypatch.setattr("modastack.manager.events.consumer.DECISIONS_LOG", tmp_path / "decisions.jsonl")
 
         events = [
             {"type": "task.created", "source": "linear"},
@@ -118,7 +118,7 @@ class TestLogBatch:
         assert "timestamp" in entry
 
     def test_appends_multiple_batches(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("manager.events.consumer.DECISIONS_LOG", tmp_path / "decisions.jsonl")
+        monkeypatch.setattr("modastack.manager.events.consumer.DECISIONS_LOG", tmp_path / "decisions.jsonl")
 
         _log_batch([{"type": "a", "source": "s"}])
         _log_batch([{"type": "b", "source": "s"}])

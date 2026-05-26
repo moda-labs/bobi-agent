@@ -4,7 +4,7 @@ import threading
 import time
 from unittest.mock import patch
 
-from manager.events.bus import EventBus
+from modastack.manager.events.bus import EventBus
 
 
 class TestEventBus:
@@ -90,7 +90,7 @@ class TestEventBus:
         events = bus.drain()
         assert len(events) == 250
 
-    @patch("manager.events.bus.EVENT_LOG")
+    @patch("modastack.manager.events.bus.EVENT_LOG")
     def test_push_appends_to_event_log(self, mock_path, tmp_path):
         log_file = tmp_path / "events.jsonl"
         mock_path.__truediv__ = lambda self, x: log_file
@@ -98,7 +98,7 @@ class TestEventBus:
 
         bus = EventBus()
         # Patch EVENT_LOG directly for the write
-        import manager.events.bus as bus_mod
+        import modastack.manager.events.bus as bus_mod
         original = bus_mod.EVENT_LOG
         bus_mod.EVENT_LOG = log_file
         try:

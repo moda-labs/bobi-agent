@@ -77,6 +77,22 @@ if ! pip install -e . -q >> "$LOG" 2>&1; then
     exit 1
 fi
 
+# Reinstall skill symlinks (roles/ replaces old engineer/, product_manager/, tools/)
+SKILLS_DIR="$REPO_DIR/.claude/skills"
+mkdir -p "$SKILLS_DIR"
+for skill_dir in \
+    "$REPO_DIR/roles/engineer/process"/* \
+    "$REPO_DIR/roles/engineer/practices"/* \
+    "$REPO_DIR/roles/product_manager"/* \
+    "$REPO_DIR/roles/tools"/*; do
+    [ -d "$skill_dir" ] && [ -f "$skill_dir/SKILL.md" ] || continue
+    name=$(basename "$skill_dir")
+    link="$SKILLS_DIR/$name"
+    rm -f "$link"
+    ln -s "$(python3 -c "import os; print(os.path.relpath('$skill_dir', '$SKILLS_DIR'))")" "$link"
+done
+log "Skill symlinks refreshed ($(ls "$SKILLS_DIR" | wc -l | tr -d ' ') skills)"
+
 # Restart consumer (kills old, starts new)
 tmux kill-session -t modastack-consumer 2>/dev/null || true
 sleep 1

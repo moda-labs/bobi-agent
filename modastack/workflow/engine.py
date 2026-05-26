@@ -204,8 +204,8 @@ class WorkflowEngine:
         inject(session_id, text)
 
     def _exec_manager(self, node: NodeDef) -> dict:
-        from manager.session import inject as mgr_inject
-        from manager.session import detect_state as mgr_detect_state
+        from modastack.manager.session import inject as mgr_inject
+        from modastack.manager.session import detect_state as mgr_detect_state
 
         prompt_text = self.ctx.resolve(node.prompt)
 
@@ -313,7 +313,7 @@ class WorkflowEngine:
         return None
 
     def _poll_manager(self, node: NodeDef) -> dict | None:
-        from manager.session import detect_state as mgr_detect_state
+        from modastack.manager.session import detect_state as mgr_detect_state
         state = mgr_detect_state()
         if state == "waiting_input":
             output = _read_last_assistant_response()
@@ -385,7 +385,7 @@ def _read_last_assistant_response(session_name: str | None = None) -> str:
     import subprocess, shutil
 
     if not session_name:
-        from manager.session import SESSION_NAME
+        from modastack.manager.session import SESSION_NAME
         session_name = SESSION_NAME
 
     TMUX = shutil.which("tmux") or "tmux"

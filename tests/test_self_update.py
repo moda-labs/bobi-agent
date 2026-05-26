@@ -25,7 +25,7 @@ class TestVersionModule:
 
 class TestChangelogParsing:
     def test_extract_entries_between_versions(self):
-        from manager.events.pollers import _extract_changelog_entries
+        from modastack.manager.events.pollers import _extract_changelog_entries
 
         changelog = """\
 # Changelog
@@ -50,14 +50,14 @@ class TestChangelogParsing:
         assert "Fix threading" not in result
 
     def test_extract_entries_no_match(self):
-        from manager.events.pollers import _extract_changelog_entries
+        from modastack.manager.events.pollers import _extract_changelog_entries
 
         changelog = "# Changelog\n\n## 0.1.0\n\n- Something\n"
         result = _extract_changelog_entries(changelog, "0.0.1", "0.2.0")
         assert result == ""
 
     def test_extract_entries_adjacent_versions(self):
-        from manager.events.pollers import _extract_changelog_entries
+        from modastack.manager.events.pollers import _extract_changelog_entries
 
         changelog = """\
 # Changelog
@@ -95,10 +95,10 @@ class TestVersionPoller:
             return mock
         return side_effect
 
-    @patch("manager.events.pollers.get_bus")
+    @patch("modastack.manager.events.pollers.get_bus")
     @patch("subprocess.run")
     def test_pushes_event_when_update_available(self, mock_run, mock_get_bus, tmp_path):
-        from manager.events.pollers import _poll_version
+        from modastack.manager.events.pollers import _poll_version
 
         version_file = tmp_path / "VERSION"
         version_file.write_text("0.2.1")
@@ -107,7 +107,7 @@ class TestVersionPoller:
         mock_get_bus.return_value = bus
         mock_run.side_effect = self._make_run_side_effect()
 
-        with patch("manager.events.pollers._get_modastack_root", return_value=tmp_path):
+        with patch("modastack.manager.events.pollers._get_modastack_root", return_value=tmp_path):
             # interval=0 makes it run once and return
             _poll_version(interval=0)
 
@@ -117,10 +117,10 @@ class TestVersionPoller:
         assert call_args[0][2]["new_version"] == "0.3.0"
         assert call_args[0][2]["current_version"] == "0.2.1"
 
-    @patch("manager.events.pollers.get_bus")
+    @patch("modastack.manager.events.pollers.get_bus")
     @patch("subprocess.run")
     def test_no_event_when_versions_equal(self, mock_run, mock_get_bus, tmp_path):
-        from manager.events.pollers import _poll_version
+        from modastack.manager.events.pollers import _poll_version
 
         version_file = tmp_path / "VERSION"
         version_file.write_text("0.2.1")
@@ -129,15 +129,15 @@ class TestVersionPoller:
         mock_get_bus.return_value = bus
         mock_run.side_effect = self._make_run_side_effect(remote_version="0.2.1")
 
-        with patch("manager.events.pollers._get_modastack_root", return_value=tmp_path):
+        with patch("modastack.manager.events.pollers._get_modastack_root", return_value=tmp_path):
             _poll_version(interval=0)
 
         bus.push.assert_not_called()
 
-    @patch("manager.events.pollers.get_bus")
+    @patch("modastack.manager.events.pollers.get_bus")
     @patch("subprocess.run")
     def test_no_event_on_fetch_failure(self, mock_run, mock_get_bus, tmp_path):
-        from manager.events.pollers import _poll_version
+        from modastack.manager.events.pollers import _poll_version
 
         version_file = tmp_path / "VERSION"
         version_file.write_text("0.2.1")
@@ -146,7 +146,7 @@ class TestVersionPoller:
         mock_get_bus.return_value = bus
         mock_run.side_effect = self._make_run_side_effect(fetch_ok=False)
 
-        with patch("manager.events.pollers._get_modastack_root", return_value=tmp_path):
+        with patch("modastack.manager.events.pollers._get_modastack_root", return_value=tmp_path):
             _poll_version(interval=0)
 
         bus.push.assert_not_called()
@@ -363,7 +363,7 @@ class TestCheckVersionEdgeCases:
     @patch("subprocess.run")
     def test_git_show_version_failure(self, mock_run, tmp_path):
         """When git show origin/main:VERSION fails, return last_announced unchanged."""
-        from manager.events.pollers import _check_version
+        from modastack.manager.events.pollers import _check_version
 
         version_file = tmp_path / "VERSION"
         version_file.write_text("0.2.1")
@@ -390,7 +390,7 @@ class TestCheckVersionEdgeCases:
     @patch("subprocess.run")
     def test_dedup_last_announced(self, mock_run, tmp_path):
         """If remote_version == last_announced, don't re-emit the event."""
-        from manager.events.pollers import _check_version
+        from modastack.manager.events.pollers import _check_version
 
         version_file = tmp_path / "VERSION"
         version_file.write_text("0.2.1")
@@ -415,7 +415,7 @@ class TestCheckVersionEdgeCases:
     @patch("subprocess.run")
     def test_no_version_file_uses_fallback(self, mock_run, tmp_path):
         """When VERSION file doesn't exist, use 0.0.0 as local_version."""
-        from manager.events.pollers import _check_version
+        from modastack.manager.events.pollers import _check_version
 
         # Don't create VERSION file
         bus = MagicMock()
@@ -443,7 +443,7 @@ class TestCheckVersionEdgeCases:
     @patch("subprocess.run")
     def test_changelog_fetch_failure_still_emits(self, mock_run, tmp_path):
         """When CHANGELOG.md fetch fails, still emit update event with empty changelog."""
-        from manager.events.pollers import _check_version
+        from modastack.manager.events.pollers import _check_version
 
         version_file = tmp_path / "VERSION"
         version_file.write_text("0.2.0")
@@ -537,7 +537,7 @@ class TestWriteEventsFile:
     """Test the new version-related fields in _write_events_file."""
 
     def test_version_fields_in_events_file(self, tmp_path):
-        from manager.events.consumer import _write_events_file, PENDING_EVENTS_PATH
+        from modastack.manager.events.consumer import _write_events_file, PENDING_EVENTS_PATH
 
         events = [{
             "type": "system.update_available",
@@ -550,7 +550,7 @@ class TestWriteEventsFile:
         }]
 
         # Temporarily override the path
-        import manager.events.consumer as consumer_mod
+        import modastack.manager.events.consumer as consumer_mod
         orig_path = consumer_mod.PENDING_EVENTS_PATH
         consumer_mod.PENDING_EVENTS_PATH = tmp_path / "pending_events.md"
         try:
@@ -564,7 +564,7 @@ class TestWriteEventsFile:
 
     def test_version_fields_missing_no_crash(self, tmp_path):
         """Events without version fields don't include those lines."""
-        from manager.events.consumer import _write_events_file
+        from modastack.manager.events.consumer import _write_events_file
 
         events = [{
             "type": "worker.working",
@@ -572,7 +572,7 @@ class TestWriteEventsFile:
             "data": {"issue_id": "TEST-1", "session_state": "working"},
         }]
 
-        import manager.events.consumer as consumer_mod
+        import modastack.manager.events.consumer as consumer_mod
         orig_path = consumer_mod.PENDING_EVENTS_PATH
         consumer_mod.PENDING_EVENTS_PATH = tmp_path / "pending_events.md"
         try:

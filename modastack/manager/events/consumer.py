@@ -23,7 +23,7 @@ from .webhook_server import start_server
 from modastack.config import GlobalConfig
 from modastack.history import context_for_events, start_background_indexer, index as index_history
 from modastack.workflow.triggers import WorkflowDispatcher
-from manager.session import start_or_resume, inject, detect_state, is_alive
+from modastack.manager.session import start_or_resume, inject, detect_state, is_alive
 
 log = logging.getLogger(__name__)
 
