@@ -124,9 +124,9 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         log.warning(f"Initial history index failed: {e}")
     start_background_indexer(interval=120)
 
-    # Load workflow definitions
+    # Load workflow definitions (repo-local > user > defaults)
     dispatcher = WorkflowDispatcher()
-    dispatcher.load_workflows()
+    dispatcher.load_all_workflows()
 
     bus = get_bus()
 

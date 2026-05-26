@@ -106,21 +106,15 @@ engineer/
 │   ├── implement/SKILL.md        # Build from spec, TDD, sub-agents
 │   ├── prepare-pr/SKILL.md       # Create/update PR
 │   └── feedback/SKILL.md         # Address review comments
-└── practices/                    # Methodology skills
+└── practices/                    # Modastack-native methodology skills
     ├── triage/SKILL.md           # Task intake & classification
     ├── build/SKILL.md            # Staff engineer coding methodology
     ├── code-review/SKILL.md      # Mandatory quality gates
     ├── ticketing-policy/SKILL.md # Who moves tickets when
-    ├── source-control-conventions/SKILL.md
-    ├── review/SKILL.md           # Pre-merge code review (from gstack)
-    ├── investigate/SKILL.md      # Root cause debugging (from gstack)
-    ├── ship/SKILL.md             # Ship workflow (from gstack)
-    ├── autoplan/SKILL.md         # Review pipeline (from gstack)
-    ├── plan-eng-review/SKILL.md  # Architecture review (from gstack)
-    ├── plan-design-review/SKILL.md # UX review (from gstack)
-    ├── plan-ceo-review/SKILL.md  # Scope review (from gstack)
-    ├── office-hours/SKILL.md     # Structured brainstorm (from gstack)
-    └── qa/SKILL.md               # Browser QA (from gstack, needs browse binary)
+    └── source-control-conventions/SKILL.md
+    # GStack skills (review, ship, autoplan, investigate, office-hours,
+    # qa, plan-*-review) come from user-level ~/.claude/skills/ via
+    # gstack setup — not copied into this repo.
 
 product_manager/                  # Product manager skills (standalone)
 ├── brand-identity/SKILL.md       # Brand discovery & visual identity

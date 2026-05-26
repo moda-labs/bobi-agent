@@ -22,10 +22,16 @@ cd "$REPO_DIR"
 
 log "Deploy starting"
 
-# Pull
+# Pull modastack
 if ! git pull origin main --ff-only >> "$LOG" 2>&1; then
     log "ERROR: git pull failed — local changes or conflicts"
     exit 1
+fi
+
+# Pull gstack (methodology skills for engineer sessions)
+GSTACK_DIR="$HOME/dev/gstack"
+if [ -d "$GSTACK_DIR" ]; then
+    git -C "$GSTACK_DIR" pull origin main --ff-only >> "$LOG" 2>&1 || log "WARNING: gstack pull failed (non-fatal)"
 fi
 
 # Reinstall

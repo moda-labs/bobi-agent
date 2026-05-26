@@ -17,10 +17,9 @@ SKILLS_INSTALLED = REPO_ROOT / ".claude" / "skills"
 EXPECTED_PROCESS_SKILLS = ["pickup", "spec", "implement", "prepare-pr", "feedback"]
 EXPECTED_PRACTICES_SKILLS = [
     "triage", "build", "code-review", "ticketing-policy", "source-control-conventions",
-    "review", "investigate", "ship", "autoplan",
-    "plan-eng-review", "plan-design-review", "plan-ceo-review",
-    "office-hours", "qa",
 ]
+# GStack skills (review, ship, autoplan, investigate, office-hours, qa,
+# plan-*-review) come from user-level ~/.claude/skills/ via gstack setup
 EXPECTED_PRODUCT_MANAGER_SKILLS = ["brand-identity", "design-critic"]
 EXPECTED_TOOLS_SKILLS = ["linear", "github-issues", "git", "github", "slack", "notion"]
 EXPECTED_SKILLS = EXPECTED_PROCESS_SKILLS + EXPECTED_PRACTICES_SKILLS + EXPECTED_PRODUCT_MANAGER_SKILLS + EXPECTED_TOOLS_SKILLS

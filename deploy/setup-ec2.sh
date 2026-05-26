@@ -45,9 +45,19 @@ if ! command -v gh &>/dev/null; then
 fi
 echo "  gh: $(gh --version | head -1)"
 
+# --- Bun (for gstack) ---
+echo "[5/9] Installing Bun..."
+if ! command -v bun &>/dev/null; then
+    curl -fsSL https://bun.sh/install | bash
+    export BUN_INSTALL="$HOME/.bun"
+    export PATH="$BUN_INSTALL/bin:$PATH"
+fi
+echo "  bun: $(bun --version 2>/dev/null || echo 'failed')"
+
 # --- Clone modastack ---
-echo "[5/7] Cloning modastack..."
-INSTALL_DIR="${HOME}/modastack"
+echo "[6/9] Cloning modastack..."
+INSTALL_DIR="${HOME}/dev/modastack"
+mkdir -p "${HOME}/dev"
 if [ -d "$INSTALL_DIR" ]; then
     echo "  Already exists at $INSTALL_DIR — pulling latest"
     git -C "$INSTALL_DIR" pull origin main
@@ -56,7 +66,7 @@ else
 fi
 
 # --- Python venv + install ---
-echo "[6/7] Setting up Python environment..."
+echo "[7/9] Setting up Python environment..."
 cd "$INSTALL_DIR"
 python3 -m venv .venv
 source .venv/bin/activate
@@ -64,8 +74,38 @@ pip install -e ".[dev]" -q
 
 echo "  modastack: $(modastack --version 2>/dev/null)"
 
+# --- GStack (methodology skills for engineer sessions) ---
+echo "[8/9] Installing GStack skills..."
+GSTACK_DIR="${HOME}/dev/gstack"
+if [ -d "$GSTACK_DIR" ]; then
+    echo "  Already exists at $GSTACK_DIR — pulling latest"
+    git -C "$GSTACK_DIR" pull origin main
+else
+    git clone https://github.com/garrytan/gstack.git "$GSTACK_DIR"
+fi
+
+# Run gstack setup (quiet, no prefix for flat skill names)
+cd "$GSTACK_DIR"
+GSTACK_SKIP_COREUTILS=1 ./setup -q --no-prefix || echo "  warning: gstack setup had errors (non-fatal)"
+cd "$INSTALL_DIR"
+
+# Configure gstack for headless/automated use — suppress all interactive prompts
+mkdir -p ~/.gstack
+"$GSTACK_DIR/bin/gstack-config" set update_check false 2>/dev/null || true
+"$GSTACK_DIR/bin/gstack-config" set routing_declined true 2>/dev/null || true
+"$GSTACK_DIR/bin/gstack-config" set proactive true 2>/dev/null || true
+"$GSTACK_DIR/bin/gstack-config" set telemetry off 2>/dev/null || true
+# Create marker files so preamble never fires AskUserQuestion
+touch ~/.gstack/.proactive-prompted
+touch ~/.gstack/.telemetry-prompted
+touch ~/.gstack/.completeness-intro-seen
+touch ~/.gstack/.welcome-seen
+
+echo "  gstack: installed at $GSTACK_DIR"
+echo "  skills: $(ls ~/.claude/skills/ 2>/dev/null | wc -l | tr -d ' ') skills linked"
+
 # --- Config directory ---
-echo "[7/7] Setting up config..."
+echo "[9/9] Setting up config..."
 mkdir -p ~/.modastack/manager
 
 if [ ! -f ~/.modastack/config.yaml ]; then

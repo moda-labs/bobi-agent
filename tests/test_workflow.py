@@ -497,7 +497,7 @@ class TestWorkflowDispatcher:
         d = WorkflowDispatcher()
         d.load_workflows(Path(__file__).parent.parent / "workflows")
         assert len(d.workflows) >= 1
-        names = {wf.name for wf in d.workflows}
+        names = {wf.name for wf, _ in d.workflows}
         assert "issue-lifecycle" in names
 
     def test_dispatch_matching_event(self, tmp_path, monkeypatch):
@@ -512,8 +512,6 @@ class TestWorkflowDispatcher:
             "type": "task.assigned",
             "data": {"issue_id": "99", "title": "Test", "repo": "/tmp/test"},
         }
-        # The dispatch will start a thread that fails (no real session),
-        # but it should return True indicating it was dispatched
         result = d.dispatch(event)
         assert result is True
         assert d.was_dispatched(event)
@@ -524,3 +522,73 @@ class TestWorkflowDispatcher:
         event = {"type": "slack.message", "data": {"text": "hello"}}
         assert d.dispatch(event) is False
         assert not d.was_dispatched(event)
+
+    def test_repo_specific_workflow_wins(self, tmp_path, monkeypatch):
+        """A repo-specific workflow takes priority over the default."""
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+
+        # Create a default workflow
+        default_dir = tmp_path / "defaults"
+        default_dir.mkdir()
+        (default_dir / "lifecycle.yaml").write_text(
+            "name: default-lifecycle\nversion: 1\n"
+            "trigger:\n  event: task.assigned\n"
+            "nodes:\n  step:\n    type: bash\n    command: echo default\n"
+        )
+
+        # Create a repo-specific workflow
+        repo_dir = tmp_path / "myrepo" / ".modastack" / "workflows"
+        repo_dir.mkdir(parents=True)
+        (repo_dir / "lifecycle.yaml").write_text(
+            "name: repo-lifecycle\nversion: 1\n"
+            "trigger:\n  event: task.assigned\n"
+            "nodes:\n  step:\n    type: bash\n    command: echo repo\n"
+        )
+
+        d = WorkflowDispatcher()
+        d._load_from(repo_dir, source=str(tmp_path / "myrepo"))
+        d._load_from(default_dir, source="default")
+
+        event = {
+            "type": "task.assigned",
+            "data": {"issue_id": "1", "repo": str(tmp_path / "myrepo")},
+        }
+        best = d._find_best_workflow(event)
+        assert best is not None
+        assert best.name == "repo-lifecycle"
+
+    def test_default_used_when_no_repo_match(self, tmp_path):
+        """Falls back to default when no repo-specific workflow matches."""
+        default_dir = tmp_path / "defaults"
+        default_dir.mkdir()
+        (default_dir / "lifecycle.yaml").write_text(
+            "name: default-lifecycle\nversion: 1\n"
+            "trigger:\n  event: task.assigned\n"
+            "nodes:\n  step:\n    type: bash\n    command: echo default\n"
+        )
+
+        repo_dir = tmp_path / "other-repo" / ".modastack" / "workflows"
+        repo_dir.mkdir(parents=True)
+        (repo_dir / "lifecycle.yaml").write_text(
+            "name: other-lifecycle\nversion: 1\n"
+            "trigger:\n  event: task.assigned\n"
+            "nodes:\n  step:\n    type: bash\n    command: echo other\n"
+        )
+
+        d = WorkflowDispatcher()
+        d._load_from(repo_dir, source=str(tmp_path / "other-repo"))
+        d._load_from(default_dir, source="default")
+
+        event = {
+            "type": "task.assigned",
+            "data": {"issue_id": "1", "repo": str(tmp_path / "myrepo")},
+        }
+        best = d._find_best_workflow(event)
+        assert best is not None
+        assert best.name == "default-lifecycle"
+
+    def test_repo_matches_slug(self):
+        """Slug format 'org/repo' matches path ending in 'repo'."""
+        d = WorkflowDispatcher()
+        assert d._repo_matches("moda-labs/bettertab", "/home/ubuntu/dev/bettertab")
+        assert not d._repo_matches("moda-labs/bettertab", "/home/ubuntu/dev/modastack")

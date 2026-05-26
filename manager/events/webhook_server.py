@@ -34,6 +34,44 @@ def _github_issue_state(labels: list[str], gh_state: str) -> str:
     return "Done" if gh_state == "closed" else "Todo"
 
 
+def _resolve_linear_repo(prefix: str) -> str:
+    """Map a Linear project prefix (e.g. 'AGD') to the repo path.
+
+    Returns the repo path string, or empty string if not configured.
+    """
+    from modastack.config import GlobalConfig, RepoConfig
+    config = GlobalConfig.load()
+    for repo_path in config.repos:
+        try:
+            rc = RepoConfig.from_file(repo_path)
+            if rc.linear_project == prefix:
+                return str(rc.path)
+        except FileNotFoundError:
+            continue
+    return ""
+
+
+def _normalize_linear_action(action: str, data: dict) -> str:
+    """Map Linear webhook action to a normalized task.* action.
+
+    Linear uses 'create'/'update'/'remove'. We normalize to match
+    GitHub Issues conventions so workflows can trigger on either source.
+    """
+    if action == "create":
+        return "created"
+    if action == "remove":
+        return "closed"
+    if action == "update":
+        # Detect assignment: Linear sends action=update with an assignee
+        if data.get("assignee"):
+            return "assigned"
+        state_name = data.get("state", {}).get("name", "")
+        if state_name == "Done":
+            return "closed"
+        return "updated"
+    return action
+
+
 class WebhookHandler(BaseHTTPRequestHandler):
     # Set by start_server
     github_secret: str = ""
@@ -161,36 +199,44 @@ class WebhookHandler(BaseHTTPRequestHandler):
         data = payload.get("data", {})
         bus = get_bus()
 
-        # Filter to configured projects only
         issue_id = ""
         if event_type == "Issue":
             issue_id = data.get("identifier", "")
         elif event_type == "Comment":
             issue_id = data.get("issue", {}).get("identifier", "")
 
+        # Resolve project prefix → repo path
+        repo_path = ""
         if issue_id:
             prefix = issue_id.split("-")[0]
-            from modastack.config import GlobalConfig
-            configured_projects = {
-                entry.linear_project
-                for entry in GlobalConfig.load().repos
-                if entry.linear_project
-            }
-            if prefix not in configured_projects:
+            repo_path = _resolve_linear_repo(prefix)
+            if not repo_path:
                 self.send_response(200)
                 self.end_headers()
                 return
 
         if event_type == "Issue":
             issue_id = data.get("identifier", "")
-            bus.push(f"linear.issue.{action}", "linear", {
-                "action": action,
+            assignee = data.get("assignee", {})
+            state_name = data.get("state", {}).get("name", "")
+
+            # Normalize to task.* events (same shape as GitHub Issues)
+            normalized_action = _normalize_linear_action(action, data)
+            event_data = {
+                "action": normalized_action,
                 "issue_id": issue_id,
+                "task_id": data.get("id", ""),
                 "linear_id": data.get("id", ""),
                 "title": data.get("title", ""),
-                "state": data.get("state", {}).get("name", ""),
+                "body": (data.get("description") or "")[:500],
+                "state": state_name,
                 "labels": [l.get("name", "") for l in data.get("labels", [])],
-            })
+                "repo": repo_path,
+            }
+            if assignee:
+                event_data["assigned_to"] = assignee.get("name", "")
+
+            bus.push(f"task.{normalized_action}", "linear", event_data)
 
         elif event_type == "Comment":
             issue = data.get("issue", {})
@@ -199,6 +245,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "linear_id": issue.get("id", ""),
                 "author": data.get("user", {}).get("name", ""),
                 "body": data.get("body", "")[:500],
+                "repo": repo_path,
             })
 
         self.send_response(200)
