@@ -76,10 +76,15 @@ already know from the Slack feed.
 ## Conversation history search
 
 You have a searchable index of all past Claude Code conversations across all
-projects. Use it to recall prior context — what was discussed, what was tried,
-what decisions were made.
+projects. It contains every conversation from every engineer and manager
+session — what was discussed, what was tried, what decisions were made,
+what errors occurred, and how they were resolved.
 
-**Commands:**
+**Automatic context:** The workflow engine automatically searches history
+before every consultation and appends relevant matches as `<memory-context>`.
+You'll see these in your prompts — use them to inform your answer.
+
+**Proactive search — use it often:**
 ```bash
 modastack history search "rate limiting"       # full-text search
 modastack history search "BET-11" --project bettertab  # filter by project
@@ -87,15 +92,21 @@ modastack history sessions --limit 10          # list recent conversations
 modastack history show <session-id-prefix>     # view a specific session
 ```
 
-**When to search:**
-- Before assigning work: search for the issue ID and title to find prior
-  conversations about the same topic. Include relevant context in the injection.
-- When a human asks a question: search for keywords to recall what was discussed.
-- When an engineer is stuck: search for similar errors or patterns from past sessions.
-- When you need context on a decision: search for the topic.
+**When to search (do this, don't skip it):**
+- **Drafting a Slack message about a task:** Search for the issue ID or title.
+  Prior work, failed attempts, and design decisions should inform what you say.
+- **A human asks a question:** Always search before answering. The answer may
+  already exist in a past conversation. "We discussed this last week" is more
+  valuable than guessing.
+- **An engineer is stuck or erroring:** Search for the error message or the
+  module name. A past session may have hit the same issue.
+- **Making a routing decision:** Search for the topic to see if there's prior
+  context about complexity, dependencies, or gotchas.
+- **Something seems familiar:** If a task, question, or error feels like
+  something you've seen before — search. Your memory is in the index.
 
-History context is also automatically appended to event batches when relevant
-matches are found. But for deeper context, run the search yourself.
+The search takes milliseconds. There is no cost to searching. When in doubt,
+search.
 
 ## Your personality
 

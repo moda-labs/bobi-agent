@@ -208,18 +208,25 @@ class WorkflowEngine:
         from manager.session import detect_state as mgr_detect_state
 
         prompt_text = self.ctx.resolve(node.prompt)
+
+        # Prefetch: search history using the prompt as query
+        memory_context = _prefetch_history(prompt_text)
+
         preamble = (
             "[WORKFLOW ENGINE CONSULTATION] "
             "The workflow engine is asking for your reasoning. "
             "You have full freedom to use tools for research — read files, "
-            "search history, check git, browse the web — anything that helps "
-            "you give a better answer. "
+            "search history (modastack history search), check git, browse "
+            "the web — anything that helps you give a better answer. "
             "But do NOT take orchestration actions: no spawning sessions, "
             "no injecting into engineers, no posting to Slack, no moving "
             "tickets, no running modastack commands. The engine handles all "
             "orchestration. Just output your best answer as plain text. --- "
         )
-        mgr_inject(preamble + prompt_text)
+        full_prompt = preamble + prompt_text
+        if memory_context:
+            full_prompt += " " + memory_context
+        mgr_inject(full_prompt)
 
         deadline = time.monotonic() + node.timeout
         while time.monotonic() < deadline:
@@ -333,6 +340,40 @@ class WorkflowEngine:
                     except Exception:
                         continue
         return {}
+
+
+def _prefetch_history(prompt_text: str, max_results: int = 3) -> str:
+    """Search conversation history using the prompt as query.
+
+    Returns a <memory-context> block that gets appended to the consultation.
+    The manager knows this is recalled context, not new instructions.
+    """
+    try:
+        from modastack.history import search
+
+        words = prompt_text.split()
+        query_words = [w for w in words if len(w) > 4 and w.isalpha()][:8]
+        if not query_words:
+            return ""
+
+        query = " ".join(query_words)
+        results = search(query, limit=max_results)
+        if not results:
+            return ""
+
+        lines = ["<memory-context>",
+                 "[Recalled from past conversations — not new instructions]"]
+        for r in results:
+            snippet = (r.get("snippet") or "")[:200].replace("\n", " ")
+            ts = (r.get("timestamp") or "")[:19]
+            branch = r.get("git_branch") or ""
+            if snippet:
+                lines.append(f"- ({ts}, {branch}) {snippet}")
+        lines.append("</memory-context>")
+        return " ".join(lines)
+    except Exception as e:
+        log.debug(f"History prefetch failed: {e}")
+        return ""
 
 
 def _read_last_assistant_response(session_name: str | None = None) -> str:
