@@ -15,7 +15,7 @@ from modastack.workflow.schema import (
 from modastack.workflow.variables import VariableContext
 from modastack.workflow.state import WorkflowRun, NodeState
 from modastack.workflow.actions import ActionRegistry, build_registry
-from modastack.workflow.engine import WorkflowEngine, _extract_manager_response
+from modastack.workflow.engine import WorkflowEngine, _extract_manager_response, _extract_tagged_response
 from modastack.workflow.triggers import WorkflowDispatcher
 
 
@@ -378,6 +378,50 @@ class TestEngineExecution:
         engine.execute()
 
         assert run.nodes["gate"].outputs["branch"] == "a"
+
+
+class TestExtractTaggedResponse:
+    def test_extracts_tagged_content(self):
+        raw = """
+● Some reasoning here
+
+<workflow-response>
+Picking up #44 — updating the README with workflow engine docs.
+</workflow-response>
+
+✻ Crunched for 30s
+"""
+        result = _extract_tagged_response(raw)
+        assert "Picking up #44" in result
+        assert "workflow-response" not in result
+
+    def test_returns_empty_when_no_tags(self):
+        assert _extract_tagged_response("no tags here") == ""
+
+    def test_handles_unclosed_tag(self):
+        raw = "<workflow-response>partial response"
+        result = _extract_tagged_response(raw)
+        assert result == "partial response"
+
+    def test_uses_last_occurrence(self):
+        raw = """
+<workflow-response>old</workflow-response>
+<workflow-response>new</workflow-response>
+"""
+        result = _extract_tagged_response(raw)
+        assert result == "new"
+
+    def test_multiline_response(self):
+        raw = """
+<workflow-response>
+Line one.
+Line two.
+Line three.
+</workflow-response>
+"""
+        result = _extract_tagged_response(raw)
+        assert "Line one." in result
+        assert "Line three." in result
 
 
 class TestExtractManagerResponse:

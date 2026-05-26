@@ -216,7 +216,10 @@ class WorkflowEngine:
             "But do NOT take orchestration actions: no spawning sessions, "
             "no injecting into engineers, no posting to Slack, no moving "
             "tickets, no running modastack commands. The engine handles all "
-            "orchestration. Just output your best answer. --- "
+            "orchestration. "
+            "IMPORTANT: Wrap your final answer in <workflow-response> tags. "
+            "Example: <workflow-response>Your answer here</workflow-response> "
+            "Only the text inside these tags will be used. --- "
         )
         mgr_inject(preamble + prompt_text)
 
@@ -229,8 +232,10 @@ class WorkflowEngine:
         else:
             raise TimeoutError(f"Manager did not respond within {node.timeout}s")
 
-        raw = mgr_capture(lines=100)
-        output = _extract_manager_response(raw)
+        raw = mgr_capture(lines=200)
+        output = _extract_tagged_response(raw)
+        if not output:
+            output = _extract_manager_response(raw)
         return {"output": output}
 
     def _exec_gate(self, node: NodeDef) -> dict:
@@ -309,8 +314,10 @@ class WorkflowEngine:
         from manager.session import detect_state as mgr_detect_state, capture as mgr_capture
         state = mgr_detect_state()
         if state == "waiting_input":
-            raw = mgr_capture(lines=100)
-            output = _extract_manager_response(raw)
+            raw = mgr_capture(lines=200)
+            output = _extract_tagged_response(raw)
+            if not output:
+                output = _extract_manager_response(raw)
             return {"output": output}
         return None
 
@@ -334,6 +341,20 @@ class WorkflowEngine:
                     except Exception:
                         continue
         return {}
+
+
+def _extract_tagged_response(raw_pane: str) -> str:
+    """Extract response wrapped in <workflow-response> tags."""
+    tag_open = "<workflow-response>"
+    tag_close = "</workflow-response>"
+    start = raw_pane.rfind(tag_open)
+    if start == -1:
+        return ""
+    start += len(tag_open)
+    end = raw_pane.find(tag_close, start)
+    if end == -1:
+        return raw_pane[start:].strip()
+    return raw_pane[start:end].strip()
 
 
 def _extract_manager_response(raw_pane: str) -> str:
