@@ -28,9 +28,37 @@ if ! git pull origin main --ff-only >> "$LOG" 2>&1; then
     exit 1
 fi
 
-# Pull gstack (methodology skills for engineer sessions)
+# Ensure gstack is installed (methodology skills for engineer sessions)
 GSTACK_DIR="$HOME/dev/gstack"
-if [ -d "$GSTACK_DIR" ]; then
+if [ ! -d "$GSTACK_DIR" ]; then
+    log "Installing gstack (first time)..."
+    mkdir -p "$HOME/dev"
+    git clone https://github.com/garrytan/gstack.git "$GSTACK_DIR" >> "$LOG" 2>&1
+
+    # Install bun if needed (required by gstack setup)
+    if ! command -v bun &>/dev/null; then
+        curl -fsSL https://bun.sh/install | bash >> "$LOG" 2>&1
+        export BUN_INSTALL="$HOME/.bun"
+        export PATH="$BUN_INSTALL/bin:$PATH"
+    fi
+
+    # Run gstack setup (quiet, flat skill names)
+    cd "$GSTACK_DIR"
+    GSTACK_SKIP_COREUTILS=1 ./setup -q --no-prefix >> "$LOG" 2>&1 || log "WARNING: gstack setup had errors (non-fatal)"
+    cd "$REPO_DIR"
+
+    # Configure for headless/automated use — suppress all interactive prompts
+    mkdir -p "$HOME/.gstack"
+    "$GSTACK_DIR/bin/gstack-config" set update_check false 2>/dev/null || true
+    "$GSTACK_DIR/bin/gstack-config" set routing_declined true 2>/dev/null || true
+    "$GSTACK_DIR/bin/gstack-config" set proactive true 2>/dev/null || true
+    "$GSTACK_DIR/bin/gstack-config" set telemetry off 2>/dev/null || true
+    touch "$HOME/.gstack/.proactive-prompted"
+    touch "$HOME/.gstack/.telemetry-prompted"
+    touch "$HOME/.gstack/.completeness-intro-seen"
+    touch "$HOME/.gstack/.welcome-seen"
+    log "gstack installed and configured for headless use"
+else
     git -C "$GSTACK_DIR" pull origin main --ff-only >> "$LOG" 2>&1 || log "WARNING: gstack pull failed (non-fatal)"
 fi
 
