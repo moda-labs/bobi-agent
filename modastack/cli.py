@@ -483,7 +483,7 @@ def dashboard(port):
 
 @main.group()
 def history():
-    """Conversation history — index and search Claude Code sessions."""
+    """Conversation history — index, search, and browse Claude Code sessions."""
     pass
 
 
@@ -560,7 +560,7 @@ main.add_command(history)
 
 @main.group()
 def workflow():
-    """Workflow engine — manage YAML-based DAG workflows."""
+    """Workflow engine — list, run, and validate YAML-based DAG workflows."""
     pass
 
 
