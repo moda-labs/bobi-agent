@@ -183,6 +183,13 @@ modastack repos                    # list registered repos
 modastack dashboard                # start web dashboard (default port 8095)
 modastack self-update              # pull from origin/main + reinstall
 modastack rollback                 # restore to pre-update state
+modastack workflow list            # list available workflow definitions
+modastack workflow status          # show active and recent workflow runs
+modastack workflow validate <path> # validate a workflow YAML file
+modastack history index            # index conversation JSONL files into SQLite
+modastack history search <query>   # full-text search across conversation history
+modastack history sessions         # list indexed conversations
+modastack history show <id>        # show messages from a specific session
 ```
 
 ### Web dashboard
@@ -266,11 +273,26 @@ modastack/                        # CLI + infrastructure
 ├── cli.py                        # Click CLI entrypoint
 ├── config.py                     # Global config (~/.modastack/config.yaml)
 ├── github_issues.py              # GitHub Issues scanning + label bootstrap
+├── history.py                    # Conversation history indexer (SQLite + FTS5)
 ├── scanner.py                    # Linear GraphQL polling
 ├── session.py                    # Engineer tmux session management (spawn, inject, capture)
 ├── setup.py                      # Repo setup — skill install, auto-detection
 ├── board_setup.py                # Bootstrap Linear board with workflow states
-└── __version__.py                # Version string from VERSION file
+├── __version__.py                # Version string from VERSION file
+└── workflow/                     # YAML DAG workflow engine
+    ├── engine.py                 # DAG executor — resolve deps, run nodes, track state
+    ├── schema.py                 # Workflow/node definitions, YAML parsing
+    ├── triggers.py               # Event-to-workflow matching
+    ├── actions.py                # Action registry (shell, API, LLM node types)
+    ├── state.py                  # Workflow run state persistence
+    └── variables.py              # Variable interpolation from event context
+
+workflows/                        # Workflow YAML definitions
+├── issue-lifecycle.yaml          # New issue → triage → spec/implement → PR
+├── pr-feedback.yaml              # Changes requested → route feedback
+├── pr-merged.yaml                # PR merged → Done + cleanup
+├── slack-question.yaml           # Engineer question → Slack bridge
+└── stall-recovery.yaml           # Stalled worker → nudge/respawn/escalate
 
 manager/                          # Persistent manager + event system
 ├── session.py                    # Manager tmux session (start, resume, inject, capture)
@@ -347,6 +369,46 @@ tools/                            # Shared tool reference (used by manager + eng
 | Webhooks + polling | Webhooks for real-time events when available, pollers as fallback. Both push to the same bus |
 | Slack Socket Mode | WebSocket connection to Slack — no public URL needed, real-time DMs and mentions |
 | Self-updating | Hourly version check against origin/main. Slack approval before updating. Rollback available if something breaks |
+| Workflow engine | YAML DAG definitions for common event patterns (issue lifecycle, PR feedback, stall recovery). Hybrid nodes: deterministic actions + LLM reasoning. Replaces hard-coded routing for known patterns |
+| History indexer | SQLite + FTS5 over Claude Code JSONL session logs. Incremental indexing. Gives the manager searchable memory across all past conversations |
+
+## Workflow engine
+
+The workflow engine executes YAML-based DAG workflows for common event patterns. Each workflow defines a graph of nodes — some deterministic (run a shell command, call an API), some LLM-powered (reason about context, make a decision). The engine resolves dependencies, interpolates variables from event context, and tracks run state.
+
+Workflow definitions live in `workflows/`:
+
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| `issue-lifecycle.yaml` | New issue with agent label | Spawn session → triage → spec/implement → PR |
+| `pr-feedback.yaml` | Changes requested on PR | Route feedback to the engineer session |
+| `pr-merged.yaml` | PR merged | Move issue to Done, clean up worktree |
+| `slack-question.yaml` | Engineer asks a question | Bridge to Slack, wait for human reply |
+| `stall-recovery.yaml` | Worker stalled/stuck | Nudge, respawn, or escalate |
+
+The event consumer (`manager/events/consumer.py`) checks incoming events against workflow triggers. When a match fires, the engine runs the DAG. The manager session still handles anything that doesn't match a workflow — the engine covers known patterns, the manager handles novel situations.
+
+```bash
+modastack workflow list            # show available workflows
+modastack workflow status          # active + recent runs with node states
+modastack workflow validate <path> # check YAML syntax and DAG validity
+```
+
+## Conversation history indexer
+
+The history indexer builds a searchable SQLite database over Claude Code conversation logs. It reads JSONL session files from `~/.claude/projects/` and `~/.claude/sessions/`, extracts messages with metadata (project, branch, timestamps), and indexes them with FTS5 full-text search.
+
+Indexing is incremental — only new lines since the last run are processed. The database lives at `~/.modastack/history.db`.
+
+```bash
+modastack history index            # index new conversation data
+modastack history index --project <name>  # index a specific project only
+modastack history search "error handling"  # full-text search across all sessions
+modastack history sessions         # list indexed conversations
+modastack history show <session-id>       # show messages from a session
+```
+
+This gives the manager searchable memory across all past engineering sessions — useful for understanding what was tried before, finding prior art, and answering "have we seen this before?" questions.
 
 ## Tests
 

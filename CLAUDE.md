@@ -72,6 +72,13 @@ modastack init                 # initialize global config
 modastack setup [path]         # set up a repo — install skills, store credentials, register
 modastack register <target>    # register a repo (local path or org/repo)
 modastack repos                # list registered repos
+modastack workflow list        # list available workflow definitions
+modastack workflow status      # show active and recent workflow runs
+modastack workflow validate    # validate a workflow YAML file
+modastack history index        # index conversation JSONL files into SQLite
+modastack history search       # full-text search across conversation history
+modastack history sessions     # list indexed conversations
+modastack history show         # show messages from a specific session
 ```
 
 ## Architecture
@@ -84,10 +91,25 @@ in tmux. The manager reasons about events and acts directly.
 modastack/                        # CLI + infrastructure
 ├── cli.py                        # Click CLI entrypoint
 ├── config.py                     # Global config (~/.modastack/config.yaml)
+├── history.py                    # Conversation history indexer (SQLite + FTS5)
 ├── scanner.py                    # Linear GraphQL polling
 ├── session.py                    # Engineer tmux session management
 ├── setup.py                      # Repo setup — skill install, auto-detection
-└── board_setup.py                # Bootstrap Linear board with workflow states
+├── board_setup.py                # Bootstrap Linear board with workflow states
+└── workflow/                     # YAML DAG workflow engine
+    ├── engine.py                 # DAG executor — resolve deps, run nodes, track state
+    ├── schema.py                 # Workflow/node definitions, YAML parsing
+    ├── triggers.py               # Event-to-workflow matching
+    ├── actions.py                # Action registry (shell, API, LLM node types)
+    ├── state.py                  # Workflow run state persistence
+    └── variables.py              # Variable interpolation from event context
+
+workflows/                        # Workflow YAML definitions
+├── issue-lifecycle.yaml          # New issue → triage → spec/implement → PR
+├── pr-feedback.yaml              # Changes requested → route feedback
+├── pr-merged.yaml                # PR merged → Done + cleanup
+├── slack-question.yaml           # Engineer question → Slack bridge
+└── stall-recovery.yaml           # Stalled worker → nudge/respawn/escalate
 
 manager/                          # Persistent manager + event system
 ├── session.py                    # Manager tmux session (start, resume, inject, capture)
