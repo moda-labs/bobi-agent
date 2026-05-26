@@ -17,7 +17,7 @@ nodes:
       - "inject:<message>" — send a specific instruction
       - "kill" — kill and respawn the session
       Output ONLY your recommendation in the format above.
-    timeout: 120
+    timeout: 300
 
   route_action:
     type: gate
@@ -53,7 +53,7 @@ nodes:
       Session for ${{event.issue_id}} stalled. Took action: ${{route_action.branch}}.
       Draft a brief Slack message about the stall and recovery.
       Output ONLY the message text.
-    timeout: 120
+    timeout: 300
     depends_on: [do_nudge, do_kill, route_action]
 
   post_slack_stall:

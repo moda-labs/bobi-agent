@@ -11,7 +11,7 @@ nodes:
       PR: ${{event.pr_url}}
       Draft a brief Slack message confirming the PR merged and work is done.
       Output ONLY the message text.
-    timeout: 120
+    timeout: 300
 
   post_slack_done:
     type: action

@@ -22,7 +22,7 @@ nodes:
       Repo: ${{event.repo}}
       Draft a brief Slack pickup message (2-3 sentences max).
       Output ONLY the message text, nothing else.
-    timeout: 120
+    timeout: 300
     depends_on: [spawn_engineer]
 
   post_slack_pickup:
@@ -58,7 +58,7 @@ nodes:
     inject: "/pickup Issue #${{event.issue_id}}: ${{event.title}}. Repo: ${{event.repo}}, cwd: ${{event.repo}}"
     wait_for:
       phase: triage_complete
-    timeout: 600
+    timeout: 1200
     outputs:
       complexity: ${{handoff.complexity}}
       needs_spec: ${{handoff.needs_spec}}
@@ -71,7 +71,7 @@ nodes:
       Triage complete for ${{event.issue_id}} "${{event.title}}".
       Complexity: ${{triage.complexity}}.
       Draft a brief Slack update (1-2 sentences). Output ONLY the message text.
-    timeout: 120
+    timeout: 300
     depends_on: [triage]
 
   post_slack_triage:
@@ -113,7 +113,7 @@ nodes:
       Wait for human approval.
     wait_for:
       phase: spec_complete
-    timeout: 1200
+    timeout: 3000
     outputs:
       spec_pr: ${{handoff.spec_pr}}
       spec_path: ${{handoff.spec_path}}
@@ -127,7 +127,7 @@ nodes:
       PR: ${{spec.spec_pr}}. Spec file: ${{spec.spec_path}}.
       Draft a Slack message asking for spec review. Include links.
       Output ONLY the message text.
-    timeout: 120
+    timeout: 300
     depends_on: [spec]
     when: "${{route.branch}} == 'needs_spec'"
 
@@ -167,7 +167,7 @@ nodes:
       Starting implementation for ${{event.issue_id}} "${{event.title}}".
       Complexity: ${{triage.complexity}}.
       Draft a brief Slack update (1-2 sentences). Output ONLY the message text.
-    timeout: 120
+    timeout: 300
     depends_on: [spec_approval, route]
     when: "${{spec_approval.approved}} == true or ${{route.branch}} == 'skip_spec'"
 
@@ -205,7 +205,7 @@ nodes:
     prompt: |
       PR created for ${{event.issue_id}} "${{event.title}}": ${{prepare_pr.pr_url}}.
       Draft a Slack message asking for review. Output ONLY the message text.
-    timeout: 120
+    timeout: 300
     depends_on: [prepare_pr]
 
   post_slack_pr_ready:
