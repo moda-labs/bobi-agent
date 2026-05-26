@@ -19,7 +19,7 @@ echo ""
 # --- System packages ---
 echo "[1/7] Installing system packages..."
 sudo apt-get update -qq
-sudo apt-get install -y -qq tmux git curl python3 python3-pip python3-venv jq
+sudo apt-get install -y -qq tmux git curl unzip python3 python3-pip python3-venv jq
 
 # --- Node.js (for Claude Code) ---
 echo "[2/7] Installing Node.js..."

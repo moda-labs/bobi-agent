@@ -35,6 +35,9 @@ if [ ! -d "$GSTACK_DIR" ]; then
     mkdir -p "$HOME/dev"
     git clone https://github.com/garrytan/gstack.git "$GSTACK_DIR" >> "$LOG" 2>&1
 
+    # Install system deps (unzip for bun, libs for Playwright Chromium)
+    sudo apt-get install -y -qq unzip >> "$LOG" 2>&1 || true
+
     # Install bun if needed (required by gstack setup)
     if ! command -v bun &>/dev/null; then
         curl -fsSL https://bun.sh/install | bash >> "$LOG" 2>&1
@@ -42,8 +45,13 @@ if [ ! -d "$GSTACK_DIR" ]; then
         export PATH="$BUN_INSTALL/bin:$PATH"
     fi
 
+    # Ensure bun is on PATH (may have been installed in a previous run)
+    export PATH="$HOME/.bun/bin:$PATH"
+
     # Run gstack setup (quiet, flat skill names)
     cd "$GSTACK_DIR"
+    bun install --frozen-lockfile >> "$LOG" 2>&1 || bun install >> "$LOG" 2>&1
+    bunx playwright install-deps chromium >> "$LOG" 2>&1 || true
     GSTACK_SKIP_COREUTILS=1 ./setup -q --no-prefix >> "$LOG" 2>&1 || log "WARNING: gstack setup had errors (non-fatal)"
     cd "$REPO_DIR"
 
