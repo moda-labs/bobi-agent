@@ -309,3 +309,34 @@ modastack workflow status
 - **Override, don't fork.** Put your custom version in the repo's
   `.modastack/workflows/` directory. The engine picks it up automatically
   without touching the built-in defaults.
+
+## Manager roles
+
+The manager's prompt is split into three layers:
+
+| Layer | File | Purpose |
+|-------|------|---------|
+| Core | `roles/manager/prompt.md` | General: Slack communication, workflow engine interaction, event handling, tools |
+| Role | `roles/manager/<role>.md` | Domain: engineering policies, escalation rules, spec gates, lifecycle |
+| Repo | `.modastack.yaml` + tool skills | Specific: label conventions, deploy configs, API patterns |
+
+The role is configured in `~/.modastack/config.yaml`:
+
+```yaml
+manager:
+  role: engineering    # loads roles/manager/engineering.md
+```
+
+### Built-in roles
+
+- **`engineering`** (default) — Software engineering manager. Spec policy,
+  PR lifecycle, technical decision-making, escalation rules.
+
+### Custom roles
+
+Create `roles/manager/<name>.md` with domain-specific policies and set
+`manager.role: <name>` in the config. The core prompt handles communication,
+event processing, and tool use — your role file adds the domain knowledge.
+
+Example: a support manager role would define ticket triage rules, SLA
+policies, and escalation criteria instead of spec gates and PR lifecycle.

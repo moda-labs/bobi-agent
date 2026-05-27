@@ -103,7 +103,8 @@ modastack/                        # All Python code
 
 roles/                            # All skill/prompt content (no Python)
 ├── manager/
-│   └── prompt.md                 # Manager personality, decision rules
+│   ├── prompt.md                 # Core manager behavior (general-purpose)
+│   └── engineering.md            # Engineering manager role (domain-specific)
 ├── engineer/
 │   ├── process/                  # Manager-routed lifecycle phases
 │   │   ├── pickup/SKILL.md       # Take ticket, create worktree, triage
