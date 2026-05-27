@@ -10,6 +10,8 @@ import subprocess
 from pathlib import Path
 
 from modastack.tmux import is_paused
+from modastack.workflow.state import WorkflowRun
+from modastack.workflow.schema import load_workflow
 
 EVENTS_PATH = Path.home() / ".modastack" / "manager" / "events.jsonl"
 DECISIONS_PATH = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
@@ -149,3 +151,40 @@ def get_event_sources() -> list[str]:
         except json.JSONDecodeError:
             continue
     return sorted(s for s in sources if s)
+
+
+def _load_workflow_labels(workflow_name: str) -> dict[str, str]:
+    """Load node labels from workflow YAML definition."""
+    from modastack.workflow.triggers import WORKFLOWS_DIR, USER_WORKFLOWS_DIR
+    for d in [USER_WORKFLOWS_DIR, WORKFLOWS_DIR]:
+        path = d / f"{workflow_name}.yaml"
+        if path.exists():
+            try:
+                wf = load_workflow(path)
+                return {nid: n.label for nid, n in wf.nodes.items() if n.label}
+            except Exception:
+                pass
+    return {}
+
+
+def get_workflow_progress(issue_id: str) -> dict | None:
+    """Find the active workflow run for an issue and return node progress."""
+    for run in WorkflowRun.list_runs():
+        trigger_data = run.trigger_event.get("data", {})
+        rid = trigger_data.get("issue_id", "")
+        if rid.lstrip("#").lower() == issue_id.lower():
+            labels = _load_workflow_labels(run.workflow_name)
+            nodes = []
+            for nid, ns in run.nodes.items():
+                nodes.append({
+                    "id": nid,
+                    "label": labels.get(nid, ""),
+                    "status": ns.status,
+                })
+            return {
+                "run_id": run.run_id,
+                "workflow": run.workflow_name,
+                "status": run.status,
+                "nodes": nodes,
+            }
+    return None

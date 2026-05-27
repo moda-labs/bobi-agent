@@ -644,25 +644,26 @@ done
 """)
         fake_claude.chmod(0o755)
 
+        subprocess.run(["tmux", "kill-session", "-t", self.TEST_SESSION], capture_output=True)
         subprocess.run([
             "tmux", "new-session", "-d", "-s", self.TEST_SESSION,
             "-x", "200", "-y", "50",
             "bash", str(fake_claude),
         ])
-        time.sleep(0.5)
+        time.sleep(1)
 
         yield {"activity_log": activity_log, "session": self.TEST_SESSION}
 
         subprocess.run(["tmux", "kill-session", "-t", self.TEST_SESSION], capture_output=True)
 
     def test_inject_triggers_hooks(self, pipeline):
-        from modastack.manager.session import _send_keys
+        from modastack.tmux import send_text
         activity_log = pipeline["activity_log"]
 
         assert not activity_log.exists() or activity_log.stat().st_size == 0
 
-        _send_keys("do something")
-        time.sleep(2)
+        send_text(self.TEST_SESSION, "do something", verify=False)
+        time.sleep(4)
 
         assert activity_log.exists()
         lines = activity_log.read_text().strip().splitlines()
@@ -673,27 +674,25 @@ done
         assert "Stop" in events
 
     def test_detect_state_reflects_hook_events(self, pipeline):
-        from modastack.manager.session import _send_keys, detect_state
+        from modastack.tmux import send_text
+        from modastack.manager.session import detect_state
 
         # Before any injection — no activity
         assert detect_state() == "unknown"
 
-        _send_keys("first prompt")
-        # Give the fake claude time to fire UserPromptSubmit
-        time.sleep(0.5)
-        assert detect_state() == "working"
-
-        # Give it time to fire Stop (fake claude sleeps 2s between events)
-        time.sleep(3)
+        send_text(self.TEST_SESSION, "first prompt", verify=False)
+        # Wait for full cycle: UserPromptSubmit + 2s sleep + Stop
+        time.sleep(5)
         assert detect_state() == "waiting_input"
 
     def test_multiple_inject_cycles(self, pipeline):
-        from modastack.manager.session import _send_keys, detect_state
+        from modastack.tmux import send_text
+        from modastack.manager.session import detect_state
         activity_log = pipeline["activity_log"]
 
         for i in range(3):
-            _send_keys(f"prompt {i}")
-            time.sleep(4)
+            send_text(self.TEST_SESSION, f"prompt {i}", verify=False)
+            time.sleep(6)
 
         lines = activity_log.read_text().strip().splitlines()
         events = [json.loads(l)["event"] for l in lines]

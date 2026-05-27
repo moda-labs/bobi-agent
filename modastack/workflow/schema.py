@@ -61,6 +61,7 @@ class BranchDef:
 class NodeDef:
     id: str
     type: NodeType
+    label: str = ""
     depends_on: list[str] = field(default_factory=list)
     when: str = ""
     timeout: int = 300
@@ -154,6 +155,7 @@ def _parse_node(node_id: str, raw: dict) -> NodeDef:
     node = NodeDef(
         id=node_id,
         type=node_type,
+        label=raw.get("label", ""),
         depends_on=raw.get("depends_on", []),
         when=raw.get("when", ""),
         timeout=raw.get("timeout", 300),

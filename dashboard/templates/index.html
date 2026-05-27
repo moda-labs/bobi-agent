@@ -32,39 +32,26 @@
   header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     padding: 12px 24px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
   }
   header h1 { font-size: 18px; font-weight: 600; }
-  .manager-status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: var(--text-muted);
-  }
-  .dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    display: inline-block;
-  }
-  .dot.alive { background: var(--green); }
-  .dot.dead { background: var(--red); }
 
   .layout {
     display: grid;
-    grid-template-columns: 280px 1fr;
-    grid-template-rows: 1fr auto;
+    grid-template-columns: 300px 1fr;
     height: calc(100vh - 49px);
   }
 
-  .panel {
+  /* Sidebar */
+  .sidebar {
     border-right: 1px solid var(--border);
     overflow-y: auto;
+    display: flex;
+    flex-direction: column;
   }
-  .panel-header {
+  .sidebar-header {
     padding: 12px 16px;
     font-size: 12px;
     font-weight: 600;
@@ -76,31 +63,32 @@
     top: 0;
     background: var(--bg);
   }
+  .sidebar-cards { overflow-y: auto; flex: 1; }
 
-  .session {
+  .session-card {
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
     cursor: pointer;
   }
-  .session:hover { background: var(--surface); }
-  .session.active { background: var(--surface); border-left: 3px solid var(--accent); }
-  .session.paused { opacity: 0.7; }
-  .session-name {
-    font-weight: 600;
-    font-size: 13px;
+  .session-card:hover { background: var(--surface); }
+  .session-card.active { background: var(--surface); border-left: 3px solid var(--accent); padding-left: 13px; }
+  .session-card.paused { opacity: 0.7; }
+  .card-header {
     display: flex;
     align-items: center;
     gap: 8px;
+    margin-bottom: 4px;
   }
-  .session-state {
+  .card-name { font-weight: 600; font-size: 13px; }
+  .card-state {
     font-size: 11px;
     padding: 2px 6px;
     border-radius: 10px;
     font-weight: 500;
   }
   .state-working { background: rgba(88,166,255,0.15); color: var(--accent); }
-  .state-waiting_input { background: rgba(63,185,80,0.15); color: var(--green); }
-  .state-asking_question { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .state-idle { background: rgba(63,185,80,0.15); color: var(--green); }
+  .state-blocked { background: rgba(210,153,34,0.15); color: var(--yellow); }
   .state-exited { background: rgba(248,81,73,0.15); color: var(--red); }
   .pause-badge {
     font-size: 10px;
@@ -110,31 +98,77 @@
     color: var(--yellow);
     margin-left: auto;
   }
-  .session-detail {
+  .card-detail {
     font-size: 12px;
     color: var(--text-muted);
-    margin-top: 4px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .card-workflow {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+  }
+  .wf-node {
+    padding: 1px 5px;
+    border-radius: 6px;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+  .wf-completed { background: rgba(63,185,80,0.15); color: var(--green); }
+  .wf-running, .wf-waiting { background: rgba(88,166,255,0.2); color: var(--accent); }
+  .wf-failed { background: rgba(248,81,73,0.15); color: var(--red); }
+  .wf-skipped { display: none; }
+  .wf-pending { color: var(--text-muted); opacity: 0.5; }
+  .wf-arrow { color: var(--text-muted); opacity: 0.3; font-size: 9px; }
   .empty-state {
     padding: 24px 16px;
     color: var(--text-muted);
     font-size: 13px;
     text-align: center;
   }
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  .dot.alive { background: var(--green); }
+  .dot.dead { background: var(--red); }
 
+  /* Event log card in sidebar */
+  .event-log-card {
+    cursor: pointer;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .event-log-card:hover { background: var(--surface); }
+  .event-log-card.active { background: var(--surface); border-left: 3px solid var(--accent); padding-left: 13px; }
+  .event-log-card .card-header { margin-bottom: 0; }
+  .event-log-badge {
+    font-size: 11px;
+    background: var(--border);
+    padding: 1px 6px;
+    border-radius: 10px;
+    margin-left: auto;
+  }
+
+  /* Main area */
   .main {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    height: 100%;
+    min-height: 0;
   }
 
-  /* Event view (default) */
-  .event-view { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
-  .event-view.hidden { display: none; }
-
+  /* Events view */
+  .events-view { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+  .events-view.active { display: flex; }
   .filters {
     display: flex;
     gap: 8px;
@@ -151,25 +185,10 @@
     border-radius: 6px;
     font-size: 13px;
   }
-  .filters select:focus, .filters input:focus {
-    outline: none;
-    border-color: var(--accent);
-  }
-  .filters label {
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-  .event-count {
-    margin-left: auto;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
-  .event-log {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0;
-  }
+  .filters select:focus, .filters input:focus { outline: none; border-color: var(--accent); }
+  .filters label { font-size: 12px; color: var(--text-muted); }
+  .event-count { margin-left: auto; font-size: 12px; color: var(--text-muted); }
+  .event-log { flex: 1; overflow-y: auto; }
   .event-row {
     display: grid;
     grid-template-columns: 140px 90px 1fr;
@@ -204,7 +223,6 @@
     text-overflow: ellipsis;
     margin-top: 2px;
   }
-
   .pagination {
     display: flex;
     gap: 8px;
@@ -225,33 +243,9 @@
   .pagination button:hover { border-color: var(--accent); }
   .pagination button:disabled { opacity: 0.4; cursor: default; }
 
-  .decisions {
-    grid-column: 1 / -1;
-    border-top: 1px solid var(--border);
-    max-height: 180px;
-    overflow-y: auto;
-  }
-  .decision-row {
-    display: grid;
-    grid-template-columns: 140px 1fr auto;
-    gap: 12px;
-    padding: 8px 16px;
-    border-bottom: 1px solid var(--border);
-    font-size: 13px;
-  }
-  .decision-types {
-    font-family: monospace;
-    font-size: 12px;
-    color: var(--accent);
-  }
-  .decision-count {
-    color: var(--text-muted);
-    font-size: 12px;
-  }
-
   /* Terminal view */
-  .terminal-container { display: none; flex-direction: column; flex: 1; overflow: hidden; }
-  .terminal-container.active { display: flex; }
+  .terminal-view { display: none; flex-direction: column; flex: 1; overflow: hidden; width: 100%; min-width: 0; }
+  .terminal-view.active { display: flex; }
   .terminal-toolbar {
     display: flex;
     align-items: center;
@@ -276,39 +270,35 @@
     border-color: var(--yellow);
     color: var(--yellow);
   }
-  .terminal-toolbar .back-link {
-    color: var(--accent);
-    cursor: pointer;
-    text-decoration: none;
-    font-size: 13px;
-  }
-  .terminal-toolbar .session-label {
-    font-weight: 600;
-    font-family: monospace;
-  }
+  .terminal-toolbar .session-label { font-weight: 600; font-family: monospace; }
   .terminal-toolbar .spacer { flex: 1; }
-  .terminal-body { flex: 1; overflow: hidden; padding: 4px; }
+  .terminal-toolbar .workflow-progress {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    overflow-x: auto;
+    max-width: 50%;
+  }
+  .terminal-body { flex: 1; overflow: hidden; position: relative; width: 100%; min-width: 0; }
+  .terminal-body .xterm { height: 100%; width: 100%; }
 </style>
 </head>
 <body>
 
 <header>
   <h1>modastack</h1>
-  <div class="manager-status">
-    <span>Manager:</span>
-    <span class="dot" id="mgr-dot"></span>
-    <span id="mgr-state">--</span>
-  </div>
 </header>
 
 <div class="layout">
-  <div class="panel">
-    <div class="panel-header">Sessions</div>
-    <div id="sessions"></div>
+  <div class="sidebar">
+    <div class="sidebar-header">Sessions</div>
+    <div class="sidebar-cards" id="session-cards"></div>
   </div>
 
   <div class="main">
-    <div class="event-view" id="event-view">
+    <!-- Events view -->
+    <div class="events-view" id="events-view">
       <div class="filters">
         <label>Source</label>
         <select id="filter-source"><option value="">All</option></select>
@@ -324,20 +314,17 @@
       </div>
     </div>
 
-    <div class="terminal-container" id="terminal-container">
+    <!-- Terminal -->
+    <div class="terminal-view" id="terminal-view">
       <div class="terminal-toolbar">
-        <a class="back-link" id="back-to-events">&larr; Events</a>
         <span class="session-label" id="terminal-label"></span>
+        <div class="workflow-progress" id="workflow-progress"></div>
         <span class="spacer"></span>
-        <button class="btn-pause" id="btn-pause">Pause</button>
+        <button class="btn-pause" id="btn-pause">Take Control</button>
+        <button id="btn-kill" style="border-color:var(--red);color:var(--red)">Close Session</button>
       </div>
       <div class="terminal-body" id="terminal-body"></div>
     </div>
-  </div>
-
-  <div class="decisions">
-    <div class="panel-header">Recent Decisions</div>
-    <div id="decisions-list"></div>
   </div>
 </div>
 
@@ -345,28 +332,32 @@
 const PAGE_SIZE = 50;
 let offset = 0;
 let totalEvents = 0;
+let currentView = 'terminal'; // 'terminal' or 'events'
 
-// Terminal state
 let currentTerminal = null;
 let currentWs = null;
 let currentFit = null;
 let currentSession = null;
 let resizeHandler = null;
 let lastStatus = null;
+let workflowCache = {};
 
 function esc(s) {
   const d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML;
 }
+function sourceClass(s) { return 'source-' + (s || '').replace(/[^a-z-]/g, ''); }
 
-function sourceClass(s) {
-  return 'source-' + (s || '').replace(/[^a-z-]/g, '');
-}
-
-function stateClass(s) {
-  return 'state-' + (s || 'unknown');
-}
+const STATE_DISPLAY = {
+  'waiting_input': { label: 'Idle', css: 'idle' },
+  'working': { label: 'Working', css: 'working' },
+  'asking_question': { label: 'Blocked', css: 'blocked' },
+  'permission_blocked': { label: 'Blocked', css: 'blocked' },
+  'exited': { label: 'Exited', css: 'exited' },
+};
+function stateLabel(s) { return (STATE_DISPLAY[s] || {}).label || s; }
+function stateClass(s) { return 'state-' + ((STATE_DISPLAY[s] || {}).css || 'unknown'); }
 
 function eventDetail(data) {
   const parts = [];
@@ -379,10 +370,34 @@ function eventDetail(data) {
   const detail = parts.join(' — ');
   return detail.length > 120 ? detail.slice(0, 120) + '...' : detail;
 }
+async function fetchJSON(url) { return (await fetch(url)).json(); }
 
-async function fetchJSON(url) {
-  const res = await fetch(url);
-  return res.json();
+function renderWorkflowNodes(nodes) {
+  if (!nodes || !nodes.length) return '';
+  const visible = nodes.filter(n => n.status !== 'skipped');
+  return visible.map((n, i) => {
+    const arrow = i < visible.length - 1 ? '<span class="wf-arrow">&rarr;</span>' : '';
+    return `<span class="wf-node wf-${n.status}">${esc(n.label || n.id)}</span>${arrow}`;
+  }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// View switching
+// ---------------------------------------------------------------------------
+
+function showTerminal() {
+  currentView = 'terminal';
+  document.getElementById('events-view').classList.remove('active');
+  document.getElementById('terminal-view').classList.add('active');
+  if (currentFit) requestAnimationFrame(() => currentFit.fit());
+}
+
+function showEvents() {
+  currentView = 'events';
+  document.getElementById('terminal-view').classList.remove('active');
+  document.getElementById('events-view').classList.add('active');
+  refreshSidebarSelection();
+  loadEvents();
 }
 
 // ---------------------------------------------------------------------------
@@ -390,22 +405,19 @@ async function fetchJSON(url) {
 // ---------------------------------------------------------------------------
 
 function openTerminal(sessionName) {
-  closeTerminal();
+  if (currentSession === sessionName && currentView === 'terminal') return;
+  closeTerminal(true);
   currentSession = sessionName;
 
-  document.getElementById('event-view').classList.add('hidden');
-  document.getElementById('terminal-container').classList.add('active');
   document.getElementById('terminal-label').textContent = sessionName;
-
-  // Update sidebar selection
-  document.querySelectorAll('.session').forEach(el => {
-    el.classList.toggle('active', el.dataset.session === sessionName);
-  });
+  showTerminal();
+  refreshSidebarSelection();
 
   const term = new Terminal({
     cursorBlink: true,
     fontSize: 13,
     fontFamily: "'Menlo', 'Monaco', 'Courier New', monospace",
+    scrollback: 5000,
     theme: {
       background: '#0d1117',
       foreground: '#e6edf3',
@@ -419,67 +431,72 @@ function openTerminal(sessionName) {
   const container = document.getElementById('terminal-body');
   container.innerHTML = '';
   term.open(container);
-  fitAddon.fit();
+  // Multiple fit attempts to handle layout timing
+  requestAnimationFrame(() => fitAddon.fit());
+  setTimeout(() => fitAddon.fit(), 100);
+  setTimeout(() => fitAddon.fit(), 300);
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/terminal/${sessionName}`);
   ws.binaryType = 'arraybuffer';
-
+  let resizeSent = false;
+  let buffered = [];
   ws.onopen = () => {
-    fitAddon.fit();
+    setTimeout(() => {
+      fitAddon.fit();
+      // After first resize, flush buffered data and switch to direct writes
+      setTimeout(() => {
+        resizeSent = true;
+        for (const chunk of buffered) term.write(chunk);
+        buffered = null;
+      }, 200);
+    }, 50);
   };
-
   ws.onmessage = (e) => {
-    term.write(new Uint8Array(e.data));
+    const data = new Uint8Array(e.data);
+    if (!resizeSent) { buffered.push(data); return; }
+    term.write(data);
   };
+  ws.onclose = () => term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
 
-  ws.onclose = () => {
-    term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
-  };
-
-  term.onData((data) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(data);
-    }
-  });
-
+  term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
   term.onResize(({ cols, rows }) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols, rows }));
   });
 
-  resizeHandler = () => fitAddon.fit();
-  window.addEventListener('resize', resizeHandler);
+  resizeHandler = new ResizeObserver(() => {
+    requestAnimationFrame(() => fitAddon.fit());
+  });
+  resizeHandler.observe(container);
 
   currentTerminal = term;
   currentWs = ws;
   currentFit = fitAddon;
 
   syncPauseButton();
+  loadWorkflowProgress();
 }
 
-function closeTerminal() {
-  if (currentWs) {
-    currentWs.close();
-    currentWs = null;
-  }
-  if (currentTerminal) {
-    currentTerminal.dispose();
-    currentTerminal = null;
-  }
-  if (resizeHandler) {
-    window.removeEventListener('resize', resizeHandler);
-    resizeHandler = null;
-  }
+function closeTerminal(keepView) {
+  if (currentWs) { currentWs.close(); currentWs = null; }
+  if (currentTerminal) { currentTerminal.dispose(); currentTerminal = null; }
+  if (resizeHandler) { resizeHandler.disconnect(); resizeHandler = null; }
   currentFit = null;
   currentSession = null;
-
   document.getElementById('terminal-body').innerHTML = '';
-  document.getElementById('terminal-container').classList.remove('active');
-  document.getElementById('event-view').classList.remove('hidden');
+  if (!keepView) {
+    document.getElementById('terminal-view').classList.remove('active');
+  }
+  refreshSidebarSelection();
+}
 
-  document.querySelectorAll('.session').forEach(el => el.classList.remove('active'));
+function refreshSidebarSelection() {
+  document.querySelectorAll('.session-card').forEach(el => {
+    el.classList.toggle('active', el.dataset.session === currentSession && currentView === 'terminal');
+  });
+  document.querySelectorAll('.event-log-card').forEach(el => {
+    el.classList.toggle('active', currentView === 'events');
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -496,8 +513,7 @@ function getSessionPaused(sessionName) {
 async function togglePause() {
   if (!currentSession) return;
   const paused = getSessionPaused(currentSession);
-  const endpoint = paused ? 'resume' : 'pause';
-  await fetch(`/api/sessions/${currentSession}/${endpoint}`, { method: 'POST' });
+  await fetch(`/api/sessions/${currentSession}/${paused ? 'resume' : 'pause'}`, { method: 'POST' });
   await loadStatus();
   syncPauseButton();
 }
@@ -506,8 +522,34 @@ function syncPauseButton() {
   const btn = document.getElementById('btn-pause');
   if (!currentSession) return;
   const paused = getSessionPaused(currentSession);
-  btn.textContent = paused ? 'Resume' : 'Pause';
+  btn.textContent = paused ? 'Release Control' : 'Take Control';
   btn.classList.toggle('paused', paused);
+}
+
+// ---------------------------------------------------------------------------
+// Workflow progress
+// ---------------------------------------------------------------------------
+
+async function loadWorkflowProgress() {
+  const el = document.getElementById('workflow-progress');
+  if (!currentSession || currentSession === 'moda-manager') { el.innerHTML = ''; return; }
+  const issueId = currentSession.replace('moda-', '');
+  try {
+    const d = await fetchJSON(`/api/workflow/${issueId}`);
+    if (!d.progress) { el.innerHTML = ''; return; }
+    el.innerHTML = renderWorkflowNodes(d.progress.nodes);
+  } catch (e) { el.innerHTML = ''; }
+}
+
+async function loadAllWorkflows() {
+  if (!lastStatus) return;
+  for (const s of lastStatus.sessions) {
+    const issueId = s.name.replace('moda-', '');
+    try {
+      const d = await fetchJSON(`/api/workflow/${issueId}`);
+      workflowCache[s.name] = d.progress;
+    } catch (e) { workflowCache[s.name] = null; }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -519,51 +561,50 @@ async function loadStatus() {
     const d = await fetchJSON('/api/status');
     lastStatus = d;
 
-    const dot = document.getElementById('mgr-dot');
-    const state = document.getElementById('mgr-state');
-    dot.className = 'dot ' + (d.manager.alive ? 'alive' : 'dead');
-    state.textContent = d.manager.alive ? d.manager.state : 'offline';
-
-    const el = document.getElementById('sessions');
+    const cards = document.getElementById('session-cards');
     let html = '';
 
-    // Manager entry
-    if (d.manager.alive) {
-      const mgrActive = currentSession === 'moda-manager' ? 'active' : '';
-      const mgrPaused = d.manager.paused ? 'paused' : '';
-      html += `<div class="session ${mgrActive} ${mgrPaused}" data-session="moda-manager" onclick="openTerminal('moda-manager')">
-        <div class="session-name">
-          <span class="dot alive"></span>
-          Manager
-          <span class="session-state ${stateClass(d.manager.state)}">${esc(d.manager.state)}</span>
-          ${d.manager.paused ? '<span class="pause-badge">PAUSED</span>' : ''}
+    // Manager card
+    const mgrState = d.manager.alive ? d.manager.state : 'exited';
+    html += `<div class="session-card ${currentSession === 'moda-manager' && currentView === 'terminal' ? 'active' : ''} ${d.manager.paused ? 'paused' : ''}"
+                  data-session="moda-manager" onclick="openTerminal('moda-manager')">
+      <div class="card-header">
+        <span class="dot ${d.manager.alive ? 'alive' : 'dead'}"></span>
+        <span class="card-name">Manager</span>
+        <span class="card-state ${stateClass(mgrState)}">${stateLabel(mgrState)}</span>
+        ${d.manager.paused ? '<span class="pause-badge">PAUSED</span>' : ''}
+      </div>
+      <div class="card-detail">${d.manager.alive ? 'Orchestration &amp; event processing' : 'Offline'}</div>
+    </div>`;
+
+    // Engineer cards
+    html += d.sessions.map(s => {
+      const wf = workflowCache[s.name];
+      const wfHtml = wf ? renderWorkflowNodes(wf.nodes) : '';
+      return `<div class="session-card ${currentSession === s.name && currentView === 'terminal' ? 'active' : ''} ${s.paused ? 'paused' : ''}"
+                    data-session="${esc(s.name)}" onclick="openTerminal('${esc(s.name)}')">
+        <div class="card-header">
+          <span class="dot ${s.state === 'exited' ? 'dead' : 'alive'}"></span>
+          <span class="card-name">${esc(s.issue_id)}</span>
+          <span class="card-state ${stateClass(s.state)}">${stateLabel(s.state)}</span>
+          ${s.paused ? '<span class="pause-badge">PAUSED</span>' : ''}
         </div>
+        ${s.last_line ? `<div class="card-detail">${esc(s.last_line)}</div>` : ''}
+        ${wfHtml ? `<div class="card-workflow">${wfHtml}</div>` : ''}
       </div>`;
-    }
+    }).join('');
 
-    if (!d.sessions.length && !d.manager.alive) {
-      html += '<div class="empty-state">No active sessions</div>';
-    } else {
-      html += d.sessions.map(s => {
-        const active = currentSession === s.name ? 'active' : '';
-        const paused = s.paused ? 'paused' : '';
-        return `<div class="session ${active} ${paused}" data-session="${esc(s.name)}" onclick="openTerminal('${esc(s.name)}')">
-          <div class="session-name">
-            <span class="dot ${s.state === 'exited' ? 'dead' : 'alive'}"></span>
-            ${esc(s.issue_id)}
-            <span class="session-state ${stateClass(s.state)}">${esc(s.state)}</span>
-            ${s.paused ? '<span class="pause-badge">PAUSED</span>' : ''}
-          </div>
-          ${s.last_line ? `<div class="session-detail">${esc(s.last_line)}</div>` : ''}
-        </div>`;
-      }).join('');
-    }
-    el.innerHTML = html;
+    // Event log card at the end
+    html += `<div class="event-log-card ${currentView === 'events' ? 'active' : ''}" onclick="showEvents()">
+      <div class="card-header">
+        <span class="card-name" style="color:var(--text-muted)">Event Log</span>
+        <span class="event-log-badge" id="event-log-badge">${totalEvents}</span>
+      </div>
+    </div>`;
 
+    cards.innerHTML = html;
     if (currentSession) syncPauseButton();
-  } catch (e) {
-    document.getElementById('mgr-state').textContent = 'fetch error';
-  }
+  } catch (e) {}
 }
 
 async function loadEvents() {
@@ -576,9 +617,8 @@ async function loadEvents() {
   try {
     const d = await fetchJSON(url);
     totalEvents = d.total;
-
-    document.getElementById('event-count').textContent =
-      `${d.total} event${d.total !== 1 ? 's' : ''}`;
+    document.getElementById('event-count').textContent = `${d.total} event${d.total !== 1 ? 's' : ''}`;
+    document.getElementById('event-log-badge').textContent = d.total;
 
     const el = document.getElementById('event-log');
     if (!d.events.length) {
@@ -602,27 +642,8 @@ async function loadEvents() {
     const pages = Math.max(1, Math.ceil(totalEvents / PAGE_SIZE));
     document.getElementById('page-info').textContent = `${page} / ${pages}`;
   } catch (e) {
-    document.getElementById('event-log').innerHTML =
-      '<div class="empty-state">Failed to load events</div>';
+    document.getElementById('event-log').innerHTML = '<div class="empty-state">Failed to load events</div>';
   }
-}
-
-async function loadDecisions() {
-  try {
-    const d = await fetchJSON('/api/decisions?limit=5');
-    const el = document.getElementById('decisions-list');
-    if (!d.decisions.length) {
-      el.innerHTML = '<div class="empty-state">No decisions yet</div>';
-    } else {
-      el.innerHTML = d.decisions.map(dec =>
-        `<div class="decision-row">
-          <span class="event-time">${esc(dec.timestamp)}</span>
-          <span class="decision-types">${esc((dec.event_types || []).join(', '))}</span>
-          <span class="decision-count">${dec.events} event${dec.events !== 1 ? 's' : ''}</span>
-        </div>`
-      ).join('');
-    }
-  } catch (e) {}
 }
 
 async function loadSources() {
@@ -633,8 +654,7 @@ async function loadSources() {
     sel.innerHTML = '<option value="">All</option>';
     (d.sources || []).forEach(s => {
       const opt = document.createElement('option');
-      opt.value = s;
-      opt.textContent = s;
+      opt.value = s; opt.textContent = s;
       if (s === current) opt.selected = true;
       sel.appendChild(opt);
     });
@@ -645,22 +665,39 @@ async function loadSources() {
 // Event listeners
 // ---------------------------------------------------------------------------
 
-document.getElementById('back-to-events').addEventListener('click', closeTerminal);
 document.getElementById('btn-pause').addEventListener('click', togglePause);
-document.getElementById('btn-newer').addEventListener('click', () => {
-  offset = Math.max(0, offset - PAGE_SIZE);
-  loadEvents();
+document.getElementById('btn-kill').addEventListener('click', async () => {
+  if (!currentSession) return;
+  const isManager = currentSession === 'moda-manager';
+  const msg = isManager
+    ? 'Kill the MANAGER session? This stops all orchestration. Are you sure?'
+    : `Close session ${currentSession}?`;
+  if (!confirm(msg)) return;
+  if (isManager && !confirm('This will stop modastack from processing events. Confirm again to proceed.')) return;
+  await fetch(`/api/sessions/${currentSession}/kill`, { method: 'POST' });
+  closeTerminal();
+  loadStatus();
 });
-document.getElementById('btn-older').addEventListener('click', () => {
-  if (offset + PAGE_SIZE < totalEvents) { offset += PAGE_SIZE; loadEvents(); }
-});
+document.getElementById('btn-newer').addEventListener('click', () => { offset = Math.max(0, offset - PAGE_SIZE); loadEvents(); });
+document.getElementById('btn-older').addEventListener('click', () => { if (offset + PAGE_SIZE < totalEvents) { offset += PAGE_SIZE; loadEvents(); } });
 document.getElementById('filter-source').addEventListener('change', () => { offset = 0; loadEvents(); });
 document.getElementById('filter-type').addEventListener('input', () => { offset = 0; loadEvents(); });
 
-function refreshAll() { loadStatus(); loadEvents(); loadDecisions(); }
+async function refreshAll() {
+  await loadStatus();
+  await loadAllWorkflows();
+  loadStatus();
+  if (currentSession && currentView === 'terminal') loadWorkflowProgress();
+}
 
+// Boot: load data then open manager by default
 loadSources();
-refreshAll();
+loadEvents();
+refreshAll().then(() => {
+  if (lastStatus && lastStatus.manager.alive) {
+    setTimeout(() => openTerminal('moda-manager'), 500);
+  }
+});
 setInterval(refreshAll, 5000);
 setInterval(loadSources, 30000);
 </script>

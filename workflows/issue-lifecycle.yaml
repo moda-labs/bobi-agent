@@ -6,6 +6,7 @@ trigger:
 nodes:
   # === SPAWN ===
   spawn_engineer:
+    label: Spawn
     type: action
     action: session.spawn
     params:
@@ -15,6 +16,7 @@ nodes:
 
   # === NOTIFY (LLM crafts, engine posts) ===
   craft_pickup_message:
+    label: Notify
     type: manager
     prompt: |
       Issue ${{event.issue_id}} "${{event.title}}" has been assigned.
@@ -26,6 +28,7 @@ nodes:
     depends_on: [spawn_engineer]
 
   post_slack_pickup:
+    label: Post Slack
     type: action
     action: slack.post
     params:
@@ -34,6 +37,7 @@ nodes:
     depends_on: [craft_pickup_message]
 
   move_to_in_progress:
+    label: Move Ticket
     type: action
     action: ticket.move
     params:
@@ -43,6 +47,7 @@ nodes:
     depends_on: [spawn_engineer]
 
   comment_ticket_pickup:
+    label: Comment
     type: action
     action: ticket.comment
     params:
@@ -53,6 +58,7 @@ nodes:
 
   # === TRIAGE ===
   triage:
+    label: Triage
     type: prompt
     session: ${{event.issue_id | lower}}
     inject: "/pickup Issue #${{event.issue_id}}: ${{event.title}}. Repo: ${{event.repo}}, cwd: ${{event.repo}}"
@@ -66,6 +72,7 @@ nodes:
 
   # === ROUTE (LLM recommends, engine enforces) ===
   craft_triage_message:
+    label: Triage Update
     type: manager
     prompt: |
       Triage complete for ${{event.issue_id}} "${{event.title}}".
@@ -75,6 +82,7 @@ nodes:
     depends_on: [triage]
 
   post_slack_triage:
+    label: Post Slack
     type: action
     action: slack.post
     params:
@@ -83,6 +91,7 @@ nodes:
     depends_on: [craft_triage_message]
 
   assess_route:
+    label: Assess
     type: manager
     prompt: |
       Triage for ${{event.issue_id}} found complexity=${{triage.complexity}},
@@ -94,6 +103,7 @@ nodes:
     depends_on: [triage]
 
   route:
+    label: Route
     type: gate
     depends_on: [assess_route]
     branches:
@@ -105,6 +115,7 @@ nodes:
 
   # === SPEC (conditional on medium/large) ===
   spec:
+    label: Spec
     type: prompt
     session: ${{event.issue_id | lower}}
     inject: >
@@ -121,6 +132,7 @@ nodes:
     when: "${{route.branch}} == 'needs_spec'"
 
   craft_spec_message:
+    label: Spec Update
     type: manager
     prompt: |
       Spec complete for ${{event.issue_id}} "${{event.title}}".
@@ -132,6 +144,7 @@ nodes:
     when: "${{route.branch}} == 'needs_spec'"
 
   post_slack_spec_ready:
+    label: Post Slack
     type: action
     action: slack.post
     params:
@@ -141,6 +154,7 @@ nodes:
     when: "${{route.branch}} == 'needs_spec'"
 
   comment_ticket_spec:
+    label: Comment
     type: action
     action: ticket.comment
     params:
@@ -151,6 +165,7 @@ nodes:
     when: "${{route.branch}} == 'needs_spec'"
 
   spec_approval:
+    label: Approval
     type: approval
     listen_for:
       source: slack
@@ -162,6 +177,7 @@ nodes:
 
   # === IMPLEMENT ===
   craft_implement_message:
+    label: Implement Update
     type: manager
     prompt: |
       Starting implementation for ${{event.issue_id}} "${{event.title}}".
@@ -172,6 +188,7 @@ nodes:
     when: "${{spec_approval.approved}} == true or ${{route.branch}} == 'skip_spec'"
 
   post_slack_implement:
+    label: Post Slack
     type: action
     action: slack.post
     params:
@@ -180,6 +197,7 @@ nodes:
     depends_on: [craft_implement_message]
 
   implement:
+    label: Implement
     type: prompt
     session: ${{event.issue_id | lower}}
     inject: "/implement ${{event.issue_id}}"
@@ -190,6 +208,7 @@ nodes:
 
   # === PREPARE PR ===
   prepare_pr:
+    label: Prepare PR
     type: prompt
     session: ${{event.issue_id | lower}}
     inject: "/prepare-pr"
@@ -201,6 +220,7 @@ nodes:
       pr_url: ${{handoff.pr_url}}
 
   craft_pr_message:
+    label: PR Update
     type: manager
     prompt: |
       PR created for ${{event.issue_id}} "${{event.title}}": ${{prepare_pr.pr_url}}.
@@ -209,6 +229,7 @@ nodes:
     depends_on: [prepare_pr]
 
   post_slack_pr_ready:
+    label: Post Slack
     type: action
     action: slack.post
     params:
@@ -217,6 +238,7 @@ nodes:
     depends_on: [craft_pr_message]
 
   move_to_in_review:
+    label: In Review
     type: action
     action: ticket.move
     params:
@@ -226,6 +248,7 @@ nodes:
     depends_on: [prepare_pr]
 
   comment_ticket_pr:
+    label: Comment
     type: action
     action: ticket.comment
     params:

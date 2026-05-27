@@ -67,6 +67,14 @@ async def api_sources():
 # Pause / Resume
 # ---------------------------------------------------------------------------
 
+@app.get("/api/workflow/{issue_id}")
+async def api_workflow_progress(issue_id: str):
+    progress = data.get_workflow_progress(issue_id)
+    if not progress:
+        return {"progress": None}
+    return {"progress": progress}
+
+
 @app.post("/api/sessions/{name}/pause")
 async def api_pause(name: str):
     pause_session(name)
@@ -77,6 +85,16 @@ async def api_pause(name: str):
 async def api_resume(name: str):
     resume_session(name)
     return {"ok": True, "paused": False}
+
+
+@app.post("/api/sessions/{name}/kill")
+async def api_kill_session(name: str):
+    from modastack.tmux import kill_session as tmux_kill, has_session as tmux_has
+    if not tmux_has(name):
+        return {"ok": False, "error": "session not found"}
+    tmux_kill(name)
+    resume_session(name)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +111,10 @@ async def ws_terminal(ws: WebSocket, session_name: str):
         return
 
     master_fd, slave_fd = pty.openpty()
+
+    # Set initial PTY size to something reasonable
+    winsize = struct.pack("HHHH", 40, 160, 0, 0)
+    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
 
     proc = subprocess.Popen(
         [TMUX, "attach-session", "-t", session_name],
@@ -149,6 +171,7 @@ async def ws_terminal(ws: WebSocket, session_name: str):
                             "HHHH", obj["rows"], obj["cols"], 0, 0
                         )
                         fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+                        os.kill(proc.pid, signal.SIGWINCH)
                         continue
                 except (json.JSONDecodeError, KeyError):
                     pass
