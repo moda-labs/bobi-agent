@@ -105,26 +105,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .card-workflow {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    font-size: 10px;
-    flex-wrap: wrap;
-    margin-top: 6px;
-  }
-  .wf-node {
-    padding: 1px 5px;
-    border-radius: 6px;
-    white-space: nowrap;
-    font-weight: 500;
-  }
-  .wf-completed { background: rgba(63,185,80,0.15); color: var(--green); }
-  .wf-running, .wf-waiting { background: rgba(88,166,255,0.2); color: var(--accent); }
-  .wf-failed { background: rgba(248,81,73,0.15); color: var(--red); }
-  .wf-skipped { display: none; }
-  .wf-pending { color: var(--text-muted); opacity: 0.5; }
-  .wf-arrow { color: var(--text-muted); opacity: 0.3; font-size: 9px; }
   .empty-state {
     padding: 24px 16px;
     color: var(--text-muted);
@@ -272,16 +252,72 @@
   }
   .terminal-toolbar .session-label { font-weight: 600; font-family: monospace; }
   .terminal-toolbar .spacer { flex: 1; }
-  .terminal-toolbar .workflow-progress {
+  .terminal-content {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    min-height: 0;
+  }
+  .terminal-body { flex: 1; overflow: hidden; position: relative; min-width: 0; }
+  .terminal-body .xterm { height: 100%; width: 100%; }
+
+  /* Workflow DAG panel */
+  .workflow-panel {
+    width: 180px;
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    overflow-y: auto;
+    padding: 16px 12px;
+    flex-shrink: 0;
+  }
+  .workflow-panel.hidden { display: none; }
+  .workflow-panel-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+  }
+  .dag-node {
     display: flex;
     align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    overflow-x: auto;
-    max-width: 50%;
+    gap: 10px;
+    padding: 4px 0;
+    font-size: 12px;
   }
-  .terminal-body { flex: 1; overflow: hidden; position: relative; width: 100%; min-width: 0; }
-  .terminal-body .xterm { height: 100%; width: 100%; }
+  .dag-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .dag-icon.completed { background: var(--green); color: var(--bg); }
+  .dag-icon.running, .dag-icon.waiting { background: var(--accent); color: var(--bg); animation: pulse 1.5s infinite; }
+  .dag-icon.failed { background: var(--red); color: var(--bg); }
+  .dag-icon.pending { background: var(--border); color: var(--text-muted); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .dag-label { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dag-label.pending { color: var(--text-muted); opacity: 0.5; }
+  .dag-label.running, .dag-label.waiting { color: var(--accent); font-weight: 600; }
+  .dag-connector {
+    width: 18px;
+    display: flex;
+    justify-content: center;
+    padding: 0;
+  }
+  .dag-connector .dag-line {
+    width: 2px;
+    height: 10px;
+    background: var(--border);
+  }
+  .dag-connector.completed .dag-line { background: var(--green); }
+  .dag-connector.active .dag-line { background: var(--accent); }
 </style>
 </head>
 <body>
@@ -318,12 +354,17 @@
     <div class="terminal-view" id="terminal-view">
       <div class="terminal-toolbar">
         <span class="session-label" id="terminal-label"></span>
-        <div class="workflow-progress" id="workflow-progress"></div>
         <span class="spacer"></span>
         <button class="btn-pause" id="btn-pause">Take Control</button>
         <button id="btn-kill" style="border-color:var(--red);color:var(--red)">Close Session</button>
       </div>
-      <div class="terminal-body" id="terminal-body"></div>
+      <div class="terminal-content">
+        <div class="terminal-body" id="terminal-body"></div>
+        <div class="workflow-panel hidden" id="workflow-panel">
+          <div class="workflow-panel-title">Workflow</div>
+          <div id="workflow-dag"></div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -340,7 +381,6 @@ let currentFit = null;
 let currentSession = null;
 let resizeHandler = null;
 let lastStatus = null;
-let workflowCache = {};
 
 function esc(s) {
   const d = document.createElement('div');
@@ -372,14 +412,6 @@ function eventDetail(data) {
 }
 async function fetchJSON(url) { return (await fetch(url)).json(); }
 
-function renderWorkflowNodes(nodes) {
-  if (!nodes || !nodes.length) return '';
-  const visible = nodes.filter(n => n.status !== 'skipped');
-  return visible.map((n, i) => {
-    const arrow = i < visible.length - 1 ? '<span class="wf-arrow">&rarr;</span>' : '';
-    return `<span class="wf-node wf-${n.status}">${esc(n.label || n.id)}</span>${arrow}`;
-  }).join('');
-}
 
 // ---------------------------------------------------------------------------
 // View switching
@@ -475,6 +507,7 @@ function openTerminal(sessionName) {
 
   syncPauseButton();
   loadWorkflowProgress();
+  document.getElementById('btn-kill').style.display = sessionName === 'moda-manager' ? 'none' : '';
 }
 
 function closeTerminal(keepView) {
@@ -484,6 +517,7 @@ function closeTerminal(keepView) {
   currentFit = null;
   currentSession = null;
   document.getElementById('terminal-body').innerHTML = '';
+  document.getElementById('workflow-panel').classList.add('hidden');
   if (!keepView) {
     document.getElementById('terminal-view').classList.remove('active');
   }
@@ -531,26 +565,39 @@ function syncPauseButton() {
 // ---------------------------------------------------------------------------
 
 async function loadWorkflowProgress() {
-  const el = document.getElementById('workflow-progress');
-  if (!currentSession || currentSession === 'moda-manager') { el.innerHTML = ''; return; }
+  const panel = document.getElementById('workflow-panel');
+  const dag = document.getElementById('workflow-dag');
+  if (!currentSession || currentSession === 'moda-manager') {
+    panel.classList.add('hidden');
+    return;
+  }
   const issueId = currentSession.replace('moda-', '');
   try {
     const d = await fetchJSON(`/api/workflow/${issueId}`);
-    if (!d.progress) { el.innerHTML = ''; return; }
-    el.innerHTML = renderWorkflowNodes(d.progress.nodes);
-  } catch (e) { el.innerHTML = ''; }
+    if (!d.progress) { panel.classList.add('hidden'); return; }
+    const nodes = d.progress.nodes.filter(n => n.status !== 'skipped');
+    if (!nodes.length) { panel.classList.add('hidden'); return; }
+
+    const icons = { completed: '&#10003;', running: '&#9679;', waiting: '&#9679;', failed: '&#10007;', pending: '' };
+    let html = '';
+    nodes.forEach((n, i) => {
+      const icon = icons[n.status] || '';
+      html += `<div class="dag-node">
+        <div class="dag-icon ${n.status}">${icon}</div>
+        <span class="dag-label ${n.status}">${esc(n.label || n.id)}</span>
+      </div>`;
+      if (i < nodes.length - 1) {
+        const connClass = n.status === 'completed' ? 'completed' : (n.status === 'running' || n.status === 'waiting' ? 'active' : '');
+        html += `<div class="dag-connector ${connClass}"><div class="dag-line"></div></div>`;
+      }
+    });
+    dag.innerHTML = html;
+    panel.classList.remove('hidden');
+    // Refit terminal since panel changed width
+    if (currentFit) setTimeout(() => currentFit.fit(), 50);
+  } catch (e) { panel.classList.add('hidden'); }
 }
 
-async function loadAllWorkflows() {
-  if (!lastStatus) return;
-  for (const s of lastStatus.sessions) {
-    const issueId = s.name.replace('moda-', '');
-    try {
-      const d = await fetchJSON(`/api/workflow/${issueId}`);
-      workflowCache[s.name] = d.progress;
-    } catch (e) { workflowCache[s.name] = null; }
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Data loading
@@ -579,8 +626,6 @@ async function loadStatus() {
 
     // Engineer cards
     html += d.sessions.map(s => {
-      const wf = workflowCache[s.name];
-      const wfHtml = wf ? renderWorkflowNodes(wf.nodes) : '';
       return `<div class="session-card ${currentSession === s.name && currentView === 'terminal' ? 'active' : ''} ${s.paused ? 'paused' : ''}"
                     data-session="${esc(s.name)}" onclick="openTerminal('${esc(s.name)}')">
         <div class="card-header">
@@ -590,7 +635,6 @@ async function loadStatus() {
           ${s.paused ? '<span class="pause-badge">PAUSED</span>' : ''}
         </div>
         ${s.last_line ? `<div class="card-detail">${esc(s.last_line)}</div>` : ''}
-        ${wfHtml ? `<div class="card-workflow">${wfHtml}</div>` : ''}
       </div>`;
     }).join('');
 
@@ -685,8 +729,6 @@ document.getElementById('filter-type').addEventListener('input', () => { offset 
 
 async function refreshAll() {
   await loadStatus();
-  await loadAllWorkflows();
-  loadStatus();
   if (currentSession && currentView === 'terminal') loadWorkflowProgress();
 }
 

@@ -25,8 +25,24 @@ log = logging.getLogger(__name__)
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
 SESSION_NAME = "moda-manager"
 SESSION_ID_PATH = Path.home() / ".modastack" / "manager" / "session_id"
-MANAGER_PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "roles" / "manager" / "prompt.md"
+_ROLES_DIR = Path(__file__).resolve().parent.parent.parent / "roles" / "manager"
+MANAGER_PROMPT_PATH = _ROLES_DIR / "prompt.md"
 ACTIVITY_LOG = Path.home() / ".modastack" / "manager" / "activity.jsonl"
+
+
+def _load_manager_prompt() -> str:
+    """Load core prompt + role-specific prompt based on config."""
+    core = MANAGER_PROMPT_PATH.read_text()
+    role_name = "engineering"
+    try:
+        config = GlobalConfig.load()
+        role_name = getattr(config, "manager_role", None) or "engineering"
+    except Exception:
+        pass
+    role_path = _ROLES_DIR / f"{role_name}.md"
+    if role_path.exists():
+        core += "\n\n" + role_path.read_text()
+    return core
 
 
 def _session_exists() -> bool:
@@ -160,7 +176,7 @@ def start_or_resume(cwd: str = None) -> bool:
 
 def _inject_startup_prompt() -> None:
     """Write the startup prompt to a file and inject a read instruction."""
-    prompt = MANAGER_PROMPT_PATH.read_text()
+    prompt = _load_manager_prompt()
     config = GlobalConfig.load()
     repos = ", ".join(p.name for p in config.repos)
 
@@ -170,11 +186,11 @@ def _inject_startup_prompt() -> None:
         f"# Startup Instructions\n\n"
         f"You are the Modastack manager. "
         f"Slack is your primary communication channel — post status updates, ask "
-        f"questions, and reply to DMs there. Use send_slack actions or call the "
-        f"Slack API directly. Your Slack DM channel with Zach is D0B51JP1N4C. "
+        f"questions, and reply to DMs there. Use the Slack API directly via curl. "
+        f"Your Slack DM channel with Zach is D0B51JP1N4C. "
         f"You are managing these repos: {repos}. "
         f"From now on, I will send you batches of events. For each batch, "
-        f"respond with a JSON array of actions, or use tools directly. "
+        f"act directly using your tools. "
         f"Start by posting a brief startup message to Slack saying you're online "
         f"and summarizing the current state.\n\n{prompt}"
     )
@@ -232,8 +248,12 @@ def _capture_session_id() -> None:
 
 
 def _send_keys(text: str) -> bool:
-    """Send text into the tmux pane with locking, length routing, and paste verification."""
-    return send_text(SESSION_NAME, text)
+    """Send text into the tmux pane with locking and length routing.
+
+    Skips paste verification — the manager session uses Claude Code's
+    input prompt which doesn't reliably echo text before submission.
+    """
+    return send_text(SESSION_NAME, text, verify=False)
 
 
 def inject(text: str) -> bool:

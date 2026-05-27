@@ -5,6 +5,11 @@
 ### Added
 - Documentation: composable skills principle, workflow resolution chain (repo > user > default), and event normalization table (GitHub Issues + Linear to task.* format)
 
+## 0.3.2.1 — 2026-05-27
+
+### Fixed
+- README phase routing table and handoff example now use the correct `implement_complete` phase name (was `implementation_complete`)
+
 ## 0.3.2 — 2026-05-26
 
 ### Added

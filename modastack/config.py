@@ -80,6 +80,9 @@ class GlobalConfig:
     github_default_account: str = ""
     github_accounts: dict[str, str] = field(default_factory=dict)
 
+    # Manager role (loads roles/manager/<role>.md)
+    manager_role: str = "engineering"
+
     @classmethod
     def load(cls) -> "GlobalConfig":
         if not GLOBAL_CONFIG_PATH.exists():
@@ -91,6 +94,8 @@ class GlobalConfig:
         webhooks = raw.get("webhooks", {})
         github = raw.get("github", {})
 
+        manager = raw.get("manager", {})
+
         return cls(
             repos=repos,
             slack_bot_token=slack.get("bot_token", "") or raw.get("slack_bot_token", ""),
@@ -99,6 +104,7 @@ class GlobalConfig:
             public_url=webhooks.get("public_url", ""),
             github_default_account=github.get("default_account", ""),
             github_accounts=github.get("accounts", {}),
+            manager_role=manager.get("role", "engineering"),
         )
 
     def save(self) -> None:
