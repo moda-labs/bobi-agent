@@ -242,20 +242,9 @@ class WorkflowEngine:
 
         prompt_text = self.ctx.resolve(node.prompt)
 
-        # Prefetch: search history using the prompt as query
         memory_context = _prefetch_history(prompt_text)
 
-        preamble = (
-            "[WORKFLOW ENGINE CONSULTATION] "
-            "The workflow engine is asking for your reasoning. "
-            "You have full freedom to use tools for research — read files, "
-            "search history (modastack history search), check git, browse "
-            "the web — anything that helps you give a better answer. "
-            "But do NOT take orchestration actions: no spawning sessions, "
-            "no injecting into engineers, no posting to Slack, no moving "
-            "tickets, no running modastack commands. The engine handles all "
-            "orchestration. Just output your best answer as plain text. --- "
-        )
+        preamble = "[WORKFLOW CONSULTATION — reply with plain text only] "
         full_prompt = preamble + prompt_text
         if memory_context:
             full_prompt += " " + memory_context
@@ -375,17 +364,29 @@ class WorkflowEngine:
         return {}
 
 
-def _prefetch_history(prompt_text: str, max_results: int = 3) -> str:
-    """Search conversation history using the prompt as query.
+HISTORY_STOPWORDS = {
+    "workflow", "engine", "consultation", "freedom", "research",
+    "orchestration", "spawning", "sessions", "injecting", "engineers",
+    "posting", "slack", "moving", "tickets", "running", "modastack",
+    "commands", "handles", "output", "plain", "nothing", "reply",
+    "message", "channel", "draft", "brief", "sentences",
+}
 
-    Returns a <memory-context> block that gets appended to the consultation.
-    The manager knows this is recalled context, not new instructions.
+
+def _prefetch_history(prompt_text: str, max_results: int = 3) -> str:
+    """Search conversation history using the actual content of the prompt.
+
+    Filters out common workflow/preamble words to avoid matching
+    previous consultation prompts instead of real context.
     """
     try:
         from modastack.history import search
 
         words = prompt_text.split()
-        query_words = [w for w in words if len(w) > 4 and w.isalpha()][:8]
+        query_words = [
+            w for w in words
+            if len(w) > 4 and w.isalpha() and w.lower() not in HISTORY_STOPWORDS
+        ][:8]
         if not query_words:
             return ""
 
