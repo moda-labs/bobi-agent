@@ -216,7 +216,7 @@ class TestSendKeys:
     @patch("modastack.manager.session.send_text", return_value=True)
     def test_success(self, mock_send):
         assert _send_keys("hello world") is True
-        mock_send.assert_called_once_with("moda-manager", "hello world")
+        mock_send.assert_called_once_with("moda-manager", "hello world", verify=False)
 
     @patch("modastack.manager.session.send_text", return_value=False)
     def test_returns_false_on_failure(self, mock_send):

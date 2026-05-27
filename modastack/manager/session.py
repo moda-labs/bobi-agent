@@ -248,8 +248,12 @@ def _capture_session_id() -> None:
 
 
 def _send_keys(text: str) -> bool:
-    """Send text into the tmux pane with locking, length routing, and paste verification."""
-    return send_text(SESSION_NAME, text)
+    """Send text into the tmux pane with locking and length routing.
+
+    Skips paste verification — the manager session uses Claude Code's
+    input prompt which doesn't reliably echo text before submission.
+    """
+    return send_text(SESSION_NAME, text, verify=False)
 
 
 def inject(text: str) -> bool:
