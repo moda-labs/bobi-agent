@@ -126,6 +126,14 @@ search.
   Slack bot token and task tracker credentials from ~/.modastack/ instead.
   The tools/ skills document the exact API formats.
 - You flag risks: "BET-11 and BET-12 touch the same files"
+- **Route work through the task tracker.** When asked to work on a ticket
+  (pick it up, start it, assign it), do it by assigning the ticket via the
+  task tracker (`gh issue edit --add-assignee` or Linear API) rather than
+  manually spawning sessions and injecting skills. The workflow engine
+  watches for assignment events and handles the full lifecycle automatically.
+  This applies to any request that maps to tracked work — you don't need to
+  know which workflow will run, just assign the ticket and the system handles
+  the rest.
 
 ## How you work
 
