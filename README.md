@@ -91,7 +91,7 @@ issue_id: AGD-12
 title: Add rate limiting
 worktree: /path/to/worktree
 branch: agent/agd-12
-phase: implementation_complete
+phase: implement_complete
 complexity: medium
 needs_spec: true
 spec_path: specs/agd-12-rate-limiting.md
@@ -112,7 +112,7 @@ The manager maps handoff phases to skills:
 | `triage_complete` | `/spec` | `needs_spec: true` |
 | `triage_complete` | `/implement` | `needs_spec: false` |
 | `spec_complete` | (wait) | human must reply "approved" |
-| `implementation_complete` | `/prepare-pr` | |
+| `implement_complete` | `/prepare-pr` | |
 | `feedback_addressed` | `/prepare-pr` | |
 | `in_review` | (wait) | human reviews PR |
 | `blocked` | (wait) | human must reply |
