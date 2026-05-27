@@ -1,4 +1,4 @@
-"""Tests for tmux primitives — pure-function state detection, send routing, paste verification."""
+"""Tests for tmux primitives — pure-function state detection, send routing, paste verification, pause."""
 
 import re
 from unittest.mock import patch, MagicMock
@@ -8,6 +8,9 @@ from modastack.tmux import (
     _normalize_for_match,
     _verify_paste,
     send_text,
+    is_paused,
+    pause_session,
+    resume_session,
     LONG_MESSAGE_THRESHOLD,
 )
 
@@ -188,3 +191,34 @@ class TestSendTextRouting:
     def test_skip_verify(self, mock_short, mock_enter):
         result = send_text("test-session", "hello", verify=False)
         assert result is True
+
+    @patch("modastack.tmux._send_short")
+    @patch("modastack.tmux.is_paused", return_value=True)
+    def test_blocked_when_paused(self, mock_paused, mock_short):
+        result = send_text("test-session", "hello")
+        assert result is False
+        mock_short.assert_not_called()
+
+
+class TestPauseResume:
+
+    def test_not_paused_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.tmux.PAUSED_DIR", tmp_path / "paused")
+        assert is_paused("moda-test") is False
+
+    def test_pause_creates_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.tmux.PAUSED_DIR", tmp_path / "paused")
+        pause_session("moda-test")
+        assert (tmp_path / "paused" / "moda-test").exists()
+        assert is_paused("moda-test") is True
+
+    def test_resume_removes_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.tmux.PAUSED_DIR", tmp_path / "paused")
+        pause_session("moda-test")
+        resume_session("moda-test")
+        assert not (tmp_path / "paused" / "moda-test").exists()
+        assert is_paused("moda-test") is False
+
+    def test_resume_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.tmux.PAUSED_DIR", tmp_path / "paused")
+        resume_session("moda-test")  # no error even if not paused

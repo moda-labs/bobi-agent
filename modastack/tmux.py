@@ -26,6 +26,22 @@ PASTE_VERIFY_INTERVAL = 0.3
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
 LOCK_DIR = Path.home() / ".modastack" / "locks"
+PAUSED_DIR = Path.home() / ".modastack" / "paused"
+
+
+def is_paused(session_name: str) -> bool:
+    return (PAUSED_DIR / session_name).exists()
+
+
+def pause_session(session_name: str) -> None:
+    PAUSED_DIR.mkdir(parents=True, exist_ok=True)
+    (PAUSED_DIR / session_name).touch()
+    log.info(f"Session {session_name} paused")
+
+
+def resume_session(session_name: str) -> None:
+    (PAUSED_DIR / session_name).unlink(missing_ok=True)
+    log.info(f"Session {session_name} resumed")
 
 
 def has_session(session_name: str) -> bool:
@@ -150,14 +166,11 @@ def _send_enter(session_name: str) -> None:
 def send_text(session_name: str, text: str, verify: bool = True) -> bool:
     """Send text into a tmux session with locking, length routing, and verification.
 
-    1. Acquire file lock (prevents concurrent injections from interleaving)
-    2. Collapse newlines (Claude Code input is single-line)
-    3. Route by length: send-keys for short, load-buffer for long
-    4. Verify paste landed (fuzzy content match)
-    5. Send Enter twice to submit
-
-    Returns True if the text was sent and (optionally) verified.
+    Returns False immediately if the session is paused (human is driving).
     """
+    if is_paused(session_name):
+        log.warning(f"Session {session_name} is paused — injection blocked")
+        return False
     collapsed = " ".join(text.splitlines())
 
     LOCK_DIR.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from modastack.tmux import is_paused
+
 EVENTS_PATH = Path.home() / ".modastack" / "manager" / "events.jsonl"
 DECISIONS_PATH = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
 TMUX = shutil.which("tmux") or "tmux"
@@ -104,6 +106,7 @@ def get_sessions() -> list[dict]:
             "issue_id": name.replace("moda-", "").upper(),
             "state": state,
             "last_line": last_line,
+            "paused": is_paused(name),
         })
     return sessions
 
@@ -133,7 +136,7 @@ def get_manager_status() -> dict:
                     state = "waiting_input"
                 break
 
-    return {"alive": alive, "state": state}
+    return {"alive": alive, "state": state, "paused": is_paused("moda-manager")}
 
 
 def get_event_sources() -> list[str]:

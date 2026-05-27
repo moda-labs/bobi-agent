@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>modastack</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <style>
   :root {
     --bg: #0d1117;
@@ -77,7 +80,11 @@
   .session {
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
+    cursor: pointer;
   }
+  .session:hover { background: var(--surface); }
+  .session.active { background: var(--surface); border-left: 3px solid var(--accent); }
+  .session.paused { opacity: 0.7; }
   .session-name {
     font-weight: 600;
     font-size: 13px;
@@ -95,6 +102,14 @@
   .state-waiting_input { background: rgba(63,185,80,0.15); color: var(--green); }
   .state-asking_question { background: rgba(210,153,34,0.15); color: var(--yellow); }
   .state-exited { background: rgba(248,81,73,0.15); color: var(--red); }
+  .pause-badge {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: rgba(210,153,34,0.2);
+    color: var(--yellow);
+    margin-left: auto;
+  }
   .session-detail {
     font-size: 12px;
     color: var(--text-muted);
@@ -115,6 +130,10 @@
     flex-direction: column;
     overflow: hidden;
   }
+
+  /* Event view (default) */
+  .event-view { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+  .event-view.hidden { display: none; }
 
   .filters {
     display: flex;
@@ -229,6 +248,46 @@
     color: var(--text-muted);
     font-size: 12px;
   }
+
+  /* Terminal view */
+  .terminal-container { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+  .terminal-container.active { display: flex; }
+  .terminal-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 13px;
+  }
+  .terminal-toolbar button {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .terminal-toolbar button:hover { border-color: var(--accent); }
+  .terminal-toolbar .btn-pause.paused {
+    background: rgba(210,153,34,0.2);
+    border-color: var(--yellow);
+    color: var(--yellow);
+  }
+  .terminal-toolbar .back-link {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: none;
+    font-size: 13px;
+  }
+  .terminal-toolbar .session-label {
+    font-weight: 600;
+    font-family: monospace;
+  }
+  .terminal-toolbar .spacer { flex: 1; }
+  .terminal-body { flex: 1; overflow: hidden; padding: 4px; }
 </style>
 </head>
 <body>
@@ -244,23 +303,35 @@
 
 <div class="layout">
   <div class="panel">
-    <div class="panel-header">Active Sessions</div>
+    <div class="panel-header">Sessions</div>
     <div id="sessions"></div>
   </div>
 
   <div class="main">
-    <div class="filters">
-      <label>Source</label>
-      <select id="filter-source"><option value="">All</option></select>
-      <label>Type</label>
-      <input id="filter-type" type="text" placeholder="e.g. slack.dm" size="16">
-      <span class="event-count" id="event-count"></span>
+    <div class="event-view" id="event-view">
+      <div class="filters">
+        <label>Source</label>
+        <select id="filter-source"><option value="">All</option></select>
+        <label>Type</label>
+        <input id="filter-type" type="text" placeholder="e.g. slack.dm" size="16">
+        <span class="event-count" id="event-count"></span>
+      </div>
+      <div class="event-log" id="event-log"></div>
+      <div class="pagination">
+        <button id="btn-newer" disabled>&larr; Newer</button>
+        <span id="page-info" style="font-size:12px;color:var(--text-muted);padding:4px 8px"></span>
+        <button id="btn-older">Older &rarr;</button>
+      </div>
     </div>
-    <div class="event-log" id="event-log"></div>
-    <div class="pagination">
-      <button id="btn-newer" disabled>&larr; Newer</button>
-      <span id="page-info" style="font-size:12px;color:var(--text-muted);padding:4px 8px"></span>
-      <button id="btn-older">Older &rarr;</button>
+
+    <div class="terminal-container" id="terminal-container">
+      <div class="terminal-toolbar">
+        <a class="back-link" id="back-to-events">&larr; Events</a>
+        <span class="session-label" id="terminal-label"></span>
+        <span class="spacer"></span>
+        <button class="btn-pause" id="btn-pause">Pause</button>
+      </div>
+      <div class="terminal-body" id="terminal-body"></div>
     </div>
   </div>
 
@@ -274,6 +345,14 @@
 const PAGE_SIZE = 50;
 let offset = 0;
 let totalEvents = 0;
+
+// Terminal state
+let currentTerminal = null;
+let currentWs = null;
+let currentFit = null;
+let currentSession = null;
+let resizeHandler = null;
+let lastStatus = null;
 
 function esc(s) {
   const d = document.createElement('div');
@@ -306,29 +385,182 @@ async function fetchJSON(url) {
   return res.json();
 }
 
+// ---------------------------------------------------------------------------
+// Terminal
+// ---------------------------------------------------------------------------
+
+function openTerminal(sessionName) {
+  closeTerminal();
+  currentSession = sessionName;
+
+  document.getElementById('event-view').classList.add('hidden');
+  document.getElementById('terminal-container').classList.add('active');
+  document.getElementById('terminal-label').textContent = sessionName;
+
+  // Update sidebar selection
+  document.querySelectorAll('.session').forEach(el => {
+    el.classList.toggle('active', el.dataset.session === sessionName);
+  });
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: "'Menlo', 'Monaco', 'Courier New', monospace",
+    theme: {
+      background: '#0d1117',
+      foreground: '#e6edf3',
+      cursor: '#58a6ff',
+      selectionBackground: '#264f78',
+    },
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+
+  const container = document.getElementById('terminal-body');
+  container.innerHTML = '';
+  term.open(container);
+  fitAddon.fit();
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws/terminal/${sessionName}`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    fitAddon.fit();
+  };
+
+  ws.onmessage = (e) => {
+    term.write(new Uint8Array(e.data));
+  };
+
+  ws.onclose = () => {
+    term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
+  };
+
+  term.onData((data) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(data);
+    }
+  });
+
+  term.onResize(({ cols, rows }) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    }
+  });
+
+  resizeHandler = () => fitAddon.fit();
+  window.addEventListener('resize', resizeHandler);
+
+  currentTerminal = term;
+  currentWs = ws;
+  currentFit = fitAddon;
+
+  syncPauseButton();
+}
+
+function closeTerminal() {
+  if (currentWs) {
+    currentWs.close();
+    currentWs = null;
+  }
+  if (currentTerminal) {
+    currentTerminal.dispose();
+    currentTerminal = null;
+  }
+  if (resizeHandler) {
+    window.removeEventListener('resize', resizeHandler);
+    resizeHandler = null;
+  }
+  currentFit = null;
+  currentSession = null;
+
+  document.getElementById('terminal-body').innerHTML = '';
+  document.getElementById('terminal-container').classList.remove('active');
+  document.getElementById('event-view').classList.remove('hidden');
+
+  document.querySelectorAll('.session').forEach(el => el.classList.remove('active'));
+}
+
+// ---------------------------------------------------------------------------
+// Pause / Resume
+// ---------------------------------------------------------------------------
+
+function getSessionPaused(sessionName) {
+  if (!lastStatus) return false;
+  if (sessionName === 'moda-manager') return lastStatus.manager.paused;
+  const s = lastStatus.sessions.find(s => s.name === sessionName);
+  return s ? s.paused : false;
+}
+
+async function togglePause() {
+  if (!currentSession) return;
+  const paused = getSessionPaused(currentSession);
+  const endpoint = paused ? 'resume' : 'pause';
+  await fetch(`/api/sessions/${currentSession}/${endpoint}`, { method: 'POST' });
+  await loadStatus();
+  syncPauseButton();
+}
+
+function syncPauseButton() {
+  const btn = document.getElementById('btn-pause');
+  if (!currentSession) return;
+  const paused = getSessionPaused(currentSession);
+  btn.textContent = paused ? 'Resume' : 'Pause';
+  btn.classList.toggle('paused', paused);
+}
+
+// ---------------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------------
+
 async function loadStatus() {
   try {
     const d = await fetchJSON('/api/status');
+    lastStatus = d;
+
     const dot = document.getElementById('mgr-dot');
     const state = document.getElementById('mgr-state');
     dot.className = 'dot ' + (d.manager.alive ? 'alive' : 'dead');
     state.textContent = d.manager.alive ? d.manager.state : 'offline';
 
     const el = document.getElementById('sessions');
-    if (!d.sessions.length) {
-      el.innerHTML = '<div class="empty-state">No active sessions</div>';
+    let html = '';
+
+    // Manager entry
+    if (d.manager.alive) {
+      const mgrActive = currentSession === 'moda-manager' ? 'active' : '';
+      const mgrPaused = d.manager.paused ? 'paused' : '';
+      html += `<div class="session ${mgrActive} ${mgrPaused}" data-session="moda-manager" onclick="openTerminal('moda-manager')">
+        <div class="session-name">
+          <span class="dot alive"></span>
+          Manager
+          <span class="session-state ${stateClass(d.manager.state)}">${esc(d.manager.state)}</span>
+          ${d.manager.paused ? '<span class="pause-badge">PAUSED</span>' : ''}
+        </div>
+      </div>`;
+    }
+
+    if (!d.sessions.length && !d.manager.alive) {
+      html += '<div class="empty-state">No active sessions</div>';
     } else {
-      el.innerHTML = d.sessions.map(s =>
-        `<div class="session">
+      html += d.sessions.map(s => {
+        const active = currentSession === s.name ? 'active' : '';
+        const paused = s.paused ? 'paused' : '';
+        return `<div class="session ${active} ${paused}" data-session="${esc(s.name)}" onclick="openTerminal('${esc(s.name)}')">
           <div class="session-name">
             <span class="dot ${s.state === 'exited' ? 'dead' : 'alive'}"></span>
-            ${esc(s.name)}
+            ${esc(s.issue_id)}
             <span class="session-state ${stateClass(s.state)}">${esc(s.state)}</span>
+            ${s.paused ? '<span class="pause-badge">PAUSED</span>' : ''}
           </div>
           ${s.last_line ? `<div class="session-detail">${esc(s.last_line)}</div>` : ''}
-        </div>`
-      ).join('');
+        </div>`;
+      }).join('');
     }
+    el.innerHTML = html;
+
+    if (currentSession) syncPauseButton();
   } catch (e) {
     document.getElementById('mgr-state').textContent = 'fetch error';
   }
@@ -409,6 +641,12 @@ async function loadSources() {
   } catch (e) {}
 }
 
+// ---------------------------------------------------------------------------
+// Event listeners
+// ---------------------------------------------------------------------------
+
+document.getElementById('back-to-events').addEventListener('click', closeTerminal);
+document.getElementById('btn-pause').addEventListener('click', togglePause);
 document.getElementById('btn-newer').addEventListener('click', () => {
   offset = Math.max(0, offset - PAGE_SIZE);
   loadEvents();
