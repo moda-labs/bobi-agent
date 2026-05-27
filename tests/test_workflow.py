@@ -380,6 +380,100 @@ class TestEngineExecution:
         assert run.nodes["gate"].outputs["branch"] == "a"
 
 
+class TestRepoScope:
+    """Test that per-repo context from .modastack.yaml is injected as ${{repo.key}}."""
+
+    def _make_workflow(self, nodes):
+        return WorkflowDef(
+            name="test", version=1,
+            trigger=TriggerDef(event="test"),
+            nodes=nodes,
+        )
+
+    def test_repo_context_injected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+
+        # Create a repo with .modastack.yaml containing context
+        repo_dir = tmp_path / "myrepo"
+        repo_dir.mkdir()
+        (repo_dir / ".modastack.yaml").write_text(yaml.dump({
+            "task_tracking": {"system": "github-issues", "project": "TEST"},
+            "context": {
+                "content_dir": "docs/blog",
+                "publish_command": "npm run publish",
+            },
+        }))
+
+        # Mock GlobalConfig to return our repo
+        mock_config = MagicMock()
+        mock_config.repos = [repo_dir]
+        mock_config.slack_bot_token = ""
+        mock_config.slack_dm_channel = ""
+        with patch("modastack.config.GlobalConfig.load", return_value=mock_config):
+            nodes = {
+                "step": NodeDef(id="step", type=NodeType.BASH,
+                               command="echo ${{repo.content_dir}}"),
+            }
+            wf = self._make_workflow(nodes)
+            event = {"type": "test", "data": {"repo": str(repo_dir)}}
+            run = WorkflowRun.create("test", event)
+            engine = WorkflowEngine(wf, run)
+            engine.execute()
+
+        assert run.nodes["step"].outputs["stdout"] == "docs/blog"
+
+    def test_repo_builtin_fields(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+
+        repo_dir = tmp_path / "myrepo"
+        repo_dir.mkdir()
+        (repo_dir / ".modastack.yaml").write_text(yaml.dump({
+            "task_tracking": {"system": "github-issues", "project": "DOCS"},
+            "verify": {"test_command": "pytest"},
+            "context": {},
+        }))
+
+        mock_config = MagicMock()
+        mock_config.repos = [repo_dir]
+        mock_config.slack_bot_token = ""
+        mock_config.slack_dm_channel = ""
+
+        with patch("modastack.config.GlobalConfig.load", return_value=mock_config):
+            nodes = {
+                "step": NodeDef(id="step", type=NodeType.BASH,
+                               command="echo ${{repo.project}}"),
+            }
+            wf = self._make_workflow(nodes)
+            event = {"type": "test", "data": {"repo": str(repo_dir)}}
+            run = WorkflowRun.create("test", event)
+            engine = WorkflowEngine(wf, run)
+            engine.execute()
+
+        assert run.nodes["step"].outputs["stdout"] == "DOCS"
+
+    def test_no_repo_scope_when_no_event_repo(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+
+        mock_config = MagicMock()
+        mock_config.repos = []
+        mock_config.slack_bot_token = ""
+        mock_config.slack_dm_channel = ""
+
+        with patch("modastack.config.GlobalConfig.load", return_value=mock_config):
+            nodes = {
+                "step": NodeDef(id="step", type=NodeType.BASH,
+                               command="echo ${{repo.content_dir}}"),
+            }
+            wf = self._make_workflow(nodes)
+            event = {"type": "test", "data": {}}
+            run = WorkflowRun.create("test", event)
+            engine = WorkflowEngine(wf, run)
+            engine.execute()
+
+        # Without repo scope, the variable resolves to empty string
+        assert run.nodes["step"].outputs["stdout"] == ""
+
+
 class TestExtractTaggedResponse:
     def test_extracts_tagged_content(self):
         raw = """

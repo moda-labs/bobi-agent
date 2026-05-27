@@ -599,26 +599,52 @@ def workflow():
 
 @workflow.command("list")
 def workflow_list():
-    """List available workflow definitions.
+    """List available workflow definitions from all sources.
 
-    Scans the workflows/ directory for YAML files and shows each workflow's
-    name, trigger event, and node count.
+    Scans three tiers in priority order:
+      1. Repo-local: <repo>/.modastack/workflows/
+      2. User: ~/.modastack/workflows/
+      3. Built-in: <modastack>/workflows/
 
     Usage:
         modastack workflow list
     """
     from .workflow.schema import load_workflow
-    workflows_dir = REPO_ROOT / "workflows"
-    if not workflows_dir.exists():
-        click.echo("No workflows directory found.")
-        return
-    for f in sorted(workflows_dir.glob("*.yaml")):
-        try:
-            wf = load_workflow(f)
-            click.echo(f"  {wf.name:30s} trigger={wf.trigger.event:20s} "
-                      f"nodes={len(wf.nodes)}")
-        except Exception as e:
-            click.echo(f"  {f.name:30s} ERROR: {e}")
+    from .workflow.triggers import WORKFLOWS_DIR, USER_WORKFLOWS_DIR
+
+    sources = []
+
+    # Repo-specific
+    config = GlobalConfig.load()
+    for repo_path in config.repos:
+        repo_wf_dir = repo_path / ".modastack" / "workflows"
+        if repo_wf_dir.exists():
+            sources.append((repo_wf_dir, f"repo:{repo_path.name}"))
+
+    # User overrides
+    if USER_WORKFLOWS_DIR.exists():
+        sources.append((USER_WORKFLOWS_DIR, "user"))
+
+    # Built-in defaults
+    sources.append((WORKFLOWS_DIR, "default"))
+
+    found = False
+    for directory, source in sources:
+        if not directory.exists():
+            continue
+        for f in sorted(directory.glob("*.yaml")):
+            found = True
+            try:
+                wf = load_workflow(f)
+                filters = ", ".join(f"{k}={v}" for k, v in wf.trigger.filter.items())
+                filter_str = f" [{filters}]" if filters else ""
+                click.echo(f"  {wf.name:25s} {source:15s} trigger={wf.trigger.event}{filter_str}  "
+                          f"nodes={len(wf.nodes)}")
+            except Exception as e:
+                click.echo(f"  {f.name:25s} {source:15s} ERROR: {e}")
+
+    if not found:
+        click.echo("No workflows found.")
 
 
 @workflow.command("status")
@@ -650,20 +676,41 @@ def workflow_status():
 def workflow_validate(path):
     """Validate a workflow YAML file.
 
-    Parses the YAML, checks the DAG structure, and prints the topological
-    execution order if valid.
+    Parses the YAML, checks the DAG structure, reports variable scopes used,
+    and prints the topological execution order if valid.
 
     Usage:
         modastack workflow validate workflows/deploy.yaml
+        modastack workflow validate myrepo/.modastack/workflows/deploy.yaml
     """
+    import re
     from .workflow.schema import load_workflow
     try:
         wf = load_workflow(Path(path))
         order = wf.topological_order()
-        click.echo(f"Valid: {wf.name} ({len(wf.nodes)} nodes)")
+        click.echo(f"Valid: {wf.name} v{wf.version} ({len(wf.nodes)} nodes)")
+        click.echo(f"Trigger: {wf.trigger.event}")
+        if wf.trigger.filter:
+            click.echo(f"Filter: {wf.trigger.filter}")
         click.echo(f"Execution order: {' -> '.join(order)}")
+
+        # Report variable scopes referenced
+        raw = Path(path).read_text()
+        refs = set(re.findall(r'\$\{\{(\w+)\.', raw))
+        builtin_scopes = {"event", "config", "repo", "handoff"} | set(wf.nodes.keys())
+        unknown = refs - builtin_scopes
+        click.echo(f"Variable scopes: {', '.join(sorted(refs))}")
+        if unknown:
+            click.echo(f"Warning: unknown scopes (may be node outputs): {', '.join(sorted(unknown))}")
+
+        # Show node types breakdown
+        from collections import Counter
+        type_counts = Counter(n.type.value for n in wf.nodes.values())
+        click.echo(f"Node types: {', '.join(f'{t}={c}' for t, c in sorted(type_counts.items()))}")
+
     except Exception as e:
-        click.echo(f"Invalid: {e}")
+        click.echo(f"Invalid: {e}", err=True)
+        raise SystemExit(1)
 
 
 main.add_command(workflow)

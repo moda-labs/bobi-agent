@@ -45,14 +45,47 @@ class WorkflowEngine:
 
     def _load_config_scope(self):
         try:
-            from modastack.config import GlobalConfig
+            from modastack.config import GlobalConfig, RepoConfig
             config = GlobalConfig.load()
             self.ctx.set_scope("config", {
                 "slack_dm_channel": getattr(config, "slack_dm_channel", "") or "D0B51JP1N4C",
                 "slack_bot_token": getattr(config, "slack_bot_token", ""),
             })
+            self._load_repo_scope(config)
         except Exception:
             self.ctx.set_scope("config", {"slack_dm_channel": "D0B51JP1N4C"})
+
+    def _load_repo_scope(self, config):
+        """Load per-repo context from .modastack.yaml into ${{repo.key}} variables."""
+        from modastack.config import RepoConfig
+        event_repo = self.run.trigger_event.get("data", {}).get("repo", "")
+        if not event_repo:
+            return
+
+        for repo_path in config.repos:
+            if not self._repo_path_matches(event_repo, repo_path):
+                continue
+            try:
+                repo_config = RepoConfig.from_file(repo_path)
+                scope = {
+                    "path": str(repo_config.path),
+                    "task_tracking": repo_config.task_tracking,
+                    "project": repo_config.project,
+                    "test_command": repo_config.test_command,
+                    **repo_config.context,
+                }
+                self.ctx.set_scope("repo", scope)
+                return
+            except FileNotFoundError:
+                continue
+
+    @staticmethod
+    def _repo_path_matches(event_repo: str, repo_path: Path) -> bool:
+        if str(repo_path) == event_repo:
+            return True
+        if "/" in event_repo:
+            return repo_path.name == event_repo.split("/")[-1]
+        return repo_path.name == Path(event_repo).name
 
     def execute(self):
         order = self.workflow.topological_order()

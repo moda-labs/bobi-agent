@@ -174,6 +174,18 @@ Each agent reads the handoff, does its work, then goes idle. The
 manager detects state changes via the worker poller and routes to
 the next skill.
 
+## Custom workflows
+
+Workflows are YAML DAGs loaded from three tiers (most specific wins):
+1. `<repo>/.modastack/workflows/` — repo-specific overrides
+2. `~/.modastack/workflows/` — user-level overrides
+3. `<modastack>/workflows/` — built-in defaults
+
+Per-repo context from `.modastack.yaml`'s `context:` section is available
+as `${{repo.key}}` in workflow templates. See `docs/CUSTOM_WORKFLOWS.md`
+for the full reference and `workflows/examples/` for non-dev examples
+(content review, research).
+
 ## Tests
 
 ```bash
