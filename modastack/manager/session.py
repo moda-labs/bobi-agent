@@ -15,10 +15,13 @@ import time
 from pathlib import Path
 
 from modastack.config import GlobalConfig
+from modastack.tmux import (
+    TMUX, has_session as _tmux_has_session,
+    capture_pane as _tmux_capture, send_text,
+)
 
 log = logging.getLogger(__name__)
 
-TMUX = shutil.which("tmux") or "tmux"
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
 SESSION_NAME = "moda-manager"
 SESSION_ID_PATH = Path.home() / ".modastack" / "manager" / "session_id"
@@ -27,11 +30,7 @@ ACTIVITY_LOG = Path.home() / ".modastack" / "manager" / "activity.jsonl"
 
 
 def _session_exists() -> bool:
-    result = subprocess.run(
-        [TMUX, "has-session", "-t", SESSION_NAME],
-        capture_output=True,
-    )
-    return result.returncode == 0
+    return _tmux_has_session(SESSION_NAME)
 
 
 def _get_saved_session_id() -> str:
@@ -233,20 +232,8 @@ def _capture_session_id() -> None:
 
 
 def _send_keys(text: str) -> bool:
-    """Send text into the tmux pane. Returns True if send-keys succeeded."""
-    collapsed = " ".join(text.splitlines())
-    result = subprocess.run(
-        [TMUX, "send-keys", "-t", SESSION_NAME, "-l", collapsed],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        log.warning(f"send-keys failed: {result.stderr.strip()}")
-        return False
-    time.sleep(0.5)
-    subprocess.run([TMUX, "send-keys", "-t", SESSION_NAME, "Enter"])
-    time.sleep(0.5)
-    subprocess.run([TMUX, "send-keys", "-t", SESSION_NAME, "Enter"])
-    return True
+    """Send text into the tmux pane with locking, length routing, and paste verification."""
+    return send_text(SESSION_NAME, text)
 
 
 def inject(text: str) -> bool:
@@ -274,13 +261,7 @@ def inject(text: str) -> bool:
 
 def capture(lines: int = 50) -> str:
     """Capture current pane content (for debugging/CLI only)."""
-    result = subprocess.run(
-        [TMUX, "capture-pane", "-t", SESSION_NAME, "-p", "-S", f"-{lines}"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return ""
-    return result.stdout
+    return _tmux_capture(SESSION_NAME, lines=lines)
 
 
 def detect_state() -> str:

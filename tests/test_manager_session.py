@@ -208,42 +208,19 @@ class TestDetectState:
 # ---------------------------------------------------------------------------
 
 class TestSendKeys:
+    """_send_keys now delegates to tmux.send_text — mock at that level.
+    Low-level tests (newline collapsing, enter sending, length routing)
+    are in test_tmux.py::TestSendTextRouting.
+    """
 
-    @patch("modastack.manager.session.time.sleep")
-    @patch("modastack.manager.session.subprocess.run")
-    def test_success(self, mock_run, _):
-        mock_run.return_value = MagicMock(returncode=0)
+    @patch("modastack.manager.session.send_text", return_value=True)
+    def test_success(self, mock_send):
         assert _send_keys("hello world") is True
+        mock_send.assert_called_once_with("moda-manager", "hello world")
 
-    @patch("modastack.manager.session.time.sleep")
-    @patch("modastack.manager.session.subprocess.run")
-    def test_collapses_newlines(self, mock_run, _):
-        mock_run.return_value = MagicMock(returncode=0)
-        _send_keys("line one\nline two\nline three")
-        first_call = mock_run.call_args_list[0]
-        cmd = first_call[0][0]
-        assert "line one line two line three" in cmd[-1]
-
-    @patch("modastack.manager.session.time.sleep")
-    @patch("modastack.manager.session.subprocess.run")
-    def test_sends_two_enters(self, mock_run, _):
-        mock_run.return_value = MagicMock(returncode=0)
-        _send_keys("test")
-        enter_calls = [c for c in mock_run.call_args_list if "Enter" in str(c)]
-        assert len(enter_calls) == 2
-
-    @patch("modastack.manager.session.time.sleep")
-    @patch("modastack.manager.session.subprocess.run")
-    def test_returns_false_on_failure(self, mock_run, _):
-        mock_run.return_value = MagicMock(returncode=1, stderr="can't find pane: moda-manager")
+    @patch("modastack.manager.session.send_text", return_value=False)
+    def test_returns_false_on_failure(self, mock_send):
         assert _send_keys("hello") is False
-
-    @patch("modastack.manager.session.time.sleep")
-    @patch("modastack.manager.session.subprocess.run")
-    def test_no_enter_on_failure(self, mock_run, _):
-        mock_run.return_value = MagicMock(returncode=1, stderr="can't find pane")
-        _send_keys("hello")
-        assert mock_run.call_count == 1  # only the send-keys call, no Enter
 
 
 # ---------------------------------------------------------------------------

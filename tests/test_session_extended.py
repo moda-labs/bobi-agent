@@ -1,4 +1,8 @@
-"""Extended tests for modastack/session.py — functions not covered by test_session.py."""
+"""Extended tests for modastack/session.py — thin wrappers over tmux.py.
+
+Real behavior tests (state detection, send routing, paste verification)
+live in test_tmux.py. These test the session-layer wiring.
+"""
 
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -27,15 +31,13 @@ class TestSessionName:
 
 class TestSessionExists:
 
-    @patch("modastack.session.subprocess.run")
-    def test_exists(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
+    @patch("modastack.session.has_session", return_value=True)
+    def test_exists(self, mock_has):
         assert session_exists("BET-1") is True
-        assert "moda-bet-1" in str(mock_run.call_args)
+        mock_has.assert_called_once_with("moda-bet-1")
 
-    @patch("modastack.session.subprocess.run")
-    def test_not_exists(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1)
+    @patch("modastack.session.has_session", return_value=False)
+    def test_not_exists(self, mock_has):
         assert session_exists("BET-1") is False
 
 
@@ -87,74 +89,45 @@ class TestListSessions:
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         assert list_sessions() == []
 
-    @patch("modastack.session.subprocess.run")
-    def test_no_sessions(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="other-session\n")
-        assert list_sessions() == []
 
+class TestDetectState:
+    """detect_state collects data and delegates to determine_agent_state.
+    The pure function is tested thoroughly in test_tmux.py.
+    """
 
-class TestDetectStateExtended:
+    @patch("modastack.session.has_session", return_value=False)
+    def test_no_session_returns_exited(self, _):
+        assert detect_state("BET-1") == {"state": "exited"}
 
-    @patch("modastack.session.subprocess.run")
-    def test_waiting_input_with_bypass(self, mock_run):
-        """Both ❯ and bypass permissions present → waiting_input."""
-        pane = "\n".join([
-            "Output done",
-            "⏵⏵ bypass permissions",
-            "❯ ",
-        ])
-
-        def side_effect(cmd, **kw):
-            cmd_str = " ".join(cmd)
-            if "has-session" in cmd_str:
-                return MagicMock(returncode=0)
-            if "capture-pane" in cmd_str:
-                return MagicMock(stdout=pane)
-            return MagicMock(returncode=0, stdout="")
-        mock_run.side_effect = side_effect
-
+    @patch("modastack.session.has_child_processes", return_value=True)
+    @patch("modastack.session.get_pane_pid", return_value="1234")
+    @patch("modastack.session.capture_pane", return_value="❯ \n  ⏵⏵ bypass permissions\n")
+    @patch("modastack.session.has_session", return_value=True)
+    def test_delegates_to_determine_agent_state(self, *_):
         result = detect_state("BET-1")
         assert result["state"] == "waiting_input"
-
-    @patch("modastack.session.subprocess.run")
-    def test_no_session_returns_exited(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1)
-        result = detect_state("BET-1")
-        assert result == {"state": "exited"}
 
 
 class TestCapture:
 
-    @patch("modastack.session.subprocess.run")
-    def test_captures_lines(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="hello\nworld\n")
+    @patch("modastack.session.capture_pane", return_value="hello\nworld\n")
+    def test_captures_lines(self, mock_cap):
         result = capture("BET-1", lines=20)
         assert result == "hello\nworld\n"
+        mock_cap.assert_called_once_with("moda-bet-1", lines=20)
 
 
 class TestInject:
 
-    @patch("modastack.session.time.sleep")
-    @patch("modastack.session.subprocess.run")
-    def test_collapses_multiline(self, mock_run, mock_sleep):
-        inject("BET-1", "line one\nline two\nline three")
-        # First call is send-keys with text, should be collapsed
-        text_call = mock_run.call_args_list[0]
-        assert "line one line two line three" in str(text_call)
-
-    @patch("modastack.session.time.sleep")
-    @patch("modastack.session.subprocess.run")
-    def test_sends_enter_keys(self, mock_run, mock_sleep):
-        inject("BET-1", "test")
-        enter_calls = [c for c in mock_run.call_args_list if "Enter" in str(c)]
-        assert len(enter_calls) == 2  # Two Enter presses
+    @patch("modastack.session.send_text", return_value=True)
+    def test_delegates_to_send_text(self, mock_send):
+        inject("BET-1", "hello world")
+        mock_send.assert_called_once_with("moda-bet-1", "hello world")
 
 
 class TestKillSession:
 
-    @patch("modastack.session.subprocess.run")
-    def test_kills_by_name(self, mock_run):
+    @patch("modastack.session._tmux_kill")
+    def test_kills_by_name(self, mock_kill):
         kill_session("BET-1")
-        cmd = mock_run.call_args[0][0]
-        assert "kill-session" in cmd
-        assert "moda-bet-1" in cmd
+        mock_kill.assert_called_once_with("moda-bet-1")

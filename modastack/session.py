@@ -6,19 +6,22 @@ new processes.
 """
 
 import logging
-import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
 from modastack.config import LOG_DIR
+from modastack.tmux import (
+    TMUX, has_session, capture_pane, get_pane_pid,
+    has_child_processes, send_text, determine_agent_state,
+    kill_session as _tmux_kill,
+)
 
 log = logging.getLogger(__name__)
 
-TMUX = shutil.which("tmux") or "tmux"
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
-SKILLS_DIR = Path(__file__).parent.parent / "engineer" / "process"
+SKILLS_DIR = Path(__file__).parent.parent / "roles" / "engineer" / "process"
 
 
 def _session_name(issue_id: str) -> str:
@@ -26,12 +29,7 @@ def _session_name(issue_id: str) -> str:
 
 
 def session_exists(issue_id: str) -> bool:
-    name = _session_name(issue_id)
-    result = subprocess.run(
-        [TMUX, "has-session", "-t", name],
-        capture_output=True,
-    )
-    return result.returncode == 0
+    return has_session(_session_name(issue_id))
 
 
 SESSION_IDS_DIR = Path.home() / ".modastack" / "sessions"
@@ -128,9 +126,7 @@ def spawn_session(issue_id: str, cwd: str) -> bool:
         if state["state"] == "waiting_input":
             LOG_DIR.mkdir(parents=True, exist_ok=True)
             log_path = LOG_DIR / f"{name}.log"
-            subprocess.run([
-                TMUX, "pipe-pane", "-t", name, "-o", f"cat >> {log_path}",
-            ])
+            subprocess.run([TMUX, "pipe-pane", "-t", name, "-o", f"cat >> {log_path}"])
             log.info(f"Session {name} ready in {cwd}")
             return True
 
@@ -140,112 +136,37 @@ def spawn_session(issue_id: str, cwd: str) -> bool:
 
 
 def inject(issue_id: str, text: str) -> None:
-    """Send text into the session as if a human typed it.
-
-    Claude Code's input is single-line — multiline pastes get held in
-    the editor buffer and don't auto-submit. We collapse newlines to
-    spaces so the text arrives as one message and submits on Enter.
-    The sleep between text and Enter is critical — without it, Enter
-    arrives before Claude Code has buffered the text and gets swallowed.
-    """
+    """Send text into the session with locking, length routing, and paste verification."""
     name = _session_name(issue_id)
-    collapsed = " ".join(text.splitlines())
-    subprocess.run([TMUX, "send-keys", "-t", name, "-l", collapsed])
-    time.sleep(1)
-    subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
-    time.sleep(0.5)
-    subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
-    log.info(f"{issue_id}: injected {len(collapsed)} chars")
+    send_text(name, text)
+    log.info(f"{issue_id}: injected {len(text)} chars")
 
 
 def capture(issue_id: str, lines: int = 80) -> str:
     """Capture current pane content."""
-    name = _session_name(issue_id)
-    result = subprocess.run(
-        [TMUX, "capture-pane", "-t", name, "-p", "-S", f"-{lines}"],
-        capture_output=True, text=True,
-    )
-    return result.stdout
+    return capture_pane(_session_name(issue_id), lines=lines)
 
 
 def detect_state(issue_id: str) -> dict:
     """Analyze the pane to determine session state.
 
-    Returns:
-        state: 'waiting_input' | 'working' | 'asking_question' | 'permission_blocked' | 'exited' | 'unknown'
-        question: str (if asking_question)
-        options: list[str] (if asking_question)
-        prompt_line: str (if permission_blocked)
+    Collects data (pane content, process liveness) then delegates to
+    the pure determine_agent_state() function for testability.
     """
-    if not session_exists(issue_id):
+    name = _session_name(issue_id)
+    if not has_session(name):
         return {"state": "exited"}
 
-    raw = capture(issue_id, lines=50)
-    lines = [l for l in raw.splitlines() if l.strip()]
+    pane = capture_pane(name, lines=50)
+    pid = get_pane_pid(name)
+    children = has_child_processes(pid)
 
-    if not lines:
-        return {"state": "unknown"}
-
-    last_lines = lines[-20:]
-
-    # Detect AskUserQuestion: numbered options
-    option_pattern = r"^\s*\d+\.\s+.+"
-    options = [l.strip() for l in last_lines if re.match(option_pattern, l)]
-    if len(options) >= 2:
-        question_lines = []
-        for l in reversed(last_lines):
-            if re.match(option_pattern, l):
-                continue
-            stripped = l.strip()
-            if stripped and "─" not in stripped and "bypass" not in stripped:
-                question_lines.insert(0, stripped)
-            if len(question_lines) >= 3:
-                break
-        return {
-            "state": "asking_question",
-            "question": " ".join(question_lines),
-            "options": options,
-        }
-
-    # Detect permission prompts (blocked waiting for interactive approval)
-    permission_patterns = [
-        r"Allow .+ \(y/n\)",
-        r"Do you want to proceed",
-        r"Yes, allow once",
-        r"Allow all",
-    ]
-    for line in last_lines:
-        if any(re.search(p, line) for p in permission_patterns):
-            return {"state": "permission_blocked", "prompt_line": line.strip()}
-
-    # Detect waiting for input: ❯ prompt + permissions indicator
-    for line in reversed(lines[-5:]):
-        if "❯" in line and "bypass permissions" not in line:
-            if any("bypass permissions" in l or "⏵⏵" in l for l in lines[-3:]):
-                return {"state": "waiting_input"}
-            break
-
-    # Check if claude process is still alive
-    name = _session_name(issue_id)
-    pane_pid_result = subprocess.run(
-        [TMUX, "list-panes", "-t", name, "-F", "#{pane_pid}"],
-        capture_output=True, text=True,
-    )
-    if pane_pid_result.returncode == 0:
-        pane_pid = pane_pid_result.stdout.strip()
-        children = subprocess.run(
-            ["pgrep", "-P", pane_pid],
-            capture_output=True, text=True,
-        )
-        if children.returncode != 0 or not children.stdout.strip():
-            return {"state": "exited"}
-
-    return {"state": "working"}
+    return determine_agent_state(pane, children)
 
 
 def kill_session(issue_id: str) -> None:
     name = _session_name(issue_id)
-    subprocess.run([TMUX, "kill-session", "-t", name], capture_output=True)
+    _tmux_kill(name)
     log.info(f"Session {name} killed")
 
 
