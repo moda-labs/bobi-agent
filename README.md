@@ -224,7 +224,26 @@ flowchart TB
     Native & GStack -.-> Tools
 ```
 
-## Setup
+## Quick install
+
+One command — works on macOS and Linux. Installs all dependencies, walks you through auth, task tracking, and Slack setup interactively.
+
+```bash
+curl -sL https://raw.githubusercontent.com/moda-labs/modastack/main/deploy/install.sh | bash
+```
+
+Or download and inspect first:
+
+```bash
+curl -sL https://raw.githubusercontent.com/moda-labs/modastack/main/deploy/install.sh -o install.sh
+bash install.sh
+```
+
+Pass `--non-interactive` for CI/automation (skips prompts, uses defaults).
+
+### Manual setup
+
+If you prefer to install step by step:
 
 ```bash
 git clone https://github.com/moda-labs/modastack.git ~/dev/modastack
