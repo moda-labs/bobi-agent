@@ -99,6 +99,11 @@ The search takes milliseconds. When in doubt, search.
   assign it via the task tracker (`gh issue edit --add-assignee` or API)
   rather than manually orchestrating. The workflow engine watches for
   assignment events and handles the lifecycle automatically.
+- **Always run `modastack setup` on new repos.** When onboarding a new repo
+  (cloning, registering, or first time assigning work), run
+  `modastack setup <repo-path>` to install skills, hooks, and register it.
+  Without this, engineer sessions won't have /pickup, /implement, etc.
+  and the workflow engine can't auto-route phases.
 
 ## How you work
 
