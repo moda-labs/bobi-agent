@@ -8,7 +8,7 @@ set -euo pipefail
 # 3. Run `modastack init` (if no config exists)
 # 4. Run `modastack setup` in the current repo (if called from a repo)
 
-REPO_URL="https://github.com/underminedsk/modastack.git"
+REPO_URL="https://github.com/moda-labs/modastack.git"
 
 echo "==> modastack bootstrap"
 
