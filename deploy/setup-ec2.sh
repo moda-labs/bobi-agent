@@ -4,7 +4,7 @@
 # Usage:
 #   1. Launch Ubuntu 24.04 EC2 instance (t3.medium+, 30GB+ disk)
 #   2. Security group: open port 22 (SSH) and 8080 (webhooks)
-#   3. SSH in and run: curl -sL https://raw.githubusercontent.com/underminedsk/modastack/main/deploy/setup-ec2.sh | bash
+#   3. SSH in and run: curl -sL https://raw.githubusercontent.com/moda-labs/modastack/main/deploy/setup-ec2.sh | bash
 #
 # After setup, you'll need to manually:
 #   - Authenticate Claude Code (interactive, one-time)
@@ -62,7 +62,7 @@ if [ -d "$INSTALL_DIR" ]; then
     echo "  Already exists at $INSTALL_DIR — pulling latest"
     git -C "$INSTALL_DIR" pull origin main
 else
-    git clone https://github.com/underminedsk/modastack.git "$INSTALL_DIR"
+    git clone https://github.com/moda-labs/modastack.git "$INSTALL_DIR"
 fi
 
 # --- Python venv + install ---
