@@ -70,7 +70,7 @@ curl -s -X POST $NGROK_URL/webhooks/github \
       "html_url": "https://github.com/test/test/pull/999",
       "user": {"login": "testuser"}
     },
-    "repository": {"full_name": "underminedsk/modastack"}
+    "repository": {"full_name": "test/test"}
   }'
 # Expected: HTTP 200, event in bus as github.pr.opened
 ```
@@ -91,7 +91,7 @@ curl -s -X POST $NGROK_URL/webhooks/github \
       "number": 999,
       "title": "[TEST] integration test PR"
     },
-    "repository": {"full_name": "underminedsk/modastack"}
+    "repository": {"full_name": "test/test"}
   }'
 # Expected: HTTP 200, event in bus as github.pr.review
 ```
@@ -108,7 +108,7 @@ curl -s -X POST $NGROK_URL/webhooks/github \
       "user": {"login": "reviewer"}
     },
     "issue": {"number": 999},
-    "repository": {"full_name": "underminedsk/modastack"}
+    "repository": {"full_name": "test/test"}
   }'
 # Expected: HTTP 200, event in bus as github.comment
 ```

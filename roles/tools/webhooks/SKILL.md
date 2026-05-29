@@ -188,7 +188,7 @@ Run this to set up all webhooks for all registered repos:
 NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
 
 # GitHub — for each repo in ~/.modastack/config.yaml
-for repo in underminedsk/modastack underminedsk/bettertab; do
+for repo in moda-labs/modastack <your-org>/<your-repo>; do
   gh api repos/$repo/hooks --method POST \
     -f "config[url]=${NGROK_URL}/webhooks/github" \
     -f "config[content_type]=json" \
@@ -225,7 +225,7 @@ When tearing down (e.g., ngrok URL changed), delete old webhooks:
 
 ```bash
 # GitHub
-for repo in underminedsk/modastack underminedsk/bettertab; do
+for repo in moda-labs/modastack <your-org>/<your-repo>; do
   HOOK_IDS=$(gh api repos/$repo/hooks --jq '.[].id')
   for id in $HOOK_IDS; do
     gh api repos/$repo/hooks/$id --method DELETE
