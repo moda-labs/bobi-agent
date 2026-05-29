@@ -137,6 +137,12 @@ class GlobalConfig:
         }
         if self.public_url:
             data["webhooks"]["public_url"] = self.public_url
+        if self.event_server_url:
+            data["event_server"] = {
+                "url": self.event_server_url,
+                "deployment_id": self.event_server_deployment_id,
+                "api_key": self.event_server_api_key,
+            }
         GLOBAL_CONFIG_PATH.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
 
 

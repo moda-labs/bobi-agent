@@ -9,6 +9,7 @@ dependencies = [
     "click>=8.1",
     "truststore>=0.9",
     "websocket-client>=1.7",
+    "certifi>=2024.0",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "jinja2>=3.1",
