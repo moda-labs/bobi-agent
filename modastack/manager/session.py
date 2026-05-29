@@ -186,19 +186,14 @@ def _inject_startup_prompt() -> None:
     startup_path.write_text(
         f"# Startup Instructions\n\n"
         f"You are the Modastack manager. "
-        f"Slack is your primary communication channel — post status updates, ask "
-        f"questions, and reply to DMs there. Use the Slack API directly via curl. "
-        f"Your Slack DM channel with Zach is D0B51JP1N4C. "
         f"You are managing these repos: {repos}. "
-        f"From now on, I will send you batches of events. For each batch, "
-        f"act directly using your tools. "
-        f"Start by posting a brief startup message to Slack saying you're online "
-        f"and summarizing the current state.\n\n{prompt}"
+        f"From now on, you will receive human messages and system event batches. "
+        f"Respond naturally — the transport layer handles delivery. "
+        f"Act directly using your tools.\n\n{prompt}"
     )
 
     _send_keys(
-        f"Read and internalize {startup_path}. It contains your full instructions. "
-        f"Read it now, then post a startup message to Slack."
+        f"Read and internalize {startup_path}. It contains your full instructions."
     )
 
 
