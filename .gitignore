@@ -5,6 +5,8 @@ dist/
 .pytest_cache/
 *.pyc
 .env
+.claude/settings.local.json
+.claude/projects/
 worktrees/
 .dispatch/
 .dispatch.yaml
