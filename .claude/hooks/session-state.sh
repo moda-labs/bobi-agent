@@ -32,8 +32,14 @@ if data['hook_event_name'] == 'Stop':
             token = slack.get('bot_token', '')
             channel = slack.get('dm_channel', '') or 'D0B51JP1N4C'
             if token:
-                import urllib.request
-                text = msg[:3000] + '\n_(truncated)_' if len(msg) > 3000 else msg
+                import urllib.request, re
+                text = msg
+                # Markdown → Slack mrkdwn
+                text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+                text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+                text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
+                if len(text) > 3000:
+                    text = text[:3000] + '\n_(truncated)_'
                 payload = json.dumps({'channel': channel, 'text': text}).encode()
                 req = urllib.request.Request(
                     'https://slack.com/api/chat.postMessage',
