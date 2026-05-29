@@ -193,6 +193,7 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
     log.info(f"Listening for events (batch window: {batch_window}s)")
     tick_count = 0
     manager_working_since: float | None = None  # watchdog: when manager entered "working"
+    trigger_in_flight = False  # True when a trigger was sent but not yet processed
     MANAGER_BUSY_TIMEOUT = 120  # 2 min — force-inject if manager stuck working
 
     while True:
@@ -201,22 +202,35 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             log.warning("Manager session died — restarting")
             start_or_resume()
             manager_working_since = None
+            trigger_in_flight = False
 
         # Wait for events
         bus.wait(timeout=batch_window)
         events = bus.drain()
+
+        # When manager becomes idle after a trigger, mark it processed
+        # (don't clear the file yet — do that only when we send the next trigger)
+        state = detect_state()
+        if trigger_in_flight and state == "waiting_input":
+            trigger_in_flight = False
+            manager_working_since = None
+            log.debug("Manager finished processing trigger")
+
         if not events:
-            # Even with no new events, check if we have deferred events
-            # and the manager is now free
+            # Check if we have deferred events and manager is free
             if PENDING_EVENTS_PATH.exists() and PENDING_EVENTS_PATH.stat().st_size > 0:
-                state = detect_state()
-                if state == "waiting_input":
+                if state == "waiting_input" and not trigger_in_flight:
                     log.info("Manager now idle — delivering deferred events")
                     trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
                     if inject(trigger):
-                        _clear_events_file()
+                        trigger_in_flight = True
                         manager_working_since = None
                         log.info("Deferred events delivered to manager")
+                    else:
+                        # inject() failed but text was still sent to the pane —
+                        # treat as in-flight to avoid duplicate triggers
+                        trigger_in_flight = True
+                        log.info("Deferred trigger sent (unconfirmed) — waiting for manager")
             continue
 
         tick_count += 1
@@ -235,9 +249,6 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             log.info(f"Batch #{tick_count}: all events handled by workflows")
             continue
 
-        # Check manager state
-        state = detect_state()
-
         if state == "working":
             # Track how long manager has been working
             if manager_working_since is None:
@@ -253,9 +264,9 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
                 )
                 _write_events_file(unhandled, append=True)
                 trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
-                if inject(trigger):
-                    _clear_events_file()
-                    manager_working_since = None
+                inject(trigger)
+                trigger_in_flight = True
+                manager_working_since = None
                 _log_batch(events)
                 continue
 
@@ -282,14 +293,18 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             _log_batch(events)
             continue
 
-        # Manager is ready — write events and inject
-        _write_events_file(unhandled, append=True)
-        trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
-        if not inject(trigger):
-            log.warning(f"Batch #{tick_count}: injection failed — events preserved for retry")
-            _log_batch(events)
-            continue
-
+        # Manager is ready — write events and inject trigger
+        # Clear any stale events file first, then write fresh
         _clear_events_file()
-        _log_batch(events)
-        log.info(f"Batch #{tick_count} delivered to manager")
+        _write_events_file(unhandled)
+        trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
+        if inject(trigger):
+            trigger_in_flight = True
+            _log_batch(events)
+            log.info(f"Batch #{tick_count} delivered to manager")
+        else:
+            # Text was sent to pane even though confirmation failed —
+            # mark as in-flight to prevent duplicate triggers
+            trigger_in_flight = True
+            log.warning(f"Batch #{tick_count}: trigger sent (unconfirmed) — waiting for manager")
+            _log_batch(events)
