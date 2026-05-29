@@ -343,5 +343,13 @@ def wait_until_ready(timeout: int = 30) -> bool:
     return False
 
 
+def read_last_response() -> str | None:
+    """Return the manager's last assistant message, if available."""
+    last = _read_last_activity()
+    if last and last.get("event") == "Stop":
+        return last.get("response")
+    return None
+
+
 def is_alive() -> bool:
     return _session_exists()

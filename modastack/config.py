@@ -71,6 +71,7 @@ class GlobalConfig:
     # Slack — one bot per modabot instance
     slack_bot_token: str = ""
     slack_app_token: str = ""
+    slack_dm_channel: str = ""
 
     # Webhook server
     webhook_port: int = 8080
@@ -100,6 +101,7 @@ class GlobalConfig:
             repos=repos,
             slack_bot_token=slack.get("bot_token", "") or raw.get("slack_bot_token", ""),
             slack_app_token=slack.get("app_token", ""),
+            slack_dm_channel=slack.get("dm_channel", ""),
             webhook_port=webhooks.get("port", 8080),
             public_url=webhooks.get("public_url", ""),
             github_default_account=github.get("default_account", ""),
@@ -113,6 +115,7 @@ class GlobalConfig:
             "slack": {
                 "bot_token": self.slack_bot_token,
                 "app_token": self.slack_app_token,
+                "dm_channel": self.slack_dm_channel,
             },
             "webhooks": {
                 "port": self.webhook_port,

@@ -23,7 +23,7 @@ from .webhook_server import start_server
 from modastack.config import GlobalConfig
 from modastack.history import context_for_events, start_background_indexer, index as index_history
 from modastack.workflow.triggers import WorkflowDispatcher
-from modastack.manager.session import start_or_resume, inject, detect_state, is_alive, wait_until_ready
+from modastack.manager.session import start_or_resume, inject, detect_state, is_alive, wait_until_ready, read_last_response
 
 log = logging.getLogger(__name__)
 
@@ -166,6 +166,21 @@ def _ensure_repos():
             log.warning(f"Registered repo not found on disk: {path}")
 
 
+def _summarize_events(events: list[dict]) -> str:
+    """One-line summary of events for the chat relay."""
+    parts = []
+    for e in events:
+        data = e.get("data", {})
+        etype = e.get("type", "")
+        detail = data.get("text", "") or data.get("title", "") or ""
+        if detail:
+            parts.append(f"{etype}: {detail[:100]}")
+        else:
+            iid = data.get("issue_id", "")
+            parts.append(f"{etype}" + (f" #{iid}" if iid else ""))
+    return "\n".join(parts)
+
+
 def _inject_trigger() -> None:
     """Send the standard trigger to the manager."""
     trigger = (
@@ -256,6 +271,11 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             log.debug(f"Startup version check failed: {e}")
     threading.Thread(target=_one_shot_version_check, daemon=True).start()
 
+    # Initialize chat relay adapter (mirrors manager I/O to Slack etc.)
+    from modastack.relay import build_adapter
+    relay = build_adapter()
+    last_relayed_response_ts: float = 0  # avoid duplicate relay of same response
+
     log.info(f"Listening for events (batch window: {batch_window}s)")
     tick_count = 0
     manager_working_since: float | None = None
@@ -283,6 +303,20 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             _truncate_processed()
 
         state = detect_state()
+
+        # Relay manager output when it finishes a turn
+        if state == "waiting_input":
+            response = read_last_response()
+            if response:
+                from modastack.manager.session import _read_last_activity
+                last = _read_last_activity()
+                resp_ts = last.get("ts", 0) if last else 0
+                if resp_ts > last_relayed_response_ts:
+                    last_relayed_response_ts = resp_ts
+                    try:
+                        relay.send(response, role="assistant")
+                    except Exception as e:
+                        log.warning(f"Relay output failed: {e}")
 
         if not events:
             # If there are unread events and manager is idle, trigger
@@ -315,6 +349,14 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         _append_batch(batch_id, unhandled)
         _log_batch(events)
         log.info(f"Batch #{tick_count} appended as batch:{batch_id}")
+
+        # Relay input to chat
+        try:
+            summary = _summarize_events(unhandled)
+            if summary:
+                relay.send(summary, role="user")
+        except Exception as e:
+            log.warning(f"Relay input failed: {e}")
 
         if state == "working":
             if manager_working_since is None:
