@@ -9,6 +9,7 @@ Instead of injecting long text into tmux (unreliable paste buffer), we:
 
 import json
 import logging
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -153,6 +154,27 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
 
     bus = get_bus()
 
+    # Emit restart event with changelog so the manager can update Slack
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-5"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(Path(__file__).resolve().parent.parent.parent),
+        )
+        changelog = result.stdout.strip() if result.returncode == 0 else ""
+        version = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(Path(__file__).resolve().parent.parent.parent),
+        ).stdout.strip()
+        bus.push("system.restarted", "system", {
+            "version": version,
+            "changelog": changelog,
+            "text": f"Modastack restarted (now at {version}). Recent changes:\n{changelog}",
+        })
+    except Exception as e:
+        log.debug(f"Failed to emit restart event: {e}")
+
     # Start the persistent manager session
     if not start_or_resume():
         log.error("Failed to start manager session")
@@ -193,8 +215,15 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
     log.info(f"Listening for events (batch window: {batch_window}s)")
     tick_count = 0
     manager_working_since: float | None = None  # watchdog: when manager entered "working"
-    trigger_in_flight = False  # True when a trigger was sent but not yet processed
+    trigger_sent_at: float | None = None  # monotonic time of last trigger send
     MANAGER_BUSY_TIMEOUT = 120  # 2 min — force-inject if manager stuck working
+    TRIGGER_COOLDOWN = 60  # don't resend trigger within 60s of an unconfirmed send
+
+    def _trigger_in_flight() -> bool:
+        """Check if a trigger was recently sent and not yet processed."""
+        if trigger_sent_at is None:
+            return False
+        return (time.monotonic() - trigger_sent_at) < TRIGGER_COOLDOWN
 
     while True:
         # Check if manager session is alive
@@ -202,35 +231,30 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             log.warning("Manager session died — restarting")
             start_or_resume()
             manager_working_since = None
-            trigger_in_flight = False
+            trigger_sent_at = None
 
         # Wait for events
         bus.wait(timeout=batch_window)
         events = bus.drain()
 
-        # When manager becomes idle after a trigger, mark it processed
-        # (don't clear the file yet — do that only when we send the next trigger)
         state = detect_state()
-        if trigger_in_flight and state == "waiting_input":
-            trigger_in_flight = False
-            manager_working_since = None
-            log.debug("Manager finished processing trigger")
+
+        # When manager becomes idle and pending file is empty, trigger was processed
+        if trigger_sent_at and state == "waiting_input":
+            if not PENDING_EVENTS_PATH.exists() or PENDING_EVENTS_PATH.stat().st_size == 0:
+                trigger_sent_at = None
+                manager_working_since = None
 
         if not events:
             # Check if we have deferred events and manager is free
             if PENDING_EVENTS_PATH.exists() and PENDING_EVENTS_PATH.stat().st_size > 0:
-                if state == "waiting_input" and not trigger_in_flight:
+                if state == "waiting_input" and not _trigger_in_flight():
                     log.info("Manager now idle — delivering deferred events")
                     trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
-                    if inject(trigger):
-                        trigger_in_flight = True
-                        manager_working_since = None
-                        log.info("Deferred events delivered to manager")
-                    else:
-                        # inject() failed but text was still sent to the pane —
-                        # treat as in-flight to avoid duplicate triggers
-                        trigger_in_flight = True
-                        log.info("Deferred trigger sent (unconfirmed) — waiting for manager")
+                    inject(trigger)
+                    trigger_sent_at = time.monotonic()
+                    manager_working_since = None
+                    log.info("Deferred events trigger sent")
             continue
 
         tick_count += 1
@@ -265,7 +289,7 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
                 _write_events_file(unhandled, append=True)
                 trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
                 inject(trigger)
-                trigger_in_flight = True
+                trigger_sent_at = time.monotonic()
                 manager_working_since = None
                 _log_batch(events)
                 continue
@@ -298,13 +322,7 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         _clear_events_file()
         _write_events_file(unhandled)
         trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
-        if inject(trigger):
-            trigger_in_flight = True
-            _log_batch(events)
-            log.info(f"Batch #{tick_count} delivered to manager")
-        else:
-            # Text was sent to pane even though confirmation failed —
-            # mark as in-flight to prevent duplicate triggers
-            trigger_in_flight = True
-            log.warning(f"Batch #{tick_count}: trigger sent (unconfirmed) — waiting for manager")
-            _log_batch(events)
+        inject(trigger)
+        trigger_sent_at = time.monotonic()
+        _log_batch(events)
+        log.info(f"Batch #{tick_count} trigger sent to manager")
