@@ -82,7 +82,7 @@ class TestListSessions:
         result = list_sessions()
         assert "BET-1" in result
         assert "BET-2" in result
-        assert "MANAGER" in result
+        assert "MANAGER" not in result  # moda-manager is excluded (it's the manager, not an engineer)
 
     @patch("modastack.session.subprocess.run")
     def test_returns_empty_on_failure(self, mock_run):

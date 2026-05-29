@@ -18,6 +18,7 @@ from modastack.config import GlobalConfig
 from modastack.tmux import (
     TMUX, has_session as _tmux_has_session,
     capture_pane as _tmux_capture, send_text,
+    get_pane_pid, has_child_processes, determine_agent_state,
 )
 
 log = logging.getLogger(__name__)
@@ -284,8 +285,23 @@ def capture(lines: int = 50) -> str:
     return _tmux_capture(SESSION_NAME, lines=lines)
 
 
+def _detect_state_from_pane() -> str:
+    """Detect manager state by parsing the tmux pane output directly."""
+    pane = _tmux_capture(SESSION_NAME, lines=20)
+    if not pane:
+        return "unknown"
+    pid = get_pane_pid(SESSION_NAME)
+    has_kids = has_child_processes(pid) if pid else False
+    result = determine_agent_state(pane, has_kids)
+    return result.get("state", "unknown")
+
+
 def detect_state() -> str:
-    """Detect manager state from the activity log.
+    """Detect manager state from activity log, cross-checked with pane.
+
+    When the activity log says "working" but the pane shows an idle prompt,
+    trusts the pane — a missed Stop hook event is the most common cause of
+    the consumer getting stuck.
 
     Returns: 'waiting_input' | 'working' | 'exited' | 'unknown'
     """
@@ -294,15 +310,37 @@ def detect_state() -> str:
 
     last = _read_last_activity()
     if last is None:
-        return "unknown"
+        return _detect_state_from_pane()
 
     event = last.get("event")
     if event == "Stop":
         return "waiting_input"
     if event == "UserPromptSubmit":
+        pane_state = _detect_state_from_pane()
+        if pane_state == "waiting_input":
+            log.info("Activity log says working but pane shows idle — trusting pane")
+            return "waiting_input"
         return "working"
 
-    return "unknown"
+    return _detect_state_from_pane()
+
+
+def wait_until_ready(timeout: int = 30) -> bool:
+    """Wait until the manager pane is accessible and idle.
+
+    Used as a startup gate to prevent injection before the pane exists.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pane = _tmux_capture(SESSION_NAME, lines=5)
+        if not pane:
+            time.sleep(1)
+            continue
+        state = detect_state()
+        if state == "waiting_input":
+            return True
+        time.sleep(2)
+    return False
 
 
 def is_alive() -> bool:

@@ -34,7 +34,8 @@ nodes:
   do_nudge:
     type: bash
     command: |
-      tmux send-keys -t moda-${{event.issue_id | lower}} Enter
+      name=$(cat ~/.modastack/sessions/${{event.issue_id}}.name 2>/dev/null || echo "moda-${{event.issue_id | lower}}")
+      tmux send-keys -t "$name" Enter
     timeout: 5
     depends_on: [route_action]
     when: "${{route_action.branch}} == 'nudge'"
@@ -42,7 +43,9 @@ nodes:
   do_kill:
     type: bash
     command: |
-      tmux kill-session -t moda-${{event.issue_id | lower}} 2>/dev/null || true
+      name=$(cat ~/.modastack/sessions/${{event.issue_id}}.name 2>/dev/null || echo "moda-${{event.issue_id | lower}}")
+      tmux kill-session -t "$name" 2>/dev/null || true
+      rm -f ~/.modastack/sessions/${{event.issue_id}}.name ~/.modastack/sessions/${{event.issue_id}}.id
     timeout: 10
     depends_on: [route_action]
     when: "${{route_action.branch}} == 'kill'"

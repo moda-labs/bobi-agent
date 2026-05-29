@@ -23,7 +23,7 @@ from .webhook_server import start_server
 from modastack.config import GlobalConfig
 from modastack.history import context_for_events, start_background_indexer, index as index_history
 from modastack.workflow.triggers import WorkflowDispatcher
-from modastack.manager.session import start_or_resume, inject, detect_state, is_alive
+from modastack.manager.session import start_or_resume, inject, detect_state, is_alive, wait_until_ready
 
 log = logging.getLogger(__name__)
 
@@ -158,6 +158,13 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
         log.error("Failed to start manager session")
         return
 
+    # Wait for the manager pane to be accessible and idle before starting
+    # pollers — prevents the "can't find pane" race on startup
+    if wait_until_ready(timeout=60):
+        log.info("Manager session verified idle and ready")
+    else:
+        log.warning("Manager not idle after 60s — proceeding (may miss first batch)")
+
     # Start webhook server if configured
     if use_webhooks:
         start_server(port=webhook_port, github_secret=github_secret,
@@ -186,7 +193,7 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
     log.info(f"Listening for events (batch window: {batch_window}s)")
     tick_count = 0
     manager_working_since: float | None = None  # watchdog: when manager entered "working"
-    MANAGER_BUSY_TIMEOUT = 300  # 5 min — force-inject if manager stuck working
+    MANAGER_BUSY_TIMEOUT = 120  # 2 min — force-inject if manager stuck working
 
     while True:
         # Check if manager session is alive

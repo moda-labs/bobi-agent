@@ -677,8 +677,8 @@ done
         from modastack.tmux import send_text
         from modastack.manager.session import detect_state
 
-        # Before any injection — no activity
-        assert detect_state() == "unknown"
+        # Before any injection — no activity log, falls back to pane detection
+        assert detect_state() in ("unknown", "exited")
 
         send_text(self.TEST_SESSION, "first prompt", verify=False)
         # Wait for full cycle: UserPromptSubmit + 2s sleep + Stop

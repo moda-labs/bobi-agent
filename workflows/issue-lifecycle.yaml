@@ -12,6 +12,7 @@ nodes:
     params:
       issue_id: ${{event.issue_id}}
       repo: ${{event.repo}}
+      title: ${{event.title}}
     timeout: 60
 
   # === NOTIFY (LLM crafts, engine posts) ===

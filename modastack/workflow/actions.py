@@ -122,12 +122,13 @@ def _resolve_repo_path(repo: str) -> str:
 
 
 def _session_spawn(params: dict) -> dict:
-    from modastack.session import spawn_session
+    from modastack.session import spawn_session, _session_name
     issue_id = params.get("issue_id", "").lstrip("#")
     repo = params.get("repo", "")
+    title = params.get("title", "")
     cwd = _resolve_repo_path(repo)
-    ok = spawn_session(issue_id, cwd)
-    return {"ok": ok, "session_name": f"moda-{issue_id.lower()}"}
+    ok = spawn_session(issue_id, cwd, title=title)
+    return {"ok": ok, "session_name": _session_name(issue_id)}
 
 
 def build_registry() -> ActionRegistry:

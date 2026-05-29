@@ -86,8 +86,15 @@ def _poll_workers(interval: int = 5):
                     and s.strip() != "moda-manager"
                 ]
 
+            from modastack.session import _build_reverse_name_map
+            reverse_map = _build_reverse_name_map()
+
             for session_name in session_names:
-                iid = session_name.upper().replace("WORKER-", "").replace("MODA-", "")
+                iid = reverse_map.get(session_name)
+                if iid is not None:
+                    iid = iid.upper()
+                else:
+                    iid = session_name.upper().replace("WORKER-", "").replace("MODA-", "")
 
                 state_info = detect_session_state(iid)
                 sess_state = state_info["state"]
@@ -348,19 +355,22 @@ def _poll_orphans(interval: int = 60):
                 for issue in issues_by_state.get("In Progress", []):
                     iid = issue["identifier"]
                     # Check if there's a tmux session for this issue
-                    session_name = f"moda-{iid.lower()}"
+                    from modastack.session import _session_name
+                    session_name = _session_name(iid)
                     has_session = subprocess.run(
                         ["tmux", "has-session", "-t", session_name],
                         capture_output=True,
                     ).returncode == 0
 
-                    # Also check the older naming format
+                    # Also check the older naming formats
                     if not has_session:
-                        alt_name = iid.lower()
-                        has_session = subprocess.run(
-                            ["tmux", "has-session", "-t", alt_name],
-                            capture_output=True,
-                        ).returncode == 0
+                        for alt in [f"moda-{iid.lower()}", iid.lower()]:
+                            has_session = subprocess.run(
+                                ["tmux", "has-session", "-t", alt],
+                                capture_output=True,
+                            ).returncode == 0
+                            if has_session:
+                                break
 
                     if not has_session:
                         now = time.monotonic()
