@@ -93,19 +93,11 @@ for skill_dir in \
 done
 log "Skill symlinks refreshed ($(ls "$SKILLS_DIR" | wc -l | tr -d ' ') skills)"
 
-# Restart consumer (kills old, starts new)
+# Stop consumer first so it doesn't inject into a dying manager
 tmux kill-session -t modastack-consumer 2>/dev/null || true
-sleep 1
-tmux new-session -d -s modastack-consumer \
-    "cd $REPO_DIR && source .venv/bin/activate && modastack start --webhooks"
-
-# Restart dashboard
 tmux kill-session -t modastack-dashboard 2>/dev/null || true
-sleep 1
-tmux new-session -d -s modastack-dashboard \
-    "cd $REPO_DIR && source .venv/bin/activate && modastack dashboard"
 
-# Restart manager (kill old, start new with auto-accept)
+# Restart manager (must be ready before consumer starts)
 tmux kill-session -t moda-manager 2>/dev/null || true
 rm -f "$HOME/.modastack/manager/session_id"
 sleep 1
@@ -117,6 +109,19 @@ sleep 3
 tmux send-keys -t moda-manager Down 2>/dev/null
 sleep 0.3
 tmux send-keys -t moda-manager Enter 2>/dev/null
+
+# Wait for manager to be idle before starting consumer
+# (consumer's readiness gate also checks, but this avoids the initial batch failure)
+sleep 5
+
+# Start consumer (its readiness gate will wait for manager to be fully ready)
+tmux new-session -d -s modastack-consumer \
+    "cd $REPO_DIR && source .venv/bin/activate && modastack start --webhooks"
+
+# Restart dashboard
+sleep 1
+tmux new-session -d -s modastack-dashboard \
+    "cd $REPO_DIR && source .venv/bin/activate && modastack dashboard"
 
 NEW_VERSION=$(git rev-parse --short HEAD)
 log "Deploy complete — now at $NEW_VERSION"
