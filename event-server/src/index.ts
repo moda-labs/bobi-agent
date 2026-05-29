@@ -23,6 +23,9 @@ export default {
 		if (request.method === "GET" && path.startsWith("/deployments/") && path.endsWith("/subscribe")) {
 			return handleSubscribe(request, env, path);
 		}
+		if (request.method === "PUT" && path.startsWith("/deployments/") && path.endsWith("/subscriptions")) {
+			return handleUpdateSubscriptions(request, env, path);
+		}
 		if (request.method === "GET" && path === "/health") {
 			return Response.json({ status: "ok" });
 		}
@@ -196,6 +199,64 @@ async function handleSubscribe(request: Request, env: Env, path: string): Promis
 	const doId = env.DEPLOYMENT_SESSION.idFromName(deploymentId);
 	const stub = env.DEPLOYMENT_SESSION.get(doId);
 	return stub.fetch(request);
+}
+
+async function handleUpdateSubscriptions(request: Request, env: Env, path: string): Promise<Response> {
+	const match = path.match(/^\/deployments\/([^/]+)\/subscriptions$/);
+	if (!match) {
+		return new Response("Invalid path", { status: 400 });
+	}
+	const deploymentId = match[1];
+
+	const authHeader = request.headers.get("authorization");
+	if (!authHeader?.startsWith("Bearer ")) {
+		return new Response("Unauthorized", { status: 401 });
+	}
+	const apiKey = authHeader.slice(7);
+
+	const deploymentData = await env.EVENTS.get(`deployments:${apiKey}`);
+	if (!deploymentData) {
+		return new Response("Invalid API key", { status: 403 });
+	}
+	const deployment = JSON.parse(deploymentData);
+	if (deployment.id !== deploymentId) {
+		return new Response("API key does not match deployment", { status: 403 });
+	}
+
+	let body: Record<string, unknown>;
+	try {
+		body = await request.json() as Record<string, unknown>;
+	} catch {
+		return new Response("Invalid JSON", { status: 400 });
+	}
+
+	const newSubs = body.add as string[] | undefined;
+	if (!newSubs?.length) {
+		return Response.json({ error: "add[] required" }, { status: 400 });
+	}
+
+	const existingSubs: string[] = deployment.subscriptions || [];
+	let added = 0;
+
+	for (const sub of newSubs) {
+		if (!existingSubs.includes(sub)) {
+			existingSubs.push(sub);
+			added++;
+		}
+		const key = `subscriptions:${sub}`;
+		const existing = await env.EVENTS.get(key);
+		const ids: string[] = existing ? JSON.parse(existing) : [];
+		if (!ids.includes(deploymentId)) {
+			ids.push(deploymentId);
+			await env.EVENTS.put(key, JSON.stringify(ids));
+		}
+	}
+
+	deployment.subscriptions = existingSubs;
+	await env.EVENTS.put(`deployments:${apiKey}`, JSON.stringify(deployment));
+	await env.EVENTS.put(`deployment_id:${deploymentId}`, JSON.stringify(deployment));
+
+	return Response.json({ subscriptions: existingSubs, added });
 }
 
 async function findSubscribedDeployments(env: Env, key: string): Promise<string[]> {

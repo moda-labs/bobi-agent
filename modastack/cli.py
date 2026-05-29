@@ -454,10 +454,23 @@ def _ensure_event_server(path: Path, global_config: GlobalConfig) -> None:
     import httpx
 
     if global_config.event_server_deployment_id and global_config.event_server_api_key:
-        # Already registered — add this repo's subscription
         repo_full = _get_repo_full_name(path)
-        if repo_full:
-            click.echo(f"  Event server: adding subscription for {repo_full}")
+        if not repo_full:
+            return
+        try:
+            resp = httpx.put(
+                f"{global_config.event_server_url}/deployments/{global_config.event_server_deployment_id}/subscriptions",
+                json={"add": [repo_full]},
+                headers={"Authorization": f"Bearer {global_config.event_server_api_key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                click.echo(f"  Event server: subscribed to {repo_full} ({len(data['subscriptions'])} total)")
+            else:
+                click.echo(f"  Event server: failed to add subscription ({resp.status_code})")
+        except Exception as e:
+            click.echo(f"  Event server: failed to add subscription ({e})")
         return
 
     # First-time registration
