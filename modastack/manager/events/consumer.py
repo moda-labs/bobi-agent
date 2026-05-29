@@ -31,8 +31,8 @@ PENDING_EVENTS_PATH = Path.home() / ".modastack" / "manager" / "pending_events.m
 DECISIONS_LOG = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
 
 
-def _write_events_file(events: list[dict]) -> None:
-    """Write events to a file the manager can read."""
+def _format_events(events: list[dict]) -> str:
+    """Format events into markdown sections."""
     lines = [f"# {len(events)} new events at {time.strftime('%Y-%m-%d %H:%M:%S')}", ""]
 
     for e in events:
@@ -82,8 +82,31 @@ def _write_events_file(events: list[dict]) -> None:
     except Exception as e:
         log.debug(f"History context lookup failed: {e}")
 
+    return "\n".join(lines)
+
+
+def _write_events_file(events: list[dict], append: bool = False) -> None:
+    """Write events to a file the manager can read.
+
+    When append=True, adds to the existing file so deferred events
+    accumulate instead of being overwritten.
+    """
+    content = _format_events(events)
     PENDING_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PENDING_EVENTS_PATH.write_text("\n".join(lines))
+
+    if append and PENDING_EVENTS_PATH.exists():
+        with open(PENDING_EVENTS_PATH, "a") as f:
+            f.write("\n\n" + content)
+    else:
+        PENDING_EVENTS_PATH.write_text(content)
+
+
+def _clear_events_file() -> None:
+    """Remove the pending events file after successful delivery."""
+    try:
+        PENDING_EVENTS_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _log_batch(events: list[dict]) -> None:
@@ -162,17 +185,31 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
 
     log.info(f"Listening for events (batch window: {batch_window}s)")
     tick_count = 0
+    manager_working_since: float | None = None  # watchdog: when manager entered "working"
+    MANAGER_BUSY_TIMEOUT = 300  # 5 min — force-inject if manager stuck working
 
     while True:
         # Check if manager session is alive
         if not is_alive():
             log.warning("Manager session died — restarting")
             start_or_resume()
+            manager_working_since = None
 
         # Wait for events
         bus.wait(timeout=batch_window)
         events = bus.drain()
         if not events:
+            # Even with no new events, check if we have deferred events
+            # and the manager is now free
+            if PENDING_EVENTS_PATH.exists() and PENDING_EVENTS_PATH.stat().st_size > 0:
+                state = detect_state()
+                if state == "waiting_input":
+                    log.info("Manager now idle — delivering deferred events")
+                    trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
+                    if inject(trigger):
+                        _clear_events_file()
+                        manager_working_since = None
+                        log.info("Deferred events delivered to manager")
             continue
 
         tick_count += 1
@@ -191,15 +228,37 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             log.info(f"Batch #{tick_count}: all events handled by workflows")
             continue
 
-        # Write unhandled events to file for the manager
-        _write_events_file(unhandled)
-
-        # Only inject trigger if manager is waiting for input.
+        # Check manager state
         state = detect_state()
+
         if state == "working":
-            log.info(f"Batch #{tick_count}: manager is busy — events written, trigger deferred")
+            # Track how long manager has been working
+            if manager_working_since is None:
+                manager_working_since = time.monotonic()
+
+            busy_secs = time.monotonic() - manager_working_since
+
+            if busy_secs > MANAGER_BUSY_TIMEOUT:
+                # Manager stuck — force-inject (better to interrupt than lose events)
+                log.warning(
+                    f"Batch #{tick_count}: manager busy for {int(busy_secs)}s — "
+                    f"force-injecting (timeout {MANAGER_BUSY_TIMEOUT}s exceeded)"
+                )
+                _write_events_file(unhandled, append=True)
+                trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
+                if inject(trigger):
+                    _clear_events_file()
+                    manager_working_since = None
+                _log_batch(events)
+                continue
+
+            # Normal deferral — append so earlier events aren't lost
+            _write_events_file(unhandled, append=True)
+            log.info(f"Batch #{tick_count}: manager is busy ({int(busy_secs)}s) — events appended, trigger deferred")
             _log_batch(events)
             continue
+        else:
+            manager_working_since = None
 
         # Wait briefly for manager to be ready if in unknown state
         if state != "waiting_input":
@@ -210,16 +269,20 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
                 time.sleep(2)
 
         if state == "working":
-            log.info(f"Batch #{tick_count}: manager started working — trigger deferred")
+            _write_events_file(unhandled, append=True)
+            log.info(f"Batch #{tick_count}: manager started working — events appended, trigger deferred")
+            manager_working_since = time.monotonic()
             _log_batch(events)
             continue
 
-        # Inject once — no retry flooding
+        # Manager is ready — write events and inject
+        _write_events_file(unhandled, append=True)
         trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
         if not inject(trigger):
-            log.warning(f"Batch #{tick_count}: injection failed — will retry on next batch")
+            log.warning(f"Batch #{tick_count}: injection failed — events preserved for retry")
             _log_batch(events)
             continue
 
+        _clear_events_file()
         _log_batch(events)
         log.info(f"Batch #{tick_count} delivered to manager")

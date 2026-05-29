@@ -317,15 +317,20 @@ def _poll_slack(interval: int = 10):
         time.sleep(interval)
 
 
+ORPHAN_REALERT_SECS = 300  # Re-alert about orphans every 5 min so they don't get lost
+
+
 def _poll_orphans(interval: int = 60):
     """Detect orphaned issues — In Progress in the task tracker but no tmux session running.
 
     This catches cases where an engineer session died (restart, crash, stall kill)
     but the task is still In Progress. Pushes an event so the manager
     can decide whether to respawn or ask the human.
+
+    Uses a TTL on alerts so orphans get re-detected if not recovered.
     """
     bus = get_bus()
-    alerted = set()
+    alerted: dict[str, float] = {}  # iid -> monotonic timestamp of last alert
 
     while True:
         try:
@@ -357,23 +362,27 @@ def _poll_orphans(interval: int = 60):
                             capture_output=True,
                         ).returncode == 0
 
-                    if not has_session and iid not in alerted:
-                        alerted.add(iid)
-                        labels = [l["name"] for l in issue.get("labels", {}).get("nodes", [])]
-                        bus.push("orphan.detected", "system", {
-                            "issue_id": iid,
-                            "task_id": issue["id"],
-                            "title": issue["title"],
-                            "state": "In Progress",
-                            "labels": labels,
-                            "repo": str(rc.path),
-                            "project": rc.project,
-                            "reason": "Task is In Progress but no engineer session is running.",
-                        })
-                        log.info(f"Orphan detected: {iid} — In Progress, no session")
+                    if not has_session:
+                        now = time.monotonic()
+                        last_alert = alerted.get(iid)
+                        if last_alert is None or (now - last_alert) > ORPHAN_REALERT_SECS:
+                            alerted[iid] = now
+                            labels = [l["name"] for l in issue.get("labels", {}).get("nodes", [])]
+                            bus.push("orphan.detected", "system", {
+                                "issue_id": iid,
+                                "task_id": issue["id"],
+                                "title": issue["title"],
+                                "state": "In Progress",
+                                "labels": labels,
+                                "repo": str(rc.path),
+                                "project": rc.project,
+                                "reason": "Task is In Progress but no engineer session is running.",
+                            })
+                            realert = "re-alert" if last_alert else "new"
+                            log.info(f"Orphan detected ({realert}): {iid} — In Progress, no session")
 
                     elif has_session and iid in alerted:
-                        alerted.discard(iid)
+                        del alerted[iid]
 
         except Exception as e:
             log.error(f"Orphan poller error: {e}")
