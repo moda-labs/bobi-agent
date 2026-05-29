@@ -1,4 +1,4 @@
-"""Event-driven architecture for modabot.
+"""Event-driven architecture for modastack.
 
 Events arrive from the centralized event server (Cloudflare Worker)
 via WebSocket. Slack messages arrive via Socket Mode. Both inject

@@ -2,7 +2,7 @@
 
 Connects to Slack via WebSocket. No public URL needed.
 Injects DMs and mentions directly into the manager session.
-Filters channel messages to only those in threads Modabot participated in.
+Filters channel messages to only those in threads Modastack participated in.
 """
 
 import json
@@ -68,7 +68,7 @@ def _run_socket(app_token: str, bot_token: str):
     """Main socket loop — connect, receive events, inject into manager."""
     bot_user_id = _get_bot_user_id(bot_token)
     user_cache = {}
-    # Track threads modabot has participated in
+    # Track threads modastack has participated in
     our_threads: set[str] = set()
 
     while True:

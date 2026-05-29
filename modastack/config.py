@@ -1,7 +1,7 @@
 """Global and per-repo configuration.
 
 Global config (~/.modastack/config.yaml): instance-level settings
-  - Slack tokens (one bot per modabot instance)
+  - Slack tokens (one bot per modastack instance)
   - Webhook server config
   - GitHub accounts
   - Registered repos
@@ -68,7 +68,7 @@ class GlobalConfig:
 
     repos: list[Path] = field(default_factory=list)
 
-    # Slack — one bot per modabot instance
+    # Slack — one bot per modastack instance
     slack_bot_token: str = ""
     slack_app_token: str = ""
     slack_dm_channel: str = ""

@@ -1,4 +1,4 @@
-"""CLI interface for modabot."""
+"""CLI interface for modastack."""
 
 import json
 import logging
@@ -78,7 +78,7 @@ def install_hooks(target_path: Path) -> list[str]:
 @click.group()
 @click.version_option(version=__version__, prog_name="modastack")
 def main():
-    """Modabot — AI engineering manager + engineer team."""
+    """Modastack — AI engineering manager + engineer team."""
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -93,7 +93,7 @@ def main():
 
 @main.command()
 def start():
-    """Start modabot. Connects to the centralized event server for webhooks.
+    """Start modastack. Connects to the centralized event server for webhooks.
 
     Usage:
         modastack start
@@ -328,7 +328,7 @@ def decisions():
 @click.option("--project", default=None, help="Project prefix (e.g., BET, TESS)")
 @click.option("--linear-key", envvar="LINEAR_API_KEY", default=None)
 def register(repo_path: str, task_tracking: str | None, project: str | None, linear_key: str | None):
-    """Register a repo with modabot (alias for setup)."""
+    """Register a repo with modastack (alias for setup)."""
     from click import Context
     ctx = click.get_current_context()
     ctx.invoke(setup, repo_path=repo_path, task_tracking=task_tracking,
@@ -370,7 +370,7 @@ EVENT_SERVER_URL = "https://modastack-events.modalabs.workers.dev"
 @click.option("--non-interactive", is_flag=True, envvar="CI")
 def setup(repo_path: str, task_tracking: str | None, project: str | None,
           linear_key: str | None, non_interactive: bool):
-    """Set up a repo for modabot."""
+    """Set up a repo for modastack."""
     import yaml
 
     path = Path(repo_path).resolve()
