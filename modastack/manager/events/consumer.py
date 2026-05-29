@@ -23,7 +23,7 @@ from .webhook_server import start_server
 from modastack.config import GlobalConfig
 from modastack.history import context_for_events, start_background_indexer, index as index_history
 from modastack.workflow.triggers import WorkflowDispatcher
-from modastack.manager.session import start_or_resume, inject, detect_state, is_alive, wait_until_ready, read_last_response
+from modastack.manager.session import start_or_resume, inject, detect_state, is_alive, wait_until_ready
 
 log = logging.getLogger(__name__)
 
@@ -289,11 +289,10 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             log.debug(f"Startup version check failed: {e}")
     threading.Thread(target=_one_shot_version_check, daemon=True).start()
 
-    # Initialize chat relay adapter (mirrors manager I/O to Slack etc.)
+    # Initialize chat relay adapter (mirrors manager input to Slack etc.)
+    # Output relay is handled by the Stop hook directly — no polling needed.
     from modastack.relay import build_adapter
     relay = build_adapter()
-    last_relayed_response_ts: float = 0  # avoid duplicate relay of same response
-    pending_reply_thread: str = ""  # thread_ts to reply to after manager responds
 
     log.info(f"Listening for events (batch window: {batch_window}s)")
     tick_count = 0
@@ -322,21 +321,6 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             _truncate_processed()
 
         state = detect_state()
-
-        # Relay manager output when it finishes a turn
-        if state == "waiting_input":
-            response = read_last_response()
-            if response:
-                from modastack.manager.session import _read_last_activity
-                last = _read_last_activity()
-                resp_ts = last.get("ts", 0) if last else 0
-                if resp_ts > last_relayed_response_ts:
-                    last_relayed_response_ts = resp_ts
-                    try:
-                        relay.send(response, role="assistant", thread_ts=pending_reply_thread)
-                        pending_reply_thread = ""
-                    except Exception as e:
-                        log.warning(f"Relay output failed: {e}")
 
         # Fast path: inject human messages directly into the manager session
         # instead of going through the events file. Much lower latency.
