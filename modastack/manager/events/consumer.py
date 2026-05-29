@@ -193,7 +193,7 @@ def _summarize_events_for_relay(events: list[dict]) -> str:
         data = e.get("data", {})
         detail = data.get("text", "") or data.get("title", "") or ""
         if detail:
-            parts.append(f"{etype}: {detail[:100]}")
+            parts.append(f"{etype}: {detail}")
         else:
             iid = data.get("issue_id", "")
             parts.append(f"{etype}" + (f" #{iid}" if iid else ""))
@@ -237,7 +237,7 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
     try:
         repo_root = str(Path(__file__).resolve().parent.parent.parent)
         result = subprocess.run(
-            ["git", "log", "--oneline", "-5"],
+            ["git", "log", "--oneline", "-15"],
             capture_output=True, text=True, timeout=5, cwd=repo_root,
         )
         changelog = result.stdout.strip() if result.returncode == 0 else ""
