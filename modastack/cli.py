@@ -103,82 +103,182 @@ def start():
 
 
 @main.command()
-@click.argument("message", required=False)
-def tick(message):
-    """Inject a message into the manager session (for debugging).
+@click.argument("text", required=True)
+@click.option("--to", default=None, help="Target an engineer by issue ID (e.g. --to AGD-12)")
+def message(text, to):
+    """Send a message to the manager or an engineer.
 
     Usage:
-        modastack tick                          # check if manager is alive
-        modastack tick "what are you working on?"  # ask the manager something
+        modastack message "what are you working on?"
+        modastack message --to AGD-12 "try a different approach"
     """
-    from modastack.manager.session import is_alive, inject, capture, detect_state
+    if to:
+        click.echo(f"Note: engineer sub-agents run autonomously. "
+                   f"To redirect {to}, cancel and re-run the phase.")
+        return
+
+    from modastack.manager.session import is_alive, inject, detect_state
     if not is_alive():
-        click.echo("Manager session not running. Start with: modastack start")
+        click.echo("Manager not running. Start with: modastack start")
         return
 
     state = detect_state()
-    click.echo(f"Manager state: {state}")
+    if state != "waiting_input":
+        click.echo(f"Manager is busy ({state}). Message queued.")
 
-    if message:
-        inject(message)
-        click.echo(f"Injected: {message}")
+    ok = inject(text)
+    if ok:
+        click.echo(f"Sent: {text}")
     else:
-        pane = capture(lines=10)
-        content = [l.strip() for l in pane.splitlines() if l.strip() and "─" not in l and "bypass" not in l]
-        for line in content[-5:]:
-            click.echo(f"  {line}")
+        click.echo("Failed to send message.", err=True)
+
+
+@main.command()
+@click.option("-n", "--lines", default=20, help="Number of recent entries to show")
+@click.option("-f", "--follow", is_flag=True, help="Follow mode — stream new entries")
+def log(lines, follow):
+    """Show manager conversation history.
+
+    Usage:
+        modastack log              # last 20 entries
+        modastack log -n 50        # last 50 entries
+        modastack log -f           # follow mode (like tail -f)
+    """
+    from modastack.manager.session import ACTIVITY_LOG
+
+    if not ACTIVITY_LOG.exists():
+        click.echo("No activity yet. Start with: modastack start")
+        return
+
+    if follow:
+        import time
+        shown = set()
+        all_lines = ACTIVITY_LOG.read_text().strip().splitlines()
+        for line in all_lines[-lines:]:
+            _print_activity_entry(line)
+            shown.add(line)
+        try:
+            while True:
+                time.sleep(1)
+                current = ACTIVITY_LOG.read_text().strip().splitlines()
+                for line in current:
+                    if line not in shown:
+                        _print_activity_entry(line)
+                        shown.add(line)
+        except KeyboardInterrupt:
+            pass
+    else:
+        all_lines = ACTIVITY_LOG.read_text().strip().splitlines()
+        for line in all_lines[-lines:]:
+            _print_activity_entry(line)
+
+
+def _print_activity_entry(line: str) -> None:
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return
+
+    event = entry.get("event", "")
+    ts = entry.get("ts", 0)
+
+    if event == "UserPromptSubmit":
+        text = entry.get("text", "")[:120]
+        click.echo(f"  → {text}")
+    elif event == "response":
+        text = entry.get("text", "")[:200]
+        click.echo(f"  ← {text}")
+    elif event == "Stop":
+        session_id = entry.get("session_id", "")[:8]
+        click.echo(f"  ◼ turn complete (session {session_id})")
+
+
+@main.command(hidden=True)
+@click.argument("text", required=False)
+def tick(text):
+    """Deprecated: use 'modastack message' instead."""
+    ctx = click.get_current_context()
+    if text:
+        ctx.invoke(message, text=text)
+    else:
+        from modastack.manager.session import is_alive, detect_state
+        state = detect_state() if is_alive() else "stopped"
+        click.echo(f"Manager state: {state}")
+        click.echo("Hint: use 'modastack message' to send, 'modastack log' to read.")
 
 
 @main.command()
 def status():
-    """Show active sessions — discovered from tmux, not state files."""
-    import subprocess
-    import shutil
+    """Show active agents — manager + engineer sub-agents."""
+    from modastack.manager.session import is_alive, detect_state, get_session_id
+    from modastack.subagent import list_agents
 
-    tmux = shutil.which("tmux") or "tmux"
-    result = subprocess.run(
-        [tmux, "list-sessions", "-F", "#{session_name} #{session_created}"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        click.echo("No tmux sessions running.")
+    mgr_state = detect_state() if is_alive() else "stopped"
+    mgr_session = get_session_id()[:8] if is_alive() else ""
+    click.echo(f"  Manager: {mgr_state}" + (f" (session {mgr_session})" if mgr_session else ""))
+
+    agents = list_agents()
+    if not agents:
+        click.echo("  Engineers: none active")
         return
 
-    sessions = []
-    for line in result.stdout.strip().splitlines():
-        parts = line.strip().split(" ", 1)
-        if parts[0] != "moda-manager":
-            sessions.append(parts[0])
+    click.echo(f"  Engineers: {len(agents)} active")
+    for agent in agents:
+        state = "running" if agent["running"] else "done"
+        click.echo(f"    {agent['issue_id']}/{agent['phase']} — {state} ({agent['elapsed_s']}s)")
 
-    if not sessions:
+
+@main.command()
+@click.argument("issue_id", required=False)
+@click.option("--cancel", is_flag=True, help="Cancel a running engineer agent")
+def engineers(issue_id, cancel):
+    """List active engineers, or inspect/cancel a specific one.
+
+    Usage:
+        modastack engineers              # list all active
+        modastack engineers AGD-12       # show details for AGD-12
+        modastack engineers AGD-12 --cancel  # cancel AGD-12
+    """
+    from modastack.subagent import list_agents, cancel_agent, is_running, get_result
+
+    if issue_id and cancel:
+        if cancel_agent(issue_id):
+            click.echo(f"Cancelled {issue_id}")
+        else:
+            click.echo(f"No running agent for {issue_id}")
+        return
+
+    if issue_id:
+        if is_running(issue_id):
+            agents = list_agents()
+            for a in agents:
+                if a["issue_id"].lower() == issue_id.lower():
+                    click.echo(f"  Issue:   {a['issue_id']}")
+                    click.echo(f"  Phase:   {a['phase']}")
+                    click.echo(f"  Status:  running ({a['elapsed_s']}s)")
+                    click.echo(f"  CWD:     {a['cwd']}")
+                    return
+        result = get_result(issue_id)
+        if result:
+            click.echo(f"  Issue:   {result.issue_id}")
+            click.echo(f"  Phase:   {result.phase}")
+            click.echo(f"  Status:  {'success' if result.success else 'failed'}")
+            click.echo(f"  Turns:   {result.num_turns}")
+            click.echo(f"  Time:    {result.duration_ms / 1000:.1f}s")
+            if result.error:
+                click.echo(f"  Error:   {result.error}")
+        else:
+            click.echo(f"No agent found for {issue_id}")
+        return
+
+    agents = list_agents()
+    if not agents:
         click.echo("No active engineers.")
-        click.echo("")
-        # Check manager
-        if any("moda-manager" in l for l in result.stdout.splitlines()):
-            click.echo("  Manager: running (tmux attach -t moda-manager)")
         return
 
-    for name in sessions:
-        # Capture last few lines to show what it's doing
-        pane = subprocess.run(
-            [tmux, "capture-pane", "-t", name, "-p", "-S", "-3"],
-            capture_output=True, text=True,
-        ).stdout
-        last_line = ""
-        for l in reversed(pane.splitlines()):
-            l = l.strip()
-            if l and "─" not in l and "bypass" not in l and "⏵⏵" not in l:
-                last_line = l[:80]
-                break
-
-        click.echo(f"  {name}")
-        click.echo(f"    tmux attach -t {name}")
-        if last_line:
-            click.echo(f"    {last_line}")
-        click.echo()
-
-    if any("moda-manager" in l for l in result.stdout.splitlines()):
-        click.echo(f"  Manager: running (tmux attach -t moda-manager)")
+    for agent in agents:
+        state = "running" if agent["running"] else "done"
+        click.echo(f"  {agent['issue_id']}/{agent['phase']} — {state} ({agent['elapsed_s']}s)")
 
 
 @main.command()

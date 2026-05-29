@@ -15,7 +15,7 @@ from pathlib import Path
 import certifi
 import websocket
 
-from modastack.manager.session import inject, detect_state, SESSION_NAME
+from modastack.manager.session import inject, detect_state
 
 log = logging.getLogger(__name__)
 

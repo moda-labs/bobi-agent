@@ -265,6 +265,7 @@ class WorkflowEngine:
     def _exec_manager(self, node: NodeDef) -> dict:
         from modastack.manager.session import inject as mgr_inject
         from modastack.manager.session import detect_state as mgr_detect_state
+        from modastack.manager.session import read_last_response
 
         prompt_text = self.ctx.resolve(node.prompt)
 
@@ -274,7 +275,9 @@ class WorkflowEngine:
         full_prompt = preamble + prompt_text
         if memory_context:
             full_prompt += " " + memory_context
-        mgr_inject(full_prompt)
+
+        if not mgr_inject(full_prompt):
+            raise RuntimeError("Failed to inject into manager session")
 
         deadline = time.monotonic() + node.timeout
         while time.monotonic() < deadline:
@@ -285,7 +288,7 @@ class WorkflowEngine:
         else:
             raise TimeoutError(f"Manager did not respond within {node.timeout}s")
 
-        output = _read_last_assistant_response()
+        output = read_last_response() or ""
         return {"output": output}
 
     def _exec_gate(self, node: NodeDef) -> dict:
@@ -378,9 +381,10 @@ class WorkflowEngine:
 
     def _poll_manager(self, node: NodeDef) -> dict | None:
         from modastack.manager.session import detect_state as mgr_detect_state
+        from modastack.manager.session import read_last_response
         state = mgr_detect_state()
         if state == "waiting_input":
-            output = _read_last_assistant_response()
+            output = read_last_response() or ""
             return {"output": output}
         return None
 
@@ -452,233 +456,3 @@ def _prefetch_history(prompt_text: str, max_results: int = 3) -> str:
         return ""
 
 
-def _read_last_assistant_response(session_name: str | None = None) -> str:
-    """Read the manager's last response from Claude Code's JSONL conversation file.
-
-    This is the reliable extraction method — the JSONL has clean role separation
-    (user vs assistant vs tool calls) with no tmux pane noise.
-    """
-    import subprocess, shutil
-
-    if not session_name:
-        from modastack.manager.session import SESSION_NAME
-        session_name = SESSION_NAME
-
-    TMUX = shutil.which("tmux") or "tmux"
-    CLAUDE_DIR = Path.home() / ".claude"
-    SESSIONS_DIR = CLAUDE_DIR / "sessions"
-
-    # Step 1: Find the session's PID via tmux
-    pane_pid_result = subprocess.run(
-        [TMUX, "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
-        capture_output=True, text=True,
-    )
-    if pane_pid_result.returncode != 0:
-        log.warning("Could not find manager pane PID")
-        return ""
-
-    pane_pid = pane_pid_result.stdout.strip()
-
-    # Step 2: Find session ID from ~/.claude/sessions/<pid>.json
-    session_id = ""
-    for session_file in SESSIONS_DIR.glob("*.json"):
-        if session_file.stem == pane_pid:
-            try:
-                data = json.loads(session_file.read_text())
-                session_id = data.get("sessionId", "")
-            except (json.JSONDecodeError, KeyError):
-                pass
-            break
-
-    if not session_id:
-        # Try matching by checking all session files for matching PID
-        for session_file in SESSIONS_DIR.glob("*.json"):
-            try:
-                data = json.loads(session_file.read_text())
-                if str(data.get("pid", "")) == pane_pid:
-                    session_id = data.get("sessionId", "")
-                    break
-            except (json.JSONDecodeError, KeyError):
-                continue
-
-    if not session_id:
-        log.warning(f"Could not find session ID for PID {pane_pid}")
-        return ""
-
-    # Step 3: Find the JSONL file in any project directory
-    jsonl_path = None
-    projects_dir = CLAUDE_DIR / "projects"
-    if projects_dir.exists():
-        for project_dir in projects_dir.iterdir():
-            candidate = project_dir / f"{session_id}.jsonl"
-            if candidate.exists():
-                jsonl_path = candidate
-                break
-
-    if not jsonl_path:
-        log.warning(f"Could not find JSONL for session {session_id}")
-        return ""
-
-    # Step 4: Read the last assistant text blocks (from the end of the file)
-    lines = jsonl_path.read_text().splitlines()
-    text_parts = []
-
-    for line in reversed(lines):
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        if msg.get("type") != "assistant":
-            if msg.get("type") == "user":
-                break
-            continue
-
-        content = msg.get("message", {}).get("content", [])
-        if not isinstance(content, list):
-            continue
-
-        for block in content:
-            if block.get("type") == "text" and block.get("text", "").strip():
-                text_parts.insert(0, block["text"].strip())
-
-    return "\n".join(text_parts).strip()
-
-
-def _extract_manager_response_excluding(raw_pane: str, injected_text: str) -> str:
-    """Extract manager response by finding text NOT from the injected prompt.
-
-    Splits the injected text into fragments and filters out any pane line
-    that substantially overlaps with the injection.
-    """
-    injection_fragments = set()
-    for word in injected_text.split():
-        if len(word) > 5:
-            injection_fragments.add(word.lower().strip(".,;:!?\"'"))
-
-    lines = raw_pane.splitlines()
-
-    NOISE_PREFIXES = ("●", "·", "⎿", "✻", "✽", "▐", "▝", "▘")
-    SKIP_CONTAINS = ("ctrl+o", "ctrl+b", "bypass permissions", "⏵⏵",
-                     "Bash(", "Read(", "Write(", "Edit(", "Agent(",
-                     "────", "╭", "╰", "│", "Searched for",
-                     "Claude Code v", "Opus 4", "Claude Max",
-                     "Crunched", "Baked", "Gallivanting", "thinking",
-                     "WORKFLOW ENGINE", "workflow-response",
-                     "orchestration", "do NOT take", "-H \"Authorization")
-
-    prompt_positions = []
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("❯") and "bypass" not in stripped:
-            prompt_positions.append(i)
-
-    if len(prompt_positions) < 2:
-        return ""
-
-    start = prompt_positions[-2] + 1
-    end = prompt_positions[-1]
-
-    response_lines = []
-    for line in lines[start:end]:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if any(stripped.startswith(n) for n in NOISE_PREFIXES):
-            continue
-        if any(s in stripped for s in SKIP_CONTAINS):
-            continue
-
-        words = [w.lower().strip(".,;:!?\"'") for w in stripped.split() if len(w) > 5]
-        if words:
-            overlap = sum(1 for w in words if w in injection_fragments)
-            if overlap > len(words) * 0.5:
-                continue
-
-        response_lines.append(stripped)
-
-    return "\n".join(response_lines).strip()
-
-
-def _extract_tagged_response(raw_pane: str) -> str:
-    """Extract response wrapped in <workflow-response> tags."""
-    tag_open = "<workflow-response>"
-    tag_close = "</workflow-response>"
-    start = raw_pane.rfind(tag_open)
-    if start == -1:
-        return ""
-    start += len(tag_open)
-    end = raw_pane.find(tag_close, start)
-    if end == -1:
-        return raw_pane[start:].strip()
-    return raw_pane[start:end].strip()
-
-
-def _extract_manager_response(raw_pane: str) -> str:
-    """Extract the assistant's text response from tmux pane capture.
-
-    Strategy: find the response section (between the last input prompt and
-    the waiting prompt), then extract only clean text lines — no tool calls,
-    no reasoning prefixes, no chrome.
-    """
-    lines = raw_pane.splitlines()
-
-    NOISE_PREFIXES = ("●", "·", "⎿", "✻", "✽", "▐", "▝", "▘")
-    SKIP_CONTAINS = ("ctrl+o", "ctrl+b", "bypass permissions", "⏵⏵",
-                     "Bash(", "Read(", "Write(", "Edit(", "Agent(",
-                     "────", "╭", "╰", "│", "Running", "Searched for",
-                     "… +", "Shell cwd", "expand)", "Claude Code v",
-                     "Opus 4", "Claude Max", "Welcome", "Tips for",
-                     "Recent activity", "No recent", "Run /init",
-                     "Crunched", "Baked", "Gallivanting", "thinking")
-
-    prompt_positions = []
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("❯") and "bypass" not in stripped:
-            prompt_positions.append(i)
-
-    if len(prompt_positions) < 2:
-        return ""
-
-    start = prompt_positions[-2] + 1
-    end = prompt_positions[-1]
-
-    response_lines = []
-    for line in lines[start:end]:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if any(stripped.startswith(n) for n in NOISE_PREFIXES):
-            continue
-        if any(s in stripped for s in SKIP_CONTAINS):
-            continue
-        response_lines.append(stripped)
-
-    result = "\n".join(response_lines).strip()
-
-    # If we extracted nothing useful, try a fallback: look for the last
-    # paragraph of plain text before the final prompt
-    if not result or len(result) < 10:
-        fallback_lines = []
-        for line in reversed(lines[:prompt_positions[-1]]):
-            stripped = line.strip()
-            if not stripped:
-                if fallback_lines:
-                    break
-                continue
-            if stripped.startswith("❯"):
-                break
-            if any(stripped.startswith(n) for n in NOISE_PREFIXES):
-                if fallback_lines:
-                    break
-                continue
-            if any(s in stripped for s in SKIP_CONTAINS):
-                if fallback_lines:
-                    break
-                continue
-            fallback_lines.insert(0, stripped)
-        if fallback_lines:
-            result = "\n".join(fallback_lines).strip()
-
-    return result

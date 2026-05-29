@@ -10,17 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from modastack.sdk import get_cli_path
+
 log = logging.getLogger(__name__)
 
 ROLES_DIR = Path(__file__).parent.parent / "roles" / "engineer" / "process"
 HANDOFF_DIR = Path.home() / ".modastack" / "handoffs"
-CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
 
 PHASE_TIMEOUT = {
     "pickup": 600,
@@ -98,7 +98,7 @@ async def _run_agent(
         permission_mode="bypassPermissions",
         max_turns=200,
         max_budget_usd=max_budget_usd or 5.0,
-        cli_path=CLAUDE,
+        cli_path=get_cli_path(),
         system_prompt={
             "type": "preset",
             "preset": "claude_code",

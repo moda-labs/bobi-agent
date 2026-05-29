@@ -15,7 +15,7 @@ from modastack.workflow.schema import (
 from modastack.workflow.variables import VariableContext
 from modastack.workflow.state import WorkflowRun, NodeState
 from modastack.workflow.actions import ActionRegistry, build_registry
-from modastack.workflow.engine import WorkflowEngine, _extract_manager_response, _extract_tagged_response
+from modastack.workflow.engine import WorkflowEngine
 from modastack.workflow.triggers import WorkflowDispatcher
 
 
@@ -474,114 +474,6 @@ class TestRepoScope:
         assert run.nodes["step"].outputs["stdout"] == ""
 
 
-class TestExtractTaggedResponse:
-    def test_extracts_tagged_content(self):
-        raw = """
-● Some reasoning here
-
-<workflow-response>
-Picking up #44 — updating the README with workflow engine docs.
-</workflow-response>
-
-✻ Crunched for 30s
-"""
-        result = _extract_tagged_response(raw)
-        assert "Picking up #44" in result
-        assert "workflow-response" not in result
-
-    def test_returns_empty_when_no_tags(self):
-        assert _extract_tagged_response("no tags here") == ""
-
-    def test_handles_unclosed_tag(self):
-        raw = "<workflow-response>partial response"
-        result = _extract_tagged_response(raw)
-        assert result == "partial response"
-
-    def test_uses_last_occurrence(self):
-        raw = """
-<workflow-response>old</workflow-response>
-<workflow-response>new</workflow-response>
-"""
-        result = _extract_tagged_response(raw)
-        assert result == "new"
-
-    def test_multiline_response(self):
-        raw = """
-<workflow-response>
-Line one.
-Line two.
-Line three.
-</workflow-response>
-"""
-        result = _extract_tagged_response(raw)
-        assert "Line one." in result
-        assert "Line three." in result
-
-
-class TestExtractManagerResponse:
-    def test_extracts_text(self):
-        raw = """
-❯ Some prompt here
-
-This is the response text.
-It has multiple lines.
-
-────────────
-❯
-  ⏵⏵ bypass permissions on
-"""
-        result = _extract_manager_response(raw)
-        assert "This is the response text." in result
-        assert "multiple lines" in result
-
-    def test_real_manager_pane(self):
-        raw = """
- ▐▛███▜▌   Claude Code v2.1.96
-▝▜█████▛▘  Opus 4.6 (1M context) · Claude Max
-  ▘▘ ▝▝    ~/dev/modastack
-
-❯ Issue #40 "Update README" assigned. Draft a brief Slack pickup message. Output ONLY the message text.
-
-● Bash(tmux list-sessions 2>/dev/null)
-  ⎿  moda-40: 1 windows (created Mon May 25 21:17:19 2026)
-
-● Bash(tmux capture-pane -t moda-40 -p -S -100 2>/dev/null | tail -80)
-  ⎿   ▐▛███▜▌   Claude Code v2.1.96
-     ▝▜█████▛▘  Opus 4.6 (1M context) · Claude Max
-      … +8 lines (ctrl+o to expand)
-
-● The worker session is waiting for input. Let me draft the message:
-
-  Picking up #40 — updating the modastack README to document the workflow engine and conversation history indexer. Quick docs update.
-
-✻ Crunched for 50s
-
-────────────────────────────────────────────────────────────
-❯
-  ⏵⏵ bypass permissions on (shift+tab to cycle)
-"""
-        result = _extract_manager_response(raw)
-        assert "Picking up #40" in result
-        assert "workflow engine" in result
-        assert "Bash(" not in result
-        assert "Claude Code" not in result
-
-    def test_strips_tool_calls(self):
-        raw = """
-❯ prompt
-
-● Bash(echo hello)
-  ⎿  hello
-
-The actual answer is here.
-
-────────────
-❯
-  ⏵⏵ bypass permissions on
-"""
-        result = _extract_manager_response(raw)
-        assert "actual answer" in result
-        assert "Bash(" not in result
 
 
 # === Dispatcher Tests ===
