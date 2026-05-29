@@ -110,8 +110,27 @@ def _run_socket(app_token: str, bot_token: str):
             text = event.get("text", "")[:500]
             thread_ts = event.get("thread_ts", "")
 
+            # Inject directly into the manager session — no event bus hop.
+            # The Stop hook handles posting the response back to Slack.
+            is_human_msg = False
+
             if event_type == "app_mention":
-                bus.push("slack.mention", "slack", {
+                is_human_msg = True
+            elif event_type == "message":
+                channel_type = event.get("channel_type", "")
+                if channel_type == "im":
+                    is_human_msg = True
+                elif thread_ts and f"{channel}:{thread_ts}" in our_threads:
+                    is_human_msg = True
+
+            if is_human_msg and text:
+                from modastack.tmux import send_text as tmux_send
+                from modastack.manager.session import SESSION_NAME
+                tmux_send(SESSION_NAME, f"{user_name} (via Slack): {text}", verify=False)
+                log.info(f"Slack → manager: {user_name}: {text[:80]}")
+
+                # Also push to bus so workflow approval nodes can match
+                bus.push(f"slack.{'dm' if event.get('channel_type') == 'im' else 'mention'}", "slack", {
                     "channel_id": channel,
                     "from": user_name,
                     "from_id": event.get("user", ""),
@@ -119,33 +138,6 @@ def _run_socket(app_token: str, bot_token: str):
                     "ts": event.get("ts", ""),
                     "thread_ts": thread_ts,
                 })
-
-            elif event_type == "message":
-                channel_type = event.get("channel_type", "")
-
-                if channel_type == "im":
-                    # All DMs come through
-                    bus.push("slack.dm", "slack", {
-                        "channel_id": channel,
-                        "from": user_name,
-                        "from_id": event.get("user", ""),
-                        "text": text,
-                        "ts": event.get("ts", ""),
-                        "thread_ts": thread_ts,
-                    })
-
-                elif thread_ts and f"{channel}:{thread_ts}" in our_threads:
-                    # Thread reply in a channel where modabot participated
-                    bus.push("slack.thread_reply", "slack", {
-                        "channel_id": channel,
-                        "from": user_name,
-                        "from_id": event.get("user", ""),
-                        "text": text,
-                        "ts": event.get("ts", ""),
-                        "thread_ts": thread_ts,
-                    })
-
-                # Ignore other channel messages (noise)
 
         def on_error(ws, error):
             log.warning(f"Socket Mode error: {error}")

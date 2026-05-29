@@ -166,8 +166,6 @@ def _ensure_repos():
             log.warning(f"Registered repo not found on disk: {path}")
 
 
-_HUMAN_EVENTS = {"slack.dm", "slack.mention", "slack.thread_reply"}
-
 _RELAY_SKIP_EVENTS = {
     "system.update_available",
     "worker.waiting_input",
@@ -175,19 +173,22 @@ _RELAY_SKIP_EVENTS = {
     "worker.exited",
     "task.unlabeled",
     "task.updated",
+    "slack.dm",
+    "slack.mention",
+    "slack.thread_reply",
 }
 
 
 def _summarize_events_for_relay(events: list[dict]) -> str:
     """One-line summary of user-facing events for the chat relay.
 
-    Filters out internal state-tracking events and human messages
-    (which are relayed via the fast path instead).
+    Filters out internal events and Slack messages (which are injected
+    directly by the socket handler, not through the consumer).
     """
     parts = []
     for e in events:
         etype = e.get("type", "")
-        if etype in _RELAY_SKIP_EVENTS or etype in _HUMAN_EVENTS:
+        if etype in _RELAY_SKIP_EVENTS:
             continue
         data = e.get("data", {})
         detail = data.get("text", "") or data.get("title", "") or ""
@@ -321,26 +322,6 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             _truncate_processed()
 
         state = detect_state()
-
-        # Fast path: inject human messages directly into the manager session
-        # instead of going through the events file. Much lower latency.
-        if events:
-            human = [e for e in events if e.get("type") in _HUMAN_EVENTS]
-            system = [e for e in events if e.get("type") not in _HUMAN_EVENTS]
-
-            for e in human:
-                data = e.get("data", {})
-                user = data.get("from", "someone")
-                text = data.get("text", "")
-                thread = data.get("thread_ts") or data.get("ts", "")
-                if text:
-                    pending_reply_thread = thread
-                    from modastack.tmux import send_text as tmux_send
-                    from modastack.manager.session import SESSION_NAME
-                    tmux_send(SESSION_NAME, f"{user} (via Slack): {text}", verify=False)
-                    log.info(f"Fast path: injected Slack message from {user}")
-
-            events = system
 
         if not events:
             # If there are unread events and manager is idle, trigger
