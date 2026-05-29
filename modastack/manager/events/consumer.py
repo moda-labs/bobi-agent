@@ -1,10 +1,9 @@
-"""Event consumer — writes events to a file, triggers the manager to read them.
+"""Event consumer — append-only event log with manager-side checkpointing.
 
-Instead of injecting long text into tmux (unreliable paste buffer), we:
-1. Write events to ~/.modastack/manager/pending_events.md
-2. Inject a short trigger: "New events — read .modastack/manager/pending_events.md"
-3. The manager reads the file and acts directly (curl, tmux, etc.)
-4. No executor needed — the manager handles everything via tools
+Events are appended to a log file with monotonic batch IDs. The manager
+tracks its own read offset via a checkpoint file. Duplicate triggers are
+harmless — the manager reads from its checkpoint and skips already-processed
+batches. The consumer periodically truncates batches before the checkpoint.
 """
 
 import json
@@ -28,13 +27,40 @@ from modastack.manager.session import start_or_resume, inject, detect_state, is_
 
 log = logging.getLogger(__name__)
 
-PENDING_EVENTS_PATH = Path.home() / ".modastack" / "manager" / "pending_events.md"
-DECISIONS_LOG = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
+EVENTS_DIR = Path.home() / ".modastack" / "manager"
+PENDING_EVENTS_PATH = EVENTS_DIR / "pending_events.md"
+CHECKPOINT_PATH = EVENTS_DIR / "events_checkpoint"
+BATCH_COUNTER_PATH = EVENTS_DIR / "batch_counter"
+DECISIONS_LOG = EVENTS_DIR / "decisions.jsonl"
 
 
-def _format_events(events: list[dict]) -> str:
-    """Format events into markdown sections."""
-    lines = [f"# {len(events)} new events at {time.strftime('%Y-%m-%d %H:%M:%S')}", ""]
+def _next_batch_id() -> int:
+    """Get and increment the persistent batch counter."""
+    BATCH_COUNTER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        n = int(BATCH_COUNTER_PATH.read_text().strip()) if BATCH_COUNTER_PATH.exists() else 0
+    except (ValueError, OSError):
+        n = 0
+    n += 1
+    BATCH_COUNTER_PATH.write_text(str(n))
+    return n
+
+
+def _read_checkpoint() -> int:
+    """Read the manager's last-processed batch ID."""
+    try:
+        return int(CHECKPOINT_PATH.read_text().strip()) if CHECKPOINT_PATH.exists() else 0
+    except (ValueError, OSError):
+        return 0
+
+
+def _format_batch(batch_id: int, events: list[dict]) -> str:
+    """Format events into a markdown batch section with an ID marker."""
+    lines = [
+        f"<!-- batch:{batch_id} -->",
+        f"# Batch {batch_id} — {len(events)} events at {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+    ]
 
     for e in events:
         data = e.get("data", {})
@@ -42,38 +68,19 @@ def _format_events(events: list[dict]) -> str:
         if len(detail) > 300:
             detail = detail[:300] + "..."
 
-        line = f"## {e['source']}/{e['type']}"
-        lines.append(line)
+        lines.append(f"## {e['source']}/{e['type']}")
 
-        if data.get("issue_id"):
-            lines.append(f"- issue_id: {data['issue_id']}")
-        if data.get("task_id"):
-            lines.append(f"- task_id: {data['task_id']}")
-        if data.get("from"):
-            lines.append(f"- from: {data['from']}")
-        if data.get("channel_id"):
-            lines.append(f"- channel_id: {data['channel_id']}")
-        if data.get("repo"):
-            lines.append(f"- repo: {data['repo']}")
-        if data.get("state"):
-            lines.append(f"- state: {data['state']}")
+        for key in ("issue_id", "task_id", "from", "channel_id", "repo",
+                     "state", "phase", "spec_pr", "current_version",
+                     "new_version", "changelog"):
+            if data.get(key):
+                lines.append(f"- {key}: {data[key]}")
         if data.get("labels"):
             lines.append(f"- labels: {', '.join(data['labels'])}")
-        if data.get("phase"):
-            lines.append(f"- phase: {data['phase']}")
-        if data.get("spec_pr"):
-            lines.append(f"- spec_pr: {data['spec_pr']}")
         if data.get("pr_url") or data.get("url"):
             lines.append(f"- url: {data.get('pr_url') or data.get('url')}")
-        if data.get("current_version"):
-            lines.append(f"- current_version: {data['current_version']}")
-        if data.get("new_version"):
-            lines.append(f"- new_version: {data['new_version']}")
-        if data.get("changelog"):
-            lines.append(f"- changelog: {data['changelog']}")
         if detail:
             lines.append(f"- detail: {detail}")
-
         lines.append("")
 
     try:
@@ -86,28 +93,56 @@ def _format_events(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _write_events_file(events: list[dict], append: bool = False) -> None:
-    """Write events to a file the manager can read.
-
-    When append=True, adds to the existing file so deferred events
-    accumulate instead of being overwritten.
-    """
-    content = _format_events(events)
+def _append_batch(batch_id: int, events: list[dict]) -> None:
+    """Append a batch to the events log file."""
+    content = _format_batch(batch_id, events)
     PENDING_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    if append and PENDING_EVENTS_PATH.exists():
-        with open(PENDING_EVENTS_PATH, "a") as f:
-            f.write("\n\n" + content)
-    else:
-        PENDING_EVENTS_PATH.write_text(content)
+    with open(PENDING_EVENTS_PATH, "a") as f:
+        f.write(content + "\n\n")
 
 
-def _clear_events_file() -> None:
-    """Remove the pending events file after successful delivery."""
+def _truncate_processed() -> None:
+    """Remove batches that the manager has already checkpointed."""
+    checkpoint = _read_checkpoint()
+    if checkpoint == 0 or not PENDING_EVENTS_PATH.exists():
+        return
+
     try:
-        PENDING_EVENTS_PATH.unlink(missing_ok=True)
-    except Exception:
-        pass
+        content = PENDING_EVENTS_PATH.read_text()
+    except OSError:
+        return
+
+    # Find the position after the last checkpointed batch
+    marker = f"<!-- batch:{checkpoint} -->"
+    idx = content.find(marker)
+    if idx == -1:
+        return
+
+    # Find the start of the next batch after the checkpoint
+    next_batch = content.find("<!-- batch:", idx + len(marker))
+    if next_batch == -1:
+        # Everything has been processed — clear the file
+        PENDING_EVENTS_PATH.write_text("")
+    else:
+        PENDING_EVENTS_PATH.write_text(content[next_batch:])
+
+
+def _has_unread_events() -> bool:
+    """Check if there are batches after the manager's checkpoint."""
+    if not PENDING_EVENTS_PATH.exists():
+        return False
+    try:
+        content = PENDING_EVENTS_PATH.read_text()
+    except OSError:
+        return False
+    if not content.strip():
+        return False
+
+    checkpoint = _read_checkpoint()
+    # Check if any batch marker has an ID > checkpoint
+    import re
+    batch_ids = [int(m) for m in re.findall(r'<!-- batch:(\d+) -->', content)]
+    return any(bid > checkpoint for bid in batch_ids)
 
 
 def _log_batch(events: list[dict]) -> None:
@@ -129,6 +164,16 @@ def _ensure_repos():
         path = repo_path if isinstance(repo_path, Path) else Path(repo_path)
         if not path.exists():
             log.warning(f"Registered repo not found on disk: {path}")
+
+
+def _inject_trigger() -> None:
+    """Send the standard trigger to the manager."""
+    trigger = (
+        f"New events. Read {PENDING_EVENTS_PATH} and process only batches "
+        f"after your checkpoint in {CHECKPOINT_PATH}. "
+        f"When done, write the last batch number you processed to {CHECKPOINT_PATH}."
+    )
+    inject(trigger)
 
 
 def run(webhook_port: int = 8080, use_webhooks: bool = False,
@@ -156,16 +201,15 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
 
     # Emit restart event with changelog so the manager can update Slack
     try:
+        repo_root = str(Path(__file__).resolve().parent.parent.parent)
         result = subprocess.run(
             ["git", "log", "--oneline", "-5"],
-            capture_output=True, text=True, timeout=5,
-            cwd=str(Path(__file__).resolve().parent.parent.parent),
+            capture_output=True, text=True, timeout=5, cwd=repo_root,
         )
         changelog = result.stdout.strip() if result.returncode == 0 else ""
         version = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-            cwd=str(Path(__file__).resolve().parent.parent.parent),
+            capture_output=True, text=True, timeout=5, cwd=repo_root,
         ).stdout.strip()
         bus.push("system.restarted", "system", {
             "version": version,
@@ -214,16 +258,12 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
 
     log.info(f"Listening for events (batch window: {batch_window}s)")
     tick_count = 0
-    manager_working_since: float | None = None  # watchdog: when manager entered "working"
-    trigger_sent_at: float | None = None  # monotonic time of last trigger send
-    MANAGER_BUSY_TIMEOUT = 120  # 2 min — force-inject if manager stuck working
-    TRIGGER_COOLDOWN = 60  # don't resend trigger within 60s of an unconfirmed send
-
-    def _trigger_in_flight() -> bool:
-        """Check if a trigger was recently sent and not yet processed."""
-        if trigger_sent_at is None:
-            return False
-        return (time.monotonic() - trigger_sent_at) < TRIGGER_COOLDOWN
+    manager_working_since: float | None = None
+    last_trigger_at: float = 0  # monotonic time of last trigger
+    MANAGER_BUSY_TIMEOUT = 120
+    TRIGGER_MIN_INTERVAL = 5  # minimum seconds between triggers
+    TRUNCATE_INTERVAL = 60  # truncate processed batches every 60s
+    last_truncate: float = 0
 
     while True:
         # Check if manager session is alive
@@ -231,73 +271,66 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             log.warning("Manager session died — restarting")
             start_or_resume()
             manager_working_since = None
-            trigger_sent_at = None
 
         # Wait for events
         bus.wait(timeout=batch_window)
         events = bus.drain()
 
+        # Periodic truncation of processed batches
+        now = time.monotonic()
+        if now - last_truncate > TRUNCATE_INTERVAL:
+            last_truncate = now
+            _truncate_processed()
+
         state = detect_state()
 
-        # When manager becomes idle and pending file is empty, trigger was processed
-        if trigger_sent_at and state == "waiting_input":
-            if not PENDING_EVENTS_PATH.exists() or PENDING_EVENTS_PATH.stat().st_size == 0:
-                trigger_sent_at = None
-                manager_working_since = None
-
         if not events:
-            # Check if we have deferred events and manager is free
-            if PENDING_EVENTS_PATH.exists() and PENDING_EVENTS_PATH.stat().st_size > 0:
-                if state == "waiting_input" and not _trigger_in_flight():
-                    log.info("Manager now idle — delivering deferred events")
-                    trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
-                    inject(trigger)
-                    trigger_sent_at = time.monotonic()
-                    manager_working_since = None
-                    log.info("Deferred events trigger sent")
+            # If there are unread events and manager is idle, trigger
+            if _has_unread_events() and state == "waiting_input":
+                if now - last_trigger_at > TRIGGER_MIN_INTERVAL:
+                    log.info("Manager idle with unread events — triggering")
+                    _inject_trigger()
+                    last_trigger_at = time.monotonic()
+            if state == "waiting_input":
+                manager_working_since = None
             continue
 
         tick_count += 1
         event_types = ", ".join(set(e["type"] for e in events))
         log.info(f"Batch #{tick_count}: {len(events)} events — {event_types}")
 
-        # Dispatch to workflow engine first; feed all events to running approvals
+        # Dispatch to workflow engine first
         for event in events:
             dispatcher.dispatch(event)
             dispatcher.feed_event(event)
 
-        # Unhandled events fall through to the manager LLM
         unhandled = [e for e in events if not dispatcher.was_dispatched(e)]
         if not unhandled:
             _log_batch(events)
             log.info(f"Batch #{tick_count}: all events handled by workflows")
             continue
 
+        # Always append events to the log — never lost
+        batch_id = _next_batch_id()
+        _append_batch(batch_id, unhandled)
+        _log_batch(events)
+        log.info(f"Batch #{tick_count} appended as batch:{batch_id}")
+
         if state == "working":
-            # Track how long manager has been working
             if manager_working_since is None:
                 manager_working_since = time.monotonic()
 
             busy_secs = time.monotonic() - manager_working_since
 
             if busy_secs > MANAGER_BUSY_TIMEOUT:
-                # Manager stuck — force-inject (better to interrupt than lose events)
                 log.warning(
-                    f"Batch #{tick_count}: manager busy for {int(busy_secs)}s — "
-                    f"force-injecting (timeout {MANAGER_BUSY_TIMEOUT}s exceeded)"
+                    f"Batch #{tick_count}: manager busy for {int(busy_secs)}s — force-triggering"
                 )
-                _write_events_file(unhandled, append=True)
-                trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
-                inject(trigger)
-                trigger_sent_at = time.monotonic()
+                _inject_trigger()
+                last_trigger_at = time.monotonic()
                 manager_working_since = None
-                _log_batch(events)
-                continue
-
-            # Normal deferral — append so earlier events aren't lost
-            _write_events_file(unhandled, append=True)
-            log.info(f"Batch #{tick_count}: manager is busy ({int(busy_secs)}s) — events appended, trigger deferred")
-            _log_batch(events)
+            else:
+                log.info(f"Batch #{tick_count}: manager busy ({int(busy_secs)}s) — events queued, trigger deferred")
             continue
         else:
             manager_working_since = None
@@ -311,18 +344,14 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
                 time.sleep(2)
 
         if state == "working":
-            _write_events_file(unhandled, append=True)
-            log.info(f"Batch #{tick_count}: manager started working — events appended, trigger deferred")
+            log.info(f"Batch #{tick_count}: manager started working — trigger deferred")
             manager_working_since = time.monotonic()
-            _log_batch(events)
             continue
 
-        # Manager is ready — write events and inject trigger
-        # Clear any stale events file first, then write fresh
-        _clear_events_file()
-        _write_events_file(unhandled)
-        trigger = f"New events. Read {PENDING_EVENTS_PATH} and act on them."
-        inject(trigger)
-        trigger_sent_at = time.monotonic()
-        _log_batch(events)
-        log.info(f"Batch #{tick_count} trigger sent to manager")
+        # Manager is idle — trigger it
+        if time.monotonic() - last_trigger_at > TRIGGER_MIN_INTERVAL:
+            _inject_trigger()
+            last_trigger_at = time.monotonic()
+            log.info(f"Batch #{tick_count} trigger sent to manager")
+        else:
+            log.info(f"Batch #{tick_count}: events queued, trigger recently sent")

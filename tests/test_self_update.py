@@ -534,10 +534,10 @@ class TestSelfUpdateFetchFailure:
 
 
 class TestWriteEventsFile:
-    """Test the new version-related fields in _write_events_file."""
+    """Test version-related fields in _format_batch."""
 
-    def test_version_fields_in_events_file(self, tmp_path):
-        from modastack.manager.events.consumer import _write_events_file, PENDING_EVENTS_PATH
+    def test_version_fields_in_events_file(self):
+        from modastack.manager.events.consumer import _format_batch
 
         events = [{
             "type": "system.update_available",
@@ -549,22 +549,14 @@ class TestWriteEventsFile:
             },
         }]
 
-        # Temporarily override the path
-        import modastack.manager.events.consumer as consumer_mod
-        orig_path = consumer_mod.PENDING_EVENTS_PATH
-        consumer_mod.PENDING_EVENTS_PATH = tmp_path / "pending_events.md"
-        try:
-            _write_events_file(events)
-            content = (tmp_path / "pending_events.md").read_text()
-            assert "current_version: 0.2.1" in content
-            assert "new_version: 0.3.0" in content
-            assert "changelog: - Stall detection" in content
-        finally:
-            consumer_mod.PENDING_EVENTS_PATH = orig_path
+        content = _format_batch(1, events)
+        assert "current_version: 0.2.1" in content
+        assert "new_version: 0.3.0" in content
+        assert "changelog: - Stall detection" in content
 
-    def test_version_fields_missing_no_crash(self, tmp_path):
+    def test_version_fields_missing_no_crash(self):
         """Events without version fields don't include those lines."""
-        from modastack.manager.events.consumer import _write_events_file
+        from modastack.manager.events.consumer import _format_batch
 
         events = [{
             "type": "worker.working",
@@ -572,17 +564,10 @@ class TestWriteEventsFile:
             "data": {"issue_id": "TEST-1", "session_state": "working"},
         }]
 
-        import modastack.manager.events.consumer as consumer_mod
-        orig_path = consumer_mod.PENDING_EVENTS_PATH
-        consumer_mod.PENDING_EVENTS_PATH = tmp_path / "pending_events.md"
-        try:
-            _write_events_file(events)
-            content = (tmp_path / "pending_events.md").read_text()
-            assert "current_version" not in content
-            assert "new_version" not in content
-            assert "changelog" not in content
-        finally:
-            consumer_mod.PENDING_EVENTS_PATH = orig_path
+        content = _format_batch(1, events)
+        assert "current_version" not in content
+        assert "new_version" not in content
+        assert "changelog" not in content
 
 
 class TestVersionModuleFallback:
