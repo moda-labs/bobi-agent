@@ -96,6 +96,9 @@ log "Skill symlinks refreshed ($(ls "$SKILLS_DIR" | wc -l | tr -d ' ') skills)"
 # Stop consumer first so it doesn't inject into a dying manager
 tmux kill-session -t modastack-consumer 2>/dev/null || true
 tmux kill-session -t modastack-dashboard 2>/dev/null || true
+# Kill any orphaned modastack processes still holding the webhook port
+pkill -f "modastack start" 2>/dev/null || true
+sleep 1
 
 # Restart manager (must be ready before consumer starts)
 tmux kill-session -t moda-manager 2>/dev/null || true
