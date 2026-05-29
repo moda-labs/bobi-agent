@@ -166,12 +166,27 @@ def _ensure_repos():
             log.warning(f"Registered repo not found on disk: {path}")
 
 
-def _summarize_events(events: list[dict]) -> str:
-    """One-line summary of events for the chat relay."""
+_RELAY_SKIP_EVENTS = {
+    "system.update_available",
+    "worker.waiting_input",
+    "worker.working",
+    "worker.exited",
+    "task.unlabeled",
+    "task.updated",
+}
+
+
+def _summarize_events_for_relay(events: list[dict]) -> str:
+    """One-line summary of user-facing events for the chat relay.
+
+    Filters out internal state-tracking events that are noise in Slack.
+    """
     parts = []
     for e in events:
-        data = e.get("data", {})
         etype = e.get("type", "")
+        if etype in _RELAY_SKIP_EVENTS:
+            continue
+        data = e.get("data", {})
         detail = data.get("text", "") or data.get("title", "") or ""
         if detail:
             parts.append(f"{etype}: {detail[:100]}")
@@ -352,7 +367,7 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
 
         # Relay input to chat
         try:
-            summary = _summarize_events(unhandled)
+            summary = _summarize_events_for_relay(unhandled)
             if summary:
                 relay.send(summary, role="user")
         except Exception as e:
