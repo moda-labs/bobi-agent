@@ -343,7 +343,9 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
             dispatcher.dispatch(event)
             dispatcher.feed_event(event)
 
-        unhandled = [e for e in events if not dispatcher.was_dispatched(e)]
+        # Filter: Slack messages are injected directly by socket handler, don't duplicate in events file
+        _SLACK_TYPES = {"slack.dm", "slack.mention", "slack.thread_reply"}
+        unhandled = [e for e in events if not dispatcher.was_dispatched(e) and e.get("type") not in _SLACK_TYPES]
         if not unhandled:
             _log_batch(events)
             log.info(f"Batch #{tick_count}: all events handled by workflows")

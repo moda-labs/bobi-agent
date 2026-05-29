@@ -7,6 +7,7 @@ Filters channel messages to only those in threads Modabot participated in.
 
 import json
 import logging
+import os
 import threading
 import time
 
@@ -126,6 +127,11 @@ def _run_socket(app_token: str, bot_token: str):
             if is_human_msg and text:
                 from modastack.tmux import send_text as tmux_send
                 from modastack.manager.session import SESSION_NAME
+                # Set marker so the Stop hook knows to relay the response to Slack
+                marker = os.path.expanduser("~/.modastack/manager/slack_reply_pending")
+                os.makedirs(os.path.dirname(marker), exist_ok=True)
+                with open(marker, "w") as f:
+                    f.write(event.get("ts", ""))
                 tmux_send(SESSION_NAME, f"{user_name} (via Slack): {text}", verify=False)
                 log.info(f"Slack → manager: {user_name}: {text[:80]}")
 

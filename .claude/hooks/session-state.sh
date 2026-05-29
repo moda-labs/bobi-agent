@@ -17,10 +17,12 @@ os.makedirs(log_dir, exist_ok=True)
 with open(os.path.join(log_dir, 'activity.jsonl'), 'a') as f:
     f.write(json.dumps(entry) + '\n')
 
-# On Stop: relay assistant response to Slack
+# On Stop: relay assistant response to Slack only if a Slack message triggered this turn
 if data['hook_event_name'] == 'Stop':
     msg = data.get('last_assistant_message', '')
-    if msg:
+    marker = os.path.expanduser('~/.modastack/manager/slack_reply_pending')
+    if msg and os.path.exists(marker):
+        os.unlink(marker)
         try:
             import yaml
             config_path = os.path.expanduser('~/.modastack/config.yaml')
