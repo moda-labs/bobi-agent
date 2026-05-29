@@ -132,7 +132,7 @@ def _run_socket(app_token: str, bot_token: str):
                 os.makedirs(os.path.dirname(marker), exist_ok=True)
                 with open(marker, "w") as f:
                     f.write(event.get("ts", ""))
-                tmux_send(SESSION_NAME, f"{user_name} (via Slack): {text}", verify=False)
+                tmux_send(SESSION_NAME, f"{user_name}: {text}", verify=False)
                 log.info(f"Slack → manager: {user_name}: {text[:80]}")
 
                 # Also push to bus so workflow approval nodes can match
