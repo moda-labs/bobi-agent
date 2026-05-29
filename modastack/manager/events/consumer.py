@@ -166,6 +166,8 @@ def _ensure_repos():
             log.warning(f"Registered repo not found on disk: {path}")
 
 
+_HUMAN_EVENTS = {"slack.dm", "slack.mention", "slack.thread_reply"}
+
 _RELAY_SKIP_EVENTS = {
     "system.update_available",
     "worker.waiting_input",
@@ -179,12 +181,13 @@ _RELAY_SKIP_EVENTS = {
 def _summarize_events_for_relay(events: list[dict]) -> str:
     """One-line summary of user-facing events for the chat relay.
 
-    Filters out internal state-tracking events that are noise in Slack.
+    Filters out internal state-tracking events and human messages
+    (which are relayed via the fast path instead).
     """
     parts = []
     for e in events:
         etype = e.get("type", "")
-        if etype in _RELAY_SKIP_EVENTS:
+        if etype in _RELAY_SKIP_EVENTS or etype in _HUMAN_EVENTS:
             continue
         data = e.get("data", {})
         detail = data.get("text", "") or data.get("title", "") or ""
@@ -290,6 +293,7 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
     from modastack.relay import build_adapter
     relay = build_adapter()
     last_relayed_response_ts: float = 0  # avoid duplicate relay of same response
+    pending_reply_thread: str = ""  # thread_ts to reply to after manager responds
 
     log.info(f"Listening for events (batch window: {batch_window}s)")
     tick_count = 0
@@ -329,9 +333,30 @@ def run(webhook_port: int = 8080, use_webhooks: bool = False,
                 if resp_ts > last_relayed_response_ts:
                     last_relayed_response_ts = resp_ts
                     try:
-                        relay.send(response, role="assistant")
+                        relay.send(response, role="assistant", thread_ts=pending_reply_thread)
+                        pending_reply_thread = ""
                     except Exception as e:
                         log.warning(f"Relay output failed: {e}")
+
+        # Fast path: inject human messages directly into the manager session
+        # instead of going through the events file. Much lower latency.
+        if events:
+            human = [e for e in events if e.get("type") in _HUMAN_EVENTS]
+            system = [e for e in events if e.get("type") not in _HUMAN_EVENTS]
+
+            for e in human:
+                data = e.get("data", {})
+                user = data.get("from", "someone")
+                text = data.get("text", "")
+                thread = data.get("thread_ts") or data.get("ts", "")
+                if text:
+                    pending_reply_thread = thread
+                    from modastack.tmux import send_text as tmux_send
+                    from modastack.manager.session import SESSION_NAME
+                    tmux_send(SESSION_NAME, f"{user} (via Slack): {text}", verify=False)
+                    log.info(f"Fast path: injected Slack message from {user}")
+
+            events = system
 
         if not events:
             # If there are unread events and manager is idle, trigger

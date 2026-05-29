@@ -17,10 +17,11 @@ log = logging.getLogger(__name__)
 
 @runtime_checkable
 class ChatAdapter(Protocol):
-    def send(self, text: str, role: str = "assistant") -> None:
+    def send(self, text: str, role: str = "assistant", thread_ts: str = "") -> None:
         """Send a message to the chat service.
 
         role: "assistant" for manager output, "user" for injected input/events.
+        thread_ts: reply in a specific thread (Slack ts, Discord thread ID, etc.)
         """
         ...
 
@@ -28,7 +29,7 @@ class ChatAdapter(Protocol):
 class NullAdapter:
     """No-op adapter when no chat service is configured."""
 
-    def send(self, text: str, role: str = "assistant") -> None:
+    def send(self, text: str, role: str = "assistant", thread_ts: str = "") -> None:
         pass
 
 
@@ -40,17 +41,19 @@ class SlackAdapter:
         self._channel = channel_id
         self._client = httpx.Client(timeout=10)
 
-    def send(self, text: str, role: str = "assistant") -> None:
+    def send(self, text: str, role: str = "assistant", thread_ts: str = "") -> None:
         if not text or not text.strip():
             return
 
         if len(text) > 3000:
             text = text[:3000] + "\n_(truncated)_"
 
-        payload = {
+        payload: dict = {
             "channel": self._channel,
             "text": text,
         }
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
 
         try:
             resp = self._client.post(
