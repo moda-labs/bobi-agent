@@ -1,0 +1,36 @@
+name: Deploy Event Server
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "event-server/**"
+
+jobs:
+  deploy:
+    name: Deploy Worker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: event-server
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: event-server/package-lock.json
+
+      - run: npm ci
+
+      - run: npx vitest run
+
+      - name: Deploy to Cloudflare
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: event-server
+          command: deploy
