@@ -119,12 +119,12 @@ sleep 5
 
 # Start consumer (its readiness gate will wait for manager to be fully ready)
 tmux new-session -d -s modastack-consumer \
-    "cd $REPO_DIR && source .venv/bin/activate && modastack start --webhooks"
+    "bash -c 'cd $REPO_DIR && source .venv/bin/activate && modastack start --webhooks'"
 
 # Restart dashboard
 sleep 1
 tmux new-session -d -s modastack-dashboard \
-    "cd $REPO_DIR && source .venv/bin/activate && modastack dashboard"
+    "bash -c 'cd $REPO_DIR && source .venv/bin/activate && modastack dashboard'"
 
 NEW_VERSION=$(git rev-parse --short HEAD)
 log "Deploy complete — now at $NEW_VERSION"
