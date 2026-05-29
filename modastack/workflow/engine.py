@@ -226,15 +226,41 @@ class WorkflowEngine:
         return self.registry.execute(node.action, resolved_params)
 
     def _exec_prompt_inject(self, node: NodeDef) -> None:
-        from modastack.session import inject, session_exists
+        from modastack.subagent import run_phase
 
-        session_id = self.ctx.resolve(node.session).lstrip("#")
-        text = self.ctx.resolve(node.inject)
+        issue_id = self.ctx.resolve(node.session).lstrip("#")
+        inject_text = self.ctx.resolve(node.inject)
 
-        if not session_exists(session_id):
-            raise RuntimeError(f"Engineer session '{session_id}' not found")
+        phase = self._detect_phase(inject_text)
+        cwd = self._resolve_cwd(issue_id)
 
-        inject(session_id, text)
+        run_phase(
+            issue_id=issue_id,
+            phase=phase,
+            cwd=cwd,
+            context=inject_text,
+        )
+        log.info(f"Sub-agent started for {issue_id}/{phase}")
+
+    def _detect_phase(self, inject_text: str) -> str:
+        text_lower = inject_text.lower()
+        for phase in ("pickup", "spec", "implement", "prepare-pr", "feedback"):
+            if f"/{phase}" in text_lower:
+                return phase
+        return "implement"
+
+    def _resolve_cwd(self, issue_id: str) -> str:
+        event_repo = self.run.trigger_event.get("data", {}).get("repo", "")
+        if not event_repo:
+            return str(Path.home())
+
+        from modastack.config import GlobalConfig
+        config = GlobalConfig.load()
+        repo_name = event_repo.split("/")[-1] if "/" in event_repo else event_repo
+        for p in config.repos:
+            if p.name == repo_name:
+                return str(p)
+        return event_repo
 
     def _exec_manager(self, node: NodeDef) -> dict:
         from modastack.manager.session import inject as mgr_inject
@@ -294,18 +320,34 @@ class WorkflowEngine:
         return None
 
     def _poll_prompt(self, node: NodeDef) -> dict | None:
-        if not node.wait_for or not node.wait_for.phase:
+        from modastack.subagent import get_result, is_running
+
+        issue_id = self.ctx.resolve(node.session).lstrip("#")
+
+        if is_running(issue_id):
             return None
 
-        session_id = self.ctx.resolve(node.session)
-        handoff = self._read_handoff(session_id)
+        agent_result = get_result(issue_id)
+        if agent_result and not agent_result.success:
+            log.warning(
+                f"Sub-agent {issue_id}/{agent_result.phase} failed: "
+                f"{agent_result.error}"
+            )
 
-        if handoff.get("phase") == node.wait_for.phase:
-            self.ctx.set_scope("handoff", handoff)
-            outputs = {}
-            for key, expr in node.outputs.items():
-                outputs[key] = self.ctx.resolve(expr)
-            return outputs
+        if node.wait_for and node.wait_for.phase:
+            handoff = self._read_handoff(issue_id)
+            if handoff.get("phase") == node.wait_for.phase:
+                self.ctx.set_scope("handoff", handoff)
+                outputs = {}
+                for key, expr in node.outputs.items():
+                    outputs[key] = self.ctx.resolve(expr)
+                if agent_result:
+                    outputs["_agent_cost_usd"] = agent_result.total_cost_usd
+                    outputs["_agent_duration_ms"] = agent_result.duration_ms
+                return outputs
+
+        if agent_result and not is_running(issue_id):
+            return {"_agent_completed": True, "_agent_error": agent_result.error}
 
         return None
 

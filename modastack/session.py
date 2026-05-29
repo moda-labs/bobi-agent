@@ -183,11 +183,23 @@ def capture(issue_id: str, lines: int = 80) -> str:
 
 
 def detect_state(issue_id: str) -> dict:
-    """Analyze the pane to determine session state.
+    """Determine session state (sub-agent or legacy tmux).
 
-    Collects data (pane content, process liveness) then delegates to
-    the pure determine_agent_state() function for testability.
+    Checks sub-agents first, falls back to tmux pane analysis.
     """
+    try:
+        from modastack.subagent import is_running, get_result
+        if is_running(issue_id):
+            return {"state": "running", "type": "subagent"}
+        result = get_result(issue_id)
+        if result is not None:
+            if result.success:
+                return {"state": "completed", "type": "subagent", "phase": result.phase}
+            return {"state": "failed", "type": "subagent", "error": result.error}
+    except ImportError:
+        pass
+
+    # Legacy tmux fallback
     name = _session_name(issue_id)
     if not has_session(name):
         return {"state": "exited"}
@@ -236,21 +248,31 @@ def _build_reverse_name_map() -> dict[str, str]:
 
 
 def list_sessions() -> list[str]:
-    """List all modastack tmux sessions. Returns issue IDs."""
+    """List all active engineer sessions (tmux + sub-agents). Returns issue IDs."""
+    sessions = set()
+
+    # Check tmux sessions (legacy, may still have some running)
     result = subprocess.run(
         [TMUX, "list-sessions", "-F", "#{session_name}"],
         capture_output=True, text=True,
     )
-    if result.returncode != 0:
-        return []
+    if result.returncode == 0:
+        reverse_map = _build_reverse_name_map()
+        for name in result.stdout.strip().splitlines():
+            if not name.startswith("moda-") or name == "moda-manager":
+                continue
+            iid = reverse_map.get(name)
+            if iid is None:
+                iid = name.replace("moda-", "", 1)
+            sessions.add(iid.upper())
 
-    reverse_map = _build_reverse_name_map()
-    sessions = []
-    for name in result.stdout.strip().splitlines():
-        if not name.startswith("moda-") or name == "moda-manager":
-            continue
-        iid = reverse_map.get(name)
-        if iid is None:
-            iid = name.replace("moda-", "", 1)
-        sessions.append(iid.upper())
-    return sessions
+    # Check sub-agents
+    try:
+        from modastack.subagent import list_agents
+        for agent in list_agents():
+            if agent.get("running"):
+                sessions.add(agent["issue_id"].upper())
+    except ImportError:
+        pass
+
+    return sorted(sessions)

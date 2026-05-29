@@ -42,8 +42,11 @@ nodes:
   cleanup_session:
     type: bash
     command: |
-      name=$(cat ~/.modastack/sessions/${{event.issue_id}}.name 2>/dev/null || echo "moda-${{event.issue_id | lower}}")
-      tmux kill-session -t "$name" 2>/dev/null || true
+      python3 -c "
+      from modastack.subagent import cancel_agent
+      cancel_agent('${{event.issue_id}}')
+      " 2>/dev/null || true
       rm -f ~/.modastack/sessions/${{event.issue_id}}.name ~/.modastack/sessions/${{event.issue_id}}.id
+      rm -f ~/.modastack/handoffs/${{event.issue_id | lower}}.md
     timeout: 10
     depends_on: [move_to_done]

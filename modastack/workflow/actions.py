@@ -122,13 +122,15 @@ def _resolve_repo_path(repo: str) -> str:
 
 
 def _session_spawn(params: dict) -> dict:
-    from modastack.session import spawn_session, _session_name
+    from modastack.session import sync_main_branch
     issue_id = params.get("issue_id", "").lstrip("#")
     repo = params.get("repo", "")
-    title = params.get("title", "")
     cwd = _resolve_repo_path(repo)
-    ok = spawn_session(issue_id, cwd, title=title)
-    return {"ok": ok, "session_name": _session_name(issue_id)}
+
+    from pathlib import Path
+    ok = sync_main_branch(Path(cwd))
+    log.info(f"Prepared repo {cwd} for sub-agent (issue {issue_id})")
+    return {"ok": ok, "cwd": cwd}
 
 
 def build_registry() -> ActionRegistry:
