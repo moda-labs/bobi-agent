@@ -186,6 +186,44 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "body": comment.get("body", "")[:500],
             })
 
+        elif event_type == "check_run":
+            check = payload.get("check_run", {})
+            conclusion = check.get("conclusion", "")
+            if payload.get("action") == "completed" and conclusion == "failure":
+                # Extract PR info from the check run's pull_requests array
+                prs = check.get("pull_requests", [])
+                pr_number = prs[0].get("number") if prs else None
+                pr_url = prs[0].get("url", "") if prs else ""
+                repo = payload.get("repository", {}).get("full_name", "")
+                bus.push("github.build_failed", "github", {
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "branch": check.get("head_branch", ""),
+                    "check_name": check.get("name", ""),
+                    "conclusion": conclusion,
+                    "url": check.get("html_url", ""),
+                    "pr_url": pr_url,
+                    "output_title": check.get("output", {}).get("title", ""),
+                    "output_summary": (check.get("output", {}).get("summary", "") or "")[:500],
+                })
+
+        elif event_type == "workflow_run":
+            run = payload.get("workflow_run", {})
+            conclusion = run.get("conclusion", "")
+            if payload.get("action") == "completed" and conclusion == "failure":
+                prs = run.get("pull_requests", [])
+                pr_number = prs[0].get("number") if prs else None
+                repo = payload.get("repository", {}).get("full_name", "")
+                bus.push("github.build_failed", "github", {
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "branch": run.get("head_branch", ""),
+                    "check_name": run.get("name", ""),
+                    "conclusion": conclusion,
+                    "url": run.get("html_url", ""),
+                    "output_summary": "",
+                })
+
         elif event_type == "ping":
             log.info(f"GitHub ping received: {payload.get('zen', '')}")
 
