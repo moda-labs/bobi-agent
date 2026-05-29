@@ -50,7 +50,7 @@ def bootstrap_labels(repo_path: Path) -> list[str]:
     return actions
 
 
-WEBHOOK_EVENTS = ["issues", "issue_comment", "pull_request", "pull_request_review"]
+WEBHOOK_EVENTS = ["issues", "issue_comment", "pull_request", "pull_request_review", "check_run", "workflow_run"]
 
 
 def setup_webhook(repo_path: Path, public_url: str) -> list[str]:
