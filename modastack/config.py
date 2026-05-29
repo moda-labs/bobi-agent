@@ -81,6 +81,11 @@ class GlobalConfig:
     github_default_account: str = ""
     github_accounts: dict[str, str] = field(default_factory=dict)
 
+    # Event server (centralized webhook relay)
+    event_server_url: str = ""
+    event_server_deployment_id: str = ""
+    event_server_api_key: str = ""
+
     # Manager role (loads roles/manager/<role>.md)
     manager_role: str = "engineering"
 
@@ -96,6 +101,7 @@ class GlobalConfig:
         github = raw.get("github", {})
 
         manager = raw.get("manager", {})
+        event_server = raw.get("event_server", {})
 
         return cls(
             repos=repos,
@@ -106,6 +112,9 @@ class GlobalConfig:
             public_url=webhooks.get("public_url", ""),
             github_default_account=github.get("default_account", ""),
             github_accounts=github.get("accounts", {}),
+            event_server_url=event_server.get("url", ""),
+            event_server_deployment_id=event_server.get("deployment_id", ""),
+            event_server_api_key=event_server.get("api_key", ""),
             manager_role=manager.get("role", "engineering"),
         )
 

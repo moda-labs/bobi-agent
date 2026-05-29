@@ -101,33 +101,14 @@ def _clear_activity_log() -> None:
 def start_or_resume(cwd: str = None) -> bool:
     """Start a new manager session or resume an existing one.
 
-    Returns True if the session is ready.
+    Non-blocking — creates the tmux session and injects the startup prompt,
+    then returns. The event client checks manager state before each injection.
     """
     if _session_exists():
-        last = _read_last_activity()
-        if last and last.get("event") == "Stop":
-            log.info("Manager session already running and idle")
-            return True
-
-        if last and last.get("event") == "UserPromptSubmit":
-            log.info("Manager session already running and working")
-            return True
-
-        # Session exists but no activity — needs startup prompt
-        log.info("Manager session exists but no activity — injecting startup")
-        _clear_activity_log()
-        _inject_startup_prompt()
-        if not _wait_for_prompt_accepted():
-            log.error("Failed to inject startup prompt")
-            return False
-        if not _wait_for_turn_complete():
-            log.warning("Startup injection accepted but turn didn't complete — continuing anyway")
-        _capture_session_id()
-        log.info("Manager session prompted and ready")
+        log.info("Manager session already running")
         return True
 
     if not cwd:
-        # Always start in the modastack repo — hooks are installed there
         repo_root = Path(__file__).parent.parent
         if repo_root.exists():
             cwd = str(repo_root)
@@ -136,7 +117,6 @@ def start_or_resume(cwd: str = None) -> bool:
             cwd = str(config.repos[0]) if config.repos else str(Path.home())
 
     saved_id = _get_saved_session_id()
-    _clear_activity_log()
 
     if saved_id:
         cmd = [CLAUDE, "--resume", saved_id, "--dangerously-skip-permissions"]
@@ -151,8 +131,8 @@ def start_or_resume(cwd: str = None) -> bool:
         "-x", "200", "-y", "50",
     ] + cmd, cwd=cwd)
 
-    # Wait for Claude Code to be ready (tmux pane exists and process is running)
-    for _ in range(30):
+    # Wait for tmux session to exist
+    for _ in range(10):
         time.sleep(1)
         if _session_exists():
             break
@@ -161,17 +141,10 @@ def start_or_resume(cwd: str = None) -> bool:
         return False
 
     if not saved_id:
-        # Give Claude Code a moment to initialize before injecting
         time.sleep(3)
         _inject_startup_prompt()
-        if not _wait_for_prompt_accepted():
-            log.error("Failed to inject startup prompt into new session")
-            return False
-        if not _wait_for_turn_complete():
-            log.warning("Startup turn didn't complete — continuing anyway")
 
-    _capture_session_id()
-    log.info("Manager session ready")
+    log.info("Manager session started")
     return True
 
 
@@ -253,26 +226,8 @@ def _send_keys(text: str) -> bool:
 
 
 def inject(text: str) -> bool:
-    """Send text into the manager session and confirm it was accepted.
-
-    Returns True if a UserPromptSubmit event appeared after injection.
-    """
-    inject_time = time.time()
-
-    if not _send_keys(text):
-        return False
-
-    # Wait for UserPromptSubmit confirmation
-    for _ in range(30):
-        time.sleep(1)
-        last = _read_last_activity()
-        if last and last.get("event") == "UserPromptSubmit":
-            if last.get("ts", 0) >= inject_time - 5:
-                log.debug(f"Injected and confirmed ({len(text)} chars)")
-                return True
-
-    log.warning("Injection not confirmed — no UserPromptSubmit received")
-    return False
+    """Send text into the manager session."""
+    return _send_keys(text)
 
 
 def capture(lines: int = 50) -> str:
@@ -292,31 +247,12 @@ def _detect_state_from_pane() -> str:
 
 
 def detect_state() -> str:
-    """Detect manager state from activity log, cross-checked with pane.
-
-    When the activity log says "working" but the pane shows an idle prompt,
-    trusts the pane — a missed Stop hook event is the most common cause of
-    the consumer getting stuck.
+    """Detect manager state by reading the tmux pane.
 
     Returns: 'waiting_input' | 'working' | 'exited' | 'unknown'
     """
     if not _session_exists():
         return "exited"
-
-    last = _read_last_activity()
-    if last is None:
-        return _detect_state_from_pane()
-
-    event = last.get("event")
-    if event == "Stop":
-        return "waiting_input"
-    if event == "UserPromptSubmit":
-        pane_state = _detect_state_from_pane()
-        if pane_state == "waiting_input":
-            log.info("Activity log says working but pane shows idle — trusting pane")
-            return "waiting_input"
-        return "working"
-
     return _detect_state_from_pane()
 
 

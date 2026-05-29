@@ -1,7 +1,7 @@
 """Slack Socket Mode client — real-time events without webhooks.
 
 Connects to Slack via WebSocket. No public URL needed.
-Receives events and pushes them to the event bus.
+Injects DMs and mentions directly into the manager session.
 Filters channel messages to only those in threads Modabot participated in.
 """
 
@@ -15,7 +15,6 @@ import httpx
 import websocket
 
 from modastack.config import GlobalConfig
-from .bus import get_bus
 
 log = logging.getLogger(__name__)
 
@@ -66,8 +65,7 @@ def _open_socket_url(app_token: str) -> str:
 
 
 def _run_socket(app_token: str, bot_token: str):
-    """Main socket loop — connect, receive events, push to bus."""
-    bus = get_bus()
+    """Main socket loop — connect, receive events, inject into manager."""
     bot_user_id = _get_bot_user_id(bot_token)
     user_cache = {}
     # Track threads modabot has participated in
@@ -134,16 +132,6 @@ def _run_socket(app_token: str, bot_token: str):
                     f.write(event.get("ts", ""))
                 tmux_send(SESSION_NAME, f"{user_name}: {text}", verify=False)
                 log.info(f"Slack → manager: {user_name}: {text[:80]}")
-
-                # Also push to bus so workflow approval nodes can match
-                bus.push(f"slack.{'dm' if event.get('channel_type') == 'im' else 'mention'}", "slack", {
-                    "channel_id": channel,
-                    "from": user_name,
-                    "from_id": event.get("user", ""),
-                    "text": text,
-                    "ts": event.get("ts", ""),
-                    "thread_ts": thread_ts,
-                })
 
         def on_error(ws, error):
             log.warning(f"Socket Mode error: {error}")

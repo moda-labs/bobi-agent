@@ -30,10 +30,14 @@ def install_hooks(target_path: Path) -> list[str]:
     """Install Claude Code hooks for session state tracking.
 
     Copies the hook script and merges hook config into .claude/settings.json.
+    Skips if target is the modastack repo itself.
     Returns list of actions taken.
     """
     actions = []
     repo_root = Path(__file__).parent.parent
+
+    if target_path.resolve() == repo_root.resolve():
+        return actions
 
     # Copy hook script
     hooks_dir = target_path / ".claude" / "hooks"
@@ -41,7 +45,7 @@ def install_hooks(target_path: Path) -> list[str]:
     src_hook = repo_root / ".claude" / "hooks" / "session-state.sh"
     dst_hook = hooks_dir / "session-state.sh"
 
-    if src_hook.exists():
+    if src_hook.exists() and src_hook.resolve() != dst_hook.resolve():
         import shutil
         shutil.copy2(src_hook, dst_hook)
         dst_hook.chmod(0o755)
@@ -88,19 +92,14 @@ def main():
 
 
 @main.command()
-@click.option("--webhooks", is_flag=True, help="Enable webhook server for GitHub/Linear")
-@click.option("--port", default=8080, help="Webhook server port")
-@click.option("--batch-window", default=5.0, help="Seconds to batch events before processing")
-def start(webhooks, port, batch_window):
-    """Start modabot. Event-driven — reacts to webhooks and polls.
+def start():
+    """Start modabot. Connects to the centralized event server for webhooks.
 
     Usage:
-        modastack start                    # polling mode (default)
-        modastack start --webhooks         # webhook + polling mode
-        modastack start --webhooks --port 9090
+        modastack start
     """
     from modastack.manager.events.consumer import run
-    run(webhook_port=port, use_webhooks=webhooks, batch_window=batch_window)
+    run()
 
 
 @main.command()
@@ -267,15 +266,9 @@ def register(repo_path: str, task_tracking: str | None, project: str | None, lin
         for action in bootstrap_labels(path):
             click.echo(f"  {action}")
 
-    # Set up GitHub webhook (requires public_url in config)
-    if task_tracking == "github-issues" and config.public_url:
-        click.echo("Setting up GitHub webhook...")
-        from .github_issues import setup_webhook
-        for action in setup_webhook(path, config.public_url):
-            click.echo(f"  {action}")
-    elif task_tracking == "github-issues" and not config.public_url:
-        click.echo("Webhook setup skipped — no public_url in ~/.modastack/config.yaml")
-        click.echo("  Set webhooks.public_url (e.g., http://your-ip:8080) and re-run register.")
+    # Webhook setup is handled by the centralized GitHub App — no per-repo setup needed.
+    if task_tracking == "github-issues":
+        click.echo("Webhooks: handled by centralized GitHub App (install at github.com/apps/modastack)")
 
     # Add .modastack/ to .gitignore
     gitignore_path = path / ".gitignore"
