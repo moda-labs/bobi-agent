@@ -158,9 +158,9 @@ def _send_long(session_name: str, text: str) -> bool:
 def _send_enter(session_name: str) -> None:
     """Send Enter twice with delays — first submits, second confirms."""
     time.sleep(0.5)
-    subprocess.run([TMUX, "send-keys", "-t", session_name, "Enter"])
+    subprocess.run([TMUX, "send-keys", "-t", session_name, "Enter"], capture_output=True)
     time.sleep(0.5)
-    subprocess.run([TMUX, "send-keys", "-t", session_name, "Enter"])
+    subprocess.run([TMUX, "send-keys", "-t", session_name, "Enter"], capture_output=True)
 
 
 def send_text(session_name: str, text: str, verify: bool = True) -> bool:
