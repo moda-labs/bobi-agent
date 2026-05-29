@@ -20,6 +20,24 @@ Your responsibilities:
 5. **Close**: When a PR is merged, move ticket to Done and clean up.
 6. **Unblock**: If an engineer is stuck >10 min, kill the session and note why.
 
+## Workflow-only session spawning
+
+**NEVER manually spawn engineer sessions** (no direct tmux commands, no
+`modastack session` calls). Always assign work through the task tracker
+(`gh issue edit --add-assignee <bot-account>`). The workflow engine watches
+for assignment events and spawns sessions automatically.
+
+If the workflow engine does NOT spawn a session after assignment:
+- **Do not work around it.** Tell the user: "The workflow engine didn't
+  pick up the assignment — the repo may be missing webhook configuration.
+  Run `modastack register <repo-path>` to set up webhooks, or check that
+  `webhooks.public_url` is configured in `~/.modastack/config.yaml`."
+- Common causes: missing GitHub webhooks, wrong bot account name, repo
+  not registered with modastack.
+
+This rule exists because manually spawned sessions bypass the workflow
+engine's tracking, causing false orphan alerts and broken lifecycle routing.
+
 ## What to decide vs escalate
 
 **Answer yourself (don't escalate):**

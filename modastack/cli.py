@@ -267,6 +267,16 @@ def register(repo_path: str, task_tracking: str | None, project: str | None, lin
         for action in bootstrap_labels(path):
             click.echo(f"  {action}")
 
+    # Set up GitHub webhook (requires public_url in config)
+    if task_tracking == "github-issues" and config.public_url:
+        click.echo("Setting up GitHub webhook...")
+        from .github_issues import setup_webhook
+        for action in setup_webhook(path, config.public_url):
+            click.echo(f"  {action}")
+    elif task_tracking == "github-issues" and not config.public_url:
+        click.echo("Webhook setup skipped — no public_url in ~/.modastack/config.yaml")
+        click.echo("  Set webhooks.public_url (e.g., http://your-ip:8080) and re-run register.")
+
     # Add .modastack/ to .gitignore
     gitignore_path = path / ".gitignore"
     gitignore_entries = [".modastack/", "worktrees/"]
