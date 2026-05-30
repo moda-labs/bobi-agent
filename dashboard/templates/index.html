@@ -174,7 +174,8 @@ function refresh() {
   document.getElementById('log-view').classList.toggle('active', currentView!=='events');
   document.getElementById('events-view').classList.toggle('active', currentView==='events');
   document.getElementById('dag-panel').classList.toggle('visible', currentView==='engineer');
-  if(currentView==='manager') { document.getElementById('log-header').textContent='Manager'; loadLog(); }
+  if(currentView==='manager') { document.getElementById('log-header').textContent='Manager'; loadLog('moda-manager'); }
+  else if(currentView==='engineer' && selectedIssue) { document.getElementById('log-header').textContent='Engineer #'+selectedIssue; loadLog('eng-'+selectedIssue.toLowerCase()); }
   else if(currentView==='events') { loadEvents(); }
   loadStatus();
 }
@@ -225,9 +226,10 @@ async function loadStatus() {
   } catch(e) {}
 }
 
-async function loadLog() {
+async function loadLog(session) {
+  session = session || 'moda-manager';
   try {
-    const d = await fetchJSON('/api/log?limit=50');
+    const d = await fetchJSON(`/api/log?limit=50&session=${encodeURIComponent(session)}`);
     const el = document.getElementById('log-scroll');
     if (!d.turns||!d.turns.length) { el.innerHTML='<div class="empty-state">No conversation yet</div>'; return; }
     const turns = d.turns.reverse();
@@ -319,7 +321,10 @@ document.getElementById('filter-type').addEventListener('input', ()=>{offset=0;l
 
 loadStatus(); loadLog(); loadSources();
 setInterval(loadStatus, 5000);
-setInterval(()=>{ if(currentView==='manager') loadLog(); }, 5000);
+setInterval(()=>{
+  if(currentView==='manager') loadLog('moda-manager');
+  else if(currentView==='engineer'&&selectedIssue) loadLog('eng-'+selectedIssue.toLowerCase());
+}, 5000);
 setInterval(loadSources, 30000);
 </script>
 </body>

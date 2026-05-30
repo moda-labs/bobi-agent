@@ -106,10 +106,14 @@ def get_sessions() -> list[dict]:
     return result
 
 
-def get_conversation_log(limit: int = 50) -> list[dict]:
-    if not ACTIVITY_PATH.exists():
-        return []
-    lines = ACTIVITY_PATH.read_text().strip().splitlines()
+def get_conversation_log(limit: int = 50, session: str = "moda-manager") -> list[dict]:
+    log_path = ACTIVITY_DIR / "logs" / f"{session}.jsonl"
+    if not log_path.exists():
+        if session == "moda-manager" and ACTIVITY_PATH.exists():
+            log_path = ACTIVITY_PATH
+        else:
+            return []
+    lines = log_path.read_text().strip().splitlines()
     turns = []
     for line in reversed(lines):
         try:

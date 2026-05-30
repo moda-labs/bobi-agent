@@ -136,14 +136,14 @@ async def _run_manager() -> None:
                         text_parts.append(block.text)
                 if text_parts:
                     _last_response = "\n".join(text_parts)
-                    log_activity("response", {"text": _last_response[:500]})
+                    log_activity("response", {"text": _last_response[:500]}, session=SESSION_NAME)
                     _relay_to_slack(_last_response)
 
             elif isinstance(msg, ResultMessage):
                 save_session_id(SESSION_NAME, msg.session_id)
                 _state = "waiting_input"
                 registry.update(SESSION_NAME, status="idle", session_id=msg.session_id)
-                log_activity("Stop", {"session_id": msg.session_id})
+                log_activity("Stop", {"session_id": msg.session_id}, session=SESSION_NAME)
     except Exception as e:
         log.error(f"Manager session error: {e}")
         _state = "error"
@@ -196,7 +196,7 @@ def inject(text: str) -> bool:
     try:
         future.result(timeout=10)
         _state_update("working")
-        log_activity("UserPromptSubmit", {"text": text[:200]})
+        log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
         return True
     except Exception as e:
         log.error(f"Manager inject failed: {e}")

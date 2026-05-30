@@ -152,11 +152,9 @@ async def _run_agent(
             if isinstance(msg, AssistantMessage):
                 text_parts = [b.text for b in msg.content if isinstance(b, TextBlock)]
                 if text_parts:
-                    log_activity("eng_response", {
-                        "issue_id": issue_id,
-                        "phase": phase,
+                    log_activity("response", {
                         "text": "\n".join(text_parts)[:500],
-                    })
+                    }, session=name)
 
             elif isinstance(msg, ResultMessage):
                 save_session_id(name, msg.session_id)
@@ -168,6 +166,9 @@ async def _run_agent(
                 if msg.is_error:
                     result.error = msg.result or "unknown error"
                 registry.update(name, status="done", session_id=msg.session_id)
+                log_activity("Stop", {
+                    "session_id": msg.session_id,
+                }, session=name)
     except asyncio.TimeoutError:
         result.error = f"timeout after {timeout}s"
         registry.update(name, status="error")

@@ -118,11 +118,16 @@ def load_session_id(name: str) -> str:
     return ""
 
 
-def log_activity(event: str, data: dict | None = None) -> None:
-    ACTIVITY_DIR.mkdir(parents=True, exist_ok=True)
+def log_activity(event: str, data: dict | None = None, session: str = "moda-manager") -> None:
+    log_dir = ACTIVITY_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
     entry = {"event": event, "ts": time.time()}
     if data:
         entry.update(data)
-    activity_path = ACTIVITY_DIR / "activity.jsonl"
-    with open(activity_path, "a") as f:
+    log_path = log_dir / f"{session}.jsonl"
+    with open(log_path, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    # Also write to the combined log for backwards compat
+    combined = ACTIVITY_DIR / "activity.jsonl"
+    with open(combined, "a") as f:
         f.write(json.dumps(entry) + "\n")
