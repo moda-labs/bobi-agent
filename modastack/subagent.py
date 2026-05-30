@@ -87,7 +87,9 @@ def _build_prompt(phase: str, issue_id: str, context: str = "") -> str:
     return "\n\n".join(parts)
 
 
-def _session_name(issue_id: str) -> str:
+def _session_name(issue_id: str, phase: str = "") -> str:
+    if phase:
+        return f"eng-{issue_id.lower()}-{phase}"
     return f"eng-{issue_id.lower()}"
 
 
@@ -107,7 +109,7 @@ async def _run_agent(
         TextBlock,
     )
 
-    name = _session_name(issue_id)
+    name = _session_name(issue_id, phase)
     saved_id = load_session_id(name)
     registry = get_registry()
 
@@ -201,7 +203,7 @@ def run_phase(
     prompt = _build_prompt(phase, issue_id, context)
     timeout = PHASE_TIMEOUT.get(phase, 1800)
 
-    name = _session_name(issue_id)
+    name = _session_name(issue_id, phase)
     registry = get_registry()
     registry.register(SessionEntry(
         name=name, session_id="", role="engineer",
@@ -312,7 +314,7 @@ def cancel_agent(issue_id: str) -> bool:
         return False
     agent.task.cancel()
     del _running[key]
-    name = _session_name(issue_id)
+    name = _session_name(issue_id, phase)
     get_registry().update(name, status="cancelled")
     log.info(f"Sub-agent cancelled: {issue_id}/{agent.phase}")
     return True

@@ -360,8 +360,8 @@ class WorkflowEngine:
         def _check_registry():
             from modastack.sdk import get_registry
             from modastack.subagent import _session_name
-            entry = get_registry().get(_session_name(issue_id))
-            if entry and entry.status == "done" and entry.phase == expected_phase:
+            entry = get_registry().get(_session_name(issue_id, expected_phase))
+            if entry and entry.status == "done":
                 return entry
             return None
 
