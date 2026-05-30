@@ -132,7 +132,7 @@ async def _run_agent(
     if key in _running:
         _running[key].client = client
 
-    registry.update(name, status="running", session_id=saved_id or "")
+    registry.update(name, status="running", phase=phase, session_id=saved_id or "")
 
     result = AgentResult(
         session_id="", issue_id=issue_id, phase=phase, success=False,
@@ -162,7 +162,7 @@ async def _run_agent(
                 result.num_turns = msg.num_turns
                 if msg.is_error:
                     result.error = msg.result or "unknown error"
-                registry.update(name, status="done", session_id=msg.session_id)
+                registry.update(name, status="done", phase=phase, session_id=msg.session_id)
                 log_activity("Stop", {
                     "session_id": msg.session_id,
                 }, session=name)
