@@ -33,6 +33,7 @@ class SessionEntry:
     session_id: str = ""
     role: str = "engineer"
     issue_id: str = ""
+    title: str = ""
     phase: str = ""
     repo: str = ""
     cwd: str = ""

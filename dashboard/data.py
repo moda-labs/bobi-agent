@@ -96,7 +96,9 @@ def get_sessions() -> list[dict]:
         result.append({
             "name": e.name,
             "issue_id": e.issue_id,
+            "title": e.title,
             "phase": e.phase,
+            "repo": e.repo,
             "cwd": e.cwd,
             "status": e.status,
             "started_at": e.started_at,

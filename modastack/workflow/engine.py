@@ -234,11 +234,16 @@ class WorkflowEngine:
         phase = self._detect_phase(inject_text)
         cwd = self._resolve_cwd(issue_id)
 
+        title = self.ctx.resolve("${{event.title}}") if "event" in self.ctx._scopes else ""
+        repo = self.ctx.resolve("${{event.repo}}") if "event" in self.ctx._scopes else ""
+
         run_phase(
             issue_id=issue_id,
             phase=phase,
             cwd=cwd,
             context=inject_text,
+            title=title,
+            repo=repo,
         )
         log.info(f"Sub-agent started for {issue_id}/{phase}")
 

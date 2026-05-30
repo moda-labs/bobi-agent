@@ -190,6 +190,8 @@ def run_phase(
     cwd: str,
     context: str = "",
     max_budget_usd: float | None = None,
+    title: str = "",
+    repo: str = "",
 ) -> str:
     key = issue_id.lower()
     if key in _running and not _running[key].task.done():
@@ -203,7 +205,8 @@ def run_phase(
     registry = get_registry()
     registry.register(SessionEntry(
         name=name, session_id="", role="engineer",
-        issue_id=issue_id, phase=phase, cwd=cwd, status="starting",
+        issue_id=issue_id, title=title, phase=phase, repo=repo,
+        cwd=cwd, status="starting",
     ))
 
     loop = _ensure_loop()
