@@ -90,7 +90,7 @@ def get_manager_status() -> dict:
 
 def get_sessions() -> list[dict]:
     registry = get_registry()
-    engineers = registry.get_by_role("engineer")
+    engineers = [e for e in registry.get_by_role("engineer") if e.status not in ("done", "cancelled")]
     result = []
     for e in engineers:
         result.append({
