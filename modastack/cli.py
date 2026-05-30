@@ -144,7 +144,8 @@ def log(lines, follow):
         modastack log -n 50        # last 50 entries
         modastack log -f           # follow mode (like tail -f)
     """
-    from modastack.manager.session import ACTIVITY_LOG
+    from modastack.sdk import ACTIVITY_DIR
+    ACTIVITY_LOG = ACTIVITY_DIR / "activity.jsonl"
 
     if not ACTIVITY_LOG.exists():
         click.echo("No activity yet. Start with: modastack start")
