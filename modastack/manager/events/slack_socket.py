@@ -122,9 +122,10 @@ def _run_socket(app_token: str, bot_token: str):
                     is_human_msg = True
 
             if is_human_msg and text:
+                log.info(f"Slack → injecting: {user_name}: {text[:80]}")
                 from modastack.manager.session import inject
-                inject(f"Slack message from {user_name}: {text}")
-                log.info(f"Slack → manager: {user_name}: {text[:80]}")
+                result = inject(f"Slack message from {user_name}: {text}")
+                log.info(f"Slack → inject result: {result}")
 
         def on_error(ws, error):
             log.warning(f"Socket Mode error: {error}")
