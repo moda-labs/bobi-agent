@@ -132,10 +132,7 @@ async def _run_agent(
     if key in _running:
         _running[key].client = client
 
-    registry.register(SessionEntry(
-        name=name, session_id=saved_id or "", role="engineer",
-        issue_id=issue_id, phase=phase, cwd=cwd, status="running",
-    ))
+    registry.update(name, status="running", session_id=saved_id or "")
 
     result = AgentResult(
         session_id="", issue_id=issue_id, phase=phase, success=False,
