@@ -1,44 +1,19 @@
-"""Extended tests for modastack/session.py — thin wrappers over tmux.py.
+"""Tests for modastack/session.py — skill loading, session listing, state detection.
 
-Real behavior tests (state detection, send routing, paste verification)
-live in test_tmux.py. These test the session-layer wiring.
+Tmux-specific tests have been removed. Session listing and state detection
+now test the sub-agent/SDK registry path.
 """
 
+import asyncio
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from modastack.session import (
-    _session_name,
-    session_exists,
     load_skill,
     inject_skill,
     list_sessions,
     detect_state,
-    capture,
-    inject,
-    kill_session,
 )
-
-
-class TestSessionName:
-
-    def test_lowercase(self):
-        assert _session_name("BET-42") == "moda-bet-42"
-
-    def test_already_lowercase(self):
-        assert _session_name("bet-42") == "moda-bet-42"
-
-
-class TestSessionExists:
-
-    @patch("modastack.session.has_session", return_value=True)
-    def test_exists(self, mock_has):
-        assert session_exists("BET-1") is True
-        mock_has.assert_called_once_with("moda-bet-1")
-
-    @patch("modastack.session.has_session", return_value=False)
-    def test_not_exists(self, mock_has):
-        assert session_exists("BET-1") is False
 
 
 class TestLoadSkill:
@@ -58,76 +33,111 @@ class TestLoadSkill:
         assert load_skill("nonexistent") == ""
 
 
-class TestInjectSkill:
-
-    @patch("modastack.session.inject")
-    def test_invokes_skill(self, mock_inject):
-        inject_skill("BET-1", "pickup")
-        mock_inject.assert_called_once_with("BET-1", "/pickup")
-
-    @patch("modastack.session.inject")
-    def test_invokes_skill_with_context(self, mock_inject):
-        inject_skill("BET-1", "implement", context="spec at specs/bet-1.md")
-        mock_inject.assert_called_once_with("BET-1", "/implement spec at specs/bet-1.md")
-
-
-class TestListSessions:
+class TestListSessionsSubagents:
+    """list_sessions should include running sub-agents from the SDK executor."""
 
     @patch("modastack.session.subprocess.run")
-    def test_lists_moda_sessions(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="moda-bet-1\nmoda-bet-2\nmoda-manager\nother-session\n",
+    def test_includes_running_subagents(self, mock_tmux_run):
+        mock_tmux_run.return_value = MagicMock(returncode=1, stdout="")
+
+        from modastack.subagent import RunningAgent, _running
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        task = asyncio.ensure_future(future, loop=loop)
+
+        _running["bet-42"] = RunningAgent(
+            issue_id="BET-42", phase="implement",
+            session_id="s1", task=task, cwd="/tmp",
         )
-        result = list_sessions()
-        assert "BET-1" in result
-        assert "BET-2" in result
-        assert "MANAGER" not in result  # moda-manager is excluded (it's the manager, not an engineer)
+        try:
+            result = list_sessions()
+            assert "BET-42" in result
+        finally:
+            task.cancel()
+            del _running["bet-42"]
+            loop.close()
 
     @patch("modastack.session.subprocess.run")
-    def test_returns_empty_on_failure(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout="")
-        assert list_sessions() == []
+    def test_empty_when_no_agents(self, mock_tmux_run):
+        mock_tmux_run.return_value = MagicMock(returncode=1, stdout="")
+
+        from modastack.subagent import _running
+        _running.clear()
+        result = list_sessions()
+        assert result == []
 
 
-class TestDetectState:
-    """detect_state collects data and delegates to determine_agent_state.
-    The pure function is tested thoroughly in test_tmux.py.
-    """
+class TestDetectStateSubagent:
+    """detect_state should check sub-agents via the SDK registry."""
+
+    def test_running_subagent(self):
+        from modastack.subagent import RunningAgent, _running
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        task = asyncio.ensure_future(future, loop=loop)
+
+        _running["bet-10"] = RunningAgent(
+            issue_id="BET-10", phase="spec",
+            session_id="s1", task=task, cwd="/tmp",
+        )
+        try:
+            state = detect_state("BET-10")
+            assert state["state"] == "running"
+            assert state["type"] == "subagent"
+        finally:
+            task.cancel()
+            del _running["bet-10"]
+            loop.close()
+
+    def test_completed_subagent(self):
+        from modastack.subagent import AgentResult, RunningAgent, _running
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        future.set_result(AgentResult(
+            session_id="s2", issue_id="BET-11", phase="implement",
+            success=True, duration_ms=5000, total_cost_usd=0.10,
+        ))
+        task = asyncio.ensure_future(future, loop=loop)
+
+        _running["bet-11"] = RunningAgent(
+            issue_id="BET-11", phase="implement",
+            session_id="s2", task=task, cwd="/tmp",
+        )
+        try:
+            state = detect_state("BET-11")
+            assert state["state"] == "completed"
+            assert state["type"] == "subagent"
+        finally:
+            if "bet-11" in _running:
+                del _running["bet-11"]
+            loop.close()
+
+    def test_failed_subagent(self):
+        from modastack.subagent import AgentResult, RunningAgent, _running
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        future.set_result(AgentResult(
+            session_id="s3", issue_id="BET-12", phase="implement",
+            success=False, error="timeout",
+        ))
+        task = asyncio.ensure_future(future, loop=loop)
+
+        _running["bet-12"] = RunningAgent(
+            issue_id="BET-12", phase="implement",
+            session_id="s3", task=task, cwd="/tmp",
+        )
+        try:
+            state = detect_state("BET-12")
+            assert state["state"] == "failed"
+            assert "timeout" in state["error"]
+        finally:
+            if "bet-12" in _running:
+                del _running["bet-12"]
+            loop.close()
 
     @patch("modastack.session.has_session", return_value=False)
-    def test_no_session_returns_exited(self, _):
-        assert detect_state("BET-1") == {"state": "exited"}
-
-    @patch("modastack.session.has_child_processes", return_value=True)
-    @patch("modastack.session.get_pane_pid", return_value="1234")
-    @patch("modastack.session.capture_pane", return_value="❯ \n  ⏵⏵ bypass permissions\n")
-    @patch("modastack.session.has_session", return_value=True)
-    def test_delegates_to_determine_agent_state(self, *_):
-        result = detect_state("BET-1")
-        assert result["state"] == "waiting_input"
-
-
-class TestCapture:
-
-    @patch("modastack.session.capture_pane", return_value="hello\nworld\n")
-    def test_captures_lines(self, mock_cap):
-        result = capture("BET-1", lines=20)
-        assert result == "hello\nworld\n"
-        mock_cap.assert_called_once_with("moda-bet-1", lines=20)
-
-
-class TestInject:
-
-    @patch("modastack.session.send_text", return_value=True)
-    def test_delegates_to_send_text(self, mock_send):
-        inject("BET-1", "hello world")
-        mock_send.assert_called_once_with("moda-bet-1", "hello world")
-
-
-class TestKillSession:
-
-    @patch("modastack.session._tmux_kill")
-    def test_kills_by_name(self, mock_kill):
-        kill_session("BET-1")
-        mock_kill.assert_called_once_with("moda-bet-1")
+    def test_no_agent_no_session_returns_exited(self, _):
+        from modastack.subagent import _running
+        _running.pop("bet-99", None)
+        state = detect_state("BET-99")
+        assert state["state"] == "exited"

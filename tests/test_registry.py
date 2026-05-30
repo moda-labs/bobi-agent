@@ -146,7 +146,7 @@ class TestSubagentLoop:
 
         from modastack.sdk import get_registry
         r = get_registry()
-        entry = r.get("eng-test-99")
+        entry = r.get("eng-test-99-pickup")
         assert entry is not None
         assert entry.role == "engineer"
         assert entry.issue_id == "TEST-99"

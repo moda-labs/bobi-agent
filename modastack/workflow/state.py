@@ -115,3 +115,23 @@ class WorkflowRun:
         if node_id not in self.nodes:
             self.nodes[node_id] = NodeState()
         return self.nodes[node_id]
+
+    def retry_failed(self) -> list[str]:
+        """Reset all failed nodes to pending so execute() retries them.
+
+        Also resets the run status back to running. Returns the IDs of
+        nodes that were reset.
+        """
+        reset = []
+        for nid, ns in self.nodes.items():
+            if ns.status == "failed":
+                ns.status = "pending"
+                ns.error = ""
+                ns.started_at = ""
+                ns.completed_at = ""
+                reset.append(nid)
+        if reset:
+            self.status = "running"
+            self.completed_at = ""
+            self.save()
+        return reset
