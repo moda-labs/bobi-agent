@@ -355,14 +355,21 @@ class WorkflowEngine:
         from modastack.subagent import get_result, is_running
 
         issue_id = self.ctx.resolve(node.session).lstrip("#")
+        expected_phase = self._detect_phase(self.ctx.resolve(node.inject))
 
-        running = is_running(issue_id)
-        if running:
+        def _check_registry():
             from modastack.sdk import get_registry
             from modastack.subagent import _session_name
             entry = get_registry().get(_session_name(issue_id))
-            if entry and entry.status == "done":
-                log.info(f"  poll #{issue_id}: is_running=True but registry=done, treating as complete")
+            if entry and entry.status == "done" and entry.phase == expected_phase:
+                return entry
+            return None
+
+        running = is_running(issue_id)
+        if running:
+            entry = _check_registry()
+            if entry:
+                log.info(f"  poll #{issue_id}: is_running=True but registry={entry.status}/{entry.phase}, treating as complete")
                 running = False
             else:
                 return None
@@ -370,16 +377,13 @@ class WorkflowEngine:
         agent_result = get_result(issue_id)
         if not agent_result:
             log.info(f"  poll #{issue_id}: not running, no result — checking registry")
-            from modastack.sdk import get_registry
-            from modastack.subagent import _session_name, AgentResult
-            entry = get_registry().get(_session_name(issue_id))
-            if entry and entry.status == "done":
+            from modastack.subagent import AgentResult
+            entry = _check_registry()
+            if entry:
                 agent_result = AgentResult(
                     session_id=entry.session_id, issue_id=issue_id,
                     phase=entry.phase, success=True,
                 )
-            elif entry and entry.status == "error":
-                raise RuntimeError(f"Sub-agent {issue_id} failed (from registry)")
             else:
                 return None
 
