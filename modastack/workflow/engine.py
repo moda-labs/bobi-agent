@@ -353,11 +353,13 @@ class WorkflowEngine:
 
         issue_id = self.ctx.resolve(node.session).lstrip("#")
 
-        if is_running(issue_id):
+        running = is_running(issue_id)
+        if running:
             return None
 
         agent_result = get_result(issue_id)
         if not agent_result:
+            log.debug(f"  poll #{issue_id}: not running, no result — checking registry")
             from modastack.sdk import get_registry
             from modastack.subagent import _session_name, AgentResult
             entry = get_registry().get(_session_name(issue_id))
