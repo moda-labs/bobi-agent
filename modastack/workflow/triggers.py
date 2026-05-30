@@ -172,6 +172,33 @@ class WorkflowDispatcher:
             })
         return result
 
+    def resume_stale_runs(self):
+        """Resume any workflow runs that were in-flight before a restart."""
+        for run in WorkflowRun.list_runs():
+            if run.status not in ("running", "waiting"):
+                continue
+            wf = self._find_workflow_by_name(run.workflow_name)
+            if not wf:
+                continue
+            event_key = run.trigger_event.get("data", {}).get("issue_id", "")
+            run_key = f"{run.workflow_name}:{event_key}"
+            if run_key in self._active:
+                continue
+            log.info(f"Resuming stale workflow {run.workflow_name} for {event_key} (run {run.run_id})")
+            engine = WorkflowEngine(wf, run)
+            thread = threading.Thread(
+                target=self._run_engine, args=(engine, run_key),
+                daemon=True, name=f"wf-{run.run_id}",
+            )
+            self._active[run_key] = (thread, engine)
+            thread.start()
+
+    def _find_workflow_by_name(self, name: str) -> WorkflowDef | None:
+        for wf, _source in self.workflows:
+            if wf.name == name:
+                return wf
+        return None
+
     def _run_engine(self, engine: WorkflowEngine, run_key: str):
         try:
             engine.execute()

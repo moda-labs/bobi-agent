@@ -45,6 +45,9 @@ def run(**kwargs):
     dispatcher.load_all_workflows()
     log.info(f"Workflow dispatcher loaded {len(dispatcher.workflows)} workflow(s)")
 
+    # Resume any in-flight workflows from before the restart
+    dispatcher.resume_stale_runs()
+
     def _on_event(event: dict):
         dispatched = dispatcher.dispatch(event)
         if dispatched:

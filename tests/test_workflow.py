@@ -620,3 +620,63 @@ class TestPromptInjectPassesMetadata:
         assert captured["title"] == "Fix the login bug"
         assert captured["repo"] == "moda-labs/myrepo"
         assert captured["issue_id"] == "42"
+
+
+class TestManagerNotifications:
+    """Test that the manager gets notified of workflow state changes."""
+
+    def test_manager_notified_on_prompt_completion(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+        nodes = {"triage": NodeDef(id="triage", type=NodeType.PROMPT, session="${{event.issue_id}}", inject="/pickup #42")}
+        wf = WorkflowDef(name="test", version=1, trigger=TriggerDef(event="task.assigned"), nodes=nodes)
+        run = WorkflowRun.create("test", {"type": "task.assigned", "data": {"issue_id": "42", "title": "Fix bug", "repo": "test"}})
+        engine = WorkflowEngine(wf, run)
+        from modastack.subagent import AgentResult
+        injected = []
+        with patch("modastack.subagent.run_phase", return_value="42"), \
+             patch("modastack.subagent.is_running", return_value=False), \
+             patch("modastack.subagent.get_result", return_value=AgentResult(session_id="s1", issue_id="42", phase="pickup", success=True)), \
+             patch("modastack.manager.session.inject", side_effect=lambda t: injected.append(t) or True), \
+             patch.object(engine, "_resolve_cwd", return_value=str(tmp_path)):
+            engine.execute()
+        assert any("completed triage" in msg for msg in injected)
+
+    def test_manager_notified_on_prompt_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+        nodes = {"triage": NodeDef(id="triage", type=NodeType.PROMPT, session="${{event.issue_id}}", inject="/pickup #42")}
+        wf = WorkflowDef(name="test", version=1, trigger=TriggerDef(event="task.assigned"), nodes=nodes)
+        run = WorkflowRun.create("test", {"type": "task.assigned", "data": {"issue_id": "42", "title": "Fix bug", "repo": "test"}})
+        engine = WorkflowEngine(wf, run)
+        from modastack.subagent import AgentResult
+        injected = []
+        with patch("modastack.subagent.run_phase", return_value="42"), \
+             patch("modastack.subagent.is_running", return_value=False), \
+             patch("modastack.subagent.get_result", return_value=AgentResult(session_id="s1", issue_id="42", phase="pickup", success=False, error="timeout")), \
+             patch("modastack.manager.session.inject", side_effect=lambda t: injected.append(t) or True), \
+             patch.object(engine, "_resolve_cwd", return_value=str(tmp_path)):
+            engine.execute()
+        assert any("failed" in msg and "42" in msg for msg in injected)
+
+    def test_manager_notified_on_workflow_completion(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+        nodes = {"step": NodeDef(id="step", type=NodeType.BASH, command="echo done")}
+        wf = WorkflowDef(name="test", version=1, trigger=TriggerDef(event="task.assigned"), nodes=nodes)
+        run = WorkflowRun.create("test", {"type": "task.assigned", "data": {"issue_id": "42", "title": "Fix bug"}})
+        engine = WorkflowEngine(wf, run)
+        injected = []
+        with patch("modastack.manager.session.inject", side_effect=lambda t: injected.append(t) or True):
+            engine.execute()
+        assert run.status == "completed"
+        assert any("complete" in msg.lower() and "42" in msg for msg in injected)
+
+    def test_manager_notified_on_workflow_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+        nodes = {"step": NodeDef(id="step", type=NodeType.BASH, command="exit 1")}
+        wf = WorkflowDef(name="test", version=1, trigger=TriggerDef(event="task.assigned"), nodes=nodes)
+        run = WorkflowRun.create("test", {"type": "task.assigned", "data": {"issue_id": "42", "title": "Fix bug"}})
+        engine = WorkflowEngine(wf, run)
+        injected = []
+        with patch("modastack.manager.session.inject", side_effect=lambda t: injected.append(t) or True):
+            engine.execute()
+        assert run.status == "failed"
+        assert any("failed" in msg.lower() and "42" in msg for msg in injected)
