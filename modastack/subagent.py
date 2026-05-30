@@ -155,6 +155,7 @@ async def _run_agent_supervised(
         cli_path=get_cli_path(),
         resume=saved_id or None,
         hooks=hooks,
+        skills="all",
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
@@ -313,6 +314,7 @@ async def _run_agent(
         max_turns=200,
         cli_path=get_cli_path(),
         resume=saved_id or None,
+        skills="all",
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
