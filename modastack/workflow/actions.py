@@ -118,7 +118,10 @@ def _resolve_repo_path(repo: str) -> str:
     for p in config.repos:
         if p.name == repo_name:
             return str(p)
-    return repo
+    raise FileNotFoundError(
+        f"Repo '{repo}' not registered with modastack. "
+        f"Run: modastack setup <path-to-{repo_name}>"
+    )
 
 
 def _session_spawn(params: dict) -> dict:
