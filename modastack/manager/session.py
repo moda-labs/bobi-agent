@@ -33,6 +33,7 @@ _client: Any | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 _thread: threading.Thread | None = None
 _ready = threading.Event()
+_keep_alive: asyncio.Event | None = None
 _last_response: str = ""
 _state: str = "stopped"
 
@@ -87,15 +88,39 @@ def _relay_to_slack(text: str) -> None:
         log.debug(f"Slack relay failed: {e}")
 
 
+async def _drain_turn() -> None:
+    """Drain receive_messages() for one turn until the iterator ends."""
+    global _last_response
+
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+    registry = get_registry()
+    _state_update("working")
+
+    async for msg in _client.receive_messages():
+        if isinstance(msg, AssistantMessage):
+            text_parts = []
+            for block in msg.content:
+                if isinstance(block, TextBlock):
+                    text_parts.append(block.text)
+            if text_parts:
+                _last_response = "\n".join(text_parts)
+                log_activity("response", {"text": _last_response[:500]}, session=SESSION_NAME)
+                _relay_to_slack(_last_response)
+
+        elif isinstance(msg, ResultMessage):
+            save_session_id(SESSION_NAME, msg.session_id)
+            _state_update("waiting_input")
+            registry.update(SESSION_NAME, status="idle", session_id=msg.session_id)
+            log_activity("Stop", {"session_id": msg.session_id}, session=SESSION_NAME)
+
+
 async def _run_manager() -> None:
-    global _client, _state, _last_response
+    global _client, _state
 
     from claude_agent_sdk import (
-        AssistantMessage,
         ClaudeAgentOptions,
         ClaudeSDKClient,
-        ResultMessage,
-        TextBlock,
     )
 
     saved_id = load_session_id(SESSION_NAME)
@@ -105,21 +130,35 @@ async def _run_manager() -> None:
     if config.repos:
         cwd = str(config.repos[0])
 
-    options = ClaudeAgentOptions(
-        cwd=cwd,
-        permission_mode="bypassPermissions",
-        cli_path=get_cli_path(),
-        resume=saved_id or None,
-        system_prompt={"type": "preset", "preset": "claude_code"},
-    )
+    for attempt in range(2):
+        resume_id = saved_id if attempt == 0 else None
 
-    _client = ClaudeSDKClient(options)
+        options = ClaudeAgentOptions(
+            cwd=cwd,
+            permission_mode="bypassPermissions",
+            cli_path=get_cli_path(),
+            resume=resume_id or None,
+            system_prompt={"type": "preset", "preset": "claude_code"},
+            strict_mcp_config=True,
+        )
 
-    startup_prompt = _build_startup_prompt() if not saved_id else None
-    await _client.connect(startup_prompt)
+        _client = ClaudeSDKClient(options)
+
+        startup_prompt = _build_startup_prompt() if not resume_id else None
+        try:
+            await _client.connect(startup_prompt)
+            break
+        except Exception as e:
+            if resume_id and attempt == 0:
+                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
+                save_session_id(SESSION_NAME, "")
+                _client = None
+                continue
+            raise
+
     _state = "running"
     _ready.set()
-    log.info(f"Manager session connected (resume={saved_id or 'new'})")
+    log.info(f"Manager session connected (resume={resume_id or 'new'})")
 
     registry = get_registry()
     registry.register(SessionEntry(
@@ -128,22 +167,10 @@ async def _run_manager() -> None:
     ))
 
     try:
-        async for msg in _client.receive_messages():
-            if isinstance(msg, AssistantMessage):
-                text_parts = []
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        text_parts.append(block.text)
-                if text_parts:
-                    _last_response = "\n".join(text_parts)
-                    log_activity("response", {"text": _last_response[:500]}, session=SESSION_NAME)
-                    _relay_to_slack(_last_response)
-
-            elif isinstance(msg, ResultMessage):
-                save_session_id(SESSION_NAME, msg.session_id)
-                _state = "waiting_input"
-                registry.update(SESSION_NAME, status="idle", session_id=msg.session_id)
-                log_activity("Stop", {"session_id": msg.session_id}, session=SESSION_NAME)
+        await _drain_turn()
+        # Keep the event loop alive — inject() schedules work on it
+        _keep_alive = asyncio.Event()
+        await _keep_alive.wait()
     except Exception as e:
         log.error(f"Manager session error: {e}")
         _state = "error"
@@ -187,16 +214,20 @@ def start_or_resume(cwd: str = None) -> bool:
     return False
 
 
+async def _inject_and_drain(text: str) -> None:
+    await _client.query(text)
+    await _drain_turn()
+
+
 def inject(text: str) -> bool:
     if not _client or not _loop:
         log.warning("Manager not running — cannot inject")
         return False
 
-    future = asyncio.run_coroutine_threadsafe(_client.query(text), _loop)
+    log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
+    future = asyncio.run_coroutine_threadsafe(_inject_and_drain(text), _loop)
     try:
-        future.result(timeout=10)
-        _state_update("working")
-        log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
+        future.result(timeout=300)
         return True
     except Exception as e:
         log.error(f"Manager inject failed: {e}")

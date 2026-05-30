@@ -32,8 +32,8 @@ ROLES_DIR = Path(__file__).parent.parent / "roles" / "engineer" / "process"
 HANDOFF_DIR = Path.home() / ".modastack" / "handoffs"
 
 PHASE_TIMEOUT = {
-    "pickup": 600,
-    "triage": 1200,
+    "pickup": 1800,
+    "triage": 1800,
     "spec": 3000,
     "implement": 3600,
     "prepare-pr": 1800,
