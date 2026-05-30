@@ -134,17 +134,19 @@ def get_event_sources() -> list[str]:
     return sorted(s for s in sources if s)
 
 
-def _load_workflow_labels(workflow_name: str) -> dict[str, str]:
+def _load_workflow_info(workflow_name: str) -> tuple[dict[str, str], list[str]]:
     from modastack.workflow.triggers import WORKFLOWS_DIR, USER_WORKFLOWS_DIR
     for d in [USER_WORKFLOWS_DIR, WORKFLOWS_DIR]:
         path = d / f"{workflow_name}.yaml"
         if path.exists():
             try:
                 wf = load_workflow(path)
-                return {nid: n.label for nid, n in wf.nodes.items() if n.label}
+                labels = {nid: n.label for nid, n in wf.nodes.items() if n.label}
+                order = wf.topological_order()
+                return labels, order
             except Exception:
                 pass
-    return {}
+    return {}, []
 
 
 def get_workflow_progress(issue_id: str) -> dict | None:
@@ -152,13 +154,14 @@ def get_workflow_progress(issue_id: str) -> dict | None:
         trigger_data = run.trigger_event.get("data", {})
         rid = trigger_data.get("issue_id", "")
         if rid.lstrip("#").lower() == issue_id.lower():
-            labels = _load_workflow_labels(run.workflow_name)
+            labels, all_node_ids = _load_workflow_info(run.workflow_name)
             nodes = []
-            for nid, ns in run.nodes.items():
+            for nid in all_node_ids:
+                ns = run.nodes.get(nid)
                 nodes.append({
                     "id": nid,
                     "label": labels.get(nid, ""),
-                    "status": ns.status,
+                    "status": ns.status if ns else "pending",
                 })
             return {
                 "run_id": run.run_id,
