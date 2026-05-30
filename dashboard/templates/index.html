@@ -249,7 +249,8 @@ async function loadWorkflow(issueId) {
   try {
     const d = await fetchJSON(`/api/workflow/${issueId}`);
     if (!d.progress) { content.innerHTML='<div class="empty-state">No workflow</div>'; return; }
-    const nodes = d.progress.nodes.filter(n => n.status!=='skipped');
+    const mainPhases = new Set(['spawn_engineer','triage','assess_route','route','spec','spec_approval','implement','prepare_pr']);
+    const nodes = d.progress.nodes.filter(n => n.status!=='skipped' && mainPhases.has(n.id));
     if (!nodes.length) { content.innerHTML=''; return; }
     const icons = { completed:'&#10003;', running:'&#9679;', waiting:'&#9679;', failed:'&#10007;', pending:'' };
     let html = '';
