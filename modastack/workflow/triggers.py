@@ -194,7 +194,7 @@ class WorkflowDispatcher:
             thread.start()
 
     def _find_workflow_by_name(self, name: str) -> WorkflowDef | None:
-        for wf in self.workflows:
+        for wf, _source in self.workflows:
             if wf.name == name:
                 return wf
         return None
