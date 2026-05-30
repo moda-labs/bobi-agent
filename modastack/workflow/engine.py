@@ -158,11 +158,18 @@ class WorkflowEngine:
                             log.info(f"  {node_id}: completed (after poll)")
                             self.run.save()
                             progress = True
-                    except TimeoutError:
+                            if node_def.type == NodeType.PROMPT:
+                                issue_id = self.run.trigger_event.get("data", {}).get("issue_id", "")
+                                self._notify_manager(
+                                    f"Engineer completed {node_id} for issue #{issue_id}."
+                                )
+                    except Exception as e:
                         ns.status = "failed"
-                        ns.error = "timeout"
-                        log.error(f"  {node_id}: timed out")
+                        ns.error = str(e)
+                        log.error(f"  {node_id}: failed — {e}")
                         self.run.save()
+                        progress = True
+                        self._notify_manager_failure(node_id, str(e))
 
             if all_terminal:
                 failed = [nid for nid, ns in self.run.nodes.items()
@@ -172,6 +179,20 @@ class WorkflowEngine:
                 self.run.save()
                 log.info(f"Workflow '{self.workflow.name}' run {self.run.run_id}: "
                          f"{self.run.status}")
+
+                issue_id = self.run.trigger_event.get("data", {}).get("issue_id", "")
+                title = self.run.trigger_event.get("data", {}).get("title", "")
+                if self.run.status == "completed":
+                    self._notify_manager(
+                        f"Workflow complete for issue #{issue_id} ({title}). "
+                        f"All phases finished successfully."
+                    )
+                elif failed:
+                    self._notify_manager(
+                        f"Workflow failed for issue #{issue_id} ({title}). "
+                        f"Failed nodes: {', '.join(failed)}. "
+                        f"Review and decide: retry, fix manually, or close."
+                    )
                 break
 
             if not progress:
@@ -336,26 +357,27 @@ class WorkflowEngine:
             return None
 
         agent_result = get_result(issue_id)
-        if agent_result and not agent_result.success:
-            log.warning(
-                f"Sub-agent {issue_id}/{agent_result.phase} failed: "
-                f"{agent_result.error}"
+        if not agent_result:
+            return None
+
+        if not agent_result.success:
+            raise RuntimeError(
+                f"Sub-agent {issue_id}/{agent_result.phase} failed: {agent_result.error}"
             )
 
-        if node.wait_for and node.wait_for.phase:
-            handoff = self._read_handoff(issue_id)
-            if handoff.get("phase") == node.wait_for.phase:
-                self.ctx.set_scope("handoff", handoff)
-                outputs = {}
-                for key, expr in node.outputs.items():
-                    outputs[key] = self.ctx.resolve(expr)
-                if agent_result:
-                    outputs["_agent_cost_usd"] = agent_result.total_cost_usd
-                    outputs["_agent_duration_ms"] = agent_result.duration_ms
-                return outputs
+        outputs = {
+            "_agent_completed": True,
+            "_agent_cost_usd": agent_result.total_cost_usd,
+            "_agent_duration_ms": agent_result.duration_ms,
+        }
 
-        if agent_result and not is_running(issue_id):
-            return {"_agent_completed": True, "_agent_error": agent_result.error}
+        handoff = self._read_handoff(issue_id)
+        if handoff:
+            self.ctx.set_scope("handoff", handoff)
+            for key, expr in node.outputs.items():
+                outputs[key] = self.ctx.resolve(expr)
+
+        return outputs
 
         return None
 
@@ -393,6 +415,22 @@ class WorkflowEngine:
             return {"output": output}
         return None
 
+    def _notify_manager(self, message: str) -> None:
+        try:
+            from modastack.manager.session import inject
+            inject(message)
+        except Exception as e:
+            log.warning(f"Failed to notify manager: {e}")
+
+    def _notify_manager_failure(self, node_id: str, error: str) -> None:
+        issue_id = self.run.trigger_event.get("data", {}).get("issue_id", "?")
+        title = self.run.trigger_event.get("data", {}).get("title", "")
+        self._notify_manager(
+            f"Engineer failed on issue #{issue_id} ({title}), "
+            f"node '{node_id}': {error}\n"
+            f"Decide: retry, reassign, or escalate to a human."
+        )
+
     def _read_handoff(self, issue_id: str) -> dict:
         from modastack.config import GlobalConfig
         config = GlobalConfig.load()
@@ -401,8 +439,8 @@ class WorkflowEngine:
         for repo_path in config.repos:
             for candidate in [
                 repo_path / "worktrees" / iid_lower / ".modastack" / "handoff.md",
-                Path.home() / ".modastack" / "handoffs" / f"{iid_lower}.md",
-                Path.home() / ".modastack" / "handoffs" / f"{issue_id}.md",
+                HANDOFF_DIR / f"{iid_lower}.md",
+                HANDOFF_DIR / f"{issue_id}.md",
             ]:
                 if candidate.exists():
                     try:
