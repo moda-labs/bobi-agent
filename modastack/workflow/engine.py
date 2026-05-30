@@ -358,7 +358,14 @@ class WorkflowEngine:
 
         running = is_running(issue_id)
         if running:
-            return None
+            from modastack.sdk import get_registry
+            from modastack.subagent import _session_name
+            entry = get_registry().get(_session_name(issue_id))
+            if entry and entry.status == "done":
+                log.info(f"  poll #{issue_id}: is_running=True but registry=done, treating as complete")
+                running = False
+            else:
+                return None
 
         agent_result = get_result(issue_id)
         if not agent_result:
