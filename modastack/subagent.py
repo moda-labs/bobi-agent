@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -205,7 +206,7 @@ def run_phase(
         issue_id=issue_id, phase=phase, cwd=cwd, status="starting",
     ))
 
-    loop = _get_or_create_loop()
+    loop = _ensure_loop()
 
     async def _wrapped():
         try:
@@ -223,12 +224,12 @@ def run_phase(
                 error=f"timeout after {timeout}s",
             )
 
-    task = loop.create_task(_wrapped())
+    future = asyncio.run_coroutine_threadsafe(_wrapped(), loop)
     _running[key] = RunningAgent(
         issue_id=issue_id,
         phase=phase,
         session_id="",
-        task=task,
+        task=future,
         cwd=cwd,
     )
     log.info(f"Sub-agent started: {issue_id}/{phase} in {cwd}")
@@ -244,13 +245,15 @@ def run_phase_sync(
 ) -> AgentResult:
     prompt = _build_prompt(phase, issue_id, context)
     timeout = PHASE_TIMEOUT.get(phase, 1800)
-    loop = _get_or_create_loop()
-    return loop.run_until_complete(
+    loop = _ensure_loop()
+    future = asyncio.run_coroutine_threadsafe(
         asyncio.wait_for(
             _run_agent(prompt, cwd, issue_id, phase, timeout, max_budget_usd),
             timeout=timeout,
-        )
+        ),
+        loop,
     )
+    return future.result(timeout=timeout + 10)
 
 
 def inject_message(issue_id: str, text: str) -> bool:
@@ -260,7 +263,7 @@ def inject_message(issue_id: str, text: str) -> bool:
         log.warning(f"No running agent for {key}")
         return False
     try:
-        loop = _get_or_create_loop()
+        loop = _ensure_loop()
         future = asyncio.run_coroutine_threadsafe(agent.client.query(text), loop)
         future.result(timeout=10)
         return True
@@ -327,10 +330,26 @@ def list_agents() -> list[dict[str, Any]]:
     return result
 
 
-def _get_or_create_loop() -> asyncio.AbstractEventLoop:
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop
+_loop: asyncio.AbstractEventLoop | None = None
+_loop_thread: threading.Thread | None = None
+
+
+def _ensure_loop() -> asyncio.AbstractEventLoop:
+    global _loop, _loop_thread
+    if _loop is not None and _loop.is_running():
+        return _loop
+
+    _loop = asyncio.new_event_loop()
+
+    def _run():
+        asyncio.set_event_loop(_loop)
+        _loop.run_forever()
+
+    _loop_thread = threading.Thread(target=_run, daemon=True, name="subagent-loop")
+    _loop_thread.start()
+
+    # Wait until the loop is actually running
+    while not _loop.is_running():
+        time.sleep(0.01)
+
+    return _loop

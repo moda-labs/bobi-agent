@@ -103,9 +103,26 @@ class TestSessionRegistry:
 
 class TestSubagentLoop:
     def test_ensure_loop_creates_running_loop(self):
-        from modastack.subagent import _get_or_create_loop
-        loop = _get_or_create_loop()
+        from modastack.subagent import _ensure_loop
+        loop = _ensure_loop()
         assert loop is not None
+        assert loop.is_running()
+
+    def test_ensure_loop_actually_executes_coroutines(self):
+        from modastack.subagent import _ensure_loop
+        loop = _ensure_loop()
+
+        async def _add(a, b):
+            return a + b
+
+        future = asyncio.run_coroutine_threadsafe(_add(2, 3), loop)
+        assert future.result(timeout=5) == 5
+
+    def test_ensure_loop_is_reentrant(self):
+        from modastack.subagent import _ensure_loop
+        loop1 = _ensure_loop()
+        loop2 = _ensure_loop()
+        assert loop1 is loop2
 
     def test_run_phase_registers_in_registry(self, tmp_path, monkeypatch):
         """run_phase should eagerly register the session in the registry."""
@@ -118,14 +135,14 @@ class TestSubagentLoop:
 
         from modastack.subagent import run_phase, _running
 
-        with patch("modastack.subagent._get_or_create_loop") as mock_loop:
+        with patch("modastack.subagent._ensure_loop") as mock_loop:
             loop = MagicMock()
-            task = MagicMock()
-            task.done.return_value = False
-            loop.create_task.return_value = task
+            future = MagicMock()
+            future.done.return_value = False
             mock_loop.return_value = loop
 
-            run_phase("TEST-99", "pickup", str(tmp_path))
+            with patch("asyncio.run_coroutine_threadsafe", return_value=future):
+                run_phase("TEST-99", "pickup", str(tmp_path))
 
         from modastack.sdk import get_registry
         r = get_registry()
