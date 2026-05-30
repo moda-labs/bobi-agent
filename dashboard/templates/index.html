@@ -65,6 +65,10 @@
   .turn-assistant pre code { background: none; padding: 0; } .turn-assistant a { color: var(--accent); } .turn-assistant strong { color: var(--text); }
   .turn-meta { font-size: 10px; color: var(--border); padding: 1px 12px; }
 
+  .working-indicator { display: none; padding: 6px 14px; font-size: 12px; color: var(--accent); border-top: 1px solid var(--border); background: var(--surface); }
+  .working-indicator.active { display: flex; align-items: center; gap: 8px; }
+  .working-spinner { width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .chat-input-bar { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface); }
   .chat-input-bar input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 7px 10px; border-radius: 6px; font-size: 14px; font-family: inherit; }
   .chat-input-bar input:focus { outline: none; border-color: var(--accent); }
@@ -128,6 +132,7 @@
       <div class="log-view active" id="log-view">
         <div class="log-header" id="log-header">Manager</div>
         <div class="log-scroll" id="log-scroll"></div>
+        <div class="working-indicator" id="working-indicator"></div>
         <div class="chat-input-bar">
           <input type="text" id="chat-input" placeholder="Send a message..." autocomplete="off">
           <button id="chat-send">Send</button>
@@ -223,6 +228,21 @@ async function loadStatus() {
     document.getElementById('sidebar').innerHTML = html;
 
     if (currentView==='engineer' && selectedIssue) loadWorkflow(selectedIssue);
+
+    // Update working indicator
+    const indicator = document.getElementById('working-indicator');
+    let isWorking = false;
+    if (currentView==='manager' && d.manager.state==='running') isWorking = true;
+    if (currentView==='engineer' && selectedIssue) {
+      const eng = (d.engineers||[]).find(e => e.issue_id===selectedIssue);
+      if (eng && eng.status==='running') isWorking = true;
+    }
+    if (isWorking) {
+      indicator.className = 'working-indicator active';
+      indicator.innerHTML = '<div class="working-spinner"></div> Working...';
+    } else {
+      indicator.className = 'working-indicator';
+    }
   } catch(e) {}
 }
 
