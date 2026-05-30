@@ -67,6 +67,16 @@ def run(**kwargs):
     from .slack_socket import start_socket_mode
     slack_thread = start_socket_mode()
 
+    # Start dashboard in background
+    import threading
+    from dashboard.app import run_dashboard
+    dashboard_thread = threading.Thread(
+        target=run_dashboard, kwargs={"port": 8095},
+        daemon=True, name="dashboard",
+    )
+    dashboard_thread.start()
+    log.info("Dashboard started on http://localhost:8095")
+
     log.info("Modastack running")
 
     while True:
