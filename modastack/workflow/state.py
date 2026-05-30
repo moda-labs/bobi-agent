@@ -70,6 +70,24 @@ class WorkflowRun:
         return None
 
     @classmethod
+    def find_completed(cls, workflow_name: str, event_key: str) -> WorkflowRun | None:
+        if not RUNS_DIR.exists():
+            return None
+        for path in RUNS_DIR.glob("*.json"):
+            try:
+                data = json.loads(path.read_text())
+                if data.get("status") != "completed":
+                    continue
+                if data.get("workflow_name") != workflow_name:
+                    continue
+                trigger_data = data.get("trigger_event", {}).get("data", {})
+                if trigger_data.get("issue_id") == event_key:
+                    return cls.load(data["run_id"])
+            except (json.JSONDecodeError, KeyError):
+                continue
+        return None
+
+    @classmethod
     def list_runs(cls, status: str | None = None) -> list[WorkflowRun]:
         if not RUNS_DIR.exists():
             return []

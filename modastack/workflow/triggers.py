@@ -128,6 +128,11 @@ class WorkflowDispatcher:
                 self._dispatched_events.add(id(event))
                 return True
 
+        completed = WorkflowRun.find_completed(wf.name, event_key)
+        if completed:
+            log.debug(f"Workflow already completed for {event_key}, skipping")
+            return False
+
         existing = WorkflowRun.find_active(wf.name, event_key)
         if existing:
             run = existing
@@ -172,26 +177,20 @@ class WorkflowDispatcher:
             })
         return result
 
-    def resume_stale_runs(self):
-        """Resume any workflow runs that were in-flight before a restart."""
+    def cleanup_stale_runs(self):
+        """Mark any in-flight workflow runs from before the restart as failed.
+
+        Fresh assignment events will create new runs.
+        """
+        cleaned = 0
         for run in WorkflowRun.list_runs():
-            if run.status not in ("running", "waiting"):
-                continue
-            wf = self._find_workflow_by_name(run.workflow_name)
-            if not wf:
-                continue
-            event_key = run.trigger_event.get("data", {}).get("issue_id", "")
-            run_key = f"{run.workflow_name}:{event_key}"
-            if run_key in self._active:
-                continue
-            log.info(f"Resuming stale workflow {run.workflow_name} for {event_key} (run {run.run_id})")
-            engine = WorkflowEngine(wf, run)
-            thread = threading.Thread(
-                target=self._run_engine, args=(engine, run_key),
-                daemon=True, name=f"wf-{run.run_id}",
-            )
-            self._active[run_key] = (thread, engine)
-            thread.start()
+            if run.status in ("running", "waiting"):
+                event_key = run.trigger_event.get("data", {}).get("issue_id", "")
+                run.status = "failed"
+                run.save()
+                cleaned += 1
+        if cleaned:
+            log.info(f"Cleaned {cleaned} stale workflow run(s) from previous session")
 
     def _find_workflow_by_name(self, name: str) -> WorkflowDef | None:
         for wf, _source in self.workflows:
