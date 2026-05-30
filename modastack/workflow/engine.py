@@ -358,7 +358,18 @@ class WorkflowEngine:
 
         agent_result = get_result(issue_id)
         if not agent_result:
-            return None
+            from modastack.sdk import get_registry
+            from modastack.subagent import _session_name, AgentResult
+            entry = get_registry().get(_session_name(issue_id))
+            if entry and entry.status == "done":
+                agent_result = AgentResult(
+                    session_id=entry.session_id, issue_id=issue_id,
+                    phase=entry.phase, success=True,
+                )
+            elif entry and entry.status == "error":
+                raise RuntimeError(f"Sub-agent {issue_id} failed (from registry)")
+            else:
+                return None
 
         if not agent_result.success:
             raise RuntimeError(
