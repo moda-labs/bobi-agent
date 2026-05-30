@@ -192,9 +192,11 @@ def run_phase(
     repo: str = "",
 ) -> str:
     key = issue_id.lower()
-    if key in _running and not _running[key].task.done():
-        log.warning(f"Agent already running for {key}, skipping")
-        return key
+    if key in _running:
+        if not _running[key].task.done():
+            log.warning(f"Agent already running for {key}, skipping")
+            return key
+        del _running[key]
 
     prompt = _build_prompt(phase, issue_id, context)
     timeout = PHASE_TIMEOUT.get(phase, 1800)
