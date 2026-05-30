@@ -224,10 +224,12 @@ def _normalize_linear(event_type: str, payload: dict) -> dict | None:
 class EventServerClient:
     """WebSocket client that connects to the centralized event server."""
 
-    def __init__(self, server_url: str, deployment_id: str, api_key: str):
+    def __init__(self, server_url: str, deployment_id: str, api_key: str,
+                 on_event: callable = None):
         self.server_url = server_url.rstrip("/")
         self.deployment_id = deployment_id
         self.api_key = api_key
+        self.on_event = on_event
         self._ws: websocket.WebSocketApp | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -290,13 +292,11 @@ class EventServerClient:
                 normalized = _normalize_event(data)
                 if normalized:
                     _log_event(normalized)
-                    state = detect_state()
-                    if state == "waiting_input":
-                        text = _format_event_for_manager(normalized)
-                        inject(text)
-                        log.info(f"Event injected: {normalized['source']}/{normalized['type']}")
-                    else:
-                        log.info(f"Event queued (manager {state}): {normalized['source']}/{normalized['type']}")
+                    text = _format_event_for_manager(normalized)
+                    inject(text)
+                    log.info(f"Event injected: {normalized['source']}/{normalized['type']}")
+                    if self.on_event:
+                        self.on_event(normalized)
 
                 if seq > 0:
                     _save_cursor(seq)
@@ -319,6 +319,7 @@ class EventServerClient:
         self._ws.run_forever(ping_interval=30, ping_timeout=10, sslopt={"context": ssl_context})
 
 
-def start_event_client(server_url: str, deployment_id: str, api_key: str) -> threading.Thread:
-    client = EventServerClient(server_url, deployment_id, api_key)
+def start_event_client(server_url: str, deployment_id: str, api_key: str,
+                       on_event: callable = None) -> threading.Thread:
+    client = EventServerClient(server_url, deployment_id, api_key, on_event=on_event)
     return client.start()

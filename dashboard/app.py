@@ -1,24 +1,12 @@
-"""FastAPI dashboard app with interactive terminals and pause/resume."""
+"""FastAPI dashboard — view layer for modastack."""
 
-import asyncio
-import fcntl
-import json
 import logging
-import os
-import pty
-import select
-import signal
-import struct
-import subprocess
-import termios
-import threading
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from modastack.tmux import TMUX, has_session, is_paused, pause_session, resume_session
 from . import data
 
 log = logging.getLogger(__name__)
@@ -36,7 +24,7 @@ async def index(request: Request):
 async def api_status():
     return {
         "manager": data.get_manager_status(),
-        "sessions": data.get_sessions(),
+        "engineers": data.get_sessions(),
     }
 
 
@@ -63,9 +51,35 @@ async def api_sources():
     return {"sources": data.get_event_sources()}
 
 
-# ---------------------------------------------------------------------------
-# Pause / Resume
-# ---------------------------------------------------------------------------
+@app.get("/api/log")
+async def api_log(limit: int = Query(50, ge=1, le=200)):
+    return {"turns": data.get_conversation_log(limit=limit)}
+
+
+@app.post("/api/message")
+async def api_send_message(request: Request):
+    body = await request.json()
+    text = body.get("text", "").strip()
+    if not text:
+        return {"ok": False, "error": "empty message"}
+    from modastack.manager.session import inject, is_alive
+    if not is_alive():
+        return {"ok": False, "error": "manager not running"}
+    inject(text)
+    return {"ok": True}
+
+
+@app.post("/api/engineers/{issue_id}/message")
+async def api_send_engineer_message(issue_id: str, request: Request):
+    body = await request.json()
+    text = body.get("text", "").strip()
+    if not text:
+        return {"ok": False, "error": "empty message"}
+    from modastack.subagent import inject_message
+    if inject_message(issue_id, text):
+        return {"ok": True}
+    return {"ok": False, "error": "agent not running"}
+
 
 @app.get("/api/workflow/{issue_id}")
 async def api_workflow_progress(issue_id: str):
@@ -73,128 +87,6 @@ async def api_workflow_progress(issue_id: str):
     if not progress:
         return {"progress": None}
     return {"progress": progress}
-
-
-@app.post("/api/sessions/{name}/pause")
-async def api_pause(name: str):
-    pause_session(name)
-    return {"ok": True, "paused": True}
-
-
-@app.post("/api/sessions/{name}/resume")
-async def api_resume(name: str):
-    resume_session(name)
-    return {"ok": True, "paused": False}
-
-
-@app.post("/api/sessions/{name}/kill")
-async def api_kill_session(name: str):
-    from modastack.tmux import kill_session as tmux_kill, has_session as tmux_has
-    if not tmux_has(name):
-        return {"ok": False, "error": "session not found"}
-    tmux_kill(name)
-    resume_session(name)
-    return {"ok": True}
-
-
-# ---------------------------------------------------------------------------
-# WebSocket Terminal — PTY bridge to tmux attach
-# ---------------------------------------------------------------------------
-
-@app.websocket("/ws/terminal/{session_name}")
-async def ws_terminal(ws: WebSocket, session_name: str):
-    await ws.accept()
-
-    if not has_session(session_name):
-        await ws.send_bytes(f"\r\nSession '{session_name}' not found.\r\n".encode())
-        await ws.close()
-        return
-
-    master_fd, slave_fd = pty.openpty()
-
-    # Set initial PTY size to something reasonable
-    winsize = struct.pack("HHHH", 40, 160, 0, 0)
-    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
-
-    proc = subprocess.Popen(
-        [TMUX, "attach-session", "-t", session_name],
-        stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-        preexec_fn=os.setsid,
-    )
-    os.close(slave_fd)
-
-    loop = asyncio.get_event_loop()
-    queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-
-    def _reader():
-        try:
-            while True:
-                r, _, _ = select.select([master_fd], [], [], 1.0)
-                if r:
-                    chunk = os.read(master_fd, 4096)
-                    if not chunk:
-                        break
-                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
-                if proc.poll() is not None:
-                    break
-        except OSError:
-            pass
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, None)
-
-    reader_thread = threading.Thread(target=_reader, daemon=True)
-    reader_thread.start()
-
-    async def _sender():
-        try:
-            while True:
-                chunk = await queue.get()
-                if chunk is None:
-                    break
-                await ws.send_bytes(chunk)
-        except (WebSocketDisconnect, RuntimeError):
-            pass
-
-    sender_task = asyncio.create_task(_sender())
-
-    try:
-        while True:
-            msg = await ws.receive()
-            if msg["type"] == "websocket.disconnect":
-                break
-            text = msg.get("text")
-            if text:
-                try:
-                    obj = json.loads(text)
-                    if obj.get("type") == "resize":
-                        winsize = struct.pack(
-                            "HHHH", obj["rows"], obj["cols"], 0, 0
-                        )
-                        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
-                        os.kill(proc.pid, signal.SIGWINCH)
-                        continue
-                except (json.JSONDecodeError, KeyError):
-                    pass
-                os.write(master_fd, text.encode())
-            elif msg.get("bytes"):
-                os.write(master_fd, msg["bytes"])
-    except WebSocketDisconnect:
-        pass
-    finally:
-        sender_task.cancel()
-        try:
-            os.kill(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=3)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            try:
-                os.kill(proc.pid, signal.SIGKILL)
-                proc.wait(timeout=1)
-            except Exception:
-                pass
-        try:
-            os.close(master_fd)
-        except OSError:
-            pass
 
 
 def run_dashboard(port: int = 8095) -> None:

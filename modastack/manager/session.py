@@ -2,7 +2,7 @@
 
 The manager runs as a long-lived interactive Claude Code session.
 Events are injected via client.query(), responses are read from
-the message stream. Sessions survive restarts via resume.
+the message stream. Sessions survive restarts via the registry.
 """
 
 from __future__ import annotations
@@ -10,20 +10,24 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 from modastack.config import GlobalConfig
-from modastack.sdk import get_cli_path, save_session_id, load_session_id
+from modastack.sdk import (
+    get_cli_path, save_session_id, load_session_id, log_activity,
+    get_registry, SessionEntry,
+)
 
 log = logging.getLogger(__name__)
 
 SESSION_NAME = "moda-manager"
 _ROLES_DIR = Path(__file__).resolve().parent.parent.parent / "roles" / "manager"
 MANAGER_PROMPT_PATH = _ROLES_DIR / "prompt.md"
-ACTIVITY_LOG = Path.home() / ".modastack" / "manager" / "activity.jsonl"
 
 _client: Any | None = None
 _loop: asyncio.AbstractEventLoop | None = None
@@ -60,6 +64,29 @@ def _build_startup_prompt() -> str:
     )
 
 
+def _relay_to_slack(text: str) -> None:
+    try:
+        config = GlobalConfig.load()
+        token = config.slack_bot_token
+        channel = config.slack_dm_channel or "D0B51JP1N4C"
+        if not token:
+            return
+        text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+        text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
+        if len(text) > 3000:
+            text = text[:3000] + '\n_(truncated)_'
+        payload = json.dumps({"channel": channel, "text": text}).encode()
+        req = urllib.request.Request(
+            "https://slack.com/api/chat.postMessage",
+            data=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        log.debug(f"Slack relay failed: {e}")
+
+
 async def _run_manager() -> None:
     global _client, _state, _last_response
 
@@ -94,6 +121,12 @@ async def _run_manager() -> None:
     _ready.set()
     log.info(f"Manager session connected (resume={saved_id or 'new'})")
 
+    registry = get_registry()
+    registry.register(SessionEntry(
+        name=SESSION_NAME, session_id=saved_id or "", role="manager",
+        cwd=cwd, status="idle",
+    ))
+
     try:
         async for msg in _client.receive_messages():
             if isinstance(msg, AssistantMessage):
@@ -103,20 +136,24 @@ async def _run_manager() -> None:
                         text_parts.append(block.text)
                 if text_parts:
                     _last_response = "\n".join(text_parts)
-                    _log_activity("response", {"text": _last_response[:500]})
+                    log_activity("response", {"text": _last_response[:500]})
+                    _relay_to_slack(_last_response)
 
             elif isinstance(msg, ResultMessage):
                 save_session_id(SESSION_NAME, msg.session_id)
                 _state = "waiting_input"
-                _log_activity("Stop", {"session_id": msg.session_id})
+                registry.update(SESSION_NAME, status="idle", session_id=msg.session_id)
+                log_activity("Stop", {"session_id": msg.session_id})
     except Exception as e:
         log.error(f"Manager session error: {e}")
         _state = "error"
+        registry.update(SESSION_NAME, status="error")
     finally:
         if _client:
             await _client.disconnect()
             _client = None
         _state = "stopped"
+        registry.update(SESSION_NAME, status="stopped")
 
 
 def _manager_thread() -> None:
@@ -151,7 +188,6 @@ def start_or_resume(cwd: str = None) -> bool:
 
 
 def inject(text: str) -> bool:
-    """Send a message into the manager session. Thread-safe."""
     if not _client or not _loop:
         log.warning("Manager not running — cannot inject")
         return False
@@ -160,7 +196,7 @@ def inject(text: str) -> bool:
     try:
         future.result(timeout=10)
         _state_update("working")
-        _log_activity("UserPromptSubmit", {"text": text[:200]})
+        log_activity("UserPromptSubmit", {"text": text[:200]})
         return True
     except Exception as e:
         log.error(f"Manager inject failed: {e}")
@@ -168,7 +204,6 @@ def inject(text: str) -> bool:
 
 
 def detect_state() -> str:
-    """Return manager state: 'waiting_input' | 'working' | 'stopped' | 'error'"""
     return _state
 
 
@@ -185,7 +220,6 @@ def read_last_response() -> str | None:
 
 
 def capture(lines: int = 50) -> str:
-    """For CLI compatibility -- returns last response."""
     return _last_response or "(no response yet)"
 
 
@@ -196,12 +230,6 @@ def get_session_id() -> str:
 def _state_update(new_state: str) -> None:
     global _state
     _state = new_state
-
-
-def _log_activity(event: str, data: dict | None = None) -> None:
-    ACTIVITY_LOG.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"event": event, "ts": time.time()}
-    if data:
-        entry.update(data)
-    with open(ACTIVITY_LOG, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    registry = get_registry()
+    status_map = {"working": "running", "waiting_input": "idle"}
+    registry.update(SESSION_NAME, status=status_map.get(new_state, new_state))

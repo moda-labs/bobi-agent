@@ -114,7 +114,7 @@ def test_status_endpoint(client, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["manager"]["alive"] is False
-    assert body["sessions"] == []
+    assert body["engineers"] == []
 
 
 def test_events_endpoint(client, events_file):

@@ -1,9 +1,8 @@
-"""Sub-agent executor — runs engineer phases as Claude Code sub-agents.
+"""Sub-agent executor — runs engineer phases as Claude Code sessions.
 
-Replaces tmux-based session management with the claude-agent-sdk.
-Each phase (pickup, spec, implement, prepare-pr, feedback) runs as
-an independent sub-agent with its own session. The manager stays
-responsive while sub-agents work in the background.
+Each engineer gets a persistent ClaudeSDKClient session tracked in the
+registry. Sessions survive restarts and can be resumed, interacted with
+from the dashboard, or cancelled.
 """
 
 from __future__ import annotations
@@ -15,7 +14,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from modastack.sdk import get_cli_path
+from modastack.sdk import (
+    get_cli_path, save_session_id, load_session_id, log_activity,
+    get_registry, SessionEntry,
+)
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ class RunningAgent:
     task: asyncio.Task[AgentResult]
     started_at: float = field(default_factory=time.time)
     cwd: str = ""
+    client: Any = None
 
 
 _running: dict[str, RunningAgent] = {}
@@ -83,6 +86,10 @@ def _build_prompt(phase: str, issue_id: str, context: str = "") -> str:
     return "\n\n".join(parts)
 
 
+def _session_name(issue_id: str) -> str:
+    return f"eng-{issue_id.lower()}"
+
+
 async def _run_agent(
     prompt: str,
     cwd: str,
@@ -91,14 +98,24 @@ async def _run_agent(
     timeout: int,
     max_budget_usd: float | None = None,
 ) -> AgentResult:
-    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        ResultMessage,
+        TextBlock,
+    )
+
+    name = _session_name(issue_id)
+    saved_id = load_session_id(name)
+    registry = get_registry()
 
     options = ClaudeAgentOptions(
         cwd=cwd,
         permission_mode="bypassPermissions",
         max_turns=200,
-        max_budget_usd=max_budget_usd or 5.0,
         cli_path=get_cli_path(),
+        resume=saved_id or None,
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
@@ -109,27 +126,59 @@ async def _run_agent(
         },
     )
 
-    session_id = ""
+    client = ClaudeSDKClient(options)
+    key = issue_id.lower()
+    if key in _running:
+        _running[key].client = client
+
+    registry.register(SessionEntry(
+        name=name, session_id=saved_id or "", role="engineer",
+        issue_id=issue_id, phase=phase, cwd=cwd, status="running",
+    ))
+
     result = AgentResult(
         session_id="", issue_id=issue_id, phase=phase, success=False,
     )
 
     try:
-        async for msg in query(prompt=prompt, options=options):
-            if isinstance(msg, ResultMessage):
-                session_id = msg.session_id
-                result.session_id = session_id
+        connect_prompt = prompt if not saved_id else None
+        await client.connect(connect_prompt)
+
+        if saved_id:
+            await client.query(prompt)
+
+        async for msg in client.receive_messages():
+            if isinstance(msg, AssistantMessage):
+                text_parts = [b.text for b in msg.content if isinstance(b, TextBlock)]
+                if text_parts:
+                    log_activity("eng_response", {
+                        "issue_id": issue_id,
+                        "phase": phase,
+                        "text": "\n".join(text_parts)[:500],
+                    })
+
+            elif isinstance(msg, ResultMessage):
+                save_session_id(name, msg.session_id)
+                result.session_id = msg.session_id
                 result.success = not msg.is_error
                 result.duration_ms = msg.duration_ms
                 result.total_cost_usd = msg.total_cost_usd or 0.0
                 result.num_turns = msg.num_turns
                 if msg.is_error:
                     result.error = msg.result or "unknown error"
+                registry.update(name, status="done", session_id=msg.session_id)
     except asyncio.TimeoutError:
         result.error = f"timeout after {timeout}s"
+        registry.update(name, status="error")
     except Exception as e:
         result.error = str(e)
+        registry.update(name, status="error")
         log.error(f"Sub-agent error for {issue_id}/{phase}: {e}")
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
     return result
 
@@ -141,15 +190,8 @@ def run_phase(
     context: str = "",
     max_budget_usd: float | None = None,
 ) -> str:
-    """Start a sub-agent for a workflow phase. Returns immediately.
-
-    The agent runs in the background. Use is_running() and get_result()
-    to check status.
-
-    Returns the agent key (issue_id).
-    """
     key = issue_id.lower()
-    if key in _running:
+    if key in _running and not _running[key].task.done():
         log.warning(f"Agent already running for {key}, skipping")
         return key
 
@@ -192,7 +234,6 @@ def run_phase_sync(
     context: str = "",
     max_budget_usd: float | None = None,
 ) -> AgentResult:
-    """Run a sub-agent phase synchronously. Blocks until complete."""
     prompt = _build_prompt(phase, issue_id, context)
     timeout = PHASE_TIMEOUT.get(phase, 1800)
     loop = _get_or_create_loop()
@@ -204,14 +245,28 @@ def run_phase_sync(
     )
 
 
+def inject_message(issue_id: str, text: str) -> bool:
+    key = issue_id.lower()
+    agent = _running.get(key)
+    if not agent or not agent.client:
+        log.warning(f"No running agent for {key}")
+        return False
+    try:
+        loop = _get_or_create_loop()
+        future = asyncio.run_coroutine_threadsafe(agent.client.query(text), loop)
+        future.result(timeout=10)
+        return True
+    except Exception as e:
+        log.error(f"Inject to {key} failed: {e}")
+        return False
+
+
 def is_running(issue_id: str) -> bool:
     key = issue_id.lower()
     agent = _running.get(key)
     if not agent:
         return False
-    if agent.task.done():
-        return False
-    return True
+    return not agent.task.done()
 
 
 def get_result(issue_id: str) -> AgentResult | None:
@@ -243,6 +298,8 @@ def cancel_agent(issue_id: str) -> bool:
         return False
     agent.task.cancel()
     del _running[key]
+    name = _session_name(issue_id)
+    get_registry().update(name, status="cancelled")
     log.info(f"Sub-agent cancelled: {issue_id}/{agent.phase}")
     return True
 

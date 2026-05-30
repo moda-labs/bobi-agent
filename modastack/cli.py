@@ -210,22 +210,37 @@ def tick(text):
 @main.command()
 def status():
     """Show active agents — manager + engineer sub-agents."""
-    from modastack.manager.session import is_alive, detect_state, get_session_id
-    from modastack.subagent import list_agents
+    from modastack.sdk import load_session_id, get_registry
 
-    mgr_state = detect_state() if is_alive() else "stopped"
-    mgr_session = get_session_id()[:8] if is_alive() else ""
-    click.echo(f"  Manager: {mgr_state}" + (f" (session {mgr_session})" if mgr_session else ""))
+    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
+    running = False
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)
+            running = True
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
 
-    agents = list_agents()
-    if not agents:
+    session_id = load_session_id("moda-manager") or ""
+    session_short = session_id[:8] if session_id else ""
+
+    if running:
+        mgr_label = f"running (session {session_short})" if session_short else "running"
+    else:
+        mgr_label = "stopped"
+    click.echo(f"  Manager: {mgr_label}")
+
+    registry = get_registry()
+    engineers = registry.get_by_role("engineer")
+    active = [e for e in engineers if e.status in ("running", "starting", "idle")]
+    if not active:
         click.echo("  Engineers: none active")
         return
 
-    click.echo(f"  Engineers: {len(agents)} active")
-    for agent in agents:
-        state = "running" if agent["running"] else "done"
-        click.echo(f"    {agent['issue_id']}/{agent['phase']} — {state} ({agent['elapsed_s']}s)")
+    click.echo(f"  Engineers: {len(active)} active")
+    for e in active:
+        click.echo(f"    {e.issue_id}/{e.phase} — {e.status}")
 
 
 @main.command()
