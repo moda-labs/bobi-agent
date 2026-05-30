@@ -196,6 +196,9 @@ class WorkflowEngine:
                 break
 
             if not progress:
+                waiting = [nid for nid in order if self.run.node_state(nid).status in ("running","waiting")]
+                if waiting:
+                    log.info(f"  polling... waiting on: {waiting}")
                 time.sleep(5)
 
     def feed_event(self, event: dict):
@@ -359,7 +362,7 @@ class WorkflowEngine:
 
         agent_result = get_result(issue_id)
         if not agent_result:
-            log.debug(f"  poll #{issue_id}: not running, no result — checking registry")
+            log.info(f"  poll #{issue_id}: not running, no result — checking registry")
             from modastack.sdk import get_registry
             from modastack.subagent import _session_name, AgentResult
             entry = get_registry().get(_session_name(issue_id))
