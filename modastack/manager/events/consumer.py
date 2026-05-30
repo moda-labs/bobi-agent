@@ -48,11 +48,12 @@ def run(**kwargs):
     # Resume any in-flight workflows from before the restart
     dispatcher.cleanup_stale_runs()
 
-    def _on_event(event: dict):
+    def _on_event(event: dict) -> bool:
         dispatched = dispatcher.dispatch(event)
         if dispatched:
             log.info(f"Workflow dispatched for {event.get('type')}: "
                      f"{event.get('data', {}).get('issue_id', '')}")
+        return dispatched
         dispatcher.feed_event(event)
 
     if config.event_server_url and config.event_server_api_key:
