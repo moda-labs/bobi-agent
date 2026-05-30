@@ -167,7 +167,10 @@ async def _run_manager() -> None:
     ))
 
     try:
-        await _drain_turn()
+        if not resume_id:
+            await _drain_turn()
+        else:
+            _state_update("waiting_input")
         # Keep the event loop alive — inject() schedules work on it
         _keep_alive = asyncio.Event()
         await _keep_alive.wait()
