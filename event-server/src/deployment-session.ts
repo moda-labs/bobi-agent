@@ -18,7 +18,6 @@ interface StoredEvent {
 const EVENT_BUFFER_TTL = 48 * 60 * 60; // 48 hours in seconds
 
 export class DeploymentSession extends DurableObject<Env> {
-	private sessions: Set<WebSocket> = new Set();
 	private deploymentId: string = "";
 	private nextSeq: number = 1;
 
@@ -77,11 +76,11 @@ export class DeploymentSession extends DurableObject<Env> {
 		);
 
 		const message = JSON.stringify({ type: "event", data: storedEvent });
-		for (const ws of this.sessions) {
+		for (const ws of this.ctx.getWebSockets()) {
 			try {
 				ws.send(message);
 			} catch {
-				this.sessions.delete(ws);
+				// Managed by hibernation API
 			}
 		}
 
@@ -102,7 +101,6 @@ export class DeploymentSession extends DurableObject<Env> {
 		const [client, server] = [pair[0], pair[1]];
 
 		this.ctx.acceptWebSocket(server);
-		this.sessions.add(server);
 
 		const url = new URL(request.url);
 		const lastSeen = parseInt(url.searchParams.get("last_seen") || "0", 10);
@@ -151,11 +149,11 @@ export class DeploymentSession extends DurableObject<Env> {
 		}
 	}
 
-	override async webSocketClose(ws: WebSocket): Promise<void> {
-		this.sessions.delete(ws);
+	override async webSocketClose(): Promise<void> {
+		// Managed by hibernation API
 	}
 
-	override async webSocketError(ws: WebSocket): Promise<void> {
-		this.sessions.delete(ws);
+	override async webSocketError(): Promise<void> {
+		// Managed by hibernation API
 	}
 }
