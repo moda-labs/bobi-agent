@@ -578,3 +578,45 @@ class TestWorkflowDispatcher:
         d = WorkflowDispatcher()
         assert d._repo_matches("moda-labs/bettertab", "/home/ubuntu/dev/bettertab")
         assert not d._repo_matches("moda-labs/bettertab", "/home/ubuntu/dev/modastack")
+
+
+class TestPromptInjectPassesMetadata:
+    def test_title_and_repo_passed_to_run_phase(self, tmp_path, monkeypatch):
+        """_exec_prompt_inject should pass title and repo from event context."""
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+
+        nodes = {
+            "triage": NodeDef(
+                id="triage", type=NodeType.PROMPT,
+                session="${{event.issue_id}}", inject="/pickup Issue #42",
+                wait_for=WaitForDef(phase="triage_complete"),
+            ),
+        }
+        wf = WorkflowDef(
+            name="test", version=1,
+            trigger=TriggerDef(event="task.assigned"),
+            nodes=nodes,
+        )
+        event = {
+            "type": "task.assigned",
+            "data": {
+                "issue_id": "42",
+                "title": "Fix the login bug",
+                "repo": "moda-labs/myrepo",
+            },
+        }
+        run = WorkflowRun.create("test", event)
+        engine = WorkflowEngine(wf, run)
+
+        captured = {}
+        def mock_run_phase(**kwargs):
+            captured.update(kwargs)
+            return "42"
+
+        with patch("modastack.subagent.run_phase", mock_run_phase):
+            with patch.object(engine, "_resolve_cwd", return_value=str(tmp_path)):
+                engine._exec_prompt_inject(nodes["triage"])
+
+        assert captured["title"] == "Fix the login bug"
+        assert captured["repo"] == "moda-labs/myrepo"
+        assert captured["issue_id"] == "42"
