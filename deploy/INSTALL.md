@@ -10,7 +10,7 @@ modastack is an event-driven AI engineering team — a persistent Claude Code
 manager that monitors task trackers, GitHub, and Slack, assigning work to
 engineer sessions. You are installing:
 
-1. System dependencies (tmux, git, python3, node, bun, gh, claude)
+1. System dependencies (git, python3, node, bun, gh, claude, tmux)
 2. The modastack repo + Python environment
 3. GStack (methodology skills for engineer sessions)
 4. Configuration (task tracking, Slack, auto-deploy)
@@ -32,13 +32,13 @@ then install in a single batch.
 
 | Tool | Min version | macOS | Debian/Ubuntu | Check |
 |------|------------|-------|---------------|-------|
-| tmux | any | `brew install tmux` | `sudo apt install -y tmux` | `tmux -V` |
 | git | any | `brew install git` | `sudo apt install -y git` | `git --version` |
 | python3 | 3.11+ | `brew install python@3.12` | `sudo apt install -y python3 python3-venv` | `python3 --version` |
 | node | 18+ | `brew install node` | See NodeSource below | `node --version` |
 | jq | any | `brew install jq` | `sudo apt install -y jq` | `jq --version` |
 | curl | any | (preinstalled) | `sudo apt install -y curl` | `curl --version` |
 | unzip | any | (preinstalled) | `sudo apt install -y unzip` | `unzip -v` |
+| tmux | any | `brew install tmux` | `sudo apt install -y tmux` | `tmux -V` (optional — process wrapper) |
 
 **Node.js on Linux (if not installed or <18):**
 ```bash
@@ -282,28 +282,28 @@ Ask the user if they want to start modastack now. If yes:
 ```bash
 INSTALL_DIR="${MODASTACK_DIR:-$HOME/dev/modastack}"
 
-# Start consumer (event loop + webhook server)
+# Kill any previous instance
+pkill -f "modastack start" 2>/dev/null || true
 tmux kill-session -t modastack-consumer 2>/dev/null || true
 sleep 1
+
+# Start modastack in a tmux session (manager + events + Slack + dashboard — all in one process)
 tmux new-session -d -s modastack-consumer \
-    "cd $INSTALL_DIR && source .venv/bin/activate && modastack start --webhooks"
-
-# Start manager (persistent Claude Code session)
-tmux kill-session -t moda-manager 2>/dev/null || true
-rm -f ~/.modastack/manager/session_id
-sleep 1
-tmux new-session -d -s moda-manager -x 200 -y 50 \
-    "cd $INSTALL_DIR && claude --dangerously-skip-permissions --name modastack-manager"
-
-# Accept initial prompts
-sleep 3
-tmux send-keys -t moda-manager Down 2>/dev/null
-sleep 0.3
-tmux send-keys -t moda-manager Enter 2>/dev/null
+    "cd $INSTALL_DIR && source .venv/bin/activate && modastack start"
 ```
 
-Verify with `tmux list-sessions` — you should see `modastack-consumer`
-and `moda-manager`.
+Verify:
+```bash
+# Check the tmux session is running
+tmux list-sessions | grep modastack
+
+# Check modastack status (manager + engineer sub-agents)
+source "$INSTALL_DIR/.venv/bin/activate"
+modastack status
+```
+
+You should see the manager running. When issues are assigned, engineer
+sub-agents will appear automatically.
 
 ## Step 9: Summary
 
@@ -448,15 +448,16 @@ If the cron runs but nothing happens:
 2. Make sure the script is executable: `chmod +x ~/dev/modastack/deploy/check-deploy.sh`
 3. Make sure git can fetch (SSH key or HTTPS credentials available to cron)
 
-### tmux session crashes immediately
+### modastack crashes immediately
 
-If `tmux new-session -d -s modastack-consumer "..."` creates a session
-that exits right away:
+If the tmux session exits right away:
 1. Try running the command directly (without tmux) to see the error:
    ```bash
-   cd ~/dev/modastack && source .venv/bin/activate && modastack start --webhooks
+   cd ~/dev/modastack && source .venv/bin/activate && modastack start
    ```
 2. Check the log: `cat ~/.modastack/modastack.log`
+3. Common causes: missing Slack tokens, missing event server config,
+   Claude Code not authenticated
 
 ### Slack token validation fails
 
