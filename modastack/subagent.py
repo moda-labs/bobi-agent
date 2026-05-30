@@ -198,6 +198,13 @@ def run_phase(
     prompt = _build_prompt(phase, issue_id, context)
     timeout = PHASE_TIMEOUT.get(phase, 1800)
 
+    name = _session_name(issue_id)
+    registry = get_registry()
+    registry.register(SessionEntry(
+        name=name, session_id="", role="engineer",
+        issue_id=issue_id, phase=phase, cwd=cwd, status="starting",
+    ))
+
     loop = _get_or_create_loop()
 
     async def _wrapped():
@@ -207,6 +214,7 @@ def run_phase(
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
+            registry.update(name, status="error")
             return AgentResult(
                 session_id="",
                 issue_id=issue_id,
