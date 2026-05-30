@@ -136,32 +136,44 @@ def message(text, to):
 @main.command()
 @click.option("-n", "--lines", default=20, help="Number of recent entries to show")
 @click.option("-f", "--follow", is_flag=True, help="Follow mode — stream new entries")
-def log(lines, follow):
-    """Show manager conversation history.
+@click.option("-s", "--session", default="moda-manager", help="Session to show (e.g. moda-manager, eng-42)")
+def log(lines, follow, session):
+    """Show conversation history for a session.
 
     Usage:
-        modastack log              # last 20 entries
-        modastack log -n 50        # last 50 entries
-        modastack log -f           # follow mode (like tail -f)
+        modastack log                     # manager log
+        modastack log -s eng-81           # engineer #81 log
+        modastack log -n 50               # last 50 entries
+        modastack log -f                  # follow mode
+        modastack log -f -s eng-81        # follow engineer
     """
     from modastack.sdk import ACTIVITY_DIR
-    ACTIVITY_LOG = ACTIVITY_DIR / "activity.jsonl"
-
-    if not ACTIVITY_LOG.exists():
-        click.echo("No activity yet. Start with: modastack start")
-        return
+    log_path = ACTIVITY_DIR / "logs" / f"{session}.jsonl"
+    if not log_path.exists():
+        fallback = ACTIVITY_DIR / "activity.jsonl"
+        if session == "moda-manager" and fallback.exists():
+            log_path = fallback
+        else:
+            click.echo(f"No log for session '{session}'.")
+            # List available sessions
+            logs_dir = ACTIVITY_DIR / "logs"
+            if logs_dir.exists():
+                sessions = [f.stem for f in logs_dir.glob("*.jsonl")]
+                if sessions:
+                    click.echo(f"Available: {', '.join(sorted(sessions))}")
+            return
 
     if follow:
         import time
         shown = set()
-        all_lines = ACTIVITY_LOG.read_text().strip().splitlines()
+        all_lines = log_path.read_text().strip().splitlines()
         for line in all_lines[-lines:]:
             _print_activity_entry(line)
             shown.add(line)
         try:
             while True:
                 time.sleep(1)
-                current = ACTIVITY_LOG.read_text().strip().splitlines()
+                current = log_path.read_text().strip().splitlines()
                 for line in current:
                     if line not in shown:
                         _print_activity_entry(line)
@@ -169,7 +181,7 @@ def log(lines, follow):
         except KeyboardInterrupt:
             pass
     else:
-        all_lines = ACTIVITY_LOG.read_text().strip().splitlines()
+        all_lines = log_path.read_text().strip().splitlines()
         for line in all_lines[-lines:]:
             _print_activity_entry(line)
 

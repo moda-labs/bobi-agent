@@ -127,7 +127,3 @@ def log_activity(event: str, data: dict | None = None, session: str = "moda-mana
     log_path = log_dir / f"{session}.jsonl"
     with open(log_path, "a") as f:
         f.write(json.dumps(entry) + "\n")
-    # Also write to the combined log for backwards compat
-    combined = ACTIVITY_DIR / "activity.jsonl"
-    with open(combined, "a") as f:
-        f.write(json.dumps(entry) + "\n")
