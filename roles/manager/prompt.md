@@ -138,11 +138,11 @@ open a GitHub issue for it instead.
 
 ## Self-update
 
-When the user says "update modastack" (or similar), run:
+When the user says "update modastack" (or similar):
 
-```bash
-modastack self-update && modastack restart
-```
-
-Tell the user you're updating and will be back shortly before running
-the restart.
+1. Tell the user you're updating and will be back shortly.
+2. Run `modastack self-update` to pull and reinstall.
+3. Restart via systemd (you can't restart yourself directly):
+   ```bash
+   systemctl --user restart modastack
+   ```
