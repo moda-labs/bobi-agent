@@ -8,6 +8,7 @@ the message stream. Sessions survive restarts via the registry.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import threading
@@ -20,6 +21,8 @@ from modastack.sdk import (
     get_cli_path, save_session_id, load_session_id, log_activity,
     get_registry, SessionEntry,
 )
+
+PROMPT_HASH_PATH = Path.home() / ".modastack" / "sessions" / "prompt_hash"
 
 log = logging.getLogger(__name__)
 
@@ -162,11 +165,25 @@ async def _run_manager() -> None:
         cwd=cwd, status="idle",
     ))
 
+    prompt_text = _build_startup_prompt()
+    prompt_hash = hashlib.sha256(prompt_text.encode()).hexdigest()[:16]
+
     try:
         if not resume_id:
             await _drain_turn()
         else:
             _state_update("waiting_input")
+            saved_hash = PROMPT_HASH_PATH.read_text().strip() if PROMPT_HASH_PATH.exists() else ""
+            if saved_hash != prompt_hash:
+                log.info(f"Prompt changed ({saved_hash[:8]}→{prompt_hash[:8]}), re-injecting")
+                await _client.query(
+                    "Your instructions have been updated. "
+                    "Read and follow these from now on:\n\n" + prompt_text
+                )
+                await _drain_turn()
+
+        PROMPT_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PROMPT_HASH_PATH.write_text(prompt_hash)
         # Keep the event loop alive — inject() schedules work on it
         _keep_alive = asyncio.Event()
         await _keep_alive.wait()
