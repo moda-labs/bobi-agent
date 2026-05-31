@@ -13,7 +13,7 @@ engineer sessions. You are installing:
 1. System dependencies (git, python3, node, bun, gh, claude, tmux)
 2. The modastack repo + Python environment
 3. GStack (methodology skills for engineer sessions)
-4. Configuration (task tracking, Slack, auto-deploy)
+4. Configuration (task tracking, Slack)
 
 ## Step 1: Detect platform
 
@@ -220,21 +220,6 @@ curl -s -H "Authorization: Bearer <BOT_TOKEN>" https://slack.com/api/auth.test
 ```
 Check that `"ok": true` in the response.
 
-### 6c: Auto-deploy
-
-Ask the user if they want auto-deploy enabled. Explain: "This installs
-a cron job that checks every minute for new commits on main. When it
-finds new commits, it pulls, reinstalls, and restarts modastack
-automatically."
-
-If yes:
-```bash
-INSTALL_DIR="${MODASTACK_DIR:-$HOME/dev/modastack}"
-(crontab -l 2>/dev/null; echo "* * * * * $INSTALL_DIR/deploy/check-deploy.sh") | crontab -
-```
-
-Verify: `crontab -l | grep check-deploy`
-
 ## Step 7: Write configuration files
 
 Create the config directory and files based on user answers from Step 6.
@@ -313,7 +298,6 @@ Print a summary of what was installed:
 - Config file locations
 - Task tracking system chosen
 - Slack: configured or not
-- Auto-deploy: enabled or not
 - Running: yes or no
 
 Tell the user their next step:
@@ -438,15 +422,6 @@ gh auth login --with-token <<< "<GITHUB_PAT>"
 ```
 The user needs a GitHub Personal Access Token with `repo` and
 `admin:repo_hook` scopes.
-
-### Cron job not running
-
-Verify it's installed: `crontab -l | grep check-deploy`
-
-If the cron runs but nothing happens:
-1. Check the log: `cat ~/.modastack/deploy.log`
-2. Make sure the script is executable: `chmod +x ~/dev/modastack/deploy/check-deploy.sh`
-3. Make sure git can fetch (SSH key or HTTPS credentials available to cron)
 
 ### modastack crashes immediately
 

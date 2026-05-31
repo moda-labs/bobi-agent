@@ -1,6 +1,5 @@
 #!/bin/bash
 # Auto-deploy: pulls latest main, reinstalls, restarts modastack.
-# Called by cron via check-deploy.sh when new commits are detected.
 
 set -euo pipefail
 
