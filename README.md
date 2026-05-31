@@ -90,7 +90,7 @@ branch: agent/agd-12
 phase: implement_complete
 complexity: medium
 needs_spec: true
-spec_path: specs/agd-12-rate-limiting.md
+spec_url: https://github.com/org/repo/issues/12
 ---
 
 ## Status

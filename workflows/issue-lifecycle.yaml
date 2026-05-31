@@ -120,15 +120,14 @@ nodes:
     type: prompt
     session: ${{event.issue_id | lower}}
     inject: >
-      /spec ${{event.issue_id}}. After creating the draft PR and updating
+      /spec ${{event.issue_id}}. After updating the issue description and updating
       the handoff to spec_complete, STOP. Do NOT proceed to implementation.
       Wait for human approval.
     wait_for:
       phase: spec_complete
     timeout: 3000
     outputs:
-      spec_pr: ${{handoff.spec_pr}}
-      spec_path: ${{handoff.spec_path}}
+      spec_url: ${{handoff.spec_url}}
     depends_on: [route]
     when: "${{route.branch}} == 'needs_spec'"
 
@@ -137,8 +136,8 @@ nodes:
     type: manager
     prompt: |
       Spec complete for ${{event.issue_id}} "${{event.title}}".
-      PR: ${{spec.spec_pr}}. Spec file: ${{spec.spec_path}}.
-      Draft a Slack message asking for spec review. Include links.
+      Issue: ${{spec.spec_url}}.
+      Draft a Slack message asking for spec review. Include the issue link.
       Output ONLY the message text.
     timeout: 300
     depends_on: [spec]
@@ -160,7 +159,7 @@ nodes:
     action: ticket.comment
     params:
       issue_id: ${{event.issue_id}}
-      body: "Spec ready for review: ${{spec.spec_pr}}"
+      body: "Spec ready for review: ${{spec.spec_url}}"
       repo: ${{event.repo}}
     depends_on: [spec]
     when: "${{route.branch}} == 'needs_spec'"

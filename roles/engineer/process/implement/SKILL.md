@@ -10,7 +10,8 @@ commit/push conventions, `practices/code-review` for mandatory quality gates.
 
 ### 1. Read the plan
 
-Read `~/.modastack/handoffs/<ISSUE_ID>.md`. If `spec_path` exists, read the spec.
+Read `~/.modastack/handoffs/<ISSUE_ID>.md`. If `spec_url` exists, fetch the spec
+from the issue description (`gh issue view <NUMBER> --json body --jq .body`).
 Otherwise use the issue description and triage notes.
 
 ### 2. For bugs: /investigate first
