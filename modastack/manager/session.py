@@ -1,37 +1,44 @@
-"""Persistent manager tmux session.
+"""Persistent manager session via ClaudeSDKClient.
 
 The manager runs as a long-lived interactive Claude Code session.
-Events are injected as messages via tmux send-keys.
-State is tracked via Claude Code hooks (UserPromptSubmit, Stop)
-that write to ~/.modastack/manager/activity.jsonl.
-Sessions survive restarts via --resume.
+Events are injected via client.query(), responses are read from
+the message stream. Sessions survive restarts via the registry.
 """
 
+from __future__ import annotations
+
+import asyncio
 import json
 import logging
-import shutil
-import subprocess
+import re
+import threading
 import time
+import urllib.request
 from pathlib import Path
+from typing import Any
 
 from modastack.config import GlobalConfig
-from modastack.tmux import (
-    TMUX, has_session as _tmux_has_session,
-    capture_pane as _tmux_capture, send_text,
+from modastack.sdk import (
+    get_cli_path, save_session_id, load_session_id, log_activity,
+    get_registry, SessionEntry,
 )
 
 log = logging.getLogger(__name__)
 
-CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
 SESSION_NAME = "moda-manager"
-SESSION_ID_PATH = Path.home() / ".modastack" / "manager" / "session_id"
 _ROLES_DIR = Path(__file__).resolve().parent.parent.parent / "roles" / "manager"
 MANAGER_PROMPT_PATH = _ROLES_DIR / "prompt.md"
-ACTIVITY_LOG = Path.home() / ".modastack" / "manager" / "activity.jsonl"
+
+_client: Any | None = None
+_loop: asyncio.AbstractEventLoop | None = None
+_thread: threading.Thread | None = None
+_ready = threading.Event()
+_keep_alive: asyncio.Event | None = None
+_last_response: str = ""
+_state: str = "stopped"
 
 
 def _load_manager_prompt() -> str:
-    """Load core prompt + role-specific prompt based on config."""
     core = MANAGER_PROMPT_PATH.read_text()
     role_name = "engineering"
     try:
@@ -45,265 +52,218 @@ def _load_manager_prompt() -> str:
     return core
 
 
-def _session_exists() -> bool:
-    return _tmux_has_session(SESSION_NAME)
-
-
-def _get_saved_session_id() -> str:
-    if SESSION_ID_PATH.exists():
-        return SESSION_ID_PATH.read_text().strip()
-    return ""
-
-
-def _save_session_id(session_id: str) -> None:
-    SESSION_ID_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SESSION_ID_PATH.write_text(session_id)
-
-
-def _read_last_activity() -> dict | None:
-    """Read the most recent entry from the activity log."""
-    if not ACTIVITY_LOG.exists():
-        return None
-    try:
-        with open(ACTIVITY_LOG, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            if size == 0:
-                return None
-            chunk_size = min(1024, size)
-            f.seek(-chunk_size, 2)
-            lines = f.read().decode().strip().splitlines()
-            if lines:
-                return json.loads(lines[-1])
-    except Exception:
-        return None
-    return None
-
-
-def _activity_line_count() -> int:
-    """Count lines in the activity log."""
-    if not ACTIVITY_LOG.exists():
-        return 0
-    try:
-        with open(ACTIVITY_LOG) as f:
-            return sum(1 for _ in f)
-    except Exception:
-        return 0
-
-
-def _clear_activity_log() -> None:
-    """Truncate the activity log on startup to avoid stale state."""
-    ACTIVITY_LOG.parent.mkdir(parents=True, exist_ok=True)
-    ACTIVITY_LOG.write_text("")
-
-
-def start_or_resume(cwd: str = None) -> bool:
-    """Start a new manager session or resume an existing one.
-
-    Returns True if the session is ready.
-    """
-    if _session_exists():
-        last = _read_last_activity()
-        if last and last.get("event") == "Stop":
-            log.info("Manager session already running and idle")
-            return True
-
-        if last and last.get("event") == "UserPromptSubmit":
-            log.info("Manager session already running and working")
-            return True
-
-        # Session exists but no activity — needs startup prompt
-        log.info("Manager session exists but no activity — injecting startup")
-        _clear_activity_log()
-        _inject_startup_prompt()
-        if not _wait_for_prompt_accepted():
-            log.error("Failed to inject startup prompt")
-            return False
-        if not _wait_for_turn_complete():
-            log.warning("Startup injection accepted but turn didn't complete — continuing anyway")
-        _capture_session_id()
-        log.info("Manager session prompted and ready")
-        return True
-
-    if not cwd:
-        # Always start in the modastack repo — hooks are installed there
-        repo_root = Path(__file__).parent.parent
-        if repo_root.exists():
-            cwd = str(repo_root)
-        else:
-            config = GlobalConfig.load()
-            cwd = str(config.repos[0]) if config.repos else str(Path.home())
-
-    saved_id = _get_saved_session_id()
-    _clear_activity_log()
-
-    if saved_id:
-        cmd = [CLAUDE, "--resume", saved_id, "--dangerously-skip-permissions"]
-        log.info(f"Resuming manager session {saved_id}")
-    else:
-        cmd = [CLAUDE, "--dangerously-skip-permissions", "--name", "modastack-manager"]
-        log.info("Starting new manager session")
-
-    subprocess.run([
-        TMUX, "new-session",
-        "-d", "-s", SESSION_NAME,
-        "-x", "200", "-y", "50",
-    ] + cmd, cwd=cwd)
-
-    # Wait for Claude Code to be ready (tmux pane exists and process is running)
-    for _ in range(30):
-        time.sleep(1)
-        if _session_exists():
-            break
-    else:
-        log.error("Manager tmux session failed to start")
-        return False
-
-    if not saved_id:
-        # Give Claude Code a moment to initialize before injecting
-        time.sleep(3)
-        _inject_startup_prompt()
-        if not _wait_for_prompt_accepted():
-            log.error("Failed to inject startup prompt into new session")
-            return False
-        if not _wait_for_turn_complete():
-            log.warning("Startup turn didn't complete — continuing anyway")
-
-    _capture_session_id()
-    log.info("Manager session ready")
-    return True
-
-
-def _inject_startup_prompt() -> None:
-    """Write the startup prompt to a file and inject a read instruction."""
+def _build_startup_prompt() -> str:
     prompt = _load_manager_prompt()
     config = GlobalConfig.load()
     repos = ", ".join(p.name for p in config.repos)
-
-    startup_path = Path.home() / ".modastack" / "manager" / "startup_prompt.md"
-    startup_path.parent.mkdir(parents=True, exist_ok=True)
-    startup_path.write_text(
-        f"# Startup Instructions\n\n"
+    return (
         f"You are the Modastack manager. "
-        f"Slack is your primary communication channel — post status updates, ask "
-        f"questions, and reply to DMs there. Use the Slack API directly via curl. "
-        f"Your Slack DM channel with Zach is D0B51JP1N4C. "
         f"You are managing these repos: {repos}. "
-        f"From now on, I will send you batches of events. For each batch, "
-        f"act directly using your tools. "
-        f"Start by posting a brief startup message to Slack saying you're online "
-        f"and summarizing the current state.\n\n{prompt}"
-    )
-
-    _send_keys(
-        f"Read and internalize {startup_path}. It contains your full instructions. "
-        f"Read it now, then post a startup message to Slack."
+        f"From now on, you will receive human messages and system event batches. "
+        f"Respond naturally — the transport layer handles delivery. "
+        f"Act directly using your tools.\n\n{prompt}"
     )
 
 
-def _wait_for_prompt_accepted(timeout: int = 60, max_retries: int = 3) -> bool:
-    """Wait for a UserPromptSubmit event, retrying send-keys if needed."""
-    for attempt in range(1, max_retries + 1):
-        inject_time = time.time()
-        deadline = time.monotonic() + timeout
+def _relay_to_slack(text: str) -> None:
+    try:
+        config = GlobalConfig.load()
+        token = config.slack_bot_token
+        channel = config.slack_dm_channel or "D0B51JP1N4C"
+        if not token:
+            return
+        text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+        text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
+        if len(text) > 3000:
+            text = text[:3000] + '\n_(truncated)_'
+        payload = json.dumps({"channel": channel, "text": text}).encode()
+        req = urllib.request.Request(
+            "https://slack.com/api/chat.postMessage",
+            data=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        log.debug(f"Slack relay failed: {e}")
 
-        while time.monotonic() < deadline:
-            time.sleep(1)
-            last = _read_last_activity()
-            if last and last.get("event") == "UserPromptSubmit":
-                event_ts = last.get("ts", 0)
-                if event_ts >= inject_time - 5:
-                    log.debug(f"Prompt accepted (attempt {attempt})")
-                    return True
 
-        log.warning(f"No UserPromptSubmit after {timeout}s (attempt {attempt}/{max_retries})")
-        if attempt < max_retries:
-            _inject_startup_prompt()
+async def _drain_turn() -> None:
+    """Drain receive_messages() for one turn until the iterator ends."""
+    global _last_response
 
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+    registry = get_registry()
+    _state_update("working")
+
+    async for msg in _client.receive_messages():
+        if isinstance(msg, AssistantMessage):
+            text_parts = []
+            for block in msg.content:
+                if isinstance(block, TextBlock):
+                    text_parts.append(block.text)
+            if text_parts:
+                _last_response = "\n".join(text_parts)
+                log_activity("response", {"text": _last_response[:500]}, session=SESSION_NAME)
+                _relay_to_slack(_last_response)
+
+        elif isinstance(msg, ResultMessage):
+            save_session_id(SESSION_NAME, msg.session_id)
+            _state_update("waiting_input")
+            registry.update(SESSION_NAME, status="idle", session_id=msg.session_id)
+            log_activity("Stop", {"session_id": msg.session_id}, session=SESSION_NAME)
+
+
+async def _run_manager() -> None:
+    global _client, _state
+
+    from claude_agent_sdk import (
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+    )
+
+    saved_id = load_session_id(SESSION_NAME)
+
+    config = GlobalConfig.load()
+    cwd = str(Path(__file__).parent.parent)
+    if config.repos:
+        cwd = str(config.repos[0])
+
+    for attempt in range(2):
+        resume_id = saved_id if attempt == 0 else None
+
+        options = ClaudeAgentOptions(
+            cwd=cwd,
+            permission_mode="bypassPermissions",
+            cli_path=get_cli_path(),
+            resume=resume_id or None,
+            system_prompt={"type": "preset", "preset": "claude_code"},
+            strict_mcp_config=True,
+        )
+
+        _client = ClaudeSDKClient(options)
+
+        startup_prompt = _build_startup_prompt() if not resume_id else None
+        try:
+            await _client.connect(startup_prompt)
+            break
+        except Exception as e:
+            if resume_id and attempt == 0:
+                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
+                save_session_id(SESSION_NAME, "")
+                _client = None
+                continue
+            raise
+
+    _state = "running"
+    _ready.set()
+    log.info(f"Manager session connected (resume={resume_id or 'new'})")
+
+    registry = get_registry()
+    registry.register(SessionEntry(
+        name=SESSION_NAME, session_id=saved_id or "", role="manager",
+        cwd=cwd, status="idle",
+    ))
+
+    try:
+        if not resume_id:
+            await _drain_turn()
+        else:
+            _state_update("waiting_input")
+        # Keep the event loop alive — inject() schedules work on it
+        _keep_alive = asyncio.Event()
+        await _keep_alive.wait()
+    except Exception as e:
+        log.error(f"Manager session error: {e}")
+        _state = "error"
+        registry.update(SESSION_NAME, status="error")
+    finally:
+        if _client:
+            await _client.disconnect()
+            _client = None
+        _state = "stopped"
+        registry.update(SESSION_NAME, status="stopped")
+
+
+def _manager_thread() -> None:
+    global _loop
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
+    try:
+        _loop.run_until_complete(_run_manager())
+    except Exception as e:
+        log.error(f"Manager thread crashed: {e}")
+    finally:
+        _loop.close()
+        _loop = None
+
+
+def start_or_resume(cwd: str = None) -> bool:
+    global _thread
+    if is_alive():
+        log.info("Manager session already running")
+        return True
+
+    _ready.clear()
+    _thread = threading.Thread(target=_manager_thread, daemon=True, name="manager-sdk")
+    _thread.start()
+
+    if _ready.wait(timeout=60):
+        log.info("Manager session ready")
+        return True
+
+    log.error("Manager session failed to start within 60s")
     return False
 
 
-def _wait_for_turn_complete(timeout: int = 300) -> bool:
-    """Wait for a Stop event indicating the turn is done."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        time.sleep(2)
-        last = _read_last_activity()
-        if last and last.get("event") == "Stop":
-            return True
-    return False
-
-
-def _capture_session_id() -> None:
-    """Try to extract the session ID from the tmux pane."""
-    pane = capture(lines=20)
-    for line in pane.splitlines():
-        if "session_" in line.lower() or "ses_" in line.lower():
-            import re
-            match = re.search(r'(session_[a-zA-Z0-9]+|ses_[a-zA-Z0-9]+)', line)
-            if match:
-                _save_session_id(match.group(1))
-                return
-    _save_session_id(SESSION_NAME)
-
-
-def _send_keys(text: str) -> bool:
-    """Send text into the tmux pane with locking and length routing.
-
-    Skips paste verification — the manager session uses Claude Code's
-    input prompt which doesn't reliably echo text before submission.
-    """
-    return send_text(SESSION_NAME, text, verify=False)
+async def _inject_and_drain(text: str) -> None:
+    await _client.query(text)
+    await _drain_turn()
 
 
 def inject(text: str) -> bool:
-    """Send text into the manager session and confirm it was accepted.
-
-    Returns True if a UserPromptSubmit event appeared after injection.
-    """
-    inject_time = time.time()
-
-    if not _send_keys(text):
+    if not _client or not _loop:
+        log.warning("Manager not running — cannot inject")
         return False
 
-    # Wait for UserPromptSubmit confirmation
-    for _ in range(30):
-        time.sleep(1)
-        last = _read_last_activity()
-        if last and last.get("event") == "UserPromptSubmit":
-            if last.get("ts", 0) >= inject_time - 5:
-                log.debug(f"Injected and confirmed ({len(text)} chars)")
-                return True
-
-    log.warning("Injection not confirmed — no UserPromptSubmit received")
-    return False
-
-
-def capture(lines: int = 50) -> str:
-    """Capture current pane content (for debugging/CLI only)."""
-    return _tmux_capture(SESSION_NAME, lines=lines)
+    log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
+    future = asyncio.run_coroutine_threadsafe(_inject_and_drain(text), _loop)
+    try:
+        future.result(timeout=300)
+        return True
+    except Exception as e:
+        log.error(f"Manager inject failed: {e}")
+        return False
 
 
 def detect_state() -> str:
-    """Detect manager state from the activity log.
+    return _state
 
-    Returns: 'waiting_input' | 'working' | 'exited' | 'unknown'
-    """
-    if not _session_exists():
-        return "exited"
 
-    last = _read_last_activity()
-    if last is None:
-        return "unknown"
-
-    event = last.get("event")
-    if event == "Stop":
-        return "waiting_input"
-    if event == "UserPromptSubmit":
-        return "working"
-
-    return "unknown"
+def wait_until_ready(timeout: int = 60) -> bool:
+    return _ready.wait(timeout=timeout)
 
 
 def is_alive() -> bool:
-    return _session_exists()
+    return _thread is not None and _thread.is_alive() and _state not in ("stopped", "error")
+
+
+def read_last_response() -> str | None:
+    return _last_response if _last_response else None
+
+
+def capture(lines: int = 50) -> str:
+    return _last_response or "(no response yet)"
+
+
+def get_session_id() -> str:
+    return load_session_id(SESSION_NAME)
+
+
+def _state_update(new_state: str) -> None:
+    global _state
+    _state = new_state
+    registry = get_registry()
+    status_map = {"working": "running", "waiting_input": "idle"}
+    registry.update(SESSION_NAME, status=status_map.get(new_state, new_state))

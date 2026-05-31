@@ -15,7 +15,7 @@ from modastack.workflow.schema import (
 from modastack.workflow.variables import VariableContext
 from modastack.workflow.state import WorkflowRun, NodeState
 from modastack.workflow.actions import ActionRegistry, build_registry
-from modastack.workflow.engine import WorkflowEngine, _extract_manager_response, _extract_tagged_response
+from modastack.workflow.engine import WorkflowEngine
 from modastack.workflow.triggers import WorkflowDispatcher
 
 
@@ -474,114 +474,6 @@ class TestRepoScope:
         assert run.nodes["step"].outputs["stdout"] == ""
 
 
-class TestExtractTaggedResponse:
-    def test_extracts_tagged_content(self):
-        raw = """
-● Some reasoning here
-
-<workflow-response>
-Picking up #44 — updating the README with workflow engine docs.
-</workflow-response>
-
-✻ Crunched for 30s
-"""
-        result = _extract_tagged_response(raw)
-        assert "Picking up #44" in result
-        assert "workflow-response" not in result
-
-    def test_returns_empty_when_no_tags(self):
-        assert _extract_tagged_response("no tags here") == ""
-
-    def test_handles_unclosed_tag(self):
-        raw = "<workflow-response>partial response"
-        result = _extract_tagged_response(raw)
-        assert result == "partial response"
-
-    def test_uses_last_occurrence(self):
-        raw = """
-<workflow-response>old</workflow-response>
-<workflow-response>new</workflow-response>
-"""
-        result = _extract_tagged_response(raw)
-        assert result == "new"
-
-    def test_multiline_response(self):
-        raw = """
-<workflow-response>
-Line one.
-Line two.
-Line three.
-</workflow-response>
-"""
-        result = _extract_tagged_response(raw)
-        assert "Line one." in result
-        assert "Line three." in result
-
-
-class TestExtractManagerResponse:
-    def test_extracts_text(self):
-        raw = """
-❯ Some prompt here
-
-This is the response text.
-It has multiple lines.
-
-────────────
-❯
-  ⏵⏵ bypass permissions on
-"""
-        result = _extract_manager_response(raw)
-        assert "This is the response text." in result
-        assert "multiple lines" in result
-
-    def test_real_manager_pane(self):
-        raw = """
- ▐▛███▜▌   Claude Code v2.1.96
-▝▜█████▛▘  Opus 4.6 (1M context) · Claude Max
-  ▘▘ ▝▝    ~/dev/modastack
-
-❯ Issue #40 "Update README" assigned. Draft a brief Slack pickup message. Output ONLY the message text.
-
-● Bash(tmux list-sessions 2>/dev/null)
-  ⎿  moda-40: 1 windows (created Mon May 25 21:17:19 2026)
-
-● Bash(tmux capture-pane -t moda-40 -p -S -100 2>/dev/null | tail -80)
-  ⎿   ▐▛███▜▌   Claude Code v2.1.96
-     ▝▜█████▛▘  Opus 4.6 (1M context) · Claude Max
-      … +8 lines (ctrl+o to expand)
-
-● The worker session is waiting for input. Let me draft the message:
-
-  Picking up #40 — updating the modastack README to document the workflow engine and conversation history indexer. Quick docs update.
-
-✻ Crunched for 50s
-
-────────────────────────────────────────────────────────────
-❯
-  ⏵⏵ bypass permissions on (shift+tab to cycle)
-"""
-        result = _extract_manager_response(raw)
-        assert "Picking up #40" in result
-        assert "workflow engine" in result
-        assert "Bash(" not in result
-        assert "Claude Code" not in result
-
-    def test_strips_tool_calls(self):
-        raw = """
-❯ prompt
-
-● Bash(echo hello)
-  ⎿  hello
-
-The actual answer is here.
-
-────────────
-❯
-  ⏵⏵ bypass permissions on
-"""
-        result = _extract_manager_response(raw)
-        assert "actual answer" in result
-        assert "Bash(" not in result
 
 
 # === Dispatcher Tests ===
@@ -686,3 +578,105 @@ class TestWorkflowDispatcher:
         d = WorkflowDispatcher()
         assert d._repo_matches("moda-labs/bettertab", "/home/ubuntu/dev/bettertab")
         assert not d._repo_matches("moda-labs/bettertab", "/home/ubuntu/dev/modastack")
+
+
+class TestPromptInjectPassesMetadata:
+    def test_title_and_repo_passed_to_run_phase(self, tmp_path, monkeypatch):
+        """_exec_prompt_inject should pass title and repo from event context."""
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+
+        nodes = {
+            "triage": NodeDef(
+                id="triage", type=NodeType.PROMPT,
+                session="${{event.issue_id}}", inject="/pickup Issue #42",
+                wait_for=WaitForDef(phase="triage_complete"),
+            ),
+        }
+        wf = WorkflowDef(
+            name="test", version=1,
+            trigger=TriggerDef(event="task.assigned"),
+            nodes=nodes,
+        )
+        event = {
+            "type": "task.assigned",
+            "data": {
+                "issue_id": "42",
+                "title": "Fix the login bug",
+                "repo": "moda-labs/myrepo",
+            },
+        }
+        run = WorkflowRun.create("test", event)
+        engine = WorkflowEngine(wf, run)
+
+        captured = {}
+        def mock_run_phase(**kwargs):
+            captured.update(kwargs)
+            return "42"
+
+        with patch("modastack.subagent.run_phase", mock_run_phase):
+            with patch.object(engine, "_resolve_cwd", return_value=str(tmp_path)):
+                engine._exec_prompt_inject(nodes["triage"])
+
+        assert captured["title"] == "Fix the login bug"
+        assert captured["repo"] == "moda-labs/myrepo"
+        assert captured["issue_id"] == "42"
+
+
+class TestManagerNotifications:
+    """Test that the manager gets notified of workflow state changes."""
+
+    def test_manager_notified_on_prompt_completion(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+        nodes = {"triage": NodeDef(id="triage", type=NodeType.PROMPT, session="${{event.issue_id}}", inject="/pickup #42")}
+        wf = WorkflowDef(name="test", version=1, trigger=TriggerDef(event="task.assigned"), nodes=nodes)
+        run = WorkflowRun.create("test", {"type": "task.assigned", "data": {"issue_id": "42", "title": "Fix bug", "repo": "test"}})
+        engine = WorkflowEngine(wf, run)
+        from modastack.subagent import AgentResult
+        injected = []
+        with patch("modastack.subagent.run_phase", return_value="42"), \
+             patch("modastack.subagent.is_running", return_value=False), \
+             patch("modastack.subagent.get_result", return_value=AgentResult(session_id="s1", issue_id="42", phase="pickup", success=True)), \
+             patch("modastack.manager.session.inject", side_effect=lambda t: injected.append(t) or True), \
+             patch.object(engine, "_resolve_cwd", return_value=str(tmp_path)):
+            engine.execute()
+        assert any("completed triage" in msg for msg in injected)
+
+    def test_manager_notified_on_prompt_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+        nodes = {"triage": NodeDef(id="triage", type=NodeType.PROMPT, session="${{event.issue_id}}", inject="/pickup #42")}
+        wf = WorkflowDef(name="test", version=1, trigger=TriggerDef(event="task.assigned"), nodes=nodes)
+        run = WorkflowRun.create("test", {"type": "task.assigned", "data": {"issue_id": "42", "title": "Fix bug", "repo": "test"}})
+        engine = WorkflowEngine(wf, run)
+        from modastack.subagent import AgentResult
+        injected = []
+        with patch("modastack.subagent.run_phase", return_value="42"), \
+             patch("modastack.subagent.is_running", return_value=False), \
+             patch("modastack.subagent.get_result", return_value=AgentResult(session_id="s1", issue_id="42", phase="pickup", success=False, error="timeout")), \
+             patch("modastack.manager.session.inject", side_effect=lambda t: injected.append(t) or True), \
+             patch.object(engine, "_resolve_cwd", return_value=str(tmp_path)):
+            engine.execute()
+        assert any("failed" in msg and "42" in msg for msg in injected)
+
+    def test_manager_notified_on_workflow_completion(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+        nodes = {"step": NodeDef(id="step", type=NodeType.BASH, command="echo done")}
+        wf = WorkflowDef(name="test", version=1, trigger=TriggerDef(event="task.assigned"), nodes=nodes)
+        run = WorkflowRun.create("test", {"type": "task.assigned", "data": {"issue_id": "42", "title": "Fix bug"}})
+        engine = WorkflowEngine(wf, run)
+        injected = []
+        with patch("modastack.manager.session.inject", side_effect=lambda t: injected.append(t) or True):
+            engine.execute()
+        assert run.status == "completed"
+        assert any("complete" in msg.lower() and "42" in msg for msg in injected)
+
+    def test_manager_notified_on_workflow_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+        nodes = {"step": NodeDef(id="step", type=NodeType.BASH, command="exit 1")}
+        wf = WorkflowDef(name="test", version=1, trigger=TriggerDef(event="task.assigned"), nodes=nodes)
+        run = WorkflowRun.create("test", {"type": "task.assigned", "data": {"issue_id": "42", "title": "Fix bug"}})
+        engine = WorkflowEngine(wf, run)
+        injected = []
+        with patch("modastack.manager.session.inject", side_effect=lambda t: injected.append(t) or True):
+            engine.execute()
+        assert run.status == "failed"
+        assert any("failed" in msg.lower() and "42" in msg for msg in injected)

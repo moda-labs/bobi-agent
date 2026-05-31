@@ -158,11 +158,18 @@ class WorkflowEngine:
                             log.info(f"  {node_id}: completed (after poll)")
                             self.run.save()
                             progress = True
-                    except TimeoutError:
+                            if node_def.type == NodeType.PROMPT:
+                                issue_id = self.run.trigger_event.get("data", {}).get("issue_id", "")
+                                self._notify_manager(
+                                    f"Engineer completed {node_id} for issue #{issue_id}."
+                                )
+                    except Exception as e:
                         ns.status = "failed"
-                        ns.error = "timeout"
-                        log.error(f"  {node_id}: timed out")
+                        ns.error = str(e)
+                        log.error(f"  {node_id}: failed — {e}")
                         self.run.save()
+                        progress = True
+                        self._notify_manager_failure(node_id, str(e))
 
             if all_terminal:
                 failed = [nid for nid, ns in self.run.nodes.items()
@@ -172,9 +179,26 @@ class WorkflowEngine:
                 self.run.save()
                 log.info(f"Workflow '{self.workflow.name}' run {self.run.run_id}: "
                          f"{self.run.status}")
+
+                issue_id = self.run.trigger_event.get("data", {}).get("issue_id", "")
+                title = self.run.trigger_event.get("data", {}).get("title", "")
+                if self.run.status == "completed":
+                    self._notify_manager(
+                        f"Workflow complete for issue #{issue_id} ({title}). "
+                        f"All phases finished successfully."
+                    )
+                elif failed:
+                    self._notify_manager(
+                        f"Workflow failed for issue #{issue_id} ({title}). "
+                        f"Failed nodes: {', '.join(failed)}. "
+                        f"Review and decide: retry, fix manually, or close."
+                    )
                 break
 
             if not progress:
+                waiting = [nid for nid in order if self.run.node_state(nid).status in ("running","waiting")]
+                if waiting:
+                    log.info(f"  polling... waiting on: {waiting}")
                 time.sleep(5)
 
     def feed_event(self, event: dict):
@@ -226,19 +250,51 @@ class WorkflowEngine:
         return self.registry.execute(node.action, resolved_params)
 
     def _exec_prompt_inject(self, node: NodeDef) -> None:
-        from modastack.session import inject, session_exists
+        from modastack.subagent import run_phase
 
-        session_id = self.ctx.resolve(node.session).lstrip("#")
-        text = self.ctx.resolve(node.inject)
+        issue_id = self.ctx.resolve(node.session).lstrip("#")
+        inject_text = self.ctx.resolve(node.inject)
 
-        if not session_exists(session_id):
-            raise RuntimeError(f"Engineer session '{session_id}' not found")
+        phase = self._detect_phase(inject_text)
+        cwd = self._resolve_cwd(issue_id)
 
-        inject(session_id, text)
+        title = self.ctx.resolve("${{event.title}}") if "event" in self.ctx.scopes else ""
+        repo = self.ctx.resolve("${{event.repo}}") if "event" in self.ctx.scopes else ""
+
+        run_phase(
+            issue_id=issue_id,
+            phase=phase,
+            cwd=cwd,
+            context=inject_text,
+            title=title,
+            repo=repo,
+        )
+        log.info(f"Sub-agent started for {issue_id}/{phase}")
+
+    def _detect_phase(self, inject_text: str) -> str:
+        text_lower = inject_text.lower()
+        for phase in ("pickup", "spec", "implement", "prepare-pr", "feedback"):
+            if f"/{phase}" in text_lower:
+                return phase
+        return "implement"
+
+    def _resolve_cwd(self, issue_id: str) -> str:
+        event_repo = self.run.trigger_event.get("data", {}).get("repo", "")
+        if not event_repo:
+            return str(Path.home())
+
+        from modastack.config import GlobalConfig
+        config = GlobalConfig.load()
+        repo_name = event_repo.split("/")[-1] if "/" in event_repo else event_repo
+        for p in config.repos:
+            if p.name == repo_name:
+                return str(p)
+        return event_repo
 
     def _exec_manager(self, node: NodeDef) -> dict:
         from modastack.manager.session import inject as mgr_inject
         from modastack.manager.session import detect_state as mgr_detect_state
+        from modastack.manager.session import read_last_response
 
         prompt_text = self.ctx.resolve(node.prompt)
 
@@ -248,7 +304,9 @@ class WorkflowEngine:
         full_prompt = preamble + prompt_text
         if memory_context:
             full_prompt += " " + memory_context
-        mgr_inject(full_prompt)
+
+        if not mgr_inject(full_prompt):
+            raise RuntimeError("Failed to inject into manager session")
 
         deadline = time.monotonic() + node.timeout
         while time.monotonic() < deadline:
@@ -259,7 +317,7 @@ class WorkflowEngine:
         else:
             raise TimeoutError(f"Manager did not respond within {node.timeout}s")
 
-        output = _read_last_assistant_response()
+        output = read_last_response() or ""
         return {"output": output}
 
     def _exec_gate(self, node: NodeDef) -> dict:
@@ -294,18 +352,59 @@ class WorkflowEngine:
         return None
 
     def _poll_prompt(self, node: NodeDef) -> dict | None:
-        if not node.wait_for or not node.wait_for.phase:
+        from modastack.subagent import get_result, is_running
+
+        issue_id = self.ctx.resolve(node.session).lstrip("#")
+        expected_phase = self._detect_phase(self.ctx.resolve(node.inject))
+
+        def _check_registry():
+            from modastack.sdk import get_registry
+            from modastack.subagent import _session_name
+            entry = get_registry().get(_session_name(issue_id, expected_phase))
+            if entry and entry.status == "done":
+                return entry
             return None
 
-        session_id = self.ctx.resolve(node.session)
-        handoff = self._read_handoff(session_id)
+        running = is_running(issue_id)
+        if running:
+            entry = _check_registry()
+            if entry:
+                log.info(f"  poll #{issue_id}: is_running=True but registry={entry.status}/{entry.phase}, treating as complete")
+                running = False
+            else:
+                return None
 
-        if handoff.get("phase") == node.wait_for.phase:
+        agent_result = get_result(issue_id)
+        if not agent_result:
+            log.info(f"  poll #{issue_id}: not running, no result — checking registry")
+            from modastack.subagent import AgentResult
+            entry = _check_registry()
+            if entry:
+                agent_result = AgentResult(
+                    session_id=entry.session_id, issue_id=issue_id,
+                    phase=entry.phase, success=True,
+                )
+            else:
+                return None
+
+        if not agent_result.success:
+            raise RuntimeError(
+                f"Sub-agent {issue_id}/{agent_result.phase} failed: {agent_result.error}"
+            )
+
+        outputs = {
+            "_agent_completed": True,
+            "_agent_cost_usd": agent_result.total_cost_usd,
+            "_agent_duration_ms": agent_result.duration_ms,
+        }
+
+        handoff = self._read_handoff(issue_id)
+        if handoff:
             self.ctx.set_scope("handoff", handoff)
-            outputs = {}
             for key, expr in node.outputs.items():
                 outputs[key] = self.ctx.resolve(expr)
-            return outputs
+
+        return outputs
 
         return None
 
@@ -336,11 +435,28 @@ class WorkflowEngine:
 
     def _poll_manager(self, node: NodeDef) -> dict | None:
         from modastack.manager.session import detect_state as mgr_detect_state
+        from modastack.manager.session import read_last_response
         state = mgr_detect_state()
         if state == "waiting_input":
-            output = _read_last_assistant_response()
+            output = read_last_response() or ""
             return {"output": output}
         return None
+
+    def _notify_manager(self, message: str) -> None:
+        try:
+            from modastack.manager.session import inject
+            inject(message)
+        except Exception as e:
+            log.warning(f"Failed to notify manager: {e}")
+
+    def _notify_manager_failure(self, node_id: str, error: str) -> None:
+        issue_id = self.run.trigger_event.get("data", {}).get("issue_id", "?")
+        title = self.run.trigger_event.get("data", {}).get("title", "")
+        self._notify_manager(
+            f"Engineer failed on issue #{issue_id} ({title}), "
+            f"node '{node_id}': {error}\n"
+            f"Decide: retry, reassign, or escalate to a human."
+        )
 
     def _read_handoff(self, issue_id: str) -> dict:
         from modastack.config import GlobalConfig
@@ -350,8 +466,8 @@ class WorkflowEngine:
         for repo_path in config.repos:
             for candidate in [
                 repo_path / "worktrees" / iid_lower / ".modastack" / "handoff.md",
-                Path.home() / ".modastack" / "handoffs" / f"{iid_lower}.md",
-                Path.home() / ".modastack" / "handoffs" / f"{issue_id}.md",
+                HANDOFF_DIR / f"{iid_lower}.md",
+                HANDOFF_DIR / f"{issue_id}.md",
             ]:
                 if candidate.exists():
                     try:
@@ -410,233 +526,3 @@ def _prefetch_history(prompt_text: str, max_results: int = 3) -> str:
         return ""
 
 
-def _read_last_assistant_response(session_name: str | None = None) -> str:
-    """Read the manager's last response from Claude Code's JSONL conversation file.
-
-    This is the reliable extraction method — the JSONL has clean role separation
-    (user vs assistant vs tool calls) with no tmux pane noise.
-    """
-    import subprocess, shutil
-
-    if not session_name:
-        from modastack.manager.session import SESSION_NAME
-        session_name = SESSION_NAME
-
-    TMUX = shutil.which("tmux") or "tmux"
-    CLAUDE_DIR = Path.home() / ".claude"
-    SESSIONS_DIR = CLAUDE_DIR / "sessions"
-
-    # Step 1: Find the session's PID via tmux
-    pane_pid_result = subprocess.run(
-        [TMUX, "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
-        capture_output=True, text=True,
-    )
-    if pane_pid_result.returncode != 0:
-        log.warning("Could not find manager pane PID")
-        return ""
-
-    pane_pid = pane_pid_result.stdout.strip()
-
-    # Step 2: Find session ID from ~/.claude/sessions/<pid>.json
-    session_id = ""
-    for session_file in SESSIONS_DIR.glob("*.json"):
-        if session_file.stem == pane_pid:
-            try:
-                data = json.loads(session_file.read_text())
-                session_id = data.get("sessionId", "")
-            except (json.JSONDecodeError, KeyError):
-                pass
-            break
-
-    if not session_id:
-        # Try matching by checking all session files for matching PID
-        for session_file in SESSIONS_DIR.glob("*.json"):
-            try:
-                data = json.loads(session_file.read_text())
-                if str(data.get("pid", "")) == pane_pid:
-                    session_id = data.get("sessionId", "")
-                    break
-            except (json.JSONDecodeError, KeyError):
-                continue
-
-    if not session_id:
-        log.warning(f"Could not find session ID for PID {pane_pid}")
-        return ""
-
-    # Step 3: Find the JSONL file in any project directory
-    jsonl_path = None
-    projects_dir = CLAUDE_DIR / "projects"
-    if projects_dir.exists():
-        for project_dir in projects_dir.iterdir():
-            candidate = project_dir / f"{session_id}.jsonl"
-            if candidate.exists():
-                jsonl_path = candidate
-                break
-
-    if not jsonl_path:
-        log.warning(f"Could not find JSONL for session {session_id}")
-        return ""
-
-    # Step 4: Read the last assistant text blocks (from the end of the file)
-    lines = jsonl_path.read_text().splitlines()
-    text_parts = []
-
-    for line in reversed(lines):
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        if msg.get("type") != "assistant":
-            if msg.get("type") == "user":
-                break
-            continue
-
-        content = msg.get("message", {}).get("content", [])
-        if not isinstance(content, list):
-            continue
-
-        for block in content:
-            if block.get("type") == "text" and block.get("text", "").strip():
-                text_parts.insert(0, block["text"].strip())
-
-    return "\n".join(text_parts).strip()
-
-
-def _extract_manager_response_excluding(raw_pane: str, injected_text: str) -> str:
-    """Extract manager response by finding text NOT from the injected prompt.
-
-    Splits the injected text into fragments and filters out any pane line
-    that substantially overlaps with the injection.
-    """
-    injection_fragments = set()
-    for word in injected_text.split():
-        if len(word) > 5:
-            injection_fragments.add(word.lower().strip(".,;:!?\"'"))
-
-    lines = raw_pane.splitlines()
-
-    NOISE_PREFIXES = ("●", "·", "⎿", "✻", "✽", "▐", "▝", "▘")
-    SKIP_CONTAINS = ("ctrl+o", "ctrl+b", "bypass permissions", "⏵⏵",
-                     "Bash(", "Read(", "Write(", "Edit(", "Agent(",
-                     "────", "╭", "╰", "│", "Searched for",
-                     "Claude Code v", "Opus 4", "Claude Max",
-                     "Crunched", "Baked", "Gallivanting", "thinking",
-                     "WORKFLOW ENGINE", "workflow-response",
-                     "orchestration", "do NOT take", "-H \"Authorization")
-
-    prompt_positions = []
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("❯") and "bypass" not in stripped:
-            prompt_positions.append(i)
-
-    if len(prompt_positions) < 2:
-        return ""
-
-    start = prompt_positions[-2] + 1
-    end = prompt_positions[-1]
-
-    response_lines = []
-    for line in lines[start:end]:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if any(stripped.startswith(n) for n in NOISE_PREFIXES):
-            continue
-        if any(s in stripped for s in SKIP_CONTAINS):
-            continue
-
-        words = [w.lower().strip(".,;:!?\"'") for w in stripped.split() if len(w) > 5]
-        if words:
-            overlap = sum(1 for w in words if w in injection_fragments)
-            if overlap > len(words) * 0.5:
-                continue
-
-        response_lines.append(stripped)
-
-    return "\n".join(response_lines).strip()
-
-
-def _extract_tagged_response(raw_pane: str) -> str:
-    """Extract response wrapped in <workflow-response> tags."""
-    tag_open = "<workflow-response>"
-    tag_close = "</workflow-response>"
-    start = raw_pane.rfind(tag_open)
-    if start == -1:
-        return ""
-    start += len(tag_open)
-    end = raw_pane.find(tag_close, start)
-    if end == -1:
-        return raw_pane[start:].strip()
-    return raw_pane[start:end].strip()
-
-
-def _extract_manager_response(raw_pane: str) -> str:
-    """Extract the assistant's text response from tmux pane capture.
-
-    Strategy: find the response section (between the last input prompt and
-    the waiting prompt), then extract only clean text lines — no tool calls,
-    no reasoning prefixes, no chrome.
-    """
-    lines = raw_pane.splitlines()
-
-    NOISE_PREFIXES = ("●", "·", "⎿", "✻", "✽", "▐", "▝", "▘")
-    SKIP_CONTAINS = ("ctrl+o", "ctrl+b", "bypass permissions", "⏵⏵",
-                     "Bash(", "Read(", "Write(", "Edit(", "Agent(",
-                     "────", "╭", "╰", "│", "Running", "Searched for",
-                     "… +", "Shell cwd", "expand)", "Claude Code v",
-                     "Opus 4", "Claude Max", "Welcome", "Tips for",
-                     "Recent activity", "No recent", "Run /init",
-                     "Crunched", "Baked", "Gallivanting", "thinking")
-
-    prompt_positions = []
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("❯") and "bypass" not in stripped:
-            prompt_positions.append(i)
-
-    if len(prompt_positions) < 2:
-        return ""
-
-    start = prompt_positions[-2] + 1
-    end = prompt_positions[-1]
-
-    response_lines = []
-    for line in lines[start:end]:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if any(stripped.startswith(n) for n in NOISE_PREFIXES):
-            continue
-        if any(s in stripped for s in SKIP_CONTAINS):
-            continue
-        response_lines.append(stripped)
-
-    result = "\n".join(response_lines).strip()
-
-    # If we extracted nothing useful, try a fallback: look for the last
-    # paragraph of plain text before the final prompt
-    if not result or len(result) < 10:
-        fallback_lines = []
-        for line in reversed(lines[:prompt_positions[-1]]):
-            stripped = line.strip()
-            if not stripped:
-                if fallback_lines:
-                    break
-                continue
-            if stripped.startswith("❯"):
-                break
-            if any(stripped.startswith(n) for n in NOISE_PREFIXES):
-                if fallback_lines:
-                    break
-                continue
-            if any(s in stripped for s in SKIP_CONTAINS):
-                if fallback_lines:
-                    break
-                continue
-            fallback_lines.insert(0, stripped)
-        if fallback_lines:
-            result = "\n".join(fallback_lines).strip()
-
-    return result

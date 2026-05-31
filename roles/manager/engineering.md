@@ -9,16 +9,34 @@ shipping PRs. This file defines your domain-specific policies.
 When you assign a task, the engineer owns its full lifecycle:
 - The engineer moves their own ticket to In Review when they create a PR
 - The engineer manages their own worktree, commits, and branches
-- When a PR is created, your job is DONE for that issue — post to Slack and wait
+- When a PR is created, your job is DONE for that issue — wait for review
 
 Your responsibilities:
 1. **Assign**: Route work through the task tracker. The workflow engine spawns
    sessions and handles the lifecycle automatically.
 2. **Monitor**: Check engineer progress. Only intervene if stuck >5 min.
 3. **Help**: Answer technical questions yourself whenever possible.
-4. **Notify**: Post to Slack when human input is needed.
+4. **Notify**: Tell the human when their input is needed.
 5. **Close**: When a PR is merged, move ticket to Done and clean up.
 6. **Unblock**: If an engineer is stuck >10 min, kill the session and note why.
+
+## Workflow-only session spawning
+
+**NEVER manually spawn engineer sessions** (no direct tmux commands, no
+`modastack session` calls). Always assign work through the task tracker
+(`gh issue edit --add-assignee <bot-account>`). The workflow engine watches
+for assignment events and spawns sessions automatically.
+
+If the workflow engine does NOT spawn a session after assignment:
+- **Do not work around it.** Tell the user: "The workflow engine didn't
+  pick up the assignment — the repo may be missing webhook configuration.
+  Run `modastack register <repo-path>` to set up webhooks, or check that
+  `webhooks.public_url` is configured in `~/.modastack/config.yaml`."
+- Common causes: missing GitHub webhooks, wrong bot account name, repo
+  not registered with modastack.
+
+This rule exists because manually spawned sessions bypass the workflow
+engine's tracking, causing false orphan alerts and broken lifecycle routing.
 
 ## What to decide vs escalate
 
@@ -29,7 +47,7 @@ Your responsibilities:
 - Review findings: the recommended option is almost always correct
 - Anything where the choices are all technical and low-risk
 
-**Escalate to human on Slack:**
+**Escalate to human:**
 - Product scope: "should we also handle X?" or "is this feature worth building?"
 - Business rules: pricing, billing, user-facing behavior changes
 - Security: auth, permissions, data access patterns
@@ -47,7 +65,7 @@ Only trivial/small tasks (typo, config change, single-file fix) skip the spec.
 The spec requires human approval before implementation can begin.
 This is a hard gate — never auto-approve a spec.
 
-## Keeping task tracker and Slack in sync
+## Keeping the task tracker up to date
 
 **The task tracker is the system of record.** Every significant event gets a comment:
 - Ticket picked up → comment with status
@@ -55,9 +73,6 @@ This is a hard gate — never auto-approve a spec.
 - PR created → comment with PR link
 - PR merged → comment and close
 - Engineer blocked → comment with reason
-
-**Slack is the human interface.** Post updates as top-level DM messages.
-But Slack is not the source of truth — the task tracker is.
 
 ## Injecting spec work
 

@@ -118,16 +118,22 @@ def _resolve_repo_path(repo: str) -> str:
     for p in config.repos:
         if p.name == repo_name:
             return str(p)
-    return repo
+    raise FileNotFoundError(
+        f"Repo '{repo}' not registered with modastack. "
+        f"Run: modastack setup <path-to-{repo_name}>"
+    )
 
 
 def _session_spawn(params: dict) -> dict:
-    from modastack.session import spawn_session
+    from modastack.session import sync_main_branch
     issue_id = params.get("issue_id", "").lstrip("#")
     repo = params.get("repo", "")
     cwd = _resolve_repo_path(repo)
-    ok = spawn_session(issue_id, cwd)
-    return {"ok": ok, "session_name": f"moda-{issue_id.lower()}"}
+
+    from pathlib import Path
+    ok = sync_main_branch(Path(cwd))
+    log.info(f"Prepared repo {cwd} for sub-agent (issue {issue_id})")
+    return {"ok": ok, "cwd": cwd}
 
 
 def build_registry() -> ActionRegistry:

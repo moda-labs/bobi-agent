@@ -50,6 +50,57 @@ def bootstrap_labels(repo_path: Path) -> list[str]:
     return actions
 
 
+WEBHOOK_EVENTS = ["issues", "issue_comment", "pull_request", "pull_request_review", "check_run", "workflow_run"]
+
+
+def setup_webhook(repo_path: Path, public_url: str) -> list[str]:
+    """Create a GitHub webhook for the repo pointing at the modastack webhook server.
+
+    Skips if a webhook already exists for this URL.  Requires the gh CLI
+    to have admin:repo_hook scope.
+    """
+    actions = []
+    webhook_url = f"{public_url.rstrip('/')}/webhooks/github"
+
+    # Check existing webhooks
+    existing = subprocess.run(
+        ["gh", "api", "repos/{owner}/{repo}/hooks", "--jq", ".[].config.url"],
+        capture_output=True, text=True, cwd=repo_path,
+    )
+    if existing.returncode == 0:
+        for line in existing.stdout.strip().splitlines():
+            if line.strip() == webhook_url:
+                actions.append(f"Webhook already exists: {webhook_url}")
+                return actions
+
+    # Build the gh api command
+    cmd = [
+        "gh", "api", "repos/{owner}/{repo}/hooks",
+        "--method", "POST",
+        "-f", f"config[url]={webhook_url}",
+        "-f", "config[content_type]=json",
+        "-F", "active=true",
+    ]
+    for event in WEBHOOK_EVENTS:
+        cmd += ["-f", f"events[]={event}"]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_path)
+    if result.returncode == 0:
+        actions.append(f"Created webhook: {webhook_url}")
+        actions.append(f"  Events: {', '.join(WEBHOOK_EVENTS)}")
+    else:
+        stderr = result.stderr.strip()
+        if "Resource not accessible" in stderr or "Not Found" in stderr:
+            actions.append(
+                "Webhook setup skipped — gh CLI lacks admin:repo_hook scope. "
+                "Run: gh auth refresh -h github.com -s admin:repo_hook"
+            )
+        else:
+            actions.append(f"Failed to create webhook: {stderr}")
+
+    return actions
+
+
 def scan_github_issues(repo_config: RepoConfig) -> dict[str, list[dict]]:
     """Fetch open issues assigned to the bot account, grouped by workflow state label.
 

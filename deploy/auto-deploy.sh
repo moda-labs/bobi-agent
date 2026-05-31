@@ -93,30 +93,17 @@ for skill_dir in \
 done
 log "Skill symlinks refreshed ($(ls "$SKILLS_DIR" | wc -l | tr -d ' ') skills)"
 
-# Restart consumer (kills old, starts new)
-tmux kill-session -t modastack-consumer 2>/dev/null || true
-sleep 1
-tmux new-session -d -s modastack-consumer \
-    "cd $REPO_DIR && source .venv/bin/activate && modastack start --webhooks"
-
-# Restart dashboard
-tmux kill-session -t modastack-dashboard 2>/dev/null || true
-sleep 1
-tmux new-session -d -s modastack-dashboard \
-    "cd $REPO_DIR && source .venv/bin/activate && modastack dashboard"
-
-# Restart manager (kill old, start new with auto-accept)
+# Stop everything
+pkill -f "modastack start" 2>/dev/null || true
 tmux kill-session -t moda-manager 2>/dev/null || true
-rm -f "$HOME/.modastack/manager/session_id"
 sleep 1
-tmux new-session -d -s moda-manager -x 200 -y 50 \
-    "cd $REPO_DIR && claude --dangerously-skip-permissions --name modastack-manager"
 
-# Wait for trust/permissions prompts and auto-accept
-sleep 3
-tmux send-keys -t moda-manager Down 2>/dev/null
-sleep 0.3
-tmux send-keys -t moda-manager Enter 2>/dev/null
+# Clear stale session ID so manager starts fresh
+rm -f "$HOME/.modastack/manager/session_id"
+
+# Start modastack (manager + event client + Slack in one process)
+tmux new-session -d -s modastack-consumer \
+    "bash -c 'cd $REPO_DIR && source .venv/bin/activate && modastack start'"
 
 NEW_VERSION=$(git rev-parse --short HEAD)
 log "Deploy complete — now at $NEW_VERSION"

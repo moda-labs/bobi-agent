@@ -1,7 +1,7 @@
 """Global and per-repo configuration.
 
 Global config (~/.modastack/config.yaml): instance-level settings
-  - Slack tokens (one bot per modabot instance)
+  - Slack tokens (one bot per modastack instance)
   - Webhook server config
   - GitHub accounts
   - Registered repos
@@ -68,9 +68,10 @@ class GlobalConfig:
 
     repos: list[Path] = field(default_factory=list)
 
-    # Slack — one bot per modabot instance
+    # Slack — one bot per modastack instance
     slack_bot_token: str = ""
     slack_app_token: str = ""
+    slack_dm_channel: str = ""
 
     # Webhook server
     webhook_port: int = 8080
@@ -79,6 +80,11 @@ class GlobalConfig:
     # GitHub accounts
     github_default_account: str = ""
     github_accounts: dict[str, str] = field(default_factory=dict)
+
+    # Event server (centralized webhook relay)
+    event_server_url: str = ""
+    event_server_deployment_id: str = ""
+    event_server_api_key: str = ""
 
     # Manager role (loads roles/manager/<role>.md)
     manager_role: str = "engineering"
@@ -95,15 +101,20 @@ class GlobalConfig:
         github = raw.get("github", {})
 
         manager = raw.get("manager", {})
+        event_server = raw.get("event_server", {})
 
         return cls(
             repos=repos,
             slack_bot_token=slack.get("bot_token", "") or raw.get("slack_bot_token", ""),
             slack_app_token=slack.get("app_token", ""),
+            slack_dm_channel=slack.get("dm_channel", ""),
             webhook_port=webhooks.get("port", 8080),
             public_url=webhooks.get("public_url", ""),
             github_default_account=github.get("default_account", ""),
             github_accounts=github.get("accounts", {}),
+            event_server_url=event_server.get("url", ""),
+            event_server_deployment_id=event_server.get("deployment_id", ""),
+            event_server_api_key=event_server.get("api_key", ""),
             manager_role=manager.get("role", "engineering"),
         )
 
@@ -113,6 +124,7 @@ class GlobalConfig:
             "slack": {
                 "bot_token": self.slack_bot_token,
                 "app_token": self.slack_app_token,
+                "dm_channel": self.slack_dm_channel,
             },
             "webhooks": {
                 "port": self.webhook_port,
@@ -125,6 +137,12 @@ class GlobalConfig:
         }
         if self.public_url:
             data["webhooks"]["public_url"] = self.public_url
+        if self.event_server_url:
+            data["event_server"] = {
+                "url": self.event_server_url,
+                "deployment_id": self.event_server_deployment_id,
+                "api_key": self.event_server_api_key,
+            }
         GLOBAL_CONFIG_PATH.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
 
 

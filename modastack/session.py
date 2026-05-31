@@ -6,9 +6,11 @@ new processes.
 """
 
 import logging
+import re
 import shutil
 import subprocess
 import time
+import unicodedata
 from pathlib import Path
 
 from modastack.config import LOG_DIR
@@ -24,7 +26,31 @@ CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
 SKILLS_DIR = Path(__file__).parent.parent / "roles" / "engineer" / "process"
 
 
+_SLUG_RE = re.compile(r'[^a-z0-9]+')
+
+
+def _slugify(title: str, max_len: int = 30) -> str:
+    """Convert a title to a tmux-safe kebab-case slug."""
+    s = unicodedata.normalize('NFKD', title).encode('ascii', 'ignore').decode()
+    s = s.lower()
+    s = _SLUG_RE.sub('-', s).strip('-')
+    if len(s) > max_len:
+        s = s[:max_len].rsplit('-', 1)[0]
+    return s or 'task'
+
+
+def _store_session_name(issue_id: str, name: str) -> None:
+    SESSION_IDS_DIR.mkdir(parents=True, exist_ok=True)
+    (SESSION_IDS_DIR / f"{issue_id}.name").write_text(name)
+
+
 def _session_name(issue_id: str) -> str:
+    name_path = SESSION_IDS_DIR / f"{issue_id}.name"
+    if name_path.exists():
+        try:
+            return name_path.read_text().strip()
+        except Exception:
+            pass
     return f"moda-{issue_id.lower()}"
 
 
@@ -90,23 +116,32 @@ def cleanup_worktree(issue_id: str, repo_path: Path) -> None:
         capture_output=True, text=True, cwd=repo_path,
     )
 
-    saved_id_path = SESSION_IDS_DIR / f"{issue_id}.id"
-    if saved_id_path.exists():
-        saved_id_path.unlink()
+    for suffix in (".id", ".name"):
+        p = SESSION_IDS_DIR / f"{issue_id}{suffix}"
+        if p.exists():
+            p.unlink()
 
 
-def spawn_session(issue_id: str, cwd: str) -> bool:
+def spawn_session(issue_id: str, cwd: str, title: str = "") -> bool:
     """Spawn an interactive claude session for an issue, or resume a previous one."""
-    name = _session_name(issue_id)
     if session_exists(issue_id):
+        name = _session_name(issue_id)
         log.info(f"Session {name} already exists")
         return True
 
     sync_main_branch(Path(cwd))
 
+    # Generate descriptive session name from title
+    if title:
+        slug = _slugify(title)
+        name = f"moda-{issue_id.lower()}-{slug}"
+        _store_session_name(issue_id, name)
+    else:
+        name = f"moda-{issue_id.lower()}"
+
     # Check for a saved session ID to resume
     saved_id_path = SESSION_IDS_DIR / f"{issue_id}.id"
-    cmd = [CLAUDE, "--dangerously-skip-permissions", "--name", f"moda-{issue_id.lower()}"]
+    cmd = [CLAUDE, "--dangerously-skip-permissions", "--name", name]
     if saved_id_path.exists():
         saved_id = saved_id_path.read_text().strip()
         if saved_id:
@@ -148,11 +183,23 @@ def capture(issue_id: str, lines: int = 80) -> str:
 
 
 def detect_state(issue_id: str) -> dict:
-    """Analyze the pane to determine session state.
+    """Determine session state (sub-agent or legacy tmux).
 
-    Collects data (pane content, process liveness) then delegates to
-    the pure determine_agent_state() function for testability.
+    Checks sub-agents first, falls back to tmux pane analysis.
     """
+    try:
+        from modastack.subagent import is_running, get_result
+        if is_running(issue_id):
+            return {"state": "running", "type": "subagent"}
+        result = get_result(issue_id)
+        if result is not None:
+            if result.success:
+                return {"state": "completed", "type": "subagent", "phase": result.phase}
+            return {"state": "failed", "type": "subagent", "error": result.error}
+    except ImportError:
+        pass
+
+    # Legacy tmux fallback
     name = _session_name(issue_id)
     if not has_session(name):
         return {"state": "exited"}
@@ -187,16 +234,45 @@ def inject_skill(issue_id: str, skill_name: str, context: str = "") -> None:
     log.info(f"{issue_id}: invoked /{skill_name}")
 
 
+def _build_reverse_name_map() -> dict[str, str]:
+    """Build session_name → issue_id mapping from stored .name files."""
+    reverse = {}
+    if SESSION_IDS_DIR.exists():
+        for f in SESSION_IDS_DIR.glob("*.name"):
+            try:
+                sname = f.read_text().strip()
+                reverse[sname] = f.stem
+            except Exception:
+                pass
+    return reverse
+
+
 def list_sessions() -> list[str]:
-    """List all modastack tmux sessions. Returns issue IDs."""
+    """List all active engineer sessions (tmux + sub-agents). Returns issue IDs."""
+    sessions = set()
+
+    # Check tmux sessions (legacy, may still have some running)
     result = subprocess.run(
         [TMUX, "list-sessions", "-F", "#{session_name}"],
         capture_output=True, text=True,
     )
-    if result.returncode != 0:
-        return []
-    return [
-        name.replace("moda-", "").upper()
-        for name in result.stdout.strip().splitlines()
-        if name.startswith("moda-")
-    ]
+    if result.returncode == 0:
+        reverse_map = _build_reverse_name_map()
+        for name in result.stdout.strip().splitlines():
+            if not name.startswith("moda-") or name == "moda-manager":
+                continue
+            iid = reverse_map.get(name)
+            if iid is None:
+                iid = name.replace("moda-", "", 1)
+            sessions.add(iid.upper())
+
+    # Check sub-agents
+    try:
+        from modastack.subagent import list_agents
+        for agent in list_agents():
+            if agent.get("running"):
+                sessions.add(agent["issue_id"].upper())
+    except ImportError:
+        pass
+
+    return sorted(sessions)

@@ -7,15 +7,12 @@ nodes:
   diagnose:
     type: manager
     prompt: |
-      Engineer session for ${{event.issue_id}} has been idle for
+      Sub-agent for ${{event.issue_id}} has been idle for
       ${{event.idle_seconds}} seconds.
-      Last output snippet: "${{event.snippet}}"
 
-      Diagnose what's happening. Check the session pane if needed.
-      Then recommend one action:
-      - "nudge" — send Enter to wake it up
-      - "inject:<message>" — send a specific instruction
-      - "kill" — kill and respawn the session
+      Diagnose what's happening. Then recommend one action:
+      - "wait" — the agent may still be working, give it more time
+      - "kill" — cancel and respawn the sub-agent
       Output ONLY your recommendation in the format above.
     timeout: 300
 
@@ -23,26 +20,20 @@ nodes:
     type: gate
     depends_on: [diagnose]
     branches:
-      nudge:
-        when: "'nudge' in ${{diagnose.output}}"
-      inject:
-        when: "'inject:' in ${{diagnose.output}}"
+      wait:
+        when: "'wait' in ${{diagnose.output}}"
       kill:
         when: "'kill' in ${{diagnose.output}}"
-    fallback: nudge
-
-  do_nudge:
-    type: bash
-    command: |
-      tmux send-keys -t moda-${{event.issue_id | lower}} Enter
-    timeout: 5
-    depends_on: [route_action]
-    when: "${{route_action.branch}} == 'nudge'"
+    fallback: wait
 
   do_kill:
     type: bash
     command: |
-      tmux kill-session -t moda-${{event.issue_id | lower}} 2>/dev/null || true
+      python3 -c "
+      from modastack.subagent import cancel_agent
+      cancel_agent('${{event.issue_id}}')
+      " 2>/dev/null || true
+      rm -f ~/.modastack/sessions/${{event.issue_id}}.name ~/.modastack/sessions/${{event.issue_id}}.id
     timeout: 10
     depends_on: [route_action]
     when: "${{route_action.branch}} == 'kill'"

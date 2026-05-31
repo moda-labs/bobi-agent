@@ -1,21 +1,21 @@
 """Read-only data access for the dashboard.
 
-Reads events.jsonl, decisions.jsonl, and tmux session state.
-No writes — the dashboard is a view layer over existing state.
+Reads events, activity log, and session registry.
 """
 
 import json
-import shutil
-import subprocess
+import os
 from pathlib import Path
 
-from modastack.tmux import is_paused
+from modastack.config import GLOBAL_CONFIG_DIR
+from modastack.sdk import get_registry, ACTIVITY_DIR
 from modastack.workflow.state import WorkflowRun
 from modastack.workflow.schema import load_workflow
 
 EVENTS_PATH = Path.home() / ".modastack" / "manager" / "events.jsonl"
 DECISIONS_PATH = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
-TMUX = shutil.which("tmux") or "tmux"
+ACTIVITY_PATH = ACTIVITY_DIR / "activity.jsonl"
+PID_PATH = GLOBAL_CONFIG_DIR / "modastack.pid"
 
 
 def _read_jsonl_tail(path: Path, limit: int) -> list[dict]:
@@ -63,82 +63,63 @@ def read_decisions(limit: int = 10) -> list[dict]:
     return _read_jsonl_tail(DECISIONS_PATH, limit)
 
 
-def get_sessions() -> list[dict]:
-    result = subprocess.run(
-        [TMUX, "list-sessions", "-F", "#{session_name} #{session_created}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return []
-
-    sessions = []
-    for line in result.stdout.strip().splitlines():
-        parts = line.strip().split(" ", 1)
-        name = parts[0]
-        if not name.startswith("moda-") or name == "moda-manager":
-            continue
-
-        pane = subprocess.run(
-            [TMUX, "capture-pane", "-t", name, "-p", "-S", "-10"],
-            capture_output=True,
-            text=True,
-        ).stdout
-        pane_lines = [l for l in pane.splitlines() if l.strip()]
-
-        state = "working"
-        for l in reversed(pane_lines[-5:]):
-            if "❯" in l and "bypass permissions" not in l:
-                if any(
-                    "bypass permissions" in x or "⏵⏵" in x
-                    for x in pane_lines[-3:]
-                ):
-                    state = "waiting_input"
-                break
-
-        last_line = ""
-        for l in reversed(pane_lines):
-            l = l.strip()
-            if l and "─" not in l and "bypass" not in l and "⏵⏵" not in l:
-                last_line = l[:100]
-                break
-
-        sessions.append({
-            "name": name,
-            "issue_id": name.replace("moda-", "").upper(),
-            "state": state,
-            "last_line": last_line,
-            "paused": is_paused(name),
-        })
-    return sessions
+def _is_running() -> bool:
+    if not PID_PATH.exists():
+        return False
+    try:
+        pid = int(PID_PATH.read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except (ValueError, ProcessLookupError, PermissionError):
+        return False
 
 
 def get_manager_status() -> dict:
-    result = subprocess.run(
-        [TMUX, "has-session", "-t", "moda-manager"],
-        capture_output=True,
-    )
-    alive = result.returncode == 0
-    state = "exited"
+    from modastack.sdk import load_session_id
+    running = _is_running()
+    session_id = load_session_id("moda-manager") or ""
+    registry = get_registry()
+    entry = registry.get("moda-manager")
+    status = entry.status if entry else ("running" if running else "stopped")
+    return {
+        "alive": running,
+        "state": status,
+        "session_id": session_id[:8] if session_id else "",
+    }
 
-    if alive:
-        pane = subprocess.run(
-            [TMUX, "capture-pane", "-t", "moda-manager", "-p", "-S", "-10"],
-            capture_output=True,
-            text=True,
-        ).stdout
-        lines = [l for l in pane.splitlines() if l.strip()]
-        state = "working"
-        for l in reversed(lines[-5:]):
-            if "❯" in l and "bypass permissions" not in l:
-                if any(
-                    "bypass permissions" in x or "⏵⏵" in x
-                    for x in lines[-3:]
-                ):
-                    state = "waiting_input"
-                break
 
-    return {"alive": alive, "state": state, "paused": is_paused("moda-manager")}
+def get_sessions() -> list[dict]:
+    registry = get_registry()
+    engineers = [e for e in registry.get_by_role("engineer") if e.status not in ("done", "cancelled")]
+    result = []
+    for e in engineers:
+        result.append({
+            "name": e.name,
+            "issue_id": e.issue_id,
+            "title": e.title,
+            "phase": e.phase,
+            "repo": e.repo,
+            "cwd": e.cwd,
+            "status": e.status,
+            "started_at": e.started_at,
+        })
+    return result
+
+
+def get_conversation_log(limit: int = 50, session: str = "moda-manager") -> list[dict]:
+    log_path = ACTIVITY_DIR / "logs" / f"{session}.jsonl"
+    if not log_path.exists():
+        return []
+    lines = log_path.read_text().strip().splitlines()
+    turns = []
+    for line in reversed(lines):
+        try:
+            turns.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+        if len(turns) >= limit:
+            break
+    return turns
 
 
 def get_event_sources() -> list[str]:
@@ -153,33 +134,34 @@ def get_event_sources() -> list[str]:
     return sorted(s for s in sources if s)
 
 
-def _load_workflow_labels(workflow_name: str) -> dict[str, str]:
-    """Load node labels from workflow YAML definition."""
+def _load_workflow_info(workflow_name: str) -> tuple[dict[str, str], list[str]]:
     from modastack.workflow.triggers import WORKFLOWS_DIR, USER_WORKFLOWS_DIR
     for d in [USER_WORKFLOWS_DIR, WORKFLOWS_DIR]:
         path = d / f"{workflow_name}.yaml"
         if path.exists():
             try:
                 wf = load_workflow(path)
-                return {nid: n.label for nid, n in wf.nodes.items() if n.label}
+                labels = {nid: n.label for nid, n in wf.nodes.items() if n.label}
+                order = wf.topological_order()
+                return labels, order
             except Exception:
                 pass
-    return {}
+    return {}, []
 
 
 def get_workflow_progress(issue_id: str) -> dict | None:
-    """Find the active workflow run for an issue and return node progress."""
     for run in WorkflowRun.list_runs():
         trigger_data = run.trigger_event.get("data", {})
         rid = trigger_data.get("issue_id", "")
         if rid.lstrip("#").lower() == issue_id.lower():
-            labels = _load_workflow_labels(run.workflow_name)
+            labels, all_node_ids = _load_workflow_info(run.workflow_name)
             nodes = []
-            for nid, ns in run.nodes.items():
+            for nid in all_node_ids:
+                ns = run.nodes.get(nid)
                 nodes.append({
                     "id": nid,
                     "label": labels.get(nid, ""),
-                    "status": ns.status,
+                    "status": ns.status if ns else "pending",
                 })
             return {
                 "run_id": run.run_id,

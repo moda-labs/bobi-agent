@@ -1,8 +1,8 @@
 """Slack Socket Mode client — real-time events without webhooks.
 
 Connects to Slack via WebSocket. No public URL needed.
-Receives events and pushes them to the event bus.
-Filters channel messages to only those in threads Modabot participated in.
+Injects DMs and mentions directly into the manager session.
+Filters channel messages to only those in threads Modastack participated in.
 """
 
 import json
@@ -14,7 +14,6 @@ import httpx
 import websocket
 
 from modastack.config import GlobalConfig
-from .bus import get_bus
 
 log = logging.getLogger(__name__)
 
@@ -65,11 +64,10 @@ def _open_socket_url(app_token: str) -> str:
 
 
 def _run_socket(app_token: str, bot_token: str):
-    """Main socket loop — connect, receive events, push to bus."""
-    bus = get_bus()
+    """Main socket loop — connect, receive events, inject into manager."""
     bot_user_id = _get_bot_user_id(bot_token)
     user_cache = {}
-    # Track threads modabot has participated in
+    # Track threads modastack has participated in
     our_threads: set[str] = set()
 
     while True:
@@ -110,42 +108,24 @@ def _run_socket(app_token: str, bot_token: str):
             text = event.get("text", "")[:500]
             thread_ts = event.get("thread_ts", "")
 
-            if event_type == "app_mention":
-                bus.push("slack.mention", "slack", {
-                    "channel_id": channel,
-                    "from": user_name,
-                    "from_id": event.get("user", ""),
-                    "text": text,
-                    "ts": event.get("ts", ""),
-                    "thread_ts": thread_ts,
-                })
+            # Inject directly into the manager session — no event bus hop.
+            # The Stop hook handles posting the response back to Slack.
+            is_human_msg = False
 
+            if event_type == "app_mention":
+                is_human_msg = True
             elif event_type == "message":
                 channel_type = event.get("channel_type", "")
-
                 if channel_type == "im":
-                    # All DMs come through
-                    bus.push("slack.dm", "slack", {
-                        "channel_id": channel,
-                        "from": user_name,
-                        "from_id": event.get("user", ""),
-                        "text": text,
-                        "ts": event.get("ts", ""),
-                        "thread_ts": thread_ts,
-                    })
-
+                    is_human_msg = True
                 elif thread_ts and f"{channel}:{thread_ts}" in our_threads:
-                    # Thread reply in a channel where modabot participated
-                    bus.push("slack.thread_reply", "slack", {
-                        "channel_id": channel,
-                        "from": user_name,
-                        "from_id": event.get("user", ""),
-                        "text": text,
-                        "ts": event.get("ts", ""),
-                        "thread_ts": thread_ts,
-                    })
+                    is_human_msg = True
 
-                # Ignore other channel messages (noise)
+            if is_human_msg and text:
+                log.info(f"Slack → injecting: {user_name}: {text[:80]}")
+                from modastack.manager.session import inject
+                result = inject(f"Slack message from {user_name}: {text}")
+                log.info(f"Slack → inject result: {result}")
 
         def on_error(ws, error):
             log.warning(f"Socket Mode error: {error}")

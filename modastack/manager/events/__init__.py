@@ -1,15 +1,6 @@
-"""Event-driven architecture for modabot.
+"""Event-driven architecture for modastack.
 
-Events flow: producers → bus → consumer (manager)
-
-Producers push events from external sources (webhooks, pollers, tmux).
-The bus queues them. The manager consumes batches and reasons about them.
-
-Standard event format:
-{
-    "type": "ticket.created",       # dotted event type
-    "source": "linear",             # which system produced it
-    "timestamp": "2026-05-20T...",  # when it happened
-    "data": { ... }                 # source-specific payload
-}
+Events arrive from the centralized event server (Cloudflare Worker)
+via WebSocket. Slack messages arrive via Socket Mode. Both inject
+directly into the manager session.
 """

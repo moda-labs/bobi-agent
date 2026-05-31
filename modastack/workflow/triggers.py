@@ -17,7 +17,7 @@ from pathlib import Path
 
 from modastack.config import GlobalConfig, RepoConfig
 
-from .engine import WorkflowEngine
+from .executor import ExecutorResult, WorkflowExecutor
 from .schema import WorkflowDef, load_workflow
 from .state import WorkflowRun
 
@@ -31,7 +31,7 @@ class WorkflowDispatcher:
 
     def __init__(self):
         self.workflows: list[tuple[WorkflowDef, str]] = []  # (workflow, source)
-        self._active: dict[str, tuple[threading.Thread, WorkflowEngine]] = {}
+        self._active: dict[str, tuple[threading.Thread, WorkflowExecutor]] = {}
         self._dispatched_events: set[int] = set()
 
     def load_all_workflows(self):
@@ -128,6 +128,11 @@ class WorkflowDispatcher:
                 self._dispatched_events.add(id(event))
                 return True
 
+        completed = WorkflowRun.find_completed(wf.name, event_key)
+        if completed:
+            log.debug(f"Workflow already completed for {event_key}, skipping")
+            return False
+
         existing = WorkflowRun.find_active(wf.name, event_key)
         if existing:
             run = existing
@@ -139,46 +144,144 @@ class WorkflowDispatcher:
             log.info(f"Starting workflow {wf.name} for {event_key} "
                     f"(run {run.run_id})")
 
-        engine = WorkflowEngine(wf, run)
+        executor = WorkflowExecutor(
+            wf, run,
+            on_notify=self._notify_manager,
+            on_input_needed=self._route_input,
+        )
         thread = threading.Thread(
-            target=self._run_engine,
-            args=(engine, run_key),
+            target=self._run_executor,
+            args=(executor, run_key),
             name=f"wf-{run.run_id}",
             daemon=True,
         )
-        self._active[run_key] = (thread, engine)
+        self._active[run_key] = (thread, executor)
         thread.start()
         self._dispatched_events.add(id(event))
         return True
 
     def feed_event(self, event: dict):
-        """Feed an event to all active workflow engines (for approval nodes)."""
-        for run_key, (thread, engine) in list(self._active.items()):
+        """Feed an event to all active workflow executors (for approval nodes)."""
+        for run_key, (thread, executor) in list(self._active.items()):
             if thread.is_alive():
-                engine.feed_event(event)
+                executor.feed_event(event)
 
     def was_dispatched(self, event: dict) -> bool:
         return id(event) in self._dispatched_events
 
     def active_runs(self) -> list[dict]:
         result = []
-        for run_key, (thread, engine) in self._active.items():
+        for run_key, (thread, executor) in self._active.items():
             result.append({
                 "key": run_key,
-                "run_id": engine.run.run_id,
-                "workflow": engine.workflow.name,
-                "status": engine.run.status,
+                "run_id": executor.run.run_id,
+                "workflow": executor.workflow.name,
+                "status": executor.run.status,
                 "alive": thread.is_alive(),
             })
         return result
 
-    def _run_engine(self, engine: WorkflowEngine, run_key: str):
+    def cleanup_stale_runs(self):
+        """Resume in-flight workflow runs from before the restart.
+
+        Nodes left in "running" state (process was killed mid-execution)
+        are re-run by the executor. Completed nodes are skipped.
+        """
+        resumed = 0
+        for run in WorkflowRun.list_runs():
+            if run.status not in ("running", "waiting"):
+                continue
+
+            wf = self._find_workflow_by_name(run.workflow_name)
+            if not wf:
+                log.warning(f"No workflow '{run.workflow_name}' for stale run "
+                            f"{run.run_id}, marking failed")
+                run.status = "failed"
+                run.save()
+                continue
+
+            event_key = run.trigger_event.get("data", {}).get("issue_id", "")
+            run_key = f"{wf.name}:{event_key}"
+
+            log.info(f"Resuming stale run {run.run_id} for {event_key} "
+                     f"({wf.name})")
+
+            executor = WorkflowExecutor(
+                wf, run,
+                on_notify=self._notify_manager,
+                on_input_needed=self._route_input,
+            )
+            thread = threading.Thread(
+                target=self._run_executor,
+                args=(executor, run_key),
+                name=f"wf-{run.run_id}-resume",
+                daemon=True,
+            )
+            self._active[run_key] = (thread, executor)
+            thread.start()
+            resumed += 1
+
+        if resumed:
+            log.info(f"Resumed {resumed} stale workflow run(s) from previous session")
+
+    def _find_workflow_by_name(self, name: str) -> WorkflowDef | None:
+        for wf, _source in self.workflows:
+            if wf.name == name:
+                return wf
+        return None
+
+    def _run_executor(self, executor: WorkflowExecutor, run_key: str):
         try:
-            engine.execute()
+            status = executor.execute()
+            if status == ExecutorResult.SUSPENDED:
+                log.info(f"Workflow {run_key} suspended (waiting for approval)")
+                return  # keep in _active so feed_event can reach it
         except Exception as e:
-            log.error(f"Workflow engine crashed for {run_key}: {e}")
-            engine.run.status = "failed"
-            engine.run.save()
+            log.error(f"Workflow executor crashed for {run_key}: {e}")
+            executor.run.status = "failed"
+            executor.run.save()
         finally:
-            if run_key in self._active:
-                del self._active[run_key]
+            if executor.run.status in ("completed", "failed"):
+                self._active.pop(run_key, None)
+
+    def resume_suspended(self, run_key: str) -> bool:
+        """Re-execute a suspended workflow after feeding events."""
+        if run_key not in self._active:
+            return False
+        _, executor = self._active[run_key]
+        if executor.run.status != "running":
+            # Reset from the suspended state for re-execution
+            executor.run.status = "running"
+        thread = threading.Thread(
+            target=self._run_executor,
+            args=(executor, run_key),
+            name=f"wf-{executor.run.run_id}-resume",
+            daemon=True,
+        )
+        self._active[run_key] = (thread, executor)
+        thread.start()
+        return True
+
+    @staticmethod
+    def _notify_manager(message: str) -> None:
+        try:
+            from modastack.manager.session import inject
+            inject(message)
+        except Exception as e:
+            log.warning(f"Failed to notify manager: {e}")
+
+    @staticmethod
+    def _route_input(tool_name: str, tool_input: dict) -> str:
+        """Route agent questions to the manager for an answer.
+
+        For now, auto-selects the first option. In the future, this
+        should inject the question into the manager session and wait
+        for a response.
+        """
+        options = tool_input.get("options", [])
+        if options:
+            first = options[0]
+            label = first.get("label", str(first)) if isinstance(first, dict) else str(first)
+            log.info(f"Auto-answering {tool_name}: {label}")
+            return label
+        return "Proceed with your best judgment."

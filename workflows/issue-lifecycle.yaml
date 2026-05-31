@@ -12,6 +12,7 @@ nodes:
     params:
       issue_id: ${{event.issue_id}}
       repo: ${{event.repo}}
+      title: ${{event.title}}
     timeout: 60
 
   # === NOTIFY (LLM crafts, engine posts) ===
@@ -64,7 +65,7 @@ nodes:
     inject: "/pickup Issue #${{event.issue_id}}: ${{event.title}}. Repo: ${{event.repo}}, cwd: ${{event.repo}}"
     wait_for:
       phase: triage_complete
-    timeout: 1200
+    timeout: 1800
     outputs:
       complexity: ${{handoff.complexity}}
       needs_spec: ${{handoff.needs_spec}}
@@ -168,9 +169,8 @@ nodes:
     label: Approval
     type: approval
     listen_for:
-      source: slack
+      source: github
       match: "approved"
-      channel_id: ${{config.slack_dm_channel}}
     timeout: 86400
     depends_on: [post_slack_spec_ready]
     when: "${{route.branch}} == 'needs_spec'"
@@ -214,7 +214,7 @@ nodes:
     inject: "/prepare-pr"
     wait_for:
       phase: pr_ready
-    timeout: 600
+    timeout: 1800
     depends_on: [implement]
     outputs:
       pr_url: ${{handoff.pr_url}}

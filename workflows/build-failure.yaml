@@ -1,0 +1,56 @@
+name: build-failure
+version: 1
+trigger:
+  event: github.build_failed
+
+nodes:
+  # Find the issue ID from the branch name (agent/24 → 24)
+  resolve_issue:
+    type: bash
+    command: |
+      branch="${{event.branch}}"
+      # Extract issue ID from branch pattern: agent/<id> or agent/<id>-<slug>
+      issue_id=$(echo "$branch" | sed -n 's|^agent/\([^-]*\).*|\1|p')
+      if [ -z "$issue_id" ]; then
+        echo "NO_ISSUE"
+      else
+        echo "$issue_id"
+      fi
+    timeout: 5
+
+  # Fetch the failure logs from GitHub
+  fetch_logs:
+    type: bash
+    command: |
+      gh run view --repo ${{event.repo}} --log-failed 2>&1 | tail -60
+    timeout: 30
+    depends_on: [resolve_issue]
+    when: "'NO_ISSUE' not in ${{resolve_issue.output}}"
+
+  # Inject the failure into the engineer session
+  inject_fix:
+    type: prompt
+    session: ${{resolve_issue.output | trim | lower}}
+    inject: |
+      Build failed on ${{event.check_name}} for branch ${{event.branch}}.
+      URL: ${{event.url}}
+      Failure summary: ${{event.output_title}} ${{event.output_summary}}
+      Logs (last 60 lines):
+      ${{fetch_logs.output}}
+      Investigate the failure, fix it, and push.
+    wait_for:
+      phase: implement_complete
+    timeout: 1800
+    depends_on: [fetch_logs]
+    when: "'NO_ISSUE' not in ${{resolve_issue.output}}"
+
+  # If no engineer session found, notify the manager
+  notify_no_session:
+    type: manager
+    prompt: |
+      Build failed on ${{event.check_name}} in ${{event.repo}}, branch ${{event.branch}}.
+      URL: ${{event.url}}
+      No engineer session found for this branch. Decide what to do.
+    timeout: 300
+    depends_on: [resolve_issue]
+    when: "'NO_ISSUE' in ${{resolve_issue.output}}"
