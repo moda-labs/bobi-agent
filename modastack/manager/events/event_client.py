@@ -389,24 +389,38 @@ class EventServerClient:
                 normalized = _normalize_event(data)
                 if normalized:
                     _log_event(normalized)
-                    text = _format_event_for_manager(normalized)
-                    response = inject(text)
-                    log.info(f"Event injected: {normalized['source']}/{normalized['type']}")
 
-                    if normalized["source"] == "slack" and response:
-                        edata = normalized["data"]
-                        etype = normalized["type"]
-                        reply_thread = edata.get("thread_ts", "")
-                        if not reply_thread and etype == "slack.mention":
-                            reply_thread = edata.get("ts", "")
-                        _post_slack_reply(edata["channel"], response, reply_thread)
+                    def _handle_event(norm, s):
+                        text = _format_event_for_manager(norm)
+                        response = inject(text)
+                        log.info(f"Event injected: {norm['source']}/{norm['type']}")
 
-                    if self.on_event:
-                        self.on_event(normalized)
+                        if norm["source"] == "slack" and response:
+                            edata = norm["data"]
+                            etype = norm["type"]
+                            reply_thread = edata.get("thread_ts", "")
+                            if not reply_thread and etype == "slack.mention":
+                                reply_thread = edata.get("ts", "")
+                            _post_slack_reply(edata["channel"], response, reply_thread)
 
-                if seq > 0:
-                    _save_cursor(seq)
-                    ws.send(json.dumps({"type": "ack", "seq": seq}))
+                        if self.on_event:
+                            self.on_event(norm)
+
+                        if s > 0:
+                            _save_cursor(s)
+                            try:
+                                ws.send(json.dumps({"type": "ack", "seq": s}))
+                            except Exception:
+                                pass
+
+                    threading.Thread(
+                        target=_handle_event, args=(normalized, seq),
+                        daemon=True, name=f"event-{normalized['type']}",
+                    ).start()
+                else:
+                    if seq > 0:
+                        _save_cursor(seq)
+                        ws.send(json.dumps({"type": "ack", "seq": seq}))
 
         def on_error(ws, error):
             log.warning(f"Event client WebSocket error: {error}")

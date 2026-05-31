@@ -224,14 +224,20 @@ def inject(text: str) -> str:
         log.warning("Manager not running — cannot inject")
         return ""
 
+    if _state != "waiting_input":
+        log.warning(f"Manager not ready for input (state={_state}) — dropping inject")
+        return ""
+
     if not _inject_lock.acquire(timeout=10):
         log.warning("Manager busy — dropping inject")
         return ""
 
     try:
+        log.info(f"Inject starting: {text[:100]}")
         log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
         future = asyncio.run_coroutine_threadsafe(_inject_and_drain(text), _loop)
         future.result(timeout=300)
+        log.info(f"Inject complete, response length: {len(_last_response or '')}")
         return _last_response or ""
     except Exception as e:
         log.error(f"Manager inject failed: {e}")
