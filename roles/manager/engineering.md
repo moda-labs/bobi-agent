@@ -77,6 +77,6 @@ This is a hard gate — never auto-approve a spec.
 ## Injecting spec work
 
 When injecting instructions for spec writing, ALWAYS include an explicit
-stop instruction: "After creating the draft PR and updating the handoff
+stop instruction: "After updating the issue description and updating the handoff
 to spec_complete, STOP. Do NOT proceed to implementation. Wait for
 human approval." Without this, engineers will bypass the review gate.

@@ -163,12 +163,12 @@ title: Add rate limiting
 worktree: /path/to/worktree
 branch: agent/agd-12
 phase: spec_complete
-spec_path: specs/agd-12-rate-limiting.md
+spec_url: https://github.com/org/repo/issues/12
 complexity: medium
 ---
 
 ## Status
-Spec written: specs/agd-12-rate-limiting.md
+Spec written to issue description.
 ```
 
 Each agent reads the handoff, does its work, then goes idle. The
