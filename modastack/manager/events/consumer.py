@@ -55,7 +55,10 @@ def _notify_slack(config: GlobalConfig, text: str) -> None:
 def _drain_loop():
     """Drain the event queue and inject batched events into the manager."""
     from .event_client import event_queue, format_event_for_manager
-    from modastack.manager.session import inject, detect_state
+    from .slack_responder import SlackResponder
+    from modastack.manager.session import inject, detect_state, read_last_response
+
+    responder = SlackResponder()
 
     while True:
         event = event_queue.get()
@@ -73,7 +76,11 @@ def _drain_loop():
             continue
 
         log.info(f"Injecting {len(batch)} event(s)")
-        inject(text)
+        ok = inject(text)
+
+        if ok and any(e.get("source") == "slack" for e in batch):
+            response = read_last_response() or ""
+            responder.handle(batch, response)
 
 
 def run(**kwargs):
