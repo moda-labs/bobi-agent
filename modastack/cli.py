@@ -92,14 +92,37 @@ def main():
 
 
 @main.command()
-def start():
+@click.option("--foreground", "-f", is_flag=True, help="Run in the foreground (default: daemonize)")
+def start(foreground):
     """Start modastack. Connects to the centralized event server for webhooks.
 
     Usage:
-        modastack start
+        modastack start              # daemonize
+        modastack start --foreground # run in foreground (for debugging)
     """
-    from modastack.manager.events.consumer import run
-    run()
+    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)
+            click.echo(f"Modastack already running (pid {pid}). Use `modastack restart`.")
+            return
+        except (ProcessLookupError, ValueError):
+            pid_path.unlink(missing_ok=True)
+
+    if foreground:
+        from modastack.manager.events.consumer import run
+        run()
+    else:
+        log_file = GLOBAL_CONFIG_DIR / "modastack.log"
+        GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(log_file, "a") as lf:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "modastack.cli", "start", "--foreground"],
+                stdout=lf, stderr=lf,
+                start_new_session=True,
+            )
+        click.echo(f"Modastack started (pid {proc.pid}). Logs: {log_file}")
 
 
 @main.command()
@@ -163,34 +186,9 @@ def restart():
     Usage:
         modastack restart
     """
-    import signal
-    import time
-
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
-
-    # Stop if running
-    if pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-            click.echo(f"Stopping modastack (pid {pid})...")
-            os.kill(pid, signal.SIGTERM)
-            for _ in range(30):
-                time.sleep(0.2)
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    break
-            else:
-                click.echo("Old process didn't exit — aborting.", err=True)
-                return
-        except (ValueError, ProcessLookupError):
-            pass
-        pid_path.unlink(missing_ok=True)
-
-    click.echo("Starting modastack...")
-    from modastack.manager.events.consumer import run
-    run()
+    ctx = click.get_current_context()
+    ctx.invoke(stop)
+    ctx.invoke(start)
 
 
 @main.command()
