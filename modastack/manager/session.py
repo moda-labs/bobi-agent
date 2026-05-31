@@ -34,6 +34,7 @@ _ready = threading.Event()
 _keep_alive: asyncio.Event | None = None
 _last_response: str = ""
 _state: str = "stopped"
+_inject_lock = threading.Lock()
 
 
 def _load_manager_prompt() -> str:
@@ -214,19 +215,29 @@ async def _inject_and_drain(text: str) -> None:
 
 
 def inject(text: str) -> str:
-    """Inject text into the manager session and return the response."""
+    """Inject text into the manager session and return the response.
+
+    Serializes concurrent callers — only one inject runs at a time.
+    If the lock can't be acquired within 10s, the call is dropped.
+    """
     if not _client or not _loop:
         log.warning("Manager not running — cannot inject")
         return ""
 
-    log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
-    future = asyncio.run_coroutine_threadsafe(_inject_and_drain(text), _loop)
+    if not _inject_lock.acquire(timeout=10):
+        log.warning("Manager busy — dropping inject")
+        return ""
+
     try:
+        log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
+        future = asyncio.run_coroutine_threadsafe(_inject_and_drain(text), _loop)
         future.result(timeout=300)
         return _last_response or ""
     except Exception as e:
         log.error(f"Manager inject failed: {e}")
         return ""
+    finally:
+        _inject_lock.release()
 
 
 def detect_state() -> str:

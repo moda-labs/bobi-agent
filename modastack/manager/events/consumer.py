@@ -70,6 +70,10 @@ def run(**kwargs):
 
     log.info("Modastack running")
 
+    from .event_client import _post_slack_reply
+    if config.slack_dm_channel:
+        _post_slack_reply(config.slack_dm_channel, "Modastack started.")
+
     while True:
         time.sleep(HEALTH_CHECK_INTERVAL)
         if not is_alive():
