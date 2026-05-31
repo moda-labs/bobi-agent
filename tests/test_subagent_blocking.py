@@ -730,9 +730,9 @@ class TestRunPhaseBlocking:
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
             run_phase_blocking(issue_id="T-1", phase="pickup", cwd="/tmp")
 
-        # pickup timeout is 600
+        # pickup timeout is 1800 (from PHASE_TIMEOUT)
         # The timeout arg is passed as the 5th positional arg
-        assert calls[0][4] == 600
+        assert calls[0][4] == 1800
 
 
 # ---------------------------------------------------------------------------

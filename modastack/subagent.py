@@ -75,7 +75,7 @@ def _resolve_skill_path(phase: str) -> Path | None:
     return None
 
 
-def _build_prompt(phase: str, issue_id: str, context: str = "") -> str:
+def _build_prompt(phase: str, issue_id: str, context: str = "", cwd: str = "") -> str:
     skill_path = _resolve_skill_path(phase)
     parts = []
     if skill_path:
@@ -84,6 +84,14 @@ def _build_prompt(phase: str, issue_id: str, context: str = "") -> str:
             f"Execute every step exactly as written."
         )
     parts.append(f"Issue: #{issue_id}")
+
+    # Provide worktree base path so agents know where to create worktrees
+    if cwd:
+        modastack_root = Path(__file__).parent.parent
+        repo_name = Path(cwd).name
+        worktree_base = modastack_root / "worktrees" / repo_name
+        parts.append(f"Worktree base: {worktree_base}")
+
     if context:
         parts.append(context)
     parts.append(
@@ -253,7 +261,7 @@ def run_phase_blocking(
     If on_input_needed is provided, AskUserQuestion calls are deferred
     and routed through the callback for manager/human answers.
     """
-    prompt = _build_prompt(phase, issue_id, context)
+    prompt = _build_prompt(phase, issue_id, context, cwd=cwd)
     effective_timeout = timeout or PHASE_TIMEOUT.get(phase, 1800)
 
     name = _session_name(issue_id, phase)

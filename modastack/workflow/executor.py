@@ -396,9 +396,14 @@ class WorkflowExecutor:
         config = GlobalConfig.load()
         handoff_dir = Path.home() / ".modastack" / "handoffs"
         iid_lower = issue_id.lstrip("#").lower()
+        modastack_root = Path(__file__).parent.parent
 
         for repo_path in config.repos:
+            repo_name = repo_path.name
             for candidate in [
+                # New location: modastack/worktrees/<repo>/<issue>/
+                modastack_root / "worktrees" / repo_name / iid_lower / ".modastack" / "handoff.md",
+                # Legacy location: <repo>/worktrees/<issue>/
                 repo_path / "worktrees" / iid_lower / ".modastack" / "handoff.md",
                 handoff_dir / f"{iid_lower}.md",
                 handoff_dir / f"{issue_id}.md",
