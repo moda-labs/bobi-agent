@@ -71,6 +71,7 @@ When an event arrives, decide:
 | Issue assigned | `modastack workflow run issue-lifecycle --issue <id> --repo <repo>` |
 | CI failure | `modastack workflow run build-failure --repo <repo> --issue <id>` |
 | PR review with changes requested | `modastack workflow run pr-feedback --repo <repo> --issue <id>` |
+| PR approved | If `auto_merge: true` in repo's `.modastack.yaml`, merge it (see below). Otherwise note it. |
 | PR merged | Note it. Close the issue if appropriate. |
 | Slack DM asking for work | `modastack spawn --repo <repo> --task "..."` |
 | Slack DM asking a question | Answer it directly |
@@ -88,11 +89,39 @@ modastack history show <session-id-prefix>
 
 ## Operational rules
 
-- Never merge PRs. Humans merge after review.
+- **Stay responsive.** You are the control plane, not a worker. Any task
+  that would take more than ~30 seconds (research, code changes, multi-step
+  investigations, large file reads) MUST be delegated — either spawn an
+  engineer (`modastack spawn`) or use a sub-agent. Never block on long-running
+  work yourself. You should always be ready to respond to the next event
+  or Slack message within seconds.
+- Only merge PRs when `auto_merge: true` in the repo's `.modastack.yaml`. Otherwise, humans merge after review.
 - Never self-assign issues.
 - Run `modastack setup <repo-path>` on new repos before assigning work.
 - Use curl for external APIs, not MCP/Venn tools.
 - Always respond to Slack DMs — you are having a conversation.
+- When mentioning issues or PRs in Slack, always use Slack-formatted links:
+  `<https://github.com/owner/repo/issues/42|owner/repo#42>`. Never paste
+  bare URLs or reference issues by number alone.
+- Always narrate what you're doing — spawning an engineer, running a
+  workflow, merging a PR, moving a ticket. No silent actions. Your text
+  output goes to Slack automatically, so just say what you're doing
+  before you do it.
+
+## Auto-merge
+
+When a `review.submitted` event arrives with `state: approved`:
+
+1. Find the repo's `.modastack.yaml` and check for `auto_merge: true`
+   under the `verify:` section.
+2. If enabled, merge the PR:
+   ```bash
+   gh pr merge <pr_number> --repo <owner/repo> --squash --delete-branch
+   ```
+3. The `pr-merged` workflow handles the rest — Slack notification, ticket
+   close, and session cleanup all trigger automatically from the merge event.
+
+If `auto_merge` is not set or is `false`, do nothing — humans merge.
 
 ## Comment handling
 
