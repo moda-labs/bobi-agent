@@ -82,28 +82,33 @@ def _build_startup_prompt() -> str:
 
 async def _drain_turn() -> None:
     """Drain receive_messages() for one turn until the iterator ends."""
-    global _last_response
+    global _last_response, _state
 
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
     registry = get_registry()
     _state_update("working")
 
-    async for msg in _client.receive_messages():
-        if isinstance(msg, AssistantMessage):
-            text_parts = []
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    text_parts.append(block.text)
-            if text_parts:
-                _last_response = "\n".join(text_parts)
-                log_activity("response", {"text": _last_response[:500]}, session=SESSION_NAME)
+    try:
+        async for msg in _client.receive_messages():
+            if isinstance(msg, AssistantMessage):
+                text_parts = []
+                for block in msg.content:
+                    if isinstance(block, TextBlock):
+                        text_parts.append(block.text)
+                if text_parts:
+                    _last_response = "\n".join(text_parts)
+                    log_activity("response", {"text": _last_response[:500]}, session=SESSION_NAME)
 
-        elif isinstance(msg, ResultMessage):
-            save_session_id(SESSION_NAME, msg.session_id)
-            _state_update("waiting_input")
-            registry.update(SESSION_NAME, status="idle", session_id=msg.session_id)
-            log_activity("Stop", {"session_id": msg.session_id}, session=SESSION_NAME)
+            elif isinstance(msg, ResultMessage):
+                save_session_id(SESSION_NAME, msg.session_id)
+                _state_update("waiting_input")
+                registry.update(SESSION_NAME, status="idle", session_id=msg.session_id)
+                log_activity("Stop", {"session_id": msg.session_id}, session=SESSION_NAME)
+    except Exception as e:
+        log.error(f"Drain failed: {e}")
+        _state = "error"
+        registry.update(SESSION_NAME, status="error")
 
 
 async def _run_manager() -> None:
@@ -235,6 +240,7 @@ def inject(text: str, timeout: int = 300) -> bool:
         return True
     except Exception as e:
         log.error(f"Manager inject failed: {e}")
+        future.cancel()
         return False
 
 
