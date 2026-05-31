@@ -1172,17 +1172,17 @@ def self_update():
         click.echo(f"Failed to fetch: {result.stderr.strip()}", err=True)
         sys.exit(1)
 
-    # Check remote version
-    result = subprocess.run(
-        ["git", "show", "origin/main:VERSION"],
+    # Check if there are new commits
+    local_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
         cwd=REPO_ROOT, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        click.echo("Failed to read remote VERSION", err=True)
-        sys.exit(1)
-    remote_version = result.stdout.strip()
+    ).stdout.strip()
+    remote_head = subprocess.run(
+        ["git", "rev-parse", "origin/main"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    ).stdout.strip()
 
-    if remote_version == old_version:
+    if local_head == remote_head:
         click.echo("Already up to date.")
         return
 
@@ -1217,7 +1217,15 @@ def self_update():
     }))
 
     # Pull
-    click.echo(f"Updating {old_version} → {remote_version}...")
+    remote_version = subprocess.run(
+        ["git", "show", "origin/main:VERSION"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    ).stdout.strip() or old_version
+    commit_count = subprocess.run(
+        ["git", "rev-list", "--count", f"HEAD..origin/main"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    ).stdout.strip()
+    click.echo(f"Updating {old_version} → {remote_version} ({commit_count} commit(s))...")
     result = subprocess.run(
         ["git", "pull", "--ff-only", "origin", "main"],
         cwd=REPO_ROOT, capture_output=True, text=True,
