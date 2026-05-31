@@ -61,13 +61,13 @@ Linear project and skills look correct.
 ## Commands
 
 ```bash
-modastack start                # start event loop (polling mode)
-modastack start --webhooks     # start with webhook server + polling
-modastack tick                 # check manager session state
-modastack tick "message"       # inject a message into the manager session
+modastack start                # start event loop
+modastack spawn --repo R --task T  # spawn an ad-hoc engineer agent
+modastack workflow run <name>  # run a named workflow
+modastack workflow list        # list available workflows
 modastack status               # show active engineer sessions
 modastack events               # show recent events from the bus
-modastack decisions            # show recent manager decisions
+modastack message "text"       # inject a message into the manager session
 modastack init                 # initialize global config
 modastack setup [path]         # set up a repo — install skills, store credentials, register
 modastack register <target>    # register a repo (local path or org/repo)
@@ -76,9 +76,10 @@ modastack repos                # list registered repos
 
 ## Architecture
 
-Event-driven: events from Linear, GitHub, Slack, and engineer sessions
-flow through an in-process bus to a persistent Claude Code manager session
-in tmux. The manager reasons about events and acts directly.
+Event-driven: events from GitHub, Linear, and Slack flow through a
+Cloudflare event server to a persistent Claude Code manager session.
+The manager receives ALL events and decides what to do — spawn an
+ad-hoc engineer, run a structured workflow, or handle it directly.
 
 ```
 modastack/                        # All Python code

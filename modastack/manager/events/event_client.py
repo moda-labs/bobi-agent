@@ -292,15 +292,12 @@ class EventServerClient:
                 normalized = _normalize_event(data)
                 if normalized:
                     _log_event(normalized)
-                    dispatched = False
+                    text = _format_event_for_manager(normalized)
+                    inject(text)
+                    log.info(f"Event injected: {normalized['source']}/{normalized['type']}")
+
                     if self.on_event:
-                        dispatched = self.on_event(normalized)
-                    if not dispatched:
-                        text = _format_event_for_manager(normalized)
-                        inject(text)
-                        log.info(f"Event injected: {normalized['source']}/{normalized['type']}")
-                    else:
-                        log.info(f"Event handled by workflow: {normalized['source']}/{normalized['type']}")
+                        self.on_event(normalized)
 
                 if seq > 0:
                     _save_cursor(seq)

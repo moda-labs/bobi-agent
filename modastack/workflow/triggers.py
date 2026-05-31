@@ -160,6 +160,38 @@ class WorkflowDispatcher:
         self._dispatched_events.add(id(event))
         return True
 
+    def run_by_name(self, name: str, event: dict) -> bool:
+        """Run a specific workflow by name with the given event context."""
+        wf = None
+        for w, source in self.workflows:
+            if w.name == name:
+                wf = w
+                break
+        if not wf:
+            raise ValueError(f"No workflow named '{name}'")
+
+        event_key = event.get("data", {}).get("issue_id", name)
+        run_key = f"{wf.name}:{event_key}"
+
+        run = WorkflowRun.create(wf.name, event)
+        run.save()
+        log.info(f"Starting workflow {wf.name} via CLI (run {run.run_id})")
+
+        executor = WorkflowExecutor(
+            wf, run,
+            on_notify=self._notify_manager,
+            on_input_needed=self._route_input,
+        )
+        thread = threading.Thread(
+            target=self._run_executor,
+            args=(executor, run_key),
+            name=f"wf-{run.run_id}",
+            daemon=True,
+        )
+        self._active[run_key] = (thread, executor)
+        thread.start()
+        return True
+
     def feed_event(self, event: dict):
         """Feed an event to all active workflow executors (for approval nodes)."""
         for run_key, (thread, executor) in list(self._active.items()):

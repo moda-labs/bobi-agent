@@ -52,16 +52,33 @@ def _load_manager_prompt() -> str:
     return core
 
 
+def _list_workflows() -> str:
+    try:
+        from modastack.workflow.triggers import WORKFLOWS_DIR
+        from modastack.workflow.schema import load_workflow
+        lines = []
+        for f in sorted(WORKFLOWS_DIR.glob("*.yaml")):
+            try:
+                wf = load_workflow(f)
+                lines.append(f"- {wf.name}: trigger={wf.trigger.event}, {len(wf.nodes)} nodes")
+            except Exception:
+                continue
+        return "\n".join(lines) if lines else "No workflows found."
+    except Exception:
+        return ""
+
+
 def _build_startup_prompt() -> str:
     prompt = _load_manager_prompt()
     config = GlobalConfig.load()
     repos = ", ".join(p.name for p in config.repos)
+    workflows = _list_workflows()
     return (
         f"You are the Modastack manager. "
         f"You are managing these repos: {repos}. "
-        f"From now on, you will receive human messages and system event batches. "
-        f"Respond naturally — the transport layer handles delivery. "
-        f"Act directly using your tools.\n\n{prompt}"
+        f"You receive ALL events and decide what to do with each one. "
+        f"Act directly using your tools.\n\n{prompt}\n\n"
+        f"## Available workflows\n\n{workflows}"
     )
 
 

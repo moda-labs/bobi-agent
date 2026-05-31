@@ -935,7 +935,82 @@ def workflow_validate(path):
         raise SystemExit(1)
 
 
+@workflow.command("run")
+@click.argument("name")
+@click.option("--repo", default=None, help="Repo (org/name or path)")
+@click.option("--issue", default=None, help="Issue ID or URL")
+@click.option("--title", default=None, help="Issue title")
+@click.option("--event-json", default=None, help="Full event JSON (overrides other options)")
+def workflow_run(name, repo, issue, title, event_json):
+    """Run a named workflow with event context.
+
+    Usage:
+        modastack workflow run issue-lifecycle --issue 42 --repo moda-labs/jobtack
+        modastack workflow run build-failure --event-json '{"type":"ci.failed",...}'
+    """
+    from .workflow.triggers import WorkflowDispatcher
+
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+
+    if event_json:
+        event = json.loads(event_json)
+    else:
+        event = {
+            "type": "cli.trigger",
+            "source": "cli",
+            "data": {},
+        }
+        if issue:
+            event["data"]["issue_id"] = issue
+        if repo:
+            event["data"]["repo"] = repo
+        if title:
+            event["data"]["title"] = title
+
+    try:
+        dispatcher.run_by_name(name, event)
+        click.echo(f"Workflow '{name}' started.")
+    except ValueError as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(1)
+
+
 main.add_command(workflow)
+
+
+@main.command()
+@click.option("--repo", required=True, help="Repo path or registered name")
+@click.option("--task", required=True, help="Task description for the engineer")
+@click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
+def spawn(repo, task, timeout):
+    """Spawn an ad-hoc engineer agent in a repo.
+
+    Usage:
+        modastack spawn --repo moda-labs/jobtack --task "Fix the login bug"
+        modastack spawn --repo ~/dev/myrepo --task "Investigate CI failure"
+    """
+    from .workflow.actions import _resolve_repo_path
+
+    try:
+        cwd = _resolve_repo_path(repo)
+    except FileNotFoundError:
+        if Path(repo).expanduser().is_dir():
+            cwd = str(Path(repo).expanduser().resolve())
+        else:
+            click.echo(f"Repo not found: {repo}", err=True)
+            raise SystemExit(1)
+
+    click.echo(f"Spawning engineer in {cwd}...")
+
+    from .subagent import spawn_adhoc
+    result = spawn_adhoc(cwd=cwd, task=task, timeout=timeout)
+
+    if result.success:
+        click.echo(f"Completed in {result.duration_ms/1000:.0f}s (${result.total_cost_usd:.2f})")
+    else:
+        click.echo(f"Failed: {result.error}", err=True)
+        raise SystemExit(1)
 
 
 @main.command("self-update")

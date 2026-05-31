@@ -291,6 +291,42 @@ def run_phase_blocking(
         )
 
 
+def spawn_adhoc(
+    cwd: str,
+    task: str,
+    timeout: int = 3600,
+    name: str | None = None,
+) -> AgentResult:
+    """Spawn a one-off engineer agent with a freeform task prompt."""
+    import hashlib
+    short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
+    agent_name = name or f"adhoc-{short_hash}"
+
+    registry = get_registry()
+    registry.register(SessionEntry(
+        name=agent_name, session_id="", role="engineer",
+        issue_id=agent_name, title=task[:80], phase="adhoc",
+        cwd=cwd, status="starting",
+    ))
+
+    try:
+        return asyncio.run(
+            asyncio.wait_for(
+                _run_agent_supervised(
+                    prompt=task, cwd=cwd, issue_id=agent_name,
+                    phase="adhoc", timeout=timeout,
+                ),
+                timeout=timeout,
+            )
+        )
+    except asyncio.TimeoutError:
+        registry.update(agent_name, status="error")
+        return AgentResult(
+            session_id="", issue_id=agent_name, phase="adhoc",
+            success=False, error=f"timeout after {timeout}s",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Fire-and-forget execution (legacy engine path)
 # ---------------------------------------------------------------------------
