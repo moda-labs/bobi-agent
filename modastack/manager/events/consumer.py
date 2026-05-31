@@ -114,15 +114,18 @@ def run(**kwargs):
     log.info(f"Loaded {len(dispatcher.workflows)} workflow(s)")
     dispatcher.cleanup_stale_runs()
 
+    event_client = None
     if config.event_server_url and config.event_server_api_key:
-        from .event_client import start_event_client
-        start_event_client(
+        from .event_client import EventServerClient
+        event_client = EventServerClient(
             server_url=config.event_server_url,
             deployment_id=config.event_server_deployment_id,
             api_key=config.event_server_api_key,
             on_event=dispatcher.feed_event,
         )
+        event_client.start()
         log.info(f"Event client started -> {config.event_server_url}")
+        atexit.register(event_client.stop)
     else:
         log.warning("No event server configured — running without webhook events")
 
