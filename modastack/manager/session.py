@@ -81,7 +81,7 @@ def _build_startup_prompt() -> str:
 
 
 async def _drain_turn() -> None:
-    """Drain receive_messages() for one turn until the iterator ends."""
+    """Drain receive_response() for one turn until ResultMessage."""
     global _last_response, _state
 
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
@@ -90,7 +90,7 @@ async def _drain_turn() -> None:
     _state_update("working")
 
     try:
-        async for msg in _client.receive_messages():
+        async for msg in _client.receive_response():
             if isinstance(msg, AssistantMessage):
                 text_parts = []
                 for block in msg.content:
@@ -106,7 +106,7 @@ async def _drain_turn() -> None:
                 registry.update(SESSION_NAME, status="idle", session_id=msg.session_id)
                 log_activity("Stop", {"session_id": msg.session_id}, session=SESSION_NAME)
     except Exception as e:
-        log.error(f"Drain failed: {e}")
+        log.error(f"Drain failed ({type(e).__name__}): {e}")
         _state = "error"
         registry.update(SESSION_NAME, status="error")
 
@@ -214,8 +214,11 @@ def start_or_resume(cwd: str = None) -> bool:
 
 
 async def _inject_and_drain(text: str) -> None:
+    log.info("inject: sending query")
     await _client.query(text)
+    log.info("inject: query sent, draining")
     await _drain_turn()
+    log.info(f"inject: drain complete, state={_state}")
 
 
 def inject(text: str, timeout: int = 300) -> bool:
@@ -238,8 +241,12 @@ def inject(text: str, timeout: int = 300) -> bool:
     try:
         future.result(timeout=timeout)
         return True
+    except TimeoutError:
+        log.error(f"Manager inject timed out after {timeout}s")
+        future.cancel()
+        return False
     except Exception as e:
-        log.error(f"Manager inject failed: {e}")
+        log.error(f"Manager inject failed ({type(e).__name__}): {e}")
         future.cancel()
         return False
 
