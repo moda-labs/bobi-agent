@@ -12,6 +12,7 @@ interface StoredEvent {
 	timestamp: string;
 	repo?: string;
 	team_key?: string;
+	workspace?: string;
 	payload: Record<string, unknown>;
 }
 
@@ -66,6 +67,7 @@ export class DeploymentSession extends DurableObject<Env> {
 			timestamp: event.timestamp as string,
 			repo: event.repo as string | undefined,
 			team_key: event.team_key as string | undefined,
+			workspace: event.workspace as string | undefined,
 			payload: event.payload as Record<string, unknown>,
 		};
 

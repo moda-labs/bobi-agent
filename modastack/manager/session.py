@@ -10,10 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import threading
 import time
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -82,29 +80,6 @@ def _build_startup_prompt() -> str:
     )
 
 
-def _relay_to_slack(text: str) -> None:
-    try:
-        config = GlobalConfig.load()
-        token = config.slack_bot_token
-        channel = config.slack_dm_channel or "D0B51JP1N4C"
-        if not token:
-            return
-        text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
-        text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
-        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
-        if len(text) > 3000:
-            text = text[:3000] + '\n_(truncated)_'
-        payload = json.dumps({"channel": channel, "text": text}).encode()
-        req = urllib.request.Request(
-            "https://slack.com/api/chat.postMessage",
-            data=payload,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=5)
-    except Exception as e:
-        log.debug(f"Slack relay failed: {e}")
-
-
 async def _drain_turn() -> None:
     """Drain receive_messages() for one turn until the iterator ends."""
     global _last_response
@@ -123,7 +98,6 @@ async def _drain_turn() -> None:
             if text_parts:
                 _last_response = "\n".join(text_parts)
                 log_activity("response", {"text": _last_response[:500]}, session=SESSION_NAME)
-                _relay_to_slack(_last_response)
 
         elif isinstance(msg, ResultMessage):
             save_session_id(SESSION_NAME, msg.session_id)
@@ -239,19 +213,20 @@ async def _inject_and_drain(text: str) -> None:
     await _drain_turn()
 
 
-def inject(text: str) -> bool:
+def inject(text: str) -> str:
+    """Inject text into the manager session and return the response."""
     if not _client or not _loop:
         log.warning("Manager not running — cannot inject")
-        return False
+        return ""
 
     log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
     future = asyncio.run_coroutine_threadsafe(_inject_and_drain(text), _loop)
     try:
         future.result(timeout=300)
-        return True
+        return _last_response or ""
     except Exception as e:
         log.error(f"Manager inject failed: {e}")
-        return False
+        return ""
 
 
 def detect_state() -> str:

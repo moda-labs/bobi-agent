@@ -1,20 +1,24 @@
 """WebSocket client for the centralized event server.
 
 Connects outbound to the Cloudflare Worker, receives webhook events
-(GitHub, Linear) with automatic catch-up on missed events after downtime.
-Injects events directly into the manager session via tmux.
+(GitHub, Linear, Slack) with automatic catch-up on missed events after downtime.
+Injects events directly into the manager session via the SDK client.
 """
 
 import json
 import logging
+import re
 import ssl
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import certifi
 import websocket
 
+from modastack.config import GlobalConfig
 from modastack.manager.session import inject, detect_state
 
 log = logging.getLogger(__name__)
@@ -50,6 +54,67 @@ def _log_event(event: dict) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
+_slack_user_cache: dict[str, str] = {}
+_slack_our_threads: set[str] = set()
+
+
+def _resolve_slack_user(bot_token: str, user_id: str) -> str:
+    if not user_id or not bot_token:
+        return user_id
+    if user_id in _slack_user_cache:
+        return _slack_user_cache[user_id]
+    try:
+        req = urllib.request.Request(
+            f"https://slack.com/api/users.info?user={user_id}",
+            headers={"Authorization": f"Bearer {bot_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+            if data.get("ok"):
+                name = data["user"].get("real_name", user_id)
+                _slack_user_cache[user_id] = name
+                return name
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
+        pass
+    _slack_user_cache[user_id] = user_id
+    return user_id
+
+
+def _markdown_to_slack(text: str) -> str:
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
+    if len(text) > 3000:
+        text = text[:3000] + '\n_(truncated)_'
+    return text
+
+
+def _post_slack_reply(channel: str, text: str, thread_ts: str = "") -> None:
+    config = GlobalConfig.load()
+    token = config.slack_bot_token
+    if not token or not text:
+        return
+    text = _markdown_to_slack(text)
+    payload: dict = {"channel": channel, "text": text}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+    try:
+        req = urllib.request.Request(
+            "https://slack.com/api/chat.postMessage",
+            data=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+        if not result.get("ok"):
+            log.debug(f"Slack reply error: {result.get('error', 'unknown')}")
+            return
+        if thread_ts:
+            _slack_our_threads.add(f"{channel}:{thread_ts}")
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        log.debug(f"Slack reply failed: {e}")
+
+
 def _format_event_for_manager(event: dict) -> str:
     """Format a normalized event as a concise message for the manager."""
     etype = event.get("type", "unknown")
@@ -58,7 +123,8 @@ def _format_event_for_manager(event: dict) -> str:
 
     lines = [f"Event: {source}/{etype}"]
     for key in ("issue_id", "pr_number", "title", "repo", "from",
-                "state", "branch", "conclusion", "text", "ref"):
+                "state", "branch", "conclusion", "text", "ref",
+                "channel", "thread_ts"):
         val = data.get(key)
         if val:
             lines.append(f"  {key}: {val}")
@@ -80,6 +146,8 @@ def _normalize_event(event_data: dict) -> dict | None:
         return _normalize_github(event_type, payload)
     elif source == "linear":
         return _normalize_linear(event_type, payload)
+    elif source == "slack":
+        return _normalize_slack(event_type, payload)
     return None
 
 
@@ -221,6 +289,35 @@ def _normalize_linear(event_type: str, payload: dict) -> dict | None:
     }
 
 
+def _normalize_slack(event_type: str, payload: dict) -> dict | None:
+    config = GlobalConfig.load()
+    user_id = payload.get("user_id", "")
+    user_name = _resolve_slack_user(config.slack_bot_token, user_id)
+    text = payload.get("text", "")
+    if event_type == "slack.mention":
+        text = re.sub(r'^<@U\w+>\s*', '', text).strip()
+
+    channel = payload.get("channel", "")
+    thread_ts = payload.get("thread_ts", "")
+
+    # Filter thread replies to threads modastack participated in
+    if event_type == "slack.thread_reply":
+        if f"{channel}:{thread_ts}" not in _slack_our_threads:
+            return None
+
+    return {
+        "type": event_type, "source": "slack",
+        "data": {
+            "from": user_name,
+            "text": text,
+            "channel": channel,
+            "channel_type": payload.get("channel_type", ""),
+            "ts": payload.get("ts", ""),
+            "thread_ts": thread_ts,
+        },
+    }
+
+
 class EventServerClient:
     """WebSocket client that connects to the centralized event server."""
 
@@ -293,8 +390,16 @@ class EventServerClient:
                 if normalized:
                     _log_event(normalized)
                     text = _format_event_for_manager(normalized)
-                    inject(text)
+                    response = inject(text)
                     log.info(f"Event injected: {normalized['source']}/{normalized['type']}")
+
+                    if normalized["source"] == "slack" and response:
+                        edata = normalized["data"]
+                        etype = normalized["type"]
+                        reply_thread = edata.get("thread_ts", "")
+                        if not reply_thread and etype == "slack.mention":
+                            reply_thread = edata.get("ts", "")
+                        _post_slack_reply(edata["channel"], response, reply_thread)
 
                     if self.on_event:
                         self.on_event(normalized)

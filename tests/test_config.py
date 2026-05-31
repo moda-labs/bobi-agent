@@ -110,7 +110,6 @@ def test_global_config_roundtrip(tmp_path, monkeypatch):
 
     config = GlobalConfig(
         slack_bot_token="xoxb-test",
-        slack_app_token="xapp-test",
         repos=[Path("/tmp/repo1"), Path("/tmp/repo2")],
         github_default_account="testuser",
     )
@@ -118,6 +117,5 @@ def test_global_config_roundtrip(tmp_path, monkeypatch):
 
     loaded = GlobalConfig.load()
     assert loaded.slack_bot_token == "xoxb-test"
-    assert loaded.slack_app_token == "xapp-test"
     assert len(loaded.repos) == 2
     assert loaded.github_default_account == "testuser"

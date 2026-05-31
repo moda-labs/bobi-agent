@@ -4,6 +4,7 @@ interface Env {
 	EVENTS: KVNamespace;
 	DEPLOYMENT_SESSION: DurableObjectNamespace;
 	WEBHOOK_SECRET?: string;
+	SLACK_SIGNING_SECRET?: string;
 }
 
 export default {
@@ -16,6 +17,9 @@ export default {
 		}
 		if (request.method === "POST" && path === "/webhooks/linear") {
 			return handleLinearWebhook(request, env);
+		}
+		if (request.method === "POST" && path === "/webhooks/slack") {
+			return handleSlackWebhook(request, env);
 		}
 		if (request.method === "POST" && path === "/deployments") {
 			return handleRegisterDeployment(request, env);
@@ -107,6 +111,120 @@ async function handleLinearWebhook(request: Request, env: Env): Promise<Response
 
 	const deploymentIds = teamKey
 		? await findSubscribedDeployments(env, `linear:${teamKey}`)
+		: [];
+
+	for (const deploymentId of deploymentIds) {
+		const doId = env.DEPLOYMENT_SESSION.idFromName(deploymentId);
+		const stub = env.DEPLOYMENT_SESSION.get(doId);
+		await stub.fetch(new Request("https://internal/event", {
+			method: "POST",
+			body: JSON.stringify(normalizedEvent),
+		}));
+	}
+
+	return Response.json({ delivered_to: deploymentIds.length });
+}
+
+async function handleSlackWebhook(request: Request, env: Env): Promise<Response> {
+	const body = await request.text();
+
+	// Slack retries — ack immediately to prevent reprocessing
+	if (request.headers.get("x-slack-retry-num")) {
+		return new Response("OK");
+	}
+
+	let payload: Record<string, unknown>;
+	try {
+		payload = JSON.parse(body);
+	} catch {
+		return new Response("Invalid JSON", { status: 400 });
+	}
+
+	// URL verification challenge (sent during Slack app setup)
+	if (payload.type === "url_verification") {
+		return Response.json({ challenge: payload.challenge });
+	}
+
+	// Verify request signature
+	if (env.SLACK_SIGNING_SECRET) {
+		const timestamp = request.headers.get("x-slack-request-timestamp") || "";
+		const signature = request.headers.get("x-slack-signature") || "";
+
+		if (!timestamp || !signature) {
+			return new Response("Missing signature headers", { status: 401 });
+		}
+
+		const age = Math.abs(Date.now() / 1000 - parseInt(timestamp, 10));
+		if (age > 300) {
+			return new Response("Request too old", { status: 401 });
+		}
+
+		const sigBase = `v0:${timestamp}:${body}`;
+		const key = await crypto.subtle.importKey(
+			"raw",
+			new TextEncoder().encode(env.SLACK_SIGNING_SECRET),
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(sigBase));
+		const hexSig = "v0=" + Array.from(new Uint8Array(sig))
+			.map(b => b.toString(16).padStart(2, "0")).join("");
+
+		if (hexSig !== signature) {
+			return new Response("Invalid signature", { status: 401 });
+		}
+	}
+
+	if (payload.type !== "event_callback") {
+		return new Response("OK");
+	}
+
+	const event = payload.event as Record<string, unknown>;
+	if (!event) {
+		return new Response("OK");
+	}
+
+	// Skip bot messages and subtypes (edits, deletes, etc.)
+	if (event.bot_id || event.subtype) {
+		return new Response("OK");
+	}
+
+	const eventType = event.type as string;
+	const channelType = event.channel_type as string || "";
+	const threadTs = event.thread_ts as string || "";
+
+	let slackEventType: string;
+	if (eventType === "app_mention") {
+		slackEventType = "slack.mention";
+	} else if (channelType === "im") {
+		slackEventType = "slack.dm";
+	} else if (threadTs) {
+		slackEventType = "slack.thread_reply";
+	} else {
+		// Non-thread channel message — skip
+		return new Response("OK");
+	}
+
+	const teamId = payload.team_id as string || "";
+	const normalizedEvent = {
+		id: (payload.event_id as string) || crypto.randomUUID(),
+		source: "slack",
+		type: slackEventType,
+		workspace: teamId,
+		timestamp: new Date().toISOString(),
+		payload: {
+			user_id: event.user as string || "",
+			channel: event.channel as string || "",
+			channel_type: channelType,
+			text: (event.text as string || "").slice(0, 4000),
+			ts: event.ts as string || "",
+			thread_ts: threadTs,
+		},
+	};
+
+	const deploymentIds = teamId
+		? await findSubscribedDeployments(env, `slack:${teamId}`)
 		: [];
 
 	for (const deploymentId of deploymentIds) {

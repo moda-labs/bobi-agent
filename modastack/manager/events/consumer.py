@@ -1,11 +1,11 @@
 """Event consumer — thin orchestrator.
 
-Starts three independent components:
+Starts two independent components:
 1. Manager session (Claude Code via Agent SDK)
 2. Event client (WebSocket to centralized event server)
-3. Slack Socket Mode (direct DM injection)
 
-Then watches the manager session and restarts it if it dies.
+Slack events flow through the event server like GitHub and Linear.
+The event client handles Slack reply-back to the originating channel/thread.
 """
 
 import logging
@@ -26,7 +26,7 @@ PID_PATH = GLOBAL_CONFIG_DIR / "modastack.pid"
 
 
 def run(**kwargs):
-    """Start modastack: manager session + event client + Slack."""
+    """Start modastack: manager session + event client."""
 
     log.info("Modastack starting")
     PID_PATH.write_text(str(os.getpid()))
@@ -57,9 +57,6 @@ def run(**kwargs):
         log.info(f"Event client started -> {config.event_server_url}")
     else:
         log.warning("No event server configured — running without webhook events")
-
-    from .slack_socket import start_socket_mode
-    slack_thread = start_socket_mode()
 
     # Start dashboard in background
     import threading

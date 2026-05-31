@@ -70,7 +70,6 @@ class GlobalConfig:
 
     # Slack — one bot per modastack instance
     slack_bot_token: str = ""
-    slack_app_token: str = ""
     slack_dm_channel: str = ""
 
     # Webhook server
@@ -106,7 +105,6 @@ class GlobalConfig:
         return cls(
             repos=repos,
             slack_bot_token=slack.get("bot_token", "") or raw.get("slack_bot_token", ""),
-            slack_app_token=slack.get("app_token", ""),
             slack_dm_channel=slack.get("dm_channel", ""),
             webhook_port=webhooks.get("port", 8080),
             public_url=webhooks.get("public_url", ""),
@@ -123,7 +121,6 @@ class GlobalConfig:
         data = {
             "slack": {
                 "bot_token": self.slack_bot_token,
-                "app_token": self.slack_app_token,
                 "dm_channel": self.slack_dm_channel,
             },
             "webhooks": {
