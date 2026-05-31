@@ -99,6 +99,11 @@ export class DeploymentSession extends DurableObject<Env> {
 			this.nextSeq = savedSeq;
 		}
 
+		// Close stale WebSockets before accepting the new one.
+		for (const old of this.ctx.getWebSockets()) {
+			try { old.close(1000, "replaced"); } catch { /* already closed */ }
+		}
+
 		const pair = new WebSocketPair();
 		const [client, server] = [pair[0], pair[1]];
 

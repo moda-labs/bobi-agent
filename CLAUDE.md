@@ -193,7 +193,9 @@ for the full reference and `workflows/examples/` for non-dev examples
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
-pytest tests/ --ignore=tests/integration/
+pytest tests/ --ignore=tests/integration/  # unit tests (~30s)
+pytest tests/                              # all tests including integration (~5min)
 ```
 
-Do NOT run `tests/integration/` — they create real Linear issues.
+Integration tests drive real Claude Code sessions. Run them before
+pushing to main or opening a PR — not on every edit.

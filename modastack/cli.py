@@ -111,6 +111,12 @@ def start(foreground):
             pid_path.unlink(missing_ok=True)
 
     if foreground:
+        # When daemonized, stdout/stderr go to the log file.
+        # Drop the StreamHandler to avoid double-logging.
+        root = logging.getLogger()
+        root.handlers = [h for h in root.handlers
+                         if isinstance(h, logging.FileHandler)]
+
         from modastack.manager.events.consumer import run
         run()
     else:
