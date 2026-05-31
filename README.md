@@ -16,6 +16,34 @@ modastack has five core principles:
 
 5. **Input routing** — when an engineer sub-agent calls `AskUserQuestion`, a `PreToolUse` hook defers the call. The executor routes the question through an `on_input_needed` callback (currently auto-selects the first option; future: routes to the manager for human escalation via Slack).
 
+6. **Composable skills** — skills come from two layers that compose at runtime. Modastack ships process skills (pickup, spec, implement, prepare-pr, feedback), practice skills (triage, build, code-review), tool references (git, github, linear, slack), and product manager skills (brand-identity, design-critic). Methodology skills (review, ship, autoplan, investigate, office-hours, qa, plan-*-review) come from [GStack](https://github.com/garrytan/gstack) installed at user-level (`~/.claude/skills/`). Claude Code's built-in skill resolution merges both layers — repo-level symlinks and user-level skills are all available in engineer sessions.
+
+### Workflow resolution
+
+Workflow definitions are resolved via a three-tier priority chain (most specific wins):
+
+1. **Repo-specific** (`<repo>/.modastack/workflows/`) — custom lifecycles for a single repo
+2. **User overrides** (`~/.modastack/workflows/`) — personal workflow tweaks across all repos
+3. **Built-in defaults** (`workflows/`) — modastack's standard workflows (issue-lifecycle, pr-feedback, etc.)
+
+When an event arrives, the dispatcher loads workflows from all three sources and picks the most specific match. A repo-specific workflow only matches events from that repo. Within the same tier, the first match wins. This lets repos ship custom lifecycles that override the defaults without forking modastack.
+
+### Event normalization
+
+Both GitHub Issues and Linear emit events in different formats. The event system normalizes them to a common `task.*` schema so workflows trigger on `task.assigned`, `task.created`, etc. regardless of the source:
+
+| Source event | Normalized event |
+|---|---|
+| GitHub `issues.opened` | `task.opened` |
+| GitHub `issues.assigned` | `task.assigned` |
+| GitHub `issues.closed` | `task.closed` |
+| Linear `Issue.create` | `task.created` |
+| Linear `Issue.update` + assignee | `task.assigned` |
+| Linear `Issue.update` + state "Done" | `task.closed` |
+| Linear `Issue.remove` | `task.closed` |
+
+For Linear events, the webhook handler resolves the project prefix (e.g., `AGD` from `AGD-12`) to a repo path via the global config, so workflows can match events to the correct repo.
+
 ### Event flow
 
 ```

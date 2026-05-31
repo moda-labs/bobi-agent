@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3 — 2026-05-27
+
+### Added
+- Documentation: composable skills principle, workflow resolution chain (repo > user > default), and event normalization table (GitHub Issues + Linear to task.* format)
+
 ## 0.3.2.1 — 2026-05-27
 
 ### Fixed
