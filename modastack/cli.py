@@ -103,6 +103,97 @@ def start():
 
 
 @main.command()
+@click.option("--force", is_flag=True, help="Send SIGKILL if SIGTERM doesn't work")
+def stop(force):
+    """Stop a running modastack instance.
+
+    Usage:
+        modastack stop
+        modastack stop --force
+    """
+    import signal
+
+    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
+    if not pid_path.exists():
+        click.echo("No PID file found — modastack is not running.")
+        return
+
+    try:
+        pid = int(pid_path.read_text().strip())
+    except (ValueError, OSError):
+        click.echo("Invalid PID file — cleaning up.")
+        pid_path.unlink(missing_ok=True)
+        return
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        click.echo(f"Process {pid} not found — cleaning up stale PID file.")
+        pid_path.unlink(missing_ok=True)
+        return
+    except PermissionError:
+        click.echo(f"No permission to signal process {pid}.", err=True)
+        return
+
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    click.echo(f"Stopping modastack (pid {pid})...")
+    os.kill(pid, sig)
+
+    import time
+    for _ in range(30):
+        time.sleep(0.2)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pid_path.unlink(missing_ok=True)
+            click.echo("Stopped.")
+            return
+
+    if not force:
+        click.echo("Process didn't exit — try: modastack stop --force")
+    else:
+        pid_path.unlink(missing_ok=True)
+        click.echo("Killed.")
+
+
+@main.command()
+def restart():
+    """Stop and restart modastack.
+
+    Usage:
+        modastack restart
+    """
+    import signal
+    import time
+
+    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
+
+    # Stop if running
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)
+            click.echo(f"Stopping modastack (pid {pid})...")
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(30):
+                time.sleep(0.2)
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+            else:
+                click.echo("Old process didn't exit — aborting.", err=True)
+                return
+        except (ValueError, ProcessLookupError):
+            pass
+        pid_path.unlink(missing_ok=True)
+
+    click.echo("Starting modastack...")
+    from modastack.manager.events.consumer import run
+    run()
+
+
+@main.command()
 @click.argument("text", required=True)
 @click.option("--to", default=None, help="Target an engineer by issue ID (e.g. --to AGD-12)")
 def message(text, to):
@@ -131,6 +222,56 @@ def message(text, to):
         click.echo(f"Sent: {text}")
     else:
         click.echo("Failed to send message.", err=True)
+
+
+@main.command("slack-reply")
+@click.argument("text")
+@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
+@click.option("--channel", "-c", required=True, help="Slack channel ID (e.g. D0B51JP1N4C)")
+@click.option("--thread", "-t", default="", help="Thread timestamp to reply in")
+def slack_reply(text, workspace, channel, thread):
+    """Post a message to Slack. Used by the manager to reply to Slack events.
+
+    Usage:
+        modastack slack-reply -w T0952RZRZ0X -c D0B51JP1N4C "Hello"
+        modastack slack-reply -w T0952RZRZ0X -c C123 -t 1780165787.159589 "Thread reply"
+    """
+    import re
+    import urllib.error
+    import urllib.request
+
+    config = GlobalConfig.load()
+    token = config.slack_token_for(workspace)
+    if not token:
+        click.echo(f"No bot token for workspace {workspace}", err=True)
+        sys.exit(1)
+
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
+    if len(text) > 3000:
+        text = text[:3000] + '\n_(truncated)_'
+
+    payload: dict = {"channel": channel, "text": text}
+    if thread:
+        payload["thread_ts"] = thread
+
+    try:
+        req = urllib.request.Request(
+            "https://slack.com/api/chat.postMessage",
+            data=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+        if result.get("ok"):
+            click.echo(f"Sent to {channel}")
+        else:
+            click.echo(f"Slack error: {result.get('error', 'unknown')}", err=True)
+            sys.exit(1)
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        click.echo(f"Failed: {e}", err=True)
+        sys.exit(1)
 
 
 @main.command()
@@ -1108,6 +1249,12 @@ def self_update():
     click.echo(f"Updated to v{new_version}")
     log.info(f"Self-update complete: {old_version} → {new_version}")
 
+    # Re-run install to update the global wrapper if it exists
+    global_wrapper = Path.home() / ".local" / "bin" / "modastack"
+    if global_wrapper.exists():
+        ctx = click.get_current_context()
+        ctx.invoke(install)
+
 
 @main.command()
 def rollback():
@@ -1207,6 +1354,58 @@ def migrate_worktrees():
         click.echo("No worktrees to migrate.")
     else:
         click.echo(f"Migrated {moved} worktree(s).")
+
+
+@main.command()
+@click.option("--path", default=None, type=click.Path(),
+              help="Install location (default: ~/.local/bin/modastack)")
+@click.option("--uninstall", is_flag=True, help="Remove the global wrapper")
+def install(path, uninstall):
+    """Install modastack as a global command (no venv activation needed).
+
+    Creates a small wrapper script that calls into the virtualenv's Python
+    directly, so `modastack` works from any shell without sourcing .venv.
+
+    Usage:
+        modastack install                          # install to ~/.local/bin
+        modastack install --path /usr/local/bin     # install to /usr/local/bin
+        modastack install --uninstall               # remove wrapper
+    """
+    if path:
+        target_dir = Path(path).expanduser().resolve()
+        target = target_dir / "modastack" if target_dir.is_dir() else target_dir
+    else:
+        target = Path.home() / ".local" / "bin" / "modastack"
+
+    if uninstall:
+        if target.exists():
+            target.unlink()
+            click.echo(f"Removed {target}")
+        else:
+            click.echo(f"No wrapper at {target}")
+        return
+
+    venv_bin = Path(sys.prefix) / "bin" / "modastack"
+    if not venv_bin.exists():
+        venv_bin = Path(sys.prefix) / "bin" / "python"
+    wrapper = f"#!/bin/sh\nexec {venv_bin} \"$@\"\n" if venv_bin.name == "modastack" else f"#!/bin/sh\nexec {venv_bin} -m modastack.cli \"$@\"\n"
+
+    if target.exists():
+        existing = target.read_text()
+        if existing == wrapper:
+            click.echo(f"Already installed: {target}")
+            return
+        click.echo(f"Updating: {target}")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(wrapper)
+    target.chmod(0o755)
+    click.echo(f"Installed: {target}")
+
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    if str(target.parent) not in path_dirs:
+        click.echo(f"\nAdd to your shell profile:")
+        click.echo(f'  export PATH="{target.parent}:$PATH"')
 
 
 if __name__ == "__main__":

@@ -17,11 +17,26 @@ Event: github/task.opened
   url: https://github.com/...
 ```
 
-Human messages from Slack arrive as:
+Slack messages arrive as events with channel and workspace context:
 
 ```
-Slack message from Zach: Can you check the deploy?
+Event: slack/slack.dm
+  from: Zach
+  text: Can you check the deploy?
+  channel: D0B51JP1N4C
+  workspace: T0952RZRZ0X
 ```
+
+**Always reply to Slack messages** using `modastack slack-reply`:
+
+```bash
+modastack slack-reply -w <workspace> -c <channel> "Your response"
+modastack slack-reply -w <workspace> -c <channel> -t <thread_ts> "Thread reply"
+```
+
+- DM → reply to the channel (no thread)
+- Channel mention → reply in thread (use the event's `ts` as `--thread`)
+- Thread reply → reply in the same thread (use the event's `thread_ts`)
 
 ## How you take action
 

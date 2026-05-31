@@ -68,9 +68,10 @@ class GlobalConfig:
 
     repos: list[Path] = field(default_factory=list)
 
-    # Slack — one bot per modastack instance
+    # Slack — per-workspace bot tokens, with single-token fallback
     slack_bot_token: str = ""
     slack_dm_channel: str = ""
+    slack_workspaces: dict[str, dict[str, str]] = field(default_factory=dict)
 
     # Webhook server
     webhook_port: int = 8080
@@ -106,6 +107,7 @@ class GlobalConfig:
             repos=repos,
             slack_bot_token=slack.get("bot_token", "") or raw.get("slack_bot_token", ""),
             slack_dm_channel=slack.get("dm_channel", ""),
+            slack_workspaces=slack.get("workspaces", {}),
             webhook_port=webhooks.get("port", 8080),
             public_url=webhooks.get("public_url", ""),
             github_default_account=github.get("default_account", ""),
@@ -116,13 +118,22 @@ class GlobalConfig:
             manager_role=manager.get("role", "engineering"),
         )
 
+    def slack_token_for(self, workspace_id: str = "") -> str:
+        """Look up the bot token for a workspace, falling back to the default."""
+        if workspace_id and workspace_id in self.slack_workspaces:
+            return self.slack_workspaces[workspace_id].get("bot_token", "")
+        return self.slack_bot_token
+
     def save(self) -> None:
         GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        slack_data: dict = {
+            "bot_token": self.slack_bot_token,
+            "dm_channel": self.slack_dm_channel,
+        }
+        if self.slack_workspaces:
+            slack_data["workspaces"] = self.slack_workspaces
         data = {
-            "slack": {
-                "bot_token": self.slack_bot_token,
-                "dm_channel": self.slack_dm_channel,
-            },
+            "slack": slack_data,
             "webhooks": {
                 "port": self.webhook_port,
             },
