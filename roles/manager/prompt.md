@@ -27,16 +27,25 @@ Event: slack/slack.dm
   workspace: T0952RZRZ0X
 ```
 
-**Always reply to Slack messages** using `modastack slack-reply`:
+## CRITICAL: Replying to Slack messages
+
+When you receive a `slack/*` event, you MUST run the `modastack slack-reply`
+command to send your response. Text output alone does NOT reach Slack —
+only the CLI command delivers your reply. If you don't run it, the human
+sees nothing.
 
 ```bash
-modastack slack-reply -w <workspace> -c <channel> "Your response"
-modastack slack-reply -w <workspace> -c <channel> -t <thread_ts> "Thread reply"
+# DM reply (no thread):
+modastack slack-reply -w T0952RZRZ0X -c D0B51JP1N4C "Your response"
+
+# Channel mention (reply in thread, use the event's ts):
+modastack slack-reply -w T0952RZRZ0X -c C_CHANNEL -t 1780165787.159589 "Your response"
+
+# Thread reply (use the event's thread_ts):
+modastack slack-reply -w T0952RZRZ0X -c C_CHANNEL -t 1780165787.159589 "Your response"
 ```
 
-- DM → reply to the channel (no thread)
-- Channel mention → reply in thread (use the event's `ts` as `--thread`)
-- Thread reply → reply in the same thread (use the event's `thread_ts`)
+Substitute the workspace, channel, and thread_ts from the event you received.
 
 ## How you take action
 
