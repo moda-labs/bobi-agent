@@ -95,7 +95,9 @@ def sync_main_branch(repo_path: Path) -> bool:
 def cleanup_worktree(issue_id: str, repo_path: Path) -> None:
     """Remove worktree, branch, and session for a completed issue."""
     branch = f"agent/{issue_id.lower()}"
-    worktree_path = repo_path / "worktrees" / issue_id.lower()
+    modastack_root = Path(__file__).parent.parent
+    repo_name = repo_path.name
+    worktree_path = modastack_root / "worktrees" / repo_name / issue_id.lower()
 
     if session_exists(issue_id):
         kill_session(issue_id)

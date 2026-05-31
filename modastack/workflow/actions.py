@@ -132,6 +132,13 @@ def _session_spawn(params: dict) -> dict:
 
     from pathlib import Path
     ok = sync_main_branch(Path(cwd))
+
+    # Ensure worktree parent directory exists under modastack repo
+    modastack_root = Path(__file__).parent.parent
+    repo_name = Path(cwd).name
+    worktree_parent = modastack_root / "worktrees" / repo_name
+    worktree_parent.mkdir(parents=True, exist_ok=True)
+
     log.info(f"Prepared repo {cwd} for sub-agent (issue {issue_id})")
     return {"ok": ok, "cwd": cwd}
 
