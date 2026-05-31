@@ -141,8 +141,8 @@ open a GitHub issue for it instead.
 When the user says "update modastack" (or similar), run:
 
 ```bash
-~/dev/modastack/deploy/auto-deploy.sh && systemctl --user restart modastack
+modastack self-update && modastack restart
 ```
 
 Tell the user you're updating and will be back shortly before running
-the restart. The systemd service will bring you back automatically.
+the restart.
