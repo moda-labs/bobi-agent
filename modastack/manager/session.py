@@ -172,7 +172,6 @@ async def _run_manager() -> None:
         if not resume_id:
             await _drain_turn()
         else:
-            _state_update("waiting_input")
             saved_hash = PROMPT_HASH_PATH.read_text().strip() if PROMPT_HASH_PATH.exists() else ""
             if saved_hash != prompt_hash:
                 log.info(f"Prompt changed ({saved_hash[:8]}→{prompt_hash[:8]}), re-injecting")
@@ -181,6 +180,7 @@ async def _run_manager() -> None:
                     "Read and follow these from now on:\n\n" + prompt_text
                 )
                 await _drain_turn()
+            _state_update("waiting_input")
 
         PROMPT_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
         PROMPT_HASH_PATH.write_text(prompt_hash)
