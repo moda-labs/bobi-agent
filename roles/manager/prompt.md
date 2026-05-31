@@ -84,14 +84,20 @@ Always use `-l` (literal), sleep between text and Enter, send Enter twice.
 
 ## Self-modification
 
-You can modify the modastack repo — skills, prompts, domain docs. Report
-what you changed. When you receive a new standing instruction, update the
-relevant prompt file so it persists.
+Never make local changes to the modastack repo. If you find issues —
+bugs, missing features, prompt improvements — ask the user if you should
+open a GitHub issue for it instead.
 
-## Updates
+## Self-update
 
-When you see `system.update_available`: summarize what's new, do NOT
-auto-update. Wait for approval, then run `modastack self-update`.
+When the user says "update modastack" (or similar), run:
+
+```bash
+~/dev/modastack/deploy/auto-deploy.sh && systemctl --user restart modastack
+```
+
+Tell the user you're updating and will be back shortly before running
+the restart. The systemd service will bring you back automatically.
 
 ## Context
 

@@ -365,7 +365,6 @@ if [[ "$OS" == "linux" ]] && [[ "$DISTRO" == "debian" ]]; then
     sudo apt-get update -qq >> "$LOG_FILE" 2>&1
 fi
 
-install_package tmux
 install_package git
 install_package curl
 install_package jq
@@ -662,24 +661,21 @@ repos: []
 CONFEOF
 success "Config written to ~/.modastack/config.yaml"
 
-# ── 11. Auto-deploy cron ────────────────────────────────────────────
-step 11 "Auto-deploy"
+# ── 11. Systemd service ─────────────────────────────────────────────
+step 11 "Process management"
 
-CRON_INSTALLED=false
-if ask_yn "Enable auto-deploy? (pulls + restarts on new commits to main)" "n"; then
-    CRON_CMD="* * * * * ${INSTALL_DIR}/deploy/check-deploy.sh"
-
-    if crontab -l 2>/dev/null | grep -q "check-deploy.sh"; then
-        success "Cron job already installed"
-    else
-        (crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -
-        success "Cron job installed — checking for updates every minute"
-    fi
-    CRON_INSTALLED=true
+SERVICE_INSTALLED=false
+if [[ "$OS" == "linux" ]]; then
+    info "Installing systemd user service..."
+    mkdir -p "$HOME/.config/systemd/user"
+    cp "$INSTALL_DIR/deploy/modastack.service" "$HOME/.config/systemd/user/modastack.service"
+    systemctl --user daemon-reload
+    systemctl --user enable modastack
+    loginctl enable-linger "$(whoami)" 2>/dev/null || true
+    SERVICE_INSTALLED=true
+    success "systemd service installed (auto-restarts on crash)"
 else
-    info "Skipped. To enable later:"
-    echo "    crontab -e"
-    echo "    * * * * * ${INSTALL_DIR}/deploy/check-deploy.sh"
+    info "systemd not available on macOS — use 'modastack start' to run manually"
 fi
 
 # ── Launch ───────────────────────────────────────────────────────────
@@ -689,23 +685,14 @@ if ask_yn "Start modastack now?" "n"; then
     info "Initializing..."
     modastack init --non-interactive >> "$LOG_FILE" 2>&1 || true
 
-    info "Starting modastack in tmux..."
-    tmux kill-session -t modastack-consumer 2>/dev/null || true
-    sleep 1
-    tmux new-session -d -s modastack-consumer \
-        "cd $INSTALL_DIR && source .venv/bin/activate && modastack start --webhooks"
-
-    tmux kill-session -t moda-manager 2>/dev/null || true
-    rm -f "$HOME/.modastack/manager/session_id"
-    sleep 1
-    tmux new-session -d -s moda-manager -x 200 -y 50 \
-        "cd $INSTALL_DIR && claude --dangerously-skip-permissions --name modastack-manager"
+    if $SERVICE_INSTALLED; then
+        systemctl --user restart modastack
+    else
+        nohup bash -c "cd $INSTALL_DIR && source .venv/bin/activate && modastack start" \
+            > "$HOME/.modastack/logs/modastack.log" 2>&1 &
+    fi
 
     sleep 3
-    tmux send-keys -t moda-manager Down 2>/dev/null || true
-    sleep 0.3
-    tmux send-keys -t moda-manager Enter 2>/dev/null || true
-
     STARTED=true
     success "modastack is running"
 fi
@@ -724,9 +711,9 @@ echo -e "  ${DIM}Tracking${RESET}     ${TASK_SYSTEM}"
 [[ -n "$SLACK_BOT_TOKEN" ]] && \
 echo -e "  ${DIM}Slack${RESET}        configured" || \
 echo -e "  ${DIM}Slack${RESET}        not configured"
-$CRON_INSTALLED && \
-echo -e "  ${DIM}Auto-deploy${RESET}  enabled" || \
-echo -e "  ${DIM}Auto-deploy${RESET}  disabled"
+$SERVICE_INSTALLED && \
+echo -e "  ${DIM}Service${RESET}      systemd (auto-restart)" || \
+echo -e "  ${DIM}Service${RESET}      manual"
 $STARTED && \
 echo -e "  ${DIM}Status${RESET}       running" || \
 echo -e "  ${DIM}Status${RESET}       not started"
@@ -739,9 +726,16 @@ echo ""
 echo "    # Register a repo"
 echo "    modastack setup ~/path/to/your-repo"
 echo ""
-if $STARTED; then
+if $STARTED && $SERVICE_INSTALLED; then
 echo "    # View logs"
-echo "    tmux attach -t modastack-consumer"
+echo "    journalctl --user -u modastack -f"
+echo ""
+echo "    # Restart"
+echo "    systemctl --user restart modastack"
+echo ""
+elif $STARTED; then
+echo "    # View logs"
+echo "    tail -f ~/.modastack/logs/modastack.log"
 echo ""
 else
 echo "    # Start modastack"

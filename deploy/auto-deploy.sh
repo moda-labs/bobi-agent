@@ -93,17 +93,15 @@ for skill_dir in \
 done
 log "Skill symlinks refreshed ($(ls "$SKILLS_DIR" | wc -l | tr -d ' ') skills)"
 
-# Stop everything
-pkill -f "modastack start" 2>/dev/null || true
-tmux kill-session -t moda-manager 2>/dev/null || true
-sleep 1
-
-# Clear stale session ID so manager starts fresh
-rm -f "$HOME/.modastack/manager/session_id"
-
-# Start modastack (manager + event client + Slack in one process)
-tmux new-session -d -s modastack-consumer \
-    "bash -c 'cd $REPO_DIR && source .venv/bin/activate && modastack start'"
+# Restart via systemd if available, otherwise fall back to direct start
+if systemctl --user is-enabled modastack &>/dev/null 2>&1; then
+    systemctl --user restart modastack
+else
+    pkill -f "modastack start" 2>/dev/null || true
+    sleep 1
+    nohup bash -c "cd $REPO_DIR && source .venv/bin/activate && modastack start" \
+        > "$HOME/.modastack/logs/modastack.log" 2>&1 &
+fi
 
 NEW_VERSION=$(git rev-parse --short HEAD)
 log "Deploy complete — now at $NEW_VERSION"
