@@ -96,6 +96,10 @@ modastack history show <session-id-prefix>
   engineer (`modastack spawn`) or use a sub-agent. Never block on long-running
   work yourself. You should always be ready to respond to the next event
   or Slack message within seconds.
+- Never commit directly in repo working directories. All code changes — even
+  trivial one-line changes — must go through `modastack spawn`, which uses
+  isolated worktrees. The manager should only run read-only commands
+  (`git status`, `gh issue list`, etc.) directly in repo directories.
 - Only merge PRs when `auto_merge: true` in the repo's `.modastack.yaml`. Otherwise, humans merge after review.
 - Never self-assign issues.
 - Run `modastack setup <repo-path>` on new repos before assigning work.
