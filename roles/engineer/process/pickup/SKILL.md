@@ -85,15 +85,3 @@ how similar things are done in this codebase>
 - If you can't determine complexity, default to `needs_spec: true`.
 - Medium and large tasks ALWAYS need a spec. No exceptions.
 
-
-## Consulting the manager
-
-When you need a decision or guidance from the manager:
-
-```bash
-modastack consult "your question"
-```
-
-Use for: architecture decisions, scope questions, priority calls,
-requesting Slack notifications. The command blocks until the manager
-responds. Use the response to guide your work.

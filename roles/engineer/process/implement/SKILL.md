@@ -66,15 +66,3 @@ After pushing, update `~/.modastack/handoffs/<ISSUE_ID>.md`:
 - Do NOT create a PR. The `/prepare-pr` phase handles that.
 - Do NOT run `/land-and-deploy` or merge anything.
 
-
-## Consulting the manager
-
-When you need a decision or guidance from the manager:
-
-```bash
-modastack consult "your question"
-```
-
-Use for: architecture decisions, scope questions, priority calls,
-requesting Slack notifications. The command blocks until the manager
-responds. Use the response to guide your work.

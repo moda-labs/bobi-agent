@@ -48,15 +48,3 @@ git push
 - `/review` on fixes is mandatory per `practices/code-review`.
 - Commit format per `practices/source-control-conventions`: `[ISSUE-ID] type: description`
 
-
-## Consulting the manager
-
-When you need a decision or guidance from the manager:
-
-```bash
-modastack consult "your question"
-```
-
-Use for: architecture decisions, scope questions, priority calls,
-requesting Slack notifications. The command blocks until the manager
-responds. Use the response to guide your work.
