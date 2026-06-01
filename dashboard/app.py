@@ -1,6 +1,9 @@
 """FastAPI dashboard — view layer for modastack."""
 
+import asyncio
+import json
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
@@ -67,6 +70,60 @@ async def api_send_message(request: Request):
         return {"ok": False, "error": "manager not running"}
     inject(text)
     return {"ok": True}
+
+
+@app.post("/api/consult")
+async def api_consult(request: Request):
+    body = await request.json()
+    question = body.get("question", "").strip()
+    timeout = body.get("timeout", 300)
+    source = body.get("source", "engineer")
+    correlation_id = body.get("correlation_id", "")
+
+    if not question:
+        return {"ok": False, "error": "empty question"}
+
+    from modastack.manager.session import is_alive
+    if not is_alive():
+        return {"ok": False, "error": "manager not running"}
+
+    result = await asyncio.to_thread(
+        _do_consult, question, timeout, source, correlation_id
+    )
+    return result
+
+
+def _do_consult(question, timeout, source, correlation_id):
+    from modastack.manager.session import inject, read_last_response, last_inject_error
+
+    _log_consultation(correlation_id, source, question)
+
+    ok = inject(
+        f"[CONSULTATION] {question}",
+        timeout=timeout,
+        wait_for_ready=timeout,
+    )
+    if not ok:
+        return {"ok": False, "error": f"inject failed: {last_inject_error()}"}
+
+    response = read_last_response() or ""
+    return {"ok": True, "response": response, "correlation_id": correlation_id}
+
+
+def _log_consultation(correlation_id: str, source: str, question: str):
+    events_log = Path.home() / ".modastack" / "manager" / "events.jsonl"
+    events_log.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "type": "consultation.request",
+        "source": source,
+        "data": {
+            "correlation_id": correlation_id,
+            "question": question[:500],
+        },
+    }
+    with open(events_log, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 @app.post("/api/engineers/{issue_id}/message")

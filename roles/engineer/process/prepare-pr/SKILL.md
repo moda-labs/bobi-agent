@@ -60,3 +60,16 @@ Then **STOP completely.** Your work is done. Do NOT proceed to any next step.
 - **NEVER run `/land-and-deploy`.** That skill merges and deploys — humans decide when to merge.
 - `/ship` handles test running, review, and PR creation — let it do its job.
 - After `/ship` creates the PR, **STOP.** Do not chain into any follow-up skill.
+
+
+## Consulting the manager
+
+When you need a decision or guidance from the manager:
+
+```bash
+modastack consult "your question"
+```
+
+Use for: architecture decisions, scope questions, priority calls,
+requesting Slack notifications. The command blocks until the manager
+responds. Use the response to guide your work.

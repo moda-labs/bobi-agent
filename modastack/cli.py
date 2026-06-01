@@ -244,6 +244,67 @@ def message(text, to):
         click.echo(f"Cannot reach manager dashboard: {e}", err=True)
 
 
+@main.command()
+@click.argument("question", required=True)
+@click.option("--timeout", default=300, type=int, help="Timeout in seconds")
+@click.option("--source", default="engineer", help="Source identifier")
+def consult(question, timeout, source):
+    """Ask the manager a question and block until it responds.
+
+    Used by engineer agents to get decisions, routing, or guidance
+    from the manager. Prints the response to stdout.
+
+    Usage:
+        modastack consult "Should we use regex or string matching?"
+        modastack consult "Draft a Slack message about the deploy" --timeout 60
+    """
+    import json as _json
+    import uuid
+    import urllib.request
+    import urllib.error
+
+    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)
+        except (ProcessLookupError, ValueError):
+            click.echo("Manager not running. Start with: modastack start", err=True)
+            raise SystemExit(1)
+    else:
+        click.echo("Manager not running. Start with: modastack start", err=True)
+        raise SystemExit(1)
+
+    payload = _json.dumps({
+        "question": question,
+        "correlation_id": str(uuid.uuid4()),
+        "timeout": timeout,
+        "source": source,
+    }).encode()
+
+    try:
+        req = urllib.request.Request(
+            "http://localhost:8095/api/consult",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout + 30) as resp:
+            result = _json.loads(resp.read())
+
+        if result.get("ok"):
+            click.echo(result.get("response", ""))
+        else:
+            click.echo(f"Consultation failed: {result.get('error', 'unknown')}", err=True)
+            raise SystemExit(1)
+
+    except urllib.error.URLError as e:
+        click.echo(f"Cannot reach manager dashboard: {e}", err=True)
+        raise SystemExit(1)
+    except TimeoutError:
+        click.echo(f"Consultation timed out after {timeout}s", err=True)
+        raise SystemExit(1)
+
+
 @main.command("slack-reply")
 @click.argument("text")
 @click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")

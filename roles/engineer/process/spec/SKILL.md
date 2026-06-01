@@ -72,3 +72,16 @@ and wait for approval.
 - The spec must be a superset of the original issue — retain all original context.
 - If the issue is too vague, ask for clarification (the manager will
   see you're idle and check on you).
+
+
+## Consulting the manager
+
+When you need a decision or guidance from the manager:
+
+```bash
+modastack consult "your question"
+```
+
+Use for: architecture decisions, scope questions, priority calls,
+requesting Slack notifications. The command blocks until the manager
+responds. Use the response to guide your work.

@@ -68,6 +68,7 @@ modastack workflow list        # list available workflows
 modastack status               # show active engineer sessions
 modastack events               # show recent events from the bus
 modastack message "text"       # inject a message into the manager session
+modastack consult "question"   # ask the manager a question, block until response
 modastack init                 # initialize global config
 modastack setup [path]         # set up a repo — install skills, store credentials, register
 modastack register <target>    # register a repo (local path or org/repo)

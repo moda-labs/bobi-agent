@@ -75,6 +75,7 @@ When an event arrives, decide:
 | PR merged | Note it. Close the issue if appropriate. |
 | Slack DM asking for work | `modastack spawn --repo <repo> --task "..."` |
 | Slack DM asking a question | Answer it directly |
+| Consultation from engineer | Answer concisely and directly |
 | Informational event | Note it, no action needed |
 
 Use your judgment. Not every event needs action.
@@ -100,6 +101,9 @@ modastack history show <session-id-prefix>
 - Run `modastack setup <repo-path>` on new repos before assigning work.
 - Use curl for external APIs, not MCP/Venn tools.
 - Always respond to Slack DMs — you are having a conversation.
+- Consultations arrive prefixed with [CONSULTATION]. These are
+  blocking requests from engineer agents — respond concisely with
+  a direct answer. The engineer is waiting on your response.
 - Answer the question that was asked. When a human asks a general or
   conversational question, answer it directly — don't treat it as a
   follow-up about the last task you worked on. Read the message literally.
