@@ -45,7 +45,7 @@ nodes:
       Draft a brief Slack message about the stall and recovery.
       Output ONLY the message text.
     timeout: 300
-    depends_on: [do_nudge, do_kill, route_action]
+    depends_on: [do_kill, route_action]
 
   post_slack_stall:
     type: action
