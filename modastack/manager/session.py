@@ -120,10 +120,12 @@ async def _drain_turn() -> None:
         log.error(f"Drain failed ({type(e).__name__}): {e}")
         _state = "error"
         registry.update(SESSION_NAME, status="error")
+        if _keep_alive is not None:
+            _keep_alive.set()
 
 
 async def _run_manager() -> None:
-    global _client, _state
+    global _client, _state, _keep_alive
 
     from claude_agent_sdk import (
         ClaudeAgentOptions,
@@ -221,10 +223,20 @@ def _manager_thread() -> None:
 
 
 def start_or_resume(cwd: str = None) -> bool:
-    global _thread
+    global _thread, _keep_alive
     if is_alive():
         log.info("Manager session already running")
         return True
+
+    if _keep_alive is not None:
+        _keep_alive.set()
+    if _thread is not None and _thread.is_alive():
+        log.info("Waiting for old manager thread to exit")
+        _thread.join(timeout=15)
+        if _thread.is_alive():
+            log.warning("Old manager thread did not exit — proceeding anyway")
+    _thread = None
+    _keep_alive = None
 
     _ready.clear()
     _thread = threading.Thread(target=_manager_thread, daemon=True, name="manager-sdk")
@@ -262,7 +274,7 @@ def inject(text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
     On failure, sets `last_inject_error()` with the reason so callers can
     surface it rather than reporting an opaque "inject failed".
     """
-    global _last_inject_error
+    global _state, _last_inject_error
 
     if not _client or not _loop:
         _last_inject_error = "manager not running"
@@ -300,6 +312,9 @@ def inject(text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
         except Exception as e:
             _last_inject_error = f"{type(e).__name__}: {e}"
             log.error(f"Manager inject failed ({type(e).__name__}): {e}")
+            _state = "error"
+            if _keep_alive is not None:
+                _keep_alive.set()
             future.cancel()
             return False
 

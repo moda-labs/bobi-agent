@@ -83,12 +83,45 @@ def _drain_loop():
             responder.handle(batch, response)
 
 
+def _kill_stale_instances():
+    """Kill any running modastack start processes besides ourselves."""
+    import subprocess as sp
+    import signal as sig
+    my_pid = os.getpid()
+
+    if PID_PATH.exists():
+        try:
+            old_pid = int(PID_PATH.read_text().strip())
+            if old_pid != my_pid:
+                os.kill(old_pid, sig.SIGTERM)
+                log.info(f"Killed stale instance from PID file (pid {old_pid})")
+        except (ProcessLookupError, ValueError, PermissionError):
+            pass
+
+    try:
+        result = sp.run(
+            ["pgrep", "-f", "modastack.*start"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            try:
+                pid = int(line.strip())
+                if pid != my_pid:
+                    os.kill(pid, sig.SIGTERM)
+                    log.info(f"Killed orphaned modastack process {pid}")
+            except (ProcessLookupError, ValueError, PermissionError):
+                pass
+    except (FileNotFoundError, sp.TimeoutExpired):
+        pass
+
+
 def run(**kwargs):
     """Start modastack: manager session + event client + drain loop."""
     import atexit
     import signal
 
     log.info("Modastack starting")
+    _kill_stale_instances()
     PID_PATH.write_text(str(os.getpid()))
     atexit.register(_cleanup_pid)
 
