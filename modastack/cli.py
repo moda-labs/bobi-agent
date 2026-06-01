@@ -212,20 +212,36 @@ def message(text, to):
                    f"To redirect {to}, cancel and re-run the phase.")
         return
 
-    from modastack.manager.session import is_alive, inject, detect_state
-    if not is_alive():
+    import urllib.request
+    import urllib.error
+
+    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)
+        except (ProcessLookupError, ValueError):
+            click.echo("Manager not running. Start with: modastack start")
+            return
+    else:
         click.echo("Manager not running. Start with: modastack start")
         return
 
-    state = detect_state()
-    if state != "waiting_input":
-        click.echo(f"Manager is busy ({state}). Message queued.")
-
-    ok = inject(text)
-    if ok:
-        click.echo(f"Sent: {text}")
-    else:
-        click.echo("Failed to send message.", err=True)
+    try:
+        import json as _json
+        req = urllib.request.Request(
+            "http://localhost:8095/api/message",
+            data=_json.dumps({"text": text}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = _json.loads(resp.read())
+        if result.get("ok"):
+            click.echo(f"Sent: {text}")
+        else:
+            click.echo(f"Failed: {result.get('error', 'unknown')}", err=True)
+    except urllib.error.URLError as e:
+        click.echo(f"Cannot reach manager dashboard: {e}", err=True)
 
 
 @main.command("slack-reply")

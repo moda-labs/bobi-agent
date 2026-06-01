@@ -52,6 +52,17 @@ def _notify_slack(config: GlobalConfig, text: str) -> None:
         pass
 
 
+def _wait_for_manager(timeout: int = 300) -> bool:
+    """Block until the manager is in waiting_input state."""
+    from modastack.manager.session import detect_state
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if detect_state() == "waiting_input":
+            return True
+        time.sleep(2)
+    return False
+
+
 def _drain_loop():
     """Drain the event queue and inject batched events into the manager."""
     from .event_client import event_queue, format_event_for_manager
@@ -59,6 +70,12 @@ def _drain_loop():
     from modastack.manager.session import inject, detect_state, read_last_response
 
     responder = SlackResponder()
+
+    log.info("Drain loop waiting for manager to finish startup")
+    if not _wait_for_manager():
+        log.error("Manager never became ready — drain loop exiting")
+        return
+    log.info("Manager ready — drain loop active")
 
     while True:
         event = event_queue.get()
@@ -72,8 +89,10 @@ def _drain_loop():
         text = "\n\n".join(lines)
 
         if detect_state() != "waiting_input":
-            log.warning(f"Manager not idle — dropping {len(batch)} event(s)")
-            continue
+            log.info(f"Manager busy — waiting before injecting {len(batch)} event(s)")
+            if not _wait_for_manager():
+                log.warning(f"Manager not ready after wait — dropping {len(batch)} event(s)")
+                continue
 
         log.info(f"Injecting {len(batch)} event(s)")
         ok = inject(text)
