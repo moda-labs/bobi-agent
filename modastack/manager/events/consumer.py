@@ -85,21 +85,28 @@ def _drain_loop():
         while not event_queue.empty():
             batch.append(event_queue.get_nowait())
 
-        lines = [format_event_for_manager(e) for e in batch]
-        text = "\n\n".join(lines)
+        slack_events = [e for e in batch if e.get("source") == "slack"]
+        other_events = [e for e in batch if e.get("source") != "slack"]
 
-        if detect_state() != "waiting_input":
-            log.info(f"Manager busy — waiting before injecting {len(batch)} event(s)")
-            if not _wait_for_manager():
-                log.warning(f"Manager not ready after wait — dropping {len(batch)} event(s)")
+        for group, is_slack in [(other_events, False), (slack_events, True)]:
+            if not group:
                 continue
 
-        log.info(f"Injecting {len(batch)} event(s)")
-        ok = inject(text)
+            lines = [format_event_for_manager(e) for e in group]
+            text = "\n\n".join(lines)
 
-        if ok and any(e.get("source") == "slack" for e in batch):
-            response = read_last_response() or ""
-            responder.handle(batch, response)
+            if detect_state() != "waiting_input":
+                log.info(f"Manager busy — waiting before injecting {len(group)} event(s)")
+                if not _wait_for_manager():
+                    log.warning(f"Manager not ready after wait — dropping {len(group)} event(s)")
+                    continue
+
+            log.info(f"Injecting {len(group)} event(s)")
+            ok = inject(text)
+
+            if ok and is_slack:
+                response = read_last_response() or ""
+                responder.handle(group, response)
 
 
 def _kill_stale_instances():

@@ -56,20 +56,27 @@ class TestDrainLoop:
         event_queue.put(self._make_event(source="slack", etype="slack.dm",
                                           text="hello", channel="D123", workspace="T123"))
 
-        def stop_after_inject(*args, **kwargs):
-            raise SystemExit()
-        mock_inject.side_effect = stop_after_inject
+        call_count = 0
+        def stop_after_slack_inject(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise SystemExit()
+            return True
+        mock_inject.side_effect = stop_after_slack_inject
 
         try:
             _drain_loop()
         except SystemExit:
             pass
 
-        mock_inject.assert_called_once()
-        injected_text = mock_inject.call_args[0][0]
-        assert "task.opened" in injected_text
-        assert "task.assigned" in injected_text
-        assert "slack.dm" in injected_text
+        assert mock_inject.call_count == 2
+        github_text = mock_inject.call_args_list[0][0][0]
+        slack_text = mock_inject.call_args_list[1][0][0]
+        assert "task.opened" in github_text
+        assert "task.assigned" in github_text
+        assert "slack.dm" not in github_text
+        assert "slack.dm" in slack_text
 
     def test_drops_events_when_manager_busy(self):
         from modastack.manager.events.event_client import event_queue
