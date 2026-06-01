@@ -9,6 +9,7 @@ deferred rounds, connection loss, and the defer hook itself.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,12 +23,17 @@ from modastack.subagent import (
     InputHandler,
     _build_check_prompt,
     _build_prompt,
+    _emit_lifecycle_event,
+    _emit_session_finished,
+    _emit_session_started,
     _make_defer_hook,
     _parse_check_output,
     _run_agent_supervised,
     _session_name,
+    _summarize_output,
     run_check_blocking,
     run_phase_blocking,
+    spawn_adhoc,
 )
 
 
@@ -737,6 +743,148 @@ class TestRunPhaseBlocking:
         # pickup timeout is 1800 (from PHASE_TIMEOUT)
         # The timeout arg is passed as the 5th positional arg
         assert calls[0][4] == 1800
+
+
+# ---------------------------------------------------------------------------
+# Tests: lifecycle events
+# ---------------------------------------------------------------------------
+
+class TestSummarizeOutput:
+    def test_takes_last_lines(self):
+        text = "\n".join(f"line {i}" for i in range(10))
+        out = _summarize_output(text, max_lines=3)
+        assert out == "line 7\nline 8\nline 9"
+
+    def test_skips_blank_lines(self):
+        out = _summarize_output("a\n\n\nb\n  \nc", max_lines=2)
+        assert out == "b\nc"
+
+    def test_truncates_chars(self):
+        out = _summarize_output("x" * 1000, max_chars=50)
+        assert len(out) == 50
+
+    def test_handles_empty(self):
+        assert _summarize_output("") == ""
+        assert _summarize_output(None) == ""
+
+
+class TestEmitLifecycleEvent:
+    def test_posts_via_cli_post_event(self):
+        """_emit_lifecycle_event posts (issue_id, repo, ...) via cli._post_event."""
+        with patch("modastack.cli._post_event") as post:
+            _emit_lifecycle_event("engineer/session.started",
+                                  {"issue_id": "X-1", "repo": "r", "task": ""})
+            # Runs on a daemon thread — wait for it to drain.
+            for t in threading.enumerate():
+                if t.name == "lifecycle-event":
+                    t.join(timeout=2)
+
+        post.assert_called_once()
+        event_type, data = post.call_args[0]
+        assert event_type == "engineer/session.started"
+        assert data["issue_id"] == "X-1"
+        # Empty values are stripped from the payload.
+        assert "task" not in data
+
+    def test_never_raises_on_post_failure(self):
+        with patch("modastack.cli._post_event", side_effect=RuntimeError("boom")):
+            _emit_lifecycle_event("engineer/session.failed", {"issue_id": "X-2"})
+            for t in threading.enumerate():
+                if t.name == "lifecycle-event":
+                    t.join(timeout=2)
+        # No exception escapes — test reaching here is the assertion.
+
+
+class TestSessionFinishedEvents:
+    def test_completed_event_on_success(self):
+        calls = []
+        result = AgentResult(
+            session_id="sdk-1", issue_id="DONE-1", phase="adhoc",
+            success=True, final_text="all\ndone\nPR up at #42",
+        )
+        with patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda *a: calls.append(a)):
+            _emit_session_finished(result, "moda-labs/app", "adhoc-x", 0.0)
+
+        assert len(calls) == 1
+        event_type, data = calls[0]
+        assert event_type == "engineer/session.completed"
+        assert data["issue_id"] == "DONE-1"
+        assert data["repo"] == "moda-labs/app"
+        assert data["session_id"] == "adhoc-x"
+        assert "PR up at #42" in data["summary"]
+        assert "duration" in data
+
+    def test_failed_event_on_error(self):
+        calls = []
+        result = AgentResult(
+            session_id="", issue_id="FAIL-1", phase="implement",
+            success=False, error="timeout after 60s",
+        )
+        with patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda *a: calls.append(a)):
+            _emit_session_finished(result, "r", "eng-fail-1-implement", 0.0)
+
+        event_type, data = calls[0]
+        assert event_type == "engineer/session.failed"
+        assert data["error"] == "timeout after 60s"
+
+
+class TestSpawnAdhocLifecycle:
+    def test_emits_started_and_completed(self):
+        events = []
+        expected = AgentResult(
+            session_id="s", issue_id="adhoc-x", phase="adhoc",
+            success=True, final_text="done",
+        )
+
+        async def _mock(*a, **kw):
+            return expected
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda et, d: events.append(et)):
+            spawn_adhoc(cwd="/tmp/test", task="Fix the login bug", name="adhoc-x")
+
+        assert events == ["engineer/session.started", "engineer/session.completed"]
+
+    def test_started_carries_task_and_repo(self):
+        captured = []
+        expected = AgentResult(session_id="s", issue_id="adhoc-y",
+                               phase="adhoc", success=True)
+
+        async def _mock(*a, **kw):
+            return expected
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda et, d: captured.append((et, d))):
+            spawn_adhoc(cwd="/repo/path", task="Investigate CI", name="adhoc-y")
+
+        et, data = captured[0]
+        assert et == "engineer/session.started"
+        assert data["task"] == "Investigate CI"
+        assert data["repo"] == "/repo/path"
+        assert data["session_id"] == "adhoc-y"
+
+
+class TestRunPhaseBlockingLifecycle:
+    def test_emits_failed_on_timeout(self):
+        events = []
+
+        async def _slow(*a, **kw):
+            await asyncio.sleep(999)
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_slow), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda et, d: events.append(et)):
+            run_phase_blocking(issue_id="SLOW-1", phase="implement",
+                               cwd="/tmp", timeout=1)
+
+        assert events == ["engineer/session.started", "engineer/session.failed"]
 
 
 # ---------------------------------------------------------------------------

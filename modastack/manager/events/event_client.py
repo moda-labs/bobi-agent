@@ -91,7 +91,8 @@ def format_event_for_manager(event: dict) -> str:
     lines = [f"Event: {source}/{etype}"]
     for key in ("issue_id", "pr_number", "title", "repo", "from",
                 "state", "branch", "conclusion", "text", "ref",
-                "channel", "workspace", "thread_ts"):
+                "channel", "workspace", "thread_ts",
+                "phase", "duration", "summary", "error"):
         val = data.get(key)
         if val:
             lines.append(f"  {key}: {val}")

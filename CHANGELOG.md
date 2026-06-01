@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 — 2026-06-01
+
+### Added
+- Engineer lifecycle events: `modastack spawn` and workflow-managed engineers now emit `engineer/session.started`, `engineer/session.completed`, and `engineer/session.failed` to the event bus, so the manager can narrate engineer activity without polling (#103)
+- Events post fire-and-forget over HTTP (`POST /api/event`) on a daemon thread, reusing the same path monitor checks use, so delivery never blocks or breaks an engineer run
+- Manager event formatter now surfaces `phase`, `duration`, `summary`, and `error` fields from lifecycle events
+
 ## 0.4.0 — 2026-06-01
 
 ### Added
