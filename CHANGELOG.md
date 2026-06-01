@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 — 2026-06-01
+
+### Added
+- Background monitoring system: scheduled polling tasks that fill webhook gaps by detecting conditions and injecting synthetic events into the manager's event stream (#100)
+- Three-tier monitor storage (built-in `monitors/defaults.yaml` → user `~/.modastack/monitors.yaml` → repo `.modastack.yaml`), merged with later tiers overriding by `name` and repo-level `enabled: false` opt-out
+- Built-in default monitors: PR conflict check (15m) and stale-PR check (1h), both working out of the box
+- `modastack monitor add/list/pause/remove` CLI for managing monitors across tiers
+- Native check runners (`pr_conflicts`, `stale_prs`) with per-condition deduplication; description-only monitors fall back to manager interpretation
+
 ## 0.3.3 — 2026-05-27
 
 ### Added

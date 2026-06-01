@@ -192,6 +192,12 @@ def run(**kwargs):
     drain_thread = threading.Thread(target=_drain_loop, daemon=True, name="drain-loop")
     drain_thread.start()
 
+    # Start background monitor scheduler (polls to fill webhook gaps,
+    # injecting synthetic events onto the same queue webhooks use).
+    from modastack.monitors.scheduler import MonitorScheduler
+    monitor_scheduler = MonitorScheduler()
+    monitor_scheduler.start()
+
     # Start dashboard in background
     from dashboard.app import run_dashboard
     dashboard_thread = threading.Thread(

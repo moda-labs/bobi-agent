@@ -1208,6 +1208,164 @@ def workflow_run(name, repo, issue, title, event_json):
 main.add_command(workflow)
 
 
+@main.group()
+def monitor():
+    """Background monitoring tasks — scheduled polling to fill webhook gaps."""
+    pass
+
+
+def _slugify(text: str) -> str:
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
+    return slug or "monitor"
+
+
+def _resolve_monitor_repo(repo: str) -> Path:
+    """Resolve a --repo argument (path or registered name) to a Path."""
+    candidate = Path(repo).expanduser()
+    if candidate.exists():
+        return candidate.resolve()
+    config = GlobalConfig.load()
+    for registered in config.repos:
+        if registered.name == repo or str(registered) == repo:
+            return registered
+        if "/" in repo and registered.name == repo.split("/")[-1]:
+            return registered
+    raise click.ClickException(f"Repo not found: {repo} (not a path or registered repo)")
+
+
+@monitor.command("list")
+def monitor_list():
+    """Show the merged view of monitors across all tiers, with source.
+
+    Usage:
+        modastack monitor list
+    """
+    from .monitors.registry import MonitorRegistry
+
+    registry = MonitorRegistry.load()
+    monitors = sorted(registry.all_monitors(), key=lambda m: (m.name, m.repo))
+    if not monitors:
+        click.echo("No monitors found.")
+        return
+
+    for m in monitors:
+        if m.source == "default":
+            tier = "default"
+        elif m.source == "user":
+            tier = "user"
+        else:
+            tier = f"repo:{Path(m.source).name}"
+        status = "active" if m.enabled else "paused"
+        scope = Path(m.repo).name if m.repo else "all repos"
+        runner = m.check or "manager"
+        click.echo(f"  {m.name:22s} {tier:16s} {m.interval:>5s}  {status:7s} "
+                   f"{scope:16s} {m.event:30s} [{runner}]")
+
+
+@monitor.command("add")
+@click.argument("name")
+@click.option("--interval", default="15m", help="How often to run (e.g. 5m, 15m, 1h)")
+@click.option("--description", default="", help="What the monitor checks (interpreted by the manager)")
+@click.option("--event", default=None, help="Synthetic event type to inject (default monitor/<name>)")
+@click.option("--check", default="", help="Native check runner (pr_conflicts, stale_prs)")
+@click.option("--url", default=None, help="URL the description references (e.g. deploy health)")
+@click.option("--repo", default=None, help="Scope to a repo (path or name); else applies globally")
+def monitor_add(name, interval, description, event, check, url, repo):
+    """Add a monitor, routing it to the right writable storage tier.
+
+    With --repo it lands in that repo's .modastack.yaml; otherwise in
+    ~/.modastack/monitors.yaml (applies across all repos).
+
+    Usage:
+        modastack monitor add "PR conflict check" --interval 15m \\
+            --description "Check open PRs for merge conflicts"
+        modastack monitor add deploy-health --interval 5m \\
+            --url https://example.com --repo jobtack
+    """
+    from .monitors.schema import Monitor, parse_interval
+    from .monitors.registry import MonitorRegistry
+
+    slug = _slugify(name)
+    try:
+        parse_interval(interval)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+
+    extra = {}
+    if url:
+        extra["url"] = url
+
+    m = Monitor(
+        name=slug,
+        description=description,
+        interval=interval,
+        event=event or f"monitor/{slug}",
+        check=check,
+        extra=extra,
+    )
+
+    if repo:
+        repo_path = _resolve_monitor_repo(repo)
+        MonitorRegistry.add_repo(m, repo_path)
+        click.echo(f"Added monitor '{slug}' to {repo_path}/.modastack.yaml")
+    else:
+        MonitorRegistry.add_global(m)
+        click.echo(f"Added global monitor '{slug}' to ~/.modastack/monitors.yaml")
+    click.echo(f"  interval={interval} event={m.event} "
+               f"check={check or 'manager-interpreted'}")
+
+
+@monitor.command("pause")
+@click.argument("name")
+@click.option("--repo", default=None, help="Pause only for a specific repo")
+def monitor_pause(name, repo):
+    """Disable a monitor (writes enabled: false to a writable tier).
+
+    Usage:
+        modastack monitor pause stale-pr-check
+        modastack monitor pause pr-conflict-check --repo jobtack
+    """
+    from .monitors.registry import MonitorRegistry
+
+    repo_path = _resolve_monitor_repo(repo) if repo else None
+    if MonitorRegistry.pause(name, repo_path):
+        where = f"{repo_path}/.modastack.yaml" if repo_path else "~/.modastack/monitors.yaml"
+        click.echo(f"Paused monitor '{name}' (enabled: false in {where})")
+    else:
+        click.echo(f"No monitor named '{name}' found.", err=True)
+        raise SystemExit(1)
+
+
+@monitor.command("remove")
+@click.argument("name")
+@click.option("--repo", default=None, help="Remove from a specific repo's config")
+def monitor_remove(name, repo):
+    """Remove a monitor from a user-writable tier.
+
+    Built-in defaults can't be deleted — pause them instead.
+
+    Usage:
+        modastack monitor remove deploy-health
+    """
+    from .monitors.registry import MonitorRegistry
+
+    repo_path = _resolve_monitor_repo(repo) if repo else None
+    result = MonitorRegistry.remove(name, repo_path)
+    if result == "removed":
+        click.echo(f"Removed monitor '{name}'.")
+    elif result == "default-only":
+        click.echo(f"'{name}' is a built-in default and can't be removed. "
+                   f"Use `modastack monitor pause {name}` to disable it.", err=True)
+        raise SystemExit(1)
+    else:
+        click.echo(f"No monitor named '{name}' found in a writable tier.", err=True)
+        raise SystemExit(1)
+
+
+main.add_command(monitor)
+
+
 @main.command()
 @click.option("--repo", required=True, help="Repo path or registered name")
 @click.option("--task", required=True, help="Task description for the engineer")
