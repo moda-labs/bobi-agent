@@ -16,6 +16,33 @@ EVENTS_PATH = Path.home() / ".modastack" / "manager" / "events.jsonl"
 DECISIONS_PATH = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
 ACTIVITY_PATH = ACTIVITY_DIR / "activity.jsonl"
 PID_PATH = GLOBAL_CONFIG_DIR / "modastack.pid"
+MODASTACK_LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
+
+
+def _tail_lines(path: Path, limit: int) -> list[str]:
+    """Return the last `limit` lines of a file without reading it whole.
+
+    Seeks backward from the end in chunks so an unbounded log (the
+    modastack daemon's stdout sink never rotates) stays cheap to poll.
+    """
+    if not path.exists():
+        return []
+    block = 64 * 1024
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        data = b""
+        newlines = 0
+        pos = size
+        while pos > 0 and newlines <= limit:
+            read = min(block, pos)
+            pos -= read
+            f.seek(pos)
+            chunk = f.read(read)
+            data = chunk + data
+            newlines += chunk.count(b"\n")
+    text = data.decode("utf-8", errors="replace")
+    return text.splitlines()[-limit:]
 
 
 def _read_jsonl_tail(path: Path, limit: int) -> list[dict]:
@@ -74,6 +101,24 @@ def _is_running() -> bool:
         return False
 
 
+def _activity_snippet(session: str, length: int = 120) -> str:
+    """Most recent assistant response text for a session, truncated.
+
+    Only scans the tail of the log — the latest response is near the end,
+    and these files are polled on the async /api/status path.
+    """
+    log_path = ACTIVITY_DIR / "logs" / f"{session}.jsonl"
+    for line in reversed(_tail_lines(log_path, 200)):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("event") == "response":
+            text = (entry.get("text") or "").strip().replace("\n", " ")
+            return text[:length] + ("…" if len(text) > length else "")
+    return ""
+
+
 def get_manager_status() -> dict:
     from modastack.sdk import load_session_id
     running = _is_running()
@@ -85,6 +130,8 @@ def get_manager_status() -> dict:
         "alive": running,
         "state": status,
         "session_id": session_id[:8] if session_id else "",
+        "activity": _activity_snippet("moda-manager"),
+        "last_activity": entry.last_activity if entry else 0,
     }
 
 
@@ -102,8 +149,15 @@ def get_sessions() -> list[dict]:
             "cwd": e.cwd,
             "status": e.status,
             "started_at": e.started_at,
+            "last_activity": e.last_activity,
+            "activity": _activity_snippet(e.name),
         })
     return result
+
+
+def read_modastack_log(limit: int = 200) -> list[str]:
+    """Return the last `limit` lines of the modastack process log."""
+    return _tail_lines(MODASTACK_LOG_PATH, limit)
 
 
 def get_conversation_log(limit: int = 50, session: str = "moda-manager") -> list[dict]:

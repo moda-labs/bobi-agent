@@ -46,6 +46,17 @@
   .events-badge { font-size: 10px; background: var(--border); padding: 1px 6px; border-radius: 10px; }
 
   .empty-state { padding: 20px 14px; color: var(--text-muted); font-size: 12px; text-align: center; }
+  .card-activity { font-size: 11px; color: var(--text-muted); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
+  .badge-phase { background: rgba(88,166,255,0.12); color: var(--accent); }
+
+  /* Logs view (modastack process log) */
+  .logs-view { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+  .logs-view.active { display: flex; }
+  .syslog-scroll { flex: 1; overflow-y: auto; padding: 8px 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; }
+  .syslog-line { white-space: pre-wrap; word-break: break-word; color: var(--text-muted); padding: 1px 0; }
+  .syslog-line.lvl-error { color: var(--red); }
+  .syslog-line.lvl-warning { color: var(--yellow); }
+  .syslog-line.lvl-info { color: var(--text); }
 
   /* Main + DAG panel */
   .main-area { display: flex; height: 100%; overflow: hidden; }
@@ -153,6 +164,10 @@
           <button id="btn-older">&rarr;</button>
         </div>
       </div>
+      <div class="logs-view" id="logs-view">
+        <div class="log-header">Modastack logs <span style="font-weight:400;color:var(--text-muted)">— ~/.modastack/modastack.log</span></div>
+        <div class="syslog-scroll" id="syslog-scroll"></div>
+      </div>
     </div>
     <div class="dag-panel" id="dag-panel">
       <div class="dag-title">Workflow</div>
@@ -162,7 +177,9 @@
 </div>
 <script>
 const PAGE_SIZE = 50;
-let offset = 0, totalEvents = 0, currentView = 'manager', selectedIssue = null;
+let offset = 0, totalEvents = 0, currentView = 'manager';
+let selectedSession = null, selectedIssue = null, selectedTitle = null;
+let engineersByName = {};
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function sourceClass(s) { return 'source-' + (s||'').replace(/[^a-z-]/g,''); }
 function eventDetail(d) {
@@ -171,17 +188,29 @@ function eventDetail(d) {
 }
 async function fetchJSON(u) { return (await fetch(u)).json(); }
 
-function selectManager() { currentView='manager'; selectedIssue=null; refresh(); }
-function selectEngineer(issueId) { currentView='engineer'; selectedIssue=issueId; refresh(); }
-function selectEvents() { currentView='events'; selectedIssue=null; refresh(); }
+function selectManager() { currentView='manager'; selectedSession=null; selectedIssue=null; refresh(); }
+function selectEngineer(name) {
+  const e = engineersByName[name] || {};
+  currentView='engineer'; selectedSession=name; selectedIssue=e.issue_id||null; selectedTitle=e.title||('#'+(e.issue_id||'')); refresh();
+}
+function selectEvents() { currentView='events'; selectedSession=null; selectedIssue=null; refresh(); }
+function selectLogs() { currentView='logs'; selectedSession=null; selectedIssue=null; refresh(); }
 
 function refresh() {
-  document.getElementById('log-view').classList.toggle('active', currentView!=='events');
+  const isLog = currentView==='manager' || currentView==='engineer';
+  document.getElementById('log-view').classList.toggle('active', isLog);
   document.getElementById('events-view').classList.toggle('active', currentView==='events');
-  document.getElementById('dag-panel').classList.toggle('visible', currentView==='engineer');
+  document.getElementById('logs-view').classList.toggle('active', currentView==='logs');
+  document.getElementById('dag-panel').classList.toggle('visible', currentView==='engineer' && !!selectedIssue);
   if(currentView==='manager') { document.getElementById('log-header').textContent='Manager'; loadLog('moda-manager'); }
-  else if(currentView==='engineer' && selectedIssue) { document.getElementById('log-header').textContent='Engineer #'+selectedIssue; loadLog('eng-'+selectedIssue.toLowerCase()); }
+  else if(currentView==='engineer' && selectedSession) {
+    document.getElementById('log-header').textContent = (selectedTitle || ('#'+selectedIssue));
+    loadLog(selectedSession);
+  }
   else if(currentView==='events') { loadEvents(); }
+  else if(currentView==='logs') { loadSysLog(); }
+  const input = document.getElementById('chat-input');
+  if (input) input.placeholder = currentView==='engineer' ? 'Send feedback to this engineer…' : 'Send a message to the manager…';
   loadStatus();
 }
 
@@ -193,33 +222,45 @@ async function loadStatus() {
 
     let html = '';
     // Manager card
+    const mgrActivity = d.manager.activity ? `<div class="card-activity">${esc(d.manager.activity)}</div>` : '';
     html += `<div class="sidebar-section">
       <div class="card ${currentView==='manager'?'active':''}" onclick="selectManager()">
         <div class="card-label">Manager</div>
         <div class="card-sub"><span class="dot ${d.manager.alive?'alive':'dead'}"></span>${d.manager.alive?d.manager.state:'stopped'}</div>
+        ${mgrActivity}
       </div>
     </div>`;
 
-    // Engineer cards
+    // Engineer cards (one per active engineer session)
+    engineersByName = {};
+    html += '<div class="sidebar-section">';
     if (d.engineers && d.engineers.length) {
-      html += '<div class="sidebar-section">';
       for (const a of d.engineers) {
-        const active = currentView==='engineer' && selectedIssue===a.issue_id;
+        engineersByName[a.name] = a;
+        const active = currentView==='engineer' && selectedSession===a.name;
         const title = a.title || `#${a.issue_id}`;
         const repo = a.repo ? a.repo.split('/').pop() : '';
-        html += `<div class="card ${active?'active':''}" onclick="selectEngineer('${esc(a.issue_id)}')">
+        const activity = a.activity ? `<div class="card-activity">${esc(a.activity)}</div>` : '';
+        html += `<div class="card ${active?'active':''}" onclick="selectEngineer('${esc(a.name)}')">
           <div class="card-label">${esc(title)}</div>
           <div class="card-sub">
             ${repo ? '<span>'+esc(repo)+'</span>' : ''}
+            ${a.phase ? '<span class="badge badge-phase">'+esc(a.phase)+'</span>' : ''}
             <span class="badge badge-${a.status}">${a.status}</span>
           </div>
+          ${activity}
         </div>`;
       }
-      html += '</div>';
+    } else {
+      html += '<div class="empty-state">No active engineers</div>';
     }
+    html += '</div>';
 
-    // Events card (always bottom)
+    // Logs + Events cards (always bottom)
     html += `<div class="sidebar-section" style="margin-top:auto;">
+      <div class="events-card ${currentView==='logs'?'active':''}" onclick="selectLogs()">
+        <div class="card-label">Modastack logs</div>
+      </div>
       <div class="events-card ${currentView==='events'?'active':''}" onclick="selectEvents()">
         <div class="card-label">Events</div>
       </div>
@@ -233,8 +274,8 @@ async function loadStatus() {
     const indicator = document.getElementById('working-indicator');
     let isWorking = false;
     if (currentView==='manager' && d.manager.state==='running') isWorking = true;
-    if (currentView==='engineer' && selectedIssue) {
-      const eng = (d.engineers||[]).find(e => e.issue_id===selectedIssue);
+    if (currentView==='engineer' && selectedSession) {
+      const eng = (d.engineers||[]).find(e => e.name===selectedSession);
       if (eng && eng.status==='running') isWorking = true;
     }
     if (isWorking) {
@@ -287,6 +328,24 @@ async function loadWorkflow(issueId) {
   } catch(e) { content.innerHTML=''; }
 }
 
+function syslogLevel(line) {
+  if (/\[ERROR\]/.test(line)) return 'lvl-error';
+  if (/\[WARNING\]|\[WARN\]/.test(line)) return 'lvl-warning';
+  if (/\[INFO\]/.test(line)) return 'lvl-info';
+  return '';
+}
+
+async function loadSysLog() {
+  const el = document.getElementById('syslog-scroll');
+  try {
+    const d = await fetchJSON('/api/logs?limit=500');
+    if (!d.lines || !d.lines.length) { el.innerHTML='<div class="empty-state">No logs</div>'; return; }
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    el.innerHTML = d.lines.map(l => `<div class="syslog-line ${syslogLevel(l)}">${esc(l)}</div>`).join('');
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  } catch(e) { el.innerHTML='<div class="empty-state">Failed to load logs</div>'; }
+}
+
 async function loadEvents() {
   const source = document.getElementById('filter-source').value;
   const type = document.getElementById('filter-type').value;
@@ -324,10 +383,11 @@ async function sendMessage() {
   if(!text) return;
   btn.disabled=true; input.disabled=true;
   try {
-    const url = currentView==='engineer' && selectedIssue ? `/api/engineers/${selectedIssue}/message` : '/api/message';
+    const url = currentView==='engineer' && selectedIssue ? `/api/engineers/${encodeURIComponent(selectedIssue)}/message` : '/api/message';
     await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text}) });
     input.value='';
-    setTimeout(loadLog, 1000);
+    const sess = currentView==='engineer' && selectedSession ? selectedSession : 'moda-manager';
+    setTimeout(()=>loadLog(sess), 1000);
   } catch(e) {}
   finally { btn.disabled=false; input.disabled=false; input.focus(); }
 }
@@ -343,7 +403,8 @@ loadStatus(); loadLog(); loadSources();
 setInterval(loadStatus, 5000);
 setInterval(()=>{
   if(currentView==='manager') loadLog('moda-manager');
-  else if(currentView==='engineer'&&selectedIssue) loadLog('eng-'+selectedIssue.toLowerCase());
+  else if(currentView==='engineer'&&selectedSession) loadLog(selectedSession);
+  else if(currentView==='logs') loadSysLog();
 }, 5000);
 setInterval(loadSources, 30000);
 </script>
