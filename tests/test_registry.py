@@ -32,6 +32,19 @@ class TestSessionEntry:
         e = SessionEntry(name="moda-manager", role="manager")
         assert e.role == "manager"
 
+    def test_requested_by_defaults_empty(self):
+        e = SessionEntry(name="test")
+        assert e.requested_by == {}
+
+    def test_requested_by_roundtrips(self, tmp_registry):
+        requester = {"from": "Alice", "user_id": "U1", "channel": "C1",
+                     "thread_ts": "171.42"}
+        tmp_registry.register(SessionEntry(name="adhoc-x", requested_by=requester))
+        # Force a reload from disk to prove it survives serialization.
+        fresh = type(tmp_registry)()
+        got = fresh.get("adhoc-x")
+        assert got.requested_by == requester
+
 
 class TestSessionRegistry:
     def test_register_and_get(self, tmp_registry):

@@ -59,6 +59,42 @@ class TestNormalizeGitHub:
         result = _normalize_event(data)
         assert result["type"] == "git.push"
 
+    def test_push_maps_sender_to_from(self):
+        data = {
+            "source": "github", "type": "github.push",
+            "payload": {"ref": "refs/heads/main", "sender": {"login": "zach"},
+                        "repository": {"full_name": "moda-labs/test"}},
+        }
+        result = _normalize_event(data)
+        assert result["data"]["from"] == "zach"
+
+    def test_issue_attributes_sender_as_from(self):
+        data = {
+            "source": "github", "type": "github.issues",
+            "payload": {
+                "action": "opened",
+                "sender": {"login": "alice"},
+                "repository": {"full_name": "moda-labs/test"},
+                "issue": {"number": 7, "title": "Bug", "labels": [],
+                          "assignees": [], "state": "open"},
+            },
+        }
+        result = _normalize_event(data)
+        assert result["data"]["from"] == "alice"
+
+    def test_pr_falls_back_to_author_when_no_sender(self):
+        data = {
+            "source": "github", "type": "github.pull_request",
+            "payload": {
+                "action": "opened",
+                "repository": {"full_name": "moda-labs/test"},
+                "pull_request": {"number": 3, "title": "Fix", "state": "open",
+                                 "user": {"login": "bob"}, "head": {"ref": "fix"}},
+            },
+        }
+        result = _normalize_event(data)
+        assert result["data"]["from"] == "bob"
+
     def test_unknown_github_event(self):
         data = {
             "source": "github", "type": "github.star",
@@ -86,6 +122,19 @@ class TestNormalizeLinear:
         assert result["data"]["issue_id"] == "ENG-42"
         assert result["data"]["state"] == "In Progress"
 
+    def test_attributes_assignee_as_from(self):
+        data = {
+            "source": "linear", "type": "linear.Issue.update",
+            "payload": {
+                "data": {
+                    "identifier": "ENG-9", "title": "Caching",
+                    "assignee": {"name": "Dana"},
+                },
+            },
+        }
+        result = _normalize_event(data)
+        assert result["data"]["from"] == "Dana"
+
 
 class TestNormalizeSlack:
 
@@ -107,6 +156,8 @@ class TestNormalizeSlack:
         result = _normalize_event(data)
         assert result["type"] == "slack.dm"
         assert result["data"]["from"] == "Zach"
+        # The stable identity is preserved alongside the resolved name.
+        assert result["data"]["user_id"] == "U123"
         assert result["data"]["text"] == "hello"
         assert result["data"]["workspace"] == "T123"
         assert result["data"]["channel"] == "D456"
@@ -166,6 +217,29 @@ class TestFormatEventForManager:
         }
         text = format_event_for_manager(event)
         assert "thread_ts" not in text
+
+    def test_renders_user_id(self):
+        event = {
+            "type": "slack.dm", "source": "slack",
+            "data": {"from": "Alice", "user_id": "U0ABC", "text": "hi",
+                     "channel": "D456", "workspace": "T123"},
+        }
+        text = format_event_for_manager(event)
+        assert "user_id: U0ABC" in text
+
+    def test_renders_requested_by(self):
+        event = {
+            "type": "engineer/session.completed", "source": "engineer",
+            "data": {
+                "issue_id": "adhoc-x", "summary": "PR up",
+                "requested_by": {"from": "Alice", "user_id": "U0ABC",
+                                 "channel": "C0SHARED", "thread_ts": "171.42"},
+            },
+        }
+        text = format_event_for_manager(event)
+        assert "requested_by: Alice" in text
+        assert "channel C0SHARED" in text
+        assert "thread 171.42" in text
 
 
 class TestEventQueue:

@@ -89,7 +89,7 @@ def format_event_for_manager(event: dict) -> str:
     data = event.get("data", {})
 
     lines = [f"Event: {source}/{etype}"]
-    for key in ("issue_id", "pr_number", "title", "repo", "from",
+    for key in ("issue_id", "pr_number", "title", "repo", "from", "user_id",
                 "state", "branch", "conclusion", "text", "ref",
                 "channel", "workspace", "thread_ts",
                 "phase", "duration", "summary", "error"):
@@ -100,8 +100,29 @@ def format_event_for_manager(event: dict) -> str:
         lines.append(f"  labels: {', '.join(data['labels'])}")
     if data.get("url") or data.get("pr_url"):
         lines.append(f"  url: {data.get('url') or data.get('pr_url')}")
+    if data.get("requested_by"):
+        lines.append(f"  requested_by: {_format_requester(data['requested_by'])}")
 
     return "\n".join(lines)
+
+
+def _format_requester(requester: dict) -> str:
+    """Render a `requested_by` block into a one-line human-readable note.
+
+    Gives the manager enough to route async results (e.g. a spawned-work
+    completion) back to the originating Slack user and thread.
+    """
+    if not isinstance(requester, dict):
+        return str(requester)
+    name = requester.get("from") or requester.get("user_id") or "unknown"
+    parts = [name]
+    if requester.get("user_id") and requester.get("from"):
+        parts.append(f"(user {requester['user_id']})")
+    if requester.get("channel"):
+        parts.append(f"in channel {requester['channel']}")
+    if requester.get("thread_ts"):
+        parts.append(f"thread {requester['thread_ts']}")
+    return " ".join(parts)
 
 
 def _normalize_event(event_data: dict) -> dict | None:
@@ -122,6 +143,10 @@ def _normalize_event(event_data: dict) -> dict | None:
 def _normalize_github(event_type: str, payload: dict) -> dict | None:
     action = payload.get("action", "")
     repo = (payload.get("repository") or {}).get("full_name", "")
+    # The webhook `sender` is the human who triggered the action — surface it
+    # as `from` so issue/PR/push events have a consistent originator the
+    # manager can attribute work to (best-effort; empty for bot/system events).
+    sender = (payload.get("sender") or {}).get("login", "")
 
     if event_type == "github.issues":
         issue = payload.get("issue", {})
@@ -135,6 +160,7 @@ def _normalize_github(event_type: str, payload: dict) -> dict | None:
                 "assignees": [a["login"] for a in issue.get("assignees", [])],
                 "state": issue.get("state", ""),
                 "repo": repo,
+                "from": sender,
                 "url": issue.get("html_url", ""),
             },
         }
@@ -165,6 +191,8 @@ def _normalize_github(event_type: str, payload: dict) -> dict | None:
                 "branch": pr.get("head", {}).get("ref", ""),
                 "state": pr.get("state", ""),
                 "merged": pr.get("merged", False),
+                # Actor who triggered the PR action; falls back to the PR author.
+                "from": sender or (pr.get("user") or {}).get("login", ""),
                 "pr_url": pr.get("html_url", ""),
             },
         }
@@ -234,7 +262,8 @@ def _normalize_github(event_type: str, payload: dict) -> dict | None:
             "data": {
                 "ref": payload.get("ref", ""),
                 "repo": repo,
-                "sender": payload.get("sender", {}).get("login", ""),
+                "from": sender,
+                "sender": sender,
             },
         }
 
@@ -246,6 +275,8 @@ def _normalize_github(event_type: str, payload: dict) -> dict | None:
 
 def _normalize_linear(event_type: str, payload: dict) -> dict | None:
     data = payload.get("data", {})
+    # Best-effort human attribution: the assignee, falling back to the creator.
+    actor = (data.get("assignee") or {}) or (data.get("creator") or {})
     return {
         "type": event_type, "source": "linear",
         "data": {
@@ -253,6 +284,7 @@ def _normalize_linear(event_type: str, payload: dict) -> dict | None:
             "title": data.get("title", ""),
             "state": (data.get("state", {}) or {}).get("name", ""),
             "team_key": (data.get("team", {}) or {}).get("key", ""),
+            "from": actor.get("name", "") or actor.get("displayName", ""),
         },
     }
 
@@ -270,6 +302,9 @@ def _normalize_slack(event_type: str, payload: dict, workspace: str) -> dict | N
         "type": event_type, "source": "slack",
         "data": {
             "from": user_name,
+            # Stable Slack identity (Uxxxx) the manager keys on — survives
+            # display-name changes. Already resolved above; no longer discarded.
+            "user_id": user_id,
             "text": text,
             "channel": payload.get("channel", ""),
             "channel_type": payload.get("channel_type", ""),

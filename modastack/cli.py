@@ -1504,7 +1504,11 @@ main.add_command(monitor)
 @click.option("--post-event", "post_event", default=None,
               help="If a non-interactive check reports a finding, post a synthetic "
                    "event of this type to the event bus (e.g. monitor/deploy.down).")
-def spawn(repo, task, timeout, non_interactive, post_event):
+@click.option("--requested-by", "requested_by", default=None,
+              help="JSON identity of who requested this work (e.g. the Slack user "
+                   "and thread), so completion notices route back to them. Example: "
+                   '\'{"from":"Alice","user_id":"U1","channel":"C1","thread_ts":"123"}\'')
+def spawn(repo, task, timeout, non_interactive, post_event, requested_by):
     """Spawn an ad-hoc engineer agent, or a non-interactive check, in a repo.
 
     Usage:
@@ -1536,10 +1540,24 @@ def spawn(repo, task, timeout, non_interactive, post_event):
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
         return
 
+    requester: dict = {}
+    if requested_by:
+        try:
+            parsed = json.loads(requested_by)
+            if isinstance(parsed, dict):
+                requester = parsed
+            else:
+                click.echo("--requested-by must be a JSON object", err=True)
+                raise SystemExit(1)
+        except json.JSONDecodeError:
+            click.echo("--requested-by must be valid JSON", err=True)
+            raise SystemExit(1)
+
     click.echo(f"Spawning engineer in {cwd}...")
 
     from .subagent import spawn_adhoc
-    result = spawn_adhoc(cwd=cwd, task=task, timeout=timeout)
+    result = spawn_adhoc(cwd=cwd, task=task, timeout=timeout,
+                         requested_by=requester)
 
     if result.success:
         click.echo(f"Completed in {result.duration_ms/1000:.0f}s (${result.total_cost_usd:.2f})")

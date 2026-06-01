@@ -148,6 +148,7 @@ def _emit_lifecycle_event(event_type: str, data: dict[str, Any]) -> None:
 
 def _emit_session_started(
     issue_id: str, repo: str, task: str, session_id: str, phase: str = "",
+    requested_by: dict | None = None,
 ) -> None:
     _emit_lifecycle_event("engineer/session.started", {
         "issue_id": issue_id,
@@ -155,12 +156,14 @@ def _emit_session_started(
         "task": (task or "")[:500],
         "session_id": session_id,
         "phase": phase,
+        "requested_by": requested_by or None,
         "text": f"Engineer started working on {issue_id}",
     })
 
 
 def _emit_session_finished(
     result: "AgentResult", repo: str, session_id: str, started_at: float,
+    requested_by: dict | None = None,
 ) -> None:
     duration = round(time.time() - started_at, 1)
     if result.success:
@@ -172,6 +175,7 @@ def _emit_session_finished(
             "phase": result.phase,
             "duration": duration,
             "summary": summary,
+            "requested_by": requested_by or None,
             "text": f"Engineer finished {result.issue_id} in {duration:.0f}s",
         })
     else:
@@ -183,6 +187,7 @@ def _emit_session_finished(
             "phase": result.phase,
             "duration": duration,
             "error": error,
+            "requested_by": requested_by or None,
             "text": f"Engineer failed on {result.issue_id}: {error}",
         })
 
@@ -384,21 +389,29 @@ def spawn_adhoc(
     task: str,
     timeout: int = 3600,
     name: str | None = None,
+    requested_by: dict | None = None,
 ) -> AgentResult:
-    """Spawn a one-off engineer agent with a freeform task prompt."""
+    """Spawn a one-off engineer agent with a freeform task prompt.
+
+    `requested_by` carries the originating identity (e.g. the Slack user and
+    thread that asked for the work) so completion notices can route back to
+    them; it is persisted on the SessionEntry and echoed on lifecycle events.
+    """
     import hashlib
     short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
     agent_name = name or f"adhoc-{short_hash}"
+    requested_by = requested_by or {}
 
     registry = get_registry()
     registry.register(SessionEntry(
         name=agent_name, session_id="", role="engineer",
         issue_id=agent_name, title=task[:80], phase="adhoc",
-        cwd=cwd, status="starting",
+        cwd=cwd, status="starting", requested_by=requested_by,
     ))
 
     started_at = time.time()
-    _emit_session_started(agent_name, cwd, task, agent_name, phase="adhoc")
+    _emit_session_started(agent_name, cwd, task, agent_name, phase="adhoc",
+                          requested_by=requested_by)
 
     try:
         result = asyncio.run(
@@ -417,7 +430,8 @@ def spawn_adhoc(
             success=False, error=f"timeout after {timeout}s",
         )
 
-    _emit_session_finished(result, cwd, agent_name, started_at)
+    _emit_session_finished(result, cwd, agent_name, started_at,
+                           requested_by=requested_by)
     return result
 
 
