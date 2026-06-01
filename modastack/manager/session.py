@@ -37,6 +37,10 @@ _ready = threading.Event()
 _keep_alive: asyncio.Event | None = None
 _last_response: str = ""
 _state: str = "stopped"
+_last_inject_error: str = ""
+# Serializes inject() across callers (event drain loop + workflow
+# consultation nodes run on different threads but share one SDK client).
+_inject_lock = threading.Lock()
 
 
 def _load_manager_prompt() -> str:
@@ -90,6 +94,10 @@ async def _drain_turn() -> None:
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
     registry = get_registry()
+    # Clear the previous turn's reply before draining. Otherwise a turn that
+    # ends without emitting any assistant text (e.g. tool-only) leaves a stale
+    # response in place, and a consultation node reads the wrong answer.
+    _last_response = ""
     _state_update("working")
 
     try:
@@ -238,34 +246,67 @@ async def _inject_and_drain(text: str) -> None:
     log.info(f"inject: drain complete, state={_state}")
 
 
-def inject(text: str, timeout: int = 300) -> bool:
-    """Inject text into the manager session.
+def inject(text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
+    """Inject text into the manager session and block until its turn ends.
 
-    Blocks until the manager finishes its turn (up to `timeout` seconds).
-    Called only by the consumer's drain loop — never concurrently.
+    Serialized via `_inject_lock`: the event drain loop and workflow
+    consultation nodes call this from different threads, and overlapping
+    queries on the single shared SDK client corrupt the stream.
+
+    `wait_for_ready` is how many seconds to wait for a busy manager to
+    return to `waiting_input` before giving up. It defaults to 0, which
+    fails fast — preserving the drain loop's drop-on-busy behavior.
+    Workflow consultation nodes pass a positive value so they queue behind
+    whatever the manager is currently doing instead of failing outright.
+
+    On failure, sets `last_inject_error()` with the reason so callers can
+    surface it rather than reporting an opaque "inject failed".
     """
+    global _last_inject_error
+
     if not _client or not _loop:
+        _last_inject_error = "manager not running"
         log.warning("Manager not running — cannot inject")
         return False
 
-    if _state != "waiting_input":
-        log.warning(f"Manager not ready for input (state={_state}) — dropping inject")
-        return False
+    with _inject_lock:
+        deadline = time.monotonic() + max(0, wait_for_ready)
+        while _state != "waiting_input":
+            if _state in ("stopped", "error"):
+                _last_inject_error = f"manager state={_state}"
+                log.warning(f"Manager not injectable (state={_state}) — dropping inject")
+                return False
+            if time.monotonic() >= deadline:
+                _last_inject_error = f"manager busy (state={_state})"
+                log.warning(
+                    f"Manager not ready for input (state={_state}) after "
+                    f"{wait_for_ready}s — dropping inject"
+                )
+                return False
+            time.sleep(1)
 
-    log.info(f"Inject: {text[:100]}")
-    log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
-    future = asyncio.run_coroutine_threadsafe(_inject_and_drain(text), _loop)
-    try:
-        future.result(timeout=timeout)
-        return True
-    except TimeoutError:
-        log.error(f"Manager inject timed out after {timeout}s")
-        future.cancel()
-        return False
-    except Exception as e:
-        log.error(f"Manager inject failed ({type(e).__name__}): {e}")
-        future.cancel()
-        return False
+        log.info(f"Inject: {text[:100]}")
+        log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
+        future = asyncio.run_coroutine_threadsafe(_inject_and_drain(text), _loop)
+        try:
+            future.result(timeout=timeout)
+            _last_inject_error = ""
+            return True
+        except TimeoutError:
+            _last_inject_error = f"manager did not finish within {timeout}s"
+            log.error(f"Manager inject timed out after {timeout}s")
+            future.cancel()
+            return False
+        except Exception as e:
+            _last_inject_error = f"{type(e).__name__}: {e}"
+            log.error(f"Manager inject failed ({type(e).__name__}): {e}")
+            future.cancel()
+            return False
+
+
+def last_inject_error() -> str:
+    """Reason the most recent inject() returned False (empty if it succeeded)."""
+    return _last_inject_error
 
 
 def detect_state() -> str:

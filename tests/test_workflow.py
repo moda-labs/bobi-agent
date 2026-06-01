@@ -147,6 +147,31 @@ class TestVariableContext:
         result = ctx.resolve("${{event.issue_id}} is ${{triage.complexity}}")
         assert result == "42 is medium"
 
+    def test_missing_key_warns(self, caplog):
+        """A missing key still resolves to '' but logs loudly (was silent)."""
+        import logging
+        ctx = VariableContext()
+        ctx.set_scope("triage", {})
+        with caplog.at_level(logging.WARNING, logger="modastack.workflow.variables"):
+            assert ctx.resolve("complexity=${{triage.complexity}}") == "complexity="
+        assert any("triage.complexity" in r.message for r in caplog.records)
+
+    def test_unknown_scope_warns(self, caplog):
+        import logging
+        ctx = VariableContext()
+        with caplog.at_level(logging.WARNING, logger="modastack.workflow.variables"):
+            assert ctx.resolve("${{triage.complexity}}") == ""
+        assert any("unknown scope" in r.message for r in caplog.records)
+
+    def test_present_empty_value_does_not_warn(self, caplog):
+        """A present-but-empty value is legitimate — no warning."""
+        import logging
+        ctx = VariableContext()
+        ctx.set_scope("event", {"body": ""})
+        with caplog.at_level(logging.WARNING, logger="modastack.workflow.variables"):
+            assert ctx.resolve("${{event.body}}") == ""
+        assert not caplog.records
+
 
 class TestConditionEvaluator:
     def test_equality(self):

@@ -869,3 +869,51 @@ class TestMiniLifecycle:
         assert phase_calls == ["pickup", "implement", "prepare-pr"]
         for nid in ("spawn", "move_ip", "triage", "implement", "pr"):
             assert run.nodes[nid].status == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Tests: state persistence
+# ---------------------------------------------------------------------------
+
+class TestStatePersistence:
+    def test_save_is_atomic_and_valid(self, tmp_path, monkeypatch):
+        """save() writes complete, parseable JSON (never a 0-byte stub)."""
+        import json
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+        run = WorkflowRun.create("test", _event())
+        run.node_state("a").status = "completed"
+        run.save()
+
+        path = tmp_path / f"{run.run_id}.json"
+        assert path.stat().st_size > 0
+        data = json.loads(path.read_text())
+        assert data["nodes"]["a"]["status"] == "completed"
+        # No temp file left behind.
+        assert not list(tmp_path.glob(".*tmp"))
+
+    def test_run_by_name_wait_persists_nodes(self, tmp_path, monkeypatch):
+        """Synchronous CLI run persists node state (regression: daemon thread
+        was killed on CLI exit, leaving runs stuck at nodes: {} / 0/0)."""
+        import json
+        from modastack.workflow.triggers import WorkflowDispatcher
+
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path)
+
+        nodes = {
+            "a": NodeDef(id="a", type=NodeType.BASH, command="echo hi"),
+            "b": NodeDef(id="b", type=NodeType.BASH, command="echo bye",
+                         depends_on=["a"]),
+        }
+        wf = _wf(nodes, name="cli-wf")
+
+        dispatcher = WorkflowDispatcher()
+        dispatcher.workflows = [(wf, "default")]
+
+        run = dispatcher.run_by_name("cli-wf", _event(), wait=True)
+
+        assert run.status == "completed"
+        # State is on disk, not just in memory.
+        data = json.loads((tmp_path / f"{run.run_id}.json").read_text())
+        assert len(data["nodes"]) == 2
+        assert data["nodes"]["a"]["status"] == "completed"
+        assert data["nodes"]["b"]["status"] == "completed"

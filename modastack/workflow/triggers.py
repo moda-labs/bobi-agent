@@ -160,8 +160,17 @@ class WorkflowDispatcher:
         self._dispatched_events.add(id(event))
         return True
 
-    def run_by_name(self, name: str, event: dict) -> bool:
-        """Run a specific workflow by name with the given event context."""
+    def run_by_name(self, name: str, event: dict, wait: bool = False) -> WorkflowRun:
+        """Run a specific workflow by name with the given event context.
+
+        When ``wait`` is True the executor runs synchronously in the calling
+        thread and this returns once the run completes or suspends. This is
+        what the CLI uses: a daemon thread would be killed the instant the
+        CLI process exits, leaving the run file stuck at ``nodes: {}`` ("0/0
+        nodes") because no node state was ever persisted.
+
+        Returns the WorkflowRun so the caller can inspect the final status.
+        """
         wf = None
         for w, source in self.workflows:
             if w.name == name:
@@ -182,6 +191,12 @@ class WorkflowDispatcher:
             on_notify=self._notify_manager,
             on_input_needed=self._route_input,
         )
+
+        if wait:
+            self._active[run_key] = (threading.current_thread(), executor)
+            self._run_executor(executor, run_key)
+            return run
+
         thread = threading.Thread(
             target=self._run_executor,
             args=(executor, run_key),
@@ -190,7 +205,7 @@ class WorkflowDispatcher:
         )
         self._active[run_key] = (thread, executor)
         thread.start()
-        return True
+        return run
 
     def feed_event(self, event: dict):
         """Feed an event to all active workflow executors (for approval nodes)."""
@@ -296,9 +311,12 @@ class WorkflowDispatcher:
 
     @staticmethod
     def _notify_manager(message: str) -> None:
+        # Status notifications (pickup posted, workflow complete/failed) are
+        # best-effort, but a short wait lets them land when the manager is
+        # only briefly busy rather than dropping on the first conflict.
         try:
             from modastack.manager.session import inject
-            inject(message)
+            inject(message, wait_for_ready=30)
         except Exception as e:
             log.warning(f"Failed to notify manager: {e}")
 
