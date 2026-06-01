@@ -118,9 +118,11 @@ def _session_name(issue_id: str, phase: str = "") -> str:
 # spawn`, or a worker thread for workflow phases — so they can't reach the
 # manager's in-process event queue directly. They post lifecycle events to the
 # bus the same way monitor checks do: over HTTP to the local dashboard's
-# /api/event endpoint (modastack.cli._post_event). Posting is fire-and-forget
-# on a daemon thread so a missing or unreachable dashboard never blocks or
-# breaks the engineer run.
+# /api/event endpoint (modastack.cli._post_event). The started emit is
+# fire-and-forget on a daemon thread so a missing or unreachable dashboard
+# never blocks or breaks the engineer run. The terminal emit (completed/failed)
+# blocks briefly on that thread: it's the last action before the spawn process
+# exits, and a daemon thread would otherwise be killed mid-POST at shutdown.
 
 
 def _summarize_output(text: str, max_lines: int = 6, max_chars: int = 600) -> str:
@@ -129,11 +131,21 @@ def _summarize_output(text: str, max_lines: int = 6, max_chars: int = 600) -> st
     return "\n".join(lines[-max_lines:])[:max_chars]
 
 
-def _emit_lifecycle_event(event_type: str, data: dict[str, Any]) -> None:
-    """Fire-and-forget POST of an engineer lifecycle event to the event bus.
+def _emit_lifecycle_event(
+    event_type: str, data: dict[str, Any], *, blocking: bool = False,
+    timeout: float = 5,
+) -> None:
+    """POST an engineer lifecycle event to the event bus.
 
     Runs on a daemon thread and swallows all errors — event delivery is
-    best-effort and must never block or fail the engineer run.
+    best-effort and must never fail the engineer run.
+
+    With ``blocking=True`` the caller waits (up to ``timeout`` seconds) for the
+    POST to land before returning. This is required for the *terminal* emit
+    (session.completed / session.failed): it fires as the last action before the
+    spawn process exits, and a daemon thread is killed at interpreter shutdown
+    without finishing its in-flight POST. The bounded join can't hang the
+    process — ``_post_event`` carries its own socket timeout.
     """
     payload = {k: v for k, v in data.items() if v not in (None, "")}
 
@@ -144,7 +156,10 @@ def _emit_lifecycle_event(event_type: str, data: dict[str, Any]) -> None:
         except Exception as e:  # never let event posting surface
             log.debug(f"Lifecycle event {event_type} not posted: {e}")
 
-    threading.Thread(target=_send, daemon=True, name="lifecycle-event").start()
+    t = threading.Thread(target=_send, daemon=True, name="lifecycle-event")
+    t.start()
+    if blocking:
+        t.join(timeout)  # let the POST land before the process exits
 
 
 def _emit_session_started(
@@ -164,6 +179,7 @@ def _emit_session_finished(
     result: "AgentResult", repo: str, session_id: str, started_at: float,
 ) -> None:
     duration = round(time.time() - started_at, 1)
+    # Terminal emit: block so the POST lands before the spawn process exits.
     if result.success:
         summary = _summarize_output(result.final_text)
         _emit_lifecycle_event("engineer/session.completed", {
@@ -174,7 +190,7 @@ def _emit_session_finished(
             "duration": duration,
             "summary": summary,
             "text": f"Engineer finished {result.issue_id} in {duration:.0f}s",
-        })
+        }, blocking=True)
     else:
         error = result.error or "unknown error"
         _emit_lifecycle_event("engineer/session.failed", {
@@ -185,7 +201,7 @@ def _emit_session_finished(
             "duration": duration,
             "error": error,
             "text": f"Engineer failed on {result.issue_id}: {error}",
-        })
+        }, blocking=True)
 
 
 # ---------------------------------------------------------------------------
