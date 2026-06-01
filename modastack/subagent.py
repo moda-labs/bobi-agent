@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -379,45 +380,124 @@ def run_phase_blocking(
     return result
 
 
+# Issue references in a freeform task, most specific first. We prefer an
+# explicit "issue" keyword over a bare "#5" so an incidental "#3" elsewhere in
+# the prompt doesn't win over the real reference.
+_ISSUE_REF_PATTERNS = (
+    re.compile(r"\bissues?\s*#\s*(\d+)\b", re.IGNORECASE),  # "issue #5", "issue#5"
+    re.compile(r"\bissues?\s+(\d+)\b", re.IGNORECASE),       # "Issue 5"
+    re.compile(r"#(\d+)\b"),                                  # bare "#5"
+)
+
+
+def _parse_issue_number(task: str) -> str | None:
+    """Extract an issue number referenced in a freeform task description.
+
+    Recognizes patterns like "issue #5", "Issue 5", or a bare "#5". Returns the
+    number as a string (e.g. "5"), or None when no reference is present.
+    """
+    if not task:
+        return None
+    for pattern in _ISSUE_REF_PATTERNS:
+        match = pattern.search(task)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _git_remote_name(path: Path) -> str:
+    """Return owner/repo from the origin git remote, or "" if unavailable."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, cwd=str(path),
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    url = result.stdout.strip()
+    if not url:
+        return ""
+    # Handle SSH (git@github.com:owner/repo.git) and HTTPS URLs.
+    if ":" in url and "@" in url:
+        path_part = url.split(":")[-1]
+    else:
+        path_part = "/".join(url.split("/")[-2:])
+    return path_part.removesuffix(".git")
+
+
+def _resolve_repo_name(cwd: str) -> str:
+    """Resolve a human GitHub-style repo name (owner/repo) for a working dir.
+
+    Prefers an explicit ``repo:`` field in .modastack.yaml, then the origin git
+    remote, and finally falls back to the directory basename so the value is
+    never empty.
+    """
+    path = Path(cwd)
+    config_path = path / ".modastack.yaml"
+    if config_path.exists():
+        try:
+            import yaml
+            raw = yaml.safe_load(config_path.read_text()) or {}
+            repo = raw.get("repo")
+            if repo:
+                return str(repo)
+        except Exception:
+            pass
+    remote = _git_remote_name(path)
+    if remote:
+        return remote
+    return path.name or cwd
+
+
 def spawn_adhoc(
     cwd: str,
     task: str,
     timeout: int = 3600,
     name: str | None = None,
 ) -> AgentResult:
-    """Spawn a one-off engineer agent with a freeform task prompt."""
+    """Spawn a one-off engineer agent with a freeform task prompt.
+
+    When the task references an issue (e.g. "issue #5"), that number is used as
+    the issue_id in lifecycle events so the manager can correlate activity back
+    to the issue. Otherwise we fall back to a stable auto-generated adhoc id.
+    """
     import hashlib
     short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
-    agent_name = name or f"adhoc-{short_hash}"
+    issue_id = name or _parse_issue_number(task) or f"adhoc-{short_hash}"
+    repo = _resolve_repo_name(cwd)
 
     registry = get_registry()
     registry.register(SessionEntry(
-        name=agent_name, session_id="", role="engineer",
-        issue_id=agent_name, title=task[:80], phase="adhoc",
-        cwd=cwd, status="starting",
+        name=issue_id, session_id="", role="engineer",
+        issue_id=issue_id, title=task[:80], phase="adhoc",
+        cwd=cwd, repo=repo, status="starting",
     ))
 
     started_at = time.time()
-    _emit_session_started(agent_name, cwd, task, agent_name, phase="adhoc")
+    _emit_session_started(issue_id, repo, task, issue_id, phase="adhoc")
 
     try:
         result = asyncio.run(
             asyncio.wait_for(
                 _run_agent_supervised(
-                    prompt=task, cwd=cwd, issue_id=agent_name,
+                    prompt=task, cwd=cwd, issue_id=issue_id,
                     phase="adhoc", timeout=timeout,
                 ),
                 timeout=timeout,
             )
         )
     except asyncio.TimeoutError:
-        registry.update(agent_name, status="error")
+        registry.update(issue_id, status="error")
         result = AgentResult(
-            session_id="", issue_id=agent_name, phase="adhoc",
+            session_id="", issue_id=issue_id, phase="adhoc",
             success=False, error=f"timeout after {timeout}s",
         )
 
-    _emit_session_finished(result, cwd, agent_name, started_at)
+    _emit_session_finished(result, repo, issue_id, started_at)
     return result
 
 

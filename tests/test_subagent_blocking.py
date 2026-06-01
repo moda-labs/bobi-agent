@@ -859,6 +859,7 @@ class TestSpawnAdhocLifecycle:
 
         with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d: captured.append((et, d))):
             spawn_adhoc(cwd="/repo/path", task="Investigate CI", name="adhoc-y")
@@ -866,8 +867,49 @@ class TestSpawnAdhocLifecycle:
         et, data = captured[0]
         assert et == "engineer/session.started"
         assert data["task"] == "Investigate CI"
-        assert data["repo"] == "/repo/path"
+        # repo is the GitHub-style name, not the filesystem path.
+        assert data["repo"] == "moda-labs/jobtack"
         assert data["session_id"] == "adhoc-y"
+
+    def test_started_uses_parsed_issue_number_as_id(self):
+        captured = []
+        expected = AgentResult(session_id="s", issue_id="5",
+                               phase="adhoc", success=True)
+
+        async def _mock(*a, **kw):
+            return expected
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda et, d: captured.append((et, d))):
+            spawn_adhoc(cwd="/repo/path",
+                        task="Write a spec for issue #5: AI Extraction Pipeline")
+
+        et, data = captured[0]
+        assert et == "engineer/session.started"
+        # The parsed issue number, not an auto-generated adhoc-<hash> id.
+        assert data["issue_id"] == "5"
+
+    def test_started_falls_back_to_adhoc_id_without_issue_ref(self):
+        captured = []
+        expected = AgentResult(session_id="s", issue_id="x",
+                               phase="adhoc", success=True)
+
+        async def _mock(*a, **kw):
+            return expected
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda et, d: captured.append((et, d))):
+            spawn_adhoc(cwd="/repo/path", task="Fix the login bug")
+
+        et, data = captured[0]
+        assert et == "engineer/session.started"
+        assert data["issue_id"].startswith("adhoc-")
 
 
 class TestRunPhaseBlockingLifecycle:

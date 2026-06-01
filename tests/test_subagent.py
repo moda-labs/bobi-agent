@@ -13,6 +13,8 @@ import pytest
 from modastack.subagent import (
     AgentResult,
     _build_prompt,
+    _parse_issue_number,
+    _resolve_repo_name,
     _resolve_skill_path,
     cancel_agent,
     get_result,
@@ -92,6 +94,61 @@ class TestBuildPrompt:
     def test_nonexistent_skill_still_works(self):
         prompt = _build_prompt("nonexistent", "AGD-12")
         assert "AGD-12" in prompt
+
+
+class TestParseIssueNumber:
+    def test_issue_hash(self):
+        assert _parse_issue_number("Write a spec for issue #5") == "5"
+
+    def test_issue_hash_no_space(self):
+        assert _parse_issue_number("fix issue#42 please") == "42"
+
+    def test_issue_hash_extra_space(self):
+        assert _parse_issue_number("issue # 7 is broken") == "7"
+
+    def test_issue_word_then_number(self):
+        assert _parse_issue_number("Issue 12: AI Extraction Pipeline") == "12"
+
+    def test_issues_plural(self):
+        assert _parse_issue_number("address issues #99 and others") == "99"
+
+    def test_bare_hash(self):
+        assert _parse_issue_number("Investigate #314 regression") == "314"
+
+    def test_case_insensitive(self):
+        assert _parse_issue_number("ISSUE #8 needs attention") == "8"
+
+    def test_prefers_issue_keyword_over_bare_hash(self):
+        # A bare "#3" earlier should not beat the explicit "issue #5".
+        assert _parse_issue_number("see section #3, fix issue #5") == "5"
+
+    def test_no_reference_returns_none(self):
+        assert _parse_issue_number("Fix the login bug") is None
+
+    def test_empty_returns_none(self):
+        assert _parse_issue_number("") is None
+
+    def test_does_not_match_numbers_without_marker(self):
+        assert _parse_issue_number("bump version to 5 today") is None
+
+
+class TestResolveRepoName:
+    def test_explicit_repo_field(self, tmp_path):
+        (tmp_path / ".modastack.yaml").write_text("repo: moda-labs/jobtack\n")
+        assert _resolve_repo_name(str(tmp_path)) == "moda-labs/jobtack"
+
+    def test_git_remote_ssh(self, tmp_path):
+        with patch("modastack.subagent._git_remote_name", return_value="moda-labs/jobtack"):
+            assert _resolve_repo_name(str(tmp_path)) == "moda-labs/jobtack"
+
+    def test_falls_back_to_dirname(self, tmp_path):
+        with patch("modastack.subagent._git_remote_name", return_value=""):
+            assert _resolve_repo_name(str(tmp_path)) == tmp_path.name
+
+    def test_explicit_field_wins_over_remote(self, tmp_path):
+        (tmp_path / ".modastack.yaml").write_text("repo: owner/explicit\n")
+        with patch("modastack.subagent._git_remote_name", return_value="owner/remote"):
+            assert _resolve_repo_name(str(tmp_path)) == "owner/explicit"
 
 
 class TestAgentLifecycle:
