@@ -1,9 +1,13 @@
 """Tests for CLI commands."""
 
+import json
+from unittest.mock import patch
+
 from click.testing import CliRunner
 
 from modastack.__version__ import __version__
 from modastack.cli import main
+from modastack.subagent import CheckResult
 
 
 def test_version_flag():
@@ -12,3 +16,132 @@ def test_version_flag():
     assert result.exit_code == 0
     assert "modastack" in result.output
     assert __version__ in result.output
+
+
+# --- spawn --non-interactive (check mode) ---------------------------------
+
+
+def test_spawn_requires_repo_for_interactive():
+    """Interactive spawn still requires --repo."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["spawn", "--task", "do a thing"])
+    assert result.exit_code != 0
+    assert "--repo is required" in result.output
+
+
+def test_spawn_non_interactive_no_finding_does_not_post():
+    """A clean check prints its verdict and posts no event."""
+    runner = CliRunner()
+    check = CheckResult(success=True, finding=False)
+    with patch("modastack.subagent.run_check_blocking", return_value=check) as rc, \
+         patch("modastack.cli._post_event") as post:
+        result = runner.invoke(
+            main,
+            ["spawn", "--non-interactive", "--task", "Check prod URL returns 200",
+             "--post-event", "monitor/deploy.down"],
+        )
+    assert result.exit_code == 0
+    out = json.loads(result.output.strip().splitlines()[0])
+    assert out["finding"] is False
+    post.assert_not_called()
+    # No --repo needed for a non-interactive check.
+    assert rc.called
+
+
+def test_spawn_non_interactive_finding_posts_event():
+    """A check with a finding posts the configured event with summary+details."""
+    runner = CliRunner()
+    check = CheckResult(
+        success=True, finding=True, summary="prod is down",
+        details={"status": 503, "url": "https://x"},
+    )
+    with patch("modastack.subagent.run_check_blocking", return_value=check), \
+         patch("modastack.cli._post_event", return_value=True) as post:
+        result = runner.invoke(
+            main,
+            ["spawn", "--check", "--task", "Check prod", "--post-event",
+             "monitor/deploy.down"],
+        )
+    assert result.exit_code == 0
+    post.assert_called_once()
+    event_type, data = post.call_args[0]
+    assert event_type == "monitor/deploy.down"
+    assert data["summary"] == "prod is down"
+    assert data["text"] == "prod is down"
+    assert data["status"] == 503
+
+
+def test_spawn_non_interactive_failed_check_exits_nonzero():
+    runner = CliRunner()
+    check = CheckResult(success=False, error="timeout after 600s")
+    with patch("modastack.subagent.run_check_blocking", return_value=check):
+        result = runner.invoke(
+            main, ["spawn", "--non-interactive", "--task", "Check prod"],
+        )
+    assert result.exit_code != 0
+    assert "Check failed" in result.output
+
+
+def test_post_event_splits_source_and_type():
+    """_post_event splits 'source/type' and POSTs the right payload."""
+    from modastack.cli import _post_event
+
+    captured = {}
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"ok": True}).encode()
+
+    def fake_urlopen(req, timeout=10):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data)
+        return FakeResp()
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        ok = _post_event("monitor/deploy.down", {"summary": "down"})
+
+    assert ok is True
+    assert captured["url"] == "http://localhost:8095/api/event"
+    assert captured["body"]["source"] == "monitor"
+    assert captured["body"]["type"] == "deploy.down"
+    assert captured["body"]["data"] == {"summary": "down"}
+
+
+def test_post_event_defaults_source_when_no_slash():
+    from modastack.cli import _post_event
+
+    captured = {}
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"ok": True}).encode()
+
+    def fake_urlopen(req, timeout=10):
+        captured["body"] = json.loads(req.data)
+        return FakeResp()
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        _post_event("deploy_down", {})
+
+    assert captured["body"]["source"] == "monitor"
+    assert captured["body"]["type"] == "deploy_down"
+
+
+def test_post_event_returns_false_on_connection_error():
+    from modastack.cli import _post_event
+    import urllib.error
+
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("nope")):
+        assert _post_event("monitor/x", {}) is False

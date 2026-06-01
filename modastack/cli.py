@@ -1367,26 +1367,46 @@ main.add_command(monitor)
 
 
 @main.command()
-@click.option("--repo", required=True, help="Repo path or registered name")
-@click.option("--task", required=True, help="Task description for the engineer")
+@click.option("--repo", default=None, help="Repo path or registered name")
+@click.option("--task", required=True, help="Task description for the engineer / check")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
-def spawn(repo, task, timeout):
-    """Spawn an ad-hoc engineer agent in a repo.
+@click.option("--non-interactive", "--check", "non_interactive", is_flag=True,
+              help="Run a one-shot, read-only check: constrained prompt, capture "
+                   "the result as JSON, exit. No conversation, no changes.")
+@click.option("--post-event", "post_event", default=None,
+              help="If a non-interactive check reports a finding, post a synthetic "
+                   "event of this type to the event bus (e.g. monitor/deploy.down).")
+def spawn(repo, task, timeout, non_interactive, post_event):
+    """Spawn an ad-hoc engineer agent, or a non-interactive check, in a repo.
 
     Usage:
         modastack spawn --repo moda-labs/jobtack --task "Fix the login bug"
         modastack spawn --repo ~/dev/myrepo --task "Investigate CI failure"
+        modastack spawn --non-interactive --task "Check prod URL returns 200"
+        modastack spawn --check --post-event monitor/deploy.down \\
+            --repo jobtack --task "Check https://jobtack.app returns 200"
     """
     from .workflow.actions import _resolve_repo_path
 
-    try:
-        cwd = _resolve_repo_path(repo)
-    except FileNotFoundError:
-        if Path(repo).expanduser().is_dir():
-            cwd = str(Path(repo).expanduser().resolve())
-        else:
-            click.echo(f"Repo not found: {repo}", err=True)
-            raise SystemExit(1)
+    if repo:
+        try:
+            cwd = _resolve_repo_path(repo)
+        except FileNotFoundError:
+            if Path(repo).expanduser().is_dir():
+                cwd = str(Path(repo).expanduser().resolve())
+            else:
+                click.echo(f"Repo not found: {repo}", err=True)
+                raise SystemExit(1)
+    elif non_interactive:
+        # A check just needs a working directory to run read-only commands in.
+        cwd = os.getcwd()
+    else:
+        click.echo("--repo is required (except for --non-interactive checks)", err=True)
+        raise SystemExit(1)
+
+    if non_interactive:
+        _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
+        return
 
     click.echo(f"Spawning engineer in {cwd}...")
 
@@ -1398,6 +1418,72 @@ def spawn(repo, task, timeout):
     else:
         click.echo(f"Failed: {result.error}", err=True)
         raise SystemExit(1)
+
+
+def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> None:
+    """Run a non-interactive check, print its verdict, optionally post an event.
+
+    Used by `modastack spawn --non-interactive` and by the monitor scheduler,
+    which launches this as a short-lived out-of-band process so the manager's
+    context stays clean — the manager only ever sees the resulting event.
+    """
+    from .subagent import run_check_blocking
+
+    # Cap the check's runtime well below an engineer phase — checks are quick.
+    from .subagent import CHECK_TIMEOUT
+    check_timeout = min(timeout, CHECK_TIMEOUT) if timeout else CHECK_TIMEOUT
+
+    result = run_check_blocking(description=task, cwd=cwd, timeout=check_timeout)
+
+    verdict = {
+        "success": result.success,
+        "finding": result.finding,
+        "summary": result.summary,
+        "details": result.details,
+    }
+    click.echo(json.dumps(verdict))
+
+    if not result.success:
+        click.echo(f"Check failed: {result.error}", err=True)
+        raise SystemExit(1)
+
+    if post_event and result.finding:
+        data = {"summary": result.summary, "text": result.summary, **result.details}
+        if _post_event(post_event, data):
+            click.echo(f"Posted event: {post_event}")
+        else:
+            click.echo(f"Could not post event: {post_event}", err=True)
+            raise SystemExit(1)
+
+
+def _post_event(event_type: str, data: dict) -> bool:
+    """Post a synthetic event onto the running manager's event bus over HTTP.
+
+    The check runs in its own process, so it can't reach the in-memory event
+    queue directly — it posts to the local dashboard, which enqueues it on the
+    same queue webhooks use.
+    """
+    import urllib.error
+    import urllib.request
+
+    if "/" in event_type:
+        source, etype = event_type.split("/", 1)
+    else:
+        source, etype = "monitor", event_type
+
+    payload = json.dumps({"type": etype, "source": source, "data": data}).encode()
+    try:
+        req = urllib.request.Request(
+            "http://localhost:8095/api/event",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+        return bool(result.get("ok"))
+    except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError) as e:
+        logging.getLogger(__name__).warning(f"Failed to post event {event_type}: {e}")
+        return False
 
 
 @main.command("self-update")

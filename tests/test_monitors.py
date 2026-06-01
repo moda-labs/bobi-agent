@@ -179,8 +179,12 @@ def _fixed_now():
     return datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def _scheduler(tmp_path, monitors, check_results=None):
-    """Build a scheduler over a hand-built registry and capture injected events."""
+def _scheduler(tmp_path, monitors, check_results=None, spawned=None):
+    """Build a scheduler over a hand-built registry and capture injected events.
+
+    `spawned` (if a list) captures (monitor, cwd) tuples from spawn_check so
+    description-only monitors don't launch real subprocesses in tests.
+    """
     injected = []
 
     class FakeRegistry:
@@ -195,6 +199,8 @@ def _scheduler(tmp_path, monitors, check_results=None):
         state_path=tmp_path / "state.json",
         now=_fixed_now,
         registry_loader=lambda: FakeRegistry(),
+        spawn_check=(lambda mon, cwd: spawned.append((mon, cwd)))
+        if spawned is not None else (lambda mon, cwd: None),
     )
     return sched, injected
 
@@ -272,13 +278,20 @@ class TestSchedulerRun:
         assert len(injected) == 1
         assert sched.state["x"]["last_run"] == _fixed_now().isoformat()
 
-    def test_manager_interpreted_injects_check_due(self, tmp_path):
+    def test_description_only_spawns_check_not_inject(self, tmp_path):
         m = Monitor(name="custom", description="check the thing", event="monitor/custom")
-        sched, injected = _scheduler(tmp_path, [m])
+        spawned = []
+        sched, injected = _scheduler(tmp_path, [m], spawned=spawned)
         reg = sched._registry_loader()
         sched.run_monitor(m, reg, _fixed_now())
-        assert injected[0]["type"] == "monitor.check_due"
-        assert injected[0]["data"]["description"] == "check the thing"
+        # The manager is never injected into for a description-only monitor —
+        # the check runs out-of-band and posts its own event on a finding.
+        assert injected == []
+        assert len(spawned) == 1
+        mon, cwd = spawned[0]
+        assert mon is m
+        assert cwd == "/repo"  # first applicable repo
+        assert sched.state["custom"]["last_run"] == _fixed_now().isoformat()
 
     def test_unknown_check_is_skipped_gracefully(self, tmp_path):
         m = Monitor(name="x", event="monitor/x", check="nonexistent")
@@ -289,7 +302,8 @@ class TestSchedulerRun:
         assert "x" in sched.state  # still marked as run
 
     def test_tick_runs_due_monitors(self, tmp_path):
-        m = Monitor(name="custom", event="monitor/custom")  # manager-interpreted
-        sched, injected = _scheduler(tmp_path, [m])
+        m = Monitor(name="custom", event="monitor/custom")  # description-only
+        spawned = []
+        sched, injected = _scheduler(tmp_path, [m], spawned=spawned)
         sched.tick()
-        assert len(injected) == 1
+        assert len(spawned) == 1

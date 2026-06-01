@@ -219,9 +219,12 @@ same queue webhooks use — so the manager routes it like any other event.
 
 A monitor with a `check:` field uses a native runner in
 `modastack/monitors/checks.py` (deterministic, deduplicated). Without one,
-the scheduler injects a `monitor.check_due` event each interval and the
-manager interprets the `description` to perform the check. PR conflict
-detection ships as a default and works out of the box.
+the scheduler launches a short-lived, non-interactive check agent out-of-band
+(`modastack spawn --non-interactive --post-event <event>`): it performs the
+check from the `description`, captures the result, and posts an event back to
+the bus *only* if it finds something. The manager never sees the check
+process — only the resulting finding — so its context stays clean and
+responsive. PR conflict detection ships as a default and works out of the box.
 
 ## Tests
 

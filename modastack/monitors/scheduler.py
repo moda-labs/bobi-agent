@@ -8,12 +8,23 @@ into the manager's event stream for each newly-appeared condition.
 
 Synthetic events are pushed onto the same `event_queue` webhooks use, so the
 manager receives and routes them exactly like a real webhook event.
+
+Monitors come in two flavors:
+  - Native check (`check:` field) — a deterministic Python runner in
+    checks.py that the scheduler calls directly and deduplicates.
+  - Description-only — the scheduler launches a short-lived, non-interactive
+    check agent out-of-band (via `modastack spawn --non-interactive`), which
+    performs the check and posts a result event back to the bus only if it
+    finds something. The manager never sees the check process itself — just
+    the eventual finding — so its context stays clean and responsive.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +35,7 @@ from .registry import MonitorRegistry
 log = logging.getLogger(__name__)
 
 STATE_PATH = Path.home() / ".modastack" / "monitor_state.json"
+MODASTACK_LOG = Path.home() / ".modastack" / "modastack.log"
 TICK_INTERVAL = 30  # seconds between scheduler ticks
 
 
@@ -33,10 +45,36 @@ def _default_inject(event: dict) -> None:
     event_queue.put(event)
 
 
+def _default_spawn_check(monitor, cwd: str | None) -> None:
+    """Launch a non-interactive check as a background subprocess.
+
+    Reuses the `modastack spawn` CLI path (`--non-interactive --post-event`)
+    so the check runs out-of-band exactly like an engineer process. It's
+    fire-and-forget: the scheduler thread is never blocked by a check, and the
+    subprocess posts a result event back to the bus only on a finding.
+    """
+    cmd = [
+        sys.executable, "-m", "modastack.cli", "spawn",
+        "--non-interactive",
+        "--task", monitor.description or monitor.name,
+        "--post-event", monitor.event,
+    ]
+    if cwd:
+        cmd += ["--repo", cwd]
+
+    try:
+        MODASTACK_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(MODASTACK_LOG, "a") as lf:
+            subprocess.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
+    except OSError as e:
+        log.error(f"Failed to spawn check for monitor {monitor.name}: {e}")
+
+
 class MonitorScheduler:
     def __init__(self, inject_event=None, state_path: Path = STATE_PATH,
-                 now=None, registry_loader=None):
+                 now=None, registry_loader=None, spawn_check=None):
         self.inject_event = inject_event or _default_inject
+        self.spawn_check = spawn_check or _default_spawn_check
         self.state_path = Path(state_path)
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._registry_loader = registry_loader or MonitorRegistry.load
@@ -101,7 +139,7 @@ class MonitorScheduler:
                 except Exception as e:
                     log.error(f"Check '{monitor.check}' for {monitor.name} failed: {e}")
         else:
-            self._manager_interpreted(monitor)
+            self._spawn_check(monitor, registry.repos_for(monitor))
 
         self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
         self._save_state()
@@ -129,26 +167,23 @@ class MonitorScheduler:
         log.info(f"Monitor {monitor.name} fired {monitor.event} ({condition.key})")
         self.inject_event(event)
 
-    def _manager_interpreted(self, monitor) -> None:
-        """No native check — ask the manager to interpret the description.
+    def _spawn_check(self, monitor, repos: list[Path]) -> None:
+        """No native check — run the description as a non-interactive check.
 
-        Description-driven monitors can't be deduplicated by the scheduler
-        (it never learns what the manager found), so this injects a
-        check-due event each interval and relies on the manager to perform
-        the check and decide whether to act.
+        Rather than injecting a check-due event into the manager (which would
+        pollute its context and tie it up every interval), the scheduler
+        launches a short-lived, out-of-band check agent. That process performs
+        the check from the monitor's description and posts a result event back
+        to the bus only if it finds something — so the manager only ever sees
+        an actionable finding, never the check itself.
+
+        The check just needs a working directory to run read-only commands in;
+        it runs once in the first applicable repo (or no repo for a pure URL/
+        API check).
         """
-        event = {
-            "type": "monitor.check_due",
-            "source": "monitor",
-            "data": {
-                "monitor": monitor.name,
-                "description": monitor.description,
-                "event": monitor.event,
-                **monitor.extra,
-            },
-        }
-        log.info(f"Monitor {monitor.name} due (manager-interpreted)")
-        self.inject_event(event)
+        cwd = str(repos[0]) if repos else None
+        log.info(f"Monitor {monitor.name} due — spawning non-interactive check")
+        self.spawn_check(monitor, cwd)
 
     # --- state persistence ---------------------------------------------
 
