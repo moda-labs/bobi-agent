@@ -164,6 +164,7 @@ def _emit_lifecycle_event(
 
 def _emit_session_started(
     issue_id: str, repo: str, task: str, session_id: str, phase: str = "",
+    requested_by: dict | None = None,
 ) -> None:
     _emit_lifecycle_event("engineer/session.started", {
         "issue_id": issue_id,
@@ -171,12 +172,14 @@ def _emit_session_started(
         "task": (task or "")[:500],
         "session_id": session_id,
         "phase": phase,
+        "requested_by": requested_by or None,
         "text": f"Engineer started working on {issue_id}",
     })
 
 
 def _emit_session_finished(
     result: "AgentResult", repo: str, session_id: str, started_at: float,
+    requested_by: dict | None = None,
 ) -> None:
     duration = round(time.time() - started_at, 1)
     # Terminal emit: block so the POST lands before the spawn process exits.
@@ -189,6 +192,7 @@ def _emit_session_finished(
             "phase": result.phase,
             "duration": duration,
             "summary": summary,
+            "requested_by": requested_by or None,
             "text": f"Engineer finished {result.issue_id} in {duration:.0f}s",
         }, blocking=True)
     else:
@@ -200,6 +204,7 @@ def _emit_session_finished(
             "phase": result.phase,
             "duration": duration,
             "error": error,
+            "requested_by": requested_by or None,
             "text": f"Engineer failed on {result.issue_id}: {error}",
         }, blocking=True)
 
@@ -474,8 +479,13 @@ def spawn_adhoc(
     task: str,
     timeout: int = 3600,
     name: str | None = None,
+    requested_by: dict | None = None,
 ) -> AgentResult:
     """Spawn a one-off engineer agent with a freeform task prompt.
+
+    `requested_by` carries the originating identity (e.g. the Slack user and
+    thread that asked for the work) so completion notices can route back to
+    them; it is persisted on the SessionEntry and echoed on lifecycle events.
 
     When the task references an issue (e.g. "issue #5"), that number is used as
     the issue_id in lifecycle events so the manager can correlate activity back
@@ -485,16 +495,18 @@ def spawn_adhoc(
     short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
     issue_id = name or _parse_issue_number(task) or f"adhoc-{short_hash}"
     repo = _resolve_repo_name(cwd)
+    requested_by = requested_by or {}
 
     registry = get_registry()
     registry.register(SessionEntry(
         name=issue_id, session_id="", role="engineer",
         issue_id=issue_id, title=task[:80], phase="adhoc",
-        cwd=cwd, repo=repo, status="starting",
+        cwd=cwd, repo=repo, status="starting", requested_by=requested_by,
     ))
 
     started_at = time.time()
-    _emit_session_started(issue_id, repo, task, issue_id, phase="adhoc")
+    _emit_session_started(issue_id, repo, task, issue_id, phase="adhoc",
+                          requested_by=requested_by)
 
     try:
         result = asyncio.run(
@@ -513,7 +525,8 @@ def spawn_adhoc(
             success=False, error=f"timeout after {timeout}s",
         )
 
-    _emit_session_finished(result, repo, issue_id, started_at)
+    _emit_session_finished(result, repo, issue_id, started_at,
+                           requested_by=requested_by)
     return result
 
 

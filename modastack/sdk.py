@@ -40,6 +40,11 @@ class SessionEntry:
     status: str = "starting"
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
+    # Who requested this work, for routing async results back to them.
+    # Slack origin: {user_id, from, workspace, channel, thread_ts}. Empty for
+    # non-Slack-originated work. Defaults empty so existing rows deserialize
+    # unchanged — no registry migration needed.
+    requested_by: dict = field(default_factory=dict)
 
 
 class SessionRegistry:

@@ -912,6 +912,46 @@ class TestSpawnAdhocLifecycle:
         assert data["repo"] == "moda-labs/jobtack"
         assert data["session_id"] == "adhoc-y"
 
+    def test_requested_by_echoed_on_lifecycle_events(self):
+        captured = []
+        expected = AgentResult(session_id="s", issue_id="adhoc-z",
+                               phase="adhoc", success=True, final_text="done")
+        requester = {"from": "Alice", "user_id": "U1", "channel": "C1",
+                     "thread_ts": "171.42"}
+
+        async def _mock(*a, **kw):
+            return expected
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda et, d, **kw: captured.append((et, d))):
+            spawn_adhoc(cwd="/repo", task="Fix it", name="adhoc-z",
+                        requested_by=requester)
+
+        started = next(d for et, d in captured if et.endswith("started"))
+        finished = next(d for et, d in captured if et.endswith("completed"))
+        assert started["requested_by"] == requester
+        assert finished["requested_by"] == requester
+
+    def test_requested_by_absent_when_not_provided(self):
+        captured = []
+        expected = AgentResult(session_id="s", issue_id="adhoc-w",
+                               phase="adhoc", success=True, final_text="done")
+
+        async def _mock(*a, **kw):
+            return expected
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda et, d, **kw: captured.append((et, d))):
+            spawn_adhoc(cwd="/repo", task="Fix it", name="adhoc-w")
+
+        # No requester → the key is None and gets stripped by the emitter.
+        started = next(d for et, d in captured if et.endswith("started"))
+        assert started["requested_by"] is None
+
     def test_started_uses_parsed_issue_number_as_id(self):
         captured = []
         expected = AgentResult(session_id="s", issue_id="5",

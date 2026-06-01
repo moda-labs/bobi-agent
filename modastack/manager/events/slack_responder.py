@@ -85,5 +85,7 @@ class SlackResponder:
 
             ok = _post_to_slack(token, channel, response, thread_ts)
             if ok:
+                user_id = data.get("user_id", "")
                 log.info(f"Slack reply sent to {channel}" +
-                         (f" thread {thread_ts}" if thread_ts else ""))
+                         (f" thread {thread_ts}" if thread_ts else "") +
+                         (f" (user {user_id})" if user_id else ""))
