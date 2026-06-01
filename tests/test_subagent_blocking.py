@@ -18,11 +18,15 @@ import pytest
 
 from modastack.subagent import (
     AgentResult,
+    CheckResult,
     InputHandler,
+    _build_check_prompt,
     _build_prompt,
     _make_defer_hook,
+    _parse_check_output,
     _run_agent_supervised,
     _session_name,
+    run_check_blocking,
     run_phase_blocking,
 )
 
@@ -770,6 +774,163 @@ class TestBuildPrompt:
     def test_includes_skill_reference_for_known_phase(self):
         prompt = _build_prompt("pickup", "AGD-12")
         assert "SKILL.md" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_check_prompt
+# ---------------------------------------------------------------------------
+
+class TestBuildCheckPrompt:
+    def test_includes_description_and_constraints(self):
+        prompt = _build_check_prompt("Check prod URL returns 200")
+        assert "Check prod URL returns 200" in prompt
+        assert "non-interactive" in prompt.lower()
+        # Read-only: must tell the agent not to make changes.
+        assert "do not" in prompt.lower()
+        assert '"finding": true' in prompt
+        assert '"finding": false' in prompt
+
+    def test_includes_extra_context(self):
+        prompt = _build_check_prompt("Check it", extra={"url": "https://x.test"})
+        assert "https://x.test" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Tests: _parse_check_output
+# ---------------------------------------------------------------------------
+
+class TestParseCheckOutput:
+    def test_finding_true_with_summary_and_details(self):
+        text = 'Looks bad.\n{"finding": true, "summary": "down", "details": {"status": 503}}'
+        finding, summary, details = _parse_check_output(text)
+        assert finding is True
+        assert summary == "down"
+        assert details == {"status": 503}
+
+    def test_finding_false(self):
+        finding, summary, details = _parse_check_output('All good.\n{"finding": false}')
+        assert finding is False
+        assert summary == ""
+        assert details == {}
+
+    def test_picks_last_verdict_json(self):
+        text = ('{"finding": false}\n'
+                'reconsidering...\n'
+                '{"finding": true, "summary": "actually down"}')
+        finding, summary, _ = _parse_check_output(text)
+        assert finding is True
+        assert summary == "actually down"
+
+    def test_ignores_non_verdict_json(self):
+        text = '{"unrelated": 1}\nfinal\n{"finding": true, "summary": "x"}'
+        finding, summary, _ = _parse_check_output(text)
+        assert finding is True
+        assert summary == "x"
+
+    def test_no_json_defaults_to_no_finding(self):
+        finding, summary, details = _parse_check_output("just prose, no json")
+        assert finding is False
+        assert summary == ""
+        assert details == {}
+
+    def test_empty_text(self):
+        assert _parse_check_output("") == (False, "", {})
+
+    def test_non_dict_details_coerced_to_empty(self):
+        text = '{"finding": true, "summary": "x", "details": "oops"}'
+        _, _, details = _parse_check_output(text)
+        assert details == {}
+
+
+# ---------------------------------------------------------------------------
+# Tests: run_check_blocking
+# ---------------------------------------------------------------------------
+
+class TestRunCheckBlocking:
+    def test_finding_parsed_from_agent_output(self):
+        agent_result = AgentResult(
+            session_id="s", issue_id="check-x", phase="check", success=True,
+            duration_ms=1200, total_cost_usd=0.03,
+            final_text='{"finding": true, "summary": "prod down", "details": {"code": 503}}',
+        )
+
+        async def _mock(*a, **kw):
+            return agent_result
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_check_blocking(description="Check prod", cwd="/tmp")
+
+        assert isinstance(result, CheckResult)
+        assert result.success is True
+        assert result.finding is True
+        assert result.summary == "prod down"
+        assert result.details == {"code": 503}
+        assert result.duration_ms == 1200
+
+    def test_no_finding(self):
+        agent_result = AgentResult(
+            session_id="s", issue_id="check-x", phase="check", success=True,
+            final_text='Everything healthy.\n{"finding": false}',
+        )
+
+        async def _mock(*a, **kw):
+            return agent_result
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_check_blocking(description="Check prod", cwd="/tmp")
+
+        assert result.success is True
+        assert result.finding is False
+
+    def test_agent_failure_propagates(self):
+        agent_result = AgentResult(
+            session_id="", issue_id="check-x", phase="check", success=False,
+            error="CLI crashed",
+        )
+
+        async def _mock(*a, **kw):
+            return agent_result
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_check_blocking(description="Check prod", cwd="/tmp")
+
+        assert result.success is False
+        assert result.finding is False
+        assert "CLI crashed" in result.error
+
+    def test_timeout_returns_failed_check(self):
+        async def _slow(*a, **kw):
+            await asyncio.sleep(999)
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_slow), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_check_blocking(description="Check", cwd="/tmp", timeout=1)
+
+        assert result.success is False
+        assert "timeout" in result.error
+
+    def test_registers_monitor_session(self):
+        agent_result = AgentResult(
+            session_id="s", issue_id="check-x", phase="check", success=True,
+            final_text='{"finding": false}',
+        )
+        mock_registry = MagicMock()
+
+        async def _mock(*a, **kw):
+            return agent_result
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry):
+            run_check_blocking(description="Check prod", cwd="/tmp", name="check-deploy")
+
+        mock_registry.register.assert_called_once()
+        entry = mock_registry.register.call_args[0][0]
+        assert entry.role == "monitor"
+        assert entry.phase == "check"
+        assert entry.name == "eng-check-deploy-check"
 
 
 # ---------------------------------------------------------------------------

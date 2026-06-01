@@ -12,6 +12,7 @@ Two execution modes:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import time
@@ -51,6 +52,7 @@ class AgentResult:
     total_cost_usd: float = 0.0
     num_turns: int = 0
     error: str = ""
+    final_text: str = ""
 
 
 @dataclass
@@ -193,8 +195,10 @@ async def _run_agent_supervised(
                 if isinstance(msg, AssistantMessage):
                     text_parts = [b.text for b in msg.content if isinstance(b, TextBlock)]
                     if text_parts:
+                        joined = "\n".join(text_parts)
+                        result.final_text = joined
                         log_activity("response", {
-                            "text": "\n".join(text_parts)[:500],
+                            "text": joined[:500],
                         }, session=name)
                 elif isinstance(msg, ResultMessage):
                     result_msg = msg
@@ -325,6 +329,173 @@ def spawn_adhoc(
             session_id="", issue_id=agent_name, phase="adhoc",
             success=False, error=f"timeout after {timeout}s",
         )
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive check execution (background monitor path)
+# ---------------------------------------------------------------------------
+
+CHECK_TIMEOUT = 600  # monitor checks are short-lived
+
+
+@dataclass
+class CheckResult:
+    """Outcome of a non-interactive check agent.
+
+    `finding` is True when the check determined a condition needs attention;
+    `summary`/`details` describe it. `success` is False only when the agent
+    itself errored or its output couldn't be parsed.
+    """
+
+    success: bool
+    finding: bool = False
+    summary: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
+    raw_output: str = ""
+    error: str = ""
+    duration_ms: int = 0
+    total_cost_usd: float = 0.0
+
+
+def _build_check_prompt(description: str, extra: dict[str, Any] | None = None) -> str:
+    """Constrained, read-only prompt for a one-shot monitoring check."""
+    parts = [
+        "You are a non-interactive monitoring check running out-of-band — not "
+        "in a conversation. Perform exactly the check described below and "
+        "nothing else. You may run read-only shell commands and API calls "
+        "(e.g. `gh`, `curl`) to observe the current state. Do NOT modify "
+        "files, open or comment on PRs, push commits, or take any corrective "
+        "action — only observe and report.",
+        f"Check to perform:\n{description}",
+    ]
+    if extra:
+        rendered = "\n".join(f"  {k}: {v}" for k, v in extra.items())
+        parts.append(f"Context:\n{rendered}")
+    parts.append(
+        "When finished, output your result as a SINGLE line of JSON as the very "
+        "last thing you say, with nothing after it, in exactly one of these "
+        "forms:\n"
+        '  {"finding": true, "summary": "<one-line description of what needs '
+        'attention>", "details": {<optional structured fields>}}\n'
+        '  {"finding": false}\n'
+        "Use finding=false when everything is healthy and nothing needs attention."
+    )
+    return "\n\n".join(parts)
+
+
+def _extract_json_objects(text: str) -> list[str]:
+    """Return top-level brace-balanced JSON object substrings, in order.
+
+    Tracks brace depth while respecting string literals, so nested objects
+    (e.g. a "details" sub-object) are kept inside their parent rather than
+    split apart.
+    """
+    objects: list[str] = []
+    depth = 0
+    start: int | None = None
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                objects.append(text[start:i + 1])
+                start = None
+    return objects
+
+
+def _parse_check_output(text: str) -> tuple[bool, str, dict]:
+    """Extract the trailing JSON verdict from a check agent's final message.
+
+    Returns (finding, summary, details). Falls back to finding=False when no
+    parseable verdict object is present.
+    """
+    if not text:
+        return False, "", {}
+    # Prefer the last parseable object that actually looks like a verdict.
+    for chunk in reversed(_extract_json_objects(text)):
+        try:
+            parsed = json.loads(chunk)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and "finding" in parsed:
+            finding = bool(parsed.get("finding"))
+            summary = str(parsed.get("summary", "")) if finding else ""
+            details = parsed.get("details") or {}
+            if not isinstance(details, dict):
+                details = {}
+            return finding, summary, details
+    return False, "", {}
+
+
+def run_check_blocking(
+    description: str,
+    cwd: str,
+    name: str | None = None,
+    extra: dict[str, Any] | None = None,
+    timeout: int = CHECK_TIMEOUT,
+) -> CheckResult:
+    """Run a one-shot, non-interactive check agent and parse its verdict.
+
+    Reuses the same supervised agent loop as engineer phases, but with a
+    constrained read-only prompt and no input handler. Blocks until the
+    agent finishes or times out.
+    """
+    import hashlib
+
+    short_hash = hashlib.sha256(description.encode()).hexdigest()[:8]
+    slug = name or f"check-{short_hash}"
+    issue_id = slug
+    phase = "check"
+    session = _session_name(issue_id, phase)
+
+    prompt = _build_check_prompt(description, extra)
+
+    registry = get_registry()
+    registry.register(SessionEntry(
+        name=session, session_id="", role="monitor",
+        issue_id=issue_id, title=description[:80], phase=phase,
+        cwd=cwd, status="starting",
+    ))
+
+    try:
+        result = asyncio.run(
+            asyncio.wait_for(
+                _run_agent_supervised(prompt, cwd, issue_id, phase, timeout),
+                timeout=timeout,
+            )
+        )
+    except asyncio.TimeoutError:
+        registry.update(session, status="error")
+        return CheckResult(success=False, error=f"timeout after {timeout}s")
+
+    if not result.success:
+        return CheckResult(
+            success=False, error=result.error or "check agent failed",
+            raw_output=result.final_text, duration_ms=result.duration_ms,
+            total_cost_usd=result.total_cost_usd,
+        )
+
+    finding, summary, details = _parse_check_output(result.final_text)
+    return CheckResult(
+        success=True, finding=finding, summary=summary, details=details,
+        raw_output=result.final_text, duration_ms=result.duration_ms,
+        total_cost_usd=result.total_cost_usd,
+    )
 
 
 # ---------------------------------------------------------------------------

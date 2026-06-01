@@ -1,0 +1,197 @@
+"""Monitor registry — merge the three storage tiers into one view.
+
+Load order (most general to most specific), later tiers override by `name`:
+
+    built-in defaults  ->  user globals  ->  repo-specific
+
+A repo-specific entry with `enabled: false` opts that repo out of an
+inherited monitor. A repo-specific entry that shares a name with a global
+monitor overrides it for that repo (the global one skips that repo).
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import yaml
+
+from modastack.config import GlobalConfig
+from .schema import Monitor
+
+log = logging.getLogger(__name__)
+
+# Built-in defaults ship in the repo, resolved by path like workflows/ —
+# never written at runtime.
+DEFAULTS_PATH = Path(__file__).resolve().parent.parent.parent / "monitors" / "defaults.yaml"
+USER_MONITORS_PATH = Path.home() / ".modastack" / "monitors.yaml"
+
+
+def _read_records(path: Path) -> list[dict]:
+    """Read the `monitors:` list from a YAML file, tolerating absence."""
+    if not path.exists():
+        return []
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as e:
+        log.warning(f"Failed to parse monitors from {path}: {e}")
+        return []
+    records = raw.get("monitors") or []
+    return [r for r in records if isinstance(r, dict)]
+
+
+class MonitorRegistry:
+    """The merged, resolved view of all monitors across the three tiers."""
+
+    def __init__(self, config: GlobalConfig | None = None):
+        self.config = config or GlobalConfig.load()
+        self.globals: dict[str, Monitor] = {}
+        self.repo_monitors: list[Monitor] = []
+        # monitor name -> repo paths (as str) that opted out / were overridden
+        self.opt_outs: dict[str, set[str]] = {}
+
+    @classmethod
+    def load(cls, config: GlobalConfig | None = None) -> "MonitorRegistry":
+        registry = cls(config)
+        registry._load()
+        return registry
+
+    def _load(self) -> None:
+        # 1. Built-in defaults
+        for raw in _read_records(DEFAULTS_PATH):
+            try:
+                m = Monitor.from_dict(raw, source="default")
+                self.globals[m.name] = m
+            except ValueError as e:
+                log.warning(f"Skipping bad default monitor: {e}")
+
+        # 2. User globals override defaults by name
+        for raw in _read_records(USER_MONITORS_PATH):
+            try:
+                m = Monitor.from_dict(raw, source="user")
+                self.globals[m.name] = m
+            except ValueError as e:
+                log.warning(f"Skipping bad user monitor: {e}")
+
+        # 3. Repo-specific monitors
+        for repo_path in self.config.repos:
+            repo_key = str(repo_path)
+            config_path = repo_path / ".modastack.yaml"
+            for raw in _read_records(config_path):
+                try:
+                    m = Monitor.from_dict(raw, source=repo_key, repo=repo_key)
+                except ValueError as e:
+                    log.warning(f"Skipping bad monitor in {config_path}: {e}")
+                    continue
+                if not m.enabled:
+                    # Opt this repo out of an inherited monitor.
+                    self.opt_outs.setdefault(m.name, set()).add(repo_key)
+                    continue
+                self.repo_monitors.append(m)
+                if m.name in self.globals:
+                    # Repo-specific override: the global monitor skips this repo.
+                    self.opt_outs.setdefault(m.name, set()).add(repo_key)
+
+    def effective_monitors(self) -> list[Monitor]:
+        """All enabled monitors that should actually be scheduled."""
+        result = [m for m in self.globals.values() if m.enabled]
+        result.extend(self.repo_monitors)
+        return result
+
+    def all_monitors(self) -> list[Monitor]:
+        """Every resolved monitor, including paused (enabled: false) ones."""
+        return list(self.globals.values()) + self.repo_monitors
+
+    def repos_for(self, monitor: Monitor) -> list[Path]:
+        """Which repos a monitor's check should run against.
+
+        Repo-scoped monitors run only on their repo; global monitors run on
+        every registered repo except those that opted out or overrode them.
+        """
+        if monitor.repo:
+            return [Path(monitor.repo)]
+        opted_out = self.opt_outs.get(monitor.name, set())
+        return [r for r in self.config.repos if str(r) not in opted_out]
+
+    # --- Writes to user-writable tiers ---------------------------------
+
+    @staticmethod
+    def add_global(monitor: Monitor) -> None:
+        """Append or replace a monitor in ~/.modastack/monitors.yaml."""
+        USER_MONITORS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        records = _read_records(USER_MONITORS_PATH)
+        records = [r for r in records if r.get("name") != monitor.name]
+        records.append(monitor.to_dict())
+        USER_MONITORS_PATH.write_text(
+            yaml.dump({"monitors": records}, default_flow_style=False, sort_keys=False)
+        )
+
+    @staticmethod
+    def add_repo(monitor: Monitor, repo_path: Path) -> None:
+        """Append or replace a monitor under `monitors:` in a repo's config.
+
+        Note: round-tripping .modastack.yaml does not preserve comments.
+        """
+        config_path = repo_path / ".modastack.yaml"
+        raw = {}
+        if config_path.exists():
+            raw = yaml.safe_load(config_path.read_text()) or {}
+        records = [r for r in (raw.get("monitors") or [])
+                   if isinstance(r, dict) and r.get("name") != monitor.name]
+        records.append(monitor.to_dict())
+        raw["monitors"] = records
+        config_path.write_text(yaml.dump(raw, default_flow_style=False, sort_keys=False))
+
+    @classmethod
+    def pause(cls, name: str, repo_path: Path | None = None) -> bool:
+        """Disable a monitor by writing `enabled: false` to a writable tier.
+
+        Works for built-in defaults too — the override lands in user globals
+        (or the given repo's config) and wins by load order.
+        """
+        registry = cls.load()
+        existing = registry.globals.get(name)
+        if repo_path is not None:
+            base = existing or Monitor(name=name)
+            base.enabled = False
+            cls.add_repo(base, repo_path)
+            return True
+        if existing is None:
+            return False
+        existing.source = "user"
+        existing.enabled = False
+        cls.add_global(existing)
+        return True
+
+    @classmethod
+    def remove(cls, name: str, repo_path: Path | None = None) -> str:
+        """Remove a monitor from a user-writable tier.
+
+        Returns: "removed", "default-only" (can't delete a built-in — pause
+        it instead), or "not-found".
+        """
+        if repo_path is not None:
+            config_path = repo_path / ".modastack.yaml"
+            raw = yaml.safe_load(config_path.read_text()) if config_path.exists() else {}
+            raw = raw or {}
+            records = raw.get("monitors") or []
+            kept = [r for r in records if r.get("name") != name]
+            if len(kept) == len(records):
+                return "not-found"
+            raw["monitors"] = kept
+            config_path.write_text(yaml.dump(raw, default_flow_style=False, sort_keys=False))
+            return "removed"
+
+        user_records = _read_records(USER_MONITORS_PATH)
+        kept = [r for r in user_records if r.get("name") != name]
+        if len(kept) < len(user_records):
+            USER_MONITORS_PATH.write_text(
+                yaml.dump({"monitors": kept}, default_flow_style=False, sort_keys=False)
+            )
+            return "removed"
+
+        # Present only as a built-in default — can't delete, must pause.
+        for raw in _read_records(DEFAULTS_PATH):
+            if raw.get("name") == name:
+                return "default-only"
+        return "not-found"

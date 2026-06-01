@@ -80,6 +80,29 @@ async def api_send_message(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/event")
+async def api_post_event(request: Request):
+    """Enqueue a synthetic event onto the same queue webhooks use.
+
+    Used by out-of-band check processes (`modastack spawn --non-interactive
+    --post-event ...`) to report findings without touching the manager's
+    conversation — the drain loop routes it like any other event.
+    """
+    body = await request.json()
+    etype = (body.get("type") or "").strip()
+    if not etype:
+        return {"ok": False, "error": "missing event type"}
+
+    from modastack.manager.events.event_client import event_queue
+    event = {
+        "type": etype,
+        "source": (body.get("source") or "monitor").strip(),
+        "data": body.get("data") or {},
+    }
+    event_queue.put(event)
+    return {"ok": True}
+
+
 @app.post("/api/consult")
 async def api_consult(request: Request):
     body = await request.json()

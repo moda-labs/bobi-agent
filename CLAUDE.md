@@ -65,6 +65,10 @@ modastack start                # start event loop
 modastack spawn --repo R --task T  # spawn an ad-hoc engineer agent
 modastack workflow run <name>  # run a named workflow
 modastack workflow list        # list available workflows
+modastack monitor list         # list background monitors (merged across tiers)
+modastack monitor add <name>   # add a monitor (--interval, --description, --repo)
+modastack monitor pause <name> # disable a monitor
+modastack monitor remove <name>  # remove a user-added monitor
 modastack status               # show active engineer sessions
 modastack events               # show recent events from the bus
 modastack message "text"       # inject a message into the manager session
@@ -98,10 +102,17 @@ modastack/                        # All Python code
 │       ├── pollers.py            # Background threads: workers (5s), Linear (30s), Slack (10s)
 │       ├── webhook_server.py     # HTTP endpoints: /webhooks/github, /linear, /slack
 │       └── slack_socket.py       # Slack Socket Mode WebSocket client
-└── workflow/
-    ├── engine.py                 # DAG executor with hybrid LLM + deterministic nodes
-    ├── triggers.py               # Event → workflow matching, resolution chain
-    └── schema.py                 # WorkflowDef, NodeDef, YAML parsing
+├── workflow/
+│   ├── engine.py                 # DAG executor with hybrid LLM + deterministic nodes
+│   ├── triggers.py               # Event → workflow matching, resolution chain
+│   └── schema.py                 # WorkflowDef, NodeDef, YAML parsing
+└── monitors/                     # Background polling to fill webhook gaps
+    ├── schema.py                 # Monitor record + interval parsing
+    ├── registry.py               # Three-tier load/merge + writes (add/pause/remove)
+    ├── checks.py                 # Native check runners (pr_conflicts, stale_prs)
+    └── scheduler.py              # Interval scheduler, dedup, synthetic event injection
+
+monitors/defaults.yaml            # Built-in monitor defaults (shipped, read-only)
 
 roles/                            # All skill/prompt content (no Python)
 ├── manager/
@@ -188,6 +199,32 @@ Per-repo context from `.modastack.yaml`'s `context:` section is available
 as `${{repo.key}}` in workflow templates. See `docs/CUSTOM_WORKFLOWS.md`
 for the full reference and `workflows/examples/` for non-dev examples
 (content review, research).
+
+## Background monitors
+
+Monitors are scheduled polling tasks that fill webhook gaps — conditions
+no webhook fires for (merge conflicts, stale PRs, deploy health). A monitor
+is a small human-readable YAML record (`name`, `description`, `interval`,
+`event`) loaded from three tiers, later tiers overriding earlier by `name`:
+
+1. `monitors/defaults.yaml` — built-in, shipped, read-only at runtime
+2. `~/.modastack/monitors.yaml` — user globals (apply to all repos)
+3. `<repo>/.modastack.yaml` under `monitors:` — repo-specific
+
+Set `enabled: false` on a repo-specific entry to opt that repo out of an
+inherited monitor. The scheduler (a thread in the manager process) runs each
+monitor on its interval, deduplicates detected conditions against
+`~/.modastack/monitor_state.json`, and injects a synthetic event onto the
+same queue webhooks use — so the manager routes it like any other event.
+
+A monitor with a `check:` field uses a native runner in
+`modastack/monitors/checks.py` (deterministic, deduplicated). Without one,
+the scheduler launches a short-lived, non-interactive check agent out-of-band
+(`modastack spawn --non-interactive --post-event <event>`): it performs the
+check from the `description`, captures the result, and posts an event back to
+the bus *only* if it finds something. The manager never sees the check
+process — only the resulting finding — so its context stays clean and
+responsive. PR conflict detection ships as a default and works out of the box.
 
 ## Tests
 
