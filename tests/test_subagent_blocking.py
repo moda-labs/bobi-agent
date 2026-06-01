@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -794,6 +795,43 @@ class TestEmitLifecycleEvent:
                     t.join(timeout=2)
         # No exception escapes — test reaching here is the assertion.
 
+    def test_blocking_waits_for_post_to_land(self):
+        """blocking=True returns only after the POST completes — no daemon race.
+
+        The terminal emit fires as the last action before the spawn process
+        exits; without the join the daemon thread would be killed mid-POST.
+        """
+        landed = threading.Event()
+
+        def _slow_post(event_type, payload):
+            time.sleep(0.1)
+            landed.set()
+
+        with patch("modastack.cli._post_event", side_effect=_slow_post):
+            _emit_lifecycle_event(
+                "engineer/session.completed", {"issue_id": "X-3"}, blocking=True,
+            )
+            # The POST has already landed by the time the call returns.
+            assert landed.is_set()
+
+    def test_blocking_join_is_bounded_by_timeout(self):
+        """A hung POST can't block the process forever — the join is bounded."""
+        release = threading.Event()
+
+        def _hang(event_type, payload):
+            release.wait(5)
+
+        with patch("modastack.cli._post_event", side_effect=_hang):
+            start = time.time()
+            _emit_lifecycle_event(
+                "engineer/session.completed", {"issue_id": "X-4"},
+                blocking=True, timeout=0.1,
+            )
+            elapsed = time.time() - start
+            # Returned promptly despite the POST still hanging.
+            assert elapsed < 1.0
+        release.set()  # let the daemon thread unwind
+
 
 class TestSessionFinishedEvents:
     def test_completed_event_on_success(self):
@@ -803,17 +841,19 @@ class TestSessionFinishedEvents:
             success=True, final_text="all\ndone\nPR up at #42",
         )
         with patch(f"{SDK_PATCH}._emit_lifecycle_event",
-                   side_effect=lambda *a: calls.append(a)):
+                   side_effect=lambda *a, **kw: calls.append((a, kw))):
             _emit_session_finished(result, "moda-labs/app", "adhoc-x", 0.0)
 
         assert len(calls) == 1
-        event_type, data = calls[0]
+        (event_type, data), kwargs = calls[0]
         assert event_type == "engineer/session.completed"
         assert data["issue_id"] == "DONE-1"
         assert data["repo"] == "moda-labs/app"
         assert data["session_id"] == "adhoc-x"
         assert "PR up at #42" in data["summary"]
         assert "duration" in data
+        # Terminal emit blocks so the POST lands before the process exits.
+        assert kwargs.get("blocking") is True
 
     def test_failed_event_on_error(self):
         calls = []
@@ -822,12 +862,13 @@ class TestSessionFinishedEvents:
             success=False, error="timeout after 60s",
         )
         with patch(f"{SDK_PATCH}._emit_lifecycle_event",
-                   side_effect=lambda *a: calls.append(a)):
+                   side_effect=lambda *a, **kw: calls.append((a, kw))):
             _emit_session_finished(result, "r", "eng-fail-1-implement", 0.0)
 
-        event_type, data = calls[0]
+        (event_type, data), kwargs = calls[0]
         assert event_type == "engineer/session.failed"
         assert data["error"] == "timeout after 60s"
+        assert kwargs.get("blocking") is True
 
 
 class TestSpawnAdhocLifecycle:
@@ -844,7 +885,7 @@ class TestSpawnAdhocLifecycle:
         with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
-                   side_effect=lambda et, d: events.append(et)):
+                   side_effect=lambda et, d, **kw: events.append(et)):
             spawn_adhoc(cwd="/tmp/test", task="Fix the login bug", name="adhoc-x")
 
         assert events == ["engineer/session.started", "engineer/session.completed"]
@@ -859,14 +900,16 @@ class TestSpawnAdhocLifecycle:
 
         with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
-                   side_effect=lambda et, d: captured.append((et, d))):
+                   side_effect=lambda et, d, **kw: captured.append((et, d))):
             spawn_adhoc(cwd="/repo/path", task="Investigate CI", name="adhoc-y")
 
         et, data = captured[0]
         assert et == "engineer/session.started"
         assert data["task"] == "Investigate CI"
-        assert data["repo"] == "/repo/path"
+        # repo is the GitHub-style name, not the filesystem path.
+        assert data["repo"] == "moda-labs/jobtack"
         assert data["session_id"] == "adhoc-y"
 
     def test_requested_by_echoed_on_lifecycle_events(self):
@@ -882,7 +925,7 @@ class TestSpawnAdhocLifecycle:
         with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
-                   side_effect=lambda et, d: captured.append((et, d))):
+                   side_effect=lambda et, d, **kw: captured.append((et, d))):
             spawn_adhoc(cwd="/repo", task="Fix it", name="adhoc-z",
                         requested_by=requester)
 
@@ -902,12 +945,52 @@ class TestSpawnAdhocLifecycle:
         with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
-                   side_effect=lambda et, d: captured.append((et, d))):
+                   side_effect=lambda et, d, **kw: captured.append((et, d))):
             spawn_adhoc(cwd="/repo", task="Fix it", name="adhoc-w")
 
         # No requester → the key is None and gets stripped by the emitter.
         started = next(d for et, d in captured if et.endswith("started"))
         assert started["requested_by"] is None
+
+    def test_started_uses_parsed_issue_number_as_id(self):
+        captured = []
+        expected = AgentResult(session_id="s", issue_id="5",
+                               phase="adhoc", success=True)
+
+        async def _mock(*a, **kw):
+            return expected
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda et, d, **kw: captured.append((et, d))):
+            spawn_adhoc(cwd="/repo/path",
+                        task="Write a spec for issue #5: AI Extraction Pipeline")
+
+        et, data = captured[0]
+        assert et == "engineer/session.started"
+        # The parsed issue number, not an auto-generated adhoc-<hash> id.
+        assert data["issue_id"] == "5"
+
+    def test_started_falls_back_to_adhoc_id_without_issue_ref(self):
+        captured = []
+        expected = AgentResult(session_id="s", issue_id="x",
+                               phase="adhoc", success=True)
+
+        async def _mock(*a, **kw):
+            return expected
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda et, d, **kw: captured.append((et, d))):
+            spawn_adhoc(cwd="/repo/path", task="Fix the login bug")
+
+        et, data = captured[0]
+        assert et == "engineer/session.started"
+        assert data["issue_id"].startswith("adhoc-")
 
 
 class TestRunPhaseBlockingLifecycle:
@@ -920,7 +1003,7 @@ class TestRunPhaseBlockingLifecycle:
         with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_slow), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
-                   side_effect=lambda et, d: events.append(et)):
+                   side_effect=lambda et, d, **kw: events.append(et)):
             run_phase_blocking(issue_id="SLOW-1", phase="implement",
                                cwd="/tmp", timeout=1)
 

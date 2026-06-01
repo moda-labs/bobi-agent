@@ -327,6 +327,12 @@ def slack_reply(text, workspace, channel, thread):
         click.echo(f"No bot token for workspace {workspace}", err=True)
         sys.exit(1)
 
+    # The manager invokes this command through a shell, where newlines in the
+    # message arrive as literal "\n" escape sequences rather than real
+    # newlines. Convert them back so Slack renders proper line breaks instead
+    # of showing the literal characters.
+    text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+
     text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
     text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
     text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)

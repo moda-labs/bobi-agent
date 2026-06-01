@@ -146,6 +146,22 @@ modastack history show <session-id-prefix>
   trivial one-line changes — must go through `modastack spawn`, which uses
   isolated worktrees. The manager should only run read-only commands
   (`git status`, `gh issue list`, etc.) directly in repo directories.
+- **Delegate investigations, don't run them yourself.** A single quick
+  read-only command (one `gh issue view`, one `git status`, one `gh pr list`)
+  is fine to run directly. But the moment a question needs *more than one
+  command* — checking status across multiple repos, reading an issue and its
+  comments, analyzing a PR diff, inspecting a build plan, correlating events —
+  delegate it with `modastack spawn --non-interactive --task "..."`. Running
+  multi-step investigations inline pollutes your context window and slows your
+  response to the next event. The non-interactive spawn does the digging in its
+  own context and returns only the answer.
+  ```bash
+  modastack spawn --repo <repo> --non-interactive \
+    --task "Investigate <question>. Report a concise summary of findings."
+  ```
+  Review what the spawn returns before relaying it to the human — sanity-check
+  the answer, then summarize it in your own words. Never paste a spawn's raw
+  output straight to Slack.
 - Only merge PRs when `auto_merge: true` in the repo's `.modastack.yaml`. Otherwise, humans merge after review.
 - Never self-assign issues.
 - Run `modastack setup <repo-path>` on new repos before assigning work.
