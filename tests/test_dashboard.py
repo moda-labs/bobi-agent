@@ -163,6 +163,51 @@ def test_index_page(client):
     assert "modastack" in resp.text
 
 
+def test_read_modastack_log_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(data, "MODASTACK_LOG_PATH", tmp_path / "missing.log")
+    assert data.read_modastack_log() == []
+
+
+def test_read_modastack_log_tail(tmp_path, monkeypatch):
+    path = tmp_path / "modastack.log"
+    path.write_text("\n".join(f"line {i}" for i in range(10)) + "\n")
+    monkeypatch.setattr(data, "MODASTACK_LOG_PATH", path)
+    lines = data.read_modastack_log(limit=3)
+    assert lines == ["line 7", "line 8", "line 9"]
+
+
+def test_tail_lines_spans_multiple_blocks(tmp_path):
+    # Write enough data to exceed the 64KB seek block so the backward
+    # read loop runs more than once.
+    path = tmp_path / "big.log"
+    path.write_text("\n".join(f"line {i:05d}" for i in range(20000)) + "\n")
+    lines = data._tail_lines(path, 4)
+    assert lines == ["line 19996", "line 19997", "line 19998", "line 19999"]
+
+
+def test_logs_endpoint(client, tmp_path, monkeypatch):
+    path = tmp_path / "modastack.log"
+    path.write_text("hello\nworld\n")
+    monkeypatch.setattr(data, "MODASTACK_LOG_PATH", path)
+    resp = client.get("/api/logs?limit=10")
+    assert resp.status_code == 200
+    assert resp.json()["lines"] == ["hello", "world"]
+
+
+def test_activity_snippet(tmp_path, monkeypatch):
+    from modastack import sdk
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    monkeypatch.setattr(data, "ACTIVITY_DIR", tmp_path)
+    (logs_dir / "eng-7-implement.jsonl").write_text(
+        json.dumps({"event": "UserPromptSubmit", "text": "go"}) + "\n"
+        + json.dumps({"event": "response", "text": "Working on it\nstep two"}) + "\n"
+        + json.dumps({"event": "Stop"}) + "\n"
+    )
+    assert data._activity_snippet("eng-7-implement") == "Working on it step two"
+    assert data._activity_snippet("nonexistent") == ""
+
+
 def test_sources_endpoint(client, events_file):
     sample = [
         {"type": "a", "source": "slack", "timestamp": "T1", "data": {}},

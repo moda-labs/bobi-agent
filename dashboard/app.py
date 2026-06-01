@@ -25,10 +25,11 @@ async def index(request: Request):
 
 @app.get("/api/status")
 async def api_status():
-    return {
-        "manager": data.get_manager_status(),
-        "engineers": data.get_sessions(),
-    }
+    manager, engineers = await asyncio.gather(
+        asyncio.to_thread(data.get_manager_status),
+        asyncio.to_thread(data.get_sessions),
+    )
+    return {"manager": manager, "engineers": engineers}
 
 
 @app.get("/api/events")
@@ -57,6 +58,13 @@ async def api_sources():
 @app.get("/api/log")
 async def api_log(limit: int = Query(50, ge=1, le=200), session: str = Query("moda-manager")):
     return {"turns": data.get_conversation_log(limit=limit, session=session)}
+
+
+@app.get("/api/logs")
+async def api_logs(limit: int = Query(200, ge=1, le=2000)):
+    """Tail of the modastack process log (~/.modastack/modastack.log)."""
+    lines = await asyncio.to_thread(data.read_modastack_log, limit)
+    return {"lines": lines}
 
 
 @app.post("/api/message")
@@ -132,10 +140,44 @@ async def api_send_engineer_message(issue_id: str, request: Request):
     text = body.get("text", "").strip()
     if not text:
         return {"ok": False, "error": "empty message"}
+
+    # Direct injection only works if the engineer sub-agent is running in
+    # this process (legacy fire-and-forget path). The supervised executor
+    # runs phases to completion without a live inbox, so fall back to
+    # relaying the feedback through the manager, who coordinates engineers.
     from modastack.subagent import inject_message
     if inject_message(issue_id, text):
-        return {"ok": True}
-    return {"ok": False, "error": "agent not running"}
+        return {"ok": True, "delivery": "direct"}
+
+    from modastack.manager.session import inject, is_alive
+    if not is_alive():
+        return {"ok": False, "error": "manager not running and no live engineer session"}
+
+    title = ""
+    entry = data.get_registry().get(f"eng-{issue_id.lower()}") or _engineer_entry(issue_id)
+    if entry:
+        title = entry.title
+    relay = (
+        f"[ENGINEER FEEDBACK] For engineer working on #{issue_id}"
+        + (f" ({title})" if title else "")
+        + f": {text}\n\nRelay this to the engineer or act on it as appropriate."
+    )
+    ok = await asyncio.to_thread(inject, relay, timeout=120, wait_for_ready=120)
+    if ok:
+        return {"ok": True, "delivery": "manager"}
+    return {"ok": False, "error": "could not deliver — manager busy or unavailable"}
+
+
+def _engineer_entry(issue_id: str):
+    """Find the most recent registry entry for an issue across phases."""
+    registry = data.get_registry()
+    matches = [
+        e for e in registry.get_by_role("engineer")
+        if e.issue_id.lower() == issue_id.lower()
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda e: e.last_activity)
 
 
 @app.get("/api/workflow/{issue_id}")
