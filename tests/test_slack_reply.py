@@ -162,6 +162,56 @@ class TestSlackReplyCommand:
         assert "<https://example.com|link>" in body["text"]
 
     @patch("urllib.request.urlopen")
+    def test_escaped_newlines_become_real(self, mock_urlopen, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_PATH", tmp_path / "config.yaml")
+        config = GlobalConfig(slack_bot_token="xoxb-test")
+        config.save()
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"ok": True}).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        runner = CliRunner()
+        # The shell passes a literal backslash-n, not a real newline.
+        result = runner.invoke(main, [
+            "slack-reply", "-w", "T123", "-c", "D456",
+            "line one\\nline two\\ttabbed",
+        ])
+        assert result.exit_code == 0
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        assert body["text"] == "line one\nline two\ttabbed"
+        assert "\\n" not in body["text"]
+
+    @patch("urllib.request.urlopen")
+    def test_real_newlines_preserved(self, mock_urlopen, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_PATH", tmp_path / "config.yaml")
+        config = GlobalConfig(slack_bot_token="xoxb-test")
+        config.save()
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"ok": True}).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        runner = CliRunner()
+        # A real newline (e.g. from a here-doc) must survive untouched.
+        result = runner.invoke(main, [
+            "slack-reply", "-w", "T123", "-c", "D456", "line one\nline two",
+        ])
+        assert result.exit_code == 0
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        assert body["text"] == "line one\nline two"
+
+    @patch("urllib.request.urlopen")
     def test_slack_api_error(self, mock_urlopen, tmp_path, monkeypatch):
         monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_DIR", tmp_path)
         monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_PATH", tmp_path / "config.yaml")
