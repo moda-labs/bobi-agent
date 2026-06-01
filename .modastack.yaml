@@ -19,5 +19,5 @@ agent:
 verify:
   test_command: pytest
   review_required: true
-  auto_merge: false
+  auto_merge: true
 credentials: modastack
