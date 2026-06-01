@@ -283,25 +283,24 @@ class WorkflowExecutor:
     def _run_manager(self, node: NodeDef) -> dict:
         from modastack.manager.session import (
             inject as mgr_inject,
-            detect_state as mgr_detect_state,
             read_last_response,
+            last_inject_error,
         )
 
         prompt_text = self.ctx.resolve(node.prompt)
         preamble = "[WORKFLOW CONSULTATION — reply with plain text only] "
         full_prompt = preamble + prompt_text
 
-        if not mgr_inject(full_prompt):
-            raise RuntimeError("Failed to inject into manager session")
-
-        deadline = time.monotonic() + node.timeout
-        while time.monotonic() < deadline:
-            time.sleep(3)
-            state = mgr_detect_state()
-            if state == "waiting_input":
-                break
-        else:
-            raise TimeoutError(f"Manager did not respond within {node.timeout}s")
+        # The manager session is shared with the event drain loop and other
+        # workflow runs, so it is frequently mid-turn when we need it. Wait
+        # for it to free up (up to the node timeout) instead of failing the
+        # instant it is busy. inject() blocks until the manager finishes its
+        # turn, so once it returns True the reply is already captured.
+        if not mgr_inject(full_prompt, timeout=node.timeout,
+                          wait_for_ready=node.timeout):
+            raise RuntimeError(
+                f"Failed to inject into manager session: {last_inject_error()}"
+            )
 
         output = read_last_response() or ""
         return {"output": output}

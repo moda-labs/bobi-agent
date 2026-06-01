@@ -33,7 +33,14 @@ class WorkflowRun:
     def save(self):
         path = RUNS_DIR / f"{self.run_id}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2))
+        # Write atomically: serialize first, write to a temp file, then
+        # rename over the target. A process killed mid-write (e.g. a
+        # systemctl restart during self-update) can no longer leave behind
+        # a truncated 0-byte run file.
+        data = json.dumps(asdict(self), indent=2)
+        tmp = path.with_name(f".{self.run_id}.json.tmp")
+        tmp.write_text(data)
+        tmp.replace(path)
 
     @classmethod
     def load(cls, run_id: str) -> WorkflowRun:

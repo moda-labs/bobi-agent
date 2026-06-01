@@ -6,8 +6,11 @@ No eval() — uses a simple recursive-descent parser for safety.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 VAR_PATTERN = re.compile(r'\$\{\{(.+?)\}\}')
 
@@ -41,7 +44,26 @@ class VariableContext:
                 return match.group(0)
 
             scope, key = parts
-            val = self.get(scope, key)
+
+            # Distinguish "missing" (scope/key absent) from "present but
+            # empty". A missing reference silently became "" before, which
+            # produced malformed prompts like "complexity=, needs_spec=."
+            # downstream. Still resolve to "" so optional fields keep working,
+            # but log loudly so the gap is visible.
+            if scope not in self.scopes:
+                log.warning(
+                    f"Variable ${{{{{scope}.{key}}}}} references unknown scope "
+                    f"'{scope}' — resolving to empty string"
+                )
+                val = ""
+            elif key not in self.scopes[scope]:
+                log.warning(
+                    f"Variable ${{{{{scope}.{key}}}}} not found in scope "
+                    f"'{scope}' — resolving to empty string"
+                )
+                val = ""
+            else:
+                val = self.get(scope, key)
 
             if pipe_filter == "lower":
                 val = val.lower()

@@ -293,8 +293,8 @@ class WorkflowEngine:
 
     def _exec_manager(self, node: NodeDef) -> dict:
         from modastack.manager.session import inject as mgr_inject
-        from modastack.manager.session import detect_state as mgr_detect_state
         from modastack.manager.session import read_last_response
+        from modastack.manager.session import last_inject_error
 
         prompt_text = self.ctx.resolve(node.prompt)
 
@@ -305,17 +305,14 @@ class WorkflowEngine:
         if memory_context:
             full_prompt += " " + memory_context
 
-        if not mgr_inject(full_prompt):
-            raise RuntimeError("Failed to inject into manager session")
-
-        deadline = time.monotonic() + node.timeout
-        while time.monotonic() < deadline:
-            time.sleep(3)
-            state = mgr_detect_state()
-            if state == "waiting_input":
-                break
-        else:
-            raise TimeoutError(f"Manager did not respond within {node.timeout}s")
+        # Wait for the shared manager session to free up instead of failing
+        # the instant it is busy. inject() blocks until the turn finishes, so
+        # the reply is already captured once it returns True.
+        if not mgr_inject(full_prompt, timeout=node.timeout,
+                          wait_for_ready=node.timeout):
+            raise RuntimeError(
+                f"Failed to inject into manager session: {last_inject_error()}"
+            )
 
         output = read_last_response() or ""
         return {"output": output}
