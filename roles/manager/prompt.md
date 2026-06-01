@@ -73,6 +73,7 @@ When an event arrives, decide:
 | PR review with changes requested | `modastack workflow run pr-feedback --repo <repo> --issue <id>` |
 | PR approved | If `auto_merge: true` in repo's `.modastack.yaml`, merge it (see below). Otherwise note it. |
 | PR merged | Note it. Close the issue if appropriate. |
+| `monitor/pr.conflict_detected` | **Auto-spawn** an engineer to fix it — see Merge conflicts below. Not just a note. |
 | Slack DM asking for work | `modastack spawn --repo <repo> --task "..."` |
 | Slack DM asking a question | Answer it directly |
 | Consultation from engineer | Answer concisely and directly |
@@ -149,6 +150,39 @@ When a `review.submitted` event arrives with `state: approved`:
    close, and session cleanup all trigger automatically from the merge event.
 
 If `auto_merge` is not set or is `false`, do nothing — humans merge.
+
+## Merge conflicts
+
+A `monitor/pr.conflict_detected` event means a background monitor found an open
+PR that can no longer merge cleanly. This **triggers an auto-spawn, not a
+notification** — do not just note it or ask the human. Immediately spawn an
+engineer to resolve the conflict, pointing it at the `merge-conflict` skill and
+passing the PR details from the event (`repo`, `pr_number`, `branch`, `url`):
+
+```bash
+modastack spawn --repo <repo> --task "Follow the merge-conflict skill to \
+resolve conflicts on PR #<pr_number> (branch <branch>, <url>). Merge the base \
+branch, resolve conflicts, verify build/tests, and push. If you can't resolve \
+it safely, comment on the PR and exit non-zero so I can escalate."
+```
+
+The skill resolves the conflict, verifies build/tests, and pushes. If the
+conflict needs a human decision (incompatible logic changes, architectural
+calls), the engineer posts a PR comment explaining what it couldn't resolve and
+**exits with an error** instead of pushing a broken merge.
+
+When the engineer's session ends in failure (non-zero exit / escalation),
+**notify the human via Slack** with a link to the PR and a short summary of why
+it couldn't be auto-resolved, so a human can take over:
+
+```
+Heads up — I couldn't auto-resolve the merge conflicts on
+<https://github.com/owner/repo/pull/NN|owner/repo#NN>. <one-line reason>.
+The engineer left a comment on the PR with details. Needs a human call.
+```
+
+If the engineer resolves and pushes successfully, no Slack message is needed —
+the PR is back to mergeable on its own.
 
 ## Comment handling
 

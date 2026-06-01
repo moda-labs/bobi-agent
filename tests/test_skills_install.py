@@ -15,7 +15,7 @@ PRODUCT_MANAGER_SKILLS_SRC = ROLES_ROOT / "product_manager"
 TOOLS_SKILLS_SRC = ROLES_ROOT / "tools"
 SKILLS_INSTALLED = REPO_ROOT / ".claude" / "skills"
 
-EXPECTED_PROCESS_SKILLS = ["pickup", "spec", "implement", "prepare-pr", "feedback"]
+EXPECTED_PROCESS_SKILLS = ["pickup", "spec", "implement", "prepare-pr", "feedback", "merge-conflict"]
 EXPECTED_PRACTICES_SKILLS = [
     "triage", "build", "code-review", "ticketing-policy", "source-control-conventions",
 ]

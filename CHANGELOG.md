@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Auto-resolve merge conflicts: `monitor/pr.conflict_detected` now triggers the manager to auto-spawn an engineer (instead of just noting it) that follows a new `merge-conflict` skill — merge the base branch, resolve conflicts honoring both sides, verify build/tests, and push. If the conflict needs a human decision, the engineer comments on the PR and exits non-zero, and the manager escalates to the human via Slack (#117)
+
 ## 0.4.1 — 2026-06-01
 
 ### Added
