@@ -479,6 +479,101 @@ def status():
 
 
 @main.command()
+@click.option("--browser/--no-browser", default=True,
+              help="Include the /browse + Chromium sandbox checks (default: on)")
+@click.option("--fix", is_flag=True, help="Offer to apply the Chromium sandbox fix if it's the problem")
+def doctor(browser, fix):
+    """Health check — verify /browse can run (Playwright, Chromium, daemon, deps).
+
+    Runs a suite of checks and prints a pass/fail line for each. With --fix,
+    if the failure is the AppArmor user-namespace sandbox restriction, offers
+    to apply the sysctl fix (requires sudo).
+
+    Usage:
+        modastack doctor
+        modastack doctor --fix
+    """
+    from . import browser as browser_mod
+
+    if not browser:
+        click.echo("Nothing to check (browser checks disabled).")
+        return
+
+    if not browser_mod.is_linux():
+        click.echo("Note: Chromium sandbox checks are Linux-specific; "
+                   "running browser launch checks only.")
+
+    results = browser_mod.run_doctor()
+
+    sandbox_failure = False
+    all_ok = True
+    for r in results:
+        mark = "✓" if r.ok else "✗"
+        click.echo(f"  {mark} {r.name}: {r.detail}")
+        if not r.ok:
+            all_ok = False
+            if r.hint:
+                click.echo(f"      → {r.hint}")
+            if r.sandbox_error:
+                sandbox_failure = True
+
+    if all_ok:
+        click.echo("\nAll checks passed — /browse is ready.")
+        return
+
+    if sandbox_failure and fix:
+        click.echo()
+        _offer_sandbox_fix(browser_mod, non_interactive=False)
+    elif sandbox_failure:
+        click.echo("\nRe-run with `modastack doctor --fix` to apply the sandbox fix.")
+
+    raise SystemExit(1)
+
+
+def _offer_sandbox_fix(browser_mod, non_interactive: bool) -> None:
+    """Explain the Chromium sandbox issue and (interactively) apply the fix.
+
+    Shared by `modastack setup` and `modastack doctor --fix`. In
+    non-interactive mode it only prints instructions; otherwise it asks for
+    confirmation before running the sudo sysctl change.
+    """
+    click.echo("Chromium's sandbox is blocked by the AppArmor restriction on")
+    click.echo("unprivileged user namespaces — this prevents /browse from running.")
+    click.echo()
+    click.echo(f"  The fix:  {browser_mod.FIX_COMMAND}")
+    click.echo(f"  Persisted in: {browser_mod.SYSCTL_CONF_PATH}")
+    click.echo()
+    click.echo("  Security tradeoff: this lets any local process create user")
+    click.echo("  namespaces, a historical local-privilege-escalation surface.")
+    click.echo("  Acceptable on dedicated dev machines. See deploy/INSTALL.md for")
+    click.echo("  a narrower per-binary AppArmor alternative and the --no-sandbox fallback.")
+    click.echo()
+
+    if non_interactive:
+        click.echo("  Non-interactive — apply it manually with the command above.")
+        return
+
+    try:
+        if not click.confirm("  Apply the fix now (requires sudo)?", default=False):
+            click.echo("  Skipped. Apply it later with the command above.")
+            return
+    except (EOFError, click.Abort):
+        click.echo("  Skipped.")
+        return
+
+    ok, message = browser_mod.apply_sandbox_fix(persist=True)
+    if ok:
+        click.echo(f"  {message}")
+        recheck = browser_mod.check_chromium_launch()
+        if recheck.ok:
+            click.echo("  Verified — Chromium now launches. /browse is ready.")
+        else:
+            click.echo(f"  Applied, but Chromium still fails: {recheck.detail}")
+    else:
+        click.echo(f"  Fix failed: {message}", err=True)
+
+
+@main.command()
 @click.argument("issue_id", required=False)
 @click.option("--cancel", is_flag=True, help="Cancel a running engineer agent")
 def engineers(issue_id, cancel):
@@ -756,7 +851,40 @@ def setup(repo_path: str, task_tracking: str | None, project: str | None,
     for action in hook_actions:
         click.echo(f"  {action}")
 
+    # Verify /browse can launch Chromium; offer the sandbox fix if it can't.
+    _check_browser_sandbox(non_interactive)
+
     click.echo(f"Ready — {path.name} is set up for modastack.")
+
+
+def _check_browser_sandbox(non_interactive: bool) -> None:
+    """Detect the Chromium sandbox block during setup and offer the fix.
+
+    Runs a quick headless Chromium launch. If it fails specifically because of
+    the AppArmor user-namespace restriction, explains the issue and (when
+    interactive) offers to apply the sysctl fix. Other failures are reported as
+    a hint without blocking setup, since /browse is optional tooling.
+    """
+    from . import browser as browser_mod
+
+    # The sandbox restriction is Linux-only; skip elsewhere.
+    if not browser_mod.is_linux():
+        return
+
+    click.echo("Checking Chromium sandbox for /browse...")
+    result = browser_mod.check_chromium_launch()
+    if result.ok:
+        click.echo("  Chromium launches — /browse is ready.")
+        return
+
+    if result.sandbox_error:
+        _offer_sandbox_fix(browser_mod, non_interactive)
+    else:
+        # Don't block setup on unrelated browser issues — just surface it.
+        click.echo(f"  /browse check skipped: {result.detail}")
+        if result.hint:
+            click.echo(f"    → {result.hint}")
+        click.echo("    Run `modastack doctor` for a full diagnosis.")
 
 
 def _open_config_pr(path: Path) -> None:

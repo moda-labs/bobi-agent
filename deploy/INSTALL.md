@@ -138,6 +138,103 @@ done
 echo "$(ls "$SKILLS_DIR" | wc -l | tr -d ' ') skills linked"
 ```
 
+## Step 4b: Chromium sandbox for /browse
+
+The engineer skills use gstack's `/browse` — a headless Chromium driven by
+Playwright — for QA and dogfooding. On **Ubuntu 23.10+ and other recent
+kernels**, this needs one piece of host configuration, or the browser won't
+launch at all.
+
+### The problem
+
+Chromium isolates each renderer in a sandbox built on **unprivileged user
+namespaces**. Ubuntu 23.10+ ships an AppArmor policy that restricts
+unprivileged user namespaces by default:
+
+```
+kernel.apparmor_restrict_unprivileged_userns = 1
+```
+
+With this set, Chromium cannot create its sandbox and fails to start. You'll
+see errors like `No usable sandbox!` or
+`Failed to move to new namespace`, and `/browse` will be unable to take a
+snapshot or navigate.
+
+Check the current value:
+```bash
+cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+# 1 = restricted (Chromium sandbox blocked), 0 = unrestricted (works)
+# (file absent = older kernel, restriction doesn't apply)
+```
+
+### Fixes (pick one)
+
+**Recommended — per-binary AppArmor exception.** Allow only Chromium to use
+unprivileged user namespaces, leaving the restriction in place for everything
+else. Create an AppArmor profile naming the Playwright Chromium binary:
+
+```bash
+CHROME=$(ls -d ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1)
+sudo tee /etc/apparmor.d/chromium-playwright >/dev/null <<EOF
+abi <abi/4.0>,
+include <tunables/global>
+
+profile chromium-playwright "$CHROME" flags=(unconfined) {
+  userns,
+  include if exists <local/chromium-playwright>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/chromium-playwright
+```
+
+This is the narrowest change — the userns attack surface stays closed for all
+other processes. The tradeoff is maintenance: the profile pins a specific
+Chromium path, so it must be refreshed when Playwright upgrades to a new
+Chromium revision (a different `chromium-<rev>` directory).
+
+**Quick fix — global sysctl disable.** Acceptable on a dedicated dev machine.
+Disables the restriction for the whole host:
+
+```bash
+# Apply now
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+# Persist across reboots
+echo "kernel.apparmor_restrict_unprivileged_userns = 0" | \
+    sudo tee /etc/sysctl.d/99-chromium-sandbox.conf
+```
+
+> **Security tradeoff:** this lets *any* unprivileged process on the machine
+> create user namespaces. User namespaces have historically been an attack
+> surface for container escapes and local privilege escalation, which is
+> exactly why Ubuntu restricts them by default. On a shared or
+> internet-exposed host, prefer the per-binary exception above. On a
+> single-tenant dev box this is a reasonable, common choice.
+
+**Fallback — run Chromium with `--no-sandbox`.** If you can't change host
+sysctl/AppArmor at all (e.g. an unprivileged container), launch Chromium with
+its internal sandbox disabled. This is the **least secure** option — it turns
+off Chromium's own renderer isolation, so only do it where the browser visits
+trusted pages. Set it for gstack browse via the Playwright launch args, e.g.:
+
+```bash
+export PLAYWRIGHT_CHROMIUM_ARGS="--no-sandbox"
+```
+
+(Some setups also honor `CHROMIUM_FLAGS`/`BROWSER_ARGS` — check your gstack
+browse version.)
+
+### Automated detection
+
+`modastack setup` runs a quick headless Chromium launch at the end and, if it
+detects this exact sandbox failure, explains the issue and offers to apply the
+sysctl fix (with a sudo confirmation). You can also check or fix it any time:
+
+```bash
+modastack doctor          # report Playwright / Chromium / browse daemon health
+modastack doctor --fix    # offer to apply the sandbox fix if that's the cause
+```
+
 ## Step 5: Authentication
 
 ### Claude Code
@@ -404,6 +501,32 @@ The gstack setup installs skills into `~/.claude/skills/`. Verify:
 ```bash
 ls ~/.claude/skills/
 ```
+
+See [Chromium sandbox for /browse](#chromium-sandbox-for-browse) below if
+`/browse` fails to launch a browser.
+
+### /browse fails to launch a browser (Chromium sandbox)
+
+On Ubuntu 23.10+ Chromium can't start because AppArmor restricts unprivileged
+user namespaces. Symptoms: `/browse` errors with `No usable sandbox!` or
+`Failed to move to new namespace`, and `modastack doctor` reports the
+"Chromium launches" check as failed.
+
+Diagnose and fix:
+```bash
+modastack doctor          # shows which check fails
+modastack doctor --fix    # offers to apply the sysctl fix (sudo)
+```
+
+Or apply manually:
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+echo "kernel.apparmor_restrict_unprivileged_userns = 0" | \
+    sudo tee /etc/sysctl.d/99-chromium-sandbox.conf
+```
+
+See [Chromium sandbox for /browse](#chromium-sandbox-for-browse) for the
+security tradeoffs and the narrower per-binary AppArmor alternative.
 
 ### Claude Code auth fails
 
