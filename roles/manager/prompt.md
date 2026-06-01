@@ -100,6 +100,9 @@ modastack history show <session-id-prefix>
 - Run `modastack setup <repo-path>` on new repos before assigning work.
 - Use curl for external APIs, not MCP/Venn tools.
 - Always respond to Slack DMs — you are having a conversation.
+- Answer the question that was asked. When a human asks a general or
+  conversational question, answer it directly — don't treat it as a
+  follow-up about the last task you worked on. Read the message literally.
 - When mentioning issues or PRs in Slack, always use Slack-formatted links:
   `<https://github.com/owner/repo/issues/42|owner/repo#42>`. Never paste
   bare URLs or reference issues by number alone.
