@@ -110,6 +110,84 @@ def _session_name(issue_id: str, phase: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle events
+# ---------------------------------------------------------------------------
+#
+# Engineer processes run out-of-band — their own OS process for `modastack
+# spawn`, or a worker thread for workflow phases — so they can't reach the
+# manager's in-process event queue directly. They post lifecycle events to the
+# bus the same way monitor checks do: over HTTP to the local dashboard's
+# /api/event endpoint (modastack.cli._post_event). Posting is fire-and-forget
+# on a daemon thread so a missing or unreachable dashboard never blocks or
+# breaks the engineer run.
+
+
+def _summarize_output(text: str, max_lines: int = 6, max_chars: int = 600) -> str:
+    """Last few non-empty lines of an agent's final output, for event summaries."""
+    lines = [ln for ln in (text or "").strip().splitlines() if ln.strip()]
+    return "\n".join(lines[-max_lines:])[:max_chars]
+
+
+def _emit_lifecycle_event(event_type: str, data: dict[str, Any]) -> None:
+    """Fire-and-forget POST of an engineer lifecycle event to the event bus.
+
+    Runs on a daemon thread and swallows all errors — event delivery is
+    best-effort and must never block or fail the engineer run.
+    """
+    payload = {k: v for k, v in data.items() if v not in (None, "")}
+
+    def _send() -> None:
+        try:
+            from modastack.cli import _post_event
+            _post_event(event_type, payload)
+        except Exception as e:  # never let event posting surface
+            log.debug(f"Lifecycle event {event_type} not posted: {e}")
+
+    threading.Thread(target=_send, daemon=True, name="lifecycle-event").start()
+
+
+def _emit_session_started(
+    issue_id: str, repo: str, task: str, session_id: str, phase: str = "",
+) -> None:
+    _emit_lifecycle_event("engineer/session.started", {
+        "issue_id": issue_id,
+        "repo": repo,
+        "task": (task or "")[:500],
+        "session_id": session_id,
+        "phase": phase,
+        "text": f"Engineer started working on {issue_id}",
+    })
+
+
+def _emit_session_finished(
+    result: "AgentResult", repo: str, session_id: str, started_at: float,
+) -> None:
+    duration = round(time.time() - started_at, 1)
+    if result.success:
+        summary = _summarize_output(result.final_text)
+        _emit_lifecycle_event("engineer/session.completed", {
+            "issue_id": result.issue_id,
+            "repo": repo,
+            "session_id": session_id,
+            "phase": result.phase,
+            "duration": duration,
+            "summary": summary,
+            "text": f"Engineer finished {result.issue_id} in {duration:.0f}s",
+        })
+    else:
+        error = result.error or "unknown error"
+        _emit_lifecycle_event("engineer/session.failed", {
+            "issue_id": result.issue_id,
+            "repo": repo,
+            "session_id": session_id,
+            "phase": result.phase,
+            "duration": duration,
+            "error": error,
+            "text": f"Engineer failed on {result.issue_id}: {error}",
+        })
+
+
+# ---------------------------------------------------------------------------
 # Blocking execution (new executor path)
 # ---------------------------------------------------------------------------
 
@@ -276,8 +354,11 @@ def run_phase_blocking(
         cwd=cwd, status="starting",
     ))
 
+    started_at = time.time()
+    _emit_session_started(issue_id, repo, title or context, name, phase=phase)
+
     try:
-        return asyncio.run(
+        result = asyncio.run(
             asyncio.wait_for(
                 _run_agent_supervised(
                     prompt, cwd, issue_id, phase, effective_timeout,
@@ -289,10 +370,13 @@ def run_phase_blocking(
         )
     except asyncio.TimeoutError:
         registry.update(name, status="error")
-        return AgentResult(
+        result = AgentResult(
             session_id="", issue_id=issue_id, phase=phase,
             success=False, error=f"timeout after {effective_timeout}s",
         )
+
+    _emit_session_finished(result, repo, name, started_at)
+    return result
 
 
 def spawn_adhoc(
@@ -313,8 +397,11 @@ def spawn_adhoc(
         cwd=cwd, status="starting",
     ))
 
+    started_at = time.time()
+    _emit_session_started(agent_name, cwd, task, agent_name, phase="adhoc")
+
     try:
-        return asyncio.run(
+        result = asyncio.run(
             asyncio.wait_for(
                 _run_agent_supervised(
                     prompt=task, cwd=cwd, issue_id=agent_name,
@@ -325,10 +412,13 @@ def spawn_adhoc(
         )
     except asyncio.TimeoutError:
         registry.update(agent_name, status="error")
-        return AgentResult(
+        result = AgentResult(
             session_id="", issue_id=agent_name, phase="adhoc",
             success=False, error=f"timeout after {timeout}s",
         )
+
+    _emit_session_finished(result, cwd, agent_name, started_at)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -624,21 +714,26 @@ def run_phase(
 
     loop = _ensure_loop()
 
+    started_at = time.time()
+    _emit_session_started(issue_id, repo, title or context, name, phase=phase)
+
     async def _wrapped():
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 _run_agent(prompt, cwd, issue_id, phase, timeout, max_budget_usd),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
             registry.update(name, status="error")
-            return AgentResult(
+            result = AgentResult(
                 session_id="",
                 issue_id=issue_id,
                 phase=phase,
                 success=False,
                 error=f"timeout after {timeout}s",
             )
+        _emit_session_finished(result, repo, name, started_at)
+        return result
 
     future = asyncio.run_coroutine_threadsafe(_wrapped(), loop)
     _running[key] = RunningAgent(
