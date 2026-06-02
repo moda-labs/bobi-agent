@@ -52,6 +52,12 @@ Then **STOP completely.** Your work is done. Do NOT proceed to any next step.
 
 ## Rules
 
+- **Always open the PR against `main`** (the default branch). Unless you were
+  explicitly instructed to target a different base, never open a PR against a
+  feature branch — it creates unnecessary merge chains and can strand code off
+  main. Pass the base explicitly: `gh pr create --base main ...`. If `/ship`
+  creates the PR, verify afterwards that the base is `main`
+  (`gh pr view --json baseRefName`).
 - PR title format per `practices/source-control-conventions`: `[ISSUE-ID] type: description`
 - **Move ticket to In Review** after creating the PR.
 - **NEVER merge PRs.** Do NOT run `gh pr merge`, `git merge main`, or any

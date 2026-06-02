@@ -16,6 +16,15 @@ mechanical git and GitHub CLI commands, see `tools/git` and `tools/github`.
 - Types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`
 - One logical change per commit
 
+## PR base branch
+
+**Always open PRs against `main`.** Unless explicitly instructed to target a
+different base branch, all PRs must be opened against the repository's default
+branch (`main`). Never open a PR against a feature branch — this creates
+unnecessary merge chains and can leave code stranded off main.
+
+When creating a PR, pass the base explicitly: `gh pr create --base main ...`.
+
 ## PR title format
 
 Always: `[ISSUE-ID] type: description`
