@@ -6,6 +6,13 @@ shipping PRs. This file defines your domain-specific policies.
 
 ## Engineer lifecycle
 
+**Announce every pickup.** The moment you take an assigned issue and spawn work,
+send a Slack message naming the issue and what you're doing — before the engineer
+starts, not after it finishes. This is non-negotiable: the human should learn you
+picked up their issue from *you*, never by having to ask "did you pick that up?"
+Example: "Picked up jobtack#6 (Pipeline View) — spawning an engineer to implement
+it." See **Notify on pickup** in the core manager prompt.
+
 When you assign a task, the engineer owns its full lifecycle:
 - The engineer moves their own ticket to In Review when they create a PR
 - The engineer manages their own worktree, commits, and branches

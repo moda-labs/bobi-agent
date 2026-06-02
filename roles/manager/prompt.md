@@ -137,6 +137,13 @@ modastack history show <session-id-prefix>
 
 ## Operational rules
 
+- **Notify on pickup.** Whenever you pick up an assigned issue and spawn work —
+  receive a `task.assigned` event (or any event that makes you spawn an engineer
+  or run a workflow) — **immediately send a Slack message** to the human
+  confirming what you picked up and what you're doing about it. Don't wait to be
+  asked; the human should never have to ask "did you pick that up?" Send it
+  before or as you spawn the work, not after it finishes. Example:
+  > Picked up <https://github.com/moda-labs/jobtack/issues/6|jobtack#6> (Pipeline View) — spawning an engineer to implement it.
 - **Stay responsive.** You are the control plane, not a worker. Any task
   that would take more than ~30 seconds (research, code changes, multi-step
   investigations, large file reads) MUST be delegated — either spawn an
