@@ -282,8 +282,7 @@ class WorkflowExecutor:
 
     def _run_manager(self, node: NodeDef) -> dict:
         from modastack.manager.session import (
-            inject as mgr_inject,
-            read_last_response,
+            inject_capture as mgr_inject_capture,
             last_inject_error,
         )
 
@@ -294,16 +293,17 @@ class WorkflowExecutor:
         # The manager session is shared with the event drain loop and other
         # workflow runs, so it is frequently mid-turn when we need it. Wait
         # for it to free up (up to the node timeout) instead of failing the
-        # instant it is busy. inject() blocks until the manager finishes its
-        # turn, so once it returns True the reply is already captured.
-        if not mgr_inject(full_prompt, timeout=node.timeout,
-                          wait_for_ready=node.timeout):
+        # instant it is busy. inject_capture() blocks until the manager
+        # finishes its turn and returns this turn's reply atomically, so a
+        # concurrent inject can't substitute its own response.
+        ok, output = mgr_inject_capture(full_prompt, timeout=node.timeout,
+                                        wait_for_ready=node.timeout)
+        if not ok:
             raise RuntimeError(
                 f"Failed to inject into manager session: {last_inject_error()}"
             )
 
-        output = read_last_response() or ""
-        return {"output": output}
+        return {"output": output or ""}
 
     def _run_gate(self, node: NodeDef) -> dict:
         for branch_name, branch_def in node.branches.items():

@@ -258,12 +258,27 @@ async def _inject_and_drain(text: str) -> None:
     log.info(f"inject: drain complete, state={_state}")
 
 
-def inject(text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
-    """Inject text into the manager session and block until its turn ends.
+def inject_capture(
+    text: str, timeout: int = 300, wait_for_ready: int = 0
+) -> tuple[bool, str]:
+    """Inject text, block until the turn ends, and return ``(ok, response)``.
 
-    Serialized via `_inject_lock`: the event drain loop and workflow
-    consultation nodes call this from different threads, and overlapping
-    queries on the single shared SDK client corrupt the stream.
+    The response is snapshotted from `_last_response` **while `_inject_lock`
+    is still held**, so it is guaranteed to be the reply produced by *this*
+    injected turn.
+
+    This is the race-free way to read a turn's response. A separate
+    `read_last_response()` call cannot offer that guarantee: `_last_response`
+    is a single module-global shared by every inject caller (event drain loop,
+    workflow consultation nodes, dashboard `/api/consult` — all on different
+    threads sharing one SDK client, see `_inject_lock`). `inject()` releases
+    the lock the instant it returns, so a concurrent inject can clear and
+    overwrite `_last_response` before the caller reads it — delivering the
+    wrong turn's text (e.g. a Slack reply shifted onto an unrelated message).
+    Capturing under the lock closes that window.
+
+    Serialized via `_inject_lock`: overlapping queries on the single shared
+    SDK client corrupt the stream.
 
     `wait_for_ready` is how many seconds to wait for a busy manager to
     return to `waiting_input` before giving up. It defaults to 0, which
@@ -271,15 +286,16 @@ def inject(text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
     Workflow consultation nodes pass a positive value so they queue behind
     whatever the manager is currently doing instead of failing outright.
 
-    On failure, sets `last_inject_error()` with the reason so callers can
-    surface it rather than reporting an opaque "inject failed".
+    On failure, returns ``(False, "")`` and sets `last_inject_error()` with
+    the reason so callers can surface it rather than reporting an opaque
+    "inject failed".
     """
     global _state, _last_inject_error
 
     if not _client or not _loop:
         _last_inject_error = "manager not running"
         log.warning("Manager not running — cannot inject")
-        return False
+        return False, ""
 
     with _inject_lock:
         deadline = time.monotonic() + max(0, wait_for_ready)
@@ -287,14 +303,14 @@ def inject(text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
             if _state in ("stopped", "error"):
                 _last_inject_error = f"manager state={_state}"
                 log.warning(f"Manager not injectable (state={_state}) — dropping inject")
-                return False
+                return False, ""
             if time.monotonic() >= deadline:
                 _last_inject_error = f"manager busy (state={_state})"
                 log.warning(
                     f"Manager not ready for input (state={_state}) after "
                     f"{wait_for_ready}s — dropping inject"
                 )
-                return False
+                return False, ""
             time.sleep(1)
 
         log.info(f"Inject: {text[:100]}")
@@ -303,12 +319,14 @@ def inject(text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
         try:
             future.result(timeout=timeout)
             _last_inject_error = ""
-            return True
+            # Snapshot the reply while still holding _inject_lock so it is
+            # bound to this turn and cannot be clobbered by a concurrent inject.
+            return True, _last_response
         except TimeoutError:
             _last_inject_error = f"manager did not finish within {timeout}s"
             log.error(f"Manager inject timed out after {timeout}s")
             future.cancel()
-            return False
+            return False, ""
         except Exception as e:
             _last_inject_error = f"{type(e).__name__}: {e}"
             log.error(f"Manager inject failed ({type(e).__name__}): {e}")
@@ -316,7 +334,19 @@ def inject(text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
             if _keep_alive is not None:
                 _keep_alive.set()
             future.cancel()
-            return False
+            return False, ""
+
+
+def inject(text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
+    """Inject text and block until the turn ends; return whether it succeeded.
+
+    Thin wrapper over `inject_capture()` for callers that only need the
+    success flag. Callers that need the turn's response should use
+    `inject_capture()` so the reply is captured atomically with the inject
+    rather than re-read from the shared global afterward.
+    """
+    ok, _ = inject_capture(text, timeout=timeout, wait_for_ready=wait_for_ready)
+    return ok
 
 
 def last_inject_error() -> str:

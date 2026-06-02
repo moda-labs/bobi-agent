@@ -16,7 +16,7 @@ class TestDrainLoop:
             data["text"] = text
         return {"type": etype, "source": source, "data": data}
 
-    @patch("modastack.manager.session.inject")
+    @patch("modastack.manager.session.inject_capture")
     @patch("modastack.manager.session.detect_state", return_value="waiting_input")
     def test_single_event_injected(self, mock_state, mock_inject):
         from modastack.manager.events.event_client import event_queue
@@ -41,7 +41,7 @@ class TestDrainLoop:
         injected_text = mock_inject.call_args[0][0]
         assert "Event: github/task.opened" in injected_text
 
-    @patch("modastack.manager.session.inject")
+    @patch("modastack.manager.session.inject_capture")
     @patch("modastack.manager.session.detect_state", return_value="waiting_input")
     @patch("modastack.manager.events.consumer.DRAIN_INTERVAL", 0.1)
     def test_multiple_events_batched(self, mock_state, mock_inject):
@@ -62,7 +62,7 @@ class TestDrainLoop:
             call_count += 1
             if call_count >= 2:
                 raise SystemExit()
-            return True
+            return True, ""
         mock_inject.side_effect = stop_after_slack_inject
 
         try:

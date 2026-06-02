@@ -125,11 +125,11 @@ async def api_consult(request: Request):
 
 
 def _do_consult(question, timeout, source, correlation_id):
-    from modastack.manager.session import inject, read_last_response, last_inject_error
+    from modastack.manager.session import inject_capture, last_inject_error
 
     _log_consultation(correlation_id, source, question)
 
-    ok = inject(
+    ok, response = inject_capture(
         f"[CONSULTATION] {question}",
         timeout=timeout,
         wait_for_ready=timeout,
@@ -137,8 +137,7 @@ def _do_consult(question, timeout, source, correlation_id):
     if not ok:
         return {"ok": False, "error": f"inject failed: {last_inject_error()}"}
 
-    response = read_last_response() or ""
-    return {"ok": True, "response": response, "correlation_id": correlation_id}
+    return {"ok": True, "response": response or "", "correlation_id": correlation_id}
 
 
 def _log_consultation(correlation_id: str, source: str, question: str):
