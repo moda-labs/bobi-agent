@@ -64,5 +64,8 @@ After pushing, update `~/.modastack/handoffs/<ISSUE_ID>.md`:
 - Commit conventions: `[ISSUE-ID] type: description`
 - `/review` is mandatory. Do not skip it.
 - Do NOT create a PR. The `/prepare-pr` phase handles that.
+- When a PR *is* created (in `/prepare-pr`), it **must target `main`** — never
+  a feature branch — unless you were explicitly instructed to use a different
+  base. See `practices/source-control-conventions`.
 - Do NOT run `/land-and-deploy` or merge anything.
 
