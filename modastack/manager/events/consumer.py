@@ -67,7 +67,7 @@ def _drain_loop():
     """Drain the event queue and inject batched events into the manager."""
     from .event_client import event_queue, format_event_for_manager
     from .slack_responder import SlackResponder
-    from modastack.manager.session import inject, detect_state, read_last_response
+    from modastack.manager.session import inject_capture, detect_state
 
     responder = SlackResponder()
 
@@ -102,10 +102,12 @@ def _drain_loop():
                     continue
 
             log.info(f"Injecting {len(group)} event(s)")
-            ok = inject(text)
+            # inject_capture returns the reply captured atomically with this
+            # turn, so the Slack post can't pick up a concurrent inject's
+            # response from the shared global (see session.inject_capture).
+            ok, response = inject_capture(text)
 
             if ok and is_slack:
-                response = read_last_response() or ""
                 responder.handle(group, response)
 
 

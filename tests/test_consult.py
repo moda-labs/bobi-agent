@@ -19,10 +19,9 @@ class TestConsultEndpoint:
         return TestClient(app)
 
     @patch("modastack.manager.session.is_alive", return_value=True)
-    @patch("modastack.manager.session.inject", return_value=True)
-    @patch("modastack.manager.session.read_last_response", return_value="Use regex.")
+    @patch("modastack.manager.session.inject_capture", return_value=(True, "Use regex."))
     @patch("modastack.manager.session.last_inject_error", return_value="")
-    def test_returns_response(self, mock_err, mock_resp, mock_inject, mock_alive, client):
+    def test_returns_response(self, mock_err, mock_inject, mock_alive, client):
         resp = client.post("/api/consult", json={
             "question": "regex or string matching?",
             "timeout": 60,
@@ -54,7 +53,7 @@ class TestConsultEndpoint:
         assert "empty" in data["error"]
 
     @patch("modastack.manager.session.is_alive", return_value=True)
-    @patch("modastack.manager.session.inject", return_value=False)
+    @patch("modastack.manager.session.inject_capture", return_value=(False, ""))
     @patch("modastack.manager.session.last_inject_error", return_value="manager busy")
     def test_error_on_inject_failure(self, mock_err, mock_inject, mock_alive, client):
         resp = client.post("/api/consult", json={"question": "hello?"})

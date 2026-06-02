@@ -292,8 +292,7 @@ class WorkflowEngine:
         return event_repo
 
     def _exec_manager(self, node: NodeDef) -> dict:
-        from modastack.manager.session import inject as mgr_inject
-        from modastack.manager.session import read_last_response
+        from modastack.manager.session import inject_capture as mgr_inject_capture
         from modastack.manager.session import last_inject_error
 
         prompt_text = self.ctx.resolve(node.prompt)
@@ -306,16 +305,17 @@ class WorkflowEngine:
             full_prompt += " " + memory_context
 
         # Wait for the shared manager session to free up instead of failing
-        # the instant it is busy. inject() blocks until the turn finishes, so
-        # the reply is already captured once it returns True.
-        if not mgr_inject(full_prompt, timeout=node.timeout,
-                          wait_for_ready=node.timeout):
+        # the instant it is busy. inject_capture() blocks until the turn
+        # finishes and returns this turn's reply atomically — re-reading the
+        # shared global afterward could pick up a concurrent inject's response.
+        ok, output = mgr_inject_capture(full_prompt, timeout=node.timeout,
+                                        wait_for_ready=node.timeout)
+        if not ok:
             raise RuntimeError(
                 f"Failed to inject into manager session: {last_inject_error()}"
             )
 
-        output = read_last_response() or ""
-        return {"output": output}
+        return {"output": output or ""}
 
     def _exec_gate(self, node: NodeDef) -> dict:
         for branch_name, branch_def in node.branches.items():

@@ -190,9 +190,8 @@ class TestManagerNodeToSlack:
         wf = _wf(nodes)
         run = WorkflowRun.create("test", _event())
 
-        with patch("modastack.manager.session.inject", return_value=True), \
-             patch("modastack.manager.session.read_last_response",
-                   return_value="Picking up #88 now — starting triage."), \
+        with patch("modastack.manager.session.inject_capture",
+                   return_value=(True, "Picking up #88 now — starting triage.")), \
              patch("modastack.manager.session.last_inject_error", return_value=""):
             ex = WorkflowExecutor(wf, run, registry=registry)
             status = ex.execute()
@@ -223,10 +222,9 @@ class TestManagerNodeToSlack:
         def fake_inject(text, timeout=300, wait_for_ready=0):
             captured["timeout"] = timeout
             captured["wait_for_ready"] = wait_for_ready
-            return True
+            return True, "ok"
 
-        with patch("modastack.manager.session.inject", side_effect=fake_inject), \
-             patch("modastack.manager.session.read_last_response", return_value="ok"), \
+        with patch("modastack.manager.session.inject_capture", side_effect=fake_inject), \
              patch("modastack.manager.session.last_inject_error", return_value=""):
             ex = WorkflowExecutor(wf, run)
             ex.execute()
@@ -248,8 +246,7 @@ class TestManagerNodeToSlack:
         wf = _wf(nodes)
         run = WorkflowRun.create("test", _event())
 
-        with patch("modastack.manager.session.inject", return_value=False), \
-             patch("modastack.manager.session.read_last_response", return_value=""), \
+        with patch("modastack.manager.session.inject_capture", return_value=(False, "")), \
              patch("modastack.manager.session.last_inject_error",
                    return_value="manager busy (state=working)"):
             ex = WorkflowExecutor(wf, run)
