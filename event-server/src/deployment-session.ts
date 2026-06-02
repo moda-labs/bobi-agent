@@ -56,6 +56,11 @@ export class DeploymentSession extends DurableObject<Env> {
 			this.deploymentId = (await this.ctx.storage.get("deployment_id")) as string || "";
 		}
 
+		const savedSeq = (await this.ctx.storage.get("next_seq")) as number | undefined;
+		if (savedSeq && savedSeq > this.nextSeq) {
+			this.nextSeq = savedSeq;
+		}
+
 		const seq = this.nextSeq++;
 		await this.ctx.storage.put("next_seq", this.nextSeq);
 

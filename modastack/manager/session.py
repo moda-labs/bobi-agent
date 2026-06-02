@@ -41,6 +41,11 @@ _last_inject_error: str = ""
 # Serializes inject() across callers (event drain loop + workflow
 # consultation nodes run on different threads but share one SDK client).
 _inject_lock = threading.Lock()
+# Called from _drain_turn whenever the model emits text.  The consumer
+# sets this to post Slack replies as they arrive rather than reading
+# _last_response after the drain (which can return stale text when the
+# SDK yields a leftover ResultMessage from a previous turn).
+_response_callback: Any | None = None
 
 
 def _load_manager_prompt() -> str:
@@ -110,6 +115,11 @@ async def _drain_turn() -> None:
                 if text_parts:
                     _last_response = "\n".join(text_parts)
                     log_activity("response", {"text": _last_response[:500]}, session=SESSION_NAME)
+                    if _response_callback:
+                        try:
+                            _response_callback(_last_response)
+                        except Exception as cb_err:
+                            log.warning(f"Response callback failed: {cb_err}")
 
             elif isinstance(msg, ResultMessage):
                 save_session_id(SESSION_NAME, msg.session_id)
@@ -356,6 +366,16 @@ def last_inject_error() -> str:
 
 def detect_state() -> str:
     return _state
+
+
+def set_response_callback(fn) -> None:
+    """Set a callback that fires whenever the model emits text.
+
+    The consumer uses this to post Slack replies as they stream in,
+    bypassing the stale-response problem with read-after-drain.
+    """
+    global _response_callback
+    _response_callback = fn
 
 
 def wait_until_ready(timeout: int = 60) -> bool:
