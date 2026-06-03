@@ -7,10 +7,8 @@
 
 name: research
 version: 1
-trigger:
-  event: task.assigned
-  filter:
-    labels: [research]
+trigger: >
+  When an issue with a "research" label is assigned for investigation.
 
 nodes:
   spawn_researcher:

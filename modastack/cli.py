@@ -1392,7 +1392,7 @@ def workflow():
 def workflow_list():
     """List available workflow definitions from all sources.
 
-    Scans three tiers in priority order:
+    Scans three tiers in priority order (most specific wins):
       1. Repo-local: <repo>/.modastack/workflows/
       2. User: ~/.modastack/workflows/
       3. Built-in: <modastack>/workflows/
@@ -1400,43 +1400,11 @@ def workflow_list():
     Usage:
         modastack workflow list
     """
-    from .workflow.schema import load_workflow
-    from .workflow.triggers import WORKFLOWS_DIR, USER_WORKFLOWS_DIR
+    from .workflow.triggers import WorkflowDispatcher
 
-    sources = []
-
-    # Repo-specific
-    config = GlobalConfig.load()
-    for repo_path in config.repos:
-        repo_wf_dir = repo_path / ".modastack" / "workflows"
-        if repo_wf_dir.exists():
-            sources.append((repo_wf_dir, f"repo:{repo_path.name}"))
-
-    # User overrides
-    if USER_WORKFLOWS_DIR.exists():
-        sources.append((USER_WORKFLOWS_DIR, "user"))
-
-    # Built-in defaults
-    sources.append((WORKFLOWS_DIR, "default"))
-
-    found = False
-    for directory, source in sources:
-        if not directory.exists():
-            continue
-        for f in sorted(directory.glob("*.yaml")):
-            found = True
-            try:
-                wf = load_workflow(f)
-                trigger = wf.trigger or "—"
-                desc = wf.description.strip().split("\n")[0][:60] if wf.description else ""
-                click.echo(f"  {wf.name:25s} trigger={trigger:25s} steps={len(wf.steps)}")
-                if desc:
-                    click.echo(f"    {desc}")
-            except Exception as e:
-                click.echo(f"  {f.name:25s} ERROR: {e}")
-
-    if not found:
-        click.echo("No workflows found.")
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    click.echo(dispatcher.format_workflow_menu())
 
 
 @workflow.command("status")

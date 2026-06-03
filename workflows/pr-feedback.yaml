@@ -1,5 +1,6 @@
 name: pr-feedback
-trigger: review.changes_requested
+trigger: >
+  When a reviewer requests changes on an open pull request.
 description: >
   Address PR review feedback. Use when a reviewer requests changes
   on an open pull request.

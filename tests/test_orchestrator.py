@@ -29,7 +29,8 @@ class TestSchemaLoad:
         f = tmp_path / "test.yaml"
         f.write_text(textwrap.dedent("""\
             name: test-wf
-            trigger: task.assigned
+            trigger: >
+              When an issue is assigned and requires code changes.
             steps:
               - name: greet
                 prompt: "Say hello"
@@ -39,7 +40,7 @@ class TestSchemaLoad:
         """))
         wf = load_workflow(f)
         assert wf.name == "test-wf"
-        assert wf.trigger == "task.assigned"
+        assert "issue is assigned" in wf.trigger
         assert len(wf.steps) == 1
         assert wf.steps[0].name == "greet"
         assert wf.steps[0].prompt.strip() == "Say hello"

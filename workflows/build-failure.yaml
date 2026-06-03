@@ -1,5 +1,6 @@
 name: build-failure
-trigger: ci.failed
+trigger: >
+  When a CI check or workflow run fails on an engineer's branch.
 description: >
   Investigate and fix a CI build failure. Use when a check run or
   workflow fails on an engineer's branch.

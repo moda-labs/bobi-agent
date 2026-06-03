@@ -1,4 +1,4 @@
-"""Workflow dispatcher — matches events to workflows.
+"""Workflow dispatcher — surfaces workflows to the manager for semantic matching.
 
 Workflow resolution order (most specific wins):
   1. <target-repo>/.modastack/workflows/   — repo-specific
@@ -19,6 +19,8 @@ log = logging.getLogger(__name__)
 
 WORKFLOWS_DIR = Path(__file__).parent.parent.parent / "workflows"
 USER_WORKFLOWS_DIR = Path.home() / ".modastack" / "workflows"
+
+_SOURCE_PRIORITY = {"default": 0, "user": 1}
 
 
 class WorkflowDispatcher:
@@ -58,38 +60,30 @@ class WorkflowDispatcher:
                 return wf
         return None
 
-    def match_event(self, event: dict) -> Workflow | None:
-        """Find the best matching workflow for an event."""
-        event_type = event.get("type", "")
-        event_repo = event.get("data", {}).get("repo", "")
+    def format_workflow_menu(self) -> str:
+        """Format all loaded workflows as a menu for the manager prompt.
 
-        best: Workflow | None = None
-        best_specificity = -1
-
+        Deduplicates by name — most-specific source wins (repo > user > default).
+        Returns a formatted string the manager can use to decide which workflow
+        to run for a given event.
+        """
+        seen: dict[str, tuple[Workflow, int]] = {}
         for wf, source in self.workflows:
-            if wf.trigger != event_type:
-                continue
+            priority = _SOURCE_PRIORITY.get(source, 2)
+            prev = seen.get(wf.name)
+            if prev is None or priority > prev[1]:
+                seen[wf.name] = (wf, priority)
 
-            if source == "default":
-                specificity = 0
-            elif source == "user":
-                specificity = 1
-            else:
-                if not event_repo or not self._repo_matches(event_repo, source):
-                    continue
-                specificity = 2
+        if not seen:
+            return "No workflows loaded."
 
-            if specificity > best_specificity:
-                best = wf
-                best_specificity = specificity
+        lines = ["Available workflows (pick by name):\n"]
+        for wf, _priority in seen.values():
+            trigger = wf.trigger.strip()
+            desc = wf.description.strip()
+            lines.append(f"- {wf.name} — {trigger}")
+            if desc and desc != trigger:
+                lines.append(f"  {desc}")
+            lines.append("")
 
-        return best
-
-    @staticmethod
-    def _repo_matches(event_repo: str, source: str) -> bool:
-        if event_repo == source:
-            return True
-        if "/" in event_repo:
-            repo_name = event_repo.split("/")[-1]
-            return Path(source).name == repo_name
-        return Path(event_repo).name == Path(source).name
+        return "\n".join(lines)
