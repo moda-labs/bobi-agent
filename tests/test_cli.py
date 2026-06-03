@@ -147,6 +147,25 @@ def test_post_event_returns_false_on_connection_error():
         assert _post_event("monitor/x", {}) is False
 
 
+# --- modastack workflow list ------------------------------------------------
+
+
+def test_workflow_list_shows_workflows():
+    runner = CliRunner()
+    result = runner.invoke(main, ["workflow", "list"])
+    assert result.exit_code == 0
+    assert "issue-lifecycle" in result.output
+    assert "steps=" in result.output
+    assert "trigger=" in result.output
+
+
+def test_workflow_list_no_errors():
+    """Every workflow YAML should load without errors."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["workflow", "list"])
+    assert "ERROR" not in result.output
+
+
 # --- modastack agent (unified command) --------------------------------------
 
 
