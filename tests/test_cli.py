@@ -242,3 +242,44 @@ class TestAgentCommand:
             ])
         assert result.exit_code == 0
         assert "eng-42" in result.output
+
+    def test_workflow_passes_issue(self, tmp_path):
+        """--issue must reach launch_agent so the run targets that issue."""
+        runner = CliRunner()
+        with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-34") as mock:
+            result = runner.invoke(main, [
+                "agent", "--workflow", "issue-lifecycle",
+                "--repo", str(tmp_path), "--issue", "34",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[1]["issue"] == "34"
+
+    def test_event_json_overrides_issue(self, tmp_path):
+        """A full event payload binds the run to its issue id and title."""
+        runner = CliRunner()
+        event = json.dumps({"issue_id": "55", "title": "Add rate limiting"})
+        with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-55") as mock:
+            result = runner.invoke(main, [
+                "agent", "--workflow", "issue-lifecycle",
+                "--repo", str(tmp_path), "--issue", "1", "--event-json", event,
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[1]["issue"] == "55"
+        assert mock.call_args[1]["title"] == "Add rate limiting"
+
+    def test_collision_reports_existing_run(self, tmp_path):
+        """A run colliding with an active (repo, issue) exits non-zero with a
+        clear message rather than silently aliasing onto the existing run."""
+        from modastack.subagent import RunCollision
+        from modastack.sdk import SessionEntry
+        existing = SessionEntry(name="wf-issue-lifecycle-34", issue_id="34",
+                                status="running")
+        runner = CliRunner()
+        with patch("modastack.subagent.launch_agent", side_effect=RunCollision(existing)):
+            result = runner.invoke(main, [
+                "agent", "--workflow", "issue-lifecycle",
+                "--repo", str(tmp_path), "--issue", "34",
+            ])
+        assert result.exit_code != 0
+        assert "already active" in result.output
+        assert "34" in result.output

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -89,6 +90,44 @@ class TestSessionRegistry:
         tmp_registry.register(SessionEntry(name="eng-2", role="engineer"))
         engineers = tmp_registry.get_by_role("engineer")
         assert len(engineers) == 2
+
+
+class TestReapDead:
+    """reap_dead reconciles 'running' rows whose process has exited.
+
+    This is the stale-status-registry fix: a detached engineer that completed
+    or crashed without writing a terminal status must not linger as "running".
+    """
+
+    def test_reaps_running_with_dead_pid(self, tmp_registry):
+        # PID 999999 is overwhelmingly unlikely to be a live process.
+        tmp_registry.register(SessionEntry(name="eng-1", status="running", pid=999999))
+        reaped = tmp_registry.reap_dead()
+        assert reaped == ["eng-1"]
+        assert tmp_registry.get("eng-1").status == "stale"
+
+    def test_keeps_running_with_live_pid(self, tmp_registry):
+        tmp_registry.register(SessionEntry(name="eng-1", status="running", pid=os.getpid()))
+        assert tmp_registry.reap_dead() == []
+        assert tmp_registry.get("eng-1").status == "running"
+
+    def test_ignores_rows_without_pid(self, tmp_registry):
+        """Legacy/in-process rows (pid 0) can't be probed — leave them be."""
+        tmp_registry.register(SessionEntry(name="eng-1", status="running", pid=0))
+        assert tmp_registry.reap_dead() == []
+        assert tmp_registry.get("eng-1").status == "running"
+
+    def test_does_not_touch_terminal_or_waiting(self, tmp_registry):
+        tmp_registry.register(SessionEntry(name="done", status="done", pid=999999))
+        tmp_registry.register(SessionEntry(name="wait", status="waiting", pid=999999))
+        assert tmp_registry.reap_dead() == []
+        assert tmp_registry.get("done").status == "done"
+        assert tmp_registry.get("wait").status == "waiting"
+
+    def test_pid_roundtrips(self, tmp_registry):
+        tmp_registry.register(SessionEntry(name="eng-1", pid=12345))
+        fresh = type(tmp_registry)()
+        assert fresh.get("eng-1").pid == 12345
 
     def test_persistence_across_instances(self, tmp_path, monkeypatch):
         registry_path = tmp_path / "registry.json"

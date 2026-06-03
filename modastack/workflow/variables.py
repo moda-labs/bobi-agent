@@ -14,19 +14,47 @@ log = logging.getLogger(__name__)
 
 VAR_PATTERN = re.compile(r'\$\{\{(.+?)\}\}')
 
+# Words that look like bare identifiers but are operators/literals in a
+# condition — never substitute these even if a handoff happens to use the name.
+_CONDITION_KEYWORDS = frozenset({"and", "or", "not", "in", "true", "false"})
+_IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+_NUMERIC = re.compile(r"-?\d+(?:\.\d+)?$")
+
+
+def _normalize_value(val: Any) -> str:
+    """Render a handoff value as a condition/template string.
+
+    YAML parses ``needs_spec: true`` to a Python ``bool``; ``str(True)`` is
+    "True", which never equals the lowercase ``true`` literal a condition
+    compares against. Normalize bools to lowercase so both ``${{...}}`` and
+    bare-name comparisons behave as authors expect.
+    """
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if val is None:
+        return ""
+    return str(val)
+
 
 class VariableContext:
 
     def __init__(self):
         self.scopes: dict[str, dict[str, Any]] = {}
+        # Flat accumulation of every step's handoff outputs, so route
+        # conditions can reference a field by bare name (`needs_spec == true`)
+        # without knowing which step produced it.
+        self.flat: dict[str, Any] = {}
 
     def set_scope(self, name: str, data: dict[str, Any]):
         self.scopes[name] = data
 
+    def update_flat(self, data: dict[str, Any]):
+        self.flat.update(data)
+
     def get(self, scope: str, key: str, default: str = "") -> str:
         data = self.scopes.get(scope, {})
         val = data.get(key, default)
-        return str(val) if val is not None else default
+        return _normalize_value(val) if val is not None else default
 
     def resolve(self, template: str) -> str:
         """Replace ${{scope.key}} with values. Supports ${{scope.key | lower}}."""
@@ -77,10 +105,36 @@ class VariableContext:
     def evaluate_condition(self, expr: str) -> bool:
         """Evaluate a when: expression. Safe — no eval().
 
-        Supports: ==, !=, in, not in, and, or, true, false, 'string literals'
+        Supports: ==, !=, in, not in, and, or, true, false, 'string literals'.
+        Bare identifiers that match an accumulated handoff field are
+        substituted with that field's value, so `needs_spec == true` compares
+        the handoff value rather than the literal string "needs_spec".
         """
         resolved = self.resolve(expr)
+        resolved = self._substitute_bare(resolved)
         return _eval_expr(resolved.strip())
+
+    def _substitute_bare(self, expr: str) -> str:
+        """Replace bare handoff-field references with their values.
+
+        Only identifiers present in ``self.flat`` are touched; operators and
+        literals (and/or/not/in/true/false) are left alone. String values are
+        single-quoted so multi-word values don't break the parser; booleans
+        and numbers are inserted bare so they compare as expected.
+        """
+        if not self.flat:
+            return expr
+
+        def _replace(match: re.Match) -> str:
+            token = match.group(0)
+            if token in _CONDITION_KEYWORDS or token not in self.flat:
+                return token
+            val = _normalize_value(self.flat[token])
+            if val in ("true", "false") or _NUMERIC.match(val):
+                return val
+            return f"'{val}'"
+
+        return _IDENTIFIER.sub(_replace, expr)
 
 
 def _eval_expr(expr: str) -> bool:

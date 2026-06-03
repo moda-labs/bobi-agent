@@ -12,6 +12,7 @@ work using its tools.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ def run_workflow(
     issue_id: str | None = None,
     requested_by: dict | None = None,
     timeout: int = 3600,
+    title: str = "",
 ) -> bool:
     """Execute a workflow end-to-end. Returns True on success."""
     issue_id = issue_id or _parse_issue_number(task) or "adhoc"
@@ -52,8 +54,8 @@ def run_workflow(
     registry = get_registry()
     registry.register(SessionEntry(
         name=session_name, session_id="", role="engineer",
-        issue_id=issue_id, title=task[:80], phase=workflow.name,
-        repo=repo, cwd=cwd, status="running",
+        issue_id=issue_id, title=(title or task)[:80], phase=workflow.name,
+        repo=repo, cwd=cwd, status="running", pid=os.getpid(),
         requested_by=requested_by,
     ))
 
@@ -165,6 +167,9 @@ def run_workflow(
                        step.handoff.required + step.handoff.optional
                        if k in handoff}
             ctx.set_scope(step.name, outputs)
+            # Also expose by bare name so route conditions like
+            # `needs_spec == true` resolve against this step's handoff.
+            ctx.update_flat(outputs)
 
             duration = time.time() - step_start
             _emit_lifecycle_event("engineer/step.completed", {

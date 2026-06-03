@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import time
 from dataclasses import dataclass, field, asdict
@@ -38,6 +39,11 @@ class SessionEntry:
     repo: str = ""
     cwd: str = ""
     status: str = "starting"
+    # OS pid of the process actually running this session. Set for detached
+    # engineer/workflow subprocesses (and the subprocess that runs their
+    # phases) so liveness can be checked and the process can be signalled to
+    # cancel. 0 means "no tracked process" (legacy rows, in-process threads).
+    pid: int = 0
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     # Who requested this work, for routing async results back to them.
@@ -109,6 +115,52 @@ class SessionRegistry:
 
     def get_by_role(self, role: str) -> list[SessionEntry]:
         return [e for e in self._entries.values() if e.role == role]
+
+    def reap_dead(self) -> list[str]:
+        """Mark active sessions whose tracked process has exited as 'stale'.
+
+        Detached engineer/workflow subprocesses record their pid (see
+        ``SessionEntry.pid``). When such a process dies without writing a
+        terminal status — crash, kill -9, machine reboot — its registry row
+        is left reading "running" forever. This reconciles the registry with
+        reality: any active row whose pid is no longer alive becomes "stale".
+
+        Rows with no tracked pid (0) are left untouched — they belong to
+        in-process threads or pre-pid legacy entries we can't probe. Returns
+        the names that were reaped.
+        """
+        reaped: list[str] = []
+        for name, entry in self._entries.items():
+            # "waiting" is an intentional suspension (e.g. awaiting human
+            # approval), not a crash — leave it for the user to resume/cancel.
+            if entry.status not in ("starting", "running", "idle"):
+                continue
+            if entry.pid and not _pid_alive(entry.pid):
+                entry.status = "stale"
+                entry.last_activity = time.time()
+                reaped.append(name)
+        if reaped:
+            self._save()
+        return reaped
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if a process with this pid currently exists.
+
+    ``os.kill(pid, 0)`` sends no signal but raises if the process is gone
+    (ProcessLookupError) — the standard liveness probe. A PermissionError
+    means the pid exists but is owned by another user, which still counts
+    as alive.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 _registry: SessionRegistry | None = None

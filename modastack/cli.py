@@ -578,8 +578,9 @@ def status():
     click.echo(f"  Manager: {mgr_label}")
 
     registry = get_registry()
+    registry.reap_dead()
     engineers = registry.get_by_role("engineer")
-    active = [e for e in engineers if e.status in ("running", "starting", "idle")]
+    active = [e for e in engineers if e.status in ("running", "starting", "idle", "waiting")]
     if not active:
         click.echo("  Engineers: none active")
         return
@@ -695,46 +696,48 @@ def engineers(issue_id, cancel):
         modastack engineers AGD-12       # show details for AGD-12
         modastack engineers AGD-12 --cancel  # cancel AGD-12
     """
-    from modastack.subagent import list_agents, cancel_agent, is_running, get_result
+    from modastack.subagent import cancel_run
+
+    registry = get_registry()
+    registry.reap_dead()
 
     if issue_id and cancel:
-        if cancel_agent(issue_id):
-            click.echo(f"Cancelled {issue_id}")
+        cancelled = cancel_run(issue_id)
+        if cancelled:
+            click.echo(f"Cancelled {', '.join(cancelled)}")
         else:
             click.echo(f"No running agent for {issue_id}")
         return
 
     if issue_id:
-        if is_running(issue_id):
-            agents = list_agents()
-            for a in agents:
-                if a["issue_id"].lower() == issue_id.lower():
-                    click.echo(f"  Issue:   {a['issue_id']}")
-                    click.echo(f"  Phase:   {a['phase']}")
-                    click.echo(f"  Status:  running ({a['elapsed_s']}s)")
-                    click.echo(f"  CWD:     {a['cwd']}")
-                    return
-        result = get_result(issue_id)
-        if result:
-            click.echo(f"  Issue:   {result.issue_id}")
-            click.echo(f"  Phase:   {result.phase}")
-            click.echo(f"  Status:  {'success' if result.success else 'failed'}")
-            click.echo(f"  Turns:   {result.num_turns}")
-            click.echo(f"  Time:    {result.duration_ms / 1000:.1f}s")
-            if result.error:
-                click.echo(f"  Error:   {result.error}")
-        else:
+        # Match either the issue id or the full session name, the same ids
+        # the listing below and `modastack status` print.
+        matches = [
+            e for e in registry.get_by_role("engineer")
+            if issue_id in (e.issue_id, e.name)
+        ]
+        if not matches:
             click.echo(f"No agent found for {issue_id}")
+            return
+        for e in matches:
+            click.echo(f"  Issue:   {e.issue_id}")
+            click.echo(f"  Session: {e.name}")
+            click.echo(f"  Phase:   {e.phase}")
+            click.echo(f"  Status:  {e.status}")
+            click.echo(f"  Repo:    {e.repo}")
+            click.echo(f"  CWD:     {e.cwd}")
         return
 
-    agents = list_agents()
-    if not agents:
+    active = [
+        e for e in registry.get_by_role("engineer")
+        if e.status in ("starting", "running", "idle", "waiting")
+    ]
+    if not active:
         click.echo("No active engineers.")
         return
 
-    for agent in agents:
-        state = "running" if agent["running"] else "done"
-        click.echo(f"  {agent['issue_id']}/{agent['phase']} — {state} ({agent['elapsed_s']}s)")
+    for e in active:
+        click.echo(f"  {e.issue_id}/{e.phase} — {e.status} ({e.name})")
 
 
 @main.command()
@@ -1681,6 +1684,20 @@ def _dispatch_agent(*, repo, task, workflow, issue, title, event_json,
         click.echo("Specify --task or --workflow, not both.", err=True)
         raise SystemExit(1)
 
+    # A full event payload binds the run to its issue: it overrides --issue
+    # and --title so the run id, worktree, and branch all derive from the real
+    # issue the event is about rather than from whatever the synthetic task
+    # text happens to say.
+    if event_json:
+        try:
+            event = json.loads(event_json)
+        except json.JSONDecodeError:
+            click.echo("--event-json must be valid JSON", err=True)
+            raise SystemExit(1)
+        if isinstance(event, dict):
+            issue = str(event.get("issue_id") or issue or "") or None
+            title = event.get("title") or title
+
     # --- Wait / check mode ---
     if wait:
         cwd = _resolve_repo(repo) if repo else os.getcwd()
@@ -1707,11 +1724,23 @@ def _dispatch_agent(*, repo, task, workflow, issue, title, event_json,
             click.echo("--requested-by must be valid JSON", err=True)
             raise SystemExit(1)
 
-    from .subagent import launch_agent
-    session_name = launch_agent(
-        task=task, cwd=cwd, workflow_name=workflow,
-        timeout=timeout, requested_by=requester,
-    )
+    from .subagent import launch_agent, RunCollision
+    try:
+        session_name = launch_agent(
+            task=task, cwd=cwd, workflow_name=workflow,
+            timeout=timeout, requested_by=requester,
+            issue=issue, title=title,
+        )
+    except RunCollision as exc:
+        existing = exc.existing
+        click.echo(
+            f"A run for issue {existing.issue_id} is already active "
+            f"(session {existing.name}, status {existing.status}). "
+            f"Cancel it first with `modastack engineers {existing.issue_id} "
+            f"--cancel`.",
+            err=True,
+        )
+        raise SystemExit(1)
     click.echo(f"Agent started: {session_name}")
 
 

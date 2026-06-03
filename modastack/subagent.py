@@ -14,18 +14,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import signal
 import subprocess as sp
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from modastack.sdk import (
     get_cli_path, save_session_id, load_session_id, log_activity,
-    get_registry, SessionEntry,
+    get_registry, SessionEntry, _pid_alive,
 )
 
 InputHandler = Callable[[str, dict[str, Any]], str]
@@ -375,7 +378,7 @@ def run_phase_blocking(
     registry.register(SessionEntry(
         name=name, session_id="", role="engineer",
         issue_id=issue_id, title=title, phase=phase, repo=repo,
-        cwd=cwd, status="starting",
+        cwd=cwd, status="starting", pid=os.getpid(),
     ))
 
     started_at = time.time()
@@ -503,7 +506,8 @@ def spawn_adhoc(
     registry.register(SessionEntry(
         name=issue_id, session_id="", role="engineer",
         issue_id=issue_id, title=task[:80], phase="adhoc",
-        cwd=cwd, repo=repo, status="starting", requested_by=requested_by,
+        cwd=cwd, repo=repo, status="starting", pid=os.getpid(),
+        requested_by=requested_by,
     ))
 
     started_at = time.time()
@@ -532,12 +536,79 @@ def spawn_adhoc(
     return result
 
 
-def _launch_detached(script: str, args: list[str], log_file: Path) -> None:
-    """Launch a detached subprocess that survives parent exit."""
+def _launch_detached(script: str, args: list[str], log_file: Path) -> int:
+    """Launch a detached subprocess that survives parent exit.
+
+    Returns the child pid. ``start_new_session=True`` makes the child its own
+    process-group leader, so the recorded pid doubles as a group id we can
+    later signal to cancel the whole run (see :func:`cancel_run`).
+    """
     cmd = [sys.executable, "-c", script, *args]
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with open(log_file, "a") as lf:
-        sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
+        proc = sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
+    return proc.pid
+
+
+class RunCollision(Exception):
+    """Raised when a new run would collide with an already-active run.
+
+    Carries the conflicting :class:`SessionEntry` so callers can report which
+    run is in the way.
+    """
+
+    def __init__(self, existing: SessionEntry):
+        self.existing = existing
+        super().__init__(
+            f"A run for {existing.issue_id} is already active "
+            f"(session {existing.name}, status {existing.status})"
+        )
+
+
+def _make_run_id(task: str, issue: str | None) -> str:
+    """Derive the run/issue id for an invocation.
+
+    Resolution order, most authoritative first:
+      1. an explicit ``--issue`` value,
+      2. an issue number referenced in the task text ("fix issue #42"),
+      3. a per-invocation unique adhoc id.
+
+    The adhoc fallback is UUID-based, *not* a hash of the task. Hashing the
+    task meant two invocations of the same task — and, critically, two
+    workflow runs whose synthetic task text is identical ("Run workflow
+    issue-lifecycle") — produced the *same* run id, so the second invocation
+    silently aliased onto the first run instead of starting its own. A UUID
+    guarantees every adhoc invocation gets its own id.
+    """
+    if issue is not None and str(issue).strip():
+        return str(issue).strip()
+    parsed = _parse_issue_number(task)
+    if parsed:
+        return parsed
+    return f"adhoc-{uuid.uuid4().hex[:8]}"
+
+
+def _session_name_for(workflow_name: str | None, issue_id: str) -> str:
+    """The registry session name a run will use (matches run_workflow)."""
+    wf = workflow_name or "adhoc"
+    return f"wf-{wf}-{issue_id}"
+
+
+def _active_run_for(repo: str, issue_id: str) -> SessionEntry | None:
+    """Return an active engineer run already targeting (repo, issue_id).
+
+    Runs are keyed by (repo, issue) so two invocations for the same issue in
+    the same repo don't race on the same worktree/branch. Dead processes are
+    reaped first so a crashed prior run never wedges the issue permanently.
+    """
+    registry = get_registry()
+    registry.reap_dead()
+    for entry in registry.list_active():
+        if entry.role != "engineer":
+            continue
+        if entry.issue_id == issue_id and entry.repo == repo:
+            return entry
+    return None
 
 
 def launch_agent(
@@ -546,15 +617,27 @@ def launch_agent(
     workflow_name: str | None = None,
     timeout: int = 3600,
     requested_by: dict | None = None,
+    issue: str | None = None,
+    title: str | None = None,
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
     If workflow_name is provided, loads and runs that workflow.
     Otherwise creates an implicit single-step workflow from the task.
     Both paths use the same orchestrator. Returns a session name.
+
+    ``issue`` binds the run to a specific issue id (e.g. the GitHub issue
+    number passed via ``--issue``); it wins over any number parsed from the
+    task text. Raises :class:`RunCollision` if an active run already targets
+    the same (repo, issue) — we refuse to start a second engineer on a branch
+    another is already working.
     """
-    import hashlib
-    issue_id = _parse_issue_number(task) or f"adhoc-{hashlib.sha256(task.encode()).hexdigest()[:8]}"
+    issue_id = _make_run_id(task, issue)
+    repo = _resolve_repo_name(cwd)
+
+    existing = _active_run_for(repo, issue_id)
+    if existing is not None:
+        raise RunCollision(existing)
 
     args_json = json.dumps({
         "task": task,
@@ -563,6 +646,7 @@ def launch_agent(
         "timeout": timeout,
         "requested_by": requested_by or {},
         "issue_id": issue_id,
+        "title": title or "",
     })
     script = (
         "import json, sys; "
@@ -573,8 +657,54 @@ def launch_agent(
     prefix = f"wf-{workflow_name}-{issue_id}" if workflow_name else f"eng-{issue_id}"
     log_dir = Path.home() / ".modastack" / "manager" / "logs"
     log_file = log_dir / f"{prefix}.jsonl"
-    _launch_detached(script, [args_json], log_file)
+    pid = _launch_detached(script, [args_json], log_file)
+
+    # Register the run synchronously with the detached pid so a second,
+    # closely-following invocation for the same (repo, issue) is rejected by
+    # the guard above even before the child has booted and registered itself.
+    # The child re-registers the same session name with its own pid (identical
+    # value) once the orchestrator starts.
+    registry = get_registry()
+    registry.register(SessionEntry(
+        name=_session_name_for(workflow_name, issue_id),
+        session_id="", role="engineer", issue_id=issue_id,
+        title=(title or task)[:80], phase=workflow_name or "adhoc",
+        repo=repo, cwd=cwd, status="starting", pid=pid,
+        requested_by=requested_by or {},
+    ))
     return prefix
+
+
+def cancel_run(identifier: str) -> list[str]:
+    """Cancel detached engineer runs matching ``identifier``.
+
+    ``identifier`` matches either a session name (e.g.
+    ``wf-issue-lifecycle-130``) or an issue id (e.g. ``130`` or
+    ``adhoc-1f5b150f``) — the same ids ``modastack status`` and the registry
+    print — so the kill switch resolves whatever the operator copy-pastes.
+
+    For each match still considered active, the recorded process group is
+    sent SIGTERM (the run is its own session leader, so this stops the
+    orchestrator and any phase subprocess it spawned) and the registry row is
+    marked ``cancelled``. Returns the session names that were cancelled.
+    """
+    registry = get_registry()
+    cancelled: list[str] = []
+    for entry in registry.list_all():
+        if entry.role != "engineer":
+            continue
+        if entry.status not in ("starting", "running", "idle", "waiting"):
+            continue
+        if identifier not in (entry.name, entry.issue_id):
+            continue
+        if entry.pid and _pid_alive(entry.pid):
+            try:
+                os.killpg(os.getpgid(entry.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        registry.update(entry.name, status="cancelled")
+        cancelled.append(entry.name)
+    return cancelled
 
 
 def _run_agent_entry(args: dict) -> None:
@@ -589,6 +719,7 @@ def _run_agent_entry(args: dict) -> None:
     timeout = args.get("timeout", 3600)
     requested_by = args.get("requested_by", {})
     issue_id = args.get("issue_id", "adhoc")
+    title = args.get("title", "")
 
     if workflow_name:
         dispatcher = WorkflowDispatcher()
@@ -609,6 +740,7 @@ def _run_agent_entry(args: dict) -> None:
         issue_id=issue_id,
         requested_by=requested_by,
         timeout=timeout,
+        title=title,
     )
 
 

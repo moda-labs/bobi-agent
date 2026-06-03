@@ -205,10 +205,40 @@ class TestRunWorkflow:
     @patch("modastack.workflow.orchestrator.run_phase_blocking")
     @patch("modastack.workflow.orchestrator._emit_lifecycle_event")
     @patch("modastack.workflow.orchestrator.get_registry")
-    def test_route_step_branches(self, mock_reg, mock_emit, mock_run, mock_handoff):
+    def test_route_to_spec_when_needs_spec_true(self, mock_reg, mock_emit, mock_run, mock_handoff):
+        """needs_spec=true must route to the spec step (the approval-gate path)."""
         mock_reg.return_value = MagicMock()
         mock_run.return_value = MagicMock(success=True)
-        mock_handoff.return_value = {"needs_spec": "true"}
+        mock_handoff.return_value = {"needs_spec": True}
+
+        # Phase names, not prompts — prompts mention "needs_spec" in their
+        # handoff contract, which would mask a routing bug. Asserting on the
+        # phase= each step ran under is unambiguous.
+        wf = Workflow(name="t", steps=[
+            StepDef(name="triage", prompt="triage",
+                    handoff=HandoffContract(required=["needs_spec"])),
+            StepDef(name="route", condition="needs_spec == true",
+                    goto="spec", else_goto="implement"),
+            StepDef(name="spec", prompt="write spec"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+        result = run_workflow(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+
+        assert result is True
+        # spec runs before implement (no gate in this minimal workflow, so it
+        # continues afterward — the gate itself is covered by the await test).
+        phases = [c[1].get("phase", "") for c in mock_run.call_args_list]
+        assert phases == ["triage", "spec", "implement"]
+
+    @patch("modastack.workflow.orchestrator._read_handoff")
+    @patch("modastack.workflow.orchestrator.run_phase_blocking")
+    @patch("modastack.workflow.orchestrator._emit_lifecycle_event")
+    @patch("modastack.workflow.orchestrator.get_registry")
+    def test_route_to_implement_when_needs_spec_false(self, mock_reg, mock_emit, mock_run, mock_handoff):
+        """needs_spec=false skips the spec gate and goes straight to implement."""
+        mock_reg.return_value = MagicMock()
+        mock_run.return_value = MagicMock(success=True)
+        mock_handoff.return_value = {"needs_spec": False}
 
         wf = Workflow(name="t", steps=[
             StepDef(name="triage", prompt="triage",
@@ -221,9 +251,41 @@ class TestRunWorkflow:
         result = run_workflow(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
 
         assert result is True
-        prompts = [c[1].get("context", "") for c in mock_run.call_args_list]
-        assert any("triage" in p for p in prompts)
-        assert any("spec" in p for p in prompts)
+        phases = [c[1].get("phase", "") for c in mock_run.call_args_list]
+        assert phases == ["triage", "implement"]
+
+    @patch("modastack.workflow.orchestrator._read_handoff")
+    @patch("modastack.workflow.orchestrator.run_phase_blocking")
+    @patch("modastack.workflow.orchestrator._emit_lifecycle_event")
+    @patch("modastack.workflow.orchestrator.get_registry")
+    def test_await_step_is_a_hard_stop(self, mock_reg, mock_emit, mock_run, mock_handoff):
+        """The spec gate: after spec, an await step suspends instead of
+        running implement. This is what enforces human approval — implement
+        must NOT run automatically."""
+        registry = MagicMock()
+        mock_reg.return_value = registry
+        mock_run.return_value = MagicMock(success=True)
+        mock_handoff.return_value = {"needs_spec": True, "spec_url": "http://x"}
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="triage", prompt="triage",
+                    handoff=HandoffContract(required=["needs_spec"])),
+            StepDef(name="route", condition="needs_spec == true",
+                    goto="spec", else_goto="implement"),
+            StepDef(name="spec", prompt="write spec",
+                    handoff=HandoffContract(required=["spec_url"])),
+            StepDef(name="await_approval", await_event="approval"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+        run_workflow(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+
+        phases = [c[1].get("phase", "") for c in mock_run.call_args_list]
+        assert "implement" not in phases
+        assert phases == ["triage", "spec"]
+        # The run is parked as waiting for the external approval event.
+        statuses = [c[1].get("status") for c in registry.update.call_args_list
+                    if "status" in c[1]]
+        assert "waiting" in statuses
 
     @patch("modastack.workflow.orchestrator._read_handoff")
     @patch("modastack.workflow.orchestrator.run_phase_blocking")

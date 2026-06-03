@@ -64,6 +64,38 @@ class TestCLIReturnsImmediately:
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert "eng-88" in result.stdout
 
+    def test_workflow_binds_issue_and_runs_are_distinct(self, tmp_path):
+        """Reproduces the headline bug (#130): two workflow runs for two
+        different issues must get DISTINCT run ids, each bound to its own
+        issue number — not the same task-hash id that aliased the second run
+        onto the first. Different repos so the (repo, issue) collision guard
+        doesn't reject the second run.
+
+        Before the fix both invocations returned the identical
+        ``adhoc-<taskhash>`` id; ``--issue`` was dropped entirely.
+        """
+        repo_a = tmp_path / "repo-a"
+        repo_b = tmp_path / "repo-b"
+        repo_a.mkdir()
+        repo_b.mkdir()
+
+        def run(repo, issue):
+            r = subprocess.run(
+                [sys.executable, "-m", "modastack.cli", "agent",
+                 "--workflow", "issue-lifecycle", "--repo", str(repo),
+                 "--issue", issue],
+                capture_output=True, text=True, timeout=10, cwd=str(REPO_ROOT),
+            )
+            assert r.returncode == 0, f"stderr: {r.stderr}"
+            return r.stdout
+
+        out_36 = run(repo_a, "36")
+        out_34 = run(repo_b, "34")
+
+        assert "wf-issue-lifecycle-36" in out_36
+        assert "wf-issue-lifecycle-34" in out_34
+        assert out_36 != out_34
+
 
 class TestValidation:
     def test_no_task_or_workflow(self):

@@ -5,6 +5,13 @@
 ### Added
 - Auto-resolve merge conflicts: `monitor/pr.conflict_detected` now triggers the manager to auto-spawn an engineer (instead of just noting it) that follows a new `merge-conflict` skill — merge the base branch, resolve conflicts honoring both sides, verify build/tests, and push. If the conflict needs a human decision, the engineer comments on the PR and exits non-zero, and the manager escalates to the human via Slack (#117)
 
+### Fixed
+- Workflow runs now get a unique run id bound to their issue. `modastack agent --workflow … --issue N` previously dropped `--issue` and derived the run id from a hash of the synthetic task text, so every workflow run collided on the same id (`adhoc-1f5b150f`) — a second issue silently aliased onto the first run's worktree/branch and never started. `--issue` (and `--event-json`) now bind the run id; adhoc runs without an issue get a per-invocation UUID instead of a task hash (#130)
+- Reject a second engineer run targeting an already-active `(repo, issue)` with a clear message instead of aliasing onto the running one (#130)
+- Route conditions like `needs_spec == true` now evaluate the handoff value instead of the literal string, so the spec/approval gate is actually reachable; YAML booleans normalize to lowercase for `==` comparisons (#130)
+- `modastack status`/`engineers` reconcile the registry with reality: detached runs whose process has exited are marked `stale` instead of lingering as "running" forever (#130)
+- `modastack engineers <id> --cancel` resolves the same ids that `status` prints (issue id or session name) and actually kills the detached run's process group — a working kill switch for in-flight workflows (#130)
+
 ## 0.4.1 — 2026-06-01
 
 ### Added

@@ -4,6 +4,7 @@ For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 """
 
 import asyncio
+import os
 import tempfile
 import shutil
 from pathlib import Path
@@ -258,36 +259,76 @@ class TestLaunchDetached:
         assert cmd[-2:] == ["a", "b"]
 
 
+@pytest.fixture
+def isolated_registry(tmp_path, monkeypatch):
+    """Point the session registry at a throwaway path and reset its singleton.
+
+    launch_agent now resolves the repo and registers the run synchronously, so
+    these tests need an empty, isolated registry rather than the real one.
+    """
+    monkeypatch.setattr("modastack.sdk.REGISTRY_PATH", tmp_path / "registry.json")
+    monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+    monkeypatch.setattr("modastack.sdk._registry", None)
+    yield
+    monkeypatch.setattr("modastack.sdk._registry", None)
+
+
+@pytest.mark.usefixtures("isolated_registry")
 class TestLaunchAgent:
     """Test that launch_agent launches a detached subprocess."""
 
-    @patch("modastack.subagent._launch_detached")
+    @patch("modastack.subagent._launch_detached", return_value=4242)
     def test_adhoc_returns_eng_prefix(self, mock_launch):
         from modastack.subagent import launch_agent
         name = launch_agent(task="Fix issue #42", cwd="/tmp/test")
         assert name == "eng-42"
         mock_launch.assert_called_once()
 
-    @patch("modastack.subagent._launch_detached")
+    @patch("modastack.subagent._launch_detached", return_value=4242)
     def test_adhoc_hash_without_issue(self, mock_launch):
         from modastack.subagent import launch_agent
         name = launch_agent(task="do something", cwd="/tmp/test")
         assert name.startswith("eng-adhoc-")
 
-    @patch("modastack.subagent._launch_detached")
+    @patch("modastack.subagent._launch_detached", return_value=4242)
     def test_workflow_returns_wf_prefix(self, mock_launch):
         from modastack.subagent import launch_agent
         name = launch_agent(task="Work on #42", cwd="/tmp/test", workflow_name="issue-lifecycle")
         assert name == "wf-issue-lifecycle-42"
 
-    @patch("modastack.subagent._launch_detached")
+    @patch("modastack.subagent._launch_detached", return_value=4242)
+    def test_explicit_issue_binds_run_id(self, mock_launch):
+        """--issue wins over a number parsed from the task text."""
+        from modastack.subagent import launch_agent
+        name = launch_agent(task="Run workflow issue-lifecycle", cwd="/tmp/test",
+                            workflow_name="issue-lifecycle", issue="34")
+        assert name == "wf-issue-lifecycle-34"
+        import json
+        parsed = json.loads(mock_launch.call_args[0][1][0])
+        assert parsed["issue_id"] == "34"
+
+    @patch("modastack.subagent._launch_detached", return_value=4242)
+    def test_adhoc_ids_are_unique_per_invocation(self, mock_launch):
+        """Two runs of the *same* task text must not collide on one run id.
+
+        This is the root-cause regression: a task-hash run id aliased the
+        second invocation onto the first run. UUID-based ids stay distinct.
+        """
+        from modastack.subagent import launch_agent
+        a = launch_agent(task="Run workflow issue-lifecycle", cwd="/tmp/test",
+                         workflow_name="issue-lifecycle")
+        b = launch_agent(task="Run workflow issue-lifecycle", cwd="/tmp/test2",
+                         workflow_name="issue-lifecycle")
+        assert a != b
+
+    @patch("modastack.subagent._launch_detached", return_value=4242)
     def test_subprocess_is_detached(self, mock_launch):
         from modastack.subagent import launch_agent
         launch_agent(task="Fix #1", cwd="/tmp/test")
         script = mock_launch.call_args[0][0]
         assert "_run_agent_entry" in script
 
-    @patch("modastack.subagent._launch_detached")
+    @patch("modastack.subagent._launch_detached", return_value=4242)
     def test_passes_requested_by(self, mock_launch):
         from modastack.subagent import launch_agent
         req = {"from": "Alice", "channel": "C1"}
@@ -296,5 +337,91 @@ class TestLaunchAgent:
         import json
         parsed = json.loads(args[0])
         assert parsed["requested_by"] == req
+
+    @patch("modastack.subagent._launch_detached", return_value=4242)
+    def test_registers_run_with_pid(self, mock_launch):
+        """The launched run is registered synchronously with its pid so a
+        second invocation for the same (repo, issue) can be rejected."""
+        from modastack.subagent import launch_agent
+        from modastack.sdk import get_registry
+        launch_agent(task="Fix #7", cwd="/tmp/test")
+        entry = get_registry().get("wf-adhoc-7")
+        assert entry is not None
+        assert entry.issue_id == "7"
+        assert entry.pid == 4242
+
+    # A live pid (this test process) so the duplicate guard's dead-process
+    # reaping doesn't immediately retire the run we just registered.
+    @patch("modastack.subagent._launch_detached", return_value=os.getpid())
+    def test_rejects_duplicate_active_run(self, mock_launch):
+        """A second run for an already-active (repo, issue) raises."""
+        from modastack.subagent import launch_agent, RunCollision
+        launch_agent(task="Fix #7", cwd="/tmp/test")
+        with pytest.raises(RunCollision):
+            launch_agent(task="Fix #7", cwd="/tmp/test")
+
+    @patch("modastack.subagent._launch_detached", return_value=os.getpid())
+    def test_allows_same_issue_different_repo(self, mock_launch):
+        """The guard is keyed by (repo, issue) — same issue number in a
+        different repo is a distinct run and must be allowed."""
+        from modastack.subagent import launch_agent
+        launch_agent(task="Fix #7", cwd="/tmp/repo-a")
+        # Different cwd → different resolved repo → no collision.
+        launch_agent(task="Fix #7", cwd="/tmp/repo-b")
+        assert mock_launch.call_count == 2
+
+
+@pytest.mark.usefixtures("isolated_registry")
+class TestCancelRun:
+    """cancel_run resolves the same ids `status`/the registry print and kills
+    the detached process — the working kill switch for an in-flight run."""
+
+    def _register(self, **kw):
+        from modastack.sdk import get_registry, SessionEntry
+        get_registry().register(SessionEntry(**kw))
+
+    @patch("modastack.subagent.os.killpg")
+    @patch("modastack.subagent.os.getpgid", return_value=4242)
+    def test_cancel_by_session_name(self, mock_getpgid, mock_killpg):
+        from modastack.subagent import cancel_run
+        self._register(name="wf-issue-lifecycle-36", issue_id="36",
+                       role="engineer", status="running", pid=os.getpid())
+        cancelled = cancel_run("wf-issue-lifecycle-36")
+        assert cancelled == ["wf-issue-lifecycle-36"]
+        mock_killpg.assert_called_once()
+
+    @patch("modastack.subagent.os.killpg")
+    @patch("modastack.subagent.os.getpgid", return_value=4242)
+    def test_cancel_by_issue_id(self, mock_getpgid, mock_killpg):
+        from modastack.subagent import cancel_run
+        from modastack.sdk import get_registry
+        self._register(name="wf-issue-lifecycle-36", issue_id="36",
+                       role="engineer", status="running", pid=os.getpid())
+        # The id `status` prints is the issue id — that must resolve too.
+        cancelled = cancel_run("36")
+        assert cancelled == ["wf-issue-lifecycle-36"]
+        assert get_registry().get("wf-issue-lifecycle-36").status == "cancelled"
+
+    def test_cancel_unknown_returns_empty(self):
+        from modastack.subagent import cancel_run
+        assert cancel_run("nope-123") == []
+
+    @patch("modastack.subagent.os.killpg")
+    @patch("modastack.subagent.os.getpgid", return_value=4242)
+    def test_cancel_skips_terminal_runs(self, mock_getpgid, mock_killpg):
+        from modastack.subagent import cancel_run
+        self._register(name="wf-x-1", issue_id="1", role="engineer",
+                       status="done", pid=os.getpid())
+        assert cancel_run("1") == []
+        mock_killpg.assert_not_called()
+
+    @patch("modastack.subagent.os.killpg")
+    @patch("modastack.subagent.os.getpgid", return_value=4242)
+    def test_cancel_waiting_run(self, mock_getpgid, mock_killpg):
+        """A run suspended at an approval gate is still cancellable."""
+        from modastack.subagent import cancel_run
+        self._register(name="wf-x-2", issue_id="2", role="engineer",
+                       status="waiting", pid=os.getpid())
+        assert cancel_run("2") == ["wf-x-2"]
 
 
