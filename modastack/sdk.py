@@ -66,18 +66,20 @@ class SessionRegistry:
 
     def _save(self) -> None:
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
-        # Merge with disk state so entries written by other processes
-        # (engineer subprocesses) aren't lost when we save.
+        # Read-modify-write: read current disk state, update only the
+        # keys this process owns, write back. This preserves entries
+        # written by other processes without resurrecting cleaned ones.
+        disk = {}
         if REGISTRY_PATH.exists():
             try:
                 disk = json.loads(REGISTRY_PATH.read_text())
-                for name, raw in disk.items():
-                    if name not in self._entries and name not in self._removed:
-                        self._entries[name] = SessionEntry(**raw)
             except (json.JSONDecodeError, TypeError):
                 pass
-        data = {name: asdict(entry) for name, entry in self._entries.items()}
-        REGISTRY_PATH.write_text(json.dumps(data, indent=2))
+        for name in self._removed:
+            disk.pop(name, None)
+        for name, entry in self._entries.items():
+            disk[name] = asdict(entry)
+        REGISTRY_PATH.write_text(json.dumps(disk, indent=2))
 
     def register(self, entry: SessionEntry) -> None:
         self._entries[entry.name] = entry
