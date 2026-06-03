@@ -42,6 +42,7 @@ class Workflow:
     name: str
     steps: list[StepDef]
     trigger: str = ""
+    description: str = ""
 
     def step_by_name(self, name: str) -> StepDef | None:
         for s in self.steps:
@@ -54,14 +55,6 @@ class Workflow:
             if s.name == name:
                 return i
         return -1
-
-    @staticmethod
-    def adhoc(task: str) -> Workflow:
-        """Create an implicit single-step workflow from a task string."""
-        return Workflow(
-            name="adhoc",
-            steps=[StepDef(name="task", prompt=task)],
-        )
 
 
 def load_workflow(path: Path) -> Workflow:
@@ -92,4 +85,5 @@ def load_workflow(path: Path) -> Workflow:
         name=raw.get("name", path.stem),
         steps=steps,
         trigger=raw.get("trigger", ""),
+        description=raw.get("description", ""),
     )

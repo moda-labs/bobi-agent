@@ -70,12 +70,17 @@ class TestSchemaLoad:
         wf = load_workflow(f)
         assert wf.steps[0].await_event == "approval"
 
-    def test_adhoc_workflow(self):
-        wf = Workflow.adhoc("Fix the bug")
-        assert wf.name == "adhoc"
-        assert len(wf.steps) == 1
-        assert wf.steps[0].name == "task"
-        assert wf.steps[0].prompt == "Fix the bug"
+    def test_workflow_with_description(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: test-wf
+            description: A test workflow for unit tests.
+            steps:
+              - name: work
+                prompt: "Do the thing"
+        """))
+        wf = load_workflow(f)
+        assert wf.description == "A test workflow for unit tests."
 
     def test_step_by_name(self):
         wf = Workflow(name="t", steps=[
@@ -170,7 +175,7 @@ class TestRunWorkflow:
         mock_reg.return_value = MagicMock()
         mock_run.return_value = MagicMock(success=True)
 
-        wf = Workflow.adhoc("Say hello")
+        wf = Workflow(name="adhoc", steps=[StepDef(name="task", prompt="Say hello")])
         result = run_workflow(wf, task="Say hello", repo="test", cwd="/tmp", issue_id="1")
 
         assert result is True
@@ -254,7 +259,7 @@ class TestRunWorkflow:
         mock_reg.return_value = registry
         mock_run.return_value = MagicMock(success=True)
 
-        wf = Workflow.adhoc("hello")
+        wf = Workflow(name="adhoc", steps=[StepDef(name="task", prompt="hello")])
         run_workflow(wf, task="hello", repo="r", cwd="/tmp", issue_id="1")
 
         registry.register.assert_called_once()

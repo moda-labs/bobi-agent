@@ -543,15 +543,13 @@ def _launch_detached(script: str, args: list[str], log_file: Path) -> None:
 def launch_agent(
     task: str,
     cwd: str,
-    workflow_name: str | None = None,
+    workflow_name: str,
     timeout: int = 3600,
     requested_by: dict | None = None,
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
-    If workflow_name is provided, loads and runs that workflow.
-    Otherwise creates an implicit single-step workflow from the task.
-    Both paths use the same orchestrator. Returns a session name.
+    Every agent runs a named workflow. Returns a session name.
     """
     import hashlib
     issue_id = _parse_issue_number(task) or f"adhoc-{hashlib.sha256(task.encode()).hexdigest()[:8]}"
@@ -570,7 +568,7 @@ def launch_agent(
         "_run_agent_entry(json.loads(sys.argv[1]))"
     )
 
-    prefix = f"wf-{workflow_name}-{issue_id}" if workflow_name else f"eng-{issue_id}"
+    prefix = f"wf-{workflow_name}-{issue_id}"
     log_dir = Path.home() / ".modastack" / "manager" / "logs"
     log_file = log_dir / f"{prefix}.jsonl"
     _launch_detached(script, [args_json], log_file)
@@ -580,25 +578,21 @@ def launch_agent(
 def _run_agent_entry(args: dict) -> None:
     """Entry point for the detached subprocess. Runs the orchestrator."""
     from modastack.workflow.orchestrator import run_workflow
-    from modastack.workflow.schema import Workflow, load_workflow as load_wf
     from modastack.workflow.triggers import WorkflowDispatcher
 
     task = args["task"]
     cwd = args["cwd"]
-    workflow_name = args.get("workflow_name")
+    workflow_name = args["workflow_name"]
     timeout = args.get("timeout", 3600)
     requested_by = args.get("requested_by", {})
     issue_id = args.get("issue_id", "adhoc")
 
-    if workflow_name:
-        dispatcher = WorkflowDispatcher()
-        dispatcher.load_all_workflows()
-        workflow = dispatcher.find_workflow(workflow_name)
-        if not workflow:
-            print(f"Workflow '{workflow_name}' not found")
-            return
-    else:
-        workflow = Workflow.adhoc(task)
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    workflow = dispatcher.find_workflow(workflow_name)
+    if not workflow:
+        print(f"Workflow '{workflow_name}' not found")
+        return
 
     repo = _resolve_repo_name(cwd)
     run_workflow(

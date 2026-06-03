@@ -262,28 +262,22 @@ class TestLaunchAgent:
     """Test that launch_agent launches a detached subprocess."""
 
     @patch("modastack.subagent._launch_detached")
-    def test_adhoc_returns_eng_prefix(self, mock_launch):
+    def test_returns_wf_prefix(self, mock_launch):
         from modastack.subagent import launch_agent
-        name = launch_agent(task="Fix issue #42", cwd="/tmp/test")
-        assert name == "eng-42"
+        name = launch_agent(task="Fix issue #42", cwd="/tmp/test", workflow_name="adhoc")
+        assert name == "wf-adhoc-42"
         mock_launch.assert_called_once()
 
     @patch("modastack.subagent._launch_detached")
-    def test_adhoc_hash_without_issue(self, mock_launch):
-        from modastack.subagent import launch_agent
-        name = launch_agent(task="do something", cwd="/tmp/test")
-        assert name.startswith("eng-adhoc-")
-
-    @patch("modastack.subagent._launch_detached")
-    def test_workflow_returns_wf_prefix(self, mock_launch):
+    def test_issue_lifecycle_prefix(self, mock_launch):
         from modastack.subagent import launch_agent
         name = launch_agent(task="Work on #42", cwd="/tmp/test", workflow_name="issue-lifecycle")
         assert name == "wf-issue-lifecycle-42"
 
     @patch("modastack.subagent._launch_detached")
-    def test_subprocess_is_detached(self, mock_launch):
+    def test_subprocess_calls_entry(self, mock_launch):
         from modastack.subagent import launch_agent
-        launch_agent(task="Fix #1", cwd="/tmp/test")
+        launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc")
         script = mock_launch.call_args[0][0]
         assert "_run_agent_entry" in script
 
@@ -291,10 +285,19 @@ class TestLaunchAgent:
     def test_passes_requested_by(self, mock_launch):
         from modastack.subagent import launch_agent
         req = {"from": "Alice", "channel": "C1"}
-        launch_agent(task="Fix #1", cwd="/tmp/test", requested_by=req)
+        launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc", requested_by=req)
         args = mock_launch.call_args[0][1]
         import json
         parsed = json.loads(args[0])
         assert parsed["requested_by"] == req
+
+    @patch("modastack.subagent._launch_detached")
+    def test_workflow_name_in_args(self, mock_launch):
+        from modastack.subagent import launch_agent
+        launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="issue-lifecycle")
+        args = mock_launch.call_args[0][1]
+        import json
+        parsed = json.loads(args[0])
+        assert parsed["workflow_name"] == "issue-lifecycle"
 
 
