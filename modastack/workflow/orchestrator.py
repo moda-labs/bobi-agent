@@ -86,6 +86,7 @@ def run_workflow(
     issue_id: str | None = None,
     requested_by: dict | None = None,
     timeout: int = 3600,
+    interactive: bool = True,
 ) -> bool:
     """Execute a workflow end-to-end with a single agent session."""
     issue_id = issue_id or _parse_issue_number(task) or "adhoc"
@@ -120,7 +121,7 @@ def run_workflow(
     success = asyncio.run(
         _run_workflow_async(
             workflow, task, repo, worktree_cwd, issue_id, session_name,
-            registry, ctx, requested_by, timeout,
+            registry, ctx, requested_by, timeout, interactive,
         )
     )
 
@@ -157,6 +158,7 @@ async def _run_workflow_async(
     ctx: VariableContext,
     requested_by: dict,
     timeout: int,
+    interactive: bool = True,
 ) -> bool:
     """Async core: one ClaudeSDKClient session for all steps."""
     from claude_agent_sdk import (
@@ -185,7 +187,14 @@ async def _run_workflow_async(
                     f"Your working directory is an isolated git worktree at {cwd}. "
                     f"All code changes go here — never modify the main repo checkout. "
                     f"You will receive step-by-step instructions. Follow each one, "
-                    f"then write your handoff file when asked."
+                    f"then write your handoff file when asked. "
+                    + (
+                        "You can use `modastack consult \"question\"` to ask the manager "
+                        "for guidance on ambiguous decisions."
+                        if interactive else
+                        "You are running in non-interactive mode. Make your best judgment "
+                        "on all decisions — do not use `modastack consult`."
+                    )
                 ),
             },
         )

@@ -547,6 +547,7 @@ def launch_agent(
     workflow_name: str,
     timeout: int = 3600,
     requested_by: dict | None = None,
+    interactive: bool = True,
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
@@ -577,6 +578,7 @@ def launch_agent(
         "timeout": timeout,
         "requested_by": requested_by or {},
         "issue_id": issue_id,
+        "interactive": interactive,
     })
     script = (
         "import json, sys; "
@@ -609,6 +611,7 @@ def _run_agent_entry(args: dict) -> None:
     timeout = args.get("timeout", 3600)
     requested_by = args.get("requested_by", {})
     issue_id = args.get("issue_id", "adhoc")
+    interactive = args.get("interactive", True)
 
     dispatcher = WorkflowDispatcher()
     dispatcher.load_all_workflows()
@@ -626,6 +629,7 @@ def _run_agent_entry(args: dict) -> None:
         issue_id=issue_id,
         requested_by=requested_by,
         timeout=timeout,
+        interactive=interactive,
     )
 
 

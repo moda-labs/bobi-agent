@@ -1667,7 +1667,9 @@ main.add_command(monitor)
               help="Post this event type on completion (for --wait checks)")
 @click.option("--requested-by", "requested_by", default=None,
               help='JSON identity of requester, e.g. \'{"from":"Alice","channel":"C1"}\'')
-def agent(repo, workflow, task, timeout, wait, post_event, requested_by):
+@click.option("--non-interactive", "non_interactive", is_flag=True,
+              help="Run without manager — agent makes all decisions autonomously")
+def agent(repo, workflow, task, timeout, wait, post_event, requested_by, non_interactive):
     """Launch an agent with a workflow.
 
     Every agent runs a workflow. Use 'adhoc' for open-ended tasks.
@@ -1675,11 +1677,12 @@ def agent(repo, workflow, task, timeout, wait, post_event, requested_by):
     Examples:
         modastack agent -w issue-lifecycle --repo jobtack --task "Work on #42"
         modastack agent -w adhoc --repo jobtack --task "Why is CI failing?"
-        modastack agent -w adhoc --wait --task "Check prod URL returns 200"
+        modastack agent -w adhoc --non-interactive --repo jobtack --task "Fix the bug"
     """
     _dispatch_agent(repo=repo, task=task, workflow=workflow,
                     timeout=timeout, wait=wait, post_event=post_event,
-                    requested_by=requested_by)
+                    requested_by=requested_by,
+                    interactive=not non_interactive)
 
 
 @main.command(hidden=True)
@@ -1696,7 +1699,7 @@ def spawn(repo, task, timeout, non_interactive, post_event, requested_by):
                     requested_by=requested_by)
 
 
-def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requested_by):
+def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requested_by, interactive=True):
     """Shared dispatch logic for the agent and spawn commands."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -1732,6 +1735,7 @@ def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requeste
     session_name = launch_agent(
         task=task, cwd=cwd, workflow_name=workflow,
         timeout=timeout, requested_by=requester,
+        interactive=interactive,
     )
     click.echo(f"Agent started: {session_name}")
 
