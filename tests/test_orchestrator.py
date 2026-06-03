@@ -162,10 +162,11 @@ class TestBuildStepPrompt:
                        handoff=HandoffContract(required=["a"], optional=["b"]))
         from modastack.workflow.variables import VariableContext
         ctx = VariableContext()
-        prompt = _build_step_prompt(step, ctx)
+        prompt = _build_step_prompt(step, ctx, issue_id="42")
         assert "Do work" in prompt
-        assert "`a` (required)" in prompt
-        assert "`b` (optional)" in prompt
+        assert "a: <value>" in prompt
+        assert "b: <value>" in prompt
+        assert "42.md" in prompt
 
     def test_no_contract_when_empty(self):
         step = StepDef(name="t", prompt="Just do it")

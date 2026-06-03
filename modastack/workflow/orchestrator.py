@@ -265,7 +265,7 @@ async def _run_workflow_async(
                 "text": f"Step {step.name} started",
             })
 
-            prompt = _build_step_prompt(step, ctx)
+            prompt = _build_step_prompt(step, ctx, issue_id)
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             await client.query(prompt)
@@ -376,16 +376,21 @@ def _emit_step_failed(issue_id, workflow_name, step_name, error):
     }, blocking=True)
 
 
-def _build_step_prompt(step: StepDef, ctx: VariableContext) -> str:
+def _build_step_prompt(step: StepDef, ctx: VariableContext, issue_id: str = "") -> str:
     """Build the full prompt for a step, including handoff contract."""
     prompt = ctx.resolve(step.prompt)
 
     if step.handoff.required or step.handoff.optional:
-        prompt += "\n\nWhen complete, write your handoff file with:"
+        handoff_path = HANDOFF_DIR / f"{issue_id}.md" if issue_id else "~/.modastack/handoffs/<issue_id>.md"
+        prompt += f"\n\nWhen complete, write your handoff file at `{handoff_path}` with YAML frontmatter:"
+        prompt += "\n```"
+        prompt += "\n---"
         for field in step.handoff.required:
-            prompt += f"\n- `{field}` (required)"
+            prompt += f"\n{field}: <value>"
         for field in step.handoff.optional:
-            prompt += f"\n- `{field}` (optional)"
+            prompt += f"\n{field}: <value>  # optional"
+        prompt += "\n---"
+        prompt += "\n```"
 
     return prompt
 
