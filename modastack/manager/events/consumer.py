@@ -189,12 +189,10 @@ def run(**kwargs):
 
     log.info("Manager session started")
 
-    # Load workflow dispatcher for feed_event (approval nodes in active runs)
     from modastack.workflow.triggers import WorkflowDispatcher
     dispatcher = WorkflowDispatcher()
     dispatcher.load_all_workflows()
     log.info(f"Loaded {len(dispatcher.workflows)} workflow(s)")
-    dispatcher.cleanup_stale_runs()
 
     event_client = None
     if config.event_server_url and config.event_server_api_key:
@@ -203,7 +201,6 @@ def run(**kwargs):
             server_url=config.event_server_url,
             deployment_id=config.event_server_deployment_id,
             api_key=config.event_server_api_key,
-            on_event=dispatcher.feed_event,
         )
         event_client.start()
         log.info(f"Event client started -> {config.event_server_url}")
