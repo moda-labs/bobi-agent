@@ -238,3 +238,9 @@ pytest tests/                              # all tests including integration (~5
 
 Integration tests drive real Claude Code sessions. Run them before
 pushing to main or opening a PR — not on every edit.
+
+**Production bug = integration test gap.** Any time an issue is found
+in production, write or update an integration test that covers that
+scenario before fixing the code. The test must fail without the fix
+and pass with it. No exceptions — if it broke in prod, it means our
+tests didn't cover that path.
