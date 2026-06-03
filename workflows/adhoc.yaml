@@ -7,4 +7,4 @@ description: >
 
 steps:
   - name: task
-    prompt: "$task"
+    prompt: "${{input.task}}"

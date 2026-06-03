@@ -605,8 +605,7 @@ def status():
     click.echo(f"  Manager: {mgr_label}")
 
     registry = get_registry()
-    engineers = registry.get_by_role("engineer")
-    active = [e for e in engineers if e.status in ("running", "starting", "idle")]
+    active = [e for e in registry.list_active() if e.role == "engineer"]
     if not active:
         click.echo("  Engineers: none active")
         return

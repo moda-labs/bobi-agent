@@ -586,12 +586,12 @@ def launch_agent(
 
     log_dir = Path.home() / ".modastack" / "manager" / "logs"
     log_file = log_dir / f"{session_name}.jsonl"
-    _launch_detached(script, [args_json], log_file)
+    pid = _launch_detached(script, [args_json], log_file)
 
     registry.register(SessionEntry(
         name=session_name, session_id="", role="engineer",
         issue_id=issue_id, title=task[:80], phase=workflow_name,
-        repo=repo, cwd=cwd, status="starting",
+        repo=repo, cwd=cwd, status="starting", pid=pid,
         requested_by=requested_by or {},
     ))
     return session_name
