@@ -186,20 +186,24 @@ def test_check_system_deps_all_present(tmp_path):
 
 
 def test_doctor_all_ok():
-    results = [CheckResult("a", ok=True, detail="x"), CheckResult("b", ok=True, detail="y")]
-    with patch("modastack.browser.run_doctor", return_value=results):
-        result = CliRunner().invoke(main, ["doctor"])
+    browser_results = [CheckResult("a", ok=True, detail="x"), CheckResult("b", ok=True, detail="y")]
+    system_results = [CheckResult("s", ok=True, detail="ok")]
+    with patch("modastack.doctor.run_doctor", return_value=system_results), \
+         patch("modastack.browser.run_doctor", return_value=browser_results):
+        result = CliRunner().invoke(main, ["doctor", "--browser"])
     assert result.exit_code == 0
     assert "All checks passed" in result.output
 
 
 def test_doctor_reports_failure_and_exits_nonzero():
-    results = [
+    browser_results = [
         CheckResult("Chromium launches", ok=False,
                     detail="blocked", hint="run the fix", sandbox_error=True),
     ]
-    with patch("modastack.browser.run_doctor", return_value=results):
-        result = CliRunner().invoke(main, ["doctor"])
+    system_results = [CheckResult("s", ok=True, detail="ok")]
+    with patch("modastack.doctor.run_doctor", return_value=system_results), \
+         patch("modastack.browser.run_doctor", return_value=browser_results):
+        result = CliRunner().invoke(main, ["doctor", "--browser"])
     assert result.exit_code == 1
     assert "✗" in result.output
     assert "run the fix" in result.output
@@ -226,12 +230,14 @@ def test_setup_browser_check_non_interactive_prints_fix_only():
 
 
 def test_doctor_fix_applies_when_confirmed():
-    results = [CheckResult("Chromium launches", ok=False, detail="blocked",
-                           sandbox_error=True)]
-    with patch("modastack.browser.run_doctor", return_value=results), \
+    browser_results = [CheckResult("Chromium launches", ok=False, detail="blocked",
+                                   sandbox_error=True)]
+    system_results = [CheckResult("s", ok=True, detail="ok")]
+    with patch("modastack.doctor.run_doctor", return_value=system_results), \
+         patch("modastack.browser.run_doctor", return_value=browser_results), \
          patch("modastack.browser.apply_sandbox_fix", return_value=(True, "Applied.")) as apply_fix, \
          patch("modastack.browser.check_chromium_launch",
                return_value=CheckResult("Chromium launches", ok=True)):
-        result = CliRunner().invoke(main, ["doctor", "--fix"], input="y\n")
+        result = CliRunner().invoke(main, ["doctor", "--browser", "--fix"], input="y\n")
     apply_fix.assert_called_once()
     assert "Verified" in result.output
