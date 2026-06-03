@@ -464,9 +464,16 @@ def _find_transcript(session: str) -> Path | None:
     id_file = SESSION_DIR / f"{session}.id"
     if not id_file.exists():
         click.echo(f"No session '{session}'.")
-        available = [f.stem for f in SESSION_DIR.glob("*.id")]
-        if available:
-            click.echo(f"Available: {', '.join(sorted(available))}")
+        from modastack.sdk import get_registry
+        registry = get_registry()
+        active = [e for e in registry.list_active() if e.role == "engineer"]
+        if active:
+            names = [e.name for e in active]
+            click.echo(f"Active engineers: {', '.join(sorted(names))}")
+        recent = sorted(SESSION_DIR.glob("*.id"), key=lambda f: f.stat().st_mtime, reverse=True)
+        recent_names = [f.stem for f in recent[:10] if f.stem != "moda-manager"]
+        if recent_names:
+            click.echo(f"Recent: {', '.join(recent_names)}")
         return None
 
     session_id = id_file.read_text().strip()
