@@ -168,38 +168,55 @@ async def _run_workflow_async(
 
     saved_id = load_session_id(session_name)
 
-    options = ClaudeAgentOptions(
-        cwd=cwd,
-        permission_mode="bypassPermissions",
-        max_turns=200,
-        cli_path=get_cli_path(),
-        resume=saved_id or None,
-        skills="all",
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": (
-                f"You are an engineer agent working on issue #{issue_id}. "
-                f"Your working directory is an isolated git worktree at {cwd}. "
-                f"All code changes go here — never modify the main repo checkout. "
-                f"You will receive step-by-step instructions. Follow each one, "
-                f"then write your handoff file when asked."
-            ),
-        },
-    )
+    def _make_options(resume_id=None):
+        return ClaudeAgentOptions(
+            cwd=cwd,
+            permission_mode="bypassPermissions",
+            max_turns=200,
+            cli_path=get_cli_path(),
+            resume=resume_id,
+            skills="all",
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": (
+                    f"You are an engineer agent working on issue #{issue_id}. "
+                    f"Your working directory is an isolated git worktree at {cwd}. "
+                    f"All code changes go here — never modify the main repo checkout. "
+                    f"You will receive step-by-step instructions. Follow each one, "
+                    f"then write your handoff file when asked."
+                ),
+            },
+        )
 
-    client = ClaudeSDKClient(options)
     _emit_lifecycle_event("engineer/session.started", {
         "issue_id": issue_id, "repo": repo,
         "text": f"Engineer started working on {issue_id}",
     })
 
+    # Try resume, fall back to fresh session
+    for attempt in range(2):
+        resume_id = saved_id if attempt == 0 else None
+        client = ClaudeSDKClient(_make_options(resume_id))
+        try:
+            initial_prompt = task if not resume_id else None
+            await client.connect(initial_prompt)
+            if resume_id:
+                await client.query(task)
+            await _drain_response(client, session_name, issue_id)
+            break
+        except Exception as e:
+            if resume_id and attempt == 0:
+                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
+                save_session_id(session_name, "")
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                continue
+            raise
+
     try:
-        initial_prompt = task if not saved_id else None
-        await client.connect(initial_prompt)
-        if saved_id:
-            await client.query(task)
-        await _drain_response(client, session_name, issue_id)
 
         registry.update(session_name, status="running",
                         session_id=saved_id or "")
