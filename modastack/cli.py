@@ -1389,18 +1389,13 @@ def workflow_run(name, repo, issue, title, event_json):
             event["data"]["title"] = title
 
     try:
-        click.echo(f"Workflow '{name}' running...")
-        run = dispatcher.run_by_name(name, event, wait=True)
+        run = dispatcher.run_by_name(name, event, wait=False)
     except ValueError as e:
         click.echo(str(e), err=True)
         raise SystemExit(1)
 
-    completed = sum(1 for ns in run.nodes.values() if ns.status == "completed")
-    total = len(run.nodes)
-    click.echo(f"Workflow '{name}' {run.status} (run {run.run_id}): "
-               f"{completed}/{total} nodes")
-    if run.status == "failed":
-        raise SystemExit(1)
+    click.echo(f"Workflow '{name}' started (run {run.run_id}). "
+               f"Progress via engineer lifecycle events.")
 
 
 main.add_command(workflow)

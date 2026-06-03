@@ -115,7 +115,7 @@ async def _drain_turn() -> None:
                         text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
                         tool_input = str(block.input.get("command", block.input.get("description", "")))[:150] if isinstance(block.input, dict) else str(block.input)[:150]
-                        tool_parts.append(f"> {block.name}: {tool_input}")
+                        tool_parts.append(f"```{block.name}: {tool_input}```")
                         log_activity("tool_use", {"tool": block.name, "input": str(block.input)[:500]}, session=SESSION_NAME)
                 if text_parts or tool_parts:
                     combined = "\n".join(text_parts + tool_parts) if tool_parts else "\n".join(text_parts)
