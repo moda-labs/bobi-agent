@@ -151,9 +151,9 @@ def test_post_event_returns_false_on_connection_error():
 
 
 class TestAgentCommand:
-    def test_adhoc_spawns_engineer(self, tmp_path):
+    def test_adhoc_launches_agent(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.spawn_adhoc_background", return_value="eng-42") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="eng-42") as mock:
             result = runner.invoke(main, [
                 "agent", "--repo", str(tmp_path), "--task", "Fix issue #42",
             ])
@@ -161,22 +161,19 @@ class TestAgentCommand:
         assert "eng-42" in result.output
         mock.assert_called_once()
         assert mock.call_args[1]["task"] == "Fix issue #42"
+        assert mock.call_args[1]["workflow_name"] is None
 
-    def test_workflow_launches_background(self):
+    def test_workflow_launches_agent(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.launch_workflow_background",
-                    return_value="wf-issue-lifecycle-42") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-42") as mock:
             result = runner.invoke(main, [
                 "agent", "--workflow", "issue-lifecycle",
-                "--repo", "moda-labs/jobtack", "--issue", "42",
+                "--repo", str(tmp_path),
             ])
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         assert "wf-issue-lifecycle-42" in result.output
         mock.assert_called_once()
-        name, event = mock.call_args[0]
-        assert name == "issue-lifecycle"
-        assert event["data"]["issue_id"] == "42"
-        assert event["data"]["repo"] == "moda-labs/jobtack"
+        assert mock.call_args[1]["workflow_name"] == "issue-lifecycle"
 
     def test_wait_mode_runs_check(self):
         runner = CliRunner()
@@ -196,18 +193,10 @@ class TestAgentCommand:
     def test_rejects_task_and_workflow_together(self):
         runner = CliRunner()
         result = runner.invoke(main, [
-            "agent", "--task", "X", "--workflow", "Y", "--issue", "1",
+            "agent", "--task", "X", "--workflow", "Y",
         ])
         assert result.exit_code != 0
         assert "not both" in result.output
-
-    def test_workflow_requires_issue_or_event_json(self):
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "agent", "--workflow", "issue-lifecycle",
-        ])
-        assert result.exit_code != 0
-        assert "--issue or --event-json" in result.output
 
     def test_adhoc_requires_repo(self):
         runner = CliRunner()
@@ -218,7 +207,7 @@ class TestAgentCommand:
     def test_passes_requested_by(self, tmp_path):
         runner = CliRunner()
         req = '{"from":"Alice","channel":"C1"}'
-        with patch("modastack.subagent.spawn_adhoc_background", return_value="eng-1") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="eng-1") as mock:
             result = runner.invoke(main, [
                 "agent", "--repo", str(tmp_path), "--task", "Fix #1",
                 "--requested-by", req,
@@ -228,7 +217,7 @@ class TestAgentCommand:
 
     def test_spawn_alias_still_works(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.spawn_adhoc_background", return_value="eng-42"):
+        with patch("modastack.subagent.launch_agent", return_value="eng-42"):
             result = runner.invoke(main, [
                 "spawn", "--repo", str(tmp_path), "--task", "Fix #42",
             ])

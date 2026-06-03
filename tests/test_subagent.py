@@ -23,7 +23,6 @@ from modastack.subagent import (
     list_agents,
     _running,
 )
-from modastack.workflow.engine import WorkflowEngine
 
 
 @pytest.fixture(autouse=True)
@@ -50,32 +49,6 @@ class TestResolveSkillPath:
     def test_nonexistent_skill(self):
         path = _resolve_skill_path("nonexistent-phase")
         assert path is None
-
-
-class TestDetectPhase:
-    def _detect(self, text):
-        return WorkflowEngine._detect_phase(None, text)
-
-    def test_pickup(self):
-        assert self._detect("/pickup Issue #AGD-12") == "pickup"
-
-    def test_spec(self):
-        assert self._detect("/spec AGD-12") == "spec"
-
-    def test_implement(self):
-        assert self._detect("/implement AGD-12") == "implement"
-
-    def test_prepare_pr(self):
-        assert self._detect("/prepare-pr") == "prepare-pr"
-
-    def test_feedback(self):
-        assert self._detect("/feedback address review comments") == "feedback"
-
-    def test_fallback(self):
-        assert self._detect("do some work") == "implement"
-
-    def test_case_insensitive(self):
-        assert self._detect("/PICKUP Issue #AGD-12") == "pickup"
 
 
 class TestBuildPrompt:
@@ -285,75 +258,43 @@ class TestLaunchDetached:
         assert cmd[-2:] == ["a", "b"]
 
 
-class TestSpawnBackground:
-    """Test that spawn_adhoc_background launches a detached subprocess."""
+class TestLaunchAgent:
+    """Test that launch_agent launches a detached subprocess."""
 
     @patch("modastack.subagent._launch_detached")
-    def test_returns_session_name_with_issue_id(self, mock_launch):
-        from modastack.subagent import spawn_adhoc_background
-        name = spawn_adhoc_background(cwd="/tmp/test", task="Fix issue #42")
+    def test_adhoc_returns_eng_prefix(self, mock_launch):
+        from modastack.subagent import launch_agent
+        name = launch_agent(task="Fix issue #42", cwd="/tmp/test")
         assert name == "eng-42"
         mock_launch.assert_called_once()
 
     @patch("modastack.subagent._launch_detached")
-    def test_returns_adhoc_hash_without_issue(self, mock_launch):
-        from modastack.subagent import spawn_adhoc_background
-        name = spawn_adhoc_background(cwd="/tmp/test", task="do something")
+    def test_adhoc_hash_without_issue(self, mock_launch):
+        from modastack.subagent import launch_agent
+        name = launch_agent(task="do something", cwd="/tmp/test")
         assert name.startswith("eng-adhoc-")
-        mock_launch.assert_called_once()
 
     @patch("modastack.subagent._launch_detached")
-    def test_script_calls_spawn_adhoc(self, mock_launch):
-        from modastack.subagent import spawn_adhoc_background
-        spawn_adhoc_background(cwd="/tmp/repo", task="Fix #5", timeout=600)
+    def test_workflow_returns_wf_prefix(self, mock_launch):
+        from modastack.subagent import launch_agent
+        name = launch_agent(task="Work on #42", cwd="/tmp/test", workflow_name="issue-lifecycle")
+        assert name == "wf-issue-lifecycle-42"
+
+    @patch("modastack.subagent._launch_detached")
+    def test_subprocess_is_detached(self, mock_launch):
+        from modastack.subagent import launch_agent
+        launch_agent(task="Fix #1", cwd="/tmp/test")
         script = mock_launch.call_args[0][0]
-        assert "spawn_adhoc" in script
+        assert "_run_agent_entry" in script
 
     @patch("modastack.subagent._launch_detached")
     def test_passes_requested_by(self, mock_launch):
-        from modastack.subagent import spawn_adhoc_background
+        from modastack.subagent import launch_agent
         req = {"from": "Alice", "channel": "C1"}
-        spawn_adhoc_background(cwd="/tmp/test", task="Fix #1", requested_by=req)
+        launch_agent(task="Fix #1", cwd="/tmp/test", requested_by=req)
         args = mock_launch.call_args[0][1]
         import json
         parsed = json.loads(args[0])
         assert parsed["requested_by"] == req
 
 
-class TestLaunchWorkflowBackground:
-    """Test that launch_workflow_background launches a detached subprocess."""
-
-    @patch("modastack.subagent._launch_detached")
-    def test_returns_session_name(self, mock_launch):
-        from modastack.subagent import launch_workflow_background
-        name = launch_workflow_background("issue-lifecycle", {"data": {"issue_id": "42"}})
-        assert name == "wf-issue-lifecycle-42"
-        mock_launch.assert_called_once()
-
-    @patch("modastack.subagent._launch_detached")
-    def test_script_uses_dispatcher(self, mock_launch):
-        from modastack.subagent import launch_workflow_background
-        launch_workflow_background("build-failure", {"data": {"issue_id": "1"}})
-        script = mock_launch.call_args[0][0]
-        assert "WorkflowDispatcher" in script
-        assert "run_by_name" in script
-
-    @patch("modastack.subagent._launch_detached")
-    def test_passes_name_and_event_as_args(self, mock_launch):
-        from modastack.subagent import launch_workflow_background
-        event = {"data": {"issue_id": "99", "repo": "moda-labs/jobtack"}}
-        launch_workflow_background("issue-lifecycle", event)
-        args = mock_launch.call_args[0][1]
-        assert args[0] == "issue-lifecycle"
-        import json
-        assert json.loads(args[1]) == event
-
-
-class TestEngineIntegration:
-    """Test that the workflow engine correctly uses sub-agents."""
-
-    def test_detect_phase_from_inject_text(self):
-        detect = lambda text: WorkflowEngine._detect_phase(None, text)
-        assert detect("/pickup Issue #AGD-12: Auth flow") == "pickup"
-        assert detect("/implement AGD-12") == "implement"
-        assert detect("/prepare-pr") == "prepare-pr"

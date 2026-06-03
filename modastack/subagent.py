@@ -540,54 +540,76 @@ def _launch_detached(script: str, args: list[str], log_file: Path) -> None:
         sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
 
 
-def spawn_adhoc_background(
-    cwd: str,
+def launch_agent(
     task: str,
+    cwd: str,
+    workflow_name: str | None = None,
     timeout: int = 3600,
-    name: str | None = None,
     requested_by: dict | None = None,
 ) -> str:
-    """Start an engineer agent as a detached subprocess and return immediately.
+    """Launch an agent as a detached subprocess and return immediately.
 
-    Returns the session name so the caller can reference it. The manager
-    learns about completion via engineer/session.completed events on the bus.
-    The subprocess survives manager restarts.
+    If workflow_name is provided, loads and runs that workflow.
+    Otherwise creates an implicit single-step workflow from the task.
+    Both paths use the same orchestrator. Returns a session name.
     """
     import hashlib
-    short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
-    issue_id = name or _parse_issue_number(task) or f"adhoc-{short_hash}"
+    issue_id = _parse_issue_number(task) or f"adhoc-{hashlib.sha256(task.encode()).hexdigest()[:8]}"
 
     args_json = json.dumps({
-        "cwd": cwd, "task": task, "timeout": timeout,
+        "task": task,
+        "cwd": cwd,
+        "workflow_name": workflow_name,
+        "timeout": timeout,
         "requested_by": requested_by or {},
+        "issue_id": issue_id,
     })
     script = (
-        "import json, sys; from modastack.subagent import spawn_adhoc; "
-        "spawn_adhoc(**json.loads(sys.argv[1]))"
-    )
-    log_file = Path.home() / ".modastack" / "manager" / "logs" / f"eng-{issue_id}-adhoc.jsonl"
-    _launch_detached(script, [args_json], log_file)
-    return f"eng-{issue_id}"
-
-
-def launch_workflow_background(name: str, event: dict) -> str:
-    """Start a workflow as a detached subprocess and return immediately.
-
-    The workflow executor runs synchronously in the subprocess (wait=True)
-    so node state is persisted. The subprocess survives parent exit.
-    """
-    event_json = json.dumps(event)
-    script = (
         "import json, sys; "
-        "from modastack.workflow.triggers import WorkflowDispatcher; "
-        "d = WorkflowDispatcher(); d.load_all_workflows(); "
-        "r = d.run_by_name(sys.argv[1], json.loads(sys.argv[2]), wait=True); "
-        "print(f'{sys.argv[1]} {r.status}')"
+        "from modastack.subagent import _run_agent_entry; "
+        "_run_agent_entry(json.loads(sys.argv[1]))"
     )
-    issue_id = event.get("data", {}).get("issue_id", "unknown")
-    log_file = Path.home() / ".modastack" / "workflow" / "logs" / f"{name}-{issue_id}.log"
-    _launch_detached(script, [name, event_json], log_file)
-    return f"wf-{name}-{issue_id}"
+
+    prefix = f"wf-{workflow_name}-{issue_id}" if workflow_name else f"eng-{issue_id}"
+    log_dir = Path.home() / ".modastack" / "manager" / "logs"
+    log_file = log_dir / f"{prefix}.jsonl"
+    _launch_detached(script, [args_json], log_file)
+    return prefix
+
+
+def _run_agent_entry(args: dict) -> None:
+    """Entry point for the detached subprocess. Runs the orchestrator."""
+    from modastack.workflow.orchestrator import run_workflow
+    from modastack.workflow.schema import Workflow, load_workflow as load_wf
+    from modastack.workflow.triggers import WorkflowDispatcher
+
+    task = args["task"]
+    cwd = args["cwd"]
+    workflow_name = args.get("workflow_name")
+    timeout = args.get("timeout", 3600)
+    requested_by = args.get("requested_by", {})
+    issue_id = args.get("issue_id", "adhoc")
+
+    if workflow_name:
+        dispatcher = WorkflowDispatcher()
+        dispatcher.load_all_workflows()
+        workflow = dispatcher.find_workflow(workflow_name)
+        if not workflow:
+            print(f"Workflow '{workflow_name}' not found")
+            return
+    else:
+        workflow = Workflow.adhoc(task)
+
+    repo = _resolve_repo_name(cwd)
+    run_workflow(
+        workflow=workflow,
+        task=task,
+        repo=repo,
+        cwd=cwd,
+        issue_id=issue_id,
+        requested_by=requested_by,
+        timeout=timeout,
+    )
 
 
 # ---------------------------------------------------------------------------

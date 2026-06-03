@@ -1675,37 +1675,12 @@ def spawn(repo, task, timeout, non_interactive, post_event, requested_by):
 def _dispatch_agent(*, repo, task, workflow, issue, title, event_json,
                     timeout, wait, post_event, requested_by):
     """Shared dispatch logic for the agent and spawn commands."""
-    from .workflow.actions import _resolve_repo_path
-
-    if task and workflow:
-        click.echo("Specify --task or --workflow, not both.", err=True)
-        raise SystemExit(1)
     if not task and not workflow:
         click.echo("Specify --task or --workflow.", err=True)
         raise SystemExit(1)
-
-    # --- Workflow mode ---
-    if workflow:
-        from .subagent import launch_workflow_background
-
-        if not issue and not event_json:
-            click.echo("--workflow requires --issue or --event-json.", err=True)
-            raise SystemExit(1)
-
-        if event_json:
-            event = json.loads(event_json)
-        else:
-            event = {"type": "cli.trigger", "source": "cli", "data": {}}
-            if issue:
-                event["data"]["issue_id"] = issue
-            if repo:
-                event["data"]["repo"] = repo
-            if title:
-                event["data"]["title"] = title
-
-        session_name = launch_workflow_background(workflow, event)
-        click.echo(f"Workflow started: {session_name}")
-        return
+    if task and workflow:
+        click.echo("Specify --task or --workflow, not both.", err=True)
+        raise SystemExit(1)
 
     # --- Wait / check mode ---
     if wait:
@@ -1713,7 +1688,9 @@ def _dispatch_agent(*, repo, task, workflow, issue, title, event_json,
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
         return
 
-    # --- Ad-hoc mode (default) ---
+    # --- Workflow or adhoc → same code path ---
+    if workflow and not task:
+        task = f"Run workflow {workflow}"
     cwd = _resolve_repo(repo)
     if not cwd:
         return
@@ -1731,9 +1708,10 @@ def _dispatch_agent(*, repo, task, workflow, issue, title, event_json,
             click.echo("--requested-by must be valid JSON", err=True)
             raise SystemExit(1)
 
-    from .subagent import spawn_adhoc_background
-    session_name = spawn_adhoc_background(
-        cwd=cwd, task=task, timeout=timeout, requested_by=requester,
+    from .subagent import launch_agent
+    session_name = launch_agent(
+        task=task, cwd=cwd, workflow_name=workflow,
+        timeout=timeout, requested_by=requester,
     )
     click.echo(f"Agent started: {session_name}")
 
@@ -1743,14 +1721,17 @@ def _resolve_repo(repo: str | None) -> str | None:
     if not repo:
         click.echo("--repo is required.", err=True)
         raise SystemExit(1)
-    from .workflow.actions import _resolve_repo_path
-    try:
-        return _resolve_repo_path(repo)
-    except FileNotFoundError:
-        if Path(repo).expanduser().is_dir():
-            return str(Path(repo).expanduser().resolve())
-        click.echo(f"Repo not found: {repo}", err=True)
-        raise SystemExit(1)
+    path = Path(repo).expanduser()
+    if path.is_dir():
+        return str(path.resolve())
+    config = GlobalConfig.load()
+    for rp in config.repos:
+        if rp.name == repo or str(rp) == repo:
+            return str(rp)
+        if "/" in repo and rp.name == repo.split("/")[-1]:
+            return str(rp)
+    click.echo(f"Repo not found: {repo}", err=True)
+    raise SystemExit(1)
 
 
 def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> None:

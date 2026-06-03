@@ -1,52 +1,10 @@
 name: pr-merged
-version: 1
-trigger:
-  event: github.pr.merged
+trigger: pr.merged
 
-nodes:
-  craft_done_message:
-    type: manager
+steps:
+  - name: cleanup
     prompt: |
-      PR merged for issue ${{event.issue_id}} in ${{event.repo}}.
-      PR: ${{event.pr_url}}
-      Draft a brief Slack message confirming the PR merged and work is done.
-      Output ONLY the message text.
+      The PR was merged. Clean up the worktree and close the issue.
+    handoff:
+      required: [status]
     timeout: 300
-
-  post_slack_done:
-    type: action
-    action: slack.post
-    params:
-      channel_id: ${{config.slack_dm_channel}}
-      text: ${{craft_done_message.output}}
-    depends_on: [craft_done_message]
-
-  move_to_done:
-    type: action
-    action: ticket.move
-    params:
-      issue_id: ${{event.issue_id}}
-      state: Done
-      repo: ${{event.repo}}
-    depends_on: [craft_done_message]
-
-  comment_ticket_done:
-    type: action
-    action: ticket.comment
-    params:
-      issue_id: ${{event.issue_id}}
-      body: "PR merged. Closing."
-      repo: ${{event.repo}}
-    depends_on: [craft_done_message]
-
-  cleanup_session:
-    type: bash
-    command: |
-      python3 -c "
-      from modastack.subagent import cancel_agent
-      cancel_agent('${{event.issue_id}}')
-      " 2>/dev/null || true
-      rm -f ~/.modastack/sessions/${{event.issue_id}}.name ~/.modastack/sessions/${{event.issue_id}}.id
-      rm -f ~/.modastack/handoffs/${{event.issue_id | lower}}.md
-    timeout: 10
-    depends_on: [move_to_done]

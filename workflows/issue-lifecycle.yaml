@@ -1,262 +1,54 @@
 name: issue-lifecycle
-version: 1
-trigger:
-  event: task.assigned
+trigger: task.assigned
 
-nodes:
-  # === SPAWN ===
-  spawn_engineer:
-    label: Spawn
-    type: action
-    action: session.spawn
-    params:
-      issue_id: ${{event.issue_id}}
-      repo: ${{event.repo}}
-      title: ${{event.title}}
-    timeout: 60
-
-  # === NOTIFY (LLM crafts, engine posts) ===
-  craft_pickup_message:
-    label: Notify
-    type: manager
+steps:
+  - name: setup
     prompt: |
-      Issue ${{event.issue_id}} "${{event.title}}" has been assigned.
-      Body: ${{event.body}}
-      Repo: ${{event.repo}}
-      Draft a brief Slack pickup message (2-3 sentences max).
-      Output ONLY the message text, nothing else.
+      Create a git worktree for this issue and set up the workspace.
+      Read the issue to understand the full context.
+    handoff:
+      required: [worktree_path]
     timeout: 300
-    depends_on: [spawn_engineer]
 
-  post_slack_pickup:
-    label: Post Slack
-    type: action
-    action: slack.post
-    params:
-      channel_id: ${{config.slack_dm_channel}}
-      text: ${{craft_pickup_message.output}}
-    depends_on: [craft_pickup_message]
-
-  move_to_in_progress:
-    label: Move Ticket
-    type: action
-    action: ticket.move
-    params:
-      issue_id: ${{event.issue_id}}
-      linear_id: ${{event.linear_id}}
-      state: In Progress
-      repo: ${{event.repo}}
-    depends_on: [spawn_engineer]
-
-  comment_ticket_pickup:
-    label: Comment
-    type: action
-    action: ticket.comment
-    params:
-      issue_id: ${{event.issue_id}}
-      linear_id: ${{event.linear_id}}
-      body: "Assigned to engineer. Starting triage."
-      repo: ${{event.repo}}
-    depends_on: [spawn_engineer]
-
-  # === TRIAGE ===
-  triage:
-    label: Triage
-    type: prompt
-    session: ${{event.issue_id | lower}}
-    inject: "/pickup Issue #${{event.issue_id}}: ${{event.title}}. Repo: ${{event.repo}}, cwd: ${{event.repo}}"
-    wait_for:
-      phase: triage_complete
+  - name: pickup
+    prompt: |
+      Move the issue to In Progress status.
+      Run /pickup to triage and assess the complexity of this ticket.
+    handoff:
+      required: [complexity, needs_spec]
+      optional: [blocked_by, notes]
     timeout: 1800
-    outputs:
-      complexity: ${{handoff.complexity}}
-      needs_spec: ${{handoff.needs_spec}}
-    depends_on: [spawn_engineer]
 
-  # === ROUTE (LLM recommends, engine enforces) ===
-  craft_triage_message:
-    label: Triage Update
-    type: manager
+  - name: route
+    if: "needs_spec == true"
+    goto: spec
+    else: implement
+
+  - name: spec
     prompt: |
-      Triage complete for ${{event.issue_id}} "${{event.title}}".
-      Complexity: ${{triage.complexity}}.
-      Draft a brief Slack update (1-2 sentences). Output ONLY the message text.
-    timeout: 300
-    depends_on: [triage]
-
-  post_slack_triage:
-    label: Post Slack
-    type: action
-    action: slack.post
-    params:
-      channel_id: ${{config.slack_dm_channel}}
-      text: ${{craft_triage_message.output}}
-    depends_on: [craft_triage_message]
-
-  assess_route:
-    label: Assess
-    type: manager
-    prompt: |
-      Triage for ${{event.issue_id}} found complexity=${{triage.complexity}},
-      needs_spec=${{triage.needs_spec}}.
-      Standard routing: medium/large -> spec, trivial/small -> implement.
-      Do you agree with the standard routing? Reply with exactly one word:
-      "spec" or "implement". Nothing else.
-    timeout: 300
-    depends_on: [triage]
-
-  route:
-    label: Route
-    type: gate
-    depends_on: [assess_route]
-    branches:
-      needs_spec:
-        when: "'spec' in ${{assess_route.output}}"
-      skip_spec:
-        when: "'implement' in ${{assess_route.output}}"
-    fallback: needs_spec
-
-  # === SPEC (conditional on medium/large) ===
-  spec:
-    label: Spec
-    type: prompt
-    session: ${{event.issue_id | lower}}
-    inject: >
-      /spec ${{event.issue_id}}. After updating the issue description and updating
-      the handoff to spec_complete, STOP. Do NOT proceed to implementation.
-      Wait for human approval.
-    wait_for:
-      phase: spec_complete
+      Run /spec to write the implementation spec.
+      Update the issue description with the spec.
+      Do NOT proceed to implementation — stop after the spec is written.
+    handoff:
+      required: [spec_url]
     timeout: 3000
-    outputs:
-      spec_url: ${{handoff.spec_url}}
-    depends_on: [route]
-    when: "${{route.branch}} == 'needs_spec'"
 
-  craft_spec_message:
-    label: Spec Update
-    type: manager
-    prompt: |
-      Spec complete for ${{event.issue_id}} "${{event.title}}".
-      Issue: ${{spec.spec_url}}.
-      Draft a Slack message asking for spec review. Include the issue link.
-      Output ONLY the message text.
-    timeout: 300
-    depends_on: [spec]
-    when: "${{route.branch}} == 'needs_spec'"
-
-  post_slack_spec_ready:
-    label: Post Slack
-    type: action
-    action: slack.post
-    params:
-      channel_id: ${{config.slack_dm_channel}}
-      text: ${{craft_spec_message.output}}
-    depends_on: [craft_spec_message]
-    when: "${{route.branch}} == 'needs_spec'"
-
-  comment_ticket_spec:
-    label: Comment
-    type: action
-    action: ticket.comment
-    params:
-      issue_id: ${{event.issue_id}}
-      linear_id: ${{event.linear_id}}
-      body: "Spec ready for review: ${{spec.spec_url}}"
-      repo: ${{event.repo}}
-    depends_on: [spec]
-    when: "${{route.branch}} == 'needs_spec'"
-
-  spec_approval:
-    label: Approval
-    type: approval
-    listen_for:
-      source: github
-      match: "approved"
+  - name: await_approval
+    await: approval
     timeout: 86400
-    depends_on: [post_slack_spec_ready]
-    when: "${{route.branch}} == 'needs_spec'"
 
-  # === IMPLEMENT ===
-  craft_implement_message:
-    label: Implement Update
-    type: manager
+  - name: implement
     prompt: |
-      Starting implementation for ${{event.issue_id}} "${{event.title}}".
-      Complexity: ${{triage.complexity}}.
-      Draft a brief Slack update (1-2 sentences). Output ONLY the message text.
-    timeout: 300
-    depends_on: [spec_approval, route]
-    when: "${{spec_approval.approved}} == true or ${{route.branch}} == 'skip_spec'"
-
-  post_slack_implement:
-    label: Post Slack
-    type: action
-    action: slack.post
-    params:
-      channel_id: ${{config.slack_dm_channel}}
-      text: ${{craft_implement_message.output}}
-    depends_on: [craft_implement_message]
-
-  implement:
-    label: Implement
-    type: prompt
-    session: ${{event.issue_id | lower}}
-    inject: "/implement ${{event.issue_id}}"
-    wait_for:
-      phase: implement_complete
+      Run /implement to build the feature.
+      Follow TDD — write tests first, then implement.
+    handoff:
+      required: [status]
     timeout: 3600
-    depends_on: [post_slack_implement]
 
-  # === PREPARE PR ===
-  prepare_pr:
-    label: Prepare PR
-    type: prompt
-    session: ${{event.issue_id | lower}}
-    inject: "/prepare-pr"
-    wait_for:
-      phase: pr_ready
-    timeout: 1800
-    depends_on: [implement]
-    outputs:
-      pr_url: ${{handoff.pr_url}}
-
-  craft_pr_message:
-    label: PR Update
-    type: manager
+  - name: pr
     prompt: |
-      PR created for ${{event.issue_id}} "${{event.title}}": ${{prepare_pr.pr_url}}.
-      Draft a Slack message asking for review. Output ONLY the message text.
-    timeout: 300
-    depends_on: [prepare_pr]
-
-  post_slack_pr_ready:
-    label: Post Slack
-    type: action
-    action: slack.post
-    params:
-      channel_id: ${{config.slack_dm_channel}}
-      text: ${{craft_pr_message.output}}
-    depends_on: [craft_pr_message]
-
-  move_to_in_review:
-    label: In Review
-    type: action
-    action: ticket.move
-    params:
-      issue_id: ${{event.issue_id}}
-      linear_id: ${{event.linear_id}}
-      state: In Review
-      repo: ${{event.repo}}
-    depends_on: [prepare_pr]
-
-  comment_ticket_pr:
-    label: Comment
-    type: action
-    action: ticket.comment
-    params:
-      issue_id: ${{event.issue_id}}
-      linear_id: ${{event.linear_id}}
-      body: "PR ready for review: ${{prepare_pr.pr_url}}"
-      repo: ${{event.repo}}
-    depends_on: [prepare_pr]
+      Run /prepare-pr to create the pull request.
+      Link the PR to the issue. Post a review summary.
+    handoff:
+      required: [pr_url]
+    timeout: 1800

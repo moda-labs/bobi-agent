@@ -1,50 +1,12 @@
 name: pr-feedback
-version: 1
-trigger:
-  event: github.pr.review
+trigger: review.changes_requested
 
-nodes:
-  craft_feedback_message:
-    type: manager
+steps:
+  - name: address
     prompt: |
-      PR review received for ${{event.issue_id}} in ${{event.repo}}.
-      PR: ${{event.pr_url}}
-      Review action: ${{event.action}}
-      Reviewer: ${{event.reviewer}}
-      Draft a brief Slack message informing the team about the review.
-      Output ONLY the message text.
-    timeout: 300
-
-  post_slack_review:
-    type: action
-    action: slack.post
-    params:
-      channel_id: ${{config.slack_dm_channel}}
-      text: ${{craft_feedback_message.output}}
-    depends_on: [craft_feedback_message]
-
-  inject_feedback:
-    type: prompt
-    session: ${{event.issue_id | lower}}
-    inject: "/feedback PR review received. Address the reviewer's comments and update the PR."
-    wait_for:
-      phase: feedback_addressed
+      A reviewer requested changes on the PR.
+      Read the review comments and address each one.
+      Push the fixes and reply to each comment.
+    handoff:
+      required: [status]
     timeout: 1800
-    depends_on: [post_slack_review]
-
-  craft_feedback_done:
-    type: manager
-    prompt: |
-      Engineer addressed PR feedback for ${{event.issue_id}}.
-      Draft a brief Slack message saying feedback was addressed.
-      Output ONLY the message text.
-    timeout: 300
-    depends_on: [inject_feedback]
-
-  post_slack_feedback_done:
-    type: action
-    action: slack.post
-    params:
-      channel_id: ${{config.slack_dm_channel}}
-      text: ${{craft_feedback_done.output}}
-    depends_on: [craft_feedback_done]

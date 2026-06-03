@@ -1,56 +1,11 @@
 name: stall-recovery
-version: 1
-trigger:
-  event: worker.stalled
+trigger: worker.stalled
 
-nodes:
-  diagnose:
-    type: manager
+steps:
+  - name: recover
     prompt: |
-      Sub-agent for ${{event.issue_id}} has been idle for
-      ${{event.idle_seconds}} seconds.
-
-      Diagnose what's happening. Then recommend one action:
-      - "wait" — the agent may still be working, give it more time
-      - "kill" — cancel and respawn the sub-agent
-      Output ONLY your recommendation in the format above.
-    timeout: 300
-
-  route_action:
-    type: gate
-    depends_on: [diagnose]
-    branches:
-      wait:
-        when: "'wait' in ${{diagnose.output}}"
-      kill:
-        when: "'kill' in ${{diagnose.output}}"
-    fallback: wait
-
-  do_kill:
-    type: bash
-    command: |
-      python3 -c "
-      from modastack.subagent import cancel_agent
-      cancel_agent('${{event.issue_id}}')
-      " 2>/dev/null || true
-      rm -f ~/.modastack/sessions/${{event.issue_id}}.name ~/.modastack/sessions/${{event.issue_id}}.id
-    timeout: 10
-    depends_on: [route_action]
-    when: "${{route_action.branch}} == 'kill'"
-
-  craft_stall_message:
-    type: manager
-    prompt: |
-      Session for ${{event.issue_id}} stalled. Took action: ${{route_action.branch}}.
-      Draft a brief Slack message about the stall and recovery.
-      Output ONLY the message text.
-    timeout: 300
-    depends_on: [do_kill, route_action]
-
-  post_slack_stall:
-    type: action
-    action: slack.post
-    params:
-      channel_id: ${{config.slack_dm_channel}}
-      text: ${{craft_stall_message.output}}
-    depends_on: [craft_stall_message]
+      This engineer session appears stalled. Check its status,
+      investigate what went wrong, and either resume or report the issue.
+    handoff:
+      required: [status]
+    timeout: 600
