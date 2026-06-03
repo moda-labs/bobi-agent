@@ -1387,10 +1387,9 @@ def workflow_list():
             found = True
             try:
                 wf = load_workflow(f)
-                filters = ", ".join(f"{k}={v}" for k, v in wf.trigger.filter.items())
-                filter_str = f" [{filters}]" if filters else ""
-                click.echo(f"  {wf.name:25s} {source:15s} trigger={wf.trigger.event}{filter_str}  "
-                          f"nodes={len(wf.nodes)}")
+                trigger = wf.trigger or "—"
+                click.echo(f"  {wf.name:25s} {source:15s} trigger={trigger}  "
+                          f"steps={len(wf.steps)}")
             except Exception as e:
                 click.echo(f"  {f.name:25s} {source:15s} ERROR: {e}")
 
