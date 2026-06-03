@@ -1627,6 +1627,7 @@ main.add_command(monitor)
 
 
 @main.command()
+@click.version_option(version=__version__, prog_name="modastack agent")
 @click.option("--repo", default=None, help="Repo path or registered name")
 @click.option("--task", default=None, help="Task description for the engineer")
 @click.option("--workflow", "-w", default=None, help="Run a named workflow instead of an ad-hoc task")
