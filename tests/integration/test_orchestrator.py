@@ -94,6 +94,13 @@ class TestSessionDirectory:
         """Adhoc agent creates session dir with state.json and log.jsonl."""
         from modastack.subagent import launch_agent
         from modastack.sdk import SESSION_DIR, SessionRegistry
+        import shutil
+
+        # Clean previous run
+        from modastack.workflow.orchestrator import make_session_name
+        old_session = SESSION_DIR / make_session_name("adhoc", "tmp", "996")
+        if old_session.exists():
+            shutil.rmtree(old_session)
 
         name = launch_agent(
             task="Say 'hello' and exit. Issue #996",
@@ -133,6 +140,15 @@ class TestSessionDirectory:
         from modastack.workflow.schema import Workflow, StepDef, HandoffContract, load_workflow
         from modastack.workflow.orchestrator import run_workflow, make_session_name
         from modastack.sdk import SESSION_DIR
+        import shutil
+
+        # Clean previous run so we don't hit stale session resume
+        session_name = make_session_name("test-handoff", "test", "995")
+        old_session = SESSION_DIR / session_name
+        if old_session.exists():
+            shutil.rmtree(old_session)
+        old_id = SESSION_DIR / f"{session_name}.id"
+        old_id.unlink(missing_ok=True)
 
         wf_file = tmp_path / "test-handoff.yaml"
         wf_file.write_text(textwrap.dedent("""\
