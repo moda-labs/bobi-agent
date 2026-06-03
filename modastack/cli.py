@@ -413,76 +413,123 @@ def slack_reply(text, workspace, channel, thread):
 
 
 @main.command()
-@click.option("-n", "--lines", default=20, help="Number of recent entries to show")
+@click.argument("session", default="manager")
+@click.option("-n", "--lines", default=30, help="Number of recent messages to show")
 @click.option("-f", "--follow", is_flag=True, help="Follow mode — stream new entries")
-@click.option("-s", "--session", default="moda-manager", help="Session to show (e.g. moda-manager, eng-42)")
-def log(lines, follow, session):
-    """Show conversation history for a session.
+def log(session, lines, follow):
+    """Show the full transcript for a session.
 
     Usage:
-        modastack log                     # manager log
-        modastack log -s eng-81           # engineer #81 log
-        modastack log -n 50               # last 50 entries
-        modastack log -f                  # follow mode
-        modastack log -f -s eng-81        # follow engineer
+        modastack log manager             # manager transcript
+        modastack log eng-70              # engineer transcript
+        modastack log manager -n 50       # last 50 messages
+        modastack log manager -f          # follow mode
     """
-    from modastack.sdk import ACTIVITY_DIR
-    log_path = ACTIVITY_DIR / "logs" / f"{session}.jsonl"
-    if not log_path.exists():
-        fallback = ACTIVITY_DIR / "activity.jsonl"
-        if session == "moda-manager" and fallback.exists():
-            log_path = fallback
-        else:
-            click.echo(f"No log for session '{session}'.")
-            # List available sessions
-            logs_dir = ACTIVITY_DIR / "logs"
-            if logs_dir.exists():
-                sessions = [f.stem for f in logs_dir.glob("*.jsonl")]
-                if sessions:
-                    click.echo(f"Available: {', '.join(sorted(sessions))}")
-            return
+    transcript_path = _find_transcript(session)
+    if not transcript_path:
+        return
 
     if follow:
         import time
-        shown = set()
-        all_lines = log_path.read_text().strip().splitlines()
+        last_size = 0
+        all_lines = transcript_path.read_text().strip().splitlines()
         for line in all_lines[-lines:]:
-            _print_activity_entry(line)
-            shown.add(line)
+            _print_transcript_entry(line)
+        last_size = transcript_path.stat().st_size
         try:
             while True:
                 time.sleep(1)
-                current = log_path.read_text().strip().splitlines()
-                for line in current:
-                    if line not in shown:
-                        _print_activity_entry(line)
-                        shown.add(line)
+                cur_size = transcript_path.stat().st_size
+                if cur_size > last_size:
+                    with open(transcript_path) as f:
+                        f.seek(last_size)
+                        for line in f:
+                            _print_transcript_entry(line.strip())
+                    last_size = cur_size
         except KeyboardInterrupt:
             pass
     else:
-        all_lines = log_path.read_text().strip().splitlines()
+        all_lines = transcript_path.read_text().strip().splitlines()
         for line in all_lines[-lines:]:
-            _print_activity_entry(line)
+            _print_transcript_entry(line)
 
 
-def _print_activity_entry(line: str) -> None:
+def _find_transcript(session: str) -> Path | None:
+    """Find the Claude Code transcript JSONL for a session name."""
+    from modastack.sdk import SESSION_DIR
+
+    if session == "manager":
+        session = "moda-manager"
+
+    id_file = SESSION_DIR / f"{session}.id"
+    if not id_file.exists():
+        click.echo(f"No session '{session}'.")
+        available = [f.stem for f in SESSION_DIR.glob("*.id")]
+        if available:
+            click.echo(f"Available: {', '.join(sorted(available))}")
+        return None
+
+    session_id = id_file.read_text().strip()
+    if not session_id:
+        click.echo(f"Session '{session}' has no ID (never started or was reset).")
+        return None
+
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        click.echo("No Claude Code projects directory found.")
+        return None
+
+    for project_dir in claude_projects.iterdir():
+        candidate = project_dir / f"{session_id}.jsonl"
+        if candidate.exists():
+            return candidate
+
+    click.echo(f"Transcript not found for session {session_id[:8]}.")
+    return None
+
+
+def _print_transcript_entry(line: str) -> None:
+    """Render one JSONL line from a Claude Code transcript."""
     try:
-        entry = json.loads(line)
+        obj = json.loads(line)
     except json.JSONDecodeError:
         return
 
-    event = entry.get("event", "")
-    ts = entry.get("ts", 0)
+    msg_type = obj.get("type", "")
+    ts = obj.get("timestamp", "")[:19]
 
-    if event == "UserPromptSubmit":
-        text = entry.get("text", "")[:120]
-        click.echo(f"  → {text}")
-    elif event == "response":
-        text = entry.get("text", "")[:200]
-        click.echo(f"  ← {text}")
-    elif event == "Stop":
-        session_id = entry.get("session_id", "")[:8]
-        click.echo(f"  ◼ turn complete (session {session_id})")
+    if msg_type in ("human", "user"):
+        content = obj.get("message", {}).get("content", [])
+        text = ""
+        for part in content:
+            if isinstance(part, str):
+                text += part
+            elif isinstance(part, dict) and part.get("type") == "text":
+                text += part.get("text", "")
+        text = text.strip()
+        if text:
+            # Truncate long event payloads but show Slack messages in full
+            display = text[:300] + "..." if len(text) > 300 else text
+            click.echo(f"\n{ts}  → {display}")
+
+    elif msg_type == "assistant":
+        content = obj.get("message", {}).get("content", [])
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                text = part.get("text", "").strip()
+                if text:
+                    click.echo(f"{ts}  ← {text}")
+            elif part.get("type") == "tool_use":
+                name = part.get("name", "")
+                inp = part.get("input", {})
+                if isinstance(inp, dict):
+                    summary = inp.get("command", inp.get("description", str(inp)))
+                else:
+                    summary = str(inp)
+                summary = str(summary)[:150]
+                click.echo(f"{ts}  ⚙ {name}: {summary}")
 
 
 @main.command(hidden=True)
