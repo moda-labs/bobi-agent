@@ -462,46 +462,73 @@ def _find_transcript(session: str) -> Path | None:
         session = "moda-manager"
 
     id_file = SESSION_DIR / f"{session}.id"
-    if not id_file.exists():
-        click.echo(f"No session '{session}'.")
-        from modastack.sdk import get_registry
-        registry = get_registry()
-        active = [e for e in registry.list_active() if e.role == "engineer"]
-        if active:
-            names = [e.name for e in active]
-            click.echo(f"Active engineers: {', '.join(sorted(names))}")
-        recent = sorted(SESSION_DIR.glob("*.id"), key=lambda f: f.stat().st_mtime, reverse=True)
-        recent_names = [f.stem for f in recent[:10] if f.stem != "moda-manager"]
-        if recent_names:
-            click.echo(f"Recent: {', '.join(recent_names)}")
-        return None
 
-    session_id = id_file.read_text().strip()
-    if not session_id:
-        click.echo(f"Session '{session}' has no ID (never started or was reset).")
-        return None
+    # Try the full Claude Code transcript first (via session ID)
+    if id_file.exists():
+        session_id = id_file.read_text().strip()
+        if session_id:
+            claude_projects = Path.home() / ".claude" / "projects"
+            if claude_projects.exists():
+                for project_dir in claude_projects.iterdir():
+                    candidate = project_dir / f"{session_id}.jsonl"
+                    if candidate.exists():
+                        return candidate
 
-    claude_projects = Path.home() / ".claude" / "projects"
-    if not claude_projects.exists():
-        click.echo("No Claude Code projects directory found.")
-        return None
+    # Fallback: activity log file (works for running sessions before
+    # the .id file is written, and for orchestrator subprocess logs)
+    from modastack.sdk import ACTIVITY_DIR
+    activity_log = ACTIVITY_DIR / "logs" / f"{session}.jsonl"
+    if activity_log.exists():
+        return activity_log
 
-    for project_dir in claude_projects.iterdir():
-        candidate = project_dir / f"{session_id}.jsonl"
-        if candidate.exists():
-            return candidate
+    click.echo(f"No session '{session}'.")
+    from modastack.sdk import get_registry
+    registry = get_registry()
+    active = [e for e in registry.list_active() if e.role == "engineer"]
+    if active:
+        names = [e.name for e in active]
+        click.echo(f"Active engineers: {', '.join(sorted(names))}")
+    recent = sorted(SESSION_DIR.glob("*.id"), key=lambda f: f.stat().st_mtime, reverse=True)
+    recent_names = [f.stem for f in recent[:10] if f.stem != "moda-manager"]
+    if recent_names:
+        click.echo(f"Recent: {', '.join(recent_names)}")
+    return None
 
     click.echo(f"Transcript not found for session {session_id[:8]}.")
     return None
 
 
 def _print_transcript_entry(line: str) -> None:
-    """Render one JSONL line from a Claude Code transcript."""
+    """Render one JSONL line from a Claude Code transcript or activity log."""
     try:
         obj = json.loads(line)
     except json.JSONDecodeError:
+        # Plain text lines (e.g. orchestrator print output)
+        line = line.strip()
+        if line:
+            click.echo(f"  {line}")
         return
 
+    # Activity log format (from orchestrator/engineer subprocess)
+    event = obj.get("event", "")
+    if event == "response":
+        import datetime
+        ts = datetime.datetime.fromtimestamp(obj.get("ts", 0)).strftime("%H:%M:%S")
+        text = obj.get("text", "")[:300]
+        click.echo(f"{ts}  ← {text}")
+        return
+    if event == "tool_use":
+        import datetime
+        ts = datetime.datetime.fromtimestamp(obj.get("ts", 0)).strftime("%H:%M:%S")
+        tool = obj.get("tool", "")
+        inp = obj.get("input", "")[:150]
+        click.echo(f"{ts}  ⚙ {tool}: {inp}")
+        return
+    if event == "stop":
+        click.echo(f"  ◼ turn complete")
+        return
+
+    # Claude Code transcript format
     msg_type = obj.get("type", "")
     ts = obj.get("timestamp", "")[:19]
 
@@ -590,34 +617,33 @@ def status():
 
 
 @main.command()
-@click.option("--browser/--no-browser", default=True,
-              help="Include the /browse + Chromium sandbox checks (default: on)")
-@click.option("--fix", is_flag=True, help="Offer to apply the Chromium sandbox fix if it's the problem")
+@click.option("--browser", is_flag=True, default=False,
+              help="Also run /browse + Chromium sandbox checks")
+@click.option("--fix", is_flag=True, help="Offer to apply the Chromium sandbox fix (with --browser)")
 def doctor(browser, fix):
-    """Health check — verify /browse can run (Playwright, Chromium, daemon, deps).
+    """System health check — verify manager, event server, dashboard, repos, workflows.
 
-    Runs a suite of checks and prints a pass/fail line for each. With --fix,
-    if the failure is the AppArmor user-namespace sandbox restriction, offers
-    to apply the sysctl fix (requires sudo).
+    Runs a suite of checks and prints a pass/fail line for each.
+    Exit 0 if all pass, 1 if any fail.
 
     Usage:
         modastack doctor
-        modastack doctor --fix
+        modastack doctor --browser
+        modastack doctor --browser --fix
     """
-    from . import browser as browser_mod
+    from .doctor import run_doctor
 
-    if not browser:
-        click.echo("Nothing to check (browser checks disabled).")
-        return
+    results = run_doctor()
 
-    if not browser_mod.is_linux():
-        click.echo("Note: Chromium sandbox checks are Linux-specific; "
-                   "running browser launch checks only.")
+    if browser:
+        from . import browser as browser_mod
+        if not browser_mod.is_linux():
+            click.echo("Note: Chromium sandbox checks are Linux-specific; "
+                       "running browser launch checks only.")
+        results.extend(browser_mod.run_doctor())
 
-    results = browser_mod.run_doctor()
-
-    sandbox_failure = False
     all_ok = True
+    sandbox_failure = False
     for r in results:
         mark = "✓" if r.ok else "✗"
         click.echo(f"  {mark} {r.name}: {r.detail}")
@@ -625,18 +651,19 @@ def doctor(browser, fix):
             all_ok = False
             if r.hint:
                 click.echo(f"      → {r.hint}")
-            if r.sandbox_error:
+            if browser and hasattr(r, "sandbox_error") and r.sandbox_error:
                 sandbox_failure = True
 
     if all_ok:
-        click.echo("\nAll checks passed — /browse is ready.")
+        click.echo("\nAll checks passed.")
         return
 
     if sandbox_failure and fix:
+        from . import browser as browser_mod
         click.echo()
         _offer_sandbox_fix(browser_mod, non_interactive=False)
     elif sandbox_failure:
-        click.echo("\nRe-run with `modastack doctor --fix` to apply the sandbox fix.")
+        click.echo("\nRe-run with `modastack doctor --browser --fix` to apply the sandbox fix.")
 
     raise SystemExit(1)
 
