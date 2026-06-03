@@ -36,7 +36,7 @@ class TestCLIReturnsImmediately:
         elapsed = time.monotonic() - start
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "wf-adhoc-99" in result.stdout
+        assert "wf-adhoc" in result.stdout and "99" in result.stdout
         assert elapsed < 5
 
     def test_workflow_returns_immediately(self, tmp_path):
@@ -62,7 +62,7 @@ class TestCLIReturnsImmediately:
             cwd=str(REPO_ROOT),
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "wf-adhoc-88" in result.stdout
+        assert "wf-adhoc" in result.stdout and "88" in result.stdout
 
 
 class TestValidation:

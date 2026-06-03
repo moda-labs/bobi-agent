@@ -532,12 +532,13 @@ def spawn_adhoc(
     return result
 
 
-def _launch_detached(script: str, args: list[str], log_file: Path) -> None:
-    """Launch a detached subprocess that survives parent exit."""
+def _launch_detached(script: str, args: list[str], log_file: Path) -> int:
+    """Launch a detached subprocess that survives parent exit. Returns pid."""
     cmd = [sys.executable, "-c", script, *args]
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with open(log_file, "a") as lf:
-        sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
+        proc = sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
+    return proc.pid
 
 
 def launch_agent(
@@ -549,10 +550,25 @@ def launch_agent(
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
-    Every agent runs a named workflow. Returns a session name.
+    Session name is deterministic: wf-{workflow}-{repo}-{issue}.
+    - If an active run exists for the same session → reject
+    - If a failed/stale run exists → resume (same session ID)
+    - If completed or new → fresh start
     """
-    import hashlib
-    issue_id = _parse_issue_number(task) or f"adhoc-{hashlib.sha256(task.encode()).hexdigest()[:8]}"
+    import uuid
+    issue_id = _parse_issue_number(task) or f"adhoc-{uuid.uuid4().hex[:8]}"
+    repo = _resolve_repo_name(cwd)
+
+    from modastack.workflow.orchestrator import make_session_name
+    session_name = make_session_name(workflow_name, repo, issue_id)
+
+    registry = get_registry()
+    existing = registry.get(session_name)
+    if existing and existing.status in ("starting", "running", "idle"):
+        raise RuntimeError(
+            f"A run is already active: {session_name} (status={existing.status}). "
+            f"Cancel it first or wait for it to complete."
+        )
 
     args_json = json.dumps({
         "task": task,
@@ -568,11 +584,17 @@ def launch_agent(
         "_run_agent_entry(json.loads(sys.argv[1]))"
     )
 
-    prefix = f"wf-{workflow_name}-{issue_id}"
     log_dir = Path.home() / ".modastack" / "manager" / "logs"
-    log_file = log_dir / f"{prefix}.jsonl"
+    log_file = log_dir / f"{session_name}.jsonl"
     _launch_detached(script, [args_json], log_file)
-    return prefix
+
+    registry.register(SessionEntry(
+        name=session_name, session_id="", role="engineer",
+        issue_id=issue_id, title=task[:80], phase=workflow_name,
+        repo=repo, cwd=cwd, status="starting",
+        requested_by=requested_by or {},
+    ))
+    return session_name
 
 
 def _run_agent_entry(args: dict) -> None:

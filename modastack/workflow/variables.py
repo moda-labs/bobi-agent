@@ -74,13 +74,34 @@ class VariableContext:
 
         return VAR_PATTERN.sub(_replacer, template)
 
+    def set_flat(self, key: str, value: Any):
+        """Set a variable accessible without a scope prefix in conditions."""
+        if "_flat" not in self.scopes:
+            self.scopes["_flat"] = {}
+        self.scopes["_flat"][key] = value
+
     def evaluate_condition(self, expr: str) -> bool:
         """Evaluate a when: expression. Safe — no eval().
 
-        Supports: ==, !=, in, not in, and, or, true, false, 'string literals'
+        Supports: ==, !=, in, not in, and, or, true, false, 'string literals'.
+        Bare names (without ${{scope.key}}) are resolved from the _flat scope.
         """
-        resolved = self.resolve(expr)
+        resolved = self._resolve_flat(expr)
         return _eval_expr(resolved.strip())
+
+    def _resolve_flat(self, expr: str) -> str:
+        """Resolve ${{scope.key}} variables AND bare names from _flat scope."""
+        resolved = self.resolve(expr)
+        flat = self.scopes.get("_flat", {})
+        if not flat:
+            return resolved
+        for key, val in flat.items():
+            resolved = re.sub(
+                rf'\b{re.escape(key)}\b',
+                str(val),
+                resolved,
+            )
+        return resolved
 
 
 def _eval_expr(expr: str) -> bool:
