@@ -1,5 +1,8 @@
 name: pr-merged
 trigger: pr.merged
+description: >
+  Post-merge cleanup. Clean up the worktree and close the issue
+  after a PR is merged.
 
 steps:
   - name: cleanup

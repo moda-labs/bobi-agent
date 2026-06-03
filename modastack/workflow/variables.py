@@ -102,6 +102,10 @@ class VariableContext:
 
         return VAR_PATTERN.sub(_replacer, template)
 
+    def set_flat(self, key: str, value: Any):
+        """Set a variable accessible without a scope prefix in conditions."""
+        self.flat[key] = value
+
     def evaluate_condition(self, expr: str) -> bool:
         """Evaluate a when: expression. Safe — no eval().
 

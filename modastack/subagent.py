@@ -588,12 +588,6 @@ def _make_run_id(task: str, issue: str | None) -> str:
     return f"adhoc-{uuid.uuid4().hex[:8]}"
 
 
-def _session_name_for(workflow_name: str | None, issue_id: str) -> str:
-    """The registry session name a run will use (matches run_workflow)."""
-    wf = workflow_name or "adhoc"
-    return f"wf-{wf}-{issue_id}"
-
-
 def _active_run_for(repo: str, issue_id: str) -> SessionEntry | None:
     """Return an active engineer run already targeting (repo, issue_id).
 
@@ -614,7 +608,7 @@ def _active_run_for(repo: str, issue_id: str) -> SessionEntry | None:
 def launch_agent(
     task: str,
     cwd: str,
-    workflow_name: str | None = None,
+    workflow_name: str,
     timeout: int = 3600,
     requested_by: dict | None = None,
     issue: str | None = None,
@@ -622,9 +616,7 @@ def launch_agent(
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
-    If workflow_name is provided, loads and runs that workflow.
-    Otherwise creates an implicit single-step workflow from the task.
-    Both paths use the same orchestrator. Returns a session name.
+    Session name is deterministic: wf-{workflow}-{repo}-{issue}.
 
     ``issue`` binds the run to a specific issue id (e.g. the GitHub issue
     number passed via ``--issue``); it wins over any number parsed from the
@@ -638,6 +630,9 @@ def launch_agent(
     existing = _active_run_for(repo, issue_id)
     if existing is not None:
         raise RunCollision(existing)
+
+    from modastack.workflow.orchestrator import make_session_name
+    session_name = make_session_name(workflow_name, repo, issue_id)
 
     args_json = json.dumps({
         "task": task,
@@ -654,25 +649,19 @@ def launch_agent(
         "_run_agent_entry(json.loads(sys.argv[1]))"
     )
 
-    prefix = f"wf-{workflow_name}-{issue_id}" if workflow_name else f"eng-{issue_id}"
     log_dir = Path.home() / ".modastack" / "manager" / "logs"
-    log_file = log_dir / f"{prefix}.jsonl"
+    log_file = log_dir / f"{session_name}.jsonl"
     pid = _launch_detached(script, [args_json], log_file)
 
-    # Register the run synchronously with the detached pid so a second,
-    # closely-following invocation for the same (repo, issue) is rejected by
-    # the guard above even before the child has booted and registered itself.
-    # The child re-registers the same session name with its own pid (identical
-    # value) once the orchestrator starts.
     registry = get_registry()
     registry.register(SessionEntry(
-        name=_session_name_for(workflow_name, issue_id),
-        session_id="", role="engineer", issue_id=issue_id,
-        title=(title or task)[:80], phase=workflow_name or "adhoc",
+        name=session_name, session_id="", role="engineer",
+        issue_id=issue_id, title=(title or task)[:80],
+        phase=workflow_name or "adhoc",
         repo=repo, cwd=cwd, status="starting", pid=pid,
         requested_by=requested_by or {},
     ))
-    return prefix
+    return session_name
 
 
 def cancel_run(identifier: str) -> list[str]:
@@ -710,26 +699,22 @@ def cancel_run(identifier: str) -> list[str]:
 def _run_agent_entry(args: dict) -> None:
     """Entry point for the detached subprocess. Runs the orchestrator."""
     from modastack.workflow.orchestrator import run_workflow
-    from modastack.workflow.schema import Workflow, load_workflow as load_wf
     from modastack.workflow.triggers import WorkflowDispatcher
 
     task = args["task"]
     cwd = args["cwd"]
-    workflow_name = args.get("workflow_name")
+    workflow_name = args["workflow_name"]
     timeout = args.get("timeout", 3600)
     requested_by = args.get("requested_by", {})
     issue_id = args.get("issue_id", "adhoc")
     title = args.get("title", "")
 
-    if workflow_name:
-        dispatcher = WorkflowDispatcher()
-        dispatcher.load_all_workflows()
-        workflow = dispatcher.find_workflow(workflow_name)
-        if not workflow:
-            print(f"Workflow '{workflow_name}' not found")
-            return
-    else:
-        workflow = Workflow.adhoc(task)
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    workflow = dispatcher.find_workflow(workflow_name)
+    if not workflow:
+        print(f"Workflow '{workflow_name}' not found")
+        return
 
     repo = _resolve_repo_name(cwd)
     run_workflow(

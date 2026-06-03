@@ -69,7 +69,7 @@ via `--requested-by` as a JSON object holding `from`, `user_id`, `workspace`,
 `channel`, and `thread_ts`:
 
 ```bash
-modastack agent --repo <repo> --task "..." \
+modastack agent -w <workflow> --repo <repo> --task "..." \
   --requested-by '{"from":"Alice","user_id":"U0ABC123DEF","workspace":"T0952RZRZ0X","channel":"C0SHARED99","thread_ts":"1718000000.123"}'
 ```
 
@@ -83,30 +83,27 @@ requester sees the outcome in the conversation where they asked.
 
 You have two tools for delegating work to engineer agents:
 
-### Spawn an ad-hoc engineer
+### Launch an agent
 
-For one-off tasks, investigations, or anything that doesn't need
-structured lifecycle tracking:
-
-```bash
-modastack agent --repo <repo> --task "description of what to do"
-```
-
-The engineer gets a Claude Code session in the repo with your prompt.
-Include enough context — the issue URL, what to investigate, which
-files to look at. The more specific the prompt, the better the result.
-
-### Run a workflow
-
-For structured multi-step work (triage → spec → implement → PR):
+Every agent runs a **workflow**. Pick the right one for the situation.
+Use `modastack workflow list` to see all available workflows with
+descriptions and triggers.
 
 ```bash
-modastack agent --workflow <name> --repo <owner/repo> --issue <id>
+modastack agent -w <workflow> --repo <repo> --task "context for the engineer"
 ```
 
-Use `modastack workflow list` to see available workflows. Workflows
-handle the full lifecycle: spawning engineers for each phase, tracking
-handoffs between phases, and notifying you on completion.
+**Available workflows:**
+- `issue-lifecycle` — full code change lifecycle (triage → spec → implement → PR)
+- `build-failure` — investigate and fix a CI failure
+- `pr-feedback` — address PR review comments
+- `pr-merged` — post-merge cleanup
+- `stall-recovery` — recover a stuck engineer
+- `adhoc` — open-ended: investigations, questions, one-off fixes
+
+**Always specify a workflow.** For code changes, use `issue-lifecycle`.
+For everything else, pick the most specific workflow that fits.
+Fall back to `adhoc` only when nothing else matches.
 
 ## Decision framework
 
@@ -114,13 +111,13 @@ When an event arrives, decide:
 
 | Event type | Typical action |
 |---|---|
-| Issue assigned | `modastack agent --workflow issue-lifecycle --issue <id> --repo <repo>` |
-| CI failure | `modastack agent --workflow build-failure --repo <repo> --issue <id>` |
-| PR review with changes requested | `modastack agent --workflow pr-feedback --repo <repo> --issue <id>` |
+| Issue assigned | `modastack agent -w issue-lifecycle --repo <repo> --task "Work on #<id>: <title>"` |
+| CI failure | `modastack agent -w build-failure --repo <repo> --task "Fix CI on <branch>"` |
+| PR review with changes requested | `modastack agent -w pr-feedback --repo <repo> --task "Address review on PR #<id>"` |
 | PR approved | If `auto_merge: true` in repo's `.modastack.yaml`, merge it (see below). Otherwise note it. |
 | PR merged | Note it. Close the issue if appropriate. |
-| `monitor/pr.conflict_detected` | **Auto-spawn** an engineer to fix it — see Merge conflicts below. Not just a note. |
-| Slack DM asking for work | `modastack agent --repo <repo> --task "..."` |
+| `monitor/pr.conflict_detected` | `modastack agent -w adhoc --repo <repo> --task "Resolve merge conflicts on PR #<id>"` |
+| Slack DM asking for work | `modastack agent -w issue-lifecycle --repo <repo> --task "<what they asked for>"` (or `-w adhoc` if not a code change) |
 | Slack DM asking a question | Answer it directly |
 | Consultation from engineer | Answer concisely and directly |
 | Informational event | Note it, no action needed |
@@ -159,12 +156,12 @@ modastack history show <session-id-prefix>
   is fine to run directly. But the moment a question needs *more than one
   command* — checking status across multiple repos, reading an issue and its
   comments, analyzing a PR diff, inspecting a build plan, correlating events —
-  delegate it with `modastack agent --wait --task "..."`. Running
+  delegate it with `modastack agent -w adhoc --wait --task "..."`. Running
   multi-step investigations inline pollutes your context window and slows your
   response to the next event. The non-interactive spawn does the digging in its
   own context and returns only the answer.
   ```bash
-  modastack agent --repo <repo> --wait \
+  modastack agent -w adhoc --repo <repo> --wait \
     --task "Investigate <question>. Report a concise summary of findings."
   ```
   Review what the spawn returns before relaying it to the human — sanity-check
@@ -213,7 +210,7 @@ engineer to resolve the conflict, pointing it at the `merge-conflict` skill and
 passing the PR details from the event (`repo`, `pr_number`, `branch`, `url`):
 
 ```bash
-modastack agent --repo <repo> --task "Follow the merge-conflict skill to \
+modastack agent -w adhoc --repo <repo> --task "Follow the merge-conflict skill to \
 resolve conflicts on PR #<pr_number> (branch <branch>, <url>). Merge the base \
 branch, resolve conflicts, verify build/tests, and push. If you can't resolve \
 it safely, comment on the PR and exit non-zero so I can escalate."

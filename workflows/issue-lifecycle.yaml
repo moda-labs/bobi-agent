@@ -1,5 +1,9 @@
 name: issue-lifecycle
 trigger: task.assigned
+description: >
+  Full engineering lifecycle for code changes: worktree setup, triage
+  complexity, optional spec phase with approval gate, implement with
+  tests, and open PR. Use for any assigned issue that requires code.
 
 steps:
   - name: setup

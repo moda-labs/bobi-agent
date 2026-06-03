@@ -8,13 +8,13 @@ modastack has five core principles:
 
 1. **Skills first** — each phase of work (triage, spec, implement, ship, feedback) is a self-contained skill. Skills are portable — they work both unattended via the manager and manually in Claude Code.
 
-2. **Claude Agent SDK sessions** — the manager and all engineer sessions run via the Claude Agent SDK (`ClaudeSDKClient`). The manager is a long-lived interactive session. Engineers are blocking sub-agent sessions spawned per-phase by the workflow executor. Sessions survive restarts via saved session IDs.
+2. **Claude Agent SDK sessions** — the manager and all engineer sessions run via the Claude Agent SDK (`ClaudeSDKClient`). The manager is a long-lived interactive session. Engineers run as blocking SDK sessions via `run_phase_blocking()` — the orchestrator drives one engineer through each step of a workflow. Sessions survive restarts via saved session IDs.
 
-3. **Event-driven architecture** — events from GitHub webhooks (via a centralized Cloudflare Worker event server), Slack Socket Mode, and engineer sessions flow through the system. The workflow dispatcher matches events to YAML workflow definitions and executes them automatically.
+3. **Event-driven architecture** — events from GitHub webhooks (via a centralized Cloudflare Worker event server) and Slack flow through the event consumer to the manager. The manager receives every event and decides what to do — launch an ad-hoc engineer, run a structured workflow, or handle the event directly with its own tools. Events that match a workflow trigger are dispatched automatically.
 
-4. **Workflow executor** — deterministic YAML DAGs with hybrid LLM reasoning. Each workflow is a directed acyclic graph of typed nodes (bash, action, prompt, manager, approval, gate) executed synchronously in topological order. Prompt nodes launch sub-agent sessions via `run_phase_blocking()` and block until the agent finishes. State persists to disk after every node transition, so workflows survive restarts and resume from the last completed node.
+4. **Prompt-driven orchestrator** — workflows are deterministic, *pure-code* state machines (no LLM in the orchestrator itself). A workflow is a sequence of steps loaded from YAML. There are three step types: **prompt** steps inject a prompt into the engineer session and wait for it to write a handoff; **route** steps branch deterministically on a handoff value; **await** steps suspend the workflow until an external event arrives. Each prompt step calls `run_phase_blocking()` and blocks until the agent finishes, then validates the handoff against the step's required fields (re-prompting on missing fields). Handoff outputs flow into a variable context so later steps can reference earlier results.
 
-5. **Input routing** — when an engineer sub-agent calls `AskUserQuestion`, a `PreToolUse` hook defers the call. The executor routes the question through an `on_input_needed` callback (currently auto-selects the first option; future: routes to the manager for human escalation via Slack).
+5. **Input routing** — when an engineer session calls `AskUserQuestion`, a `PreToolUse` hook defers the call. `run_phase_blocking()` routes the deferred question through an `on_input_needed` callback and resumes the agent with the answer — so a question can be answered by the manager (or a human via Slack) without the agent getting stuck.
 
 6. **Composable skills** — skills come from two layers that compose at runtime. Modastack ships process skills (pickup, spec, implement, prepare-pr, feedback), practice skills (triage, build, code-review), tool references (git, github, linear, slack), and product manager skills (brand-identity, design-critic). Methodology skills (review, ship, autoplan, investigate, office-hours, qa, plan-*-review) come from [GStack](https://github.com/garrytan/gstack) installed at user-level (`~/.claude/skills/`). Claude Code's built-in skill resolution merges both layers — repo-level symlinks and user-level skills are all available in engineer sessions.
 
@@ -30,7 +30,7 @@ When an event arrives, the dispatcher loads workflows from all three sources and
 
 ### Event normalization
 
-Both GitHub Issues and Linear emit events in different formats. The event system normalizes them to a common `task.*` schema so workflows trigger on `task.assigned`, `task.created`, etc. regardless of the source:
+GitHub Issues and Linear emit events in different formats. The event system normalizes them to a common `task.*` schema so workflows trigger on `task.assigned`, `task.created`, etc. regardless of the source:
 
 | Source event | Normalized event |
 |---|---|
@@ -42,31 +42,28 @@ Both GitHub Issues and Linear emit events in different formats. The event system
 | Linear `Issue.update` + state "Done" | `task.closed` |
 | Linear `Issue.remove` | `task.closed` |
 
-For Linear events, the webhook handler resolves the project prefix (e.g., `AGD` from `AGD-12`) to a repo path via the global config, so workflows can match events to the correct repo.
+For Linear events, the project prefix (e.g., `AGD` from `AGD-12`) is resolved to a repo path via the global config, so workflows can match events to the correct repo.
 
 ### Event flow
 
 ```
-Event sources                      Dispatcher          Workflow Executor
-─────────────                      ──────────          ─────────────────
+Event sources                      Consumer            Orchestrator
+─────────────                      ────────            ────────────
 
 GitHub webhooks  ──┐
   (via event       │
    server WS)      │
-                   ├──→  match event  ──→  spawn thread  ──→  execute DAG
-Slack Socket     ──┤      to YAML          per workflow       nodes in order
-  Mode (DMs)       │      trigger                             (blocking)
-                   │
-Manager session  ──┘                       ├─ bash: run command
-                                           ├─ action: slack.post, ticket.move
-                                           ├─ prompt: run_phase_blocking()
-                                           │    └─ ClaudeSDKClient session
-                                           ├─ manager: consult manager LLM
-                                           ├─ gate: conditional routing
-                                           └─ approval: suspend for event
+                   ├──→  drain queue  ──→  match event  ──→  run workflow
+Slack            ──┤      into batch        to YAML            step by step
+                   │                        trigger
+Manager session  ──┘                        │
+                                            ├─ prompt: run_phase_blocking()
+                                            │    └─ engineer SDK session
+                                            ├─ route: branch on handoff value
+                                            └─ await: suspend for event
 ```
 
-Events arrive from the centralized event server (GitHub webhooks via WebSocket) and Slack (Socket Mode). The workflow dispatcher matches each event against YAML trigger definitions. Matched events spawn a daemon thread running the workflow executor, which walks the DAG synchronously — each node blocks until completion. Unmatched events are injected into the manager session for freeform reasoning.
+Events arrive from the centralized event server (GitHub webhooks via WebSocket) and Slack. The consumer drains the queue and injects batched events into the manager. When an event matches a workflow trigger, the dispatcher runs the prompt-driven orchestrator, which walks the workflow's steps in order — each prompt step blocks until the engineer finishes and writes its handoff. Events that don't match a workflow are handled directly by the manager.
 
 ### Task tracking
 
@@ -75,7 +72,7 @@ modastack supports pluggable task tracking systems:
 - **GitHub Issues (default)** — uses `gh` CLI for authentication. Issues are labeled with `status:todo`, `status:in-progress`, `status:blocked`, `status:in-review`. No API key needed.
 - **Linear (optional)** — pass `--linear-key` and `--linear-project` during setup. Uses GraphQL API for polling and mutations.
 
-The system defaults to GitHub Issues without prompting. All webhook events emit generic `task.*` events regardless of which backend is configured.
+The system defaults to GitHub Issues without prompting. All events emit generic `task.*` events regardless of which backend is configured.
 
 ### Handoff contract
 
@@ -97,22 +94,22 @@ spec_url: https://github.com/org/repo/issues/12
 Implementation pushed. 3 files changed.
 ```
 
-The workflow executor reads handoff files after each prompt node completes to extract outputs for downstream nodes.
+After each prompt step, the orchestrator reads the handoff file, validates it against the step's required fields, and extracts outputs into the variable context for downstream steps.
 
 ### Phase routing
 
-The workflow executor routes based on gate nodes in the YAML DAG:
+The orchestrator routes via **route** steps that branch on a handoff value:
 
-| Triage result | Gate branch | Next phase |
+| Triage result | Route condition | Next phase |
 |---|---|---|
-| `needs_spec: true` | `needs_spec` | `/spec` then `/implement` |
-| `needs_spec: false` | `skip_spec` | `/implement` directly |
+| `needs_spec: true` | branch taken | `/spec` then `/implement` |
+| `needs_spec: false` | else branch | `/implement` directly |
 
-Approval nodes (e.g., spec approval) suspend the workflow until an external event (GitHub PR review) arrives. The executor persists state and resumes when the event is fed.
+**Await** steps (e.g., waiting for spec approval or a PR review) suspend the workflow until an external event arrives, then the orchestrator resumes from where it left off.
 
 ### Sub-agents
 
-Each workflow phase spawns a blocking sub-agent via `run_phase_blocking()`. Within each phase, the skill uses Claude Code's built-in Agent tool for context isolation:
+Each workflow step drives an engineer via `run_phase_blocking()`. Within a phase, the skill uses Claude Code's built-in Agent tool for context isolation:
 
 ```
 /pickup
@@ -130,7 +127,7 @@ Each sub-agent gets only the context it needs. The implement sub-agent never see
 
 ### Question bridging
 
-When an engineer sub-agent calls `AskUserQuestion`, a `PreToolUse` hook intercepts the call and defers it. The `ResultMessage` carries the deferred question back to the executor, which routes it through the `on_input_needed` callback. The agent is then resumed with `client.query(answer)`. This allows the manager (or a human via Slack) to answer agent questions without the agent getting stuck.
+When an engineer session calls `AskUserQuestion`, a `PreToolUse` hook intercepts the call and defers it. The deferred question is carried back through `run_phase_blocking()` and routed through the `on_input_needed` callback. The agent is then resumed with the answer via `client.query(answer)`. This lets the manager (or a human via Slack) answer agent questions without the agent getting stuck.
 
 ### Skill integration
 
@@ -199,38 +196,76 @@ modastack register ~/path/to/repo --linear-key <KEY> --linear-project <PROJECT>
 modastack register org/repo
 ```
 
-`register` handles the full setup: generates `.modastack.yaml`, bootstraps labels (GitHub) or workflow states (Linear), adds `.modastack/` and `worktrees/` to `.gitignore`, installs engineer skills as symlinks, and registers the repo in `~/.modastack/config.yaml`.
+`register` (an alias for `setup`) handles the full setup: generates `.modastack.yaml`, bootstraps labels (GitHub) or workflow states (Linear), adds `.modastack/` and `worktrees/` to `.gitignore`, installs engineer skills as symlinks, and registers the repo in `~/.modastack/config.yaml`.
+
+## Running engineers
+
+`modastack agent` is the single entrypoint for launching an engineer — either an ad-hoc task or a structured workflow. (It replaces the older separate `spawn` and `workflow run` commands.)
+
+```bash
+# Ad-hoc task
+modastack agent --repo myrepo --task "Fix the login bug"
+
+# Run a named workflow on an issue
+modastack agent --workflow issue-lifecycle --repo myrepo --issue 42
+
+# Blocking check (run, capture result, optionally post an event)
+modastack agent --wait --task "Check prod URL returns 200"
+```
+
+Key flags: `--repo`, `--task`, `-w`/`--workflow`, `--issue`, `--title`, `--event-json`, `--timeout`, `--wait`, `--post-event`, `--requested-by`. Run `modastack agent --help` for the full list.
 
 ### Commands
 
 ```bash
 modastack start                    # start everything (manager + events + Slack + dashboard)
-modastack status                   # show active agents — manager + engineer sub-agents
-modastack message "text"           # send a message to the manager
-modastack events                   # show recent events
+modastack stop                     # stop a running instance
+modastack restart                  # stop and restart
+
+modastack agent ...                # launch an engineer — ad-hoc task or workflow (see above)
+modastack status                   # show active agents — manager + engineer sessions
+modastack engineers                # list active engineers, or inspect/cancel a specific one
+modastack message "text"           # send a message to the manager (or an engineer)
+modastack consult "question"       # ask the manager a question, block until it responds
+
+modastack events                   # show recent events from the event bus
 modastack decisions                # show recent manager decisions
-modastack init                     # initialize global config
+modastack log <session>            # show the full transcript for a session
+modastack history                  # index and search Claude Code conversation history
+
+modastack workflow list            # list available workflow definitions from all sources
+modastack workflow status          # show active and recent workflow runs
+modastack workflow validate <f>    # validate a workflow YAML file
+
+modastack monitor list             # list background monitors (merged across tiers)
+modastack monitor add <name>       # add a monitor (--interval, --description, --repo)
+modastack monitor pause <name>     # disable a monitor
+modastack monitor remove <name>    # remove a user-added monitor
+
+modastack init                     # initialize global config + install to PATH
+modastack install                  # install modastack as a global command
 modastack register <target>        # register a repo + full setup (local path or org/repo)
 modastack setup [path]             # set up a repo — install skills, store credentials, register
 modastack repos                    # list registered repos
-modastack engineers                # list active engineer sub-agents
-modastack workflow list            # list available workflow definitions
-modastack workflow status          # show active and recent workflow runs
-modastack self-update              # pull from origin/main + reinstall
-modastack rollback                 # restore to pre-update state
+modastack dashboard                # start the web dashboard
+modastack doctor                   # health-check /browse (Playwright, Chromium sandbox)
+modastack slack-reply              # post a message to Slack
+modastack migrate-worktrees        # move legacy <repo>/worktrees/ into the central location
+modastack self-update              # pull from origin/main, reinstall, restart
+modastack rollback                 # roll back the last self-update
 ```
 
 ### Web dashboard
 
-`modastack start` includes a web dashboard on port 8095 with:
+`modastack start` includes a web dashboard (also launchable on its own with `modastack dashboard`):
 
-- **Active sessions** — SDK session state for manager and all engineer sub-agents
+- **Active sessions** — SDK session state for the manager and all engineer sessions
 - **Event log** — filterable by source/type, paginated
 - **Conversation view** — live agent output with markdown rendering
 
 ### Self-updating
 
-modastack checks for updates hourly by comparing against `origin/main`. When a new version is available, the manager posts to Slack for approval. `modastack self-update` pulls, stashes any dirty state, and reinstalls. `modastack rollback` restores the pre-update state if something breaks.
+modastack checks for updates by comparing against `origin/main`. When a new version is available, the manager posts to Slack for approval. `modastack self-update` pulls the latest, reinstalls, and restarts. `modastack rollback` restores the pre-update state if something breaks.
 
 ## Configuration
 
@@ -264,6 +299,16 @@ task_tracking:
 
 Per-project API keys (Linear, etc.). GitHub Issues uses `gh` CLI auth — no key needed.
 
+## Background monitors
+
+Monitors are scheduled polling tasks that fill webhook gaps — conditions no webhook fires for (merge conflicts, stale PRs, deploy health). A monitor is a small YAML record (`name`, `description`, `interval`, `event`) loaded from three tiers, later tiers overriding earlier by `name`:
+
+1. `monitors/defaults.yaml` — built-in, shipped, read-only at runtime
+2. `~/.modastack/monitors.yaml` — user globals (apply to all repos)
+3. `<repo>/.modastack.yaml` under `monitors:` — repo-specific
+
+The scheduler runs each monitor on its interval, deduplicates detected conditions, and injects a synthetic event onto the same queue webhooks use — so the manager routes it like any other event. A monitor with a `check:` field uses a native runner in `modastack/monitors/checks.py`; without one, the scheduler launches a short-lived `modastack agent --wait` check that posts an event back only if it finds something. PR conflict detection ships as a default.
+
 ## Issue lifecycle
 
 GitHub Issues labels: **status:todo → status:in-progress → status:in-review → Done** (+ status:blocked)
@@ -271,16 +316,16 @@ GitHub Issues labels: **status:todo → status:in-progress → status:in-review 
 ```
 Todo
   │  Assign to @modastack → webhook → event server → task.assigned event
-  │  Workflow dispatcher matches issue-lifecycle.yaml
+  │  Dispatcher matches issue-lifecycle.yaml
   ▼
 In Progress
-  │  Executor runs DAG: spawn → notify → triage → route → implement
-  │  Each prompt node blocks on a sub-agent session
-  │  Triage determines complexity, routes to spec or implement
-  │  Implement: TDD, code review, security review, push
+  │  Orchestrator runs the workflow steps: spawn → triage → route → implement
+  │  Each prompt step blocks on the engineer session
+  │  Triage determines complexity; a route step picks spec or implement
+  │  Implement: TDD, code review, push
   ▼
 In Review
-  │  Executor runs prepare-pr: /ship creates PR with full review gauntlet
+  │  prepare-pr step: /ship creates the PR with the full review gauntlet
   │  Human reviews PR
   │  ├─ Changes requested → pr-feedback workflow triggers
   │  └─ PR merged → pr-merged workflow triggers → Done
@@ -294,33 +339,44 @@ Done
 modastack/                        # CLI + infrastructure
 ├── cli.py                        # Click CLI entrypoint
 ├── config.py                     # Global config (~/.modastack/config.yaml)
-├── subagent.py                   # Sub-agent executor — run_phase_blocking(), SDK client
+├── subagent.py                   # Engineer executor — run_phase_blocking(), SDK client, hooks
 ├── sdk.py                        # Session registry, activity logging
 ├── session.py                    # Session helpers (sync, cleanup, skill loading)
 ├── setup.py                      # Repo setup — skill install, auto-detection
 ├── github_issues.py              # GitHub Issues scanning + label bootstrap
 ├── scanner.py                    # Linear GraphQL polling
 ├── history.py                    # Conversation history indexer (SQLite + FTS5)
+├── board_setup.py                # Bootstrap Linear board / workflow states
+├── browser.py                    # Headless browser helpers (/browse, doctor)
+├── relay.py                      # Chat relay — mirror manager I/O to Slack/Discord
 ├── manager/
 │   ├── session.py                # Manager SDK session (start, resume, inject, query)
 │   └── events/
-│       ├── consumer.py           # Event loop orchestrator
+│       ├── consumer.py           # Event loop — drain queue, batch, inject into manager
 │       ├── event_client.py       # WebSocket client to centralized event server
-│       └── slack_socket.py       # Slack Socket Mode WebSocket client
-└── workflow/
-    ├── executor.py               # Blocking DAG executor — walks nodes synchronously
-    ├── engine.py                 # Legacy polling executor (deprecated)
-    ├── schema.py                 # Workflow/node schema, YAML parsing, topological sort
-    ├── state.py                  # JSON persistence for workflow runs
-    ├── triggers.py               # Event→workflow matching, dispatch, resume
-    ├── actions.py                # Action registry (slack.post, ticket.move, etc.)
-    └── variables.py              # Variable resolution, safe condition evaluation
+│       └── slack_responder.py    # Format + post manager replies to Slack
+├── workflow/
+│   ├── orchestrator.py           # Prompt-driven orchestrator — pure-code step machine
+│   ├── schema.py                 # Workflow/step schema, YAML parsing
+│   ├── state.py                  # JSON persistence for workflow runs
+│   ├── triggers.py               # Event→workflow matching + dispatch
+│   └── variables.py              # Variable resolution, safe condition evaluation
+└── monitors/                     # Background polling to fill webhook gaps
+    ├── schema.py                 # Monitor record + interval parsing
+    ├── registry.py               # Three-tier load/merge + writes
+    ├── checks.py                 # Native check runners (pr_conflicts, etc.)
+    └── scheduler.py              # Interval scheduler, dedup, synthetic events
 
-workflows/                        # Workflow definitions (YAML DAGs)
+workflows/                        # Workflow definitions (YAML)
 ├── issue-lifecycle.yaml          # Full issue: spawn → triage → route → impl → PR
 ├── pr-feedback.yaml              # PR change-request handling
 ├── pr-merged.yaml                # Post-merge cleanup
-└── build-failure.yaml            # CI failure handling
+├── build-failure.yaml            # CI failure handling
+├── stall-recovery.yaml           # Recover stalled engineer sessions
+└── examples/                     # Non-dev examples (content review, research)
+
+dashboard/                        # Web dashboard (FastAPI app)
+monitors/defaults.yaml            # Built-in monitor defaults (shipped, read-only)
 
 roles/                            # All skill/prompt content (no Python)
 ├── manager/
@@ -349,16 +405,15 @@ roles/                            # All skill/prompt content (no Python)
 | Decision | Rationale |
 |----------|-----------|
 | Skills first | Each phase is a self-contained skill — portable, testable, works manually or via the manager |
-| Claude Agent SDK | Manager and engineers all use `ClaudeSDKClient`. No tmux, no process management. Sessions resume via saved IDs |
-| Blocking executor | Each workflow node runs to completion before the next starts. No polling, no async futures. Sub-agents block via `asyncio.run()` with a fresh event loop |
-| Crash-resumable | State persisted to `~/.modastack/workflow/runs/` after every node transition. On restart, the dispatcher resumes in-flight workflows from the last completed node |
-| AskUserQuestion deferral | PreToolUse hook defers agent questions. Executor routes them through a callback. Agent resumes with the answer via `client.query()` |
-| Event-driven bus | Decouples event sources from the manager. Centralized event server aggregates webhooks from all repos |
-| Handoff contract | `~/.modastack/handoffs/<id>.md` is the interface between phases — minimal, structured |
-| Sub-agents | Context isolation within phases. Reviewer only sees the diff, not the spec |
+| Claude Agent SDK | Manager and engineers all use `ClaudeSDKClient`. Sessions resume via saved IDs |
+| Prompt-driven orchestrator | The orchestrator is pure code with no LLM — it sequences steps, injects prompts, validates handoffs, and routes. The agent does all the reasoning via its tools |
+| Blocking steps | Each step runs to completion before the next starts. No polling, no async futures — sub-agents block via `run_phase_blocking()` |
+| Handoff contract | `~/.modastack/handoffs/<id>.md` is the interface between steps — minimal, structured, validated against required fields |
+| Sub-agents | Context isolation within phases. The reviewer only sees the diff, not the spec |
+| AskUserQuestion deferral | A PreToolUse hook defers agent questions; `run_phase_blocking()` routes them through a callback and resumes the agent with the answer |
+| Event-driven consumer | Decouples event sources from the manager. The centralized event server aggregates webhooks from all repos |
 | GitHub Issues default | No API key needed — uses `gh` CLI auth. Linear available as an option for teams already using it |
 | Centralized config | All repo settings in `~/.modastack/config.yaml`. No modastack files in target repos except `.modastack.yaml` |
-| Slack Socket Mode | WebSocket connection to Slack — no public URL needed, real-time DMs and mentions |
 
 ## Tests
 

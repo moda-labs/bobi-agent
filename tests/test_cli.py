@@ -18,6 +18,14 @@ def test_version_flag():
     assert __version__ in result.output
 
 
+def test_agent_version_flag():
+    runner = CliRunner()
+    result = runner.invoke(main, ["agent", "--version"])
+    assert result.exit_code == 0
+    assert "modastack" in result.output
+    assert __version__ in result.output
+
+
 # --- spawn --non-interactive (check mode) ---------------------------------
 
 
@@ -170,78 +178,68 @@ def test_workflow_list_no_errors():
 
 
 class TestAgentCommand:
-    def test_adhoc_launches_agent(self, tmp_path):
+    def test_adhoc_workflow(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.launch_agent", return_value="eng-42") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-42") as mock:
             result = runner.invoke(main, [
-                "agent", "--repo", str(tmp_path), "--task", "Fix issue #42",
+                "agent", "-w", "adhoc", "--repo", str(tmp_path), "--task", "Fix #42",
             ])
         assert result.exit_code == 0, result.output
-        assert "eng-42" in result.output
+        assert "wf-adhoc-42" in result.output
         mock.assert_called_once()
-        assert mock.call_args[1]["task"] == "Fix issue #42"
-        assert mock.call_args[1]["workflow_name"] is None
+        assert mock.call_args[1]["workflow_name"] == "adhoc"
+        assert mock.call_args[1]["task"] == "Fix #42"
 
-    def test_workflow_launches_agent(self, tmp_path):
+    def test_issue_lifecycle_workflow(self, tmp_path):
         runner = CliRunner()
         with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-42") as mock:
             result = runner.invoke(main, [
-                "agent", "--workflow", "issue-lifecycle",
-                "--repo", str(tmp_path),
+                "agent", "-w", "issue-lifecycle",
+                "--repo", str(tmp_path), "--task", "Work on #42",
             ])
         assert result.exit_code == 0, result.output
         assert "wf-issue-lifecycle-42" in result.output
-        mock.assert_called_once()
         assert mock.call_args[1]["workflow_name"] == "issue-lifecycle"
+
+    def test_workflow_required(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["agent", "--repo", "/tmp", "--task", "X"])
+        assert result.exit_code != 0
 
     def test_wait_mode_runs_check(self):
         runner = CliRunner()
         check = CheckResult(success=True, finding=False)
         with patch("modastack.subagent.run_check_blocking", return_value=check):
             result = runner.invoke(main, [
-                "agent", "--wait", "--task", "Check prod URL",
+                "agent", "-w", "adhoc", "--wait", "--task", "Check prod URL",
             ])
         assert result.exit_code == 0
 
-    def test_requires_task_or_workflow(self):
+    def test_requires_repo(self, tmp_path):
         runner = CliRunner()
-        result = runner.invoke(main, ["agent", "--repo", "/tmp/test"])
-        assert result.exit_code != 0
-        assert "Specify --task or --workflow" in result.output
-
-    def test_rejects_task_and_workflow_together(self):
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "agent", "--task", "X", "--workflow", "Y",
-        ])
-        assert result.exit_code != 0
-        assert "not both" in result.output
-
-    def test_adhoc_requires_repo(self):
-        runner = CliRunner()
-        result = runner.invoke(main, ["agent", "--task", "do a thing"])
+        result = runner.invoke(main, ["agent", "-w", "adhoc", "--task", "do a thing"])
         assert result.exit_code != 0
         assert "--repo is required" in result.output
 
     def test_passes_requested_by(self, tmp_path):
         runner = CliRunner()
         req = '{"from":"Alice","channel":"C1"}'
-        with patch("modastack.subagent.launch_agent", return_value="eng-1") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-1") as mock:
             result = runner.invoke(main, [
-                "agent", "--repo", str(tmp_path), "--task", "Fix #1",
+                "agent", "-w", "adhoc", "--repo", str(tmp_path), "--task", "Fix #1",
                 "--requested-by", req,
             ])
         assert result.exit_code == 0
         assert mock.call_args[1]["requested_by"] == {"from": "Alice", "channel": "C1"}
 
-    def test_spawn_alias_still_works(self, tmp_path):
+    def test_spawn_alias_uses_adhoc(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.launch_agent", return_value="eng-42"):
+        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-42") as mock:
             result = runner.invoke(main, [
                 "spawn", "--repo", str(tmp_path), "--task", "Fix #42",
             ])
         assert result.exit_code == 0
-        assert "eng-42" in result.output
+        assert mock.call_args[1]["workflow_name"] == "adhoc"
 
     def test_workflow_passes_issue(self, tmp_path):
         """--issue must reach launch_agent so the run targets that issue."""

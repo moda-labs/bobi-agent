@@ -29,21 +29,21 @@ class TestCLIReturnsImmediately:
         start = time.monotonic()
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
-             "--repo", str(tmp_path), "--task", "say hello #99"],
+             "-w", "adhoc", "--repo", str(tmp_path), "--task", "say hello #99"],
             capture_output=True, text=True, timeout=10,
             cwd=str(REPO_ROOT),
         )
         elapsed = time.monotonic() - start
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "eng-99" in result.stdout
+        assert "wf-adhoc" in result.stdout and "99" in result.stdout
         assert elapsed < 5
 
     def test_workflow_returns_immediately(self, tmp_path):
         start = time.monotonic()
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
-             "--workflow", "issue-lifecycle",
+             "-w", "issue-lifecycle",
              "--repo", str(tmp_path)],
             capture_output=True, text=True, timeout=10,
             cwd=str(REPO_ROOT),
@@ -54,7 +54,7 @@ class TestCLIReturnsImmediately:
         assert "wf-issue-lifecycle" in result.stdout
         assert elapsed < 5
 
-    def test_spawn_alias_still_works(self, tmp_path):
+    def test_spawn_alias_uses_adhoc(self, tmp_path):
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "spawn",
              "--repo", str(tmp_path), "--task", "hello #88"],
@@ -62,7 +62,7 @@ class TestCLIReturnsImmediately:
             cwd=str(REPO_ROOT),
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "eng-88" in result.stdout
+        assert "wf-adhoc" in result.stdout and "88" in result.stdout
 
     def test_workflow_binds_issue_and_runs_are_distinct(self, tmp_path):
         """Reproduces the headline bug (#130): two workflow runs for two
@@ -98,24 +98,23 @@ class TestCLIReturnsImmediately:
 
 
 class TestValidation:
-    def test_no_task_or_workflow(self):
-        result = subprocess.run(
-            [sys.executable, "-m", "modastack.cli", "agent", "--repo", "/tmp"],
-            capture_output=True, text=True, timeout=5,
-            cwd=str(REPO_ROOT),
-        )
-        assert result.returncode != 0
-        assert "Specify --task or --workflow" in result.stderr
-
-    def test_both_task_and_workflow(self):
+    def test_workflow_required(self):
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
-             "--task", "X", "--workflow", "Y"],
+             "--repo", "/tmp", "--task", "X"],
             capture_output=True, text=True, timeout=5,
             cwd=str(REPO_ROOT),
         )
         assert result.returncode != 0
-        assert "not both" in result.stderr
+
+    def test_repo_required(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "modastack.cli", "agent",
+             "-w", "adhoc", "--task", "X"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(REPO_ROOT),
+        )
+        assert result.returncode != 0
 
 
 @requires_claude
@@ -125,7 +124,7 @@ class TestAdhocAgentEndToEnd:
     def test_adhoc_agent_log_written(self, tmp_path):
         """Subprocess writes responses to the log file."""
         from modastack.subagent import launch_agent
-        name = launch_agent(task="Say 'hello' and exit. Issue #997", cwd=str(tmp_path))
+        name = launch_agent(task="Say 'hello' and exit. Issue #997", cwd=str(tmp_path), workflow_name="adhoc")
 
         log_file = Path.home() / ".modastack" / "manager" / "logs" / f"{name}.jsonl"
 
@@ -137,7 +136,8 @@ class TestAdhocAgentEndToEnd:
 
         assert log_file.exists(), f"Log file {log_file} not created"
         content = log_file.read_text()
-        assert '"response"' in content or '"stop"' in content
+        assert "workflow.started" in content or "step.started" in content or "session.completed" in content, \
+            f"No lifecycle events in log:\n{content[:500]}"
 
 
 @requires_claude

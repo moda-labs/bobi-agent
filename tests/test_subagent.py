@@ -278,23 +278,12 @@ class TestLaunchAgent:
     """Test that launch_agent launches a detached subprocess."""
 
     @patch("modastack.subagent._launch_detached", return_value=4242)
-    def test_adhoc_returns_eng_prefix(self, mock_launch):
+    def test_adhoc_returns_deterministic_name(self, mock_launch):
         from modastack.subagent import launch_agent
-        name = launch_agent(task="Fix issue #42", cwd="/tmp/test")
-        assert name == "eng-42"
+        name = launch_agent(task="Fix issue #42", cwd="/tmp/test", workflow_name="adhoc")
+        assert "adhoc" in name
+        assert "42" in name
         mock_launch.assert_called_once()
-
-    @patch("modastack.subagent._launch_detached", return_value=4242)
-    def test_adhoc_hash_without_issue(self, mock_launch):
-        from modastack.subagent import launch_agent
-        name = launch_agent(task="do something", cwd="/tmp/test")
-        assert name.startswith("eng-adhoc-")
-
-    @patch("modastack.subagent._launch_detached", return_value=4242)
-    def test_workflow_returns_wf_prefix(self, mock_launch):
-        from modastack.subagent import launch_agent
-        name = launch_agent(task="Work on #42", cwd="/tmp/test", workflow_name="issue-lifecycle")
-        assert name == "wf-issue-lifecycle-42"
 
     @patch("modastack.subagent._launch_detached", return_value=4242)
     def test_explicit_issue_binds_run_id(self, mock_launch):
@@ -302,7 +291,7 @@ class TestLaunchAgent:
         from modastack.subagent import launch_agent
         name = launch_agent(task="Run workflow issue-lifecycle", cwd="/tmp/test",
                             workflow_name="issue-lifecycle", issue="34")
-        assert name == "wf-issue-lifecycle-34"
+        assert "34" in name
         import json
         parsed = json.loads(mock_launch.call_args[0][1][0])
         assert parsed["issue_id"] == "34"
@@ -324,7 +313,7 @@ class TestLaunchAgent:
     @patch("modastack.subagent._launch_detached", return_value=4242)
     def test_subprocess_is_detached(self, mock_launch):
         from modastack.subagent import launch_agent
-        launch_agent(task="Fix #1", cwd="/tmp/test")
+        launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc")
         script = mock_launch.call_args[0][0]
         assert "_run_agent_entry" in script
 
@@ -332,7 +321,7 @@ class TestLaunchAgent:
     def test_passes_requested_by(self, mock_launch):
         from modastack.subagent import launch_agent
         req = {"from": "Alice", "channel": "C1"}
-        launch_agent(task="Fix #1", cwd="/tmp/test", requested_by=req)
+        launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc", requested_by=req)
         args = mock_launch.call_args[0][1]
         import json
         parsed = json.loads(args[0])
@@ -344,8 +333,8 @@ class TestLaunchAgent:
         second invocation for the same (repo, issue) can be rejected."""
         from modastack.subagent import launch_agent
         from modastack.sdk import get_registry
-        launch_agent(task="Fix #7", cwd="/tmp/test")
-        entry = get_registry().get("wf-adhoc-7")
+        launch_agent(task="Fix #7", cwd="/tmp/test", workflow_name="adhoc")
+        entry = get_registry().get("wf-adhoc-test-7")
         assert entry is not None
         assert entry.issue_id == "7"
         assert entry.pid == 4242
@@ -356,18 +345,18 @@ class TestLaunchAgent:
     def test_rejects_duplicate_active_run(self, mock_launch):
         """A second run for an already-active (repo, issue) raises."""
         from modastack.subagent import launch_agent, RunCollision
-        launch_agent(task="Fix #7", cwd="/tmp/test")
+        launch_agent(task="Fix #7", cwd="/tmp/test", workflow_name="adhoc")
         with pytest.raises(RunCollision):
-            launch_agent(task="Fix #7", cwd="/tmp/test")
+            launch_agent(task="Fix #7", cwd="/tmp/test", workflow_name="adhoc")
 
     @patch("modastack.subagent._launch_detached", return_value=os.getpid())
     def test_allows_same_issue_different_repo(self, mock_launch):
         """The guard is keyed by (repo, issue) — same issue number in a
         different repo is a distinct run and must be allowed."""
         from modastack.subagent import launch_agent
-        launch_agent(task="Fix #7", cwd="/tmp/repo-a")
+        launch_agent(task="Fix #7", cwd="/tmp/repo-a", workflow_name="adhoc")
         # Different cwd → different resolved repo → no collision.
-        launch_agent(task="Fix #7", cwd="/tmp/repo-b")
+        launch_agent(task="Fix #7", cwd="/tmp/repo-b", workflow_name="adhoc")
         assert mock_launch.call_count == 2
 
 

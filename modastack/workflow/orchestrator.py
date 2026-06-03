@@ -1,9 +1,10 @@
-"""Workflow orchestrator — deterministic state machine driving an agent.
+"""Workflow orchestrator — deterministic state machine driving one agent session.
 
-Each step injects a prompt into a single agent session, waits for the
-agent to write a handoff, validates the outputs, and moves to the next
-step. Route steps branch based on handoff values. Await steps suspend
-until an external event arrives.
+One Claude Code session persists across all steps. The agent accumulates
+context as it progresses — what it learns in setup carries into pickup,
+pickup insights carry into implement.
+
+One registry entry per workflow. One log file. One session ID.
 
 The orchestrator has no LLM — it is pure code. The agent does all the
 work using its tools.
@@ -11,6 +12,7 @@ work using its tools.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -19,13 +21,15 @@ from typing import Any
 
 import yaml
 
-from modastack.sdk import get_registry, SessionEntry
+from modastack.sdk import (
+    get_cli_path, get_registry, save_session_id, load_session_id,
+    log_activity, SessionEntry,
+)
 from modastack.subagent import (
     HANDOFF_DIR,
     AgentResult,
     _emit_lifecycle_event,
     _parse_issue_number,
-    run_phase_blocking,
 )
 from modastack.workflow.schema import Workflow, StepDef
 from modastack.workflow.variables import VariableContext
@@ -33,6 +37,12 @@ from modastack.workflow.variables import VariableContext
 log = logging.getLogger(__name__)
 
 MAX_HANDOFF_RETRIES = 2
+
+
+def make_session_name(workflow_name: str, repo: str, issue_id: str) -> str:
+    """Deterministic session name for a workflow run."""
+    repo_name = repo.split("/")[-1] if "/" in repo else repo
+    return f"wf-{workflow_name}-{repo_name}-{issue_id}"
 
 
 def run_workflow(
@@ -45,12 +55,12 @@ def run_workflow(
     timeout: int = 3600,
     title: str = "",
 ) -> bool:
-    """Execute a workflow end-to-end. Returns True on success."""
+    """Execute a workflow end-to-end with a single agent session."""
     issue_id = issue_id or _parse_issue_number(task) or "adhoc"
     requested_by = requested_by or {}
     started_at = time.time()
 
-    session_name = f"wf-{workflow.name}-{issue_id}"
+    session_name = make_session_name(workflow.name, repo, issue_id)
     registry = get_registry()
     registry.register(SessionEntry(
         name=session_name, session_id="", role="engineer",
@@ -69,20 +79,103 @@ def run_workflow(
 
     ctx = VariableContext()
     ctx.set_scope("input", {"task": task, "repo": repo, "issue_id": issue_id})
-    step_idx = 0
-    success = True
-    failed_step = ""
+
+    success = asyncio.run(
+        _run_workflow_async(
+            workflow, task, repo, cwd, issue_id, session_name,
+            registry, ctx, requested_by, timeout,
+        )
+    )
+
+    duration = time.time() - started_at
+    if success:
+        _emit_lifecycle_event("engineer/workflow.completed", {
+            "issue_id": issue_id,
+            "workflow": workflow.name,
+            "duration": round(duration, 1),
+            "text": f"Workflow {workflow.name} completed for {issue_id} in {duration:.0f}s",
+        }, blocking=True)
+        registry.update(session_name, status="done", phase="complete")
+    else:
+        _emit_lifecycle_event("engineer/workflow.failed", {
+            "issue_id": issue_id,
+            "workflow": workflow.name,
+            "text": f"Workflow {workflow.name} failed for {issue_id}",
+        }, blocking=True)
+        registry.update(session_name, status="error")
+
+    log.info(f"Workflow {workflow.name} {'completed' if success else 'failed'} "
+             f"in {duration:.0f}s")
+    return success
+
+
+async def _run_workflow_async(
+    workflow: Workflow,
+    task: str,
+    repo: str,
+    cwd: str,
+    issue_id: str,
+    session_name: str,
+    registry,
+    ctx: VariableContext,
+    requested_by: dict,
+    timeout: int,
+) -> bool:
+    """Async core: one ClaudeSDKClient session for all steps."""
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        ResultMessage,
+        TextBlock,
+    )
+
+    saved_id = load_session_id(session_name)
+
+    options = ClaudeAgentOptions(
+        cwd=cwd,
+        permission_mode="bypassPermissions",
+        max_turns=200,
+        cli_path=get_cli_path(),
+        resume=saved_id or None,
+        skills="all",
+        system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": (
+                f"You are an engineer agent working on issue #{issue_id}. "
+                f"You will receive step-by-step instructions. Follow each one, "
+                f"then write your handoff file when asked."
+            ),
+        },
+    )
+
+    client = ClaudeSDKClient(options)
+    _emit_lifecycle_event("engineer/session.started", {
+        "issue_id": issue_id, "repo": repo,
+        "text": f"Engineer started working on {issue_id}",
+    })
 
     try:
+        initial_prompt = task if not saved_id else None
+        await client.connect(initial_prompt)
+        if saved_id:
+            await client.query(task)
+        await _drain_response(client, session_name, issue_id)
+
+        registry.update(session_name, status="running",
+                        session_id=saved_id or "")
+
+        step_idx = 0
+        failed_step = ""
+
         while step_idx < len(workflow.steps):
             step = workflow.steps[step_idx]
 
+            # Route step — deterministic, no LLM
             if step.condition:
                 taken = ctx.evaluate_condition(step.condition)
-                if taken:
-                    target = step.goto
-                else:
-                    target = step.else_goto
+                target = step.goto if taken else step.else_goto
                 log.info(f"Route {step.name}: {step.condition} → {target}")
                 if target:
                     jump = workflow.step_index(target)
@@ -92,12 +185,16 @@ def run_workflow(
                 step_idx += 1
                 continue
 
+            # Await step — suspend
             if step.await_event:
-                log.info(f"Await step {step.name}: suspended (not yet implemented)")
-                registry.update(session_name, status="waiting")
-                break
+                log.info(f"Await step {step.name}: suspended")
+                registry.update(session_name, status="waiting", phase=step.name)
+                return True
 
+            # Prompt step — inject into the persistent session
             step_start = time.time()
+            registry.update(session_name, phase=step.name)
+
             _emit_lifecycle_event("engineer/step.started", {
                 "issue_id": issue_id,
                 "workflow": workflow.name,
@@ -109,28 +206,16 @@ def run_workflow(
             prompt = _build_step_prompt(step, ctx)
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
-            result = run_phase_blocking(
-                issue_id=issue_id,
-                phase=step.name,
-                cwd=cwd,
-                context=prompt,
-                title=task[:80],
-                repo=repo,
-                timeout=step.timeout,
-            )
+            await client.query(prompt)
+            final_text = await _drain_response(client, session_name, issue_id)
 
-            if not result.success:
+            if final_text is None:
                 failed_step = step.name
-                _emit_lifecycle_event("engineer/step.failed", {
-                    "issue_id": issue_id,
-                    "workflow": workflow.name,
-                    "step": step.name,
-                    "error": result.error,
-                    "text": f"Step {step.name} failed: {result.error}",
-                }, blocking=True)
-                success = False
-                break
+                _emit_step_failed(issue_id, workflow.name, step.name,
+                                  "connection lost")
+                return False
 
+            # Validate handoff
             handoff = _read_handoff(issue_id)
             missing = _validate_handoff(step, handoff)
 
@@ -142,33 +227,22 @@ def run_workflow(
                     f"Your handoff is missing required fields: {', '.join(missing)}. "
                     f"Please update your handoff file with these fields and confirm."
                 )
-                result = run_phase_blocking(
-                    issue_id=issue_id, phase=f"{step.name}-fix",
-                    cwd=cwd, context=fix_prompt, title=task[:80],
-                    repo=repo, timeout=300,
-                )
+                await client.query(fix_prompt)
+                await _drain_response(client, session_name, issue_id)
                 handoff = _read_handoff(issue_id)
                 missing = _validate_handoff(step, handoff)
 
             if missing:
                 failed_step = step.name
                 error = f"Handoff missing required fields after retries: {missing}"
-                _emit_lifecycle_event("engineer/step.failed", {
-                    "issue_id": issue_id,
-                    "workflow": workflow.name,
-                    "step": step.name,
-                    "error": error,
-                    "text": f"Step {step.name} failed: {error}",
-                }, blocking=True)
-                success = False
-                break
+                _emit_step_failed(issue_id, workflow.name, step.name, error)
+                return False
 
+            # Capture outputs for routing
             outputs = {k: handoff.get(k, "") for k in
                        step.handoff.required + step.handoff.optional
                        if k in handoff}
             ctx.set_scope(step.name, outputs)
-            # Also expose by bare name so route conditions like
-            # `needs_spec == true` resolve against this step's handoff.
             ctx.update_flat(outputs)
 
             duration = time.time() - step_start
@@ -184,40 +258,59 @@ def run_workflow(
 
             step_idx += 1
 
-    except Exception as e:
-        success = False
-        failed_step = workflow.steps[step_idx].name if step_idx < len(workflow.steps) else "unknown"
-        log.error(f"Workflow {workflow.name} error at step {failed_step}: {e}")
-        _emit_lifecycle_event("engineer/step.failed", {
-            "issue_id": issue_id,
-            "workflow": workflow.name,
-            "step": failed_step,
-            "error": str(e),
-            "text": f"Step {failed_step} error: {e}",
-        }, blocking=True)
+        return True
 
-    duration = time.time() - started_at
-    if success:
-        _emit_lifecycle_event("engineer/workflow.completed", {
-            "issue_id": issue_id,
-            "workflow": workflow.name,
-            "duration": round(duration, 1),
-            "text": f"Workflow {workflow.name} completed for {issue_id} in {duration:.0f}s",
-        }, blocking=True)
-        registry.update(session_name, status="done")
-    else:
+    except Exception as e:
+        log.error(f"Workflow error: {e}")
         _emit_lifecycle_event("engineer/workflow.failed", {
             "issue_id": issue_id,
             "workflow": workflow.name,
-            "step": failed_step,
-            "error": f"Failed at step {failed_step}",
-            "text": f"Workflow {workflow.name} failed at step {failed_step}",
+            "error": str(e),
+            "text": f"Workflow error: {e}",
         }, blocking=True)
-        registry.update(session_name, status="error")
+        return False
+    finally:
+        _emit_lifecycle_event("engineer/session.completed", {
+            "issue_id": issue_id, "repo": repo,
+            "text": f"Engineer finished {issue_id}",
+        }, blocking=True)
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
-    log.info(f"Workflow {workflow.name} {'completed' if success else 'failed'} "
-             f"in {duration:.0f}s")
-    return success
+
+async def _drain_response(client, session_name: str, issue_id: str) -> str | None:
+    """Drain one turn of the agent's response. Returns final text or None."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+    final_text = ""
+    try:
+        async for msg in client.receive_response():
+            if isinstance(msg, AssistantMessage):
+                text_parts = [b.text for b in msg.content if isinstance(b, TextBlock)]
+                if text_parts:
+                    final_text = "\n".join(text_parts)
+                    log_activity("response", {"text": final_text[:500]},
+                                 session=session_name)
+            elif isinstance(msg, ResultMessage):
+                save_session_id(session_name, msg.session_id)
+                log_activity("stop", {"session_id": msg.session_id},
+                             session=session_name)
+                return final_text
+    except Exception as e:
+        log.error(f"Drain error: {e}")
+    return None
+
+
+def _emit_step_failed(issue_id, workflow_name, step_name, error):
+    _emit_lifecycle_event("engineer/step.failed", {
+        "issue_id": issue_id,
+        "workflow": workflow_name,
+        "step": step_name,
+        "error": error,
+        "text": f"Step {step_name} failed: {error}",
+    }, blocking=True)
 
 
 def _build_step_prompt(step: StepDef, ctx: VariableContext) -> str:
