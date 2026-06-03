@@ -806,7 +806,11 @@ def init(non_interactive):
 
 
 def _install_to_path():
-    """Symlink the modastack binary into ~/.local/bin so it works without venv activation."""
+    """Symlink the modastack binary into ~/.local/bin and ensure it's on PATH.
+
+    Adds the PATH export above the interactive guard in .bashrc so it
+    works for both interactive shells and non-interactive SSH commands.
+    """
     import shutil
 
     venv_bin = shutil.which("modastack")
@@ -819,6 +823,7 @@ def _install_to_path():
 
     if link.exists() or link.is_symlink():
         if link.resolve() == Path(venv_bin).resolve():
+            click.echo(f"Already installed: {link}")
             return
         link.unlink()
 
@@ -826,7 +831,30 @@ def _install_to_path():
     click.echo(f"Installed: {link} -> {venv_bin}")
 
     if str(local_bin) not in os.environ.get("PATH", ""):
-        click.echo(f"Add {local_bin} to your PATH if not already there.")
+        _ensure_path_in_bashrc(str(local_bin))
+
+
+def _ensure_path_in_bashrc(bin_dir: str):
+    """Add bin_dir to PATH in .bashrc, above the interactive guard."""
+    bashrc = Path.home() / ".bashrc"
+    export_line = f'export PATH="$HOME/.local/bin:$PATH"'
+
+    if bashrc.exists():
+        content = bashrc.read_text()
+        if ".local/bin" in content:
+            return
+        # Insert before the interactive guard so non-interactive SSH picks it up
+        guard = "# If not running interactively"
+        if guard in content:
+            content = content.replace(guard, export_line + "\n\n" + guard)
+            bashrc.write_text(content)
+            click.echo(f"Added {bin_dir} to PATH in ~/.bashrc")
+            return
+
+    # No bashrc or no guard — just append
+    with open(bashrc, "a") as f:
+        f.write(f"\n{export_line}\n")
+    click.echo(f"Added {bin_dir} to PATH in ~/.bashrc")
 
 
 @main.command()
