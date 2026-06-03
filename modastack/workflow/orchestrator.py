@@ -44,17 +44,17 @@ def make_session_name(workflow_name: str, repo: str, issue_id: str) -> str:
     return f"wf-{workflow_name}-{repo_name}-{issue_id}"
 
 
-def _setup_worktree(cwd: str, issue_id: str) -> str:
-    """Create a git worktree for the issue and return its path.
+def _setup_worktree(cwd: str, session_name: str) -> str:
+    """Create a git worktree for the session and return its path.
 
-    Worktrees live inside the repo at .claude/worktrees/<issue_id>.
+    Worktrees live inside the repo at .claude/worktrees/<session_name>.
     If the worktree already exists, just return its path.
     """
     import subprocess as sp
 
     repo_root = Path(cwd).resolve()
-    worktree_dir = repo_root / ".claude" / "worktrees" / str(issue_id)
-    branch = f"agent/{issue_id}"
+    worktree_dir = repo_root / ".claude" / "worktrees" / session_name
+    branch = session_name
 
     if worktree_dir.exists():
         return str(worktree_dir)
@@ -92,9 +92,8 @@ def run_workflow(
     requested_by = requested_by or {}
     started_at = time.time()
 
-    worktree_cwd = _setup_worktree(cwd, issue_id)
-
     session_name = make_session_name(workflow.name, repo, issue_id)
+    worktree_cwd = _setup_worktree(cwd, session_name)
     registry = get_registry()
     registry.register(SessionEntry(
         name=session_name, session_id="", role="engineer",
