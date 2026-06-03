@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import time
 from dataclasses import dataclass, field, asdict
@@ -38,79 +39,101 @@ class SessionEntry:
     repo: str = ""
     cwd: str = ""
     status: str = "starting"
+    pid: int = 0
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
-    # Who requested this work, for routing async results back to them.
-    # Slack origin: {user_id, from, workspace, channel, thread_ts}. Empty for
-    # non-Slack-originated work. Defaults empty so existing rows deserialize
-    # unchanged — no registry migration needed.
     requested_by: dict = field(default_factory=dict)
 
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+ACTIVE_DIR = SESSION_DIR / "active"
+
+
 class SessionRegistry:
+    """File-per-worker registry. Each active worker owns one JSON file.
+
+    No shared state, no merge logic. A worker writes its file on start
+    and deletes it on exit. ``modastack status`` lists the directory.
+    """
+
     def __init__(self):
-        self._entries: dict[str, SessionEntry] = {}
-        self._removed: set[str] = set()
-        self._load()
+        ACTIVE_DIR.mkdir(parents=True, exist_ok=True)
 
-    def _load(self) -> None:
-        if not REGISTRY_PATH.exists():
-            return
-        try:
-            data = json.loads(REGISTRY_PATH.read_text())
-            for name, raw in data.items():
-                self._entries[name] = SessionEntry(**raw)
-        except (json.JSONDecodeError, TypeError):
-            log.warning("Corrupt session registry — starting fresh")
-            self._entries = {}
-
-    def _save(self) -> None:
-        SESSION_DIR.mkdir(parents=True, exist_ok=True)
-        # Read-modify-write: read current disk state, update only the
-        # keys this process owns, write back. This preserves entries
-        # written by other processes without resurrecting cleaned ones.
-        disk = {}
-        if REGISTRY_PATH.exists():
-            try:
-                disk = json.loads(REGISTRY_PATH.read_text())
-            except (json.JSONDecodeError, TypeError):
-                pass
-        for name in self._removed:
-            disk.pop(name, None)
-        for name, entry in self._entries.items():
-            disk[name] = asdict(entry)
-        REGISTRY_PATH.write_text(json.dumps(disk, indent=2))
+    @staticmethod
+    def _path(name: str) -> Path:
+        return ACTIVE_DIR / f"{name}.json"
 
     def register(self, entry: SessionEntry) -> None:
-        self._entries[entry.name] = entry
-        self._save()
+        path = self._path(entry.name)
+        path.write_text(json.dumps(asdict(entry), indent=2))
 
     def update(self, name: str, **kwargs) -> None:
-        entry = self._entries.get(name)
-        if not entry:
+        path = self._path(name)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, TypeError):
             return
         for k, v in kwargs.items():
-            if hasattr(entry, k):
-                setattr(entry, k, v)
-        entry.last_activity = time.time()
-        self._save()
+            if k in data:
+                data[k] = v
+        data["last_activity"] = time.time()
+        path.write_text(json.dumps(data, indent=2))
 
     def remove(self, name: str) -> None:
-        self._entries.pop(name, None)
-        self._removed.add(name)
-        self._save()
+        self._path(name).unlink(missing_ok=True)
 
     def get(self, name: str) -> SessionEntry | None:
-        return self._entries.get(name)
+        path = self._path(name)
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+            return SessionEntry(**data)
+        except (json.JSONDecodeError, TypeError):
+            return None
 
     def list_active(self) -> list[SessionEntry]:
-        return [e for e in self._entries.values() if e.status in ("starting", "running", "idle")]
+        """List active workers, reaping any whose process has died."""
+        result = []
+        for path in ACTIVE_DIR.glob("*.json"):
+            try:
+                data = json.loads(path.read_text())
+                entry = SessionEntry(**data)
+            except (json.JSONDecodeError, TypeError):
+                path.unlink(missing_ok=True)
+                continue
+            if entry.status not in ("starting", "running", "idle"):
+                continue
+            if entry.pid and not _pid_alive(entry.pid):
+                path.unlink(missing_ok=True)
+                continue
+            result.append(entry)
+        return result
 
     def list_all(self) -> list[SessionEntry]:
-        return list(self._entries.values())
+        result = []
+        for path in ACTIVE_DIR.glob("*.json"):
+            try:
+                result.append(SessionEntry(**json.loads(path.read_text())))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return result
 
     def get_by_role(self, role: str) -> list[SessionEntry]:
-        return [e for e in self._entries.values() if e.role == role]
+        return [e for e in self.list_all() if e.role == role]
 
 
 _registry: SessionRegistry | None = None

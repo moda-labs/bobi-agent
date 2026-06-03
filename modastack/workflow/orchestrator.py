@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -98,7 +99,7 @@ def run_workflow(
     registry.register(SessionEntry(
         name=session_name, session_id="", role="engineer",
         issue_id=issue_id, title=task[:80], phase=workflow.name,
-        repo=repo, cwd=worktree_cwd, status="running",
+        repo=repo, cwd=worktree_cwd, status="running", pid=os.getpid(),
         requested_by=requested_by,
     ))
 
@@ -130,14 +131,15 @@ def run_workflow(
             "duration": round(duration, 1),
             "text": f"Workflow {workflow.name} completed for {issue_id} in {duration:.0f}s",
         }, blocking=True)
-        registry.update(session_name, status="done", phase="complete")
     else:
         _emit_lifecycle_event("engineer/workflow.failed", {
             "issue_id": issue_id,
             "workflow": workflow.name,
             "text": f"Workflow {workflow.name} failed for {issue_id}",
         }, blocking=True)
-        registry.update(session_name, status="error")
+
+    # Clean up — registry only holds active workers
+    registry.remove(session_name)
 
     log.info(f"Workflow {workflow.name} {'completed' if success else 'failed'} "
              f"in {duration:.0f}s")
