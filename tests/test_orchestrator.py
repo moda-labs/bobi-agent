@@ -281,7 +281,14 @@ class TestRunWorkflow:
 
     def test_route_step_branches(self, tmp_path, monkeypatch):
         monkeypatch.setattr("modastack.workflow.orchestrator.HANDOFF_DIR", tmp_path)
-        (tmp_path / "1.md").write_text("---\nneeds_spec: true\n---\n")
+
+        # Write handoff during the fake agent's response (simulating the
+        # agent writing it after the triage step runs, not before)
+        original_init = FakeClient.__init__
+        def _patched_init(self_client):
+            original_init(self_client)
+            (tmp_path / "1.md").write_text("---\nneeds_spec: true\n---\n")
+        monkeypatch.setattr(FakeClient, "__init__", _patched_init)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="triage", prompt="triage",

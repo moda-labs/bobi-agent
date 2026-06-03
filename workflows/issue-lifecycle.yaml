@@ -11,7 +11,7 @@ steps:
       Create a git worktree for this issue and set up the workspace.
       Read the issue to understand the full context.
     handoff:
-      required: [worktree_path]
+      required: [worktree]
     timeout: 300
 
   - name: pickup

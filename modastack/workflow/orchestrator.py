@@ -93,6 +93,12 @@ def run_workflow(
     requested_by = requested_by or {}
     started_at = time.time()
 
+    # Clean stale handoff from previous runs
+    old_handoff = HANDOFF_DIR / f"{issue_id}.md"
+    if old_handoff.exists():
+        old_handoff.unlink()
+        log.info(f"Cleaned stale handoff at {old_handoff}")
+
     session_name = make_session_name(workflow.name, repo, issue_id)
     worktree_cwd = _setup_worktree(cwd, session_name)
     registry = get_registry()
