@@ -44,6 +44,40 @@ def make_session_name(workflow_name: str, repo: str, issue_id: str) -> str:
     return f"wf-{workflow_name}-{repo_name}-{issue_id}"
 
 
+def _setup_worktree(cwd: str, issue_id: str) -> str:
+    """Create a git worktree for the issue and return its path.
+
+    Worktrees live inside the repo at .claude/worktrees/<issue_id>.
+    If the worktree already exists, just return its path.
+    """
+    import subprocess as sp
+
+    repo_root = Path(cwd).resolve()
+    worktree_dir = repo_root / ".claude" / "worktrees" / str(issue_id)
+    branch = f"agent/{issue_id}"
+
+    if worktree_dir.exists():
+        return str(worktree_dir)
+
+    worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    result = sp.run(
+        ["git", "worktree", "add", "-b", branch, str(worktree_dir)],
+        cwd=str(repo_root), capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        result = sp.run(
+            ["git", "worktree", "add", str(worktree_dir), branch],
+            cwd=str(repo_root), capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            log.warning(f"Worktree creation failed: {result.stderr.strip()}")
+            return str(repo_root)
+
+    log.info(f"Created worktree at {worktree_dir} on branch {branch}")
+    return str(worktree_dir)
+
+
 def run_workflow(
     workflow: Workflow,
     task: str,
@@ -58,12 +92,15 @@ def run_workflow(
     requested_by = requested_by or {}
     started_at = time.time()
 
+    worktree_cwd = _setup_worktree(cwd, issue_id)
+
     session_name = make_session_name(workflow.name, repo, issue_id)
     registry = get_registry()
     registry.register(SessionEntry(
         name=session_name, session_id="", role="engineer",
         issue_id=issue_id, title=task[:80], phase=workflow.name,
-        repo=repo, cwd=cwd, status="running",         requested_by=requested_by,
+        repo=repo, cwd=worktree_cwd, status="running",
+        requested_by=requested_by,
     ))
 
     _emit_lifecycle_event("engineer/workflow.started", {
@@ -77,9 +114,11 @@ def run_workflow(
     ctx = VariableContext()
     ctx.set_scope("input", {"task": task, "repo": repo, "issue_id": issue_id})
 
+    ctx.set_scope("worktree", {"path": worktree_cwd})
+
     success = asyncio.run(
         _run_workflow_async(
-            workflow, task, repo, cwd, issue_id, session_name,
+            workflow, task, repo, worktree_cwd, issue_id, session_name,
             registry, ctx, requested_by, timeout,
         )
     )
@@ -141,6 +180,8 @@ async def _run_workflow_async(
             "preset": "claude_code",
             "append": (
                 f"You are an engineer agent working on issue #{issue_id}. "
+                f"Your working directory is an isolated git worktree at {cwd}. "
+                f"All code changes go here — never modify the main repo checkout. "
                 f"You will receive step-by-step instructions. Follow each one, "
                 f"then write your handoff file when asked."
             ),
