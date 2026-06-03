@@ -455,15 +455,19 @@ def log(session, lines, follow):
 
 
 def _find_transcript(session: str) -> Path | None:
-    """Find the Claude Code transcript JSONL for a session name."""
-    from modastack.sdk import SESSION_DIR
+    """Find the log file for a session."""
+    from modastack.sdk import SESSION_DIR, SessionRegistry, get_registry
 
     if session == "manager":
         session = "moda-manager"
 
-    id_file = SESSION_DIR / f"{session}.id"
+    # Primary: session dir log
+    session_log = SessionRegistry.log_path(session)
+    if session_log.exists():
+        return session_log
 
-    # Try the full Claude Code transcript first (via session ID)
+    # Fallback: Claude Code transcript via session ID
+    id_file = SESSION_DIR / f"{session}.id"
     if id_file.exists():
         session_id = id_file.read_text().strip()
         if session_id:
@@ -474,27 +478,25 @@ def _find_transcript(session: str) -> Path | None:
                     if candidate.exists():
                         return candidate
 
-    # Fallback: activity log file (works for running sessions before
-    # the .id file is written, and for orchestrator subprocess logs)
+    # Legacy: old activity log location
     from modastack.sdk import ACTIVITY_DIR
     activity_log = ACTIVITY_DIR / "logs" / f"{session}.jsonl"
     if activity_log.exists():
         return activity_log
 
     click.echo(f"No session '{session}'.")
-    from modastack.sdk import get_registry
     registry = get_registry()
     active = [e for e in registry.list_active() if e.role == "engineer"]
     if active:
         names = [e.name for e in active]
-        click.echo(f"Active engineers: {', '.join(sorted(names))}")
-    recent = sorted(SESSION_DIR.glob("*.id"), key=lambda f: f.stat().st_mtime, reverse=True)
-    recent_names = [f.stem for f in recent[:10] if f.stem != "moda-manager"]
+        click.echo(f"Active: {', '.join(sorted(names))}")
+    recent_dirs = sorted(
+        [d for d in SESSION_DIR.iterdir() if d.is_dir() and (d / "state.json").exists()],
+        key=lambda d: d.stat().st_mtime, reverse=True,
+    )
+    recent_names = [d.name for d in recent_dirs[:10] if d.name != "moda-manager"]
     if recent_names:
         click.echo(f"Recent: {', '.join(recent_names)}")
-    return None
-
-    click.echo(f"Transcript not found for session {session_id[:8]}.")
     return None
 
 

@@ -23,10 +23,9 @@ import yaml
 
 from modastack.sdk import (
     get_cli_path, get_registry, save_session_id, load_session_id,
-    log_activity, SessionEntry,
+    log_activity, SessionEntry, SessionRegistry,
 )
 from modastack.subagent import (
-    HANDOFF_DIR,
     AgentResult,
     _emit_lifecycle_event,
     _parse_issue_number,
@@ -93,11 +92,7 @@ def run_workflow(
     requested_by = requested_by or {}
     started_at = time.time()
 
-    # Clean stale handoff from previous runs
-    old_handoff = HANDOFF_DIR / f"{issue_id}.md"
-    if old_handoff.exists():
-        old_handoff.unlink()
-        log.info(f"Cleaned stale handoff at {old_handoff}")
+    # Session dir is created by the registry on register
 
     session_name = make_session_name(workflow.name, repo, issue_id)
     worktree_cwd = _setup_worktree(cwd, session_name)
@@ -144,8 +139,7 @@ def run_workflow(
             "text": f"Workflow {workflow.name} failed for {issue_id}",
         }, blocking=True)
 
-    # Clean up — registry only holds active workers
-    registry.remove(session_name)
+    registry.mark_done(session_name)
 
     log.info(f"Workflow {workflow.name} {'completed' if success else 'failed'} "
              f"in {duration:.0f}s")
@@ -265,7 +259,7 @@ async def _run_workflow_async(
                 "text": f"Step {step.name} started",
             })
 
-            prompt = _build_step_prompt(step, ctx, issue_id)
+            prompt = _build_step_prompt(step, ctx, session_name, step.name)
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             await client.query(prompt)
@@ -278,7 +272,7 @@ async def _run_workflow_async(
                 return False
 
             # Validate handoff
-            handoff = _read_handoff(issue_id)
+            handoff = _read_handoff(session_name, step.name)
             missing = _validate_handoff(step, handoff)
 
             for retry in range(MAX_HANDOFF_RETRIES):
@@ -291,7 +285,7 @@ async def _run_workflow_async(
                 )
                 await client.query(fix_prompt)
                 await _drain_response(client, session_name, issue_id)
-                handoff = _read_handoff(issue_id)
+                handoff = _read_handoff(session_name, step.name)
                 missing = _validate_handoff(step, handoff)
 
             if missing:
@@ -376,41 +370,33 @@ def _emit_step_failed(issue_id, workflow_name, step_name, error):
     }, blocking=True)
 
 
-def _build_step_prompt(step: StepDef, ctx: VariableContext, issue_id: str = "") -> str:
+def _build_step_prompt(step: StepDef, ctx: VariableContext, session_name: str = "", step_name: str = "") -> str:
     """Build the full prompt for a step, including handoff contract."""
     prompt = ctx.resolve(step.prompt)
 
     if step.handoff.required or step.handoff.optional:
-        handoff_path = HANDOFF_DIR / f"{issue_id}.md" if issue_id else "~/.modastack/handoffs/<issue_id>.md"
-        prompt += f"\n\nWhen complete, write your handoff file at `{handoff_path}` with YAML frontmatter:"
-        prompt += "\n```"
-        prompt += "\n---"
+        handoff_path = SessionRegistry.handoff_path(session_name, step_name) if session_name else "<session>/handoff-<step>.yaml"
+        prompt += f"\n\nWhen complete, write your handoff file at `{handoff_path}` as YAML:"
+        prompt += "\n```yaml"
         for field in step.handoff.required:
             prompt += f"\n{field}: <value>"
         for field in step.handoff.optional:
             prompt += f"\n{field}: <value>  # optional"
-        prompt += "\n---"
         prompt += "\n```"
 
     return prompt
 
 
-def _read_handoff(issue_id: str) -> dict:
-    """Read the handoff YAML for an issue."""
-    candidates = [
-        HANDOFF_DIR / f"{issue_id.lower()}.md",
-        HANDOFF_DIR / f"{issue_id}.md",
-    ]
-    for path in candidates:
-        if path.exists():
-            content = path.read_text()
-            if content.startswith("---"):
-                try:
-                    end = content.index("---", 3)
-                    return yaml.safe_load(content[3:end]) or {}
-                except (ValueError, yaml.YAMLError):
-                    pass
-    return {}
+def _read_handoff(session_name: str, step_name: str) -> dict:
+    """Read the handoff YAML for a step."""
+    path = SessionRegistry.handoff_path(session_name, step_name)
+    if not path.exists():
+        return {}
+    try:
+        content = path.read_text()
+        return yaml.safe_load(content) or {}
+    except yaml.YAMLError:
+        return {}
 
 
 def _validate_handoff(step: StepDef, handoff: dict) -> list[str]:

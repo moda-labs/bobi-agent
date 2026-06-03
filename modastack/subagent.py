@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 from modastack.sdk import (
     get_cli_path, save_session_id, load_session_id, log_activity,
-    get_registry, SessionEntry,
+    get_registry, SessionEntry, SessionRegistry,
 )
 
 InputHandler = Callable[[str, dict[str, Any]], str]
@@ -584,16 +584,17 @@ def launch_agent(
         "_run_agent_entry(json.loads(sys.argv[1]))"
     )
 
-    log_dir = Path.home() / ".modastack" / "manager" / "logs"
-    log_file = log_dir / f"{session_name}.jsonl"
-    pid = _launch_detached(script, [args_json], log_file)
-
+    # Register first so the session dir exists for the log file
     registry.register(SessionEntry(
         name=session_name, session_id="", role="engineer",
         issue_id=issue_id, title=task[:80], phase=workflow_name,
-        repo=repo, cwd=cwd, status="starting", pid=pid,
+        repo=repo, cwd=cwd, status="starting",
         requested_by=requested_by or {},
     ))
+
+    log_file = SessionRegistry.log_path(session_name)
+    pid = _launch_detached(script, [args_json], log_file)
+    registry.update(session_name, pid=pid)
     return session_name
 
 

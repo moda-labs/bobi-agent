@@ -135,21 +135,27 @@ class TestHandoffValidation:
 
 
 class TestReadHandoff:
-    def test_reads_yaml_frontmatter(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.orchestrator.HANDOFF_DIR", tmp_path)
-        (tmp_path / "42.md").write_text("---\ncomplexity: medium\nneeds_spec: true\n---\nNotes here")
-        result = _read_handoff("42")
+    def test_reads_yaml(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        session_dir = tmp_path / "wf-test-42"
+        session_dir.mkdir()
+        (session_dir / "handoff-setup.yaml").write_text("complexity: medium\nneeds_spec: true\n")
+        result = _read_handoff("wf-test-42", "setup")
         assert result["complexity"] == "medium"
         assert result["needs_spec"] is True
 
     def test_missing_handoff_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.orchestrator.HANDOFF_DIR", tmp_path)
-        assert _read_handoff("999") == {}
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        assert _read_handoff("wf-test-999", "setup") == {}
 
-    def test_case_insensitive_lookup(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.orchestrator.HANDOFF_DIR", tmp_path)
-        (tmp_path / "abc.md").write_text("---\nstatus: done\n---\n")
-        assert _read_handoff("ABC")["status"] == "done"
+    def test_step_specific_handoffs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        session_dir = tmp_path / "wf-test-1"
+        session_dir.mkdir()
+        (session_dir / "handoff-setup.yaml").write_text("worktree: /tmp/wt\n")
+        (session_dir / "handoff-pickup.yaml").write_text("complexity: medium\n")
+        assert _read_handoff("wf-test-1", "setup")["worktree"] == "/tmp/wt"
+        assert _read_handoff("wf-test-1", "pickup")["complexity"] == "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -158,15 +164,15 @@ class TestReadHandoff:
 
 class TestBuildStepPrompt:
     def test_includes_handoff_contract(self):
-        step = StepDef(name="t", prompt="Do work",
+        step = StepDef(name="setup", prompt="Do work",
                        handoff=HandoffContract(required=["a"], optional=["b"]))
         from modastack.workflow.variables import VariableContext
         ctx = VariableContext()
-        prompt = _build_step_prompt(step, ctx, issue_id="42")
+        prompt = _build_step_prompt(step, ctx, session_name="wf-test-42", step_name="setup")
         assert "Do work" in prompt
         assert "a: <value>" in prompt
         assert "b: <value>" in prompt
-        assert "42.md" in prompt
+        assert "handoff-setup.yaml" in prompt
 
     def test_no_contract_when_empty(self):
         step = StepDef(name="t", prompt="Just do it")
@@ -281,14 +287,17 @@ class TestRunWorkflow:
         assert result is True
 
     def test_route_step_branches(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.orchestrator.HANDOFF_DIR", tmp_path)
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
 
         # Write handoff during the fake agent's response (simulating the
         # agent writing it after the triage step runs, not before)
         original_init = FakeClient.__init__
         def _patched_init(self_client):
             original_init(self_client)
-            (tmp_path / "1.md").write_text("---\nneeds_spec: true\n---\n")
+            # Write to the session dir handoff path
+            d = tmp_path / "wf-t-r-1"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "handoff-triage.yaml").write_text("needs_spec: true\n")
         monkeypatch.setattr(FakeClient, "__init__", _patched_init)
 
         wf = Workflow(name="t", steps=[
