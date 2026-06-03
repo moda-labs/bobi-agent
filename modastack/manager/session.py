@@ -109,18 +109,21 @@ async def _drain_turn() -> None:
         async for msg in _client.receive_response():
             if isinstance(msg, AssistantMessage):
                 text_parts = []
+                tool_parts = []
                 for block in msg.content:
                     if isinstance(block, TextBlock):
                         text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
-                        tool_summary = f"{block.name}: {str(block.input)[:200]}"
+                        tool_input = str(block.input.get("command", block.input.get("description", "")))[:150] if isinstance(block.input, dict) else str(block.input)[:150]
+                        tool_parts.append(f"> {block.name}: {tool_input}")
                         log_activity("tool_use", {"tool": block.name, "input": str(block.input)[:500]}, session=SESSION_NAME)
-                if text_parts:
-                    _last_response = "\n".join(text_parts)
-                    log_activity("response", {"text": _last_response[:500]}, session=SESSION_NAME)
-                    if _response_callback:
+                if text_parts or tool_parts:
+                    combined = "\n".join(text_parts + tool_parts) if tool_parts else "\n".join(text_parts)
+                    _last_response = "\n".join(text_parts) if text_parts else ""
+                    log_activity("response", {"text": combined[:500]}, session=SESSION_NAME)
+                    if _response_callback and combined.strip():
                         try:
-                            _response_callback(_last_response)
+                            _response_callback(combined)
                         except Exception as cb_err:
                             log.warning(f"Response callback failed: {cb_err}")
 
