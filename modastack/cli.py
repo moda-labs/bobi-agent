@@ -794,12 +794,39 @@ def register(repo_path: str, task_tracking: str | None, project: str | None, lin
 @main.command()
 @click.option("--non-interactive", is_flag=True, envvar="CI")
 def init(non_interactive):
-    """Initialize global config."""
+    """Initialize global config and install modastack to PATH."""
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config = GlobalConfig.load()
     config.save()
     click.echo(f"Config initialized at {GLOBAL_CONFIG_DIR / 'config.yaml'}")
+
+    _install_to_path()
+
     click.echo("Run `modastack setup <repo>` to add a repo.")
+
+
+def _install_to_path():
+    """Symlink the modastack binary into ~/.local/bin so it works without venv activation."""
+    import shutil
+
+    venv_bin = shutil.which("modastack")
+    if not venv_bin:
+        return
+
+    local_bin = Path.home() / ".local" / "bin"
+    local_bin.mkdir(parents=True, exist_ok=True)
+    link = local_bin / "modastack"
+
+    if link.exists() or link.is_symlink():
+        if link.resolve() == Path(venv_bin).resolve():
+            return
+        link.unlink()
+
+    link.symlink_to(venv_bin)
+    click.echo(f"Installed: {link} -> {venv_bin}")
+
+    if str(local_bin) not in os.environ.get("PATH", ""):
+        click.echo(f"Add {local_bin} to your PATH if not already there.")
 
 
 @main.command()
