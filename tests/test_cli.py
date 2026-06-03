@@ -18,6 +18,14 @@ def test_version_flag():
     assert __version__ in result.output
 
 
+def test_agent_version_flag():
+    runner = CliRunner()
+    result = runner.invoke(main, ["agent", "--version"])
+    assert result.exit_code == 0
+    assert "modastack" in result.output
+    assert __version__ in result.output
+
+
 # --- spawn --non-interactive (check mode) ---------------------------------
 
 
