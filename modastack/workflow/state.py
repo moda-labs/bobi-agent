@@ -29,6 +29,13 @@ class WorkflowRun:
     started_at: str = ""
     completed_at: str = ""
     status: str = "running"
+    suspended_at_step: int = -1
+    await_event: str = ""
+    session_name: str = ""
+    variable_scopes: dict = field(default_factory=dict)
+    repo: str = ""
+    cwd: str = ""
+    issue_id: str = ""
 
     def save(self):
         path = RUNS_DIR / f"{self.run_id}.json"
@@ -53,6 +60,13 @@ class WorkflowRun:
             started_at=data.get("started_at", ""),
             completed_at=data.get("completed_at", ""),
             status=data.get("status", "running"),
+            suspended_at_step=data.get("suspended_at_step", -1),
+            await_event=data.get("await_event", ""),
+            session_name=data.get("session_name", ""),
+            variable_scopes=data.get("variable_scopes", {}),
+            repo=data.get("repo", ""),
+            cwd=data.get("cwd", ""),
+            issue_id=data.get("issue_id", ""),
         )
         for nid, ns_data in data.get("nodes", {}).items():
             run.nodes[nid] = NodeState(**ns_data)
@@ -72,6 +86,27 @@ class WorkflowRun:
                 trigger_data = data.get("trigger_event", {}).get("data", {})
                 if trigger_data.get("issue_id") == event_key:
                     return cls.load(data["run_id"])
+            except (json.JSONDecodeError, KeyError):
+                continue
+        return None
+
+    @classmethod
+    def find_waiting(cls, await_event: str, issue_id: str = "") -> WorkflowRun | None:
+        """Find a run suspended and waiting for a specific event type."""
+        if not RUNS_DIR.exists():
+            return None
+        for path in RUNS_DIR.glob("*.json"):
+            try:
+                data = json.loads(path.read_text())
+                if data.get("status") != "waiting":
+                    continue
+                if data.get("await_event") != await_event:
+                    continue
+                if issue_id:
+                    trigger_data = data.get("trigger_event", {}).get("data", {})
+                    if trigger_data.get("issue_id") != issue_id:
+                        continue
+                return cls.load(data["run_id"])
             except (json.JSONDecodeError, KeyError):
                 continue
         return None

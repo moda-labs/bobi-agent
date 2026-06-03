@@ -21,7 +21,6 @@ log = logging.getLogger(__name__)
 CLAUDE_CLI = shutil.which("claude") or "/opt/homebrew/bin/claude"
 SESSION_DIR = Path.home() / ".modastack" / "sessions"
 REGISTRY_PATH = SESSION_DIR / "registry.json"
-ACTIVITY_DIR = Path.home() / ".modastack" / "manager"
 
 
 def get_cli_path() -> str:
@@ -158,9 +157,6 @@ class SessionRegistry:
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
-    def get_by_role(self, role: str) -> list[SessionEntry]:
-        return [e for e in self.list_all() if e.role == role]
-
 
 _registry: SessionRegistry | None = None
 
@@ -190,13 +186,6 @@ def log_activity(event: str, data: dict | None = None, session: str = "moda-mana
     entry = {"event": event, "ts": time.time()}
     if data:
         entry.update(data)
-    # Write to session dir if it exists, else legacy location
-    session_log = SESSION_DIR / session / "log.jsonl"
-    if session_log.parent.exists():
-        log_path = session_log
-    else:
-        log_dir = ACTIVITY_DIR / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / f"{session}.jsonl"
+    log_path = SessionRegistry.log_path(session)
     with open(log_path, "a") as f:
         f.write(json.dumps(entry) + "\n")

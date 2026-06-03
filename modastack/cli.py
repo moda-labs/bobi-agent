@@ -478,12 +478,6 @@ def _find_transcript(session: str) -> Path | None:
                     if candidate.exists():
                         return candidate
 
-    # Legacy: old activity log location
-    from modastack.sdk import ACTIVITY_DIR
-    activity_log = ACTIVITY_DIR / "logs" / f"{session}.jsonl"
-    if activity_log.exists():
-        return activity_log
-
     click.echo(f"No session '{session}'.")
     registry = get_registry()
     active = [e for e in registry.list_active() if e.role == "engineer"]
@@ -595,6 +589,24 @@ def status():
             os.kill(pid, 0)
             running = True
         except (ValueError, ProcessLookupError, PermissionError):
+            pass
+
+    if not running:
+        import subprocess as _sp
+        try:
+            result = _sp.run(
+                ["pgrep", "-f", "modastack.*start"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.strip().splitlines():
+                try:
+                    pid = int(line.strip())
+                    os.kill(pid, 0)
+                    running = True
+                    break
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pass
+        except (FileNotFoundError, _sp.TimeoutExpired):
             pass
 
     session_id = load_session_id("moda-manager") or ""
@@ -1444,11 +1456,56 @@ def workflow_status():
         return
     for run in runs[:20]:
         event_data = run.trigger_event.get("data", {})
-        issue = event_data.get("issue_id", "?")
+        issue = event_data.get("issue_id", run.issue_id or "?")
         completed = sum(1 for ns in run.nodes.values() if ns.status == "completed")
         total = len(run.nodes)
+        suffix = ""
+        if run.status == "waiting" and run.await_event:
+            suffix = f"  awaiting={run.await_event}"
         click.echo(f"  {run.run_id}  {run.workflow_name:20s} {run.status:10s} "
-                  f"issue={issue}  {completed}/{total} nodes  {run.started_at[:19]}")
+                  f"issue={issue}  {completed}/{total} nodes  {run.started_at[:19]}{suffix}")
+
+
+@workflow.command("resume")
+@click.argument("run_id")
+@click.option("--timeout", default=3600, help="Max execution time in seconds")
+def workflow_resume(run_id, timeout):
+    """Resume a suspended workflow run.
+
+    Picks up from the step after the await that suspended it.
+
+    Usage:
+        modastack workflow resume abc123
+    """
+    from .workflow.state import WorkflowRun
+    from .workflow.triggers import WorkflowDispatcher
+    from .workflow.orchestrator import resume_workflow
+
+    try:
+        run = WorkflowRun.load(run_id)
+    except (FileNotFoundError, KeyError):
+        click.echo(f"No run '{run_id}'.", err=True)
+        sys.exit(1)
+
+    if run.status != "waiting":
+        click.echo(f"Run {run_id} is '{run.status}', not 'waiting'.", err=True)
+        sys.exit(1)
+
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    wf = dispatcher.find_workflow(run.workflow_name)
+    if not wf:
+        click.echo(f"Workflow '{run.workflow_name}' not found.", err=True)
+        sys.exit(1)
+
+    click.echo(f"Resuming {run.workflow_name} for {run.issue_id} "
+               f"from step {run.suspended_at_step}...")
+    success = resume_workflow(run, wf, timeout=timeout)
+    if success:
+        click.echo("Workflow completed.")
+    else:
+        click.echo("Workflow failed.", err=True)
+        sys.exit(1)
 
 
 @workflow.command("validate")

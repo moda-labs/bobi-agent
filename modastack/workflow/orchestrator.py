@@ -31,11 +31,46 @@ from modastack.subagent import (
     _parse_issue_number,
 )
 from modastack.workflow.schema import Workflow, StepDef
+from modastack.workflow.state import WorkflowRun
 from modastack.workflow.variables import VariableContext
 
 log = logging.getLogger(__name__)
 
 MAX_HANDOFF_RETRIES = 2
+
+
+def try_resume_for_event(event_type: str, issue_id: str = "", event: dict | None = None) -> bool:
+    """Check if any suspended workflow is waiting for this event type and resume it.
+
+    Called by the manager when it receives an event that might unblock a workflow.
+    Returns True if a workflow was resumed.
+    """
+    from modastack.workflow.triggers import WorkflowDispatcher
+
+    run = WorkflowRun.find_waiting(event_type, issue_id)
+    if not run:
+        return False
+
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    wf = dispatcher.find_workflow(run.workflow_name)
+    if not wf:
+        log.error(f"Cannot resume run {run.run_id}: workflow '{run.workflow_name}' not found")
+        return False
+
+    log.info(f"Resuming workflow {run.workflow_name} for {run.issue_id} "
+             f"(run {run.run_id}, awaited '{event_type}')")
+
+    import threading
+    t = threading.Thread(
+        target=resume_workflow,
+        args=(run, wf),
+        kwargs={"event": event},
+        daemon=True,
+        name=f"resume-{run.run_id}",
+    )
+    t.start()
+    return True
 
 
 def make_session_name(workflow_name: str, repo: str, issue_id: str) -> str:
@@ -147,6 +182,80 @@ def run_workflow(
     return success
 
 
+def resume_workflow(
+    run: WorkflowRun,
+    workflow: Workflow,
+    event: dict | None = None,
+    timeout: int = 3600,
+    interactive: bool = True,
+) -> bool:
+    """Resume a suspended workflow from its await step.
+
+    Restores the variable context and session, then continues execution
+    from the step after the one that suspended.
+    """
+    session_name = run.session_name
+    issue_id = run.issue_id
+    repo = run.repo
+    cwd = run.cwd
+    step_idx = run.suspended_at_step
+    started_at = time.time()
+
+    registry = get_registry()
+    registry.update(session_name, status="running", phase=f"resuming")
+
+    ctx = VariableContext()
+    ctx.scopes = run.variable_scopes
+
+    if event:
+        ctx.set_scope("event", event.get("data", {}))
+
+    run.status = "running"
+    run.await_event = ""
+    run.suspended_at_step = -1
+    run.save()
+
+    _emit_lifecycle_event("engineer/workflow.resumed", {
+        "issue_id": issue_id,
+        "workflow": workflow.name,
+        "run_id": run.run_id,
+        "resume_step": workflow.steps[step_idx].name if step_idx < len(workflow.steps) else "end",
+        "text": f"Workflow {workflow.name} resumed for {issue_id}",
+    })
+
+    success = asyncio.run(
+        _run_workflow_async(
+            workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
+            issue_id, session_name, registry, ctx, {}, timeout, interactive,
+            start_step=step_idx,
+        )
+    )
+
+    duration = time.time() - started_at
+    if success:
+        run.status = "completed"
+        run.completed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        _emit_lifecycle_event("engineer/workflow.completed", {
+            "issue_id": issue_id,
+            "workflow": workflow.name,
+            "duration": round(duration, 1),
+            "text": f"Workflow {workflow.name} completed for {issue_id} in {duration:.0f}s",
+        }, blocking=True)
+    else:
+        run.status = "failed"
+        _emit_lifecycle_event("engineer/workflow.failed", {
+            "issue_id": issue_id,
+            "workflow": workflow.name,
+            "text": f"Workflow {workflow.name} failed for {issue_id}",
+        }, blocking=True)
+
+    run.save()
+    registry.mark_done(session_name)
+    log.info(f"Resumed workflow {workflow.name} {'completed' if success else 'failed'} "
+             f"in {duration:.0f}s")
+    return success
+
+
 async def _run_workflow_async(
     workflow: Workflow,
     task: str,
@@ -159,6 +268,7 @@ async def _run_workflow_async(
     requested_by: dict,
     timeout: int,
     interactive: bool = True,
+    start_step: int = 0,
 ) -> bool:
     """Async core: one ClaudeSDKClient session for all steps."""
     from claude_agent_sdk import (
@@ -231,7 +341,7 @@ async def _run_workflow_async(
         registry.update(session_name, status="running",
                         session_id=saved_id or "")
 
-        step_idx = 0
+        step_idx = start_step
         failed_step = ""
 
         while step_idx < len(workflow.steps):
@@ -250,10 +360,35 @@ async def _run_workflow_async(
                 step_idx += 1
                 continue
 
-            # Await step — suspend
+            # Await step — suspend and persist state for resume
             if step.await_event:
-                log.info(f"Await step {step.name}: suspended")
+                log.info(f"Await step {step.name}: suspending, waiting for '{step.await_event}'")
                 registry.update(session_name, status="waiting", phase=step.name)
+
+                run = WorkflowRun.create(workflow.name, {"data": {"issue_id": issue_id}})
+                run.status = "waiting"
+                run.suspended_at_step = step_idx + 1
+                run.await_event = step.await_event
+                run.session_name = session_name
+                run.variable_scopes = ctx.scopes
+                run.repo = repo
+                run.cwd = cwd
+                run.issue_id = issue_id
+                run.save()
+
+                _emit_lifecycle_event("engineer/workflow.suspended", {
+                    "issue_id": issue_id,
+                    "workflow": workflow.name,
+                    "step": step.name,
+                    "await_event": step.await_event,
+                    "run_id": run.run_id,
+                    "text": f"Workflow suspended at {step.name}, waiting for '{step.await_event}'",
+                })
+
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
                 return True
 
             # Prompt step — inject into the persistent session

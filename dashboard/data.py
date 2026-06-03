@@ -8,13 +8,13 @@ import os
 from pathlib import Path
 
 from modastack.config import GLOBAL_CONFIG_DIR
-from modastack.sdk import get_registry, ACTIVITY_DIR
+from modastack.sdk import get_registry, SessionRegistry
 from modastack.workflow.state import WorkflowRun
 from modastack.workflow.schema import load_workflow
 
 EVENTS_PATH = Path.home() / ".modastack" / "manager" / "events.jsonl"
 DECISIONS_PATH = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
-ACTIVITY_PATH = ACTIVITY_DIR / "activity.jsonl"
+ACTIVITY_PATH = SessionRegistry.log_path("moda-manager")
 PID_PATH = GLOBAL_CONFIG_DIR / "modastack.pid"
 MODASTACK_LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
 
@@ -107,7 +107,7 @@ def _activity_snippet(session: str, length: int = 120) -> str:
     Only scans the tail of the log — the latest response is near the end,
     and these files are polled on the async /api/status path.
     """
-    log_path = ACTIVITY_DIR / "logs" / f"{session}.jsonl"
+    log_path = SessionRegistry.log_path(session)
     for line in reversed(_tail_lines(log_path, 200)):
         try:
             entry = json.loads(line)
@@ -161,7 +161,7 @@ def read_modastack_log(limit: int = 200) -> list[str]:
 
 
 def get_conversation_log(limit: int = 50, session: str = "moda-manager") -> list[dict]:
-    log_path = ACTIVITY_DIR / "logs" / f"{session}.jsonl"
+    log_path = SessionRegistry.log_path(session)
     if not log_path.exists():
         return []
     lines = log_path.read_text().strip().splitlines()

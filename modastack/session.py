@@ -185,7 +185,7 @@ def capture(issue_id: str, lines: int = 80) -> str:
 
 
 def detect_state(issue_id: str) -> dict:
-    """Determine session state (sub-agent or legacy tmux).
+    """Determine session state (sub-agent or tmux).
 
     Checks sub-agents first, falls back to tmux pane analysis.
     """
@@ -201,7 +201,6 @@ def detect_state(issue_id: str) -> dict:
     except ImportError:
         pass
 
-    # Legacy tmux fallback
     name = _session_name(issue_id)
     if not has_session(name):
         return {"state": "exited"}
@@ -253,7 +252,7 @@ def list_sessions() -> list[str]:
     """List all active engineer sessions (tmux + sub-agents). Returns issue IDs."""
     sessions = set()
 
-    # Check tmux sessions (legacy, may still have some running)
+    # Check tmux sessions
     result = subprocess.run(
         [TMUX, "list-sessions", "-F", "#{session_name}"],
         capture_output=True, text=True,

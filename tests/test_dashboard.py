@@ -196,10 +196,10 @@ def test_logs_endpoint(client, tmp_path, monkeypatch):
 
 def test_activity_snippet(tmp_path, monkeypatch):
     from modastack import sdk
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
-    monkeypatch.setattr(data, "ACTIVITY_DIR", tmp_path)
-    (logs_dir / "eng-7-implement.jsonl").write_text(
+    monkeypatch.setattr(sdk, "SESSION_DIR", tmp_path)
+    session_dir = tmp_path / "eng-7-implement"
+    session_dir.mkdir()
+    (session_dir / "log.jsonl").write_text(
         json.dumps({"event": "UserPromptSubmit", "text": "go"}) + "\n"
         + json.dumps({"event": "response", "text": "Working on it\nstep two"}) + "\n"
         + json.dumps({"event": "Stop"}) + "\n"

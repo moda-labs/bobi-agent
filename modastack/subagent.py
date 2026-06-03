@@ -5,8 +5,8 @@ registry. Sessions survive restarts and can be resumed, interacted with
 from the dashboard, or cancelled.
 
 Two execution modes:
-  - run_phase(): fire-and-forget async (legacy, used by old engine)
-  - run_phase_blocking(): synchronous, blocks until completion (new executor)
+  - run_phase(): fire-and-forget async
+  - run_phase_blocking(): synchronous, blocks until completion
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ InputHandler = Callable[[str, dict[str, Any]], str]
 log = logging.getLogger(__name__)
 
 ROLES_DIR = Path(__file__).parent.parent / "roles" / "engineer" / "process"
-HANDOFF_DIR = Path.home() / ".modastack" / "handoffs"
 
 PHASE_TIMEOUT = {
     "pickup": 1800,
@@ -99,9 +98,11 @@ def _build_prompt(phase: str, issue_id: str, context: str = "", cwd: str = "") -
 
     if context:
         parts.append(context)
+    session_name = _session_name(issue_id, phase)
+    handoff_path = SessionRegistry.handoff_path(session_name, phase)
     parts.append(
-        f"After completing this phase, update the handoff file at "
-        f"{HANDOFF_DIR / f'{issue_id.lower()}.md'} with your results."
+        f"After completing this phase, write your handoff file at "
+        f"`{handoff_path}` with your results."
     )
     return "\n\n".join(parts)
 

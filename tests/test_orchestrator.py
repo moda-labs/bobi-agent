@@ -14,8 +14,10 @@ from modastack.workflow.schema import (
 )
 from modastack.workflow.orchestrator import (
     _build_step_prompt, _read_handoff, _validate_handoff,
-    run_workflow, make_session_name,
+    run_workflow, resume_workflow, try_resume_for_event,
+    make_session_name,
 )
+from modastack.workflow.state import WorkflowRun
 
 
 # ---------------------------------------------------------------------------
@@ -320,3 +322,101 @@ class TestRunWorkflow:
         name1 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")
         name2 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "43")
         assert name1 != name2
+
+
+# ---------------------------------------------------------------------------
+# Await / resume
+# ---------------------------------------------------------------------------
+
+class TestAwaitStep:
+    def _mock_asyncio_run(self, workflow, **kwargs):
+        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("modastack.workflow.orchestrator.save_session_id"), \
+             patch("modastack.workflow.orchestrator.log_activity"), \
+             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+                 ClaudeSDKClient=lambda opts: FakeClient(),
+                 ClaudeAgentOptions=MagicMock,
+                 AssistantMessage=FakeAssistantMessage,
+                 ResultMessage=FakeResultMessage,
+                 TextBlock=FakeTextBlock,
+             )}):
+            mock_reg.return_value = MagicMock()
+            return run_workflow(workflow, **kwargs)
+
+    def test_await_suspends_workflow(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="spec", prompt="write spec"),
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+        assert result is True
+
+        run = WorkflowRun.find_waiting("approval")
+        assert run is not None
+        assert run.status == "waiting"
+        assert run.await_event == "approval"
+        assert run.suspended_at_step == 2
+        assert run.session_name == "wf-t-r-1"
+        assert run.issue_id == "1"
+
+    def test_resume_continues_from_suspended_step(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+
+        run = WorkflowRun.create("t", {"data": {"issue_id": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {"input": {"task": "t", "repo": "r", "issue_id": "1"}}
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.issue_id = "1"
+        run.save()
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="spec", prompt="write spec"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+
+        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("modastack.workflow.orchestrator.save_session_id"), \
+             patch("modastack.workflow.orchestrator.log_activity"), \
+             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+                 ClaudeSDKClient=lambda opts: FakeClient(),
+                 ClaudeAgentOptions=MagicMock,
+                 AssistantMessage=FakeAssistantMessage,
+                 ResultMessage=FakeResultMessage,
+                 TextBlock=FakeTextBlock,
+             )}):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        reloaded = WorkflowRun.load(run.run_id)
+        assert reloaded.status == "completed"
+
+    def test_find_waiting_returns_none_when_no_match(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        assert WorkflowRun.find_waiting("approval") is None
+
+    def test_find_waiting_filters_by_issue(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+
+        run = WorkflowRun.create("t", {"data": {"issue_id": "42"}})
+        run.status = "waiting"
+        run.await_event = "approval"
+        run.save()
+
+        assert WorkflowRun.find_waiting("approval", "42") is not None
+        assert WorkflowRun.find_waiting("approval", "99") is None
