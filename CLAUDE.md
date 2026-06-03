@@ -152,15 +152,18 @@ roles/                            # All skill/prompt content (no Python)
 
 Linear states: Todo → In Progress → In Review → Done (+ Blocked)
 
-The manager routes based on events:
+The manager matches incoming events against workflow trigger descriptions
+(natural language conditions) to decide what to do:
 
-| Event | Action |
+| Condition | Action |
 |---|---|
-| New issue with agent label | spawn tmux session + inject `/pickup`, move to In Progress |
-| Worker state change | read handoff, inject next skill |
-| PR merged | move to Done |
-| Changes requested | inject `/feedback` into session |
-| Human replied | inject answer into tmux session |
+| Issue assigned that needs code changes | run `issue-lifecycle` workflow |
+| Engineer session state changes | read handoff, run next workflow step |
+| Pull request merged | run `pr-merged` workflow |
+| Reviewer requests changes | run `pr-feedback` workflow |
+| CI check fails | run `build-failure` workflow |
+| Engineer session stalls | run `stall-recovery` workflow |
+| Human replied | inject answer into engineer session |
 
 Internal phases (triage, spec, implement) happen within "In Progress".
 The handoff file (`~/.modastack/handoffs/<issue_id>.md`) tracks which

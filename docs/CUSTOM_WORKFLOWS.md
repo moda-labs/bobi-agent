@@ -45,11 +45,8 @@ The repo's version takes priority over the built-in for events from that repo.
 ```yaml
 name: my-workflow        # unique name
 version: 1               # version number
-trigger:
-  event: task.assigned   # event type to match
-  filter:                # optional — narrow which events trigger this
-    labels: [research]   # only trigger on issues with this label
-    repo: my-repo        # only trigger for this repo
+trigger: >
+  When an issue with a "research" label is assigned for investigation.
 
 nodes:
   step_one:
@@ -66,9 +63,16 @@ nodes:
     when: "'yes' in ${{step_one.stdout}}"  # conditional execution
 ```
 
+The `trigger` field is a natural language description of when the workflow
+should run. The manager LLM evaluates incoming events against these
+descriptions and picks the most specific matching workflow. You can express
+label filters, repo filters, or any other condition in plain English.
+
 ### Event types
 
-These are the events the engine can trigger on:
+Events are normalized to these types internally. You don't need to reference
+them in triggers — just describe the condition in natural language — but they
+are useful for understanding what data is available in the `${{event.*}}` scope:
 
 | Event | Source | Data fields |
 |-------|--------|-------------|
@@ -250,10 +254,8 @@ context:
 # .modastack/workflows/docs-update.yaml
 name: docs-update
 version: 1
-trigger:
-  event: task.assigned
-  filter:
-    labels: [docs]
+trigger: >
+  When an issue with a "docs" label is assigned for documentation updates.
 
 nodes:
   edit:
@@ -291,7 +293,8 @@ modastack workflow status
 ## Tips
 
 - **Filter by label** to route different task types to different workflows.
-  Use `trigger.filter.labels: [content]` and label issues accordingly.
+  Mention the label in the trigger description (e.g. `When an issue with a
+  "content" label is assigned`) and label issues accordingly.
 
 - **The prompt node is your escape hatch.** The `inject` text doesn't have
   to be a slash command — it can be any instruction. Write prose describing

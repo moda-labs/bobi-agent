@@ -1,5 +1,6 @@
 name: pr-merged
-trigger: pr.merged
+trigger: >
+  When a pull request is merged.
 description: >
   Post-merge cleanup. Clean up the worktree and close the issue
   after a PR is merged.

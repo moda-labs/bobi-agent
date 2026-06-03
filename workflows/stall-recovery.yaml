@@ -1,5 +1,6 @@
 name: stall-recovery
-trigger: worker.stalled
+trigger: >
+  When an engineer session appears stalled or unresponsive.
 description: >
   Recover a stalled engineer session. Investigate what went wrong
   and either resume or report the issue.

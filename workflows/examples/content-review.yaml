@@ -14,10 +14,8 @@
 
 name: content-review
 version: 1
-trigger:
-  event: task.assigned
-  filter:
-    labels: [content]
+trigger: >
+  When an issue with a "content" label is assigned for editing or publishing.
 
 nodes:
   spawn_editor:

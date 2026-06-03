@@ -1,5 +1,7 @@
 name: adhoc
-trigger: any
+trigger: >
+  For any ad-hoc task, investigation, question, or one-off fix that
+  doesn't match a more specific workflow.
 description: >
   Open-ended task with no structured lifecycle. Use for investigations,
   questions, one-off fixes, research, or anything that doesn't fit a
