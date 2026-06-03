@@ -194,14 +194,6 @@ def run(**kwargs):
     dispatcher.load_all_workflows()
     log.info(f"Loaded {len(dispatcher.workflows)} workflow(s)")
 
-    from modastack.manager.session import inject as inject_text
-    workflow_menu = dispatcher.format_workflow_menu()
-    if _wait_for_manager(timeout=60):
-        inject_text(workflow_menu)
-        log.info("Injected workflow menu into manager")
-    else:
-        log.warning("Manager not ready — skipped workflow menu injection")
-
     event_client = None
     if config.event_server_url and config.event_server_api_key:
         from .event_client import EventServerClient

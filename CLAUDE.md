@@ -166,26 +166,18 @@ The manager matches incoming events against workflow trigger descriptions
 | Human replied | inject answer into engineer session |
 
 Internal phases (triage, spec, implement) happen within "In Progress".
-The handoff file (`~/.modastack/handoffs/<issue_id>.md`) tracks which
-sub-phase the agent is in. Linear doesn't need to know.
+Per-step handoff files in the session directory track sub-phase state.
+Linear doesn't need to know.
 
 ## Handoff contract
 
-Engineers write `~/.modastack/handoffs/<issue_id>.md`:
+Each workflow step writes a handoff file at
+`~/.modastack/sessions/<session-name>/handoff-<step>.yaml`:
 
 ```yaml
----
-issue_id: AGD-12
-title: Add rate limiting
-worktree: /path/to/worktree
-branch: agent/agd-12
-phase: spec_complete
-spec_url: https://github.com/org/repo/issues/12
 complexity: medium
----
-
-## Status
-Spec written to issue description.
+needs_spec: true
+notes: "Requires API changes"
 ```
 
 Each agent reads the handoff, does its work, then goes idle. The
