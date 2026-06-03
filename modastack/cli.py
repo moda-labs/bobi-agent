@@ -1820,8 +1820,13 @@ def _post_event(event_type: str, data: dict) -> bool:
 
 
 @main.command("self-update")
-def self_update():
-    """Pull latest from origin/main and reinstall modastack."""
+@click.option("--no-restart", is_flag=True, help="Skip automatic restart after update")
+def self_update(no_restart):
+    """Pull latest from origin/main, reinstall, and restart.
+
+    The restart happens via systemd (or a detached process) so the
+    update completes cleanly even when called from inside the manager.
+    """
     log = logging.getLogger(__name__)
 
     old_version = (REPO_ROOT / "VERSION").read_text().strip()
@@ -1851,37 +1856,29 @@ def self_update():
         click.echo("Already up to date.")
         return
 
-    # Check for dirty working tree
+    # Check for dirty working tree — reset to remote instead of stashing
     dirty = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=REPO_ROOT, capture_output=True, text=True,
     ).stdout.strip()
 
-    stashed = False
     if dirty:
-        click.echo("Working tree has uncommitted changes — stashing...")
+        click.echo("Working tree has uncommitted changes — resetting to origin/main...")
         subprocess.run(
             ["git", "stash", "push", "-m", "modastack-self-update-backup"],
             cwd=REPO_ROOT, check=True,
         )
-        stashed = True
 
     # Save rollback state
-    pre_head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    ).stdout.strip()
-
     import datetime
     UPDATE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     UPDATE_STATE_PATH.write_text(json.dumps({
-        "pre_update_head": pre_head,
+        "pre_update_head": local_head,
         "pre_update_version": old_version,
         "updated_at": datetime.datetime.now().isoformat(),
-        "stashed": stashed,
     }))
 
-    # Pull
+    # Reset to remote HEAD (avoids merge conflicts from SCP'd files)
     remote_version = subprocess.run(
         ["git", "show", "origin/main:VERSION"],
         cwd=REPO_ROOT, capture_output=True, text=True,
@@ -1892,14 +1889,11 @@ def self_update():
     ).stdout.strip()
     click.echo(f"Updating {old_version} → {remote_version} ({commit_count} commit(s))...")
     result = subprocess.run(
-        ["git", "pull", "--ff-only", "origin", "main"],
+        ["git", "reset", "--hard", "origin/main"],
         cwd=REPO_ROOT, capture_output=True, text=True,
     )
     if result.returncode != 0:
-        click.echo(f"Pull failed (history diverged?): {result.stderr.strip()}", err=True)
-        click.echo("Run `modastack rollback` to restore, or reconcile manually.")
-        if stashed:
-            subprocess.run(["git", "stash", "pop"], cwd=REPO_ROOT)
+        click.echo(f"Reset failed: {result.stderr.strip()}", err=True)
         sys.exit(1)
 
     # Reinstall
@@ -1913,20 +1907,42 @@ def self_update():
         click.echo("Run `modastack rollback` to restore.")
         sys.exit(1)
 
-    # Pop stash if needed
-    if stashed:
-        click.echo("Restoring stashed changes...")
-        subprocess.run(["git", "stash", "pop"], cwd=REPO_ROOT)
+    # Verify the wrapper is a valid Python script (not a shell self-loop)
+    wrapper = Path(REPO_ROOT) / ".venv" / "bin" / "modastack"
+    if wrapper.exists():
+        first_line = wrapper.read_text().splitlines()[0]
+        if "python" not in first_line:
+            click.echo(f"WARNING: wrapper script looks corrupted ({first_line})", err=True)
+            click.echo("Reinstalling to fix...")
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", ".", "--force-reinstall", "--quiet"],
+                cwd=REPO_ROOT, capture_output=True, text=True,
+            )
 
     new_version = (REPO_ROOT / "VERSION").read_text().strip()
-    click.echo(f"Updated to v{new_version}")
+    click.echo(f"Updated to v{new_version} ({remote_head[:8]})")
     log.info(f"Self-update complete: {old_version} → {new_version}")
 
-    # Re-run install to update the global wrapper if it exists
-    global_wrapper = Path.home() / ".local" / "bin" / "modastack"
-    if global_wrapper.exists():
-        ctx = click.get_current_context()
-        ctx.invoke(install)
+    if no_restart:
+        click.echo("Skipping restart (--no-restart). Run `modastack restart` manually.")
+        return
+
+    # Restart via systemd or detached process — never from inside our own process
+    if _has_systemd_service():
+        click.echo("Restarting via systemd...")
+        subprocess.Popen(
+            ["systemctl", "--user", "restart", "modastack"],
+            start_new_session=True,
+        )
+        click.echo("Restart queued. The manager will be back shortly.")
+    else:
+        click.echo("Restarting...")
+        subprocess.Popen(
+            [sys.executable, "-m", "modastack.cli", "restart"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        click.echo("Restart queued.")
 
 
 @main.command()

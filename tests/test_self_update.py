@@ -50,12 +50,17 @@ class TestSelfUpdateCommand:
         assert result.exit_code == 0
         assert "Already up to date" in result.output
 
+    @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_update_happy_path(self, mock_run, tmp_path):
+    def test_update_happy_path(self, mock_run, mock_popen, tmp_path):
         version_file = tmp_path / "VERSION"
         version_file.write_text("0.2.1")
+        # Create a valid wrapper so verification passes
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "modastack").write_text("#!/usr/bin/python3\n")
 
-        call_count = {"pull": 0}
+        call_count = {"reset": 0}
 
         def side_effect(cmd, **kwargs):
             mock = MagicMock()
@@ -71,32 +76,41 @@ class TestSelfUpdateCommand:
                 mock.stdout = ""
             elif cmd == ["git", "rev-parse", "HEAD"]:
                 mock.stdout = "abc123"
-            elif "pull" in cmd:
-                call_count["pull"] += 1
+            elif "rev-parse" in cmd and "origin/main" in cmd:
+                mock.stdout = "def456"
+            elif "reset" in cmd and "--hard" in cmd:
+                call_count["reset"] += 1
                 version_file.write_text("0.3.0")
             elif "pip" in cmd:
                 pass
+            elif "rev-list" in cmd:
+                mock.stdout = "3"
             return mock
 
         mock_run.side_effect = side_effect
 
         runner = CliRunner()
         with patch("modastack.cli.REPO_ROOT", tmp_path), \
-             patch("modastack.cli.UPDATE_STATE_PATH", tmp_path / "update_state.json"):
-            result = runner.invoke(main, ["self-update"])
+             patch("modastack.cli.UPDATE_STATE_PATH", tmp_path / "update_state.json"), \
+             patch("modastack.cli._has_systemd_service", return_value=False):
+            result = runner.invoke(main, ["self-update", "--no-restart"])
 
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         assert "Updated to v0.3.0" in result.output
-        assert call_count["pull"] == 1
+        assert call_count["reset"] == 1
 
         state = json.loads((tmp_path / "update_state.json").read_text())
         assert state["pre_update_head"] == "abc123"
         assert state["pre_update_version"] == "0.2.1"
 
+    @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_update_with_dirty_tree_stashes(self, mock_run, tmp_path):
+    def test_update_with_dirty_tree_stashes(self, mock_run, mock_popen, tmp_path):
         version_file = tmp_path / "VERSION"
         version_file.write_text("0.2.1")
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "modastack").write_text("#!/usr/bin/python3\n")
 
         stash_calls = []
 
@@ -114,26 +128,29 @@ class TestSelfUpdateCommand:
                 mock.stdout = "M some_file.py\n"
             elif "stash" in cmd and "push" in cmd:
                 stash_calls.append("push")
-            elif "stash" in cmd and "pop" in cmd:
-                stash_calls.append("pop")
             elif cmd == ["git", "rev-parse", "HEAD"]:
                 mock.stdout = "abc123"
-            elif "pull" in cmd:
+            elif "rev-parse" in cmd and "origin/main" in cmd:
+                mock.stdout = "def456"
+            elif "reset" in cmd and "--hard" in cmd:
                 version_file.write_text("0.3.0")
+            elif "rev-list" in cmd:
+                mock.stdout = "3"
             return mock
 
         mock_run.side_effect = side_effect
 
         runner = CliRunner()
         with patch("modastack.cli.REPO_ROOT", tmp_path), \
-             patch("modastack.cli.UPDATE_STATE_PATH", tmp_path / "update_state.json"):
-            result = runner.invoke(main, ["self-update"])
+             patch("modastack.cli.UPDATE_STATE_PATH", tmp_path / "update_state.json"), \
+             patch("modastack.cli._has_systemd_service", return_value=False):
+            result = runner.invoke(main, ["self-update", "--no-restart"])
 
         assert result.exit_code == 0
-        assert stash_calls == ["push", "pop"]
+        assert stash_calls == ["push"]
 
     @patch("subprocess.run")
-    def test_update_ff_only_failure_aborts(self, mock_run, tmp_path):
+    def test_update_reset_failure_aborts(self, mock_run, tmp_path):
         version_file = tmp_path / "VERSION"
         version_file.write_text("0.2.1")
 
@@ -151,9 +168,13 @@ class TestSelfUpdateCommand:
                 mock.stdout = ""
             elif cmd == ["git", "rev-parse", "HEAD"]:
                 mock.stdout = "abc123"
-            elif "pull" in cmd:
+            elif "rev-parse" in cmd and "origin/main" in cmd:
+                mock.stdout = "def456"
+            elif "reset" in cmd and "--hard" in cmd:
                 mock.returncode = 1
-                mock.stderr = "fatal: Not possible to fast-forward"
+                mock.stderr = "fatal: Could not reset"
+            elif "rev-list" in cmd:
+                mock.stdout = "3"
             return mock
 
         mock_run.side_effect = side_effect
@@ -164,7 +185,7 @@ class TestSelfUpdateCommand:
             result = runner.invoke(main, ["self-update"])
 
         assert result.exit_code != 0
-        assert "rollback" in result.output.lower()
+        assert "reset failed" in result.output.lower()
 
 
 class TestRollbackCommand:
@@ -274,8 +295,12 @@ class TestSelfUpdateFetchFailure:
                 mock.stdout = ""
             elif cmd == ["git", "rev-parse", "HEAD"]:
                 mock.stdout = "abc123"
-            elif "pull" in cmd:
+            elif "rev-parse" in cmd and "origin/main" in cmd:
+                mock.stdout = "def456"
+            elif "reset" in cmd and "--hard" in cmd:
                 version_file.write_text("0.3.0")
+            elif "rev-list" in cmd:
+                mock.stdout = "3"
             elif "pip" in cmd:
                 mock.returncode = 1
                 mock.stderr = "ERROR: Could not install"
