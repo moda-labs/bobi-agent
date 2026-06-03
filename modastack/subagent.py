@@ -532,6 +532,14 @@ def spawn_adhoc(
     return result
 
 
+def _launch_detached(script: str, args: list[str], log_file: Path) -> None:
+    """Launch a detached subprocess that survives parent exit."""
+    cmd = [sys.executable, "-c", script, *args]
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_file, "a") as lf:
+        sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
+
+
 def spawn_adhoc_background(
     cwd: str,
     task: str,
@@ -549,25 +557,37 @@ def spawn_adhoc_background(
     short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
     issue_id = name or _parse_issue_number(task) or f"adhoc-{short_hash}"
 
-    args = json.dumps({
+    args_json = json.dumps({
         "cwd": cwd, "task": task, "timeout": timeout,
         "requested_by": requested_by or {},
     })
-    cmd = [
-        sys.executable, "-c",
+    script = (
         "import json, sys; from modastack.subagent import spawn_adhoc; "
-        f"spawn_adhoc(**json.loads(sys.argv[1]))",
-        args,
-    ]
-
-    log_dir = Path.home() / ".modastack" / "manager" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"eng-{issue_id}-adhoc.jsonl"
-
-    with open(log_file, "a") as lf:
-        sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
-
+        "spawn_adhoc(**json.loads(sys.argv[1]))"
+    )
+    log_file = Path.home() / ".modastack" / "manager" / "logs" / f"eng-{issue_id}-adhoc.jsonl"
+    _launch_detached(script, [args_json], log_file)
     return f"eng-{issue_id}"
+
+
+def launch_workflow_background(name: str, event: dict) -> str:
+    """Start a workflow as a detached subprocess and return immediately.
+
+    The workflow executor runs synchronously in the subprocess (wait=True)
+    so node state is persisted. The subprocess survives parent exit.
+    """
+    event_json = json.dumps(event)
+    script = (
+        "import json, sys; "
+        "from modastack.workflow.triggers import WorkflowDispatcher; "
+        "d = WorkflowDispatcher(); d.load_all_workflows(); "
+        "r = d.run_by_name(sys.argv[1], json.loads(sys.argv[2]), wait=True); "
+        "print(f'{sys.argv[1]} {r.status}')"
+    )
+    issue_id = event.get("data", {}).get("issue_id", "unknown")
+    log_file = Path.home() / ".modastack" / "workflow" / "logs" / f"{name}-{issue_id}.log"
+    _launch_detached(script, [name, event_json], log_file)
+    return f"wf-{name}-{issue_id}"
 
 
 # ---------------------------------------------------------------------------

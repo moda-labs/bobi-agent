@@ -6,6 +6,7 @@ For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 import asyncio
 import tempfile
 import shutil
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -259,48 +260,93 @@ class TestAgentLifecycle:
         loop.close()
 
 
-class TestSpawnBackground:
-    """Test that spawn_adhoc_background launches a detached subprocess."""
+class TestLaunchDetached:
+    """Test the shared _launch_detached helper."""
 
     @patch("modastack.subagent.sp.Popen")
-    def test_returns_session_name_with_issue_id(self, mock_popen):
-        from modastack.subagent import spawn_adhoc_background
-        name = spawn_adhoc_background(cwd="/tmp/test", task="Fix issue #42")
-        assert name == "eng-42"
-        mock_popen.assert_called_once()
-
-    @patch("modastack.subagent.sp.Popen")
-    def test_returns_adhoc_hash_without_issue(self, mock_popen):
-        from modastack.subagent import spawn_adhoc_background
-        name = spawn_adhoc_background(cwd="/tmp/test", task="do something")
-        assert name.startswith("eng-adhoc-")
-        mock_popen.assert_called_once()
-
-    @patch("modastack.subagent.sp.Popen")
-    def test_subprocess_is_detached(self, mock_popen):
-        from modastack.subagent import spawn_adhoc_background
-        spawn_adhoc_background(cwd="/tmp/test", task="Fix issue #1")
+    def test_uses_start_new_session(self, mock_popen):
+        from modastack.subagent import _launch_detached
+        _launch_detached("print('hi')", [], Path("/tmp/test.log"))
         _, kwargs = mock_popen.call_args
         assert kwargs.get("start_new_session") is True
 
     @patch("modastack.subagent.sp.Popen")
-    def test_subprocess_calls_spawn_adhoc(self, mock_popen):
-        from modastack.subagent import spawn_adhoc_background
-        spawn_adhoc_background(cwd="/tmp/repo", task="Fix #5", timeout=600)
-        cmd = mock_popen.call_args[0][0]
-        assert "spawn_adhoc" in cmd[2]
-        assert '"/tmp/repo"' in cmd[3] or "/tmp/repo" in cmd[3]
+    def test_creates_log_dir(self, mock_popen, tmp_path):
+        from modastack.subagent import _launch_detached
+        log_file = tmp_path / "nested" / "dir" / "test.log"
+        _launch_detached("print('hi')", [], log_file)
+        assert log_file.parent.exists()
 
     @patch("modastack.subagent.sp.Popen")
-    def test_passes_requested_by(self, mock_popen):
+    def test_passes_args(self, mock_popen):
+        from modastack.subagent import _launch_detached
+        _launch_detached("import sys; print(sys.argv)", ["a", "b"], Path("/tmp/t.log"))
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[-2:] == ["a", "b"]
+
+
+class TestSpawnBackground:
+    """Test that spawn_adhoc_background launches a detached subprocess."""
+
+    @patch("modastack.subagent._launch_detached")
+    def test_returns_session_name_with_issue_id(self, mock_launch):
+        from modastack.subagent import spawn_adhoc_background
+        name = spawn_adhoc_background(cwd="/tmp/test", task="Fix issue #42")
+        assert name == "eng-42"
+        mock_launch.assert_called_once()
+
+    @patch("modastack.subagent._launch_detached")
+    def test_returns_adhoc_hash_without_issue(self, mock_launch):
+        from modastack.subagent import spawn_adhoc_background
+        name = spawn_adhoc_background(cwd="/tmp/test", task="do something")
+        assert name.startswith("eng-adhoc-")
+        mock_launch.assert_called_once()
+
+    @patch("modastack.subagent._launch_detached")
+    def test_script_calls_spawn_adhoc(self, mock_launch):
+        from modastack.subagent import spawn_adhoc_background
+        spawn_adhoc_background(cwd="/tmp/repo", task="Fix #5", timeout=600)
+        script = mock_launch.call_args[0][0]
+        assert "spawn_adhoc" in script
+
+    @patch("modastack.subagent._launch_detached")
+    def test_passes_requested_by(self, mock_launch):
         from modastack.subagent import spawn_adhoc_background
         req = {"from": "Alice", "channel": "C1"}
         spawn_adhoc_background(cwd="/tmp/test", task="Fix #1", requested_by=req)
-        cmd = mock_popen.call_args[0][0]
-        args_json = cmd[3]
+        args = mock_launch.call_args[0][1]
         import json
-        args = json.loads(args_json)
-        assert args["requested_by"] == req
+        parsed = json.loads(args[0])
+        assert parsed["requested_by"] == req
+
+
+class TestLaunchWorkflowBackground:
+    """Test that launch_workflow_background launches a detached subprocess."""
+
+    @patch("modastack.subagent._launch_detached")
+    def test_returns_session_name(self, mock_launch):
+        from modastack.subagent import launch_workflow_background
+        name = launch_workflow_background("issue-lifecycle", {"data": {"issue_id": "42"}})
+        assert name == "wf-issue-lifecycle-42"
+        mock_launch.assert_called_once()
+
+    @patch("modastack.subagent._launch_detached")
+    def test_script_uses_dispatcher(self, mock_launch):
+        from modastack.subagent import launch_workflow_background
+        launch_workflow_background("build-failure", {"data": {"issue_id": "1"}})
+        script = mock_launch.call_args[0][0]
+        assert "WorkflowDispatcher" in script
+        assert "run_by_name" in script
+
+    @patch("modastack.subagent._launch_detached")
+    def test_passes_name_and_event_as_args(self, mock_launch):
+        from modastack.subagent import launch_workflow_background
+        event = {"data": {"issue_id": "99", "repo": "moda-labs/jobtack"}}
+        launch_workflow_background("issue-lifecycle", event)
+        args = mock_launch.call_args[0][1]
+        assert args[0] == "issue-lifecycle"
+        import json
+        assert json.loads(args[1]) == event
 
 
 class TestEngineIntegration:

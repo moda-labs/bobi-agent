@@ -1464,47 +1464,6 @@ def workflow_validate(path):
         raise SystemExit(1)
 
 
-@workflow.command("run")
-@click.argument("name")
-@click.option("--repo", default=None, help="Repo (org/name or path)")
-@click.option("--issue", default=None, help="Issue ID or URL")
-@click.option("--title", default=None, help="Issue title")
-@click.option("--event-json", default=None, help="Full event JSON (overrides other options)")
-def workflow_run(name, repo, issue, title, event_json):
-    """Run a named workflow with event context.
-
-    Usage:
-        modastack workflow run issue-lifecycle --issue 42 --repo moda-labs/jobtack
-        modastack workflow run build-failure --event-json '{"type":"ci.failed",...}'
-    """
-    from .workflow.triggers import WorkflowDispatcher
-
-    dispatcher = WorkflowDispatcher()
-    dispatcher.load_all_workflows()
-
-    if event_json:
-        event = json.loads(event_json)
-    else:
-        event = {
-            "type": "cli.trigger",
-            "source": "cli",
-            "data": {},
-        }
-        if issue:
-            event["data"]["issue_id"] = issue
-        if repo:
-            event["data"]["repo"] = repo
-        if title:
-            event["data"]["title"] = title
-
-    try:
-        run = dispatcher.run_by_name(name, event, wait=False)
-    except ValueError as e:
-        click.echo(str(e), err=True)
-        raise SystemExit(1)
-
-    click.echo(f"Workflow '{name}' started (run {run.run_id}). "
-               f"Progress via engineer lifecycle events.")
 
 
 main.add_command(workflow)
@@ -1670,48 +1629,93 @@ main.add_command(monitor)
 
 @main.command()
 @click.option("--repo", default=None, help="Repo path or registered name")
-@click.option("--task", required=True, help="Task description for the engineer / check")
+@click.option("--task", default=None, help="Task description for the engineer")
+@click.option("--workflow", "-w", default=None, help="Run a named workflow instead of an ad-hoc task")
+@click.option("--issue", default=None, help="Issue ID (for workflows)")
+@click.option("--title", default=None, help="Issue title (for workflows)")
+@click.option("--event-json", default=None, help="Full event JSON (overrides --issue/--title)")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
-@click.option("--non-interactive", "--check", "non_interactive", is_flag=True,
-              help="Run a one-shot, read-only check: constrained prompt, capture "
-                   "the result as JSON, exit. No conversation, no changes.")
+@click.option("--wait", is_flag=True, help="Block until the agent completes")
 @click.option("--post-event", "post_event", default=None,
-              help="If a non-interactive check reports a finding, post a synthetic "
-                   "event of this type to the event bus (e.g. monitor/deploy.down).")
+              help="Post this event type on completion (for --wait checks)")
 @click.option("--requested-by", "requested_by", default=None,
-              help="JSON identity of who requested this work (e.g. the Slack user "
-                   "and thread), so completion notices route back to them. Example: "
-                   '\'{"from":"Alice","user_id":"U1","channel":"C1","thread_ts":"123"}\'')
-def spawn(repo, task, timeout, non_interactive, post_event, requested_by):
-    """Spawn an ad-hoc engineer agent, or a non-interactive check, in a repo.
+              help='JSON identity of requester, e.g. \'{"from":"Alice","channel":"C1"}\'')
+def agent(repo, task, workflow, issue, title, event_json, timeout, wait, post_event, requested_by):
+    """Launch an agent — ad-hoc task or workflow.
 
-    Usage:
-        modastack spawn --repo moda-labs/jobtack --task "Fix the login bug"
-        modastack spawn --repo ~/dev/myrepo --task "Investigate CI failure"
-        modastack spawn --non-interactive --task "Check prod URL returns 200"
-        modastack spawn --check --post-event monitor/deploy.down \\
-            --repo jobtack --task "Check https://jobtack.app returns 200"
+    Ad-hoc:
+        modastack agent --repo jobtack --task "Fix the login bug"
+
+    Workflow:
+        modastack agent --workflow issue-lifecycle --repo jobtack --issue 42
+
+    Blocking check:
+        modastack agent --wait --task "Check prod URL returns 200"
     """
+    _dispatch_agent(repo=repo, task=task, workflow=workflow, issue=issue,
+                    title=title, event_json=event_json, timeout=timeout,
+                    wait=wait, post_event=post_event, requested_by=requested_by)
+
+
+@main.command(hidden=True)
+@click.option("--repo", default=None)
+@click.option("--task", required=True)
+@click.option("--timeout", default=3600, type=int)
+@click.option("--non-interactive", "--check", "non_interactive", is_flag=True)
+@click.option("--post-event", "post_event", default=None)
+@click.option("--requested-by", "requested_by", default=None)
+def spawn(repo, task, timeout, non_interactive, post_event, requested_by):
+    """Backwards-compatible alias for 'modastack agent'."""
+    _dispatch_agent(repo=repo, task=task, workflow=None, issue=None,
+                    title=None, event_json=None, timeout=timeout,
+                    wait=non_interactive, post_event=post_event,
+                    requested_by=requested_by)
+
+
+def _dispatch_agent(*, repo, task, workflow, issue, title, event_json,
+                    timeout, wait, post_event, requested_by):
+    """Shared dispatch logic for the agent and spawn commands."""
     from .workflow.actions import _resolve_repo_path
 
-    if repo:
-        try:
-            cwd = _resolve_repo_path(repo)
-        except FileNotFoundError:
-            if Path(repo).expanduser().is_dir():
-                cwd = str(Path(repo).expanduser().resolve())
-            else:
-                click.echo(f"Repo not found: {repo}", err=True)
-                raise SystemExit(1)
-    elif non_interactive:
-        # A check just needs a working directory to run read-only commands in.
-        cwd = os.getcwd()
-    else:
-        click.echo("--repo is required (except for --non-interactive checks)", err=True)
+    if task and workflow:
+        click.echo("Specify --task or --workflow, not both.", err=True)
+        raise SystemExit(1)
+    if not task and not workflow:
+        click.echo("Specify --task or --workflow.", err=True)
         raise SystemExit(1)
 
-    if non_interactive:
+    # --- Workflow mode ---
+    if workflow:
+        from .subagent import launch_workflow_background
+
+        if not issue and not event_json:
+            click.echo("--workflow requires --issue or --event-json.", err=True)
+            raise SystemExit(1)
+
+        if event_json:
+            event = json.loads(event_json)
+        else:
+            event = {"type": "cli.trigger", "source": "cli", "data": {}}
+            if issue:
+                event["data"]["issue_id"] = issue
+            if repo:
+                event["data"]["repo"] = repo
+            if title:
+                event["data"]["title"] = title
+
+        session_name = launch_workflow_background(workflow, event)
+        click.echo(f"Workflow started: {session_name}")
+        return
+
+    # --- Wait / check mode ---
+    if wait:
+        cwd = _resolve_repo(repo) if repo else os.getcwd()
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
+        return
+
+    # --- Ad-hoc mode (default) ---
+    cwd = _resolve_repo(repo)
+    if not cwd:
         return
 
     requester: dict = {}
@@ -1728,12 +1732,25 @@ def spawn(repo, task, timeout, non_interactive, post_event, requested_by):
             raise SystemExit(1)
 
     from .subagent import spawn_adhoc_background
-
     session_name = spawn_adhoc_background(
         cwd=cwd, task=task, timeout=timeout, requested_by=requester,
     )
-    click.echo(f"Engineer spawned: {session_name}")
-    click.echo("Completion will arrive as an engineer/session.completed event.")
+    click.echo(f"Agent started: {session_name}")
+
+
+def _resolve_repo(repo: str | None) -> str | None:
+    """Resolve a repo flag to a local path."""
+    if not repo:
+        click.echo("--repo is required.", err=True)
+        raise SystemExit(1)
+    from .workflow.actions import _resolve_repo_path
+    try:
+        return _resolve_repo_path(repo)
+    except FileNotFoundError:
+        if Path(repo).expanduser().is_dir():
+            return str(Path(repo).expanduser().resolve())
+        click.echo(f"Repo not found: {repo}", err=True)
+        raise SystemExit(1)
 
 
 def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> None:

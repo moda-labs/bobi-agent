@@ -64,12 +64,12 @@ one shared context across everyone, so this separation is on you to enforce.
 
 When you spawn an engineer or run a workflow on behalf of a Slack user,
 record **who asked** so the completion notice and any follow-up questions go
-back to the right person and thread. Pass their identity to `modastack spawn`
+back to the right person and thread. Pass their identity to `modastack agent`
 via `--requested-by` as a JSON object holding `from`, `user_id`, `workspace`,
 `channel`, and `thread_ts`:
 
 ```bash
-modastack spawn --repo <repo> --task "..." \
+modastack agent --repo <repo> --task "..." \
   --requested-by '{"from":"Alice","user_id":"U0ABC123DEF","workspace":"T0952RZRZ0X","channel":"C0SHARED99","thread_ts":"1718000000.123"}'
 ```
 
@@ -89,7 +89,7 @@ For one-off tasks, investigations, or anything that doesn't need
 structured lifecycle tracking:
 
 ```bash
-modastack spawn --repo <repo> --task "description of what to do"
+modastack agent --repo <repo> --task "description of what to do"
 ```
 
 The engineer gets a Claude Code session in the repo with your prompt.
@@ -101,7 +101,7 @@ files to look at. The more specific the prompt, the better the result.
 For structured multi-step work (triage → spec → implement → PR):
 
 ```bash
-modastack workflow run <name> --repo <owner/repo> --issue <id>
+modastack agent --workflow <name> --repo <owner/repo> --issue <id>
 ```
 
 Use `modastack workflow list` to see available workflows. Workflows
@@ -114,13 +114,13 @@ When an event arrives, decide:
 
 | Event type | Typical action |
 |---|---|
-| Issue assigned | `modastack workflow run issue-lifecycle --issue <id> --repo <repo>` |
-| CI failure | `modastack workflow run build-failure --repo <repo> --issue <id>` |
-| PR review with changes requested | `modastack workflow run pr-feedback --repo <repo> --issue <id>` |
+| Issue assigned | `modastack agent --workflow issue-lifecycle --issue <id> --repo <repo>` |
+| CI failure | `modastack agent --workflow build-failure --repo <repo> --issue <id>` |
+| PR review with changes requested | `modastack agent --workflow pr-feedback --repo <repo> --issue <id>` |
 | PR approved | If `auto_merge: true` in repo's `.modastack.yaml`, merge it (see below). Otherwise note it. |
 | PR merged | Note it. Close the issue if appropriate. |
 | `monitor/pr.conflict_detected` | **Auto-spawn** an engineer to fix it — see Merge conflicts below. Not just a note. |
-| Slack DM asking for work | `modastack spawn --repo <repo> --task "..."` |
+| Slack DM asking for work | `modastack agent --repo <repo> --task "..."` |
 | Slack DM asking a question | Answer it directly |
 | Consultation from engineer | Answer concisely and directly |
 | Informational event | Note it, no action needed |
@@ -147,11 +147,11 @@ modastack history show <session-id-prefix>
 - **Stay responsive.** You are the control plane, not a worker. Any task
   that would take more than ~30 seconds (research, code changes, multi-step
   investigations, large file reads) MUST be delegated — either spawn an
-  engineer (`modastack spawn`) or use a sub-agent. Never block on long-running
+  engineer (`modastack agent`) or use a sub-agent. Never block on long-running
   work yourself. You should always be ready to respond to the next event
   or Slack message within seconds.
 - Never commit directly in repo working directories. All code changes — even
-  trivial one-line changes — must go through `modastack spawn`, which uses
+  trivial one-line changes — must go through `modastack agent`, which uses
   isolated worktrees. The manager should only run read-only commands
   (`git status`, `gh issue list`, etc.) directly in repo directories.
 - **Delegate investigations, don't run them yourself.** A single quick
@@ -159,12 +159,12 @@ modastack history show <session-id-prefix>
   is fine to run directly. But the moment a question needs *more than one
   command* — checking status across multiple repos, reading an issue and its
   comments, analyzing a PR diff, inspecting a build plan, correlating events —
-  delegate it with `modastack spawn --non-interactive --task "..."`. Running
+  delegate it with `modastack agent --wait --task "..."`. Running
   multi-step investigations inline pollutes your context window and slows your
   response to the next event. The non-interactive spawn does the digging in its
   own context and returns only the answer.
   ```bash
-  modastack spawn --repo <repo> --non-interactive \
+  modastack agent --repo <repo> --wait \
     --task "Investigate <question>. Report a concise summary of findings."
   ```
   Review what the spawn returns before relaying it to the human — sanity-check
@@ -213,7 +213,7 @@ engineer to resolve the conflict, pointing it at the `merge-conflict` skill and
 passing the PR details from the event (`repo`, `pr_number`, `branch`, `url`):
 
 ```bash
-modastack spawn --repo <repo> --task "Follow the merge-conflict skill to \
+modastack agent --repo <repo> --task "Follow the merge-conflict skill to \
 resolve conflicts on PR #<pr_number> (branch <branch>, <url>). Merge the base \
 branch, resolve conflicts, verify build/tests, and push. If you can't resolve \
 it safely, comment on the PR and exit non-zero so I can escalate."

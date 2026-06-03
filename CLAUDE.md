@@ -62,8 +62,8 @@ Linear project and skills look correct.
 
 ```bash
 modastack start                # start event loop
-modastack spawn --repo R --task T  # spawn an ad-hoc engineer agent
-modastack workflow run <name>  # run a named workflow
+modastack agent --repo R --task T   # launch an ad-hoc engineer agent
+modastack agent --workflow W --repo R --issue I  # run a workflow
 modastack workflow list        # list available workflows
 modastack monitor list         # list background monitors (merged across tiers)
 modastack monitor add <name>   # add a monitor (--interval, --description, --repo)
@@ -221,7 +221,7 @@ same queue webhooks use — so the manager routes it like any other event.
 A monitor with a `check:` field uses a native runner in
 `modastack/monitors/checks.py` (deterministic, deduplicated). Without one,
 the scheduler launches a short-lived, non-interactive check agent out-of-band
-(`modastack spawn --non-interactive --post-event <event>`): it performs the
+(`modastack agent --wait --task "..." --post-event <event>`): it performs the
 check from the `description`, captures the result, and posts an event back to
 the bus *only* if it finds something. The manager never sees the check
 process — only the resulting finding — so its context stays clean and
