@@ -997,19 +997,32 @@ def _ensure_event_server(path: Path, global_config: GlobalConfig) -> None:
     import httpx
 
     if global_config.event_server_deployment_id and global_config.event_server_api_key:
+        subs_to_add = []
         repo_full = _get_repo_full_name(path)
-        if not repo_full:
+        if repo_full:
+            subs_to_add.append(repo_full)
+
+        # Subscribe to Linear team events if this repo uses Linear
+        try:
+            from .config import RepoConfig
+            repo_config = RepoConfig.from_file(path)
+            if repo_config.task_tracking == "linear" and repo_config.project:
+                subs_to_add.append(f"linear:{repo_config.project}")
+        except FileNotFoundError:
+            pass
+
+        if not subs_to_add:
             return
         try:
             resp = httpx.put(
                 f"{global_config.event_server_url}/deployments/{global_config.event_server_deployment_id}/subscriptions",
-                json={"add": [repo_full]},
+                json={"add": subs_to_add},
                 headers={"Authorization": f"Bearer {global_config.event_server_api_key}"},
                 timeout=10,
             )
             if resp.status_code == 200:
                 data = resp.json()
-                click.echo(f"  Event server: subscribed to {repo_full} ({len(data['subscriptions'])} total)")
+                click.echo(f"  Event server: subscribed to {', '.join(subs_to_add)} ({len(data['subscriptions'])} total)")
             else:
                 click.echo(f"  Event server: failed to add subscription ({resp.status_code})")
         except Exception as e:

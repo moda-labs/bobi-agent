@@ -43,6 +43,7 @@ nodes:
     action: ticket.move
     params:
       issue_id: ${{event.issue_id}}
+      linear_id: ${{event.linear_id}}
       state: In Progress
       repo: ${{event.repo}}
     depends_on: [spawn_engineer]
@@ -53,6 +54,7 @@ nodes:
     action: ticket.comment
     params:
       issue_id: ${{event.issue_id}}
+      linear_id: ${{event.linear_id}}
       body: "Assigned to engineer. Starting triage."
       repo: ${{event.repo}}
     depends_on: [spawn_engineer]
@@ -159,6 +161,7 @@ nodes:
     action: ticket.comment
     params:
       issue_id: ${{event.issue_id}}
+      linear_id: ${{event.linear_id}}
       body: "Spec ready for review: ${{spec.spec_url}}"
       repo: ${{event.repo}}
     depends_on: [spec]
@@ -242,6 +245,7 @@ nodes:
     action: ticket.move
     params:
       issue_id: ${{event.issue_id}}
+      linear_id: ${{event.linear_id}}
       state: In Review
       repo: ${{event.repo}}
     depends_on: [prepare_pr]
@@ -252,6 +256,7 @@ nodes:
     action: ticket.comment
     params:
       issue_id: ${{event.issue_id}}
+      linear_id: ${{event.linear_id}}
       body: "PR ready for review: ${{prepare_pr.pr_url}}"
       repo: ${{event.repo}}
     depends_on: [prepare_pr]

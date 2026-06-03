@@ -281,6 +281,7 @@ def _normalize_linear(event_type: str, payload: dict) -> dict | None:
         "type": event_type, "source": "linear",
         "data": {
             "issue_id": data.get("identifier", ""),
+            "linear_id": data.get("id", ""),
             "title": data.get("title", ""),
             "state": (data.get("state", {}) or {}).get("name", ""),
             "team_key": (data.get("team", {}) or {}).get("key", ""),
