@@ -22,6 +22,7 @@ import truststore
 truststore.inject_into_ssl()
 
 from modastack.config import GlobalConfig, GLOBAL_CONFIG_DIR
+from modastack.manager.events.slack_responder import _markdown_to_slack
 from modastack.manager.session import start_or_resume, is_alive, detect_state
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,28 @@ PID_PATH = GLOBAL_CONFIG_DIR / "modastack.pid"
 
 def _cleanup_pid():
     PID_PATH.unlink(missing_ok=True)
+
+
+def _post_dm(token: str, channel: str, text: str) -> None:
+    """Post a manager text response to the configured Slack DM channel."""
+    if not text.strip():
+        return
+    text = _markdown_to_slack(text)
+    payload = json.dumps({"channel": channel, "text": text}).encode()
+    try:
+        req = urllib.request.Request(
+            "https://slack.com/api/chat.postMessage",
+            data=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+        if result.get("ok"):
+            log.info(f"Slack reply sent to {channel}")
+        else:
+            log.warning(f"Slack DM error: {result.get('error')}")
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        log.warning(f"Slack DM failed: {e}")
 
 
 def _notify_slack(config: GlobalConfig, text: str) -> None:
@@ -66,16 +89,20 @@ def _wait_for_manager(timeout: int = 300) -> bool:
 def _drain_loop():
     """Drain the event queue and inject batched events into the manager."""
     from .event_client import event_queue, format_event_for_manager
-    from .slack_responder import SlackResponder
     from modastack.manager.session import inject, detect_state, set_response_callback
-
-    responder = SlackResponder()
 
     log.info("Drain loop waiting for manager to finish startup")
     if not _wait_for_manager():
         log.error("Manager never became ready — drain loop exiting")
         return
     log.info("Manager ready — drain loop active")
+
+    config = GlobalConfig.load()
+    dm_channel = config.slack_dm_channel
+    dm_token = config.slack_bot_token
+    if dm_channel and dm_token:
+        set_response_callback(lambda t: _post_dm(dm_token, dm_channel, t))
+        log.info(f"Streaming all manager output to Slack DM {dm_channel}")
 
     while True:
         event = event_queue.get()
@@ -100,12 +127,6 @@ def _drain_loop():
                 if not _wait_for_manager():
                     log.warning(f"Manager not ready after wait — dropping {len(group)} event(s)")
                     continue
-
-            if is_slack:
-                sg = list(group)
-                set_response_callback(lambda t, _sg=sg: responder.handle(_sg, t))
-            else:
-                set_response_callback(None)
 
             log.info(f"Injecting {len(group)} event(s)")
             inject(text)

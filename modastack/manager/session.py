@@ -96,7 +96,7 @@ async def _drain_turn() -> None:
     """Drain receive_response() for one turn until ResultMessage."""
     global _last_response, _state
 
-    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
 
     registry = get_registry()
     # Clear the previous turn's reply before draining. Otherwise a turn that
@@ -112,6 +112,9 @@ async def _drain_turn() -> None:
                 for block in msg.content:
                     if isinstance(block, TextBlock):
                         text_parts.append(block.text)
+                    elif isinstance(block, ToolUseBlock):
+                        tool_summary = f"{block.name}: {str(block.input)[:200]}"
+                        log_activity("tool_use", {"tool": block.name, "input": str(block.input)[:500]}, session=SESSION_NAME)
                 if text_parts:
                     _last_response = "\n".join(text_parts)
                     log_activity("response", {"text": _last_response[:500]}, session=SESSION_NAME)
