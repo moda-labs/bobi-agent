@@ -113,6 +113,57 @@ class TestSessionRegistry:
         r = SessionRegistry()
         assert len(r.list_all()) == 0
 
+    def test_save_merges_disk_entries_from_other_processes(self, tmp_path, monkeypatch):
+        """When a subprocess writes an entry to disk, the manager's save
+        must not clobber it — save should read-merge-write."""
+        registry_path = tmp_path / "registry.json"
+        monkeypatch.setattr("modastack.sdk.REGISTRY_PATH", registry_path)
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+
+        # Manager creates its registry with one entry
+        manager_reg = SessionRegistry()
+        manager_reg.register(SessionEntry(name="moda-manager", role="manager", status="idle"))
+
+        # Subprocess writes a second entry directly to disk (simulating
+        # a subprocess that loaded, registered, and saved independently)
+        disk = json.loads(registry_path.read_text())
+        disk["eng-70"] = {
+            "name": "eng-70", "role": "engineer", "issue_id": "70",
+            "phase": "adhoc", "status": "running", "session_id": "",
+            "title": "Fix conflicts", "repo": "moda-labs/memorize",
+            "cwd": "/tmp", "started_at": 0, "last_activity": 0,
+            "requested_by": {},
+        }
+        registry_path.write_text(json.dumps(disk))
+
+        # Manager saves again (e.g. drain complete → registry.update)
+        manager_reg.update("moda-manager", status="idle")
+
+        # eng-70 must survive the manager's save
+        final = json.loads(registry_path.read_text())
+        assert "eng-70" in final, "Subprocess entry was clobbered by manager save"
+        assert final["eng-70"]["status"] == "running"
+        assert "moda-manager" in final
+
+    def test_save_prefers_in_memory_over_disk_for_same_key(self, tmp_path, monkeypatch):
+        """If both in-memory and disk have the same key, in-memory wins."""
+        registry_path = tmp_path / "registry.json"
+        monkeypatch.setattr("modastack.sdk.REGISTRY_PATH", registry_path)
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+
+        reg = SessionRegistry()
+        reg.register(SessionEntry(name="eng-1", status="running"))
+
+        # Someone else writes a stale status to disk
+        disk = json.loads(registry_path.read_text())
+        disk["eng-1"]["status"] = "starting"
+        registry_path.write_text(json.dumps(disk))
+
+        # Our save should keep "running", not revert to "starting"
+        reg.update("eng-1", status="done")
+        final = json.loads(registry_path.read_text())
+        assert final["eng-1"]["status"] == "done"
+
 
 class TestSubagentLoop:
     def test_ensure_loop_creates_running_loop(self):

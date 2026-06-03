@@ -15,6 +15,8 @@ import asyncio
 import json
 import logging
 import re
+import subprocess as sp
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -528,6 +530,44 @@ def spawn_adhoc(
     _emit_session_finished(result, repo, issue_id, started_at,
                            requested_by=requested_by)
     return result
+
+
+def spawn_adhoc_background(
+    cwd: str,
+    task: str,
+    timeout: int = 3600,
+    name: str | None = None,
+    requested_by: dict | None = None,
+) -> str:
+    """Start an engineer agent as a detached subprocess and return immediately.
+
+    Returns the session name so the caller can reference it. The manager
+    learns about completion via engineer/session.completed events on the bus.
+    The subprocess survives manager restarts.
+    """
+    import hashlib
+    short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
+    issue_id = name or _parse_issue_number(task) or f"adhoc-{short_hash}"
+
+    args = json.dumps({
+        "cwd": cwd, "task": task, "timeout": timeout,
+        "requested_by": requested_by or {},
+    })
+    cmd = [
+        sys.executable, "-c",
+        "import json, sys; from modastack.subagent import spawn_adhoc; "
+        f"spawn_adhoc(**json.loads(sys.argv[1]))",
+        args,
+    ]
+
+    log_dir = Path.home() / ".modastack" / "manager" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"eng-{issue_id}-adhoc.jsonl"
+
+    with open(log_file, "a") as lf:
+        sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
+
+    return f"eng-{issue_id}"
 
 
 # ---------------------------------------------------------------------------

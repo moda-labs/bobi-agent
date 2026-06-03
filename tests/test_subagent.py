@@ -259,6 +259,50 @@ class TestAgentLifecycle:
         loop.close()
 
 
+class TestSpawnBackground:
+    """Test that spawn_adhoc_background launches a detached subprocess."""
+
+    @patch("modastack.subagent.sp.Popen")
+    def test_returns_session_name_with_issue_id(self, mock_popen):
+        from modastack.subagent import spawn_adhoc_background
+        name = spawn_adhoc_background(cwd="/tmp/test", task="Fix issue #42")
+        assert name == "eng-42"
+        mock_popen.assert_called_once()
+
+    @patch("modastack.subagent.sp.Popen")
+    def test_returns_adhoc_hash_without_issue(self, mock_popen):
+        from modastack.subagent import spawn_adhoc_background
+        name = spawn_adhoc_background(cwd="/tmp/test", task="do something")
+        assert name.startswith("eng-adhoc-")
+        mock_popen.assert_called_once()
+
+    @patch("modastack.subagent.sp.Popen")
+    def test_subprocess_is_detached(self, mock_popen):
+        from modastack.subagent import spawn_adhoc_background
+        spawn_adhoc_background(cwd="/tmp/test", task="Fix issue #1")
+        _, kwargs = mock_popen.call_args
+        assert kwargs.get("start_new_session") is True
+
+    @patch("modastack.subagent.sp.Popen")
+    def test_subprocess_calls_spawn_adhoc(self, mock_popen):
+        from modastack.subagent import spawn_adhoc_background
+        spawn_adhoc_background(cwd="/tmp/repo", task="Fix #5", timeout=600)
+        cmd = mock_popen.call_args[0][0]
+        assert "spawn_adhoc" in cmd[2]
+        assert '"/tmp/repo"' in cmd[3] or "/tmp/repo" in cmd[3]
+
+    @patch("modastack.subagent.sp.Popen")
+    def test_passes_requested_by(self, mock_popen):
+        from modastack.subagent import spawn_adhoc_background
+        req = {"from": "Alice", "channel": "C1"}
+        spawn_adhoc_background(cwd="/tmp/test", task="Fix #1", requested_by=req)
+        cmd = mock_popen.call_args[0][0]
+        args_json = cmd[3]
+        import json
+        args = json.loads(args_json)
+        assert args["requested_by"] == req
+
+
 class TestEngineIntegration:
     """Test that the workflow engine correctly uses sub-agents."""
 

@@ -50,6 +50,7 @@ class SessionEntry:
 class SessionRegistry:
     def __init__(self):
         self._entries: dict[str, SessionEntry] = {}
+        self._removed: set[str] = set()
         self._load()
 
     def _load(self) -> None:
@@ -65,6 +66,16 @@ class SessionRegistry:
 
     def _save(self) -> None:
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        # Merge with disk state so entries written by other processes
+        # (engineer subprocesses) aren't lost when we save.
+        if REGISTRY_PATH.exists():
+            try:
+                disk = json.loads(REGISTRY_PATH.read_text())
+                for name, raw in disk.items():
+                    if name not in self._entries and name not in self._removed:
+                        self._entries[name] = SessionEntry(**raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
         data = {name: asdict(entry) for name, entry in self._entries.items()}
         REGISTRY_PATH.write_text(json.dumps(data, indent=2))
 
@@ -84,6 +95,7 @@ class SessionRegistry:
 
     def remove(self, name: str) -> None:
         self._entries.pop(name, None)
+        self._removed.add(name)
         self._save()
 
     def get(self, name: str) -> SessionEntry | None:

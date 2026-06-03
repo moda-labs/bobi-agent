@@ -336,6 +336,7 @@ def inject_capture(
             _last_inject_error = f"manager did not finish within {timeout}s"
             log.error(f"Manager inject timed out after {timeout}s")
             future.cancel()
+            _state = "waiting_input"
             return False, ""
         except Exception as e:
             _last_inject_error = f"{type(e).__name__}: {e}"

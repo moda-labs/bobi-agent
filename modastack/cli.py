@@ -91,6 +91,32 @@ def main():
     )
 
 
+def _has_systemd_service() -> bool:
+    """Check if modastack is managed by a systemd user service."""
+    svc = Path.home() / ".config" / "systemd" / "user" / "modastack.service"
+    if not svc.exists():
+        return False
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-enabled", "modastack"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _systemctl(action: str) -> bool:
+    result = subprocess.run(
+        ["systemctl", "--user", action, "modastack"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        click.echo(f"systemctl {action} failed: {result.stderr.strip()}", err=True)
+        return False
+    return True
+
+
 @main.command()
 @click.option("--foreground", "-f", is_flag=True, help="Run in the foreground (default: daemonize)")
 def start(foreground):
@@ -100,6 +126,17 @@ def start(foreground):
         modastack start              # daemonize
         modastack start --foreground # run in foreground (for debugging)
     """
+    if not foreground and _has_systemd_service():
+        click.echo("Starting via systemd...")
+        if _systemctl("start"):
+            result = subprocess.run(
+                ["systemctl", "--user", "show", "modastack", "--property=MainPID", "--value"],
+                capture_output=True, text=True, timeout=5,
+            )
+            pid = result.stdout.strip()
+            click.echo(f"Modastack started (pid {pid}). Logs: {GLOBAL_CONFIG_DIR / 'modastack.log'}")
+        return
+
     pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
     if pid_path.exists():
         try:
@@ -111,8 +148,6 @@ def start(foreground):
             pid_path.unlink(missing_ok=True)
 
     if foreground:
-        # When daemonized, stdout/stderr go to the log file.
-        # Drop the StreamHandler to avoid double-logging.
         root = logging.getLogger()
         root.handlers = [h for h in root.handlers
                          if isinstance(h, logging.FileHandler)]
@@ -140,6 +175,11 @@ def stop(force):
         modastack stop
         modastack stop --force
     """
+    if _has_systemd_service() and not force:
+        click.echo("Stopping via systemd...")
+        _systemctl("stop")
+        return
+
     import signal
 
     pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
@@ -192,6 +232,17 @@ def restart():
     Usage:
         modastack restart
     """
+    if _has_systemd_service():
+        click.echo("Restarting via systemd...")
+        _systemctl("restart")
+        result = subprocess.run(
+            ["systemctl", "--user", "show", "modastack", "--property=MainPID", "--value"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pid = result.stdout.strip()
+        click.echo(f"Modastack restarted (pid {pid}). Logs: {GLOBAL_CONFIG_DIR / 'modastack.log'}")
+        return
+
     ctx = click.get_current_context()
     ctx.invoke(stop)
     ctx.invoke(start)
@@ -1572,17 +1623,13 @@ def spawn(repo, task, timeout, non_interactive, post_event, requested_by):
             click.echo("--requested-by must be valid JSON", err=True)
             raise SystemExit(1)
 
-    click.echo(f"Spawning engineer in {cwd}...")
+    from .subagent import spawn_adhoc_background
 
-    from .subagent import spawn_adhoc
-    result = spawn_adhoc(cwd=cwd, task=task, timeout=timeout,
-                         requested_by=requester)
-
-    if result.success:
-        click.echo(f"Completed in {result.duration_ms/1000:.0f}s (${result.total_cost_usd:.2f})")
-    else:
-        click.echo(f"Failed: {result.error}", err=True)
-        raise SystemExit(1)
+    session_name = spawn_adhoc_background(
+        cwd=cwd, task=task, timeout=timeout, requested_by=requester,
+    )
+    click.echo(f"Engineer spawned: {session_name}")
+    click.echo("Completion will arrive as an engineer/session.completed event.")
 
 
 def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> None:
