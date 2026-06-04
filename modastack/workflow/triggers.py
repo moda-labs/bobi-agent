@@ -28,11 +28,18 @@ class WorkflowDispatcher:
     def __init__(self):
         self.workflows: list[tuple[Workflow, str]] = []
 
-    def load_all_workflows(self):
+    def load_all_workflows(self, repo_path: Path | None = None):
         """Load workflows from all sources: repo-local, user, built-in defaults."""
-        config = GlobalConfig.load()
+        if repo_path is None:
+            from modastack.manager.session import get_default_session
+            session = get_default_session()
+            if session:
+                repo_path = session.repo_path
+            else:
+                config = GlobalConfig.load()
+                repo_path = config.repos[0] if config.repos else None
 
-        for repo_path in config.repos:
+        if repo_path:
             repo_wf_dir = repo_path / ".modastack" / "workflows"
             if repo_wf_dir.exists():
                 self._load_from(repo_wf_dir, source=str(repo_path))
