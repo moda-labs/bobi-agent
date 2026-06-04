@@ -2,7 +2,14 @@
 
 Event-driven AI engineering team. A persistent Claude Code manager monitors Linear, GitHub, Slack, and engineer sessions — assigning work, routing phases, answering questions, and communicating with humans.
 
-## Setup
+## Install
+
+```bash
+brew tap moda-labs/modastack
+brew install modastack
+```
+
+Works on macOS and Linux. For development, clone and install in editable mode:
 
 ```bash
 cd ~/dev/modastack
@@ -20,10 +27,8 @@ Do NOT guess or skip these steps.
 ### Step 1: Install
 
 ```bash
-cd ~/dev/modastack
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+brew tap moda-labs/modastack
+brew install modastack
 modastack init --non-interactive
 ```
 
@@ -228,6 +233,15 @@ the bus *only* if it finds something. The manager never sees the check
 process — only the resulting finding — so its context stays clean and
 responsive. Engineering-specific monitors (PR conflicts, stale PRs) are
 configured in `.modastack/monitors.yaml` — see this repo's own config.
+
+## Releasing
+
+1. Bump `version` in `pyproject.toml`
+2. `git tag v<version> && git push --tags`
+3. GitHub Actions publishes to PyPI and auto-updates the Homebrew formula
+
+The publish workflow (`.github/workflows/publish-pypi.yml`) triggers on `v*` tags.
+The Homebrew tap (`moda-labs/homebrew-modastack`) updates automatically via repository dispatch.
 
 ## Tests
 

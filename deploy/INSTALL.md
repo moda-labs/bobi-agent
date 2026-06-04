@@ -67,25 +67,43 @@ sudo apt update && sudo apt install -y gh
 npm install -g @anthropic-ai/claude-code
 ```
 
-## Step 3: Clone and install modastack
+## Step 3: Install modastack
+
+### Via Homebrew (recommended — macOS and Linux)
+
+```bash
+brew tap moda-labs/modastack
+brew install modastack
+```
+
+### Via PyPI
+
+```bash
+pip install modastack
+# or
+uv tool install modastack
+```
+
+### From source (development)
 
 ```bash
 INSTALL_DIR="${MODASTACK_DIR:-$HOME/dev/modastack}"
 mkdir -p "$(dirname "$INSTALL_DIR")"
 
-# Clone or update
 if [ -d "$INSTALL_DIR/.git" ]; then
     git -C "$INSTALL_DIR" pull origin main --ff-only
 else
     git clone https://github.com/moda-labs/modastack.git "$INSTALL_DIR"
 fi
 
-# Python environment
 python3 -m venv "$INSTALL_DIR/.venv"
 source "$INSTALL_DIR/.venv/bin/activate"
 pip install -e "$INSTALL_DIR" -q
+```
 
-# Verify
+### Verify
+
+```bash
 modastack --version
 ```
 
@@ -399,19 +417,11 @@ Print a summary of what was installed:
 
 Tell the user their next step:
 ```
-# Activate the modastack environment
-source ~/dev/modastack/.venv/bin/activate
-
 # Register a repo for modastack to manage
 modastack register ~/path/to/your-repo
 
 # Check status
 modastack status
-```
-
-Suggest they add to their shell profile:
-```bash
-export PATH="$HOME/dev/modastack/.venv/bin:$PATH"
 ```
 
 ---

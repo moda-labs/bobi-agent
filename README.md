@@ -156,23 +156,21 @@ Key enforcement points:
 
 ## Install
 
-Paste this into Claude Code (or any AI coding agent):
-
+```bash
+brew tap moda-labs/modastack
+brew install modastack
+modastack init
 ```
-Follow the instructions at https://raw.githubusercontent.com/moda-labs/modastack/main/deploy/INSTALL.md to install modastack on this machine.
-```
 
-The agent will install all dependencies, walk you through auth and configuration, and debug any issues. Works on macOS and Linux.
-
-### Manual setup
-
-If you prefer to install without an agent:
+Works on macOS and Linux via [Homebrew](https://brew.sh). Also available on [PyPI](https://pypi.org/project/modastack/):
 
 ```bash
-curl -sL https://raw.githubusercontent.com/moda-labs/modastack/main/deploy/install.sh | bash
+pip install modastack
+# or
+uv tool install modastack
 ```
 
-Or step by step:
+### Development setup
 
 ```bash
 git clone https://github.com/moda-labs/modastack.git ~/dev/modastack
@@ -181,6 +179,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 modastack init
+```
+
+### Agent-assisted install
+
+Paste this into Claude Code (or any AI coding agent):
+
+```
+Follow the instructions at https://raw.githubusercontent.com/moda-labs/modastack/main/deploy/INSTALL.md to install modastack on this machine.
 ```
 
 ### Per-repo setup
@@ -414,6 +420,12 @@ roles/                            # All skill/prompt content (no Python)
 | Event-driven consumer | Decouples event sources from the manager. The centralized event server aggregates webhooks from all repos |
 | GitHub Issues default | No API key needed — uses `gh` CLI auth. Linear available as an option for teams already using it |
 | Centralized config | All repo settings in `~/.modastack/config.yaml`. No modastack files in target repos except `.modastack.yaml` |
+
+## Releasing
+
+1. Bump `version` in `pyproject.toml`
+2. `git tag v<version> && git push --tags`
+3. GitHub Actions publishes to PyPI and auto-updates the Homebrew formula
 
 ## Tests
 
