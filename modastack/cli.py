@@ -987,12 +987,13 @@ def setup(repo_path: str, task_tracking: str | None, project: str | None,
     if is_new_file:
         _open_config_pr(path)
 
-    # Auto-register in global config
+    # Auto-register in global config (legacy) and repos.json (discovery)
     global_config = GlobalConfig.load()
     if path not in global_config.repos:
         global_config.repos.append(path)
         global_config.save()
         click.echo("Registered.")
+    _register_repo_discovery(path)
 
     # Bootstrap task tracker
     if task_tracking == "linear":
@@ -1019,9 +1020,25 @@ def setup(repo_path: str, task_tracking: str | None, project: str | None,
     # Event server: register deployment and subscribe to this repo
     _ensure_event_server(path, global_config)
 
-    # Add worktrees/ to .gitignore (runtime state only — .modastack/ is tracked)
+    # Create .modastack/local.yaml with operator-specific config
+    from .config import LocalConfig
+    local = LocalConfig.load(path)
+    if linear_key and not local.credentials.get("linear_api_key"):
+        local.credentials["linear_api_key"] = linear_key
+    if global_config.event_server_deployment_id and not local.event_server_deployment_id:
+        local.event_server_url = global_config.event_server_url
+        local.event_server_deployment_id = global_config.event_server_deployment_id
+        local.event_server_api_key = global_config.event_server_api_key
+    if global_config.slack_bot_token and not local.slack_bot_token:
+        local.slack_bot_token = global_config.slack_bot_token
+    if global_config.slack_dm_channel and not local.slack_dm_channel:
+        local.slack_dm_channel = global_config.slack_dm_channel
+    local.save(path)
+    click.echo(f"Generated: {path / '.modastack' / 'local.yaml'}")
+
+    # Add local state to .gitignore
     gitignore_path = path / ".gitignore"
-    gitignore_entries = ["worktrees/"]
+    gitignore_entries = ["worktrees/", ".modastack/local.yaml", ".modastack/state/"]
     existing = gitignore_path.read_text() if gitignore_path.exists() else ""
     added = []
     for entry in gitignore_entries:
@@ -1122,6 +1139,24 @@ def _open_config_pr(path: Path) -> None:
 
     # Switch back to original branch
     _run("git", "checkout", original_branch)
+
+
+REPOS_JSON_PATH = GLOBAL_CONFIG_DIR / "repos.json"
+
+
+def _register_repo_discovery(path: Path) -> None:
+    """Append a repo to ~/.modastack/repos.json for discoverability."""
+    repos: list[str] = []
+    if REPOS_JSON_PATH.exists():
+        try:
+            repos = json.loads(REPOS_JSON_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    path_str = str(path.resolve())
+    if path_str not in repos:
+        repos.append(path_str)
+        REPOS_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+        REPOS_JSON_PATH.write_text(json.dumps(repos, indent=2) + "\n")
 
 
 def _get_repo_full_name(path: Path) -> str:
