@@ -1210,72 +1210,80 @@ def _ensure_github_app(path: Path, non_interactive: bool) -> None:
 
 
 def _ensure_event_server(path: Path, global_config: GlobalConfig) -> None:
-    """Register deployment with the event server if not already configured."""
+    """Register a per-repo deployment with the event server.
+
+    Each repo gets its own Cloudflare deployment with subscriptions
+    scoped to that repo's GitHub, Linear, and Slack event sources.
+    Credentials are stored in .modastack/local.yaml.
+    """
     import httpx
+    from .config import LocalConfig, RepoConfig
 
-    if global_config.event_server_deployment_id and global_config.event_server_api_key:
-        subs_to_add = []
-        repo_full = _get_repo_full_name(path)
-        if repo_full:
-            subs_to_add.append(repo_full)
+    local = LocalConfig.load(path)
 
-        # Subscribe to Linear team events if this repo uses Linear
-        try:
-            from .config import RepoConfig
-            repo_config = RepoConfig.from_file(path)
-            if repo_config.task_tracking == "linear" and repo_config.project:
-                subs_to_add.append(f"linear:{repo_config.project}")
-        except FileNotFoundError:
-            pass
+    # Build subscription keys for this repo
+    subscriptions: list[str] = []
+    repo_full = _get_repo_full_name(path)
+    if repo_full:
+        subscriptions.append(repo_full)
+    try:
+        repo_config = RepoConfig.from_file(path)
+        if repo_config.task_tracking == "linear" and repo_config.project:
+            subscriptions.append(f"linear:{repo_config.project}")
+        if repo_config.slack_workspace_id:
+            subscriptions.append(f"slack:{repo_config.slack_workspace_id}")
+    except FileNotFoundError:
+        pass
 
-        if not subs_to_add:
-            return
+    if not subscriptions:
+        click.echo("  No event sources detected — skipping event server registration")
+        return
+
+    server_url = local.event_server_url or global_config.event_server_url or EVENT_SERVER_URL
+
+    if local.event_server_deployment_id and local.event_server_api_key:
+        # Existing per-repo deployment — update subscriptions
         try:
             resp = httpx.put(
-                f"{global_config.event_server_url}/deployments/{global_config.event_server_deployment_id}/subscriptions",
-                json={"add": subs_to_add},
-                headers={"Authorization": f"Bearer {global_config.event_server_api_key}"},
+                f"{server_url}/deployments/{local.event_server_deployment_id}/subscriptions",
+                json={"add": subscriptions},
+                headers={"Authorization": f"Bearer {local.event_server_api_key}"},
                 timeout=10,
             )
             if resp.status_code == 200:
                 data = resp.json()
-                click.echo(f"  Event server: subscribed to {', '.join(subs_to_add)} ({len(data['subscriptions'])} total)")
+                click.echo(f"  Event server: subscribed to {', '.join(subscriptions)} ({len(data['subscriptions'])} total)")
             else:
                 click.echo(f"  Event server: failed to add subscription ({resp.status_code})")
         except Exception as e:
             click.echo(f"  Event server: failed to add subscription ({e})")
         return
 
-    # First-time registration
-    repo_full = _get_repo_full_name(path)
-    all_repos = []
-    for repo_path in global_config.repos:
-        name = _get_repo_full_name(repo_path)
-        if name:
-            all_repos.append(name)
-    if repo_full and repo_full not in all_repos:
-        all_repos.append(repo_full)
-
-    if not all_repos:
-        click.echo("  No GitHub repos detected — skipping event server registration")
-        return
-
-    click.echo(f"  Registering with event server...")
+    # New per-repo deployment
+    click.echo(f"  Registering {path.name} with event server...")
     import socket
     hostname = socket.gethostname()
     try:
         resp = httpx.post(
-            f"{EVENT_SERVER_URL}/deployments",
-            json={"name": hostname, "subscriptions": all_repos},
+            f"{server_url}/deployments",
+            json={"name": f"{hostname}-{path.name}", "subscriptions": subscriptions},
             timeout=10,
         )
         if resp.status_code == 201:
             data = resp.json()
-            global_config.event_server_url = EVENT_SERVER_URL
-            global_config.event_server_deployment_id = data["deployment_id"]
-            global_config.event_server_api_key = data["api_key"]
-            global_config.save()
-            click.echo(f"  Event server: registered ({len(all_repos)} repos)")
+            local.event_server_url = server_url
+            local.event_server_deployment_id = data["deployment_id"]
+            local.event_server_api_key = data["api_key"]
+            local.save(path)
+
+            # Also store in global config for backward compat
+            if not global_config.event_server_url:
+                global_config.event_server_url = server_url
+                global_config.event_server_deployment_id = data["deployment_id"]
+                global_config.event_server_api_key = data["api_key"]
+                global_config.save()
+
+            click.echo(f"  Event server: registered ({', '.join(subscriptions)})")
         else:
             click.echo(f"  Event server registration failed: {resp.status_code} {resp.text}")
     except Exception as e:
