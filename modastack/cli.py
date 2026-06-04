@@ -183,17 +183,14 @@ def start(foreground):
     state_dir = _repo_state_dir(repo_path)
     pid_path = state_dir / "manager.pid"
 
-    # Also check legacy PID path
-    legacy_pid = GLOBAL_CONFIG_DIR / "modastack.pid"
-    for p in [pid_path, legacy_pid]:
-        if p.exists():
-            try:
-                pid = int(p.read_text().strip())
-                os.kill(pid, 0)
-                click.echo(f"Modastack already running for {repo_path.name} (pid {pid}). Use `modastack restart`.")
-                return
-            except (ProcessLookupError, ValueError):
-                p.unlink(missing_ok=True)
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)
+            click.echo(f"Modastack already running for {repo_path.name} (pid {pid}). Use `modastack restart`.")
+            return
+        except (ProcessLookupError, ValueError):
+            pid_path.unlink(missing_ok=True)
 
     if foreground:
         root = logging.getLogger()
