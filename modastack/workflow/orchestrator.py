@@ -213,6 +213,7 @@ def resume_workflow(
     run.status = "running"
     run.await_event = ""
     run.suspended_at_step = -1
+    run.resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     run.save()
 
     _emit_lifecycle_event("engineer/workflow.resumed", {
