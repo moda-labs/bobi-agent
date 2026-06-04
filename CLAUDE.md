@@ -19,53 +19,12 @@ pip install -e .
 modastack init --non-interactive
 ```
 
-## First-time setup (agent guidance)
-
-When setting up dispatch for a user, you MUST ask them for information.
-Do NOT guess or skip these steps.
-
-### Step 1: Install
-
-```bash
-brew tap moda-labs/modastack
-brew install modastack
-modastack init --non-interactive
-```
-
-### Step 2: Setup the repo
-
-Ask the user TWO things:
-
-1. "What's your Linear API key? You can create one at
-   https://linear.app/settings/api → click 'Create key'."
-
-2. "What's your Linear project key? This is the prefix on your issue
-   IDs (e.g., if issues look like ENG-42, the key is ENG)."
-
-Then run:
-```bash
-modastack setup --linear-key <API_KEY> --linear-project <PROJECT_KEY>
-```
-
-This stores the API key per-project (in ~/.modastack/credentials.yaml,
-not in the repo) and registers the repo in ~/.modastack/config.yaml.
-
-### Step 3: Verify
-
-Show the user the registered repo entry and ask if the detected
-Linear project and skills look correct.
-
-### Important
-
-- NEVER guess the Linear project key — always ask
-- NEVER guess the Linear API key — always ask
-- Credentials are per-project, stored in ~/.modastack/credentials.yaml
-- All repo config lives in ~/.modastack/config.yaml (nothing in the target repo)
-
 ## Commands
 
 ```bash
 modastack start                # start event loop
+modastack stop                 # stop the running instance
+modastack restart              # stop and restart
 modastack agent --repo R --task T   # launch an ad-hoc engineer agent
 modastack agent --workflow W --repo R --issue I  # run a workflow
 modastack workflow list        # list available workflows
@@ -74,14 +33,15 @@ modastack monitor add <name>   # add a monitor (--interval, --description, --rep
 modastack monitor pause <name> # disable a monitor
 modastack monitor remove <name>  # remove a user-added monitor
 modastack status               # show active engineer sessions
+modastack engineers            # list active engineers
 modastack events               # show recent events from the bus
+modastack decisions            # show recent manager decisions
 modastack message "text"       # inject a message into the manager session
 modastack consult "question"   # ask the manager a question, block until response
+modastack log <session>        # show session transcript
 modastack init                 # initialize global config
-modastack setup [path]         # set up a repo — generate config, store credentials, register
-modastack register <target>    # register a repo (local path or org/repo)
-modastack repos                # list registered repos
-modastack doctor               # health-check /browse (Playwright, Chromium sandbox, daemon)
+modastack doctor               # system health check
+modastack dashboard            # start the web dashboard
 ```
 
 ## Architecture

@@ -137,7 +137,7 @@ modastack history show <session-id-prefix>
   the answer, then summarize it in your own words. Never paste a spawn's raw
   output straight to Slack.
 - Never self-assign issues.
-- Run `modastack setup <repo-path>` on new repos before assigning work.
+
 - Use curl for external APIs, not MCP/Venn tools.
 - Always respond to Slack DMs — you are having a conversation.
 - Consultations arrive prefixed with [CONSULTATION]. These are
@@ -160,13 +160,7 @@ Never make local changes to the modastack repo. If you find issues —
 bugs, missing features, prompt improvements — ask the user if you should
 open a GitHub issue for it instead.
 
-## Self-update
+## Updating
 
-When the user says "update modastack" (or similar):
-
-1. Tell the user you're updating and will be back shortly.
-2. Run `modastack self-update` to pull and reinstall.
-3. Restart via systemd (you can't restart yourself directly):
-   ```bash
-   systemctl --user restart modastack
-   ```
+modastack is installed via Homebrew. When the user says "update modastack",
+tell them to run `brew upgrade modastack`.
