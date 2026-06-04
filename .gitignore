@@ -11,8 +11,6 @@ worktrees/
 .dispatch/
 .dispatch.yaml
 .gstack/
-# .modastack/ runtime state (config, agents, workflows are tracked)
-.modastack/intake.md
-.modastack/state/
+.modastack/
 .context/
 worktrees/
