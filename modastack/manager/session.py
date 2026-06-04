@@ -16,405 +16,417 @@ import time
 from pathlib import Path
 from typing import Any
 
-from modastack.config import GlobalConfig
 from modastack.sdk import (
     get_cli_path, save_session_id, load_session_id, log_activity,
-    get_registry, SessionEntry,
+    get_registry, SessionEntry, SESSION_DIR,
 )
-
-PROMPT_HASH_PATH = Path.home() / ".modastack" / "sessions" / "prompt_hash"
 
 log = logging.getLogger(__name__)
 
-SESSION_NAME = "moda-manager"
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 MANAGER_BASE_PATH = _PROMPTS_DIR / "manager_base.md"
 
-_client: Any | None = None
-_loop: asyncio.AbstractEventLoop | None = None
-_thread: threading.Thread | None = None
-_ready = threading.Event()
-_keep_alive: asyncio.Event | None = None
-_last_response: str = ""
-_state: str = "stopped"
-_last_inject_error: str = ""
-# Serializes inject() across callers (event drain loop + workflow
-# consultation nodes run on different threads but share one SDK client).
-_inject_lock = threading.Lock()
-# Called from _drain_turn whenever the model emits text.  The consumer
-# sets this to post Slack replies as they arrive rather than reading
-# _last_response after the drain (which can return stale text when the
-# SDK yields a leftover ResultMessage from a previous turn).
-_response_callback: Any | None = None
 
+class ManagerSession:
+    """A single manager session bound to one repo."""
 
-def _load_manager_prompt() -> str:
-    core = MANAGER_BASE_PATH.read_text()
+    def __init__(self, repo_path: Path, session_name: str | None = None):
+        self.repo_path = repo_path
+        self.session_name = session_name or f"moda-mgr-{repo_path.name}"
+        self.cwd = str(repo_path)
 
-    # Load global user manager role prompt
-    global_mgr = Path.home() / ".modastack" / "manager.md"
-    if global_mgr.exists():
-        core += "\n\n" + global_mgr.read_text()
+        self._client: Any | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._ready = threading.Event()
+        self._keep_alive: asyncio.Event | None = None
+        self._last_response: str = ""
+        self._state: str = "stopped"
+        self._last_inject_error: str = ""
+        self._inject_lock = threading.Lock()
+        self._response_callback: Any | None = None
+        self._prompt_hash_path = SESSION_DIR / self.session_name / "prompt_hash"
 
-    # Load per-repo manager role prompts
-    try:
-        config = GlobalConfig.load()
-        for repo_path in config.repos:
-            repo_mgr = repo_path / ".modastack" / "manager.md"
-            if repo_mgr.exists():
-                core += f"\n\n## {repo_path.name} policies\n\n" + repo_mgr.read_text()
-    except Exception:
-        pass
+    def _load_manager_prompt(self) -> str:
+        core = MANAGER_BASE_PATH.read_text()
 
-    return core
+        # Load global user manager role prompt
+        global_mgr = Path.home() / ".modastack" / "manager.md"
+        if global_mgr.exists():
+            core += "\n\n" + global_mgr.read_text()
 
+        # Load this repo's manager role prompt
+        repo_mgr = self.repo_path / ".modastack" / "manager.md"
+        if repo_mgr.exists():
+            core += f"\n\n## {self.repo_path.name} policies\n\n" + repo_mgr.read_text()
 
-def _list_workflows() -> str:
-    try:
-        from modastack.workflow.triggers import WORKFLOWS_DIR
-        from modastack.workflow.schema import load_workflow
-        lines = []
-        for f in sorted(WORKFLOWS_DIR.glob("*.yaml")):
-            try:
-                wf = load_workflow(f)
-                lines.append(f"- {wf.name}: trigger={wf.trigger.event}, {len(wf.nodes)} nodes")
-            except Exception:
-                continue
-        return "\n".join(lines) if lines else "No workflows found."
-    except Exception:
-        return ""
+        return core
 
+    def _list_workflows(self) -> str:
+        try:
+            from modastack.workflow.triggers import WORKFLOWS_DIR, USER_WORKFLOWS_DIR
+            from modastack.workflow.schema import load_workflow
 
-def _build_startup_prompt() -> str:
-    prompt = _load_manager_prompt()
-    config = GlobalConfig.load()
-    repos = ", ".join(p.name for p in config.repos)
-    workflows = _list_workflows()
-    return (
-        f"You are the Modastack manager. "
-        f"You are managing these repos: {repos}. "
-        f"You receive ALL events and decide what to do with each one. "
-        f"Act directly using your tools.\n\n{prompt}\n\n"
-        f"## Available workflows\n\n{workflows}"
-    )
+            lines = []
+            sources = [WORKFLOWS_DIR]
+            if USER_WORKFLOWS_DIR.exists():
+                sources.append(USER_WORKFLOWS_DIR)
+            repo_wf = self.repo_path / ".modastack" / "workflows"
+            if repo_wf.exists():
+                sources.append(repo_wf)
 
+            seen = set()
+            for d in reversed(sources):
+                for f in sorted(d.glob("*.yaml")):
+                    if f.stem in seen:
+                        continue
+                    seen.add(f.stem)
+                    try:
+                        wf = load_workflow(f)
+                        lines.append(f"- {wf.name}: trigger={wf.trigger.event}, {len(wf.nodes)} nodes")
+                    except Exception:
+                        continue
+            return "\n".join(lines) if lines else "No workflows found."
+        except Exception:
+            return ""
 
-async def _drain_turn() -> None:
-    """Drain receive_response() for one turn until ResultMessage."""
-    global _last_response, _state
-
-    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
-
-    registry = get_registry()
-    # Clear the previous turn's reply before draining. Otherwise a turn that
-    # ends without emitting any assistant text (e.g. tool-only) leaves a stale
-    # response in place, and a consultation node reads the wrong answer.
-    _last_response = ""
-    _state_update("working")
-
-    try:
-        async for msg in _client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                text_parts = []
-                tool_parts = []
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        text_parts.append(block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        tool_input = str(block.input.get("command", block.input.get("description", "")))[:150] if isinstance(block.input, dict) else str(block.input)[:150]
-                        tool_parts.append(f"```{block.name}: {tool_input}```")
-                        log_activity("tool_use", {"tool": block.name, "input": str(block.input)[:500]}, session=SESSION_NAME)
-                if text_parts or tool_parts:
-                    combined = "\n".join(text_parts + tool_parts) if tool_parts else "\n".join(text_parts)
-                    _last_response = "\n".join(text_parts) if text_parts else ""
-                    log_activity("response", {"text": combined[:500]}, session=SESSION_NAME)
-                    if _response_callback and combined.strip():
-                        try:
-                            _response_callback(combined)
-                        except Exception as cb_err:
-                            log.warning(f"Response callback failed: {cb_err}")
-
-            elif isinstance(msg, ResultMessage):
-                save_session_id(SESSION_NAME, msg.session_id)
-                _state_update("waiting_input")
-                registry.update(SESSION_NAME, status="idle", session_id=msg.session_id)
-                log_activity("Stop", {"session_id": msg.session_id}, session=SESSION_NAME)
-    except Exception as e:
-        log.error(f"Drain failed ({type(e).__name__}): {e}")
-        _state = "error"
-        registry.update(SESSION_NAME, status="error")
-        if _keep_alive is not None:
-            _keep_alive.set()
-
-
-async def _run_manager() -> None:
-    global _client, _state, _keep_alive
-
-    from claude_agent_sdk import (
-        ClaudeAgentOptions,
-        ClaudeSDKClient,
-    )
-
-    saved_id = load_session_id(SESSION_NAME)
-
-    config = GlobalConfig.load()
-    cwd = str(Path(__file__).parent.parent)
-    if config.repos:
-        cwd = str(config.repos[0])
-
-    for attempt in range(2):
-        resume_id = saved_id if attempt == 0 else None
-
-        options = ClaudeAgentOptions(
-            cwd=cwd,
-            permission_mode="bypassPermissions",
-            cli_path=get_cli_path(),
-            resume=resume_id or None,
-            system_prompt={"type": "preset", "preset": "claude_code"},
-            strict_mcp_config=True,
+    def _build_startup_prompt(self) -> str:
+        prompt = self._load_manager_prompt()
+        workflows = self._list_workflows()
+        return (
+            f"You are the Modastack manager. "
+            f"You are managing repo: {self.repo_path.name}. "
+            f"You receive ALL events and decide what to do with each one. "
+            f"Act directly using your tools.\n\n{prompt}\n\n"
+            f"## Available workflows\n\n{workflows}"
         )
 
-        _client = ClaudeSDKClient(options)
+    async def _drain_turn(self) -> None:
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
 
-        startup_prompt = _build_startup_prompt() if not resume_id else None
+        registry = get_registry()
+        self._last_response = ""
+        self._state_update("working")
+
         try:
-            await _client.connect(startup_prompt)
-            break
+            async for msg in self._client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    text_parts = []
+                    tool_parts = []
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            text_parts.append(block.text)
+                        elif isinstance(block, ToolUseBlock):
+                            tool_input = str(block.input.get("command", block.input.get("description", "")))[:150] if isinstance(block.input, dict) else str(block.input)[:150]
+                            tool_parts.append(f"```{block.name}: {tool_input}```")
+                            log_activity("tool_use", {"tool": block.name, "input": str(block.input)[:500]}, session=self.session_name)
+                    if text_parts or tool_parts:
+                        combined = "\n".join(text_parts + tool_parts) if tool_parts else "\n".join(text_parts)
+                        self._last_response = "\n".join(text_parts) if text_parts else ""
+                        log_activity("response", {"text": combined[:500]}, session=self.session_name)
+                        if self._response_callback and combined.strip():
+                            try:
+                                self._response_callback(combined)
+                            except Exception as cb_err:
+                                log.warning(f"Response callback failed: {cb_err}")
+
+                elif isinstance(msg, ResultMessage):
+                    save_session_id(self.session_name, msg.session_id)
+                    self._state_update("waiting_input")
+                    registry.update(self.session_name, status="idle", session_id=msg.session_id)
+                    log_activity("Stop", {"session_id": msg.session_id}, session=self.session_name)
         except Exception as e:
-            if resume_id and attempt == 0:
-                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
-                save_session_id(SESSION_NAME, "")
-                _client = None
-                continue
-            raise
+            log.error(f"Drain failed ({type(e).__name__}): {e}")
+            self._state = "error"
+            registry.update(self.session_name, status="error")
+            if self._keep_alive is not None:
+                self._keep_alive.set()
 
-    _state = "running"
-    _ready.set()
-    log.info(f"Manager session connected (resume={resume_id or 'new'})")
+    async def _run(self) -> None:
+        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=SESSION_NAME, session_id=saved_id or "", role="manager",
-        cwd=cwd, status="idle",
-    ))
+        saved_id = load_session_id(self.session_name)
 
-    prompt_text = _build_startup_prompt()
-    prompt_hash = hashlib.sha256(prompt_text.encode()).hexdigest()[:16]
+        for attempt in range(2):
+            resume_id = saved_id if attempt == 0 else None
 
-    try:
-        if not resume_id:
-            await _drain_turn()
-        else:
-            saved_hash = PROMPT_HASH_PATH.read_text().strip() if PROMPT_HASH_PATH.exists() else ""
-            if saved_hash != prompt_hash:
-                log.info(f"Prompt changed ({saved_hash[:8]}→{prompt_hash[:8]}), re-injecting")
-                await _client.query(
-                    "Your instructions have been updated. "
-                    "Read and follow these from now on:\n\n" + prompt_text
-                )
-                await _drain_turn()
-            _state_update("waiting_input")
+            options = ClaudeAgentOptions(
+                cwd=self.cwd,
+                permission_mode="bypassPermissions",
+                cli_path=get_cli_path(),
+                resume=resume_id or None,
+                system_prompt={"type": "preset", "preset": "claude_code"},
+                strict_mcp_config=True,
+            )
 
-        PROMPT_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
-        PROMPT_HASH_PATH.write_text(prompt_hash)
-        # Keep the event loop alive — inject() schedules work on it
-        _keep_alive = asyncio.Event()
-        await _keep_alive.wait()
-    except Exception as e:
-        log.error(f"Manager session error: {e}")
-        _state = "error"
-        registry.update(SESSION_NAME, status="error")
-    finally:
-        if _client:
-            await _client.disconnect()
-            _client = None
-        _state = "stopped"
-        registry.update(SESSION_NAME, status="stopped")
+            self._client = ClaudeSDKClient(options)
+
+            startup_prompt = self._build_startup_prompt() if not resume_id else None
+            try:
+                await self._client.connect(startup_prompt)
+                break
+            except Exception as e:
+                if resume_id and attempt == 0:
+                    log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
+                    save_session_id(self.session_name, "")
+                    self._client = None
+                    continue
+                raise
+
+        self._state = "running"
+        self._ready.set()
+        log.info(f"Manager session '{self.session_name}' connected (resume={resume_id or 'new'})")
+
+        registry = get_registry()
+        registry.register(SessionEntry(
+            name=self.session_name, session_id=saved_id or "", role="manager",
+            cwd=self.cwd, status="idle",
+        ))
+
+        prompt_text = self._build_startup_prompt()
+        prompt_hash = hashlib.sha256(prompt_text.encode()).hexdigest()[:16]
+
+        try:
+            if not resume_id:
+                await self._drain_turn()
+            else:
+                saved_hash = self._prompt_hash_path.read_text().strip() if self._prompt_hash_path.exists() else ""
+                if saved_hash != prompt_hash:
+                    log.info(f"Prompt changed ({saved_hash[:8]}→{prompt_hash[:8]}), re-injecting")
+                    await self._client.query(
+                        "Your instructions have been updated. "
+                        "Read and follow these from now on:\n\n" + prompt_text
+                    )
+                    await self._drain_turn()
+                self._state_update("waiting_input")
+
+            self._prompt_hash_path.parent.mkdir(parents=True, exist_ok=True)
+            self._prompt_hash_path.write_text(prompt_hash)
+            self._keep_alive = asyncio.Event()
+            await self._keep_alive.wait()
+        except Exception as e:
+            log.error(f"Manager session error: {e}")
+            self._state = "error"
+            registry.update(self.session_name, status="error")
+        finally:
+            if self._client:
+                await self._client.disconnect()
+                self._client = None
+            self._state = "stopped"
+            registry.update(self.session_name, status="stopped")
+
+    def _thread_target(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._run())
+        except Exception as e:
+            log.error(f"Manager thread crashed: {e}")
+        finally:
+            self._loop.close()
+            self._loop = None
+
+    def start_or_resume(self) -> bool:
+        if self.is_alive():
+            log.info(f"Manager session '{self.session_name}' already running")
+            return True
+
+        if self._keep_alive is not None:
+            self._keep_alive.set()
+        if self._thread is not None and self._thread.is_alive():
+            log.info("Waiting for old manager thread to exit")
+            self._thread.join(timeout=15)
+            if self._thread.is_alive():
+                log.warning("Old manager thread did not exit — proceeding anyway")
+        self._thread = None
+        self._keep_alive = None
+
+        self._ready.clear()
+        self._thread = threading.Thread(
+            target=self._thread_target, daemon=True,
+            name=f"manager-{self.session_name}",
+        )
+        self._thread.start()
+
+        if self._ready.wait(timeout=60):
+            log.info(f"Manager session '{self.session_name}' ready")
+            return True
+
+        log.error(f"Manager session '{self.session_name}' failed to start within 60s")
+        return False
+
+    async def _inject_and_drain(self, text: str) -> None:
+        log.info("inject: sending query")
+        await self._client.query(text)
+        log.info("inject: query sent, draining")
+        await self._drain_turn()
+        log.info(f"inject: drain complete, state={self._state}")
+
+    def inject_capture(
+        self, text: str, timeout: int = 300, wait_for_ready: int = 0
+    ) -> tuple[bool, str]:
+        if not self._client or not self._loop:
+            self._last_inject_error = "manager not running"
+            log.warning("Manager not running — cannot inject")
+            return False, ""
+
+        with self._inject_lock:
+            deadline = time.monotonic() + max(0, wait_for_ready)
+            while self._state != "waiting_input":
+                if self._state in ("stopped", "error"):
+                    self._last_inject_error = f"manager state={self._state}"
+                    log.warning(f"Manager not injectable (state={self._state}) — dropping inject")
+                    return False, ""
+                if time.monotonic() >= deadline:
+                    self._last_inject_error = f"manager busy (state={self._state})"
+                    log.warning(
+                        f"Manager not ready for input (state={self._state}) after "
+                        f"{wait_for_ready}s — dropping inject"
+                    )
+                    return False, ""
+                time.sleep(1)
+
+            log.info(f"Inject: {text[:100]}")
+            log_activity("UserPromptSubmit", {"text": text[:200]}, session=self.session_name)
+            future = asyncio.run_coroutine_threadsafe(self._inject_and_drain(text), self._loop)
+            try:
+                future.result(timeout=timeout)
+                self._last_inject_error = ""
+                return True, self._last_response
+            except TimeoutError:
+                self._last_inject_error = f"manager did not finish within {timeout}s"
+                log.error(f"Manager inject timed out after {timeout}s")
+                future.cancel()
+                self._state = "waiting_input"
+                return False, ""
+            except Exception as e:
+                self._last_inject_error = f"{type(e).__name__}: {e}"
+                log.error(f"Manager inject failed ({type(e).__name__}): {e}")
+                self._state = "error"
+                if self._keep_alive is not None:
+                    self._keep_alive.set()
+                future.cancel()
+                return False, ""
+
+    def inject(self, text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
+        ok, _ = self.inject_capture(text, timeout=timeout, wait_for_ready=wait_for_ready)
+        return ok
+
+    def last_inject_error(self) -> str:
+        return self._last_inject_error
+
+    def detect_state(self) -> str:
+        return self._state
+
+    def set_response_callback(self, fn) -> None:
+        self._response_callback = fn
+
+    def wait_until_ready(self, timeout: int = 60) -> bool:
+        return self._ready.wait(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive() and self._state not in ("stopped", "error")
+
+    def read_last_response(self) -> str | None:
+        return self._last_response if self._last_response else None
+
+    def capture(self, lines: int = 50) -> str:
+        return self._last_response or "(no response yet)"
+
+    def get_session_id(self) -> str:
+        return load_session_id(self.session_name)
+
+    def _state_update(self, new_state: str) -> None:
+        self._state = new_state
+        registry = get_registry()
+        status_map = {"working": "running", "waiting_input": "idle"}
+        registry.update(self.session_name, status=status_map.get(new_state, new_state))
 
 
-def _manager_thread() -> None:
-    global _loop
-    _loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(_loop)
-    try:
-        _loop.run_until_complete(_run_manager())
-    except Exception as e:
-        log.error(f"Manager thread crashed: {e}")
-    finally:
-        _loop.close()
-        _loop = None
+# ---------------------------------------------------------------------------
+# Backward-compat module-level API
+#
+# These delegate to _default_session, which is set by consumer.run().
+# Callers that haven't been updated to use ManagerSession directly
+# (dashboard, cli, etc.) continue to work through these wrappers.
+# ---------------------------------------------------------------------------
+
+_default_session: ManagerSession | None = None
+
+
+def set_default_session(session: ManagerSession) -> None:
+    """Set the module-level default session (called by consumer.run)."""
+    global _default_session
+    _default_session = session
+
+
+def get_default_session() -> ManagerSession | None:
+    return _default_session
 
 
 def start_or_resume(cwd: str = None) -> bool:
-    global _thread, _keep_alive
-    if is_alive():
-        log.info("Manager session already running")
-        return True
-
-    if _keep_alive is not None:
-        _keep_alive.set()
-    if _thread is not None and _thread.is_alive():
-        log.info("Waiting for old manager thread to exit")
-        _thread.join(timeout=15)
-        if _thread.is_alive():
-            log.warning("Old manager thread did not exit — proceeding anyway")
-    _thread = None
-    _keep_alive = None
-
-    _ready.clear()
-    _thread = threading.Thread(target=_manager_thread, daemon=True, name="manager-sdk")
-    _thread.start()
-
-    if _ready.wait(timeout=60):
-        log.info("Manager session ready")
-        return True
-
-    log.error("Manager session failed to start within 60s")
-    return False
-
-
-async def _inject_and_drain(text: str) -> None:
-    log.info("inject: sending query")
-    await _client.query(text)
-    log.info("inject: query sent, draining")
-    await _drain_turn()
-    log.info(f"inject: drain complete, state={_state}")
+    if _default_session is None:
+        log.warning("No default session configured")
+        return False
+    return _default_session.start_or_resume()
 
 
 def inject_capture(
     text: str, timeout: int = 300, wait_for_ready: int = 0
 ) -> tuple[bool, str]:
-    """Inject text, block until the turn ends, and return ``(ok, response)``.
-
-    The response is snapshotted from `_last_response` **while `_inject_lock`
-    is still held**, so it is guaranteed to be the reply produced by *this*
-    injected turn.
-
-    This is the race-free way to read a turn's response. A separate
-    `read_last_response()` call cannot offer that guarantee: `_last_response`
-    is a single module-global shared by every inject caller (event drain loop,
-    workflow consultation nodes, dashboard `/api/consult` — all on different
-    threads sharing one SDK client, see `_inject_lock`). `inject()` releases
-    the lock the instant it returns, so a concurrent inject can clear and
-    overwrite `_last_response` before the caller reads it — delivering the
-    wrong turn's text (e.g. a Slack reply shifted onto an unrelated message).
-    Capturing under the lock closes that window.
-
-    Serialized via `_inject_lock`: overlapping queries on the single shared
-    SDK client corrupt the stream.
-
-    `wait_for_ready` is how many seconds to wait for a busy manager to
-    return to `waiting_input` before giving up. It defaults to 0, which
-    fails fast — preserving the drain loop's drop-on-busy behavior.
-    Workflow consultation nodes pass a positive value so they queue behind
-    whatever the manager is currently doing instead of failing outright.
-
-    On failure, returns ``(False, "")`` and sets `last_inject_error()` with
-    the reason so callers can surface it rather than reporting an opaque
-    "inject failed".
-    """
-    global _state, _last_inject_error
-
-    if not _client or not _loop:
-        _last_inject_error = "manager not running"
-        log.warning("Manager not running — cannot inject")
+    if _default_session is None:
         return False, ""
-
-    with _inject_lock:
-        deadline = time.monotonic() + max(0, wait_for_ready)
-        while _state != "waiting_input":
-            if _state in ("stopped", "error"):
-                _last_inject_error = f"manager state={_state}"
-                log.warning(f"Manager not injectable (state={_state}) — dropping inject")
-                return False, ""
-            if time.monotonic() >= deadline:
-                _last_inject_error = f"manager busy (state={_state})"
-                log.warning(
-                    f"Manager not ready for input (state={_state}) after "
-                    f"{wait_for_ready}s — dropping inject"
-                )
-                return False, ""
-            time.sleep(1)
-
-        log.info(f"Inject: {text[:100]}")
-        log_activity("UserPromptSubmit", {"text": text[:200]}, session=SESSION_NAME)
-        future = asyncio.run_coroutine_threadsafe(_inject_and_drain(text), _loop)
-        try:
-            future.result(timeout=timeout)
-            _last_inject_error = ""
-            # Snapshot the reply while still holding _inject_lock so it is
-            # bound to this turn and cannot be clobbered by a concurrent inject.
-            return True, _last_response
-        except TimeoutError:
-            _last_inject_error = f"manager did not finish within {timeout}s"
-            log.error(f"Manager inject timed out after {timeout}s")
-            future.cancel()
-            _state = "waiting_input"
-            return False, ""
-        except Exception as e:
-            _last_inject_error = f"{type(e).__name__}: {e}"
-            log.error(f"Manager inject failed ({type(e).__name__}): {e}")
-            _state = "error"
-            if _keep_alive is not None:
-                _keep_alive.set()
-            future.cancel()
-            return False, ""
+    return _default_session.inject_capture(text, timeout=timeout, wait_for_ready=wait_for_ready)
 
 
 def inject(text: str, timeout: int = 300, wait_for_ready: int = 0) -> bool:
-    """Inject text and block until the turn ends; return whether it succeeded.
-
-    Thin wrapper over `inject_capture()` for callers that only need the
-    success flag. Callers that need the turn's response should use
-    `inject_capture()` so the reply is captured atomically with the inject
-    rather than re-read from the shared global afterward.
-    """
-    ok, _ = inject_capture(text, timeout=timeout, wait_for_ready=wait_for_ready)
-    return ok
+    if _default_session is None:
+        return False
+    return _default_session.inject(text, timeout=timeout, wait_for_ready=wait_for_ready)
 
 
 def last_inject_error() -> str:
-    """Reason the most recent inject() returned False (empty if it succeeded)."""
-    return _last_inject_error
+    if _default_session is None:
+        return "no session"
+    return _default_session.last_inject_error()
 
 
 def detect_state() -> str:
-    return _state
+    if _default_session is None:
+        return "stopped"
+    return _default_session.detect_state()
 
 
 def set_response_callback(fn) -> None:
-    """Set a callback that fires whenever the model emits text.
-
-    The consumer uses this to post Slack replies as they stream in,
-    bypassing the stale-response problem with read-after-drain.
-    """
-    global _response_callback
-    _response_callback = fn
+    if _default_session is not None:
+        _default_session.set_response_callback(fn)
 
 
 def wait_until_ready(timeout: int = 60) -> bool:
-    return _ready.wait(timeout=timeout)
+    if _default_session is None:
+        return False
+    return _default_session.wait_until_ready(timeout=timeout)
 
 
 def is_alive() -> bool:
-    return _thread is not None and _thread.is_alive() and _state not in ("stopped", "error")
+    if _default_session is None:
+        return False
+    return _default_session.is_alive()
 
 
 def read_last_response() -> str | None:
-    return _last_response if _last_response else None
+    if _default_session is None:
+        return None
+    return _default_session.read_last_response()
 
 
 def capture(lines: int = 50) -> str:
-    return _last_response or "(no response yet)"
+    if _default_session is None:
+        return "(no session)"
+    return _default_session.capture(lines)
 
 
 def get_session_id() -> str:
-    return load_session_id(SESSION_NAME)
-
-
-def _state_update(new_state: str) -> None:
-    global _state
-    _state = new_state
-    registry = get_registry()
-    status_map = {"working": "running", "waiting_input": "idle"}
-    registry.update(SESSION_NAME, status=status_map.get(new_state, new_state))
+    if _default_session is None:
+        return ""
+    return _default_session.get_session_id()

@@ -182,7 +182,7 @@ def load_session_id(name: str) -> str:
     return ""
 
 
-def log_activity(event: str, data: dict | None = None, session: str = "moda-manager") -> None:
+def log_activity(event: str, data: dict | None = None, session: str = "") -> None:
     entry = {"event": event, "ts": time.time()}
     if data:
         entry.update(data)

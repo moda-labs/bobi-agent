@@ -56,7 +56,9 @@ async def api_sources():
 
 
 @app.get("/api/log")
-async def api_log(limit: int = Query(50, ge=1, le=200), session: str = Query("moda-manager")):
+async def api_log(limit: int = Query(50, ge=1, le=200), session: str = Query("")):
+    if not session:
+        session = data._get_manager_session_name()
     return {"turns": data.get_conversation_log(limit=limit, session=session)}
 
 

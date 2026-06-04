@@ -256,7 +256,7 @@ def list_sessions() -> list[str]:
     if result.returncode == 0:
         reverse_map = _build_reverse_name_map()
         for name in result.stdout.strip().splitlines():
-            if not name.startswith("moda-") or name == "moda-manager":
+            if not name.startswith("moda-") or name.startswith("moda-mgr"):
                 continue
             iid = reverse_map.get(name)
             if iid is None:

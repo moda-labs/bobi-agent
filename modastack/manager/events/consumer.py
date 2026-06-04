@@ -23,7 +23,10 @@ truststore.inject_into_ssl()
 
 from modastack.config import GlobalConfig, GLOBAL_CONFIG_DIR
 from modastack.manager.events.slack_responder import _markdown_to_slack
-from modastack.manager.session import start_or_resume, is_alive, detect_state
+from modastack.manager.session import (
+    ManagerSession, set_default_session,
+    start_or_resume, is_alive, detect_state,
+)
 
 log = logging.getLogger(__name__)
 
@@ -183,7 +186,12 @@ def run(**kwargs):
 
     config = GlobalConfig.load()
 
-    if not start_or_resume():
+    # Create the manager session for the first registered repo (or cwd)
+    repo_path = config.repos[0] if config.repos else Path.cwd()
+    session = ManagerSession(repo_path=repo_path)
+    set_default_session(session)
+
+    if not session.start_or_resume():
         log.error("Failed to start manager session")
         return
 

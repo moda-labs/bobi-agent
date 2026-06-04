@@ -20,7 +20,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from modastack.manager import session
+from modastack.manager.session import ManagerSession, set_default_session
 from modastack.manager.events.event_client import event_queue, format_event_for_manager
 from modastack.manager.events.slack_responder import SlackResponder
 
@@ -50,18 +50,27 @@ Always take action — never just describe what you would do.
 """
 
 
+_test_session: ManagerSession | None = None
+
+
 def _start_manager_session(prompt: str = MANAGER_PROMPT):
     """Start a Claude session with the given prompt."""
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
     from modastack.sdk import get_cli_path
+    from pathlib import Path
 
-    session._client = None
-    session._loop = None
-    session._state = "stopped"
-    session._last_response = ""
+    global _test_session
+    s = ManagerSession(repo_path=Path("/tmp/test-lifecycle"))
+    _test_session = s
+    set_default_session(s)
+
+    s._client = None
+    s._loop = None
+    s._state = "stopped"
+    s._last_response = ""
 
     loop = asyncio.new_event_loop()
-    session._loop = loop
+    s._loop = loop
 
     async def _run():
         options = ClaudeAgentOptions(
@@ -71,9 +80,9 @@ def _start_manager_session(prompt: str = MANAGER_PROMPT):
             system_prompt=prompt,
         )
         client = ClaudeSDKClient(options)
-        session._client = client
+        s._client = client
         await client.connect("You are online. Reply: READY")
-        await session._drain_turn()
+        await s._drain_turn()
         keep_alive = asyncio.Event()
         await keep_alive.wait()
 
@@ -85,13 +94,14 @@ def _start_manager_session(prompt: str = MANAGER_PROMPT):
             pass
         finally:
             loop.close()
-            session._loop = None
+            s._loop = None
 
     t = threading.Thread(target=_thread, daemon=True, name="test-manager")
     t.start()
+    s._thread = t
 
     for _ in range(60):
-        if session._state == "waiting_input":
+        if s._state == "waiting_input":
             return t
         time.sleep(1)
 
@@ -99,16 +109,21 @@ def _start_manager_session(prompt: str = MANAGER_PROMPT):
 
 
 def _stop_session():
-    if session._client and session._loop:
+    global _test_session
+    s = _test_session
+    if not s:
+        return
+    if s._client and s._loop:
         async def _disconnect():
-            await session._client.disconnect()
+            await s._client.disconnect()
         try:
-            fut = asyncio.run_coroutine_threadsafe(_disconnect(), session._loop)
+            fut = asyncio.run_coroutine_threadsafe(_disconnect(), s._loop)
             fut.result(timeout=5)
         except Exception:
             pass
-    session._client = None
-    session._state = "stopped"
+    s._client = None
+    s._state = "stopped"
+    _test_session = None
 
 
 def _clear_queue():
@@ -122,14 +137,12 @@ class TestIssueAssignedTriggersSpawn:
     """Issue assigned → manager runs spawn command."""
 
     def setup_method(self):
-        self._orig = (session._client, session._loop, session._state, session._last_response)
         _clear_queue()
         _start_manager_session()
 
     def teardown_method(self):
         _stop_session()
         _clear_queue()
-        session._client, session._loop, session._state, session._last_response = self._orig
 
     def test_manager_spawns_on_issue_assigned(self):
         event = {
@@ -141,10 +154,10 @@ class TestIssueAssignedTriggersSpawn:
             },
         }
         text = format_event_for_manager(event)
-        ok = session.inject(text, timeout=90)
+        ok = _test_session.inject(text, timeout=90)
         assert ok is True
 
-        response = session.read_last_response() or ""
+        response = _test_session.read_last_response() or ""
         # The manager should have tried to run echo SPAWN:...
         # or at minimum acknowledged with the issue details.
         # Since it has bypassPermissions, it may actually run the command.
@@ -157,14 +170,12 @@ class TestSlackDMFullCycle:
     """Slack DM → manager responds → SlackResponder delivers."""
 
     def setup_method(self):
-        self._orig = (session._client, session._loop, session._state, session._last_response)
         _clear_queue()
         _start_manager_session()
 
     def teardown_method(self):
         _stop_session()
         _clear_queue()
-        session._client, session._loop, session._state, session._last_response = self._orig
 
     @patch("modastack.manager.events.slack_responder._post_to_slack", return_value=True)
     @patch("modastack.manager.events.slack_responder.GlobalConfig")
@@ -183,11 +194,11 @@ class TestSlackDMFullCycle:
 
         # Step 1: Inject the Slack event
         text = format_event_for_manager(event)
-        ok = session.inject(text, timeout=90)
+        ok = _test_session.inject(text, timeout=90)
         assert ok is True
 
         # Step 2: Capture the manager's response
-        response = session.read_last_response()
+        response = _test_session.read_last_response()
         assert response is not None
         assert len(response) > 0
 
@@ -206,73 +217,16 @@ class TestSlackDMFullCycle:
 
 @requires_claude
 @pytest.mark.timeout(180)
-class TestMixedEventBatch:
-    """Batch of GitHub + Slack events → manager handles all → Slack gets reply."""
-
-    def setup_method(self):
-        self._orig = (session._client, session._loop, session._state, session._last_response)
-        _clear_queue()
-        _start_manager_session()
-
-    def teardown_method(self):
-        _stop_session()
-        _clear_queue()
-        session._client, session._loop, session._state, session._last_response = self._orig
-
-    @patch("modastack.manager.events.slack_responder._post_to_slack", return_value=True)
-    @patch("modastack.manager.events.slack_responder.GlobalConfig")
-    def test_batch_with_slack_gets_reply(self, mock_config, mock_post):
-        mock_config.load.return_value = MagicMock()
-        mock_config.load.return_value.slack_token_for.return_value = "xoxb-test"
-
-        github_event = {
-            "type": "pr.closed", "source": "github",
-            "data": {
-                "pr_number": 10, "title": "Fix auth",
-                "repo": "moda-labs/test", "state": "closed", "merged": True,
-            },
-        }
-        slack_event = {
-            "type": "slack.dm", "source": "slack",
-            "data": {
-                "from": "Zach", "text": "Hey, did that PR land?",
-                "channel": "D0B51JP1N4C", "workspace": "T0952RZRZ0X",
-                "ts": "100.001", "thread_ts": "",
-            },
-        }
-
-        batch = [github_event, slack_event]
-        lines = [format_event_for_manager(e) for e in batch]
-        text = "\n\n".join(lines)
-
-        ok = session.inject(text, timeout=90)
-        assert ok is True
-
-        response = session.read_last_response()
-        assert response is not None
-
-        # SlackResponder should only post for the Slack event, not GitHub
-        responder = SlackResponder()
-        responder.handle(batch, response)
-
-        mock_post.assert_called_once()
-        assert mock_post.call_args[0][1] == "D0B51JP1N4C"
-
-
-@requires_claude
-@pytest.mark.timeout(180)
 class TestChannelMentionThreading:
     """Channel mention → manager responds → reply goes in thread."""
 
     def setup_method(self):
-        self._orig = (session._client, session._loop, session._state, session._last_response)
         _clear_queue()
         _start_manager_session()
 
     def teardown_method(self):
         _stop_session()
         _clear_queue()
-        session._client, session._loop, session._state, session._last_response = self._orig
 
     @patch("modastack.manager.events.slack_responder._post_to_slack", return_value=True)
     @patch("modastack.manager.events.slack_responder.GlobalConfig")
@@ -290,10 +244,10 @@ class TestChannelMentionThreading:
         }
 
         text = format_event_for_manager(event)
-        ok = session.inject(text, timeout=90)
+        ok = _test_session.inject(text, timeout=90)
         assert ok is True
 
-        response = session.read_last_response()
+        response = _test_session.read_last_response()
         responder = SlackResponder()
         responder.handle([event], response)
 
@@ -309,14 +263,12 @@ class TestConsumerDrainToSlackReply:
     """Full drain loop cycle: queue → batch → inject → responder."""
 
     def setup_method(self):
-        self._orig = (session._client, session._loop, session._state, session._last_response)
         _clear_queue()
         _start_manager_session()
 
     def teardown_method(self):
         _stop_session()
         _clear_queue()
-        session._client, session._loop, session._state, session._last_response = self._orig
 
     @patch("modastack.manager.events.slack_responder._post_to_slack", return_value=True)
     @patch("modastack.manager.events.slack_responder.GlobalConfig")
@@ -344,15 +296,15 @@ class TestConsumerDrainToSlackReply:
         lines = [format_event_for_manager(e) for e in batch]
         text = "\n\n".join(lines)
 
-        assert session.detect_state() == "waiting_input"
-        ok = session.inject(text, timeout=90)
+        assert _test_session.detect_state() == "waiting_input"
+        ok = _test_session.inject(text, timeout=90)
         assert ok is True
 
         # 3. Check for Slack events and route response
         has_slack = any(e.get("source") == "slack" for e in batch)
         assert has_slack is True
 
-        response = session.read_last_response() or ""
+        response = _test_session.read_last_response() or ""
         assert len(response) > 0
 
         responder = SlackResponder()

@@ -459,7 +459,9 @@ def _find_transcript(session: str) -> Path | None:
     from modastack.sdk import SESSION_DIR, SessionRegistry, get_registry
 
     if session == "manager":
-        session = "moda-manager"
+        from modastack.manager.session import get_default_session
+        s = get_default_session()
+        session = s.session_name if s else "moda-manager"
 
     # Primary: session dir log
     session_log = SessionRegistry.log_path(session)
@@ -488,7 +490,7 @@ def _find_transcript(session: str) -> Path | None:
         [d for d in SESSION_DIR.iterdir() if d.is_dir() and (d / "state.json").exists()],
         key=lambda d: d.stat().st_mtime, reverse=True,
     )
-    recent_names = [d.name for d in recent_dirs[:10] if d.name != "moda-manager"]
+    recent_names = [d.name for d in recent_dirs[:10] if not d.name.startswith("moda-mgr")]
     if recent_names:
         click.echo(f"Recent: {', '.join(recent_names)}")
     return None
@@ -609,7 +611,10 @@ def status():
         except (FileNotFoundError, _sp.TimeoutExpired):
             pass
 
-    session_id = load_session_id("moda-manager") or ""
+    from modastack.manager.session import get_default_session
+    mgr = get_default_session()
+    mgr_name = mgr.session_name if mgr else "moda-manager"
+    session_id = load_session_id(mgr_name) or ""
     session_short = session_id[:8] if session_id else ""
 
     if running:

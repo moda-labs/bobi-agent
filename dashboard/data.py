@@ -14,7 +14,6 @@ from modastack.workflow.schema import load_workflow
 
 EVENTS_PATH = Path.home() / ".modastack" / "manager" / "events.jsonl"
 DECISIONS_PATH = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
-ACTIVITY_PATH = SessionRegistry.log_path("moda-manager")
 PID_PATH = GLOBAL_CONFIG_DIR / "modastack.pid"
 MODASTACK_LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
 
@@ -119,18 +118,25 @@ def _activity_snippet(session: str, length: int = 120) -> str:
     return ""
 
 
+def _get_manager_session_name() -> str:
+    from modastack.manager.session import get_default_session
+    session = get_default_session()
+    return session.session_name if session else "moda-manager"
+
+
 def get_manager_status() -> dict:
     from modastack.sdk import load_session_id
+    name = _get_manager_session_name()
     running = _is_running()
-    session_id = load_session_id("moda-manager") or ""
+    session_id = load_session_id(name) or ""
     registry = get_registry()
-    entry = registry.get("moda-manager")
+    entry = registry.get(name)
     status = entry.status if entry else ("running" if running else "stopped")
     return {
         "alive": running,
         "state": status,
         "session_id": session_id[:8] if session_id else "",
-        "activity": _activity_snippet("moda-manager"),
+        "activity": _activity_snippet(name),
         "last_activity": entry.last_activity if entry else 0,
     }
 
@@ -160,7 +166,9 @@ def read_modastack_log(limit: int = 200) -> list[str]:
     return _tail_lines(MODASTACK_LOG_PATH, limit)
 
 
-def get_conversation_log(limit: int = 50, session: str = "moda-manager") -> list[dict]:
+def get_conversation_log(limit: int = 50, session: str = "") -> list[dict]:
+    if not session:
+        session = _get_manager_session_name()
     log_path = SessionRegistry.log_path(session)
     if not log_path.exists():
         return []

@@ -16,7 +16,7 @@ class TestDrainLoop:
             data["text"] = text
         return {"type": etype, "source": source, "data": data}
 
-    @patch("modastack.manager.session.inject_capture")
+    @patch("modastack.manager.session.inject")
     @patch("modastack.manager.session.detect_state", return_value="waiting_input")
     def test_single_event_injected(self, mock_state, mock_inject):
         from modastack.manager.events.event_client import event_queue
@@ -41,7 +41,7 @@ class TestDrainLoop:
         injected_text = mock_inject.call_args[0][0]
         assert "Event: github/task.opened" in injected_text
 
-    @patch("modastack.manager.session.inject_capture")
+    @patch("modastack.manager.session.inject")
     @patch("modastack.manager.session.detect_state", return_value="waiting_input")
     @patch("modastack.manager.events.consumer.DRAIN_INTERVAL", 0.1)
     def test_multiple_events_batched(self, mock_state, mock_inject):
@@ -122,7 +122,7 @@ class TestStartup:
     Catches import errors and missing method calls.
     """
 
-    @patch("modastack.manager.events.consumer.start_or_resume", return_value=True)
+    @patch("modastack.manager.session.ManagerSession.start_or_resume", return_value=True)
     @patch("modastack.manager.events.consumer._kill_stale_instances")
     @patch("modastack.manager.events.consumer._wait_for_manager", return_value=True)
     @patch("modastack.manager.session.detect_state", return_value="waiting_input")
@@ -145,7 +145,7 @@ class TestStartup:
 
         with patch("time.sleep", side_effect=short_sleep), \
              patch("modastack.manager.events.consumer.PID_PATH", MagicMock()), \
-             patch("modastack.manager.session.is_alive", return_value=True), \
+             patch("modastack.manager.session.ManagerSession.is_alive", return_value=True), \
              patch("signal.signal"):
             try:
                 run()
