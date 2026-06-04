@@ -180,12 +180,12 @@ def test_workflow_list_no_errors():
 class TestAgentCommand:
     def test_adhoc_workflow(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-42") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="eng-42") as mock:
             result = runner.invoke(main, [
-                "agent", "-w", "adhoc", "--repo", str(tmp_path), "--task", "Fix #42",
+                "agent", "--repo", str(tmp_path), "--task", "Fix #42",
             ])
         assert result.exit_code == 0, result.output
-        assert "wf-adhoc-42" in result.output
+        assert "eng-42" in result.output
         mock.assert_called_once()
         assert mock.call_args[1]["workflow_name"] == "adhoc"
         assert mock.call_args[1]["task"] == "Fix #42"
@@ -195,15 +195,22 @@ class TestAgentCommand:
         with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-42") as mock:
             result = runner.invoke(main, [
                 "agent", "-w", "issue-lifecycle",
-                "--repo", str(tmp_path), "--task", "Work on #42",
+                "--repo", str(tmp_path), "--issue", "42",
             ])
         assert result.exit_code == 0, result.output
         assert "wf-issue-lifecycle-42" in result.output
         assert mock.call_args[1]["workflow_name"] == "issue-lifecycle"
 
-    def test_workflow_required(self):
+    def test_neither_task_nor_workflow(self):
         runner = CliRunner()
-        result = runner.invoke(main, ["agent", "--repo", "/tmp", "--task", "X"])
+        result = runner.invoke(main, ["agent", "--repo", "/tmp"])
+        assert result.exit_code != 0
+
+    def test_both_task_and_workflow(self):
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "agent", "--repo", "/tmp", "--task", "X", "-w", "Y",
+        ])
         assert result.exit_code != 0
 
     def test_wait_mode_runs_check(self):
@@ -211,22 +218,22 @@ class TestAgentCommand:
         check = CheckResult(success=True, finding=False)
         with patch("modastack.subagent.run_check_blocking", return_value=check):
             result = runner.invoke(main, [
-                "agent", "-w", "adhoc", "--wait", "--task", "Check prod URL",
+                "agent", "--wait", "--task", "Check prod URL",
             ])
         assert result.exit_code == 0
 
     def test_requires_repo(self, tmp_path):
         runner = CliRunner()
-        result = runner.invoke(main, ["agent", "-w", "adhoc", "--task", "do a thing"])
+        result = runner.invoke(main, ["agent", "--task", "do a thing"])
         assert result.exit_code != 0
         assert "--repo is required" in result.output
 
     def test_passes_requested_by(self, tmp_path):
         runner = CliRunner()
         req = '{"from":"Alice","channel":"C1"}'
-        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-1") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="eng-1") as mock:
             result = runner.invoke(main, [
-                "agent", "-w", "adhoc", "--repo", str(tmp_path), "--task", "Fix #1",
+                "agent", "--repo", str(tmp_path), "--task", "Fix #1",
                 "--requested-by", req,
             ])
         assert result.exit_code == 0
@@ -234,7 +241,7 @@ class TestAgentCommand:
 
     def test_spawn_alias_uses_adhoc(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-42") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="eng-42") as mock:
             result = runner.invoke(main, [
                 "spawn", "--repo", str(tmp_path), "--task", "Fix #42",
             ])

@@ -29,14 +29,14 @@ class TestCLIReturnsImmediately:
         start = time.monotonic()
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
-             "-w", "adhoc", "--repo", str(tmp_path), "--task", "say hello #99"],
+             "--repo", str(tmp_path), "--task", "say hello #99"],
             capture_output=True, text=True, timeout=10,
             cwd=str(REPO_ROOT),
         )
         elapsed = time.monotonic() - start
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "wf-adhoc" in result.stdout and "99" in result.stdout
+        assert "eng-99" in result.stdout
         assert elapsed < 5
 
     def test_workflow_returns_immediately(self, tmp_path):
@@ -62,7 +62,7 @@ class TestCLIReturnsImmediately:
             cwd=str(REPO_ROOT),
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "wf-adhoc" in result.stdout and "88" in result.stdout
+        assert "eng-88" in result.stdout
 
     def test_workflow_binds_issue_and_runs_are_distinct(self, tmp_path):
         """Reproduces the headline bug (#130): two workflow runs for two
@@ -98,10 +98,10 @@ class TestCLIReturnsImmediately:
 
 
 class TestValidation:
-    def test_workflow_required(self):
+    def test_neither_task_nor_workflow(self):
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
-             "--repo", "/tmp", "--task", "X"],
+             "--repo", "/tmp"],
             capture_output=True, text=True, timeout=5,
             cwd=str(REPO_ROOT),
         )
@@ -110,7 +110,7 @@ class TestValidation:
     def test_repo_required(self):
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
-             "-w", "adhoc", "--task", "X"],
+             "--task", "X"],
             capture_output=True, text=True, timeout=5,
             cwd=str(REPO_ROOT),
         )

@@ -1651,7 +1651,7 @@ main.add_command(monitor)
 @main.command()
 @click.version_option(version=__version__, prog_name="modastack agent")
 @click.option("--repo", default=None, help="Repo path or registered name")
-@click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
+@click.option("--workflow", "-w", default=None, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
 @click.option("--task", default=None, help="Task description / context for the engineer")
 @click.option("--issue", default=None, help="Issue ID (for workflows)")
 @click.option("--title", default=None, help="Issue title (for workflows)")
@@ -1663,15 +1663,22 @@ main.add_command(monitor)
 @click.option("--requested-by", "requested_by", default=None,
               help='JSON identity of requester, e.g. \'{"from":"Alice","channel":"C1"}\'')
 def agent(repo, task, workflow, issue, title, event_json, timeout, wait, post_event, requested_by):
-    """Launch an agent with a workflow.
+    """Launch an agent.
 
-    Every agent runs a workflow. Use 'adhoc' for open-ended tasks.
+    Provide --task for ad-hoc work, or --workflow for a structured workflow.
 
     Examples:
-        modastack agent -w issue-lifecycle --repo jobtack --task "Work on #42"
-        modastack agent -w adhoc --repo jobtack --task "Why is CI failing?"
-        modastack agent -w adhoc --wait --task "Check prod URL returns 200"
+        modastack agent --repo jobtack --task "Why is CI failing?"
+        modastack agent -w issue-lifecycle --repo jobtack --issue 42
     """
+    if task and workflow:
+        click.echo("Specify --task or --workflow, not both.", err=True)
+        raise SystemExit(1)
+    if not task and not workflow:
+        click.echo("Specify --task or --workflow.", err=True)
+        raise SystemExit(1)
+    if task and not workflow:
+        workflow = "adhoc"
     _dispatch_agent(repo=repo, task=task, workflow=workflow,
                     issue=issue, title=title, event_json=event_json,
                     timeout=timeout, wait=wait, post_event=post_event,
@@ -1696,10 +1703,6 @@ def spawn(repo, task, timeout, non_interactive, post_event, requested_by):
 def _dispatch_agent(*, repo, task, workflow, issue, title, event_json,
                     timeout, wait, post_event, requested_by):
     """Shared dispatch logic for the agent and spawn commands."""
-    if not workflow:
-        click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
-        raise SystemExit(1)
-
     if not task:
         task = f"Run workflow {workflow}"
 

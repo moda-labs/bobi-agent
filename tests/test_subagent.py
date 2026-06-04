@@ -281,8 +281,7 @@ class TestLaunchAgent:
     def test_adhoc_returns_deterministic_name(self, mock_launch):
         from modastack.subagent import launch_agent
         name = launch_agent(task="Fix issue #42", cwd="/tmp/test", workflow_name="adhoc")
-        assert "adhoc" in name
-        assert "42" in name
+        assert name == "eng-42"
         mock_launch.assert_called_once()
 
     @patch("modastack.subagent._launch_detached", return_value=4242)
@@ -334,7 +333,7 @@ class TestLaunchAgent:
         from modastack.subagent import launch_agent
         from modastack.sdk import get_registry
         launch_agent(task="Fix #7", cwd="/tmp/test", workflow_name="adhoc")
-        entry = get_registry().get("wf-adhoc-test-7")
+        entry = get_registry().get("eng-7")
         assert entry is not None
         assert entry.issue_id == "7"
         assert entry.pid == 4242

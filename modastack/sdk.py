@@ -143,9 +143,10 @@ class SessionRegistry:
                 entry.last_activity = time.time()
                 reaped.append(name)
                 continue
-            # No tracked pid and stuck in "starting" for >5 min → zombie.
-            if not entry.pid and entry.status == "starting":
-                age = time.time() - entry.started_at
+            if not entry.pid:
+                ref_time = (entry.started_at if entry.status == "starting"
+                            else entry.last_activity)
+                age = time.time() - ref_time
                 if age > 300:
                     entry.status = "stale"
                     entry.last_activity = time.time()

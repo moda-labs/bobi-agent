@@ -631,8 +631,11 @@ def launch_agent(
     if existing is not None:
         raise RunCollision(existing)
 
-    from modastack.workflow.orchestrator import make_session_name
-    session_name = make_session_name(workflow_name, repo, issue_id)
+    if workflow_name == "adhoc":
+        session_name = f"eng-{issue_id}"
+    else:
+        from modastack.workflow.orchestrator import make_session_name
+        session_name = make_session_name(workflow_name, repo, issue_id)
 
     args_json = json.dumps({
         "task": task,
