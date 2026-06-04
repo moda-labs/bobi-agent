@@ -27,11 +27,21 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 class TestSpawnBackgroundSubprocess:
     """Test that spawn / agent launch returns immediately."""
 
-    def test_cli_spawn_returns_immediately(self, tmp_path):
-        """modastack spawn should return in <5s, not block for the full agent."""
+    def test_cli_agent_returns_immediately(self, tmp_path):
+        """modastack agent should return in <5s, not block for the full agent."""
+        from modastack.sdk import SessionRegistry, get_registry, set_repo_root
+        session_name = f"wf-adhoc-{tmp_path.name}-99"
+        set_repo_root(REPO_ROOT)
+        registry = get_registry()
+        registry.mark_done(session_name)
+        session_dir = SessionRegistry.session_dir(session_name)
+        if session_dir.exists():
+            shutil.rmtree(session_dir)
+
         start = time.monotonic()
         result = subprocess.run(
-            [sys.executable, "-m", "modastack.cli", "spawn",
+            [sys.executable, "-m", "modastack.cli", "agent",
+             "-w", "adhoc", "--role", "engineer",
              "--repo", str(tmp_path), "--task", "say hello #99"],
             capture_output=True, text=True, timeout=10,
             cwd=str(REPO_ROOT),
@@ -39,7 +49,11 @@ class TestSpawnBackgroundSubprocess:
         elapsed = time.monotonic() - start
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert elapsed < 5, f"spawn took {elapsed:.1f}s — should return immediately"
+        assert elapsed < 5, f"agent took {elapsed:.1f}s — should return immediately"
+
+        registry.mark_done(session_name)
+        if session_dir.exists():
+            shutil.rmtree(session_dir)
 
     def test_subprocess_command_is_valid_python(self):
         """The -c script passed to the subprocess should parse without errors."""

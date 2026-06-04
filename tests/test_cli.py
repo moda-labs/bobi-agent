@@ -118,19 +118,21 @@ class TestAgentCommand:
         runner = CliRunner()
         with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-42") as mock:
             result = runner.invoke(main, [
-                "agent", "-w", "adhoc", "--repo", str(tmp_path), "--task", "Fix #42",
+                "agent", "-w", "adhoc", "--role", "engineer",
+                "--repo", str(tmp_path), "--task", "Fix #42",
             ])
         assert result.exit_code == 0, result.output
         assert "wf-adhoc-42" in result.output
         mock.assert_called_once()
         assert mock.call_args[1]["workflow_name"] == "adhoc"
         assert mock.call_args[1]["task"] == "Fix #42"
+        assert mock.call_args[1]["role"] == "engineer"
 
     def test_issue_lifecycle_workflow(self, tmp_path):
         runner = CliRunner()
         with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-42") as mock:
             result = runner.invoke(main, [
-                "agent", "-w", "issue-lifecycle",
+                "agent", "-w", "issue-lifecycle", "--role", "engineer",
                 "--repo", str(tmp_path), "--task", "Work on #42",
             ])
         assert result.exit_code == 0, result.output
@@ -139,21 +141,39 @@ class TestAgentCommand:
 
     def test_workflow_required(self):
         runner = CliRunner()
-        result = runner.invoke(main, ["agent", "--repo", "/tmp", "--task", "X"])
+        result = runner.invoke(main, ["agent", "--role", "engineer", "--repo", "/tmp", "--task", "X"])
         assert result.exit_code != 0
+
+    def test_role_required(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["agent", "-w", "adhoc", "--repo", "/tmp", "--task", "X"])
+        assert result.exit_code != 0
+        assert "--role" in result.output
+
+    def test_invalid_role(self, tmp_path):
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "agent", "-w", "adhoc", "--role", "nonexistent",
+            "--repo", str(tmp_path), "--task", "X",
+        ])
+        assert result.exit_code != 0
+        assert "Unknown role" in result.output
 
     def test_wait_mode_runs_check(self):
         runner = CliRunner()
         check = CheckResult(success=True, finding=False)
         with patch("modastack.subagent.run_check_blocking", return_value=check):
             result = runner.invoke(main, [
-                "agent", "-w", "adhoc", "--wait", "--task", "Check prod URL",
+                "agent", "-w", "adhoc", "--role", "engineer",
+                "--wait", "--task", "Check prod URL",
             ])
         assert result.exit_code == 0
 
     def test_requires_repo(self, tmp_path):
         runner = CliRunner()
-        result = runner.invoke(main, ["agent", "-w", "adhoc", "--task", "do a thing"])
+        result = runner.invoke(main, [
+            "agent", "-w", "adhoc", "--role", "engineer", "--task", "do a thing",
+        ])
         assert result.exit_code != 0
         assert "--repo is required" in result.output
 
@@ -162,7 +182,8 @@ class TestAgentCommand:
         req = '{"from":"Alice","channel":"C1"}'
         with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-1") as mock:
             result = runner.invoke(main, [
-                "agent", "-w", "adhoc", "--repo", str(tmp_path), "--task", "Fix #1",
+                "agent", "-w", "adhoc", "--role", "engineer",
+                "--repo", str(tmp_path), "--task", "Fix #1",
                 "--requested-by", req,
             ])
         assert result.exit_code == 0

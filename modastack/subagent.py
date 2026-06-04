@@ -535,6 +535,7 @@ def launch_agent(
     timeout: int = 3600,
     requested_by: dict | None = None,
     interactive: bool = True,
+    role: str = "engineer",
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
@@ -566,6 +567,7 @@ def launch_agent(
         "requested_by": requested_by or {},
         "issue_id": issue_id,
         "interactive": interactive,
+        "role": role,
     })
     script = (
         "import json, sys; "
@@ -575,7 +577,7 @@ def launch_agent(
 
     # Register first so the session dir exists for the log file
     registry.register(SessionEntry(
-        name=session_name, session_id="", role="engineer",
+        name=session_name, session_id="", role=role,
         issue_id=issue_id, title=task[:80], phase=workflow_name,
         repo=repo, cwd=cwd, status="starting",
         requested_by=requested_by or {},
@@ -599,6 +601,7 @@ def _run_agent_entry(args: dict) -> None:
     requested_by = args.get("requested_by", {})
     issue_id = args.get("issue_id", "adhoc")
     interactive = args.get("interactive", True)
+    role = args.get("role", "engineer")
 
     dispatcher = WorkflowDispatcher()
     dispatcher.load_all_workflows()
@@ -617,6 +620,7 @@ def _run_agent_entry(args: dict) -> None:
         requested_by=requested_by,
         timeout=timeout,
         interactive=interactive,
+        role=role,
     )
 
 

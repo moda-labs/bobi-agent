@@ -487,7 +487,8 @@ def _find_transcript(session: str) -> Path | None:
         return session_log
 
     # Fallback: Claude Code transcript via session ID
-    id_file = SESSION_DIR / f"{session}.id"
+    from modastack.sdk import _sessions_dir
+    id_file = _sessions_dir() / f"{session}.id"
     if id_file.exists():
         session_id = id_file.read_text().strip()
         if session_id:
@@ -504,8 +505,9 @@ def _find_transcript(session: str) -> Path | None:
     if active:
         names = [e.name for e in active]
         click.echo(f"Active: {', '.join(sorted(names))}")
+    sessions = _sessions_dir()
     recent_dirs = sorted(
-        [d for d in SESSION_DIR.iterdir() if d.is_dir() and (d / "state.json").exists()],
+        [d for d in sessions.iterdir() if d.is_dir() and (d / "state.json").exists()],
         key=lambda d: d.stat().st_mtime, reverse=True,
     )
     recent_names = [d.name for d in recent_dirs[:10] if not d.name.startswith("moda-mgr")]
@@ -1086,6 +1088,37 @@ main.add_command(workflow)
 
 
 @main.group()
+def role():
+    """Agent roles — list available role prompts."""
+    pass
+
+
+@role.command("list")
+@click.option("--repo", default=None, help="Include repo-specific roles from this repo")
+def role_list(repo):
+    """List available agent roles.
+
+    Scans two tiers (repo overrides built-in):
+      1. Built-in: <modastack>/prompts/agents/
+      2. Repo-local: <repo>/.modastack/agents/
+
+    Usage:
+        modastack role list
+        modastack role list --repo jobtack
+    """
+    from .prompts.resolver import discover_roles, format_role_list
+
+    repo_path = None
+    if repo:
+        repo_path = Path(_resolve_repo(repo))
+    roles = discover_roles(repo_path)
+    click.echo(format_role_list(roles))
+
+
+main.add_command(role)
+
+
+@main.group()
 def monitor():
     """Background monitoring tasks — scheduled polling to fill webhook gaps."""
     pass
@@ -1249,7 +1282,8 @@ main.add_command(monitor)
 @click.version_option(version=__version__, prog_name="modastack agent")
 @click.option("--repo", default=None, help="Repo path or registered name")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
-@click.option("--task", default=None, help="Task description / context for the engineer")
+@click.option("--role", required=True, help="Agent role (see 'modastack role list')")
+@click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
 @click.option("--wait", is_flag=True, help="Block until the agent completes")
 @click.option("--post-event", "post_event", default=None,
@@ -1258,23 +1292,24 @@ main.add_command(monitor)
               help='JSON identity of requester, e.g. \'{"from":"Alice","channel":"C1"}\'')
 @click.option("--non-interactive", "non_interactive", is_flag=True,
               help="Run without manager — agent makes all decisions autonomously")
-def agent(repo, workflow, task, timeout, wait, post_event, requested_by, non_interactive):
-    """Launch an agent with a workflow.
+def agent(repo, workflow, role, task, timeout, wait, post_event, requested_by, non_interactive):
+    """Launch an agent with a workflow and role.
 
-    Every agent runs a workflow. Use 'adhoc' for open-ended tasks.
+    Every agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
+    Use 'modastack role list' to see available roles.
 
     Examples:
-        modastack agent -w issue-lifecycle --repo jobtack --task "Work on #42"
-        modastack agent -w adhoc --repo jobtack --task "Why is CI failing?"
-        modastack agent -w adhoc --non-interactive --repo jobtack --task "Fix the bug"
+        modastack agent -w issue-lifecycle --role engineer --repo jobtack --task "Work on #42"
+        modastack agent -w adhoc --role engineer --repo jobtack --task "Why is CI failing?"
+        modastack agent -w adhoc --role engineer --non-interactive --repo jobtack --task "Fix the bug"
     """
-    _dispatch_agent(repo=repo, task=task, workflow=workflow,
+    _dispatch_agent(repo=repo, task=task, workflow=workflow, role=role,
                     timeout=timeout, wait=wait, post_event=post_event,
                     requested_by=requested_by,
                     interactive=not non_interactive)
 
 
-def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requested_by, interactive=True):
+def _dispatch_agent(*, repo, task, workflow, role, timeout, wait, post_event, requested_by, interactive=True):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -1292,6 +1327,14 @@ def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requeste
     cwd = _resolve_repo(repo)
     if not cwd:
         return
+
+    # --- Validate role ---
+    from .prompts.resolver import validate_role, discover_roles
+    if not validate_role(role, Path(cwd)):
+        available = discover_roles(Path(cwd))
+        names = ", ".join(r["name"] for r in available) if available else "(none)"
+        click.echo(f"Unknown role '{role}'. Available: {names}", err=True)
+        raise SystemExit(1)
 
     requester: dict = {}
     if requested_by:
@@ -1311,6 +1354,7 @@ def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requeste
         task=task, cwd=cwd, workflow_name=workflow,
         timeout=timeout, requested_by=requester,
         interactive=interactive,
+        role=role,
     )
     click.echo(f"Agent started: {session_name}")
 

@@ -50,7 +50,7 @@ a single quick command if one suffices, but delegate anything multi-step to a
 non-interactive spawn:
 
 ```bash
-modastack agent -w adhoc --repo <repo> --wait \
+modastack agent -w adhoc --role engineer --repo <repo> --wait \
   --task "Investigate <question>. Report a concise summary."
 ```
 
@@ -60,7 +60,7 @@ raw output.
 
 Your responsibilities:
 1. **Decide**: You receive all events. Decide what needs action.
-2. **Delegate**: Use `modastack agent -w <workflow>` to assign work.
+2. **Delegate**: Use `modastack agent -w <workflow> --role <role>` to assign work.
 3. **Monitor**: Check agent progress. Only intervene if stuck.
 4. **Help**: Answer technical questions yourself whenever possible.
 5. **Notify**: Tell the human when their input is needed.
@@ -131,7 +131,7 @@ notification** — do not just note it or ask the human. Immediately spawn an
 engineer to resolve the conflict:
 
 ```bash
-modastack agent -w adhoc --repo <repo> --task "Resolve merge conflicts on \
+modastack agent -w adhoc --role engineer --repo <repo> --task "Resolve merge conflicts on \
 PR #<pr_number> (branch <branch>, <url>). Merge the base branch, resolve \
 conflicts, verify build/tests, and push. If you can't resolve it safely, \
 comment on the PR and exit non-zero so I can escalate."
