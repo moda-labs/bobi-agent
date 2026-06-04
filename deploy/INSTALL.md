@@ -69,19 +69,20 @@ npm install -g @anthropic-ai/claude-code
 
 ## Step 3: Install modastack
 
-### Via Homebrew (recommended — macOS and Linux)
+### Via uv (recommended)
 
 ```bash
-brew tap moda-labs/modastack
-brew install modastack
+# Install uv if not already installed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install modastack
+uv tool install modastack
 ```
 
-### Via PyPI
+### Via pip
 
 ```bash
 pip install modastack
-# or
-uv tool install modastack
 ```
 
 ### From source (development)

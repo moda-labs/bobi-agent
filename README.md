@@ -157,18 +157,12 @@ Key enforcement points:
 ## Install
 
 ```bash
-brew tap moda-labs/modastack
-brew install modastack
-modastack init
-```
-
-Works on macOS and Linux via [Homebrew](https://brew.sh). Also available on [PyPI](https://pypi.org/project/modastack/):
-
-```bash
-pip install modastack
-# or
 uv tool install modastack
 ```
+
+If `uv` isn't installed yet: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+Also available via pip: `pip install modastack`
 
 ### Development setup
 
@@ -397,9 +391,9 @@ roles/                            # All skill/prompt content (no Python)
 
 ## Releasing
 
-1. Bump `version` in `pyproject.toml`
+1. Bump `version` in `pyproject.toml` and `VERSION`
 2. `git tag v<version> && git push --tags`
-3. GitHub Actions publishes to PyPI and auto-updates the Homebrew formula
+3. GitHub Actions publishes to PyPI
 
 ## Tests
 

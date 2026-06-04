@@ -5,11 +5,12 @@ Event-driven AI engineering team. A persistent Claude Code manager monitors Line
 ## Install
 
 ```bash
-brew tap moda-labs/modastack
-brew install modastack
+uv tool install modastack
 ```
 
-Works on macOS and Linux. For development, clone and install in editable mode:
+If `uv` isn't installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+For development, clone and install in editable mode:
 
 ```bash
 cd ~/dev/modastack
@@ -196,12 +197,12 @@ configured in `.modastack/monitors.yaml` — see this repo's own config.
 
 ## Releasing
 
-1. Bump `version` in `pyproject.toml`
+1. Bump `version` in `pyproject.toml` and `VERSION`
 2. `git tag v<version> && git push --tags`
-3. GitHub Actions publishes to PyPI and auto-updates the Homebrew formula
+3. GitHub Actions publishes to PyPI
 
 The publish workflow (`.github/workflows/publish-pypi.yml`) triggers on `v*` tags.
-The Homebrew tap (`moda-labs/homebrew-modastack`) updates automatically via repository dispatch.
+Users upgrade with `uv tool upgrade modastack`.
 
 ## Tests
 
