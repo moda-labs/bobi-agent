@@ -823,7 +823,13 @@ def init(non_interactive):
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config = GlobalConfig.load()
     config.save()
+    if not config.webhook_secret:
+        import secrets
+        config.webhook_secret = f"whsec_{secrets.token_hex(24)}"
+        config.save()
     click.echo(f"Config initialized at {GLOBAL_CONFIG_DIR / 'config.yaml'}")
+    click.echo(f"Webhook secret: {config.webhook_secret}")
+    click.echo(f"  Use this as your GitHub webhook secret")
 
 
 
@@ -1243,6 +1249,85 @@ def monitor_remove(name, repo):
 
 
 main.add_command(monitor)
+
+
+# ---------------------------------------------------------------------------
+# event-server group
+# ---------------------------------------------------------------------------
+
+
+@main.group("event-server")
+def event_server_cmd():
+    """Manage the local event server daemon."""
+    pass
+
+
+@event_server_cmd.command("start")
+@click.option("--foreground", "-f", is_flag=True, help="Run in foreground")
+@click.option("--port", default=None, type=int, help="Override webhook port")
+def event_server_start(foreground, port):
+    """Start the local event server."""
+    config = GlobalConfig.load()
+    es_port = port or config.webhook_port
+
+    if foreground:
+        from modastack.manager.events.event_server import run_server
+        run_server(es_port, config.webhook_secret, config.slack_signing_secret)
+    else:
+        from modastack.manager.events.event_server import ensure_running
+        ensure_running(es_port, config.webhook_secret, config.slack_signing_secret)
+        click.echo(f"Event server running on port {es_port}")
+        click.echo(f"  GitHub:  http://localhost:{es_port}/webhooks/github")
+        click.echo(f"  Linear:  http://localhost:{es_port}/webhooks/linear")
+        click.echo(f"  Slack:   http://localhost:{es_port}/webhooks/slack")
+
+
+@event_server_cmd.command("stop")
+def event_server_stop():
+    """Stop the local event server."""
+    import signal
+    pid_file = GLOBAL_CONFIG_DIR / "event-server.pid"
+    if not pid_file.exists():
+        click.echo("Event server is not running")
+        return
+    pid = int(pid_file.read_text().strip())
+    try:
+        os.kill(pid, signal.SIGTERM)
+        click.echo(f"Event server stopped (pid {pid})")
+    except ProcessLookupError:
+        click.echo("Event server was not running (stale PID file)")
+    pid_file.unlink(missing_ok=True)
+
+
+@event_server_cmd.command("restart")
+@click.option("--port", default=None, type=int, help="Override webhook port")
+@click.pass_context
+def event_server_restart(ctx, port):
+    """Restart the local event server."""
+    ctx.invoke(event_server_stop)
+    import time as _time
+    _time.sleep(1)
+    ctx.invoke(event_server_start, foreground=False, port=port)
+
+
+@event_server_cmd.command("status")
+def event_server_status():
+    """Show event server status."""
+    import urllib.request
+    config = GlobalConfig.load()
+    es_port = config.webhook_port
+    try:
+        req = urllib.request.Request(f"http://localhost:{es_port}/health")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+        click.echo(f"Event server: running on port {es_port}")
+        click.echo(f"  Mode: {data.get('mode', 'unknown')}")
+        click.echo(f"  Deployments: {data.get('deployments', 0)}")
+    except Exception:
+        click.echo(f"Event server: not running (port {es_port})")
+
+
+main.add_command(event_server_cmd)
 
 
 @main.command()
