@@ -187,6 +187,9 @@ def run(repo_path: Path | None = None, **kwargs):
     if repo_path is None:
         repo_path = config.repos[0] if config.repos else Path.cwd()
 
+    from modastack.sdk import set_repo_root
+    set_repo_root(repo_path)
+
     local = LocalConfig.load(repo_path)
     state_dir = repo_path / ".modastack" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)

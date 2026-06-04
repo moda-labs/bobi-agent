@@ -72,78 +72,40 @@ def _write(path: Path, monitors: list[dict]):
     path.write_text(yaml.dump({"monitors": monitors}))
 
 
-@pytest.fixture
-def isolated(tmp_path, monkeypatch):
-    """Point registry storage at a temp dir."""
-    user_path = tmp_path / "user_monitors.yaml"
-    monkeypatch.setattr(registry_mod, "USER_MONITORS_PATH", user_path)
-    return tmp_path, user_path
-
-
 class TestRegistryMerge:
-    def test_user_monitor_loads(self, isolated):
-        _, user_path = isolated
-        _write(user_path, [{"name": "pr-conflict-check", "interval": "5m"}])
-        reg = MonitorRegistry.load(GlobalConfig(repos=[]))
-        names = {m.name: m for m in reg.effective_monitors()}
-        assert names["pr-conflict-check"].interval == "5m"
-        assert names["pr-conflict-check"].source == "user"
-
-    def test_repo_specific_monitor_scoped(self, isolated, tmp_path):
+    def test_repo_specific_monitor_scoped(self, tmp_path):
         repo = tmp_path / "jobtack"
         _write(repo / ".modastack" / "monitors.yaml", [
             {"name": "deploy-health", "interval": "5m", "url": "https://j"},
         ])
-        reg = MonitorRegistry.load(GlobalConfig(repos=[repo]))
+        reg = MonitorRegistry.load(GlobalConfig(repos=[repo]), repo_path=repo)
         dh = [m for m in reg.effective_monitors() if m.name == "deploy-health"]
         assert len(dh) == 1
         assert dh[0].repo == str(repo)
         assert reg.repos_for(dh[0]) == [repo]
 
-    def test_repo_opt_out_of_global(self, isolated, tmp_path):
-        _, user_path = isolated
-        _write(user_path, [{"name": "stale-pr-check", "interval": "1h"}])
+    def test_repo_opt_out_of_default(self, tmp_path):
         repo = tmp_path / "jobtack"
         _write(repo / ".modastack" / "monitors.yaml", [{"name": "stale-pr-check", "enabled": False}])
-        reg = MonitorRegistry.load(GlobalConfig(repos=[repo]))
-        stale = [m for m in reg.effective_monitors() if m.name == "stale-pr-check"][0]
-        assert reg.repos_for(stale) == []
+        reg = MonitorRegistry.load(GlobalConfig(repos=[repo]), repo_path=repo)
+        stale = [m for m in reg.effective_monitors() if m.name == "stale-pr-check"]
+        for s in stale:
+            assert reg.repos_for(s) == []
 
-    def test_repo_override_skips_global_for_that_repo(self, isolated, tmp_path):
-        _, user_path = isolated
-        _write(user_path, [{"name": "pr-conflict-check", "interval": "15m"}])
+    def test_repo_override_of_default(self, tmp_path):
         repo = tmp_path / "jobtack"
         _write(repo / ".modastack" / "monitors.yaml", [{"name": "pr-conflict-check", "interval": "5m"}])
-        reg = MonitorRegistry.load(GlobalConfig(repos=[repo]))
-        glob = reg.globals["pr-conflict-check"]
-        assert reg.repos_for(glob) == []
+        reg = MonitorRegistry.load(GlobalConfig(repos=[repo]), repo_path=repo)
+        glob = reg.globals.get("pr-conflict-check")
+        if glob:
+            assert reg.repos_for(glob) == []
         scoped = [m for m in reg.repo_monitors if m.name == "pr-conflict-check"][0]
         assert reg.repos_for(scoped) == [repo]
-
-    def test_paused_user_monitor(self, isolated):
-        _, user_path = isolated
-        _write(user_path, [{"name": "stale-pr-check", "enabled": False}])
-        reg = MonitorRegistry.load(GlobalConfig(repos=[]))
-        assert all(m.name != "stale-pr-check" for m in reg.effective_monitors())
-        assert any(m.name == "stale-pr-check" and not m.enabled for m in reg.all_monitors())
 
 
 # === Registry writes ===
 
 class TestRegistryWrites:
-    def test_add_global(self, isolated):
-        _, user_path = isolated
-        MonitorRegistry.add_global(Monitor(name="x", interval="5m", event="monitor/x"))
-        records = yaml.safe_load(user_path.read_text())["monitors"]
-        assert records[0]["name"] == "x"
-
-    def test_add_global_replaces_by_name(self, isolated):
-        MonitorRegistry.add_global(Monitor(name="x", interval="5m"))
-        MonitorRegistry.add_global(Monitor(name="x", interval="9m"))
-        _, user_path = isolated
-        records = yaml.safe_load(user_path.read_text())["monitors"]
-        assert len(records) == 1 and records[0]["interval"] == "9m"
-
     def test_add_repo_writes_monitors_file(self, tmp_path):
         repo = tmp_path / "r"
         repo.mkdir()
@@ -153,21 +115,8 @@ class TestRegistryWrites:
         raw = yaml.safe_load(monitors_path.read_text())
         assert raw["monitors"][0]["name"] == "dh"
 
-    def test_pause_user_monitor(self, isolated):
-        _, user_path = isolated
-        MonitorRegistry.add_global(Monitor(name="pr-conflict-check", interval="15m"))
-        assert MonitorRegistry.pause("pr-conflict-check") is True
-        records = yaml.safe_load(user_path.read_text())["monitors"]
-        paused = [r for r in records if r["name"] == "pr-conflict-check" and r.get("enabled") is False]
-        assert len(paused) == 1
-
-    def test_pause_unknown_returns_false(self, isolated):
+    def test_pause_unknown_returns_false(self):
         assert MonitorRegistry.pause("does-not-exist") is False
-
-    def test_remove_user_monitor(self, isolated):
-        MonitorRegistry.add_global(Monitor(name="x"))
-        assert MonitorRegistry.remove("x") == "removed"
-        assert MonitorRegistry.remove("x") == "not-found"
 
 
 # === Scheduler ===

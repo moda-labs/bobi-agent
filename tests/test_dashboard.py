@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from dashboard.app import app
 from dashboard import data
+from modastack import sdk
 
 
 @pytest.fixture
@@ -14,18 +15,24 @@ def client():
     return TestClient(app)
 
 
-@pytest.fixture
-def events_file(tmp_path, monkeypatch):
-    path = tmp_path / "events.jsonl"
-    monkeypatch.setattr(data, "EVENTS_PATH", path)
-    return path
+@pytest.fixture(autouse=True)
+def _repo_root(tmp_path, monkeypatch):
+    """Point all state to a temp dir for test isolation."""
+    state_dir = tmp_path / ".modastack" / "state"
+    state_dir.mkdir(parents=True)
+    sessions_dir = tmp_path / ".modastack" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    monkeypatch.setattr(sdk, "_repo_root", tmp_path)
 
 
 @pytest.fixture
-def decisions_file(tmp_path, monkeypatch):
-    path = tmp_path / "decisions.jsonl"
-    monkeypatch.setattr(data, "DECISIONS_PATH", path)
-    return path
+def events_file(tmp_path):
+    return tmp_path / ".modastack" / "state" / "events.jsonl"
+
+
+@pytest.fixture
+def decisions_file(tmp_path):
+    return tmp_path / ".modastack" / "state" / "decisions.jsonl"
 
 
 def _write_events(path, events):
@@ -54,7 +61,7 @@ def test_read_events_with_data(events_file):
     events, total = data.read_events()
     assert total == 3
     assert len(events) == 3
-    assert events[0]["type"] == "worker.waiting_input"  # reverse chronological
+    assert events[0]["type"] == "worker.waiting_input"
 
 
 def test_read_events_filtering(events_file):
@@ -82,7 +89,7 @@ def test_read_events_pagination(events_file):
     events, total = data.read_events(limit=3, offset=0)
     assert total == 10
     assert len(events) == 3
-    assert events[0]["type"] == "event.9"  # reverse order
+    assert events[0]["type"] == "event.9"
 
     events, total = data.read_events(limit=3, offset=3)
     assert len(events) == 3
@@ -103,7 +110,7 @@ def test_read_decisions_with_data(decisions_file):
 
     decisions = data.read_decisions(limit=5)
     assert len(decisions) == 2
-    assert decisions[0]["events"] == 1  # most recent first
+    assert decisions[0]["events"] == 1
 
 
 def test_status_endpoint(client, monkeypatch):
@@ -163,42 +170,35 @@ def test_index_page(client):
     assert "modastack" in resp.text
 
 
-def test_read_modastack_log_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(data, "MODASTACK_LOG_PATH", tmp_path / "missing.log")
+def test_read_modastack_log_empty(tmp_path):
     assert data.read_modastack_log() == []
 
 
-def test_read_modastack_log_tail(tmp_path, monkeypatch):
-    path = tmp_path / "modastack.log"
+def test_read_modastack_log_tail(tmp_path):
+    path = tmp_path / ".modastack" / "state" / "manager.log"
     path.write_text("\n".join(f"line {i}" for i in range(10)) + "\n")
-    monkeypatch.setattr(data, "MODASTACK_LOG_PATH", path)
     lines = data.read_modastack_log(limit=3)
     assert lines == ["line 7", "line 8", "line 9"]
 
 
 def test_tail_lines_spans_multiple_blocks(tmp_path):
-    # Write enough data to exceed the 64KB seek block so the backward
-    # read loop runs more than once.
     path = tmp_path / "big.log"
     path.write_text("\n".join(f"line {i:05d}" for i in range(20000)) + "\n")
     lines = data._tail_lines(path, 4)
     assert lines == ["line 19996", "line 19997", "line 19998", "line 19999"]
 
 
-def test_logs_endpoint(client, tmp_path, monkeypatch):
-    path = tmp_path / "modastack.log"
+def test_logs_endpoint(client, tmp_path):
+    path = tmp_path / ".modastack" / "state" / "manager.log"
     path.write_text("hello\nworld\n")
-    monkeypatch.setattr(data, "MODASTACK_LOG_PATH", path)
     resp = client.get("/api/logs?limit=10")
     assert resp.status_code == 200
     assert resp.json()["lines"] == ["hello", "world"]
 
 
-def test_activity_snippet(tmp_path, monkeypatch):
-    from modastack import sdk
-    monkeypatch.setattr(sdk, "SESSION_DIR", tmp_path)
-    session_dir = tmp_path / "eng-7-implement"
-    session_dir.mkdir()
+def test_activity_snippet(tmp_path):
+    session_dir = tmp_path / ".modastack" / "sessions" / "eng-7-implement"
+    session_dir.mkdir(parents=True)
     (session_dir / "log.jsonl").write_text(
         json.dumps({"event": "UserPromptSubmit", "text": "go"}) + "\n"
         + json.dumps({"event": "response", "text": "Working on it\nstep two"}) + "\n"

@@ -1722,11 +1722,13 @@ def monitor_add(name, interval, description, event, check, url, repo):
 
     if repo:
         repo_path = _resolve_monitor_repo(repo)
-        MonitorRegistry.add_repo(m, repo_path)
-        click.echo(f"Added monitor '{slug}' to {repo_path}/.modastack/monitors.yaml")
     else:
-        MonitorRegistry.add_global(m)
-        click.echo(f"Added global monitor '{slug}' to ~/.modastack/monitors.yaml")
+        repo_path = _detect_repo_root()
+        if not repo_path:
+            click.echo("Not inside a modastack repo. Use --repo or run from inside a repo.", err=True)
+            raise SystemExit(1)
+    MonitorRegistry.add_repo(m, repo_path)
+    click.echo(f"Added monitor '{slug}' to {repo_path}/.modastack/monitors.yaml")
     click.echo(f"  interval={interval} event={m.event} "
                f"check={check or 'manager-interpreted'}")
 
