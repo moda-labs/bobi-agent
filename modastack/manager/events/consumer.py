@@ -100,9 +100,18 @@ def _drain_loop():
         return
     log.info("Manager ready — drain loop active")
 
-    config = GlobalConfig.load()
-    dm_channel = config.slack_dm_channel
-    dm_token = config.slack_bot_token
+    from modastack.manager.session import get_default_session
+    session = get_default_session()
+    if session:
+        from modastack.config import LocalConfig
+        local = LocalConfig.load(session.repo_path)
+        config = GlobalConfig.load()
+        dm_token = local.slack_bot_token or config.slack_bot_token
+        dm_channel = local.slack_dm_channel or config.slack_dm_channel
+    else:
+        config = GlobalConfig.load()
+        dm_token = config.slack_bot_token
+        dm_channel = config.slack_dm_channel
     if dm_channel and dm_token:
         set_response_callback(lambda t: _post_dm(dm_token, dm_channel, t))
         log.info(f"Streaming all manager output to Slack DM {dm_channel}")
@@ -167,27 +176,42 @@ def _kill_stale_instances():
         pass
 
 
-def run(**kwargs):
-    """Start modastack: manager session + event client + drain loop."""
+def run(repo_path: Path | None = None, **kwargs):
+    """Start modastack for a single repo."""
     import atexit
     import signal
+    from modastack.config import LocalConfig
 
-    log.info("Modastack starting")
+    config = GlobalConfig.load()
+
+    if repo_path is None:
+        repo_path = config.repos[0] if config.repos else Path.cwd()
+
+    local = LocalConfig.load(repo_path)
+    state_dir = repo_path / ".modastack" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info(f"Modastack starting for {repo_path.name}")
     _kill_stale_instances()
-    PID_PATH.write_text(str(os.getpid()))
-    atexit.register(_cleanup_pid)
+
+    # Write PID to both per-repo state dir and legacy path
+    pid_str = str(os.getpid())
+    (state_dir / "manager.pid").write_text(pid_str)
+    PID_PATH.write_text(pid_str)
+
+    def _cleanup():
+        (state_dir / "manager.pid").unlink(missing_ok=True)
+        (state_dir / "dashboard.port").unlink(missing_ok=True)
+        _cleanup_pid()
+    atexit.register(_cleanup)
 
     def _handle_term(signum, frame):
         log.info("Received SIGTERM — shutting down")
-        _cleanup_pid()
+        _cleanup()
         raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, _handle_term)
 
-    config = GlobalConfig.load()
-
-    # Create the manager session for the first registered repo (or cwd)
-    repo_path = config.repos[0] if config.repos else Path.cwd()
     session = ManagerSession(repo_path=repo_path)
     set_default_session(session)
 
@@ -195,23 +219,28 @@ def run(**kwargs):
         log.error("Failed to start manager session")
         return
 
-    log.info("Manager session started")
+    log.info(f"Manager session '{session.session_name}' started")
 
     from modastack.workflow.triggers import WorkflowDispatcher
     dispatcher = WorkflowDispatcher()
     dispatcher.load_all_workflows()
     log.info(f"Loaded {len(dispatcher.workflows)} workflow(s)")
 
+    # Event server — prefer per-repo local config, fall back to global
+    es_url = local.event_server_url or config.event_server_url
+    es_deployment = local.event_server_deployment_id or config.event_server_deployment_id
+    es_key = local.event_server_api_key or config.event_server_api_key
+
     event_client = None
-    if config.event_server_url and config.event_server_api_key:
+    if es_url and es_key:
         from .event_client import EventServerClient
         event_client = EventServerClient(
-            server_url=config.event_server_url,
-            deployment_id=config.event_server_deployment_id,
-            api_key=config.event_server_api_key,
+            server_url=es_url,
+            deployment_id=es_deployment,
+            api_key=es_key,
         )
         event_client.start()
-        log.info(f"Event client started -> {config.event_server_url}")
+        log.info(f"Event client started -> {es_url}")
         atexit.register(event_client.stop)
     else:
         log.warning("No event server configured — running without webhook events")
@@ -220,26 +249,33 @@ def run(**kwargs):
     drain_thread = threading.Thread(target=_drain_loop, daemon=True, name="drain-loop")
     drain_thread.start()
 
-    # Start background monitor scheduler (polls to fill webhook gaps,
-    # injecting synthetic events onto the same queue webhooks use).
     from modastack.monitors.scheduler import MonitorScheduler
     monitor_scheduler = MonitorScheduler()
     monitor_scheduler.start()
 
-    # Start dashboard in background
+    # Dashboard — use port from local config, write chosen port to state
+    dashboard_port = local.dashboard_port or 8095
     from dashboard.app import run_dashboard
     dashboard_thread = threading.Thread(
-        target=run_dashboard, kwargs={"port": 8095},
+        target=run_dashboard, kwargs={"port": dashboard_port},
         daemon=True, name="dashboard",
     )
     dashboard_thread.start()
-    log.info("Dashboard started on http://localhost:8095")
+    (state_dir / "dashboard.port").write_text(str(dashboard_port))
+    log.info(f"Dashboard started on http://localhost:{dashboard_port}")
 
-    log.info("Modastack running")
-    _notify_slack(config, "Modastack started.")
+    # Slack DM relay — prefer per-repo local config
+    dm_token = local.slack_bot_token or config.slack_bot_token
+    dm_channel = local.slack_dm_channel or config.slack_dm_channel
+    if dm_token and dm_channel:
+        def _notify(text):
+            _post_dm(dm_token, dm_channel, text)
+        _notify(f"Modastack started for {repo_path.name}.")
+
+    log.info(f"Modastack running for {repo_path.name}")
 
     while True:
         time.sleep(HEALTH_CHECK_INTERVAL)
-        if not is_alive():
+        if not session.is_alive():
             log.warning("Manager session died — restarting")
-            start_or_resume()
+            session.start_or_resume()

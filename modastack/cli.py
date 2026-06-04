@@ -20,6 +20,24 @@ LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
 UPDATE_STATE_PATH = GLOBAL_CONFIG_DIR / "update_state.json"
 REPO_ROOT = Path(__file__).parent.parent
 
+def _detect_repo_root(cwd: Path | None = None) -> Path | None:
+    """Walk up from cwd to find a repo with .modastack/config.yaml."""
+    path = (cwd or Path.cwd()).resolve()
+    for candidate in [path, *path.parents]:
+        if (candidate / ".modastack" / "config.yaml").exists():
+            return candidate
+        if (candidate / ".modastack.yaml").exists():
+            return candidate
+    return None
+
+
+def _repo_state_dir(repo_path: Path) -> Path:
+    """Runtime state directory for a repo's manager."""
+    d = repo_path / ".modastack" / "state"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 HOOK_SETTINGS = {
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": ".claude/hooks/session-state.sh", "timeout": 5}]}],
     "Stop": [{"hooks": [{"type": "command", "command": ".claude/hooks/session-state.sh", "timeout": 5}]}],
@@ -120,12 +138,22 @@ def _systemctl(action: str) -> bool:
 @main.command()
 @click.option("--foreground", "-f", is_flag=True, help="Run in the foreground (default: daemonize)")
 def start(foreground):
-    """Start modastack. Connects to the centralized event server for webhooks.
+    """Start modastack for the repo in the current directory.
 
     Usage:
-        modastack start              # daemonize
-        modastack start --foreground # run in foreground (for debugging)
+        cd myrepo && modastack start              # daemonize
+        cd myrepo && modastack start --foreground  # run in foreground
     """
+    repo_path = _detect_repo_root()
+    if not repo_path:
+        # Fallback: check GlobalConfig.repos for legacy setups
+        config = GlobalConfig.load()
+        if config.repos:
+            repo_path = config.repos[0]
+        else:
+            click.echo("Not inside a modastack repo. Run `modastack setup .` first.", err=True)
+            raise SystemExit(1)
+
     if not foreground and _has_systemd_service():
         click.echo("Starting via systemd...")
         if _systemctl("start"):
@@ -134,18 +162,23 @@ def start(foreground):
                 capture_output=True, text=True, timeout=5,
             )
             pid = result.stdout.strip()
-            click.echo(f"Modastack started (pid {pid}). Logs: {GLOBAL_CONFIG_DIR / 'modastack.log'}")
+            click.echo(f"Modastack started (pid {pid}). Logs: {_repo_state_dir(repo_path) / 'manager.log'}")
         return
 
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
-    if pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-            click.echo(f"Modastack already running (pid {pid}). Use `modastack restart`.")
-            return
-        except (ProcessLookupError, ValueError):
-            pid_path.unlink(missing_ok=True)
+    state_dir = _repo_state_dir(repo_path)
+    pid_path = state_dir / "manager.pid"
+
+    # Also check legacy PID path
+    legacy_pid = GLOBAL_CONFIG_DIR / "modastack.pid"
+    for p in [pid_path, legacy_pid]:
+        if p.exists():
+            try:
+                pid = int(p.read_text().strip())
+                os.kill(pid, 0)
+                click.echo(f"Modastack already running for {repo_path.name} (pid {pid}). Use `modastack restart`.")
+                return
+            except (ProcessLookupError, ValueError):
+                p.unlink(missing_ok=True)
 
     if foreground:
         root = logging.getLogger()
@@ -153,23 +186,36 @@ def start(foreground):
                          if isinstance(h, logging.FileHandler)]
 
         from modastack.manager.events.consumer import run
-        run()
+        run(repo_path=repo_path)
     else:
-        log_file = GLOBAL_CONFIG_DIR / "modastack.log"
-        GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        log_file = state_dir / "manager.log"
         with open(log_file, "a") as lf:
             proc = subprocess.Popen(
                 [sys.executable, "-m", "modastack.cli", "start", "--foreground"],
                 stdout=lf, stderr=lf,
+                cwd=str(repo_path),
                 start_new_session=True,
             )
-        click.echo(f"Modastack started (pid {proc.pid}). Logs: {log_file}")
+        click.echo(f"Modastack started for {repo_path.name} (pid {proc.pid}). Logs: {log_file}")
+
+
+def _find_pid_path() -> Path | None:
+    """Find the PID file for the current repo's manager."""
+    repo_path = _detect_repo_root()
+    if repo_path:
+        p = _repo_state_dir(repo_path) / "manager.pid"
+        if p.exists():
+            return p
+    legacy = GLOBAL_CONFIG_DIR / "modastack.pid"
+    if legacy.exists():
+        return legacy
+    return None
 
 
 @main.command()
 @click.option("--force", is_flag=True, help="Send SIGKILL if SIGTERM doesn't work")
 def stop(force):
-    """Stop a running modastack instance.
+    """Stop the modastack instance for the current repo.
 
     Usage:
         modastack stop
@@ -182,8 +228,8 @@ def stop(force):
 
     import signal
 
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
-    if not pid_path.exists():
+    pid_path = _find_pid_path()
+    if not pid_path:
         click.echo("No PID file found — modastack is not running.")
         return
 
