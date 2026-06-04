@@ -205,7 +205,7 @@ def run(repo_path: Path | None = None, **kwargs):
     config = GlobalConfig.load()
 
     if repo_path is None:
-        repo_path = config.repos[0] if config.repos else Path.cwd()
+        raise RuntimeError("repo_path is required — run from a repo with .modastack/config.yaml")
 
     from modastack.sdk import set_repo_root
     set_repo_root(repo_path)
@@ -223,7 +223,12 @@ def run(repo_path: Path | None = None, **kwargs):
     PID_PATH.write_text(pid_str)
 
     def _cleanup():
-        (state_dir / "manager.pid").unlink(missing_ok=True)
+        pid_file = state_dir / "manager.pid"
+        try:
+            if pid_file.exists() and pid_file.read_text().strip() == pid_str:
+                pid_file.unlink(missing_ok=True)
+        except OSError:
+            pass
         (state_dir / "dashboard.port").unlink(missing_ok=True)
         _cleanup_pid()
     atexit.register(_cleanup)

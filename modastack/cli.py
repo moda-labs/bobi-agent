@@ -110,13 +110,8 @@ def start(foreground):
     """
     repo_path = _detect_repo_root()
     if not repo_path:
-        # Fallback: check GlobalConfig.repos for legacy setups
-        config = GlobalConfig.load()
-        if config.repos:
-            repo_path = config.repos[0]
-        else:
-            click.echo("Not inside a modastack repo. Run `modastack setup .` first.", err=True)
-            raise SystemExit(1)
+        click.echo("Not inside a modastack repo (no .modastack/config.yaml found). Run `modastack init` first.", err=True)
+        raise SystemExit(1)
 
     if not foreground and _has_systemd_service():
         click.echo("Starting via systemd...")

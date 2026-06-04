@@ -126,7 +126,7 @@ class TestStartup:
     @patch("modastack.manager.events.consumer._kill_stale_instances")
     @patch("modastack.manager.events.consumer._wait_for_manager", return_value=True)
     @patch("modastack.manager.session.detect_state", return_value="waiting_input")
-    def test_run_starts_without_crash(self, mock_state, mock_wait, mock_kill, mock_start):
+    def test_run_starts_without_crash(self, mock_state, mock_wait, mock_kill, mock_start, tmp_path):
         """run() should get through startup without AttributeError or ImportError."""
         import signal
         from modastack.manager.events.consumer import run
@@ -148,7 +148,7 @@ class TestStartup:
              patch("modastack.manager.session.ManagerSession.is_alive", return_value=True), \
              patch("signal.signal"):
             try:
-                run()
+                run(repo_path=tmp_path)
             except SystemExit:
                 pass
 
