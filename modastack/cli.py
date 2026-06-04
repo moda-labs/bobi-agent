@@ -204,11 +204,16 @@ def start(foreground):
         run(repo_path=repo_path)
     else:
         log_file = state_dir / "manager.log"
+        env = os.environ.copy()
+        venv_bin = str(Path(sys.executable).parent)
+        local_bin = str(Path.home() / ".local" / "bin")
+        env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
         with open(log_file, "a") as lf:
             proc = subprocess.Popen(
                 [sys.executable, "-m", "modastack.cli", "start", "--foreground"],
                 stdout=lf, stderr=lf,
                 cwd=str(repo_path),
+                env=env,
                 start_new_session=True,
             )
         click.echo(f"Modastack started for {repo_path.name} (pid {proc.pid}). Logs: {log_file}")
