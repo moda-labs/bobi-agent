@@ -15,6 +15,8 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_global_config())
     results.append(_check_repos())
     results.append(_check_workflows())
+    results.append(_check_event_server())
+    results.append(_check_recent_events())
 
     return results
 
@@ -68,3 +70,63 @@ def _check_workflows() -> CheckResult:
                            detail=f"{len(names)} loaded: {', '.join(names)}")
     except Exception as e:
         return CheckResult("Workflows", ok=False, detail=str(e))
+
+
+def _check_event_server() -> CheckResult:
+    """Probe the event server /health endpoint."""
+    import json
+    import urllib.request
+
+    config = GlobalConfig.load()
+    port = config.webhook_port
+
+    # If cloud config is present, report that instead
+    if config.event_server_url and config.event_server_api_key:
+        return CheckResult("Event server", ok=True,
+                           detail=f"cloud mode ({config.event_server_url})")
+
+    try:
+        req = urllib.request.Request(f"http://localhost:{port}/health")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+            mode = data.get("mode", "unknown")
+            deployments = data.get("deployments", 0)
+            return CheckResult("Event server", ok=True,
+                               detail=f"running on port {port} (mode={mode}, deployments={deployments})")
+    except Exception:
+        return CheckResult("Event server", ok=False,
+                           detail=f"not running on port {port}",
+                           hint="`modastack event-server start` or `modastack start` will auto-launch")
+
+
+def _check_recent_events() -> CheckResult:
+    """Check if events have been received recently."""
+    import datetime
+    import json
+    import time
+
+    from modastack.manager.events.event_client import _state_path
+
+    events_file = _state_path("events.jsonl")
+    if not events_file.exists():
+        return CheckResult("Recent events", ok=True,
+                           detail="no events yet (normal for new installs)")
+
+    one_hour_ago = time.time() - 3600
+    recent_count = 0
+    try:
+        for line in events_file.read_text().splitlines()[-100:]:
+            entry = json.loads(line)
+            ts = entry.get("timestamp", "")
+            if ts:
+                dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if dt.timestamp() > one_hour_ago:
+                    recent_count += 1
+    except Exception:
+        pass
+
+    if recent_count > 0:
+        return CheckResult("Recent events", ok=True,
+                           detail=f"{recent_count} events in the last hour")
+    return CheckResult("Recent events", ok=True,
+                       detail="no events in the last hour")

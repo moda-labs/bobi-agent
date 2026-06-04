@@ -176,6 +176,26 @@ def _kill_stale_instances():
         pass
 
 
+def _build_subscriptions(repo_path: Path) -> list[str]:
+    """Build subscription keys from repo config for event server registration."""
+    subs: list[str] = []
+    try:
+        from modastack.config import RepoConfig
+        rc = RepoConfig.from_file(repo_path)
+        if rc.github_repo:
+            subs.append(rc.github_repo)
+        if rc.slack_workspace_id:
+            subs.append(f"slack:{rc.slack_workspace_id}")
+        if rc.project and rc.task_tracking == "linear":
+            subs.append(f"linear:{rc.project}")
+    except (FileNotFoundError, Exception) as e:
+        log.warning(f"Could not read repo config for subscriptions: {e}")
+    if not subs:
+        # Fallback: use the repo directory name
+        subs.append(repo_path.name)
+    return subs
+
+
 def run(repo_path: Path | None = None, **kwargs):
     """Start modastack for a single repo."""
     import atexit
@@ -246,7 +266,35 @@ def run(repo_path: Path | None = None, **kwargs):
         log.info(f"Event client started -> {es_url}")
         atexit.register(event_client.stop)
     else:
-        log.warning("No event server configured — running without webhook events")
+        from .event_server import ensure_running, register
+
+        es_port = config.webhook_port
+        base_url = f"http://localhost:{es_port}"
+
+        # Start daemon if not already running
+        ensure_running(es_port, config.webhook_secret, config.slack_signing_secret)
+
+        # Register this manager's subscriptions
+        subs = _build_subscriptions(repo_path)
+        deployment_id, api_key = register(base_url, repo_path.name, subs)
+
+        # Connect via EventServerClient — same code path as cloud mode
+        from .event_client import EventServerClient
+        event_client = EventServerClient(
+            server_url=base_url,
+            deployment_id=deployment_id,
+            api_key=api_key,
+        )
+        event_client.start()
+        log.info(f"Event client started -> {base_url} (local)")
+        atexit.register(event_client.stop)
+
+        log.info("Webhook endpoints ready:")
+        log.info(f"  GitHub:  {base_url}/webhooks/github")
+        log.info(f"  Linear:  {base_url}/webhooks/linear")
+        log.info(f"  Slack:   {base_url}/webhooks/slack")
+        if not config.public_url:
+            log.info(f"Expose with: ngrok http {es_port}")
 
     # Start drain loop
     drain_thread = threading.Thread(target=_drain_loop, daemon=True, name="drain-loop")
