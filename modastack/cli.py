@@ -122,6 +122,10 @@ def main():
             logging.FileHandler(LOG_PATH),
         ],
     )
+    repo = _detect_repo_root()
+    if repo:
+        from modastack.sdk import set_repo_root
+        set_repo_root(repo)
 
 
 def _has_systemd_service() -> bool:
@@ -526,12 +530,11 @@ def log(session, lines, follow):
 
 def _find_transcript(session: str) -> Path | None:
     """Find the log file for a session."""
-    from modastack.sdk import SESSION_DIR, SessionRegistry, get_registry
+    from modastack.sdk import SessionRegistry, get_registry
 
     if session == "manager":
-        from modastack.manager.session import get_default_session
-        s = get_default_session()
-        session = s.session_name if s else "moda-manager"
+        repo = _detect_repo_root()
+        session = f"moda-mgr-{repo.name}" if repo else "moda-manager"
 
     # Primary: session dir log
     session_log = SessionRegistry.log_path(session)
@@ -653,9 +656,10 @@ def status():
     """Show active agents — manager + engineer sub-agents."""
     from modastack.sdk import load_session_id, get_registry
 
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
+    repo_path = _detect_repo_root()
     running = False
-    if pid_path.exists():
+    pid_path = _find_pid_path()
+    if pid_path and pid_path.exists():
         try:
             pid = int(pid_path.read_text().strip())
             os.kill(pid, 0)
@@ -663,27 +667,7 @@ def status():
         except (ValueError, ProcessLookupError, PermissionError):
             pass
 
-    if not running:
-        import subprocess as _sp
-        try:
-            result = _sp.run(
-                ["pgrep", "-f", "modastack.*start"],
-                capture_output=True, text=True, timeout=5,
-            )
-            for line in result.stdout.strip().splitlines():
-                try:
-                    pid = int(line.strip())
-                    os.kill(pid, 0)
-                    running = True
-                    break
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-        except (FileNotFoundError, _sp.TimeoutExpired):
-            pass
-
-    from modastack.manager.session import get_default_session
-    mgr = get_default_session()
-    mgr_name = mgr.session_name if mgr else "moda-manager"
+    mgr_name = f"moda-mgr-{repo_path.name}" if repo_path else "moda-manager"
     session_id = load_session_id(mgr_name) or ""
     session_short = session_id[:8] if session_id else ""
 
