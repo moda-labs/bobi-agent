@@ -7,21 +7,25 @@ Global config (~/.modastack/config.yaml): instance-level settings
   - Registered repos
 
 Credentials (~/.modastack/credentials.yaml): API keys per workspace
-  - Referenced by .modastack.yaml "credentials:" field in each repo
+  - Referenced by config "credentials:" field in each repo
   - Keys depend on task tracker: linear_api_key for Linear, etc.
   - GitHub Issues uses gh CLI auth (no key needed)
 
-Per-repo config (.modastack.yaml): repo-specific settings
+Per-repo config (.modastack/config.yaml): repo-specific settings
   - Task tracking system (github-issues or linear)
   - Project prefix, trigger labels
   - Test command, review policy
-  - Repo-specific context for engineers
+  - Repo-specific context for agents
 """
 
+import logging
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 GLOBAL_CONFIG_DIR = Path.home() / ".modastack"
 GLOBAL_CONFIG_PATH = GLOBAL_CONFIG_DIR / "config.yaml"
@@ -86,9 +90,6 @@ class GlobalConfig:
     event_server_deployment_id: str = ""
     event_server_api_key: str = ""
 
-    # Manager role (loads roles/manager/<role>.md)
-    manager_role: str = "engineering"
-
     @classmethod
     def load(cls) -> "GlobalConfig":
         if not GLOBAL_CONFIG_PATH.exists():
@@ -100,7 +101,6 @@ class GlobalConfig:
         webhooks = raw.get("webhooks", {})
         github = raw.get("github", {})
 
-        manager = raw.get("manager", {})
         event_server = raw.get("event_server", {})
 
         return cls(
@@ -115,7 +115,6 @@ class GlobalConfig:
             event_server_url=event_server.get("url", ""),
             event_server_deployment_id=event_server.get("deployment_id", ""),
             event_server_api_key=event_server.get("api_key", ""),
-            manager_role=manager.get("role", "engineering"),
         )
 
     def slack_token_for(self, workspace_id: str = "") -> str:
@@ -154,9 +153,28 @@ class GlobalConfig:
         GLOBAL_CONFIG_PATH.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
 
 
+def _resolve_repo_config_path(repo_path: Path) -> Path:
+    """Find the repo config file, preferring .modastack/config.yaml."""
+    new_path = repo_path / ".modastack" / "config.yaml"
+    if new_path.exists():
+        return new_path
+    legacy_path = repo_path / ".modastack.yaml"
+    if legacy_path.exists():
+        warnings.warn(
+            f"Using deprecated .modastack.yaml in {repo_path}; "
+            "migrate to .modastack/config.yaml",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return legacy_path
+    raise FileNotFoundError(
+        f"No .modastack/config.yaml or .modastack.yaml in {repo_path}"
+    )
+
+
 @dataclass
 class RepoConfig:
-    """Per-repo config from .modastack.yaml."""
+    """Per-repo config from .modastack/config.yaml (or legacy .modastack.yaml)."""
 
     path: Path
     task_tracking: str = "github-issues"  # "github-issues" or "linear"
@@ -172,9 +190,7 @@ class RepoConfig:
 
     @classmethod
     def from_file(cls, repo_path: Path) -> "RepoConfig":
-        config_path = repo_path / ".modastack.yaml"
-        if not config_path.exists():
-            raise FileNotFoundError(f"No .modastack.yaml in {repo_path}")
+        config_path = _resolve_repo_config_path(repo_path)
 
         raw = yaml.safe_load(config_path.read_text()) or {}
         task_tracking_config = raw.get("task_tracking", {})

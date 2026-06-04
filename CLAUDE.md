@@ -43,8 +43,7 @@ modastack setup --linear-key <API_KEY> --linear-project <PROJECT_KEY>
 ```
 
 This stores the API key per-project (in ~/.modastack/credentials.yaml,
-not in the repo), registers the repo in ~/.modastack/config.yaml, and
-installs engineer skills.
+not in the repo) and registers the repo in ~/.modastack/config.yaml.
 
 ### Step 3: Verify
 
@@ -74,7 +73,7 @@ modastack events               # show recent events from the bus
 modastack message "text"       # inject a message into the manager session
 modastack consult "question"   # ask the manager a question, block until response
 modastack init                 # initialize global config
-modastack setup [path]         # set up a repo — install skills, store credentials, register
+modastack setup [path]         # set up a repo — generate config, store credentials, register
 modastack register <target>    # register a repo (local path or org/repo)
 modastack repos                # list registered repos
 modastack doctor               # health-check /browse (Playwright, Chromium sandbox, daemon)
@@ -82,21 +81,29 @@ modastack doctor               # health-check /browse (Playwright, Chromium sand
 
 ## Architecture
 
-Event-driven: events from GitHub, Linear, and Slack flow through a
-Cloudflare event server to a persistent Claude Code manager session.
-The manager receives ALL events and decides what to do — spawn an
-ad-hoc engineer, run a structured workflow, or handle it directly.
+Modastack is a generic event-driven agent framework. Events from
+GitHub, Linear, Slack, and other sources flow through a Cloudflare
+event server to a persistent Claude Code manager session. The manager
+receives ALL events and decides what to do — spawn an agent, run a
+structured workflow, or handle it directly.
+
+The framework has no domain opinions. All domain-specific behavior
+(what kind of work to do, how to do it, what workflows to run) comes
+from per-repo `.modastack/` configuration.
 
 ```
-modastack/                        # All Python code
+modastack/                        # Framework (Python package)
 ├── cli.py                        # Click CLI entrypoint
-├── config.py                     # Global config (~/.modastack/config.yaml)
-├── scanner.py                    # Linear GraphQL polling
-├── session.py                    # Engineer tmux session management
-├── setup.py                      # Repo setup — skill install, auto-detection
+├── config.py                     # Global + per-repo config loading
+├── session.py                    # Legacy tmux session management
+├── setup.py                      # Repo setup — auto-detection
 ├── board_setup.py                # Bootstrap Linear board with workflow states
+├── prompts/                      # Framework base prompts (no domain logic)
+│   ├── manager_base.md           # Event format, Slack threading, agent spawning
+│   ├── agent_base.md             # Handoff mechanics, manager communication
+│   └── resolver.py               # Agent prompt resolution from repo config
 ├── manager/                      # Persistent manager + event system
-│   ├── session.py                # Manager tmux session (start, resume, inject, capture)
+│   ├── session.py                # Manager SDK session (start, resume, inject)
 │   └── events/
 │       ├── bus.py                # Thread-safe in-process event queue
 │       ├── consumer.py           # Drain bus → write events file → trigger manager
@@ -104,53 +111,52 @@ modastack/                        # All Python code
 │       ├── webhook_server.py     # HTTP endpoints: /webhooks/github, /linear, /slack
 │       └── slack_socket.py       # Slack Socket Mode WebSocket client
 ├── workflow/
-│   ├── engine.py                 # DAG executor with hybrid LLM + deterministic nodes
-│   ├── triggers.py               # Event → workflow matching, resolution chain
-│   └── schema.py                 # WorkflowDef, NodeDef, YAML parsing
+│   ├── orchestrator.py           # DAG executor with deterministic routing
+│   ├── triggers.py               # Workflow discovery, three-tier resolution
+│   └── schema.py                 # WorkflowDef, StepDef (with agent: field), YAML parsing
 └── monitors/                     # Background polling to fill webhook gaps
     ├── schema.py                 # Monitor record + interval parsing
-    ├── registry.py               # Three-tier load/merge + writes (add/pause/remove)
+    ├── registry.py               # Three-tier load/merge + writes
     ├── checks.py                 # Native check runners (pr_conflicts, stale_prs)
     └── scheduler.py              # Interval scheduler, dedup, synthetic event injection
 
-monitors/defaults.yaml            # Built-in monitor defaults (shipped, read-only)
+workflows/adhoc.yaml              # Only built-in workflow (generic pass-through)
+monitors/defaults.yaml            # Empty — domain monitors go in repo config
 
-roles/                            # All skill/prompt content (no Python)
-├── manager/
-│   ├── prompt.md                 # Core manager behavior (general-purpose)
-│   └── engineering.md            # Engineering manager role (domain-specific)
-├── engineer/
-│   ├── process/                  # Manager-routed lifecycle phases
-│   │   ├── pickup/SKILL.md       # Take ticket, create worktree, triage
-│   │   ├── spec/SKILL.md         # Write implementation spec
-│   │   ├── implement/SKILL.md    # Build from spec, TDD, sub-agents
-│   │   ├── prepare-pr/SKILL.md   # Create/update PR
-│   │   └── feedback/SKILL.md     # Address review comments
-│   └── practices/                # Modastack-native methodology skills
-│       ├── triage/SKILL.md       # Task intake & classification
-│       ├── build/SKILL.md        # Staff engineer coding methodology
-│       ├── code-review/SKILL.md  # Mandatory quality gates
-│       ├── ticketing-policy/SKILL.md
-│       └── source-control-conventions/SKILL.md
-├── product_manager/
-│   ├── brand-identity/SKILL.md   # Brand discovery & visual identity
-│   └── design-critic/SKILL.md    # Adversarial design doc reviewer
-└── tools/                        # Shared tool reference (manager + engineers)
-    ├── git/SKILL.md              # Git CLI commands
-    ├── github/SKILL.md           # gh CLI commands
-    ├── linear/SKILL.md           # Linear GraphQL API
-    ├── slack/SKILL.md            # Slack setup & API
-    ├── webhooks/SKILL.md         # Webhook setup guide
-    └── notion/SKILL.md           # Notion integration (placeholder)
-
-# GStack skills (review, ship, autoplan, investigate, office-hours,
-# qa, plan-*-review) come from user-level ~/.claude/skills/ via
-# gstack setup — not copied into this repo.
+.modastack/                       # This repo's own config (dogfooding)
+├── config.yaml                   # Task tracking, test command, credentials
+├── manager.md                    # Engineering manager role prompt
+├── agents/
+│   └── engineer.md               # Engineer agent: standards, conventions, phases
+├── workflows/                    # Engineering lifecycle workflows
+│   ├── issue-lifecycle.yaml      # triage → spec → implement → PR
+│   ├── pr-feedback.yaml          # address review comments
+│   ├── build-failure.yaml        # fix CI failures
+│   ├── pr-merged.yaml            # post-merge cleanup
+│   └── stall-recovery.yaml       # recover stuck agents
+└── monitors.yaml                 # PR conflict + stale PR checks
 ```
 
-## Issue lifecycle
+### Per-repo configuration
 
-Linear states: Todo → In Progress → In Review → Done (+ Blocked)
+Repos bring their own `.modastack/` directory:
+
+```
+<repo>/.modastack/
+├── config.yaml                   # connections, tracker type/auth, test command
+├── manager.md                    # domain-specific manager role prompt
+├── agents/
+│   └── <role>.md                 # agent role prompt(s)
+├── workflows/
+│   └── <workflow>.yaml           # domain-specific workflow definitions
+└── monitors.yaml                 # domain-specific monitor definitions
+```
+
+The framework loads `manager_base.md` + repo `manager.md` for the manager,
+and `agent_base.md` + repo `agents/<role>.md` for each agent. Workflow
+steps specify `agent: <role>` to select which agent prompt to use.
+
+## Issue lifecycle
 
 The manager matches incoming events against workflow trigger descriptions
 (natural language conditions) to decide what to do:
@@ -191,8 +197,8 @@ Workflows are YAML DAGs loaded from three tiers (most specific wins):
 2. `~/.modastack/workflows/` — user-level overrides
 3. `<modastack>/workflows/` — built-in defaults
 
-Per-repo context from `.modastack.yaml`'s `context:` section is available
-as `${{repo.key}}` in workflow templates. See `docs/CUSTOM_WORKFLOWS.md`
+Per-repo context from `.modastack/config.yaml`'s `context:` section is
+available as `${{repo.key}}` in workflow templates. See `docs/CUSTOM_WORKFLOWS.md`
 for the full reference and `workflows/examples/` for non-dev examples
 (content review, research).
 
@@ -203,9 +209,9 @@ no webhook fires for (merge conflicts, stale PRs, deploy health). A monitor
 is a small human-readable YAML record (`name`, `description`, `interval`,
 `event`) loaded from three tiers, later tiers overriding earlier by `name`:
 
-1. `monitors/defaults.yaml` — built-in, shipped, read-only at runtime
+1. `monitors/defaults.yaml` — built-in, shipped, read-only (empty by default)
 2. `~/.modastack/monitors.yaml` — user globals (apply to all repos)
-3. `<repo>/.modastack.yaml` under `monitors:` — repo-specific
+3. `<repo>/.modastack/monitors.yaml` — repo-specific
 
 Set `enabled: false` on a repo-specific entry to opt that repo out of an
 inherited monitor. The scheduler (a thread in the manager process) runs each
@@ -220,7 +226,8 @@ the scheduler launches a short-lived, non-interactive check agent out-of-band
 check from the `description`, captures the result, and posts an event back to
 the bus *only* if it finds something. The manager never sees the check
 process — only the resulting finding — so its context stays clean and
-responsive. PR conflict detection ships as a default and works out of the box.
+responsive. Engineering-specific monitors (PR conflicts, stale PRs) are
+configured in `.modastack/monitors.yaml` — see this repo's own config.
 
 ## Tests
 

@@ -73,6 +73,17 @@ def try_resume_for_event(event_type: str, issue_id: str = "", event: dict | None
     return True
 
 
+def _find_repo_root(cwd: str) -> Path:
+    """Find the original repo root from a working directory or worktree."""
+    path = Path(cwd)
+    for candidate in [path, *path.parents]:
+        if (candidate / ".modastack" / "config.yaml").exists():
+            return candidate
+        if (candidate / ".modastack.yaml").exists():
+            return candidate
+    return path
+
+
 def make_session_name(workflow_name: str, repo: str, issue_id: str) -> str:
     """Deterministic session name for a workflow run."""
     repo_name = repo.split("/")[-1] if "/" in repo else repo
@@ -281,7 +292,18 @@ async def _run_workflow_async(
 
     saved_id = load_session_id(session_name)
 
-    def _make_options(resume_id=None):
+    from modastack.prompts.resolver import resolve_agent_prompt
+
+    # Resolve the repo root for agent prompt loading (cwd may be a worktree)
+    repo_root = _find_repo_root(cwd)
+
+    def _make_options(resume_id=None, agent_name=""):
+        agent_prompt = ""
+        if agent_name:
+            agent_prompt = resolve_agent_prompt(agent_name, repo_root, interactive)
+        else:
+            agent_prompt = resolve_agent_prompt("", repo_root, interactive)
+
         return ClaudeAgentOptions(
             cwd=cwd,
             permission_mode="bypassPermissions",
@@ -293,18 +315,12 @@ async def _run_workflow_async(
                 "type": "preset",
                 "preset": "claude_code",
                 "append": (
-                    f"You are an engineer agent working on issue #{issue_id}. "
+                    f"You are an agent working on issue #{issue_id}. "
                     f"Your working directory is an isolated git worktree at {cwd}. "
-                    f"All code changes go here — never modify the main repo checkout. "
+                    f"All changes go here — never modify the main repo checkout. "
                     f"You will receive step-by-step instructions. Follow each one, "
-                    f"then write your handoff file when asked. "
-                    + (
-                        "You can use `modastack consult \"question\"` to ask the manager "
-                        "for guidance on ambiguous decisions."
-                        if interactive else
-                        "You are running in non-interactive mode. Make your best judgment "
-                        "on all decisions — do not use `modastack consult`."
-                    )
+                    f"then write your handoff file when asked.\n\n"
+                    + agent_prompt
                 ),
             },
         )
@@ -314,10 +330,17 @@ async def _run_workflow_async(
         "text": f"Engineer started working on {issue_id}",
     })
 
+    # Determine the agent name from the first prompt step
+    first_agent = ""
+    for s in workflow.steps[start_step:]:
+        if s.agent:
+            first_agent = s.agent
+            break
+
     # Try resume, fall back to fresh session
     for attempt in range(2):
         resume_id = saved_id if attempt == 0 else None
-        client = ClaudeSDKClient(_make_options(resume_id))
+        client = ClaudeSDKClient(_make_options(resume_id, agent_name=first_agent))
         try:
             initial_prompt = task if not resume_id else None
             await client.connect(initial_prompt)

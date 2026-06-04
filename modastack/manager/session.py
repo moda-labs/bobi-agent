@@ -27,8 +27,8 @@ PROMPT_HASH_PATH = Path.home() / ".modastack" / "sessions" / "prompt_hash"
 log = logging.getLogger(__name__)
 
 SESSION_NAME = "moda-manager"
-_ROLES_DIR = Path(__file__).resolve().parent.parent.parent / "roles" / "manager"
-MANAGER_PROMPT_PATH = _ROLES_DIR / "prompt.md"
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+MANAGER_BASE_PATH = _PROMPTS_DIR / "manager_base.md"
 
 _client: Any | None = None
 _loop: asyncio.AbstractEventLoop | None = None
@@ -49,16 +49,23 @@ _response_callback: Any | None = None
 
 
 def _load_manager_prompt() -> str:
-    core = MANAGER_PROMPT_PATH.read_text()
-    role_name = "engineering"
+    core = MANAGER_BASE_PATH.read_text()
+
+    # Load global user manager role prompt
+    global_mgr = Path.home() / ".modastack" / "manager.md"
+    if global_mgr.exists():
+        core += "\n\n" + global_mgr.read_text()
+
+    # Load per-repo manager role prompts
     try:
         config = GlobalConfig.load()
-        role_name = getattr(config, "manager_role", None) or "engineering"
+        for repo_path in config.repos:
+            repo_mgr = repo_path / ".modastack" / "manager.md"
+            if repo_mgr.exists():
+                core += f"\n\n## {repo_path.name} policies\n\n" + repo_mgr.read_text()
     except Exception:
         pass
-    role_path = _ROLES_DIR / f"{role_name}.md"
-    if role_path.exists():
-        core += "\n\n" + role_path.read_text()
+
     return core
 
 

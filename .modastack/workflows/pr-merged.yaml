@@ -1,0 +1,14 @@
+name: pr-merged
+trigger: When a pull request is merged.
+description: >
+  Post-merge cleanup. Clean up the worktree and close the issue
+  after a PR is merged.
+
+steps:
+  - name: cleanup
+    agent: engineer
+    prompt: |
+      The PR was merged. Clean up the worktree and close the issue.
+    handoff:
+      required: [status]
+    timeout: 300

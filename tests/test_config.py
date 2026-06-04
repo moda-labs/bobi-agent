@@ -6,9 +6,11 @@ from textwrap import dedent
 from modastack.config import RepoConfig, GlobalConfig
 
 
-def test_repo_config_new_format(tmp_path):
-    config_file = tmp_path / ".modastack.yaml"
-    config_file.write_text(dedent("""
+def test_repo_config_new_path(tmp_path):
+    """Config loads from .modastack/config.yaml."""
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(dedent("""
         task_tracking:
           system: "github-issues"
           project: "MYPROJ"
@@ -45,10 +47,39 @@ def test_repo_config_new_format(tmp_path):
     assert config.context["github_org"] == "myorg"
 
 
-def test_repo_config_backwards_compat_linear(tmp_path):
-    """Old configs with 'linear:' section still work."""
+def test_repo_config_legacy_path(tmp_path):
+    """Config still loads from .modastack.yaml (backward compat)."""
+    import warnings
     config_file = tmp_path / ".modastack.yaml"
     config_file.write_text(dedent("""
+        task_tracking:
+          system: "github-issues"
+          project: "LEGACY"
+    """))
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        config = RepoConfig.from_file(tmp_path)
+        assert config.project == "LEGACY"
+        assert any("deprecated" in str(warning.message).lower() for warning in w)
+
+
+def test_repo_config_new_path_preferred(tmp_path):
+    """New path wins over legacy when both exist."""
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("task_tracking:\n  project: NEW\n")
+    (tmp_path / ".modastack.yaml").write_text("task_tracking:\n  project: OLD\n")
+
+    config = RepoConfig.from_file(tmp_path)
+    assert config.project == "NEW"
+
+
+def test_repo_config_backwards_compat_linear(tmp_path):
+    """Old configs with 'linear:' section still work."""
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(dedent("""
         linear:
           project: "BET"
           trigger_labels: ["agent", "auto"]
@@ -74,8 +105,9 @@ def test_repo_config_backwards_compat_linear(tmp_path):
 
 
 def test_repo_config_defaults(tmp_path):
-    config_file = tmp_path / ".modastack.yaml"
-    config_file.write_text("task_tracking:\n  project: X\n")
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("task_tracking:\n  project: X\n")
 
     config = RepoConfig.from_file(tmp_path)
 

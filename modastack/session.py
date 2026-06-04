@@ -23,7 +23,6 @@ from modastack.tmux import (
 log = logging.getLogger(__name__)
 
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
-SKILLS_DIR = Path(__file__).parent.parent / "roles" / "engineer" / "process"
 
 
 _SLUG_RE = re.compile(r'[^a-z0-9]+')
@@ -219,10 +218,7 @@ def kill_session(issue_id: str) -> None:
 
 
 def load_skill(skill_name: str) -> str:
-    """Load a SKILL.md file content."""
-    skill_path = SKILLS_DIR / skill_name / "SKILL.md"
-    if skill_path.exists():
-        return skill_path.read_text()
+    """Load a SKILL.md file content (legacy — skills now come from agent prompts)."""
     return ""
 
 

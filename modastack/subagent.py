@@ -32,8 +32,6 @@ InputHandler = Callable[[str, dict[str, Any]], str]
 
 log = logging.getLogger(__name__)
 
-ROLES_DIR = Path(__file__).parent.parent / "roles" / "engineer" / "process"
-
 PHASE_TIMEOUT = {
     "pickup": 1800,
     "triage": 1800,
@@ -71,25 +69,9 @@ class RunningAgent:
 _running: dict[str, RunningAgent] = {}
 
 
-def _resolve_skill_path(phase: str) -> Path | None:
-    skill_dir = ROLES_DIR / phase
-    skill_file = skill_dir / "SKILL.md"
-    if skill_file.exists():
-        return skill_file
-    return None
-
-
 def _build_prompt(phase: str, issue_id: str, context: str = "", cwd: str = "") -> str:
-    skill_path = _resolve_skill_path(phase)
-    parts = []
-    if skill_path:
-        parts.append(
-            f"Read and follow the skill file at {skill_path}. "
-            f"Execute every step exactly as written."
-        )
-    parts.append(f"Issue: #{issue_id}")
+    parts = [f"Phase: {phase}", f"Issue: #{issue_id}"]
 
-    # Provide worktree base path so agents know where to create worktrees
     if cwd:
         modastack_root = Path(__file__).parent.parent
         repo_name = Path(cwd).name
@@ -461,16 +443,20 @@ def _resolve_repo_name(cwd: str) -> str:
     never empty.
     """
     path = Path(cwd)
-    config_path = path / ".modastack.yaml"
-    if config_path.exists():
-        try:
-            import yaml
-            raw = yaml.safe_load(config_path.read_text()) or {}
-            repo = raw.get("repo")
-            if repo:
-                return str(repo)
-        except Exception:
-            pass
+    for config_path in [
+        path / ".modastack" / "config.yaml",
+        path / ".modastack.yaml",
+    ]:
+        if config_path.exists():
+            try:
+                import yaml
+                raw = yaml.safe_load(config_path.read_text()) or {}
+                repo = raw.get("repo")
+                if repo:
+                    return str(repo)
+            except Exception:
+                pass
+            break
     remote = _git_remote_name(path)
     if remote:
         return remote

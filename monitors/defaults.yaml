@@ -1,9 +1,7 @@
 # Built-in monitor defaults — shipped with modastack.
 #
-# READ-ONLY at runtime. The manager never writes here; these change only
-# via PRs to the modastack repo. User-added monitors live in
-# ~/.modastack/monitors.yaml (globals) or a repo's .modastack.yaml
-# (repo-specific) and override these by `name`.
+# READ-ONLY at runtime. The manager never writes here.
+# Domain-specific monitors belong in your repo's .modastack/monitors.yaml.
 #
 # Each monitor:
 #   name        unique identifier (used for override/disable across tiers)
@@ -12,15 +10,4 @@
 #   event       synthetic event type injected when the condition is met
 #   check       (optional) native check runner; omit for manager-interpreted
 #   enabled     (optional) set false to disable an inherited monitor
-monitors:
-  - name: pr-conflict-check
-    description: Check open PRs across all registered repos for merge conflicts
-    interval: 15m
-    event: monitor/pr.conflict_detected
-    check: pr_conflicts
-
-  - name: stale-pr-check
-    description: Flag open PRs with no activity in 48 hours
-    interval: 1h
-    event: monitor/pr.stale
-    check: stale_prs
+monitors: []

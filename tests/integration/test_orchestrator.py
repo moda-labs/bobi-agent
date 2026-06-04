@@ -44,7 +44,7 @@ class TestCLIReturnsImmediately:
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
              "-w", "issue-lifecycle",
-             "--repo", str(tmp_path)],
+             "--repo", str(REPO_ROOT)],
             capture_output=True, text=True, timeout=10,
             cwd=str(REPO_ROOT),
         )
