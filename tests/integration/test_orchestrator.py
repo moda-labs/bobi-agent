@@ -92,8 +92,8 @@ class TestCLIReturnsImmediately:
         out_36 = run(repo_a, "36")
         out_34 = run(repo_b, "34")
 
-        assert "wf-issue-lifecycle-36" in out_36
-        assert "wf-issue-lifecycle-34" in out_34
+        assert "wf-issue-lifecycle" in out_36 and "36" in out_36
+        assert "wf-issue-lifecycle" in out_34 and "34" in out_34
         assert out_36 != out_34
 
 

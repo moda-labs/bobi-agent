@@ -281,3 +281,23 @@ class TestAgentCommand:
         assert result.exit_code != 0
         assert "already active" in result.output
         assert "34" in result.output
+
+
+# --- modastack cancel --------------------------------------------------------
+
+
+class TestCancelCommand:
+    def test_cancel_success(self):
+        runner = CliRunner()
+        with patch("modastack.subagent.cancel_run", return_value=["wf-issue-lifecycle-42"]):
+            result = runner.invoke(main, ["cancel", "42"])
+        assert result.exit_code == 0
+        assert "Cancelled" in result.output
+        assert "wf-issue-lifecycle-42" in result.output
+
+    def test_cancel_no_match(self):
+        runner = CliRunner()
+        with patch("modastack.subagent.cancel_run", return_value=[]):
+            result = runner.invoke(main, ["cancel", "nope"])
+        assert result.exit_code == 1
+        assert "No active session" in result.output

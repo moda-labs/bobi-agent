@@ -741,6 +741,23 @@ def engineers(issue_id, cancel):
 
 
 @main.command()
+@click.argument("session_name")
+def cancel(session_name):
+    """Cancel a running agent session.
+
+    Accepts a full session name, issue id, or substring match.
+    """
+    from modastack.subagent import cancel_run
+
+    cancelled = cancel_run(session_name)
+    if cancelled:
+        click.echo(f"Cancelled {', '.join(cancelled)}")
+    else:
+        click.echo(f"No active session matching: {session_name}", err=True)
+        raise SystemExit(1)
+
+
+@main.command()
 @click.option("--tail", default=20, help="Number of recent events to show")
 def events(tail):
     """Show recent events from the event bus."""

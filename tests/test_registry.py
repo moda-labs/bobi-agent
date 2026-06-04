@@ -117,6 +117,25 @@ class TestReapDead:
         assert tmp_registry.reap_dead() == []
         assert tmp_registry.get("eng-1").status == "running"
 
+    def test_reaps_starting_with_no_pid_after_timeout(self, tmp_registry):
+        """Sessions stuck in 'starting' with pid=0 for >5 min are zombies."""
+        tmp_registry.register(SessionEntry(
+            name="eng-zombie", status="starting", pid=0,
+            started_at=time.time() - 400,
+        ))
+        reaped = tmp_registry.reap_dead()
+        assert reaped == ["eng-zombie"]
+        assert tmp_registry.get("eng-zombie").status == "stale"
+
+    def test_keeps_recent_starting_with_no_pid(self, tmp_registry):
+        """Sessions in 'starting' with pid=0 that are young should be kept."""
+        tmp_registry.register(SessionEntry(
+            name="eng-new", status="starting", pid=0,
+            started_at=time.time() - 10,
+        ))
+        assert tmp_registry.reap_dead() == []
+        assert tmp_registry.get("eng-new").status == "starting"
+
     def test_does_not_touch_terminal_or_waiting(self, tmp_registry):
         tmp_registry.register(SessionEntry(name="done", status="done", pid=999999))
         tmp_registry.register(SessionEntry(name="wait", status="waiting", pid=999999))

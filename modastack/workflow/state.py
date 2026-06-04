@@ -112,7 +112,7 @@ class WorkflowRun:
     @classmethod
     def create(cls, workflow_name: str, event: dict) -> WorkflowRun:
         return cls(
-            run_id=str(uuid.uuid4())[:8],
+            run_id=uuid.uuid4().hex[:8],
             workflow_name=workflow_name,
             trigger_event=event,
             started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),

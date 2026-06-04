@@ -125,9 +125,12 @@ class SessionRegistry:
         is left reading "running" forever. This reconciles the registry with
         reality: any active row whose pid is no longer alive becomes "stale".
 
-        Rows with no tracked pid (0) are left untouched — they belong to
-        in-process threads or pre-pid legacy entries we can't probe. Returns
-        the names that were reaped.
+        Rows with no tracked pid (0) are normally left untouched — they
+        belong to in-process threads or pre-pid legacy entries we can't
+        probe. However, a session stuck in "starting" with pid=0 for more
+        than 5 minutes is almost certainly dead (the subprocess never
+        reported its PID), so those are reaped too. Returns the names that
+        were reaped.
         """
         reaped: list[str] = []
         for name, entry in self._entries.items():
@@ -139,6 +142,14 @@ class SessionRegistry:
                 entry.status = "stale"
                 entry.last_activity = time.time()
                 reaped.append(name)
+                continue
+            # No tracked pid and stuck in "starting" for >5 min → zombie.
+            if not entry.pid and entry.status == "starting":
+                age = time.time() - entry.started_at
+                if age > 300:
+                    entry.status = "stale"
+                    entry.last_activity = time.time()
+                    reaped.append(name)
         if reaped:
             self._save()
         return reaped

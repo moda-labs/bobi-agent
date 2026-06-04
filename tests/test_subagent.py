@@ -413,4 +413,14 @@ class TestCancelRun:
                        status="waiting", pid=os.getpid())
         assert cancel_run("2") == ["wf-x-2"]
 
+    @patch("modastack.subagent.os.killpg")
+    @patch("modastack.subagent.os.getpgid", return_value=4242)
+    def test_cancel_by_substring(self, mock_getpgid, mock_killpg):
+        """Partial name matching: '42' matches 'wf-issue-lifecycle-jobtack-42'."""
+        from modastack.subagent import cancel_run
+        self._register(name="wf-issue-lifecycle-jobtack-42", issue_id="42",
+                       role="engineer", status="running", pid=os.getpid())
+        cancelled = cancel_run("jobtack-42")
+        assert cancelled == ["wf-issue-lifecycle-jobtack-42"]
+
 

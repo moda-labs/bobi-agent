@@ -684,7 +684,7 @@ def cancel_run(identifier: str) -> list[str]:
             continue
         if entry.status not in ("starting", "running", "idle", "waiting"):
             continue
-        if identifier not in (entry.name, entry.issue_id):
+        if identifier not in (entry.name, entry.issue_id) and identifier not in entry.name:
             continue
         if entry.pid and _pid_alive(entry.pid):
             try:

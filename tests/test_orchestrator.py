@@ -303,3 +303,16 @@ class TestRunWorkflow:
         name1 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")
         name2 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "43")
         assert name1 != name2
+
+
+class TestWorkflowRunCreate:
+    def test_run_id_is_hex_only(self):
+        from modastack.workflow.state import WorkflowRun
+        run = WorkflowRun.create("test-wf", {"data": {"issue_id": "1"}})
+        assert len(run.run_id) == 8
+        assert all(c in "0123456789abcdef" for c in run.run_id)
+
+    def test_unique_ids(self):
+        from modastack.workflow.state import WorkflowRun
+        ids = {WorkflowRun.create("t", {}).run_id for _ in range(50)}
+        assert len(ids) == 50
