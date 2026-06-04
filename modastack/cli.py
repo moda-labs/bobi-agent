@@ -38,6 +38,21 @@ def _repo_state_dir(repo_path: Path) -> Path:
     return d
 
 
+def _get_dashboard_url(repo_path: Path | None = None) -> str:
+    """Read the dashboard port from the repo's state dir."""
+    if repo_path is None:
+        repo_path = _detect_repo_root()
+    if repo_path:
+        port_file = repo_path / ".modastack" / "state" / "dashboard.port"
+        if port_file.exists():
+            try:
+                port = int(port_file.read_text().strip())
+                return f"http://localhost:{port}"
+            except (ValueError, OSError):
+                pass
+    return "http://localhost:8095"
+
+
 HOOK_SETTINGS = {
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": ".claude/hooks/session-state.sh", "timeout": 5}]}],
     "Stop": [{"hooks": [{"type": "command", "command": ".claude/hooks/session-state.sh", "timeout": 5}]}],
@@ -312,22 +327,22 @@ def message(text, to):
     import urllib.request
     import urllib.error
 
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
-    if pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-        except (ProcessLookupError, ValueError):
-            click.echo("Manager not running. Start with: modastack start")
-            return
-    else:
+    pid_path = _find_pid_path()
+    if not pid_path:
+        click.echo("Manager not running. Start with: modastack start")
+        return
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 0)
+    except (ProcessLookupError, ValueError):
         click.echo("Manager not running. Start with: modastack start")
         return
 
     try:
         import json as _json
+        dashboard = _get_dashboard_url()
         req = urllib.request.Request(
-            "http://localhost:8095/api/message",
+            f"{dashboard}/api/message",
             data=_json.dumps({"text": text}).encode(),
             headers={"Content-Type": "application/json"},
         )
@@ -360,15 +375,14 @@ def consult(question, timeout, source):
     import urllib.request
     import urllib.error
 
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
-    if pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-        except (ProcessLookupError, ValueError):
-            click.echo("Manager not running. Start with: modastack start", err=True)
-            raise SystemExit(1)
-    else:
+    pid_path = _find_pid_path()
+    if not pid_path:
+        click.echo("Manager not running. Start with: modastack start", err=True)
+        raise SystemExit(1)
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 0)
+    except (ProcessLookupError, ValueError):
         click.echo("Manager not running. Start with: modastack start", err=True)
         raise SystemExit(1)
 
@@ -379,9 +393,10 @@ def consult(question, timeout, source):
         "source": source,
     }).encode()
 
+    dashboard = _get_dashboard_url()
     try:
         req = urllib.request.Request(
-            "http://localhost:8095/api/consult",
+            f"{dashboard}/api/consult",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
@@ -418,8 +433,15 @@ def slack_reply(text, workspace, channel, thread):
     import urllib.error
     import urllib.request
 
-    config = GlobalConfig.load()
-    token = config.slack_token_for(workspace)
+    token = ""
+    repo_path = _detect_repo_root()
+    if repo_path and (repo_path / ".modastack" / "local.yaml").exists():
+        from .config import LocalConfig
+        local = LocalConfig.load(repo_path)
+        token = local.slack_bot_token
+    if not token:
+        config = GlobalConfig.load()
+        token = config.slack_token_for(workspace)
     if not token:
         click.echo(f"No bot token for workspace {workspace}", err=True)
         sys.exit(1)
@@ -832,7 +854,10 @@ def engineers(issue_id, cancel):
 @click.option("--tail", default=20, help="Number of recent events to show")
 def events(tail):
     """Show recent events from the event bus."""
-    events_path = Path.home() / ".modastack" / "manager" / "events.jsonl"
+    repo_path = _detect_repo_root()
+    events_path = (repo_path / ".modastack" / "state" / "events.jsonl") if repo_path else None
+    if not events_path or not events_path.exists():
+        events_path = Path.home() / ".modastack" / "manager" / "events.jsonl"
     if not events_path.exists():
         click.echo("No events yet.")
         return
@@ -852,7 +877,10 @@ def events(tail):
 @main.command()
 def decisions():
     """Show recent manager decisions."""
-    decisions_path = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
+    repo_path = _detect_repo_root()
+    decisions_path = (repo_path / ".modastack" / "state" / "decisions.jsonl") if repo_path else None
+    if not decisions_path or not decisions_path.exists():
+        decisions_path = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
     if not decisions_path.exists():
         click.echo("No decisions yet.")
         return
@@ -1907,8 +1935,9 @@ def _post_event(event_type: str, data: dict) -> bool:
 
     payload = json.dumps({"type": etype, "source": source, "data": data}).encode()
     try:
+        dashboard = _get_dashboard_url()
         req = urllib.request.Request(
-            "http://localhost:8095/api/event",
+            f"{dashboard}/api/event",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
