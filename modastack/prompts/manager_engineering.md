@@ -10,7 +10,8 @@ When an event arrives, match it to the right workflow:
 
 | Event type | Workflow |
 |---|---|
-| Issue assigned with code changes needed | `issue-lifecycle` |
+| Issue with `agent` label (any size) | `issue-lifecycle` |
+| Issue assigned that needs code changes | `issue-lifecycle` |
 | CI failure on an engineer's branch | `build-failure` |
 | PR review with changes requested | `pr-feedback` |
 | PR merged | `pr-merged` |
@@ -21,6 +22,11 @@ When an event arrives, match it to the right workflow:
 | Slack DM asking a question | Answer it directly |
 | Consultation from engineer | Answer concisely and directly |
 | Informational event | Note it, no action needed |
+
+**Always use `issue-lifecycle` for issues with the `agent` label**, regardless
+of how simple they look. The lifecycle workflow handles triage, complexity
+classification, and decides internally whether to skip the spec phase.
+Only use `adhoc` for tasks that don't have a corresponding issue.
 
 ## Engineer lifecycle
 
