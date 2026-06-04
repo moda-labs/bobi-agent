@@ -1489,12 +1489,11 @@ def workflow():
 
 @workflow.command("list")
 def workflow_list():
-    """List available workflow definitions from all sources.
+    """List available workflow definitions.
 
-    Scans three tiers in priority order (most specific wins):
+    Scans two tiers (most specific wins):
       1. Repo-local: <repo>/.modastack/workflows/
-      2. User: ~/.modastack/workflows/
-      3. Built-in: <modastack>/workflows/
+      2. Built-in: <modastack>/workflows/
 
     Usage:
         modastack workflow list

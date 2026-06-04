@@ -1,8 +1,8 @@
-"""Resolve agent prompts from repo-provided .modastack/agents/ files."""
+"""Resolve agent prompts: built-in defaults + repo overrides."""
 
 from pathlib import Path
 
-from . import AGENT_BASE_PATH
+from . import AGENT_BASE_PATH, AGENTS_DIR
 
 
 def resolve_agent_prompt(
@@ -12,14 +12,19 @@ def resolve_agent_prompt(
 ) -> str:
     """Build the full system prompt for an agent.
 
-    Combines the framework agent base with the repo-specific agent role.
+    Resolution: framework base + built-in role + repo override.
+    Repo override replaces the built-in role if present.
     """
     parts = [AGENT_BASE_PATH.read_text()]
 
     repo = Path(repo_path)
-    agent_file = repo / ".modastack" / "agents" / f"{agent_name}.md"
-    if agent_file.exists():
-        parts.append(agent_file.read_text())
+    repo_agent = repo / ".modastack" / "agents" / f"{agent_name}.md"
+    builtin_agent = AGENTS_DIR / f"{agent_name}.md"
+
+    if repo_agent.exists():
+        parts.append(repo_agent.read_text())
+    elif builtin_agent.exists():
+        parts.append(builtin_agent.read_text())
 
     if interactive:
         parts.append(
