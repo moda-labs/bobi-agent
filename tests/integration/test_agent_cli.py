@@ -40,7 +40,7 @@ class TestAgentCLI:
         elapsed = time.monotonic() - start
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "wf-issue-lifecycle-42" in result.stdout
+        assert "wf-issue-lifecycle-jobtack-42" in result.stdout
         assert elapsed < 5, f"workflow took {elapsed:.1f}s — should return immediately"
 
     def test_spawn_alias_returns_immediately(self, tmp_path):

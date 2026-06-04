@@ -549,6 +549,7 @@ def launch_agent(
     timeout: int = 3600,
     requested_by: dict | None = None,
     interactive: bool = True,
+    issue_id: str | None = None,
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
@@ -558,7 +559,7 @@ def launch_agent(
     - If completed or new → fresh start
     """
     import uuid
-    issue_id = _parse_issue_number(task) or f"adhoc-{uuid.uuid4().hex[:8]}"
+    issue_id = issue_id or _parse_issue_number(task) or f"adhoc-{uuid.uuid4().hex[:8]}"
     repo = _resolve_repo_name(cwd)
 
     from modastack.workflow.orchestrator import make_session_name

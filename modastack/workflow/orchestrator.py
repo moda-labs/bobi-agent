@@ -194,6 +194,13 @@ def resume_workflow(
     Restores the variable context and session, then continues execution
     from the step after the one that suspended.
     """
+    if run.await_event and event:
+        event_type = event.get("type", "")
+        if event_type and event_type != run.await_event:
+            log.warning(f"Resume event type '{event_type}' doesn't match "
+                        f"awaited '{run.await_event}' — rejecting")
+            return False
+
     session_name = run.session_name
     issue_id = run.issue_id
     repo = run.repo

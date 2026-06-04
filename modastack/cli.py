@@ -1694,20 +1694,22 @@ main.add_command(monitor)
               help='JSON identity of requester, e.g. \'{"from":"Alice","channel":"C1"}\'')
 @click.option("--non-interactive", "non_interactive", is_flag=True,
               help="Run without manager — agent makes all decisions autonomously")
-def agent(repo, workflow, task, timeout, wait, post_event, requested_by, non_interactive):
+@click.option("--issue", default=None, help="Issue number to target (e.g. 42)")
+def agent(repo, workflow, task, timeout, wait, post_event, requested_by, non_interactive, issue):
     """Launch an agent with a workflow.
 
     Every agent runs a workflow. Use 'adhoc' for open-ended tasks.
 
     Examples:
-        modastack agent -w issue-lifecycle --repo jobtack --task "Work on #42"
+        modastack agent -w issue-lifecycle --repo jobtack --issue 42
         modastack agent -w adhoc --repo jobtack --task "Why is CI failing?"
         modastack agent -w adhoc --non-interactive --repo jobtack --task "Fix the bug"
     """
     _dispatch_agent(repo=repo, task=task, workflow=workflow,
                     timeout=timeout, wait=wait, post_event=post_event,
                     requested_by=requested_by,
-                    interactive=not non_interactive)
+                    interactive=not non_interactive,
+                    issue_id=issue)
 
 
 @main.command(hidden=True)
@@ -1724,7 +1726,7 @@ def spawn(repo, task, timeout, non_interactive, post_event, requested_by):
                     requested_by=requested_by)
 
 
-def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requested_by, interactive=True):
+def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requested_by, interactive=True, issue_id=None):
     """Shared dispatch logic for the agent and spawn commands."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -1761,6 +1763,7 @@ def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requeste
         task=task, cwd=cwd, workflow_name=workflow,
         timeout=timeout, requested_by=requester,
         interactive=interactive,
+        issue_id=issue_id,
     )
     click.echo(f"Agent started: {session_name}")
 
@@ -1847,6 +1850,37 @@ def _post_event(event_type: str, data: dict) -> bool:
     except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError) as e:
         logging.getLogger(__name__).warning(f"Failed to post event {event_type}: {e}")
         return False
+
+
+@main.command()
+@click.argument("session_name")
+def cancel(session_name):
+    """Cancel a running agent session.
+
+    Accepts a full session name or a partial match (e.g. '42' matches
+    'wf-issue-lifecycle-jobtack-42').
+    """
+    import signal
+
+    from .sdk import get_registry, _pid_alive
+
+    registry = get_registry()
+
+    entry = registry.get(session_name)
+    if not entry or entry.status not in ("starting", "running", "idle", "waiting"):
+        for e in registry.list_active():
+            if session_name in e.name:
+                entry = e
+                break
+
+    if not entry or entry.status not in ("starting", "running", "idle", "waiting"):
+        click.echo(f"No active session matching: {session_name}", err=True)
+        raise SystemExit(1)
+
+    if entry.pid and _pid_alive(entry.pid):
+        os.kill(entry.pid, signal.SIGTERM)
+    registry.mark_done(entry.name)
+    click.echo(f"Cancelled: {entry.name}")
 
 
 @main.command("self-update")

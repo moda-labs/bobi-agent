@@ -122,11 +122,16 @@ class SessionRegistry:
                 entry = SessionEntry(**data)
             except (json.JSONDecodeError, TypeError):
                 continue
-            if entry.status not in ("starting", "running", "idle"):
+            if entry.status not in ("starting", "running", "idle", "waiting"):
                 continue
             if entry.pid and not _pid_alive(entry.pid):
                 self.mark_done(entry.name)
                 continue
+            if not entry.pid and entry.status == "starting":
+                age = time.time() - entry.started_at
+                if age > 300:
+                    self.mark_done(entry.name)
+                    continue
             result.append(entry)
         return result
 

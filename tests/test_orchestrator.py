@@ -421,3 +421,57 @@ class TestAwaitStep:
 
         assert WorkflowRun.find_waiting("approval", "42") is not None
         assert WorkflowRun.find_waiting("approval", "99") is None
+
+    def test_resume_rejects_wrong_event_type(self, tmp_path, monkeypatch):
+        """resume_workflow rejects events that don't match the awaited type."""
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+
+        run = WorkflowRun.create("t", {"data": {"issue_id": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {"input": {"task": "t", "repo": "r", "issue_id": "1"}}
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.issue_id = "1"
+        run.save()
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="spec", prompt="write spec"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+
+        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("modastack.workflow.orchestrator._emit_lifecycle_event"):
+            mock_reg.return_value = MagicMock()
+            result = resume_workflow(
+                run, wf,
+                event={"type": "wrong_event", "data": {}},
+            )
+
+        assert result is False
+        reloaded = WorkflowRun.load(run.run_id)
+        assert reloaded.status == "waiting"
+
+
+# ---------------------------------------------------------------------------
+# WorkflowRun.create run_id format
+# ---------------------------------------------------------------------------
+
+class TestWorkflowRunId:
+    def test_run_id_is_hex_only(self, tmp_path, monkeypatch):
+        """run_id should be hex chars only — no hyphens from uuid str()."""
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        run = WorkflowRun.create("test", {})
+        assert all(c in "0123456789abcdef" for c in run.run_id), \
+            f"run_id contains non-hex chars: {run.run_id}"
+        assert len(run.run_id) == 8
+
+    def test_run_ids_are_unique(self, tmp_path, monkeypatch):
+        """Two creates produce different run_ids."""
+        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        r1 = WorkflowRun.create("test", {})
+        r2 = WorkflowRun.create("test", {})
+        assert r1.run_id != r2.run_id

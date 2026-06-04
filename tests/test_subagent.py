@@ -312,4 +312,32 @@ class TestLaunchAgent:
         parsed = json.loads(args[0])
         assert parsed["requested_by"] == req
 
+    @patch("modastack.subagent.get_registry")
+    @patch("modastack.subagent._launch_detached")
+    def test_explicit_issue_id_overrides_task_parsing(self, mock_launch, mock_reg):
+        """Explicit issue_id param takes precedence over parsing task text."""
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from modastack.subagent import launch_agent
+        name = launch_agent(
+            task="Fix some stuff about #99", cwd="/tmp/test",
+            workflow_name="issue-lifecycle", issue_id="42",
+        )
+        assert "42" in name
+        assert "99" not in name
+
+    @patch("modastack.subagent.get_registry")
+    @patch("modastack.subagent._launch_detached")
+    def test_issue_id_threaded_to_subprocess_args(self, mock_launch, mock_reg):
+        """Explicit issue_id appears in the subprocess args JSON."""
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from modastack.subagent import launch_agent
+        launch_agent(
+            task="Work on it", cwd="/tmp/test",
+            workflow_name="adhoc", issue_id="77",
+        )
+        args = mock_launch.call_args[0][1]
+        import json
+        parsed = json.loads(args[0])
+        assert parsed["issue_id"] == "77"
+
 

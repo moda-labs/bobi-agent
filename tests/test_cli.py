@@ -7,6 +7,7 @@ from click.testing import CliRunner
 
 from modastack.__version__ import __version__
 from modastack.cli import main
+from modastack.sdk import SessionEntry
 from modastack.subagent import CheckResult
 
 
@@ -239,3 +240,75 @@ class TestAgentCommand:
             ])
         assert result.exit_code == 0
         assert mock.call_args[1]["workflow_name"] == "adhoc"
+
+    def test_issue_flag_passed_to_launch_agent(self, tmp_path):
+        """--issue flag threads issue_id to launch_agent."""
+        runner = CliRunner()
+        with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-jobtack-42") as mock:
+            result = runner.invoke(main, [
+                "agent", "-w", "issue-lifecycle",
+                "--repo", str(tmp_path), "--issue", "42",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[1]["issue_id"] == "42"
+
+    def test_issue_flag_with_task(self, tmp_path):
+        """--issue flag works alongside --task."""
+        runner = CliRunner()
+        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-jobtack-99") as mock:
+            result = runner.invoke(main, [
+                "agent", "-w", "adhoc", "--repo", str(tmp_path),
+                "--task", "Fix the bug", "--issue", "99",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[1]["issue_id"] == "99"
+        assert mock.call_args[1]["task"] == "Fix the bug"
+
+
+# --- modastack cancel -------------------------------------------------------
+
+
+class TestCancelCommand:
+    def test_cancel_kills_and_marks_done(self, tmp_path, monkeypatch):
+        """Cancel kills the process and marks the session done."""
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        from modastack.sdk import SessionRegistry
+        reg = SessionRegistry()
+        reg.register(SessionEntry(
+            name="wf-issue-lifecycle-jobtack-42", status="running", pid=99999,
+        ))
+
+        runner = CliRunner()
+        with patch("modastack.sdk._pid_alive", return_value=True), \
+             patch("os.kill") as mock_kill:
+            result = runner.invoke(main, ["cancel", "wf-issue-lifecycle-jobtack-42"])
+
+        assert result.exit_code == 0, result.output
+        assert "Cancelled" in result.output
+        mock_kill.assert_called_once()
+        got = reg.get("wf-issue-lifecycle-jobtack-42")
+        assert got.status == "done"
+
+    def test_cancel_partial_match(self, tmp_path, monkeypatch):
+        """Cancel with a partial name matches the full session name."""
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        from modastack.sdk import SessionRegistry
+        reg = SessionRegistry()
+        reg.register(SessionEntry(
+            name="wf-issue-lifecycle-jobtack-42", status="running", pid=99999,
+        ))
+
+        runner = CliRunner()
+        with patch("modastack.sdk._pid_alive", return_value=True), \
+             patch("os.kill"):
+            result = runner.invoke(main, ["cancel", "42"])
+
+        assert result.exit_code == 0, result.output
+        assert "Cancelled" in result.output
+
+    def test_cancel_no_match(self, tmp_path, monkeypatch):
+        """Cancel with unknown name exits non-zero."""
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["cancel", "nonexistent"])
+        assert result.exit_code != 0

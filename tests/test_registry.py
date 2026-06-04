@@ -126,3 +126,31 @@ class TestSessionRegistry:
         assert r.get("eng-42").status == "done"
         assert len(r.list_active()) == 0
         assert len(r.list_all()) == 1
+
+    def test_reaps_zombie_starting_sessions(self, tmp_path, monkeypatch):
+        """Sessions stuck in 'starting' with pid=0 for >5 min are reaped."""
+        import time
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+
+        r = SessionRegistry()
+        r.register(SessionEntry(
+            name="zombie", status="starting", pid=0,
+            started_at=time.time() - 600,
+        ))
+        active = r.list_active()
+        assert len(active) == 0
+        assert r.get("zombie").status == "done"
+
+    def test_fresh_starting_session_not_reaped(self, tmp_path, monkeypatch):
+        """A recently-started session with pid=0 should NOT be reaped yet."""
+        import time
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+
+        r = SessionRegistry()
+        r.register(SessionEntry(
+            name="fresh", status="starting", pid=0,
+            started_at=time.time(),
+        ))
+        active = r.list_active()
+        assert len(active) == 1
+        assert active[0].name == "fresh"
