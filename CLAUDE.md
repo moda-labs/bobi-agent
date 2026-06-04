@@ -10,6 +10,8 @@ uv tool install modastack
 
 If `uv` isn't installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
+Also available via Homebrew: `brew tap moda-labs/modastack && brew install modastack`
+
 For development, clone and install in editable mode:
 
 ```bash
