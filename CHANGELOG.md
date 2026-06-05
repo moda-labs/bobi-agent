@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.1 — 2026-06-05
+
+### Added
+- CI pipeline: unit tests + fast integration on GitHub-hosted, Claude integration tests on self-hosted EC2 runner
+- Release pipeline: dogfood smoke test — installs from PyPI, starts modastack in dogfood repo, files a ticket, waits for modastack to close it, then restarts all configured repos with the new version
+- `deploy/setup-ci-runner.sh` for provisioning new self-hosted runner instances
+
+### Changed
+- `--repo` flag removed from all CLI commands — modastack always detects the repo from cwd
+
 ## 0.7.0 — 2026-06-05
 
 ### Breaking
