@@ -194,11 +194,11 @@ def test_doctor_all_ok():
 
 
 def test_doctor_reports_failure_and_exits_nonzero():
-    results = [
+    browser_results = [
         CheckResult("Chromium launches", ok=False,
                     detail="blocked", hint="run the fix", sandbox_error=True),
     ]
-    with patch("modastack.doctor.run_doctor", return_value=results), \
+    with patch("modastack.doctor.run_doctor", return_value=browser_results), \
          patch("modastack.browser.run_doctor", return_value=[]), \
          patch("modastack.browser.is_linux", return_value=True):
         result = CliRunner().invoke(main, ["doctor", "--browser"])
