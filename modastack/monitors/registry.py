@@ -21,10 +21,7 @@ from .schema import Monitor
 
 log = logging.getLogger(__name__)
 
-# Built-in defaults ship in the repo, resolved by path like workflows/ —
-# never written at runtime.
-DEFAULTS_PATH = Path(__file__).resolve().parent.parent.parent / "monitors" / "defaults.yaml"
-USER_MONITORS_PATH = Path.home() / ".modastack" / "monitors.yaml"
+DEFAULTS_PATH = Path(__file__).resolve().parent / "defaults.yaml"
 
 
 def _read_records(path: Path) -> list[dict]:
@@ -43,16 +40,16 @@ def _read_records(path: Path) -> list[dict]:
 class MonitorRegistry:
     """The merged, resolved view of all monitors across the three tiers."""
 
-    def __init__(self, config: GlobalConfig | None = None):
+    def __init__(self, config: GlobalConfig | None = None, repo_path: Path | None = None):
         self.config = config or GlobalConfig.load()
+        self.repo_path = repo_path
         self.globals: dict[str, Monitor] = {}
         self.repo_monitors: list[Monitor] = []
-        # monitor name -> repo paths (as str) that opted out / were overridden
         self.opt_outs: dict[str, set[str]] = {}
 
     @classmethod
-    def load(cls, config: GlobalConfig | None = None) -> "MonitorRegistry":
-        registry = cls(config)
+    def load(cls, config: GlobalConfig | None = None, repo_path: Path | None = None) -> "MonitorRegistry":
+        registry = cls(config, repo_path=repo_path)
         registry._load()
         return registry
 
@@ -65,17 +62,9 @@ class MonitorRegistry:
             except ValueError as e:
                 log.warning(f"Skipping bad default monitor: {e}")
 
-        # 2. User globals override defaults by name
-        for raw in _read_records(USER_MONITORS_PATH):
-            try:
-                m = Monitor.from_dict(raw, source="user")
-                self.globals[m.name] = m
-            except ValueError as e:
-                log.warning(f"Skipping bad user monitor: {e}")
-
-        # 3. Repo-specific monitors (from .modastack/monitors.yaml or
-        #    .modastack/config.yaml monitors: section, with legacy fallback)
-        for repo_path in self.config.repos:
+        # 2. Repo-specific monitors
+        repo_paths = [self.repo_path] if self.repo_path else self.config.repos
+        for repo_path in repo_paths:
             repo_key = str(repo_path)
             repo_sources = [
                 repo_path / ".modastack" / "monitors.yaml",
@@ -114,6 +103,11 @@ class MonitorRegistry:
         """
         if monitor.repo:
             return [Path(monitor.repo)]
+        if self.repo_path:
+            opted_out = self.opt_outs.get(monitor.name, set())
+            if str(self.repo_path) in opted_out:
+                return []
+            return [self.repo_path]
         opted_out = self.opt_outs.get(monitor.name, set())
         return [r for r in self.config.repos if str(r) not in opted_out]
 
@@ -121,13 +115,9 @@ class MonitorRegistry:
 
     @staticmethod
     def add_global(monitor: Monitor) -> None:
-        """Append or replace a monitor in ~/.modastack/monitors.yaml."""
-        USER_MONITORS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        records = _read_records(USER_MONITORS_PATH)
-        records = [r for r in records if r.get("name") != monitor.name]
-        records.append(monitor.to_dict())
-        USER_MONITORS_PATH.write_text(
-            yaml.dump({"monitors": records}, default_flow_style=False, sort_keys=False)
+        """Deprecated — use add_repo instead. Global monitors are not supported."""
+        raise NotImplementedError(
+            "Global monitors removed. Use `modastack monitor add --repo .` instead."
         )
 
     @staticmethod
@@ -158,10 +148,13 @@ class MonitorRegistry:
             return True
         if existing is None:
             return False
-        existing.source = "user"
-        existing.enabled = False
-        cls.add_global(existing)
-        return True
+        from modastack.sdk import get_repo_root
+        rp = get_repo_root()
+        if rp:
+            existing.enabled = False
+            cls.add_repo(existing, rp)
+            return True
+        return False
 
     @classmethod
     def remove(cls, name: str, repo_path: Path | None = None) -> str:
@@ -177,14 +170,6 @@ class MonitorRegistry:
             if len(kept) == len(records):
                 return "not-found"
             monitors_path.write_text(
-                yaml.dump({"monitors": kept}, default_flow_style=False, sort_keys=False)
-            )
-            return "removed"
-
-        user_records = _read_records(USER_MONITORS_PATH)
-        kept = [r for r in user_records if r.get("name") != name]
-        if len(kept) < len(user_records):
-            USER_MONITORS_PATH.write_text(
                 yaml.dump({"monitors": kept}, default_flow_style=False, sort_keys=False)
             )
             return "removed"

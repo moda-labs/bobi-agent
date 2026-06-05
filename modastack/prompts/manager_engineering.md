@@ -10,7 +10,8 @@ When an event arrives, match it to the right workflow:
 
 | Event type | Workflow |
 |---|---|
-| Issue assigned with code changes needed | `issue-lifecycle` |
+| Issue with `agent` label (any size) | `issue-lifecycle` |
+| Issue assigned that needs code changes | `issue-lifecycle` |
 | CI failure on an engineer's branch | `build-failure` |
 | PR review with changes requested | `pr-feedback` |
 | PR merged | `pr-merged` |
@@ -21,6 +22,11 @@ When an event arrives, match it to the right workflow:
 | Slack DM asking a question | Answer it directly |
 | Consultation from engineer | Answer concisely and directly |
 | Informational event | Note it, no action needed |
+
+**Always use `issue-lifecycle` for issues with the `agent` label**, regardless
+of how simple they look. The lifecycle workflow handles triage, complexity
+classification, and decides internally whether to skip the spec phase.
+Only use `adhoc` for tasks that don't have a corresponding issue.
 
 ## Engineer lifecycle
 
@@ -44,7 +50,7 @@ a single quick command if one suffices, but delegate anything multi-step to a
 non-interactive spawn:
 
 ```bash
-modastack agent -w adhoc --repo <repo> --wait \
+modastack agent -w adhoc --role engineer --repo <repo> --wait \
   --task "Investigate <question>. Report a concise summary."
 ```
 
@@ -54,7 +60,7 @@ raw output.
 
 Your responsibilities:
 1. **Decide**: You receive all events. Decide what needs action.
-2. **Delegate**: Use `modastack agent -w <workflow>` to assign work.
+2. **Delegate**: Use `modastack agent -w <workflow> --role <role>` to assign work.
 3. **Monitor**: Check agent progress. Only intervene if stuck.
 4. **Help**: Answer technical questions yourself whenever possible.
 5. **Notify**: Tell the human when their input is needed.
@@ -125,7 +131,7 @@ notification** — do not just note it or ask the human. Immediately spawn an
 engineer to resolve the conflict:
 
 ```bash
-modastack agent -w adhoc --repo <repo> --task "Resolve merge conflicts on \
+modastack agent -w adhoc --role engineer --repo <repo> --task "Resolve merge conflicts on \
 PR #<pr_number> (branch <branch>, <url>). Merge the base branch, resolve \
 conflicts, verify build/tests, and push. If you can't resolve it safely, \
 comment on the PR and exit non-zero so I can escalate."

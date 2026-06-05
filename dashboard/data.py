@@ -12,10 +12,16 @@ from modastack.sdk import get_registry, SessionRegistry
 from modastack.workflow.state import WorkflowRun
 from modastack.workflow.schema import load_workflow
 
-EVENTS_PATH = Path.home() / ".modastack" / "manager" / "events.jsonl"
-DECISIONS_PATH = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
-PID_PATH = GLOBAL_CONFIG_DIR / "modastack.pid"
-MODASTACK_LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
+def _state_file(name: str) -> Path:
+    from modastack.sdk import get_repo_root
+    root = get_repo_root()
+    if root:
+        return root / ".modastack" / "state" / name
+    return GLOBAL_CONFIG_DIR / name
+
+
+def _log_path() -> Path:
+    return _state_file("manager.log")
 
 
 def _tail_lines(path: Path, limit: int) -> list[str]:
@@ -65,10 +71,10 @@ def read_events(
     source: str | None = None,
     type_filter: str | None = None,
 ) -> tuple[list[dict], int]:
-    if not EVENTS_PATH.exists():
+    if not _state_file("events.jsonl").exists():
         return [], 0
 
-    lines = EVENTS_PATH.read_text().strip().splitlines()
+    lines = _state_file("events.jsonl").read_text().strip().splitlines()
     all_events = []
     for line in reversed(lines):
         try:
@@ -86,14 +92,14 @@ def read_events(
 
 
 def read_decisions(limit: int = 10) -> list[dict]:
-    return _read_jsonl_tail(DECISIONS_PATH, limit)
+    return _read_jsonl_tail(_state_file("decisions.jsonl"), limit)
 
 
 def _is_running() -> bool:
-    if not PID_PATH.exists():
+    if not _state_file("manager.pid").exists():
         return False
     try:
-        pid = int(PID_PATH.read_text().strip())
+        pid = int(_state_file("manager.pid").read_text().strip())
         os.kill(pid, 0)
         return True
     except (ValueError, ProcessLookupError, PermissionError):
@@ -163,7 +169,7 @@ def get_sessions() -> list[dict]:
 
 def read_modastack_log(limit: int = 200) -> list[str]:
     """Return the last `limit` lines of the modastack process log."""
-    return _tail_lines(MODASTACK_LOG_PATH, limit)
+    return _tail_lines(_log_path(), limit)
 
 
 def get_conversation_log(limit: int = 50, session: str = "") -> list[dict]:
@@ -185,10 +191,10 @@ def get_conversation_log(limit: int = 50, session: str = "") -> list[dict]:
 
 
 def get_event_sources() -> list[str]:
-    if not EVENTS_PATH.exists():
+    if not _state_file("events.jsonl").exists():
         return []
     sources = set()
-    for line in EVENTS_PATH.read_text().strip().splitlines()[-200:]:
+    for line in _state_file("events.jsonl").read_text().strip().splitlines()[-200:]:
         try:
             sources.add(json.loads(line).get("source", ""))
         except json.JSONDecodeError:

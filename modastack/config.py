@@ -177,6 +177,8 @@ class GlobalConfig:
     # Webhook server
     webhook_port: int = 8080
     public_url: str = ""
+    webhook_secret: str = ""
+    slack_signing_secret: str = ""
 
     # GitHub accounts
     github_default_account: str = ""
@@ -207,6 +209,8 @@ class GlobalConfig:
             slack_workspaces=slack.get("workspaces", {}),
             webhook_port=webhooks.get("port", 8080),
             public_url=webhooks.get("public_url", ""),
+            webhook_secret=webhooks.get("secret", ""),
+            slack_signing_secret=webhooks.get("slack_signing_secret", ""),
             github_default_account=github.get("default_account", ""),
             github_accounts=github.get("accounts", {}),
             event_server_url=event_server.get("url", ""),
@@ -241,6 +245,10 @@ class GlobalConfig:
         }
         if self.public_url:
             data["webhooks"]["public_url"] = self.public_url
+        if self.webhook_secret:
+            data["webhooks"]["secret"] = self.webhook_secret
+        if self.slack_signing_secret:
+            data["webhooks"]["slack_signing_secret"] = self.slack_signing_secret
         if self.event_server_url:
             data["event_server"] = {
                 "url": self.event_server_url,

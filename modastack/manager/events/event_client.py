@@ -23,8 +23,15 @@ from modastack.config import GlobalConfig
 
 log = logging.getLogger(__name__)
 
-CURSOR_PATH = Path.home() / ".modastack" / "cursor.json"
-EVENTS_LOG = Path.home() / ".modastack" / "manager" / "events.jsonl"
+def _state_path(name: str) -> Path:
+    from modastack.sdk import get_repo_root
+    root = get_repo_root()
+    if root:
+        d = root / ".modastack" / "state"
+    else:
+        d = Path.home() / ".modastack"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / name
 
 # Normalized events land here for the consumer to drain.
 event_queue: SimpleQueue = SimpleQueue()
@@ -32,8 +39,8 @@ event_queue: SimpleQueue = SimpleQueue()
 
 def _load_cursor() -> int:
     try:
-        if CURSOR_PATH.exists():
-            data = json.loads(CURSOR_PATH.read_text())
+        if _state_path("cursor.json").exists():
+            data = json.loads(_state_path("cursor.json").read_text())
             return data.get("last_seen", 0)
     except (json.JSONDecodeError, OSError):
         pass
@@ -41,19 +48,17 @@ def _load_cursor() -> int:
 
 
 def _save_cursor(seq: int) -> None:
-    CURSOR_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CURSOR_PATH.write_text(json.dumps({"last_seen": seq}))
+    _state_path("cursor.json").write_text(json.dumps({"last_seen": seq}))
 
 
 def _log_event(event: dict) -> None:
-    EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "type": event.get("type", ""),
         "source": event.get("source", ""),
         "data": event.get("data", {}),
     }
-    with open(EVENTS_LOG, "a") as f:
+    with open(_state_path("events.jsonl"), "a") as f:
         f.write(json.dumps(entry) + "\n")
 
 

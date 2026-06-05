@@ -133,6 +133,7 @@ def run_workflow(
     requested_by: dict | None = None,
     timeout: int = 3600,
     interactive: bool = True,
+    role: str = "engineer",
 ) -> bool:
     """Execute a workflow end-to-end with a single agent session."""
     issue_id = issue_id or _parse_issue_number(task) or "adhoc"
@@ -145,7 +146,7 @@ def run_workflow(
     worktree_cwd = _setup_worktree(cwd, session_name)
     registry = get_registry()
     registry.register(SessionEntry(
-        name=session_name, session_id="", role="engineer",
+        name=session_name, session_id="", role=role,
         issue_id=issue_id, title=task[:80], phase=workflow.name,
         repo=repo, cwd=worktree_cwd, status="running", pid=os.getpid(),
         requested_by=requested_by,
@@ -167,7 +168,7 @@ def run_workflow(
     success = asyncio.run(
         _run_workflow_async(
             workflow, task, repo, worktree_cwd, issue_id, session_name,
-            registry, ctx, requested_by, timeout, interactive,
+            registry, ctx, requested_by, timeout, interactive, role=role,
         )
     )
 
@@ -280,6 +281,7 @@ async def _run_workflow_async(
     timeout: int,
     interactive: bool = True,
     start_step: int = 0,
+    role: str = "engineer",
 ) -> bool:
     """Async core: one ClaudeSDKClient session for all steps."""
     from claude_agent_sdk import (
@@ -330,12 +332,13 @@ async def _run_workflow_async(
         "text": f"Engineer started working on {issue_id}",
     })
 
-    # Determine the agent name from the first prompt step
-    first_agent = ""
-    for s in workflow.steps[start_step:]:
-        if s.agent:
-            first_agent = s.agent
-            break
+    # CLI --role always wins; fall back to workflow step's agent field
+    first_agent = role or ""
+    if not first_agent:
+        for s in workflow.steps[start_step:]:
+            if s.agent:
+                first_agent = s.agent
+                break
 
     # Try resume, fall back to fresh session
     for attempt in range(2):

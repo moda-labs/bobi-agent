@@ -2,7 +2,17 @@
 
 Event-driven AI engineering team. A persistent Claude Code manager monitors Linear, GitHub, Slack, and engineer sessions — assigning work, routing phases, answering questions, and communicating with humans.
 
-## Setup
+## Install
+
+```bash
+uv tool install modastack
+```
+
+If `uv` isn't installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+Also available via Homebrew: `brew tap moda-labs/modastack && brew install modastack`
+
+For development, clone and install in editable mode:
 
 ```bash
 cd ~/dev/modastack
@@ -11,56 +21,13 @@ source .venv/bin/activate
 pip install -e .
 modastack init --non-interactive
 ```
-
-## First-time setup (agent guidance)
-
-When setting up dispatch for a user, you MUST ask them for information.
-Do NOT guess or skip these steps.
-
-### Step 1: Install
-
-```bash
-cd ~/dev/modastack
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-modastack init --non-interactive
-```
-
-### Step 2: Setup the repo
-
-Ask the user TWO things:
-
-1. "What's your Linear API key? You can create one at
-   https://linear.app/settings/api → click 'Create key'."
-
-2. "What's your Linear project key? This is the prefix on your issue
-   IDs (e.g., if issues look like ENG-42, the key is ENG)."
-
-Then run:
-```bash
-modastack setup --linear-key <API_KEY> --linear-project <PROJECT_KEY>
-```
-
-This stores the API key per-project (in ~/.modastack/credentials.yaml,
-not in the repo) and registers the repo in ~/.modastack/config.yaml.
-
-### Step 3: Verify
-
-Show the user the registered repo entry and ask if the detected
-Linear project and skills look correct.
-
-### Important
-
-- NEVER guess the Linear project key — always ask
-- NEVER guess the Linear API key — always ask
-- Credentials are per-project, stored in ~/.modastack/credentials.yaml
-- All repo config lives in ~/.modastack/config.yaml (nothing in the target repo)
 
 ## Commands
 
 ```bash
 modastack start                # start event loop
+modastack stop                 # stop the running instance
+modastack restart              # stop and restart
 modastack agent --repo R --task T   # launch an ad-hoc engineer agent
 modastack agent --workflow W --repo R --issue I  # run a workflow
 modastack workflow list        # list available workflows
@@ -69,14 +36,15 @@ modastack monitor add <name>   # add a monitor (--interval, --description, --rep
 modastack monitor pause <name> # disable a monitor
 modastack monitor remove <name>  # remove a user-added monitor
 modastack status               # show active engineer sessions
+modastack engineers            # list active engineers
 modastack events               # show recent events from the bus
+modastack decisions            # show recent manager decisions
 modastack message "text"       # inject a message into the manager session
 modastack consult "question"   # ask the manager a question, block until response
+modastack log <session>        # show session transcript
 modastack init                 # initialize global config
-modastack setup [path]         # set up a repo — generate config, store credentials, register
-modastack register <target>    # register a repo (local path or org/repo)
-modastack repos                # list registered repos
-modastack doctor               # health-check /browse (Playwright, Chromium sandbox, daemon)
+modastack doctor               # system health check
+modastack dashboard            # start the web dashboard
 ```
 
 ## Architecture
@@ -228,6 +196,15 @@ the bus *only* if it finds something. The manager never sees the check
 process — only the resulting finding — so its context stays clean and
 responsive. Engineering-specific monitors (PR conflicts, stale PRs) are
 configured in `.modastack/monitors.yaml` — see this repo's own config.
+
+## Releasing
+
+1. Bump `version` in `pyproject.toml` and `VERSION`
+2. `git tag v<version> && git push --tags`
+3. GitHub Actions publishes to PyPI
+
+The publish workflow (`.github/workflows/publish-pypi.yml`) triggers on `v*` tags.
+Users upgrade with `uv tool upgrade modastack`.
 
 ## Tests
 

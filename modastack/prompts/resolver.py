@@ -1,8 +1,10 @@
-"""Resolve agent prompts from repo-provided .modastack/agents/ files."""
+"""Resolve agent prompts: built-in defaults + repo overrides."""
+
+from __future__ import annotations
 
 from pathlib import Path
 
-from . import AGENT_BASE_PATH
+from . import AGENT_BASE_PATH, AGENTS_DIR
 
 
 def resolve_agent_prompt(
@@ -12,14 +14,19 @@ def resolve_agent_prompt(
 ) -> str:
     """Build the full system prompt for an agent.
 
-    Combines the framework agent base with the repo-specific agent role.
+    Resolution: framework base + built-in role + repo override.
+    Repo override replaces the built-in role if present.
     """
     parts = [AGENT_BASE_PATH.read_text()]
 
     repo = Path(repo_path)
-    agent_file = repo / ".modastack" / "agents" / f"{agent_name}.md"
-    if agent_file.exists():
-        parts.append(agent_file.read_text())
+    repo_agent = repo / ".modastack" / "agents" / f"{agent_name}.md"
+    builtin_agent = AGENTS_DIR / f"{agent_name}.md"
+
+    if repo_agent.exists():
+        parts.append(repo_agent.read_text())
+    elif builtin_agent.exists():
+        parts.append(builtin_agent.read_text())
 
     if interactive:
         parts.append(
@@ -33,3 +40,90 @@ def resolve_agent_prompt(
         )
 
     return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Role discovery
+# ---------------------------------------------------------------------------
+
+def _extract_description(path: Path) -> str:
+    """Extract a one-sentence description from a role markdown file."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return ""
+    # Collect the first non-heading paragraph
+    lines: list[str] = []
+    found_content = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if not stripped:
+            if found_content:
+                break
+            continue
+        found_content = True
+        lines.append(stripped)
+    paragraph = " ".join(lines)
+    # Take the first sentence
+    dot = paragraph.find(". ")
+    if dot >= 0:
+        return paragraph[: dot + 1]
+    if paragraph.endswith("."):
+        return paragraph
+    if len(paragraph) > 80:
+        return paragraph[:77] + "..."
+    return paragraph
+
+
+def discover_roles(repo_path: Path | str | None = None) -> list[dict]:
+    """List available agent roles from built-in and repo tiers.
+
+    Returns a list of dicts: [{"name", "source", "description", "path"}].
+    Repo roles override built-in roles with the same name.
+    """
+    roles: dict[str, dict] = {}
+
+    for md in sorted(AGENTS_DIR.glob("*.md")):
+        roles[md.stem] = {
+            "name": md.stem,
+            "source": "built-in",
+            "description": _extract_description(md),
+            "path": str(md),
+        }
+
+    if repo_path:
+        repo_agents = Path(repo_path) / ".modastack" / "agents"
+        if repo_agents.is_dir():
+            for md in sorted(repo_agents.glob("*.md")):
+                roles[md.stem] = {
+                    "name": md.stem,
+                    "source": "repo",
+                    "description": _extract_description(md),
+                    "path": str(md),
+                }
+
+    return list(roles.values())
+
+
+def format_role_list(roles: list[dict]) -> str:
+    """Format roles for terminal output."""
+    if not roles:
+        return "No roles found."
+    lines = ["Available roles:\n"]
+    for r in roles:
+        source = "repo" if r["source"] == "repo" else "built-in"
+        lines.append(f"  {r['name']:20s} [{source:8s}]  {r['description']}")
+    return "\n".join(lines)
+
+
+def validate_role(role_name: str, repo_path: Path | str | None = None) -> bool:
+    """Check whether a role exists in either tier."""
+    if (AGENTS_DIR / f"{role_name}.md").exists():
+        return True
+    if repo_path:
+        repo_agent = Path(repo_path) / ".modastack" / "agents" / f"{role_name}.md"
+        if repo_agent.exists():
+            return True
+    return False

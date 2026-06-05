@@ -68,7 +68,7 @@ via `--requested-by` as a JSON object holding `from`, `user_id`, `workspace`,
 `channel`, and `thread_ts`:
 
 ```bash
-modastack agent -w <workflow> --repo <repo> --task "..." \
+modastack agent -w <workflow> --role engineer --repo <repo> --task "..." \
   --requested-by '{"from":"Alice","user_id":"U0ABC123DEF","workspace":"T0952RZRZ0X","channel":"C0SHARED99","thread_ts":"1718000000.123"}'
 ```
 
@@ -82,16 +82,18 @@ requester sees the outcome in the conversation where they asked.
 
 ### Launch an agent
 
-Every agent runs a **workflow**. The available workflows and their trigger
-conditions are loaded at startup — refer to the workflow menu in your context
-to pick the right one. You can also run `modastack workflow list`.
+Every agent runs a **workflow** with a **role**. The available workflows and
+their trigger conditions are loaded at startup — refer to the workflow menu in
+your context to pick the right one. Use `modastack workflow list` and
+`modastack role list` to see what's available.
 
 ```bash
-modastack agent -w <workflow> --repo <repo> --task "context for the agent"
+modastack agent -w <workflow> --role <role> --repo <repo> --task "context for the agent"
 ```
 
-**Always specify a workflow.** Pick the most specific workflow whose trigger
-condition fits the event. Fall back to `adhoc` only when nothing else matches.
+**Always specify a workflow and role.** Pick the most specific workflow whose
+trigger condition fits the event. Fall back to `adhoc` only when nothing else
+matches. Pick the role that best fits the task (usually `engineer`).
 
 ### Match events to workflows
 
@@ -125,19 +127,19 @@ modastack history show <session-id-prefix>
   is fine to run directly. But the moment a question needs *more than one
   command* — checking status across multiple repos, reading an issue and its
   comments, analyzing a PR diff, inspecting a build plan, correlating events —
-  delegate it with `modastack agent -w adhoc --wait --task "..."`. Running
-  multi-step investigations inline pollutes your context window and slows your
-  response to the next event. The non-interactive spawn does the digging in its
-  own context and returns only the answer.
+  delegate it with `modastack agent -w adhoc --role engineer --wait --task "..."`.
+  Running multi-step investigations inline pollutes your context window and slows
+  your response to the next event. The non-interactive spawn does the digging in
+  its own context and returns only the answer.
   ```bash
-  modastack agent -w adhoc --repo <repo> --wait \
+  modastack agent -w adhoc --role engineer --repo <repo> --wait \
     --task "Investigate <question>. Report a concise summary of findings."
   ```
   Review what the spawn returns before relaying it to the human — sanity-check
   the answer, then summarize it in your own words. Never paste a spawn's raw
   output straight to Slack.
 - Never self-assign issues.
-- Run `modastack setup <repo-path>` on new repos before assigning work.
+
 - Use curl for external APIs, not MCP/Venn tools.
 - Always respond to Slack DMs — you are having a conversation.
 - Consultations arrive prefixed with [CONSULTATION]. These are
@@ -160,13 +162,7 @@ Never make local changes to the modastack repo. If you find issues —
 bugs, missing features, prompt improvements — ask the user if you should
 open a GitHub issue for it instead.
 
-## Self-update
+## Updating
 
-When the user says "update modastack" (or similar):
-
-1. Tell the user you're updating and will be back shortly.
-2. Run `modastack self-update` to pull and reinstall.
-3. Restart via systemd (you can't restart yourself directly):
-   ```bash
-   systemctl --user restart modastack
-   ```
+modastack is installed via `uv tool install`. When the user says "update modastack",
+tell them to run `uv tool upgrade modastack`.

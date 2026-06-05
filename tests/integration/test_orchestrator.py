@@ -19,17 +19,32 @@ requires_claude = pytest.mark.skipif(
     reason="claude CLI not installed",
 )
 
+from modastack.sdk import SessionRegistry, get_registry, set_repo_root
+
 REPO_ROOT = Path(__file__).parent.parent.parent
+
+
+def _cleanup_session(name: str) -> None:
+    """Mark a session done and remove its directory so the next run doesn't collide."""
+    set_repo_root(REPO_ROOT)
+    registry = get_registry()
+    registry.mark_done(name)
+    session_dir = SessionRegistry.session_dir(name)
+    if session_dir.exists():
+        shutil.rmtree(session_dir)
 
 
 class TestCLIReturnsImmediately:
     """modastack agent should return in <5s for both modes."""
 
     def test_adhoc_returns_immediately(self, tmp_path):
+        _cleanup_session(f"wf-adhoc-{tmp_path.name}-99")
+
         start = time.monotonic()
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
-             "-w", "adhoc", "--repo", str(tmp_path), "--task", "say hello #99"],
+             "-w", "adhoc", "--role", "engineer",
+             "--repo", str(tmp_path), "--task", "say hello #99"],
             capture_output=True, text=True, timeout=10,
             cwd=str(REPO_ROOT),
         )
@@ -39,11 +54,15 @@ class TestCLIReturnsImmediately:
         assert "wf-adhoc" in result.stdout and "99" in result.stdout
         assert elapsed < 5
 
+        _cleanup_session(f"wf-adhoc-{tmp_path.name}-99")
+
     def test_workflow_returns_immediately(self, tmp_path):
+        _cleanup_session("wf-issue-lifecycle-modastack-adhoc")
+
         start = time.monotonic()
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
-             "-w", "issue-lifecycle",
+             "-w", "issue-lifecycle", "--role", "engineer",
              "--repo", str(REPO_ROOT)],
             capture_output=True, text=True, timeout=10,
             cwd=str(REPO_ROOT),
@@ -54,22 +73,17 @@ class TestCLIReturnsImmediately:
         assert "wf-issue-lifecycle" in result.stdout
         assert elapsed < 5
 
-    def test_spawn_alias_uses_adhoc(self, tmp_path):
-        result = subprocess.run(
-            [sys.executable, "-m", "modastack.cli", "spawn",
-             "--repo", str(tmp_path), "--task", "hello #88"],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(REPO_ROOT),
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "wf-adhoc" in result.stdout and "88" in result.stdout
+        # Clean up — session name includes a uuid suffix, extract from stdout
+        session_name = result.stdout.strip().replace("Agent started: ", "")
+        if session_name:
+            _cleanup_session(session_name)
 
 
 class TestValidation:
     def test_workflow_required(self):
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
-             "--repo", "/tmp", "--task", "X"],
+             "--role", "engineer", "--repo", "/tmp", "--task", "X"],
             capture_output=True, text=True, timeout=5,
             cwd=str(REPO_ROOT),
         )
@@ -78,7 +92,7 @@ class TestValidation:
     def test_repo_required(self):
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agent",
-             "-w", "adhoc", "--task", "X"],
+             "-w", "adhoc", "--role", "engineer", "--task", "X"],
             capture_output=True, text=True, timeout=5,
             cwd=str(REPO_ROOT),
         )

@@ -13,7 +13,12 @@ from pathlib import Path
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
-DB_PATH = Path.home() / ".modastack" / "history.db"
+def _db_path() -> Path:
+    from modastack.sdk import get_repo_root
+    root = get_repo_root()
+    if root:
+        return root / ".modastack" / "state" / "history.db"
+    return Path.home() / ".modastack" / "history.db"
 
 
 def _init_db(conn: sqlite3.Connection):
@@ -174,8 +179,8 @@ def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
 
 def index(project_filter: str | None = None) -> dict:
     """Index all conversation JSONL files. Returns stats."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    _db_path().parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(_db_path()))
     _init_db(conn)
 
     files = []
@@ -220,10 +225,10 @@ def _fts_query(query: str) -> str:
 
 def search(query: str, limit: int = 20, project: str | None = None) -> list[dict]:
     """Full-text search across conversation history."""
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         return []
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(_db_path()))
     conn.row_factory = sqlite3.Row
 
     fts_query = _fts_query(query)
@@ -256,10 +261,10 @@ def search(query: str, limit: int = 20, project: str | None = None) -> list[dict
 
 def conversations(limit: int = 20, project: str | None = None) -> list[dict]:
     """List recent conversations."""
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         return []
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(_db_path()))
     conn.row_factory = sqlite3.Row
 
     sql = "SELECT * FROM conversations"
@@ -278,10 +283,10 @@ def conversations(limit: int = 20, project: str | None = None) -> list[dict]:
 
 def session_messages(session_id: str) -> list[dict]:
     """Get all messages from a specific session."""
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         return []
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(_db_path()))
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
@@ -298,7 +303,7 @@ def context_for_events(events: list[dict], max_results: int = 5) -> str:
     Extracts search terms from event data (issue titles, messages, details)
     and returns formatted context.
     """
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         return ""
 
     queries = set()

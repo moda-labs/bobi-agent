@@ -139,7 +139,9 @@ class TestHandoffValidation:
 
 class TestReadHandoff:
     def test_reads_yaml(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
         session_dir = tmp_path / "wf-test-42"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("complexity: medium\nneeds_spec: true\n")
@@ -148,11 +150,15 @@ class TestReadHandoff:
         assert result["needs_spec"] is True
 
     def test_missing_handoff_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
         assert _read_handoff("wf-test-999", "setup") == {}
 
     def test_step_specific_handoffs(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
         session_dir = tmp_path / "wf-test-1"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("worktree: /tmp/wt\n")
@@ -290,7 +296,9 @@ class TestRunWorkflow:
         assert result is True
 
     def test_route_step_branches(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
 
         # Write handoff during the fake agent's response (simulating the
         # agent writing it after the triage step runs, not before)
@@ -348,8 +356,12 @@ class TestAwaitStep:
             return run_workflow(workflow, **kwargs)
 
     def test_await_suspends_workflow(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="spec", prompt="write spec"),
@@ -368,8 +380,12 @@ class TestAwaitStep:
         assert run.issue_id == "1"
 
     def test_resume_continues_from_suspended_step(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
 
         run = WorkflowRun.create("t", {"data": {"issue_id": "1"}})
         run.status = "waiting"
@@ -408,11 +424,15 @@ class TestAwaitStep:
         assert reloaded.status == "completed"
 
     def test_find_waiting_returns_none_when_no_match(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
         assert WorkflowRun.find_waiting("approval") is None
 
     def test_find_waiting_filters_by_issue(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
 
         run = WorkflowRun.create("t", {"data": {"issue_id": "42"}})
         run.status = "waiting"

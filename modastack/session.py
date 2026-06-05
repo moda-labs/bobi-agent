@@ -39,12 +39,12 @@ def _slugify(title: str, max_len: int = 30) -> str:
 
 
 def _store_session_name(issue_id: str, name: str) -> None:
-    SESSION_IDS_DIR.mkdir(parents=True, exist_ok=True)
-    (SESSION_IDS_DIR / f"{issue_id}.name").write_text(name)
+    _session_ids_dir().mkdir(parents=True, exist_ok=True)
+    (_session_ids_dir() / f"{issue_id}.name").write_text(name)
 
 
 def _session_name(issue_id: str) -> str:
-    name_path = SESSION_IDS_DIR / f"{issue_id}.name"
+    name_path = _session_ids_dir() / f"{issue_id}.name"
     if name_path.exists():
         try:
             return name_path.read_text().strip()
@@ -57,7 +57,9 @@ def session_exists(issue_id: str) -> bool:
     return has_session(_session_name(issue_id))
 
 
-SESSION_IDS_DIR = Path.home() / ".modastack" / "sessions"
+def _session_ids_dir() -> Path:
+    from modastack.sdk import _sessions_dir
+    return _sessions_dir()
 
 
 def sync_main_branch(repo_path: Path) -> bool:
@@ -118,7 +120,7 @@ def cleanup_worktree(issue_id: str, repo_path: Path) -> None:
     )
 
     for suffix in (".id", ".name"):
-        p = SESSION_IDS_DIR / f"{issue_id}{suffix}"
+        p = _session_ids_dir() / f"{issue_id}{suffix}"
         if p.exists():
             p.unlink()
 
@@ -141,7 +143,7 @@ def spawn_session(issue_id: str, cwd: str, title: str = "") -> bool:
         name = f"moda-{issue_id.lower()}"
 
     # Check for a saved session ID to resume
-    saved_id_path = SESSION_IDS_DIR / f"{issue_id}.id"
+    saved_id_path = _session_ids_dir() / f"{issue_id}.id"
     cmd = [CLAUDE, "--dangerously-skip-permissions", "--name", name]
     if saved_id_path.exists():
         saved_id = saved_id_path.read_text().strip()
@@ -234,8 +236,8 @@ def inject_skill(issue_id: str, skill_name: str, context: str = "") -> None:
 def _build_reverse_name_map() -> dict[str, str]:
     """Build session_name → issue_id mapping from stored .name files."""
     reverse = {}
-    if SESSION_IDS_DIR.exists():
-        for f in SESSION_IDS_DIR.glob("*.name"):
+    if _session_ids_dir().exists():
+        for f in _session_ids_dir().glob("*.name"):
             try:
                 sname = f.read_text().strip()
                 reverse[sname] = f.stem

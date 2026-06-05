@@ -50,12 +50,12 @@ class ManagerSession:
     def _load_manager_prompt(self) -> str:
         core = MANAGER_BASE_PATH.read_text()
 
-        # Load global user manager role prompt
-        global_mgr = Path.home() / ".modastack" / "manager.md"
-        if global_mgr.exists():
-            core += "\n\n" + global_mgr.read_text()
+        # Built-in engineering role (shipped with modastack)
+        builtin_role = MANAGER_BASE_PATH.parent / "manager_engineering.md"
+        if builtin_role.exists():
+            core += "\n\n" + builtin_role.read_text()
 
-        # Load this repo's manager role prompt
+        # Repo override replaces or extends the built-in role
         repo_mgr = self.repo_path / ".modastack" / "manager.md"
         if repo_mgr.exists():
             core += f"\n\n## {self.repo_path.name} policies\n\n" + repo_mgr.read_text()
@@ -64,18 +64,16 @@ class ManagerSession:
 
     def _list_workflows(self) -> str:
         try:
-            from modastack.workflow.triggers import WORKFLOWS_DIR, USER_WORKFLOWS_DIR
+            from modastack.workflow.triggers import WORKFLOWS_DIR
             from modastack.workflow.schema import load_workflow
 
-            lines = []
             sources = [WORKFLOWS_DIR]
-            if USER_WORKFLOWS_DIR.exists():
-                sources.append(USER_WORKFLOWS_DIR)
             repo_wf = self.repo_path / ".modastack" / "workflows"
             if repo_wf.exists():
                 sources.append(repo_wf)
 
             seen = set()
+            lines = []
             for d in reversed(sources):
                 for f in sorted(d.glob("*.yaml")):
                     if f.stem in seen:

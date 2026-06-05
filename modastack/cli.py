@@ -13,66 +13,44 @@ truststore.inject_into_ssl()
 import click
 
 from .config import GlobalConfig, GLOBAL_CONFIG_DIR
-from .setup import generate_dispatch_yaml
+
 from .__version__ import __version__
 
 LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
-UPDATE_STATE_PATH = GLOBAL_CONFIG_DIR / "update_state.json"
 REPO_ROOT = Path(__file__).parent.parent
 
-HOOK_SETTINGS = {
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": ".claude/hooks/session-state.sh", "timeout": 5}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": ".claude/hooks/session-state.sh", "timeout": 5}]}],
-}
+def _detect_repo_root(cwd: Path | None = None) -> Path | None:
+    """Walk up from cwd to find a repo with .modastack/config.yaml."""
+    path = (cwd or Path.cwd()).resolve()
+    for candidate in [path, *path.parents]:
+        if (candidate / ".modastack" / "config.yaml").exists():
+            return candidate
+        if (candidate / ".modastack.yaml").exists():
+            return candidate
+    return None
 
 
-def install_hooks(target_path: Path) -> list[str]:
-    """Install Claude Code hooks for session state tracking.
+def _repo_state_dir(repo_path: Path) -> Path:
+    """Runtime state directory for a repo's manager."""
+    d = repo_path / ".modastack" / "state"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
-    Copies the hook script and merges hook config into .claude/settings.json.
-    Skips if target is the modastack repo itself.
-    Returns list of actions taken.
-    """
-    actions = []
-    repo_root = Path(__file__).parent.parent
 
-    if target_path.resolve() == repo_root.resolve():
-        return actions
+def _get_dashboard_url(repo_path: Path | None = None) -> str:
+    """Read the dashboard port from the repo's state dir."""
+    if repo_path is None:
+        repo_path = _detect_repo_root()
+    if repo_path:
+        port_file = repo_path / ".modastack" / "state" / "dashboard.port"
+        if port_file.exists():
+            try:
+                port = int(port_file.read_text().strip())
+                return f"http://localhost:{port}"
+            except (ValueError, OSError):
+                pass
+    return "http://localhost:8095"
 
-    # Copy hook script
-    hooks_dir = target_path / ".claude" / "hooks"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
-    src_hook = repo_root / ".claude" / "hooks" / "session-state.sh"
-    dst_hook = hooks_dir / "session-state.sh"
-
-    if src_hook.exists() and src_hook.resolve() != dst_hook.resolve():
-        import shutil
-        shutil.copy2(src_hook, dst_hook)
-        dst_hook.chmod(0o755)
-        actions.append("Installed .claude/hooks/session-state.sh")
-
-    # Merge hooks into settings.json
-    settings_path = target_path / ".claude" / "settings.json"
-    settings = {}
-    if settings_path.exists():
-        try:
-            settings = json.loads(settings_path.read_text())
-        except json.JSONDecodeError:
-            pass
-
-    existing_hooks = settings.get("hooks", {})
-    changed = False
-    for event_name, event_config in HOOK_SETTINGS.items():
-        if event_name not in existing_hooks:
-            existing_hooks[event_name] = event_config
-            changed = True
-
-    if changed:
-        settings["hooks"] = existing_hooks
-        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
-        actions.append("Configured hooks in .claude/settings.json")
-
-    return actions
 
 
 @click.group()
@@ -89,6 +67,10 @@ def main():
             logging.FileHandler(LOG_PATH),
         ],
     )
+    repo = _detect_repo_root()
+    if repo:
+        from modastack.sdk import set_repo_root
+        set_repo_root(repo)
 
 
 def _has_systemd_service() -> bool:
@@ -120,12 +102,17 @@ def _systemctl(action: str) -> bool:
 @main.command()
 @click.option("--foreground", "-f", is_flag=True, help="Run in the foreground (default: daemonize)")
 def start(foreground):
-    """Start modastack. Connects to the centralized event server for webhooks.
+    """Start modastack for the repo in the current directory.
 
     Usage:
-        modastack start              # daemonize
-        modastack start --foreground # run in foreground (for debugging)
+        cd myrepo && modastack start              # daemonize
+        cd myrepo && modastack start --foreground  # run in foreground
     """
+    repo_path = _detect_repo_root()
+    if not repo_path:
+        click.echo("Not inside a modastack repo (no .modastack/config.yaml found). Run `modastack init` first.", err=True)
+        raise SystemExit(1)
+
     if not foreground and _has_systemd_service():
         click.echo("Starting via systemd...")
         if _systemctl("start"):
@@ -134,15 +121,17 @@ def start(foreground):
                 capture_output=True, text=True, timeout=5,
             )
             pid = result.stdout.strip()
-            click.echo(f"Modastack started (pid {pid}). Logs: {GLOBAL_CONFIG_DIR / 'modastack.log'}")
+            click.echo(f"Modastack started (pid {pid}). Logs: {_repo_state_dir(repo_path) / 'manager.log'}")
         return
 
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
+    state_dir = _repo_state_dir(repo_path)
+    pid_path = state_dir / "manager.pid"
+
     if pid_path.exists():
         try:
             pid = int(pid_path.read_text().strip())
             os.kill(pid, 0)
-            click.echo(f"Modastack already running (pid {pid}). Use `modastack restart`.")
+            click.echo(f"Modastack already running for {repo_path.name} (pid {pid}). Use `modastack restart`.")
             return
         except (ProcessLookupError, ValueError):
             pid_path.unlink(missing_ok=True)
@@ -153,23 +142,41 @@ def start(foreground):
                          if isinstance(h, logging.FileHandler)]
 
         from modastack.manager.events.consumer import run
-        run()
+        run(repo_path=repo_path)
     else:
-        log_file = GLOBAL_CONFIG_DIR / "modastack.log"
-        GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        log_file = state_dir / "manager.log"
+        env = os.environ.copy()
+        venv_bin = str(Path(sys.executable).parent)
+        local_bin = str(Path.home() / ".local" / "bin")
+        env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
         with open(log_file, "a") as lf:
             proc = subprocess.Popen(
                 [sys.executable, "-m", "modastack.cli", "start", "--foreground"],
                 stdout=lf, stderr=lf,
+                cwd=str(repo_path),
+                env=env,
                 start_new_session=True,
             )
-        click.echo(f"Modastack started (pid {proc.pid}). Logs: {log_file}")
+        click.echo(f"Modastack started for {repo_path.name} (pid {proc.pid}). Logs: {log_file}")
+
+
+def _find_pid_path() -> Path | None:
+    """Find the PID file for the current repo's manager."""
+    repo_path = _detect_repo_root()
+    if repo_path:
+        p = _repo_state_dir(repo_path) / "manager.pid"
+        if p.exists():
+            return p
+    legacy = GLOBAL_CONFIG_DIR / "modastack.pid"
+    if legacy.exists():
+        return legacy
+    return None
 
 
 @main.command()
 @click.option("--force", is_flag=True, help="Send SIGKILL if SIGTERM doesn't work")
 def stop(force):
-    """Stop a running modastack instance.
+    """Stop the modastack instance for the current repo.
 
     Usage:
         modastack stop
@@ -182,8 +189,8 @@ def stop(force):
 
     import signal
 
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
-    if not pid_path.exists():
+    pid_path = _find_pid_path()
+    if not pid_path:
         click.echo("No PID file found — modastack is not running.")
         return
 
@@ -266,22 +273,22 @@ def message(text, to):
     import urllib.request
     import urllib.error
 
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
-    if pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-        except (ProcessLookupError, ValueError):
-            click.echo("Manager not running. Start with: modastack start")
-            return
-    else:
+    pid_path = _find_pid_path()
+    if not pid_path:
+        click.echo("Manager not running. Start with: modastack start")
+        return
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 0)
+    except (ProcessLookupError, ValueError):
         click.echo("Manager not running. Start with: modastack start")
         return
 
     try:
         import json as _json
+        dashboard = _get_dashboard_url()
         req = urllib.request.Request(
-            "http://localhost:8095/api/message",
+            f"{dashboard}/api/message",
             data=_json.dumps({"text": text}).encode(),
             headers={"Content-Type": "application/json"},
         )
@@ -314,15 +321,14 @@ def consult(question, timeout, source):
     import urllib.request
     import urllib.error
 
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
-    if pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-        except (ProcessLookupError, ValueError):
-            click.echo("Manager not running. Start with: modastack start", err=True)
-            raise SystemExit(1)
-    else:
+    pid_path = _find_pid_path()
+    if not pid_path:
+        click.echo("Manager not running. Start with: modastack start", err=True)
+        raise SystemExit(1)
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 0)
+    except (ProcessLookupError, ValueError):
         click.echo("Manager not running. Start with: modastack start", err=True)
         raise SystemExit(1)
 
@@ -333,9 +339,10 @@ def consult(question, timeout, source):
         "source": source,
     }).encode()
 
+    dashboard = _get_dashboard_url()
     try:
         req = urllib.request.Request(
-            "http://localhost:8095/api/consult",
+            f"{dashboard}/api/consult",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
@@ -372,8 +379,15 @@ def slack_reply(text, workspace, channel, thread):
     import urllib.error
     import urllib.request
 
-    config = GlobalConfig.load()
-    token = config.slack_token_for(workspace)
+    token = ""
+    repo_path = _detect_repo_root()
+    if repo_path and (repo_path / ".modastack" / "local.yaml").exists():
+        from .config import LocalConfig
+        local = LocalConfig.load(repo_path)
+        token = local.slack_bot_token
+    if not token:
+        config = GlobalConfig.load()
+        token = config.slack_token_for(workspace)
     if not token:
         click.echo(f"No bot token for workspace {workspace}", err=True)
         sys.exit(1)
@@ -456,12 +470,11 @@ def log(session, lines, follow):
 
 def _find_transcript(session: str) -> Path | None:
     """Find the log file for a session."""
-    from modastack.sdk import SESSION_DIR, SessionRegistry, get_registry
+    from modastack.sdk import SessionRegistry, get_registry
 
     if session == "manager":
-        from modastack.manager.session import get_default_session
-        s = get_default_session()
-        session = s.session_name if s else "moda-manager"
+        repo = _detect_repo_root()
+        session = f"moda-mgr-{repo.name}" if repo else "moda-manager"
 
     # Primary: session dir log
     session_log = SessionRegistry.log_path(session)
@@ -469,7 +482,8 @@ def _find_transcript(session: str) -> Path | None:
         return session_log
 
     # Fallback: Claude Code transcript via session ID
-    id_file = SESSION_DIR / f"{session}.id"
+    from modastack.sdk import _sessions_dir
+    id_file = _sessions_dir() / f"{session}.id"
     if id_file.exists():
         session_id = id_file.read_text().strip()
         if session_id:
@@ -486,8 +500,9 @@ def _find_transcript(session: str) -> Path | None:
     if active:
         names = [e.name for e in active]
         click.echo(f"Active: {', '.join(sorted(names))}")
+    sessions = _sessions_dir()
     recent_dirs = sorted(
-        [d for d in SESSION_DIR.iterdir() if d.is_dir() and (d / "state.json").exists()],
+        [d for d in sessions.iterdir() if d.is_dir() and (d / "state.json").exists()],
         key=lambda d: d.stat().st_mtime, reverse=True,
     )
     recent_names = [d.name for d in recent_dirs[:10] if not d.name.startswith("moda-mgr")]
@@ -564,28 +579,16 @@ def _print_transcript_entry(line: str) -> None:
                 click.echo(f"{ts}  ⚙ {name}: {summary}")
 
 
-@main.command(hidden=True)
-@click.argument("text", required=False)
-def tick(text):
-    """Deprecated: use 'modastack message' instead."""
-    ctx = click.get_current_context()
-    if text:
-        ctx.invoke(message, text=text)
-    else:
-        from modastack.manager.session import is_alive, detect_state
-        state = detect_state() if is_alive() else "stopped"
-        click.echo(f"Manager state: {state}")
-        click.echo("Hint: use 'modastack message' to send, 'modastack log' to read.")
-
 
 @main.command()
 def status():
     """Show active agents — manager + engineer sub-agents."""
     from modastack.sdk import load_session_id, get_registry
 
-    pid_path = GLOBAL_CONFIG_DIR / "modastack.pid"
+    repo_path = _detect_repo_root()
     running = False
-    if pid_path.exists():
+    pid_path = _find_pid_path()
+    if pid_path and pid_path.exists():
         try:
             pid = int(pid_path.read_text().strip())
             os.kill(pid, 0)
@@ -593,27 +596,7 @@ def status():
         except (ValueError, ProcessLookupError, PermissionError):
             pass
 
-    if not running:
-        import subprocess as _sp
-        try:
-            result = _sp.run(
-                ["pgrep", "-f", "modastack.*start"],
-                capture_output=True, text=True, timeout=5,
-            )
-            for line in result.stdout.strip().splitlines():
-                try:
-                    pid = int(line.strip())
-                    os.kill(pid, 0)
-                    running = True
-                    break
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-        except (FileNotFoundError, _sp.TimeoutExpired):
-            pass
-
-    from modastack.manager.session import get_default_session
-    mgr = get_default_session()
-    mgr_name = mgr.session_name if mgr else "moda-manager"
+    mgr_name = f"moda-mgr-{repo_path.name}" if repo_path else "moda-manager"
     session_id = load_session_id(mgr_name) or ""
     session_short = session_id[:8] if session_id else ""
 
@@ -786,7 +769,10 @@ def engineers(issue_id, cancel):
 @click.option("--tail", default=20, help="Number of recent events to show")
 def events(tail):
     """Show recent events from the event bus."""
-    events_path = Path.home() / ".modastack" / "manager" / "events.jsonl"
+    repo_path = _detect_repo_root()
+    events_path = (repo_path / ".modastack" / "state" / "events.jsonl") if repo_path else None
+    if not events_path or not events_path.exists():
+        events_path = Path.home() / ".modastack" / "manager" / "events.jsonl"
     if not events_path.exists():
         click.echo("No events yet.")
         return
@@ -806,7 +792,10 @@ def events(tail):
 @main.command()
 def decisions():
     """Show recent manager decisions."""
-    decisions_path = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
+    repo_path = _detect_repo_root()
+    decisions_path = (repo_path / ".modastack" / "state" / "decisions.jsonl") if repo_path else None
+    if not decisions_path or not decisions_path.exists():
+        decisions_path = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
     if not decisions_path.exists():
         click.echo("No decisions yet.")
         return
@@ -823,471 +812,23 @@ def decisions():
         click.echo()
 
 
-@main.command()
-@click.argument("repo_path", type=click.Path(exists=True))
-@click.option("--task-tracking", type=click.Choice(["github-issues", "linear"]), default=None)
-@click.option("--project", default=None, help="Project prefix (e.g., BET, TESS)")
-@click.option("--linear-key", envvar="LINEAR_API_KEY", default=None)
-def register(repo_path: str, task_tracking: str | None, project: str | None, linear_key: str | None):
-    """Register a repo with modastack (alias for setup)."""
-    from click import Context
-    ctx = click.get_current_context()
-    ctx.invoke(setup, repo_path=repo_path, task_tracking=task_tracking,
-               project=project, linear_key=linear_key, non_interactive=True)
-
 
 @main.command()
 @click.option("--non-interactive", is_flag=True, envvar="CI")
 def init(non_interactive):
-    """Initialize global config and install modastack to PATH."""
+    """Initialize global config."""
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config = GlobalConfig.load()
     config.save()
+    if not config.webhook_secret:
+        import secrets
+        config.webhook_secret = f"whsec_{secrets.token_hex(24)}"
+        config.save()
     click.echo(f"Config initialized at {GLOBAL_CONFIG_DIR / 'config.yaml'}")
+    click.echo(f"Webhook secret: {config.webhook_secret}")
+    click.echo(f"  Use this as your GitHub webhook secret")
 
-    _install_to_path()
 
-    click.echo("Run `modastack setup <repo>` to add a repo.")
-
-
-def _install_to_path():
-    """Symlink the modastack binary into ~/.local/bin and ensure it's on PATH.
-
-    Adds the PATH export above the interactive guard in .bashrc so it
-    works for both interactive shells and non-interactive SSH commands.
-    """
-    import shutil
-
-    venv_bin = shutil.which("modastack")
-    if not venv_bin:
-        return
-
-    local_bin = Path.home() / ".local" / "bin"
-    local_bin.mkdir(parents=True, exist_ok=True)
-    link = local_bin / "modastack"
-
-    if link.exists() or link.is_symlink():
-        if link.resolve() == Path(venv_bin).resolve():
-            click.echo(f"Already installed: {link}")
-            return
-        link.unlink()
-
-    link.symlink_to(venv_bin)
-    click.echo(f"Installed: {link} -> {venv_bin}")
-
-    if str(local_bin) not in os.environ.get("PATH", ""):
-        _ensure_path_in_bashrc(str(local_bin))
-
-
-def _ensure_path_in_bashrc(bin_dir: str):
-    """Add bin_dir to PATH in .bashrc, above the interactive guard."""
-    bashrc = Path.home() / ".bashrc"
-    export_line = f'export PATH="$HOME/.local/bin:$PATH"'
-
-    if bashrc.exists():
-        content = bashrc.read_text()
-        if ".local/bin" in content:
-            return
-        # Insert before the interactive guard so non-interactive SSH picks it up
-        guard = "# If not running interactively"
-        if guard in content:
-            content = content.replace(guard, export_line + "\n\n" + guard)
-            bashrc.write_text(content)
-            click.echo(f"Added {bin_dir} to PATH in ~/.bashrc")
-            return
-
-    # No bashrc or no guard — just append
-    with open(bashrc, "a") as f:
-        f.write(f"\n{export_line}\n")
-    click.echo(f"Added {bin_dir} to PATH in ~/.bashrc")
-
-
-@main.command()
-def repos():
-    """List registered repos."""
-    config = GlobalConfig.load()
-    if not config.repos:
-        click.echo("No repos registered.")
-        return
-    for path in config.repos:
-        has_config = (
-            (path / ".modastack" / "config.yaml").exists()
-            or (path / ".modastack.yaml").exists()
-        )
-        click.echo(f"  {path.name:30s} [{'ready' if has_config else 'no config'}] {path}")
-
-
-EVENT_SERVER_URL = "https://modastack-events.modalabs.workers.dev"
-
-
-@main.command()
-@click.argument("repo_path", type=click.Path(exists=True), default=".")
-@click.option("--task-tracking", type=click.Choice(["github-issues", "linear"]), default=None,
-              help="Task tracking system (default: github-issues)")
-@click.option("--project", default=None, help="Project prefix (e.g., BET, TESS)")
-@click.option("--linear-key", envvar="LINEAR_API_KEY", default=None, help="Linear API key (only for --task-tracking linear)")
-@click.option("--non-interactive", is_flag=True, envvar="CI")
-def setup(repo_path: str, task_tracking: str | None, project: str | None,
-          linear_key: str | None, non_interactive: bool):
-    """Set up a repo for modastack."""
-    import yaml
-
-    path = Path(repo_path).resolve()
-    config_dir = path / ".modastack"
-    config_path = config_dir / "config.yaml"
-    credential_name = path.name
-
-    if config_path.exists() and not non_interactive:
-        try:
-            if not click.confirm(f".modastack/config.yaml exists in {path}. Overwrite?"):
-                return
-        except (EOFError, click.Abort):
-            pass
-
-    # Default to github-issues
-    if not task_tracking:
-        task_tracking = "linear" if linear_key else "github-issues"
-
-    # Handle credentials for Linear
-    if task_tracking == "linear":
-        from .config import Credentials
-        creds = Credentials.load()
-        existing_cred = creds.get(credential_name)
-        has_key = bool(existing_cred.get("linear_api_key"))
-
-        if linear_key:
-            creds.add(credential_name, linear_api_key=linear_key)
-            click.echo(f"Linear API key stored for '{credential_name}'")
-        elif not has_key and not non_interactive:
-            try:
-                key = click.prompt("Linear API key", default="", show_default=False)
-                if key:
-                    creds.add(credential_name, linear_api_key=key)
-            except (EOFError, click.Abort):
-                pass
-        elif has_key:
-            click.echo(f"Linear API key already configured for '{credential_name}'")
-
-    config = generate_dispatch_yaml(path, task_tracking=task_tracking)
-    config["credentials"] = credential_name
-    if project:
-        config["task_tracking"]["project"] = project
-
-    # Check if config is already tracked BEFORE writing
-    is_new_file = not config_path.exists() or subprocess.run(
-        ["git", "ls-files", "--error-unmatch", ".modastack/config.yaml"],
-        capture_output=True, cwd=path,
-    ).returncode != 0
-
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
-    click.echo(f"Generated: {config_path}")
-
-    # Open a PR to commit .modastack/config.yaml if it's new
-    if is_new_file:
-        _open_config_pr(path)
-
-    # Auto-register in global config (legacy) and repos.json (discovery)
-    global_config = GlobalConfig.load()
-    if path not in global_config.repos:
-        global_config.repos.append(path)
-        global_config.save()
-        click.echo("Registered.")
-    _register_repo_discovery(path)
-
-    # Bootstrap task tracker
-    if task_tracking == "linear":
-        resolved_key = linear_key
-        if not resolved_key:
-            from .config import Credentials
-            resolved_key = (Credentials.load().get(credential_name) or {}).get("linear_api_key")
-        resolved_project = project or config["task_tracking"]["project"]
-        if resolved_key and resolved_project:
-            click.echo("Bootstrapping Linear board...")
-            from .board_setup import bootstrap_board
-            for action in bootstrap_board(resolved_key, resolved_project):
-                click.echo(f"  {action}")
-    elif task_tracking == "github-issues":
-        click.echo("Bootstrapping GitHub Issues labels...")
-        from .github_issues import bootstrap_labels
-        for action in bootstrap_labels(path):
-            click.echo(f"  {action}")
-
-    # GitHub App: check installation and prompt if missing
-    if task_tracking == "github-issues":
-        _ensure_github_app(path, non_interactive)
-
-    # Event server: register deployment and subscribe to this repo
-    _ensure_event_server(path, global_config)
-
-    # Create .modastack/local.yaml with operator-specific config
-    from .config import LocalConfig
-    local = LocalConfig.load(path)
-    if linear_key and not local.credentials.get("linear_api_key"):
-        local.credentials["linear_api_key"] = linear_key
-    if global_config.event_server_deployment_id and not local.event_server_deployment_id:
-        local.event_server_url = global_config.event_server_url
-        local.event_server_deployment_id = global_config.event_server_deployment_id
-        local.event_server_api_key = global_config.event_server_api_key
-    if global_config.slack_bot_token and not local.slack_bot_token:
-        local.slack_bot_token = global_config.slack_bot_token
-    if global_config.slack_dm_channel and not local.slack_dm_channel:
-        local.slack_dm_channel = global_config.slack_dm_channel
-    local.save(path)
-    click.echo(f"Generated: {path / '.modastack' / 'local.yaml'}")
-
-    # Add local state to .gitignore
-    gitignore_path = path / ".gitignore"
-    gitignore_entries = ["worktrees/", ".modastack/local.yaml", ".modastack/state/"]
-    existing = gitignore_path.read_text() if gitignore_path.exists() else ""
-    added = []
-    for entry in gitignore_entries:
-        if entry not in existing:
-            added.append(entry)
-    if added:
-        with open(gitignore_path, "a") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            f.write("\n".join(added) + "\n")
-        click.echo(f"Added to .gitignore: {', '.join(added)}")
-
-    # Install hooks
-    hook_actions = install_hooks(path)
-    for action in hook_actions:
-        click.echo(f"  {action}")
-
-    # Verify /browse can launch Chromium; offer the sandbox fix if it can't.
-    _check_browser_sandbox(non_interactive)
-
-    click.echo(f"Ready — {path.name} is set up for modastack.")
-
-
-def _check_browser_sandbox(non_interactive: bool) -> None:
-    """Detect the Chromium sandbox block during setup and offer the fix.
-
-    Runs a quick headless Chromium launch. If it fails specifically because of
-    the AppArmor user-namespace restriction, explains the issue and (when
-    interactive) offers to apply the sysctl fix. Other failures are reported as
-    a hint without blocking setup, since /browse is optional tooling.
-    """
-    from . import browser as browser_mod
-
-    # The sandbox restriction is Linux-only; skip elsewhere.
-    if not browser_mod.is_linux():
-        return
-
-    click.echo("Checking Chromium sandbox for /browse...")
-    result = browser_mod.check_chromium_launch()
-    if result.ok:
-        click.echo("  Chromium launches — /browse is ready.")
-        return
-
-    if result.sandbox_error:
-        _offer_sandbox_fix(browser_mod, non_interactive)
-    else:
-        # Don't block setup on unrelated browser issues — just surface it.
-        click.echo(f"  /browse check skipped: {result.detail}")
-        if result.hint:
-            click.echo(f"    → {result.hint}")
-        click.echo("    Run `modastack doctor` for a full diagnosis.")
-
-
-def _open_config_pr(path: Path) -> None:
-    """Create a branch, commit .modastack.yaml, push, and open a PR."""
-    branch = "chore/add-modastack-config"
-
-    def _run(*cmd: str, **kwargs) -> subprocess.CompletedProcess:
-        return subprocess.run(cmd, capture_output=True, text=True, cwd=path, **kwargs)
-
-    # Determine default branch
-    result = _run("git", "rev-parse", "--abbrev-ref", "HEAD")
-    original_branch = result.stdout.strip() if result.returncode == 0 else "main"
-
-    # Create and switch to the new branch
-    result = _run("git", "checkout", "-b", branch)
-    if result.returncode != 0:
-        click.echo(f"  Could not create branch '{branch}': {result.stderr.strip()}")
-        return
-
-    # Stage and commit
-    _run("git", "add", ".modastack/config.yaml")
-    result = _run("git", "commit", "-m", "chore: add .modastack/config.yaml for modastack integration")
-    if result.returncode != 0:
-        click.echo(f"  Commit failed: {result.stderr.strip()}")
-        _run("git", "checkout", original_branch)
-        return
-
-    # Push
-    result = _run("git", "push", "-u", "origin", branch)
-    if result.returncode != 0:
-        click.echo(f"  Push failed: {result.stderr.strip()}")
-        _run("git", "checkout", original_branch)
-        return
-
-    # Open PR
-    result = _run(
-        "gh", "pr", "create",
-        "--title", "chore: add modastack config",
-        "--body", "Adds modastack configuration generated by `modastack setup`.\n\n"
-                  "This file configures task tracking and agent integration for this repository.",
-    )
-    if result.returncode == 0:
-        pr_url = result.stdout.strip()
-        click.echo(f"  PR opened: {pr_url}")
-    else:
-        click.echo(f"  PR creation failed: {result.stderr.strip()}")
-
-    # Switch back to original branch
-    _run("git", "checkout", original_branch)
-
-
-REPOS_JSON_PATH = GLOBAL_CONFIG_DIR / "repos.json"
-
-
-def _register_repo_discovery(path: Path) -> None:
-    """Append a repo to ~/.modastack/repos.json for discoverability."""
-    repos: list[str] = []
-    if REPOS_JSON_PATH.exists():
-        try:
-            repos = json.loads(REPOS_JSON_PATH.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    path_str = str(path.resolve())
-    if path_str not in repos:
-        repos.append(path_str)
-        REPOS_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
-        REPOS_JSON_PATH.write_text(json.dumps(repos, indent=2) + "\n")
-
-
-def _get_repo_full_name(path: Path) -> str:
-    """Get owner/repo from git remote."""
-    if not path.exists():
-        return ""
-    result = subprocess.run(
-        ["git", "remote", "get-url", "origin"],
-        capture_output=True, text=True, cwd=path,
-    )
-    if result.returncode != 0:
-        return ""
-    url = result.stdout.strip()
-    # Handle SSH (git@github.com:owner/repo.git) and HTTPS
-    if ":" in url and "@" in url:
-        path_part = url.split(":")[-1]
-    else:
-        path_part = "/".join(url.split("/")[-2:])
-    return path_part.removesuffix(".git")
-
-
-def _ensure_github_app(path: Path, non_interactive: bool) -> None:
-    """Check if the Modastack GitHub App is installed on this repo's org."""
-    repo_full = _get_repo_full_name(path)
-    if not repo_full:
-        click.echo("  Could not detect GitHub remote — skipping app check")
-        return
-
-    owner = repo_full.split("/")[0]
-    result = subprocess.run(
-        ["gh", "api", f"orgs/{owner}/installations", "--jq",
-         '[.installations[] | select(.app_slug == "modastack")] | length'],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0 and result.stdout.strip() not in ("", "0"):
-        click.echo(f"  GitHub App installed on {owner}")
-        return
-
-    click.echo(f"  GitHub App not installed on {owner}")
-    install_url = "https://github.com/apps/modastack/installations/new"
-    if not non_interactive:
-        click.echo(f"  Install at: {install_url}")
-        try:
-            if click.confirm("  Open in browser?", default=True):
-                subprocess.run(["open", install_url], capture_output=True)
-                click.pause("  Press Enter after installing...")
-        except (EOFError, click.Abort):
-            pass
-    else:
-        click.echo(f"  Install at: {install_url}")
-
-
-def _ensure_event_server(path: Path, global_config: GlobalConfig) -> None:
-    """Register a per-repo deployment with the event server.
-
-    Each repo gets its own Cloudflare deployment with subscriptions
-    scoped to that repo's GitHub, Linear, and Slack event sources.
-    Credentials are stored in .modastack/local.yaml.
-    """
-    import httpx
-    from .config import LocalConfig, RepoConfig
-
-    local = LocalConfig.load(path)
-
-    # Build subscription keys for this repo
-    subscriptions: list[str] = []
-    repo_full = _get_repo_full_name(path)
-    if repo_full:
-        subscriptions.append(repo_full)
-    try:
-        repo_config = RepoConfig.from_file(path)
-        if repo_config.task_tracking == "linear" and repo_config.project:
-            subscriptions.append(f"linear:{repo_config.project}")
-        if repo_config.slack_workspace_id:
-            subscriptions.append(f"slack:{repo_config.slack_workspace_id}")
-    except FileNotFoundError:
-        pass
-
-    if not subscriptions:
-        click.echo("  No event sources detected — skipping event server registration")
-        return
-
-    server_url = local.event_server_url or global_config.event_server_url or EVENT_SERVER_URL
-
-    if local.event_server_deployment_id and local.event_server_api_key:
-        # Existing per-repo deployment — update subscriptions
-        try:
-            resp = httpx.put(
-                f"{server_url}/deployments/{local.event_server_deployment_id}/subscriptions",
-                json={"add": subscriptions},
-                headers={"Authorization": f"Bearer {local.event_server_api_key}"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                click.echo(f"  Event server: subscribed to {', '.join(subscriptions)} ({len(data['subscriptions'])} total)")
-            else:
-                click.echo(f"  Event server: failed to add subscription ({resp.status_code})")
-        except Exception as e:
-            click.echo(f"  Event server: failed to add subscription ({e})")
-        return
-
-    # New per-repo deployment
-    click.echo(f"  Registering {path.name} with event server...")
-    import socket
-    hostname = socket.gethostname()
-    try:
-        resp = httpx.post(
-            f"{server_url}/deployments",
-            json={"name": f"{hostname}-{path.name}", "subscriptions": subscriptions},
-            timeout=10,
-        )
-        if resp.status_code == 201:
-            data = resp.json()
-            local.event_server_url = server_url
-            local.event_server_deployment_id = data["deployment_id"]
-            local.event_server_api_key = data["api_key"]
-            local.save(path)
-
-            # Also store in global config for backward compat
-            if not global_config.event_server_url:
-                global_config.event_server_url = server_url
-                global_config.event_server_deployment_id = data["deployment_id"]
-                global_config.event_server_api_key = data["api_key"]
-                global_config.save()
-
-            click.echo(f"  Event server: registered ({', '.join(subscriptions)})")
-        else:
-            click.echo(f"  Event server registration failed: {resp.status_code} {resp.text}")
-    except Exception as e:
-        click.echo(f"  Event server registration failed: {e}")
 
 
 @main.command()
@@ -1415,12 +956,11 @@ def workflow():
 
 @workflow.command("list")
 def workflow_list():
-    """List available workflow definitions from all sources.
+    """List available workflow definitions.
 
-    Scans three tiers in priority order (most specific wins):
+    Scans two tiers (most specific wins):
       1. Repo-local: <repo>/.modastack/workflows/
-      2. User: ~/.modastack/workflows/
-      3. Built-in: <modastack>/workflows/
+      2. Built-in: <modastack>/workflows/
 
     Usage:
         modastack workflow list
@@ -1549,6 +1089,37 @@ main.add_command(workflow)
 
 
 @main.group()
+def role():
+    """Agent roles — list available role prompts."""
+    pass
+
+
+@role.command("list")
+@click.option("--repo", default=None, help="Include repo-specific roles from this repo")
+def role_list(repo):
+    """List available agent roles.
+
+    Scans two tiers (repo overrides built-in):
+      1. Built-in: <modastack>/prompts/agents/
+      2. Repo-local: <repo>/.modastack/agents/
+
+    Usage:
+        modastack role list
+        modastack role list --repo jobtack
+    """
+    from .prompts.resolver import discover_roles, format_role_list
+
+    repo_path = None
+    if repo:
+        repo_path = Path(_resolve_repo(repo))
+    roles = discover_roles(repo_path)
+    click.echo(format_role_list(roles))
+
+
+main.add_command(role)
+
+
+@main.group()
 def monitor():
     """Background monitoring tasks — scheduled polling to fill webhook gaps."""
     pass
@@ -1647,11 +1218,13 @@ def monitor_add(name, interval, description, event, check, url, repo):
 
     if repo:
         repo_path = _resolve_monitor_repo(repo)
-        MonitorRegistry.add_repo(m, repo_path)
-        click.echo(f"Added monitor '{slug}' to {repo_path}/.modastack/monitors.yaml")
     else:
-        MonitorRegistry.add_global(m)
-        click.echo(f"Added global monitor '{slug}' to ~/.modastack/monitors.yaml")
+        repo_path = _detect_repo_root()
+        if not repo_path:
+            click.echo("Not inside a modastack repo. Use --repo or run from inside a repo.", err=True)
+            raise SystemExit(1)
+    MonitorRegistry.add_repo(m, repo_path)
+    click.echo(f"Added monitor '{slug}' to {repo_path}/.modastack/monitors.yaml")
     click.echo(f"  interval={interval} event={m.event} "
                f"check={check or 'manager-interpreted'}")
 
@@ -1706,11 +1279,91 @@ def monitor_remove(name, repo):
 main.add_command(monitor)
 
 
+# ---------------------------------------------------------------------------
+# event-server group
+# ---------------------------------------------------------------------------
+
+
+@main.group("event-server")
+def event_server_cmd():
+    """Manage the local event server daemon."""
+    pass
+
+
+@event_server_cmd.command("start")
+@click.option("--foreground", "-f", is_flag=True, help="Run in foreground")
+@click.option("--port", default=None, type=int, help="Override webhook port")
+def event_server_start(foreground, port):
+    """Start the local event server."""
+    config = GlobalConfig.load()
+    es_port = port or config.webhook_port
+
+    if foreground:
+        from modastack.manager.events.event_server import run_server
+        run_server(es_port, config.webhook_secret, config.slack_signing_secret)
+    else:
+        from modastack.manager.events.event_server import ensure_running
+        ensure_running(es_port, config.webhook_secret, config.slack_signing_secret)
+        click.echo(f"Event server running on port {es_port}")
+        click.echo(f"  GitHub:  http://localhost:{es_port}/webhooks/github")
+        click.echo(f"  Linear:  http://localhost:{es_port}/webhooks/linear")
+        click.echo(f"  Slack:   http://localhost:{es_port}/webhooks/slack")
+
+
+@event_server_cmd.command("stop")
+def event_server_stop():
+    """Stop the local event server."""
+    import signal
+    pid_file = GLOBAL_CONFIG_DIR / "event-server.pid"
+    if not pid_file.exists():
+        click.echo("Event server is not running")
+        return
+    pid = int(pid_file.read_text().strip())
+    try:
+        os.kill(pid, signal.SIGTERM)
+        click.echo(f"Event server stopped (pid {pid})")
+    except ProcessLookupError:
+        click.echo("Event server was not running (stale PID file)")
+    pid_file.unlink(missing_ok=True)
+
+
+@event_server_cmd.command("restart")
+@click.option("--port", default=None, type=int, help="Override webhook port")
+@click.pass_context
+def event_server_restart(ctx, port):
+    """Restart the local event server."""
+    ctx.invoke(event_server_stop)
+    import time as _time
+    _time.sleep(1)
+    ctx.invoke(event_server_start, foreground=False, port=port)
+
+
+@event_server_cmd.command("status")
+def event_server_status():
+    """Show event server status."""
+    import urllib.request
+    config = GlobalConfig.load()
+    es_port = config.webhook_port
+    try:
+        req = urllib.request.Request(f"http://localhost:{es_port}/health")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+        click.echo(f"Event server: running on port {es_port}")
+        click.echo(f"  Mode: {data.get('mode', 'unknown')}")
+        click.echo(f"  Deployments: {data.get('deployments', 0)}")
+    except Exception:
+        click.echo(f"Event server: not running (port {es_port})")
+
+
+main.add_command(event_server_cmd)
+
+
 @main.command()
 @click.version_option(version=__version__, prog_name="modastack agent")
 @click.option("--repo", default=None, help="Repo path or registered name")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
-@click.option("--task", default=None, help="Task description / context for the engineer")
+@click.option("--role", required=True, help="Agent role (see 'modastack role list')")
+@click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
 @click.option("--wait", is_flag=True, help="Block until the agent completes")
 @click.option("--post-event", "post_event", default=None,
@@ -1719,38 +1372,25 @@ main.add_command(monitor)
               help='JSON identity of requester, e.g. \'{"from":"Alice","channel":"C1"}\'')
 @click.option("--non-interactive", "non_interactive", is_flag=True,
               help="Run without manager — agent makes all decisions autonomously")
-def agent(repo, workflow, task, timeout, wait, post_event, requested_by, non_interactive):
-    """Launch an agent with a workflow.
+def agent(repo, workflow, role, task, timeout, wait, post_event, requested_by, non_interactive):
+    """Launch an agent with a workflow and role.
 
-    Every agent runs a workflow. Use 'adhoc' for open-ended tasks.
+    Every agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
+    Use 'modastack role list' to see available roles.
 
     Examples:
-        modastack agent -w issue-lifecycle --repo jobtack --task "Work on #42"
-        modastack agent -w adhoc --repo jobtack --task "Why is CI failing?"
-        modastack agent -w adhoc --non-interactive --repo jobtack --task "Fix the bug"
+        modastack agent -w issue-lifecycle --role engineer --repo jobtack --task "Work on #42"
+        modastack agent -w adhoc --role engineer --repo jobtack --task "Why is CI failing?"
+        modastack agent -w adhoc --role engineer --non-interactive --repo jobtack --task "Fix the bug"
     """
-    _dispatch_agent(repo=repo, task=task, workflow=workflow,
+    _dispatch_agent(repo=repo, task=task, workflow=workflow, role=role,
                     timeout=timeout, wait=wait, post_event=post_event,
                     requested_by=requested_by,
                     interactive=not non_interactive)
 
 
-@main.command(hidden=True)
-@click.option("--repo", default=None)
-@click.option("--task", required=True)
-@click.option("--timeout", default=3600, type=int)
-@click.option("--non-interactive", "--check", "non_interactive", is_flag=True)
-@click.option("--post-event", "post_event", default=None)
-@click.option("--requested-by", "requested_by", default=None)
-def spawn(repo, task, timeout, non_interactive, post_event, requested_by):
-    """Backwards-compatible alias — routes to adhoc workflow."""
-    _dispatch_agent(repo=repo, task=task, workflow="adhoc",
-                    timeout=timeout, wait=non_interactive, post_event=post_event,
-                    requested_by=requested_by)
-
-
-def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requested_by, interactive=True):
-    """Shared dispatch logic for the agent and spawn commands."""
+def _dispatch_agent(*, repo, task, workflow, role, timeout, wait, post_event, requested_by, interactive=True):
+    """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
         raise SystemExit(1)
@@ -1767,6 +1407,14 @@ def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requeste
     cwd = _resolve_repo(repo)
     if not cwd:
         return
+
+    # --- Validate role ---
+    from .prompts.resolver import validate_role, discover_roles
+    if not validate_role(role, Path(cwd)):
+        available = discover_roles(Path(cwd))
+        names = ", ".join(r["name"] for r in available) if available else "(none)"
+        click.echo(f"Unknown role '{role}'. Available: {names}", err=True)
+        raise SystemExit(1)
 
     requester: dict = {}
     if requested_by:
@@ -1786,6 +1434,7 @@ def _dispatch_agent(*, repo, task, workflow, timeout, wait, post_event, requeste
         task=task, cwd=cwd, workflow_name=workflow,
         timeout=timeout, requested_by=requester,
         interactive=interactive,
+        role=role,
     )
     click.echo(f"Agent started: {session_name}")
 
@@ -1861,8 +1510,9 @@ def _post_event(event_type: str, data: dict) -> bool:
 
     payload = json.dumps({"type": etype, "source": source, "data": data}).encode()
     try:
+        dashboard = _get_dashboard_url()
         req = urllib.request.Request(
-            "http://localhost:8095/api/event",
+            f"{dashboard}/api/event",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
@@ -1872,284 +1522,6 @@ def _post_event(event_type: str, data: dict) -> bool:
     except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError) as e:
         logging.getLogger(__name__).warning(f"Failed to post event {event_type}: {e}")
         return False
-
-
-@main.command("self-update")
-@click.option("--no-restart", is_flag=True, help="Skip automatic restart after update")
-def self_update(no_restart):
-    """Pull latest from origin/main, reinstall, and restart.
-
-    The restart happens via systemd (or a detached process) so the
-    update completes cleanly even when called from inside the manager.
-    """
-    log = logging.getLogger(__name__)
-
-    old_version = (REPO_ROOT / "VERSION").read_text().strip()
-    click.echo(f"Current version: {old_version}")
-
-    # Fetch latest
-    click.echo("Fetching origin/main...")
-    result = subprocess.run(
-        ["git", "fetch", "origin", "main", "--quiet"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Failed to fetch: {result.stderr.strip()}", err=True)
-        sys.exit(1)
-
-    # Check if there are new commits
-    local_head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    ).stdout.strip()
-    remote_head = subprocess.run(
-        ["git", "rev-parse", "origin/main"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    ).stdout.strip()
-
-    if local_head == remote_head:
-        click.echo("Already up to date.")
-        return
-
-    # Check for dirty working tree — reset to remote instead of stashing
-    dirty = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    ).stdout.strip()
-
-    if dirty:
-        click.echo("Working tree has uncommitted changes — resetting to origin/main...")
-        subprocess.run(
-            ["git", "stash", "push", "-m", "modastack-self-update-backup"],
-            cwd=REPO_ROOT, check=True,
-        )
-
-    # Save rollback state
-    import datetime
-    UPDATE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    UPDATE_STATE_PATH.write_text(json.dumps({
-        "pre_update_head": local_head,
-        "pre_update_version": old_version,
-        "updated_at": datetime.datetime.now().isoformat(),
-    }))
-
-    # Reset to remote HEAD (avoids merge conflicts from SCP'd files)
-    remote_version = subprocess.run(
-        ["git", "show", "origin/main:VERSION"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    ).stdout.strip() or old_version
-    commit_count = subprocess.run(
-        ["git", "rev-list", "--count", f"HEAD..origin/main"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    ).stdout.strip()
-    click.echo(f"Updating {old_version} → {remote_version} ({commit_count} commit(s))...")
-    result = subprocess.run(
-        ["git", "reset", "--hard", "origin/main"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Reset failed: {result.stderr.strip()}", err=True)
-        sys.exit(1)
-
-    # Reinstall
-    click.echo("Reinstalling...")
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"pip install failed: {result.stderr.strip()}", err=True)
-        click.echo("Run `modastack rollback` to restore.")
-        sys.exit(1)
-
-    # Verify the wrapper is a valid Python script (not a shell self-loop)
-    wrapper = Path(REPO_ROOT) / ".venv" / "bin" / "modastack"
-    if wrapper.exists():
-        first_line = wrapper.read_text().splitlines()[0]
-        if "python" not in first_line:
-            click.echo(f"WARNING: wrapper script looks corrupted ({first_line})", err=True)
-            click.echo("Reinstalling to fix...")
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-e", ".", "--force-reinstall", "--quiet"],
-                cwd=REPO_ROOT, capture_output=True, text=True,
-            )
-
-    new_version = (REPO_ROOT / "VERSION").read_text().strip()
-    click.echo(f"Updated to v{new_version} ({remote_head[:8]})")
-    log.info(f"Self-update complete: {old_version} → {new_version}")
-
-    if no_restart:
-        click.echo("Skipping restart (--no-restart). Run `modastack restart` manually.")
-        return
-
-    # Restart via systemd or detached process — never from inside our own process
-    if _has_systemd_service():
-        click.echo("Restarting via systemd...")
-        subprocess.Popen(
-            ["systemctl", "--user", "restart", "modastack"],
-            start_new_session=True,
-        )
-        click.echo("Restart queued. The manager will be back shortly.")
-    else:
-        click.echo("Restarting...")
-        subprocess.Popen(
-            [sys.executable, "-m", "modastack.cli", "restart"],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        click.echo("Restart queued.")
-
-
-@main.command()
-def rollback():
-    """Roll back the last self-update."""
-    if not UPDATE_STATE_PATH.exists():
-        click.echo("No update state found — nothing to roll back.")
-        sys.exit(1)
-
-    state = json.loads(UPDATE_STATE_PATH.read_text())
-    pre_head = state["pre_update_head"]
-    pre_version = state["pre_update_version"]
-
-    click.echo(f"Rolling back to v{pre_version} (commit {pre_head[:8]})...")
-
-    result = subprocess.run(
-        ["git", "reset", "--hard", pre_head],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Reset failed: {result.stderr.strip()}", err=True)
-        sys.exit(1)
-
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"pip install failed: {result.stderr.strip()}", err=True)
-        sys.exit(1)
-
-    UPDATE_STATE_PATH.unlink(missing_ok=True)
-    click.echo(f"Rolled back to v{pre_version}")
-
-
-@main.command("migrate-worktrees")
-def migrate_worktrees():
-    """Move existing worktrees from <repo>/worktrees/ into modastack/worktrees/<repo>/."""
-    config = GlobalConfig.load()
-    modastack_root = REPO_ROOT
-    moved = 0
-
-    for repo_path in config.repos:
-        old_wt_dir = repo_path / "worktrees"
-        if not old_wt_dir.exists():
-            continue
-
-        repo_name = repo_path.name
-        new_wt_dir = modastack_root / "worktrees" / repo_name
-        new_wt_dir.mkdir(parents=True, exist_ok=True)
-
-        for entry in old_wt_dir.iterdir():
-            if not entry.is_dir():
-                continue
-            dest = new_wt_dir / entry.name
-            if dest.exists():
-                click.echo(f"  skip {entry.name} (already exists at {dest})")
-                continue
-
-            # Remove old worktree via git and re-add at new location
-            branch_result = subprocess.run(
-                ["git", "worktree", "list", "--porcelain"],
-                capture_output=True, text=True, cwd=repo_path,
-            )
-            # Find the branch for this worktree
-            branch = None
-            lines = branch_result.stdout.splitlines()
-            for i, line in enumerate(lines):
-                if line.startswith("worktree ") and line.endswith(str(entry)):
-                    for j in range(i + 1, min(i + 5, len(lines))):
-                        if lines[j].startswith("branch "):
-                            branch = lines[j].split("refs/heads/", 1)[-1]
-                            break
-                    break
-
-            # Remove old worktree
-            subprocess.run(
-                ["git", "worktree", "remove", str(entry), "--force"],
-                capture_output=True, text=True, cwd=repo_path,
-            )
-
-            # Re-add at new location
-            if branch:
-                subprocess.run(
-                    ["git", "worktree", "add", str(dest), branch],
-                    capture_output=True, text=True, cwd=repo_path,
-                )
-                click.echo(f"  moved {entry.name} → {dest}")
-                moved += 1
-            else:
-                click.echo(f"  warn: could not determine branch for {entry.name}, removed only")
-
-        # Clean up empty old worktrees dir
-        if old_wt_dir.exists() and not any(old_wt_dir.iterdir()):
-            old_wt_dir.rmdir()
-
-    if moved == 0:
-        click.echo("No worktrees to migrate.")
-    else:
-        click.echo(f"Migrated {moved} worktree(s).")
-
-
-@main.command()
-@click.option("--path", default=None, type=click.Path(),
-              help="Install location (default: ~/.local/bin/modastack)")
-@click.option("--uninstall", is_flag=True, help="Remove the global wrapper")
-def install(path, uninstall):
-    """Install modastack as a global command (no venv activation needed).
-
-    Creates a small wrapper script that calls into the virtualenv's Python
-    directly, so `modastack` works from any shell without sourcing .venv.
-
-    Usage:
-        modastack install                          # install to ~/.local/bin
-        modastack install --path /usr/local/bin     # install to /usr/local/bin
-        modastack install --uninstall               # remove wrapper
-    """
-    if path:
-        target_dir = Path(path).expanduser().resolve()
-        target = target_dir / "modastack" if target_dir.is_dir() else target_dir
-    else:
-        target = Path.home() / ".local" / "bin" / "modastack"
-
-    if uninstall:
-        if target.exists():
-            target.unlink()
-            click.echo(f"Removed {target}")
-        else:
-            click.echo(f"No wrapper at {target}")
-        return
-
-    venv_bin = Path(sys.prefix) / "bin" / "modastack"
-    if not venv_bin.exists():
-        venv_bin = Path(sys.prefix) / "bin" / "python"
-    wrapper = f"#!/bin/sh\nexec {venv_bin} \"$@\"\n" if venv_bin.name == "modastack" else f"#!/bin/sh\nexec {venv_bin} -m modastack.cli \"$@\"\n"
-
-    if target.exists():
-        existing = target.read_text()
-        if existing == wrapper:
-            click.echo(f"Already installed: {target}")
-            return
-        click.echo(f"Updating: {target}")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(wrapper)
-    target.chmod(0o755)
-    click.echo(f"Installed: {target}")
-
-    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
-    if str(target.parent) not in path_dirs:
-        click.echo(f"\nAdd to your shell profile:")
-        click.echo(f'  export PATH="{target.parent}:$PATH"')
 
 
 if __name__ == "__main__":
