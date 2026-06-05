@@ -87,6 +87,9 @@ async def _route_event(event_data: dict) -> int:
         keys.append(f"linear:{event_data['team_key']}")
     if event_data.get("workspace"):
         keys.append(f"slack:{event_data['workspace']}")
+        channel = event_data.get("channel")
+        if channel:
+            keys.append(f"slack:{event_data['workspace']}:{channel}")
 
     deployment_ids: set[str] = set()
     async with _lock:
@@ -272,15 +275,17 @@ async def slack_webhook(request: Request):
         return JSONResponse({"ok": True})
 
     team_id = payload.get("team_id", "")
+    channel = event.get("channel", "")
     normalized = {
         "id": payload.get("event_id", str(uuid.uuid4())),
         "source": "slack",
         "type": slack_event_type,
         "workspace": team_id,
+        "channel": channel,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "payload": {
             "user_id": event.get("user", ""),
-            "channel": event.get("channel", ""),
+            "channel": channel,
             "channel_type": channel_type,
             "text": (event.get("text", "") or "")[:4000],
             "ts": event.get("ts", ""),

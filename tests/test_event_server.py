@@ -345,6 +345,52 @@ class TestSlackWebhook:
         assert len(dep.event_buffer) == 1
         assert dep.event_buffer[0]["type"] == "slack.thread_reply"
 
+    def test_slack_channel_scoped_routing(self, client):
+        """Channel-scoped subscriber gets events from its channel only."""
+        dep_a, _ = _register(client, name="repo-a", subscriptions=["slack:T12345:C_AAA"])
+        dep_b, _ = _register(client, name="repo-b", subscriptions=["slack:T12345:C_BBB"])
+
+        payload = {
+            "type": "event_callback",
+            "team_id": "T12345",
+            "event": {
+                "type": "app_mention",
+                "user": "U12345",
+                "channel": "C_AAA",
+                "channel_type": "channel",
+                "text": "<@U99> hello",
+                "ts": "123",
+            },
+        }
+        resp = client.post("/webhooks/slack", json=payload)
+        assert resp.status_code == 200
+
+        assert len(_deployments[dep_a].event_buffer) == 1
+        assert len(_deployments[dep_b].event_buffer) == 0
+
+    def test_slack_workspace_sub_still_gets_all(self, client):
+        """Workspace-scoped subscriber gets events from all channels (future org router)."""
+        dep_ws, _ = _register(client, name="org-router", subscriptions=["slack:T12345"])
+        dep_ch, _ = _register(client, name="repo-a", subscriptions=["slack:T12345:C_AAA"])
+
+        payload = {
+            "type": "event_callback",
+            "team_id": "T12345",
+            "event": {
+                "type": "app_mention",
+                "user": "U12345",
+                "channel": "C_BBB",
+                "channel_type": "channel",
+                "text": "<@U99> hello",
+                "ts": "123",
+            },
+        }
+        resp = client.post("/webhooks/slack", json=payload)
+        assert resp.status_code == 200
+
+        assert len(_deployments[dep_ws].event_buffer) == 1
+        assert len(_deployments[dep_ch].event_buffer) == 0
+
 
 # ---------------------------------------------------------------------------
 # Deployment management

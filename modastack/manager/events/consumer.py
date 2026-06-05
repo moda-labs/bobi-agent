@@ -161,8 +161,12 @@ def _build_subscriptions(repo_path: Path) -> list[str]:
         rc = RepoConfig.from_file(repo_path)
         if rc.github_repo:
             subs.append(rc.github_repo)
-        if rc.slack_workspace_id:
-            subs.append(f"slack:{rc.slack_workspace_id}")
+        if rc.slack_workspace_id and rc.slack_channel:
+            subs.append(f"slack:{rc.slack_workspace_id}:{rc.slack_channel}")
+        elif rc.slack_workspace_id:
+            log.warning("slack.workspace_id set but no slack.channel — "
+                        "Slack events will not be routed to this manager. "
+                        "Set slack.channel in .modastack/config.yaml.")
         if rc.project and rc.task_tracking == "linear":
             subs.append(f"linear:{rc.project}")
     except (FileNotFoundError, Exception) as e:

@@ -17,9 +17,9 @@ When an event arrives, match it to the right workflow:
 | PR merged | `pr-merged` |
 | A stalled engineer session | `stall-recovery` |
 | A question, investigation, or one-off task | `adhoc` |
-| Slack DM requesting work | pick the workflow that fits |
+| Slack message requesting work | pick the workflow that fits |
 | PR approved | If `auto_merge: true` in config, merge it (see below). Otherwise note it. |
-| Slack DM asking a question | Answer it directly |
+| Slack message asking a question | Answer it directly |
 | Consultation from engineer | Answer concisely and directly |
 | Informational event | Note it, no action needed |
 
@@ -50,7 +50,7 @@ a single quick command if one suffices, but delegate anything multi-step to a
 non-interactive spawn:
 
 ```bash
-modastack agents launch -w adhoc --role engineer --repo <repo> --wait \
+modastack agents launch -w adhoc --role engineer --wait \
   --task "Investigate <question>. Report a concise summary."
 ```
 
@@ -131,7 +131,7 @@ notification** — do not just note it or ask the human. Immediately spawn an
 engineer to resolve the conflict:
 
 ```bash
-modastack agents launch -w adhoc --role engineer --repo <repo> --task "Resolve merge conflicts on \
+modastack agents launch -w adhoc --role engineer --task "Resolve merge conflicts on \
 PR #<pr_number> (branch <branch>, <url>). Merge the base branch, resolve \
 conflicts, verify build/tests, and push. If you can't resolve it safely, \
 comment on the PR and exit non-zero so I can escalate."

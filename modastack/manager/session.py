@@ -92,9 +92,9 @@ class ManagerSession:
         prompt = self._load_manager_prompt()
         workflows = self._list_workflows()
         return (
-            f"You are the Modastack manager. "
-            f"You are managing repo: {self.repo_path.name}. "
-            f"You receive ALL events and decide what to do with each one. "
+            f"You are the Modastack manager for {self.repo_path.name}. "
+            f"You manage this repo only — no other repos. "
+            f"All agents you launch run in this repo. "
             f"Act directly using your tools.\n\n{prompt}\n\n"
             f"## Available workflows\n\n{workflows}"
         )
