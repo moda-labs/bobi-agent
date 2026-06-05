@@ -39,7 +39,7 @@ def projects_dir(tmp_path, monkeypatch):
     pdir.mkdir()
     db_path = tmp_path / "history.db"
     monkeypatch.setattr(history, "PROJECTS_DIR", pdir)
-    monkeypatch.setattr(history, "DB_PATH", db_path)
+    monkeypatch.setattr(history, "_db_path", lambda: db_path)
     return pdir
 
 
@@ -390,7 +390,7 @@ class TestIndex:
 
     def test_missing_projects_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(history, "PROJECTS_DIR", tmp_path / "nonexistent")
-        monkeypatch.setattr(history, "DB_PATH", tmp_path / "history.db")
+        monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "history.db")
         stats = index()
         assert stats["files_scanned"] == 0
 
@@ -416,7 +416,7 @@ class TestSearch:
                     for r in results)
 
     def test_returns_empty_when_no_db(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(history, "DB_PATH", tmp_path / "nonexistent.db")
+        monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "nonexistent.db")
         assert search("anything") == []
 
     def test_project_filter(self, projects_dir):
@@ -484,7 +484,7 @@ class TestConversations:
         assert len(filtered) == 1
 
     def test_returns_empty_when_no_db(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(history, "DB_PATH", tmp_path / "nonexistent.db")
+        monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "nonexistent.db")
         assert conversations() == []
 
     def test_limit(self, projects_dir):
@@ -518,7 +518,7 @@ class TestSessionMessages:
         assert msgs[1]["role"] == "assistant"
 
     def test_no_db_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(history, "DB_PATH", tmp_path / "nonexistent.db")
+        monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "nonexistent.db")
         assert session_messages("anything") == []
 
     def test_unknown_session(self, projects_dir):
@@ -563,7 +563,7 @@ class TestContextForEvents:
         assert context_for_events([]) == ""
 
     def test_no_db_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(history, "DB_PATH", tmp_path / "nonexistent.db")
+        monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "nonexistent.db")
         assert context_for_events([{"data": {"title": "test"}}]) == ""
 
     def test_extracts_issue_id(self, projects_dir):

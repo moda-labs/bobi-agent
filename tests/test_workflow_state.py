@@ -6,15 +6,15 @@ from unittest.mock import patch
 
 import pytest
 
-from modastack.workflow.state import WorkflowRun, NodeState, RUNS_DIR
+from modastack.workflow.state import WorkflowRun, NodeState
 
 
 @pytest.fixture
 def runs_dir(tmp_path, monkeypatch):
-    """Redirect RUNS_DIR to a temp directory for test isolation."""
+    """Redirect _runs_dir to a temp directory for test isolation."""
     d = tmp_path / "runs"
     d.mkdir()
-    monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", d)
+    monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: d)
     return d
 
 
@@ -195,8 +195,8 @@ class TestFindActive:
         assert WorkflowRun.find_active("test-wf", "42") is None
 
     def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR",
-                            tmp_path / "nonexistent")
+        monkeypatch.setattr("modastack.workflow.state._runs_dir",
+                            lambda: tmp_path / "nonexistent")
         assert WorkflowRun.find_active("wf", "42") is None
 
     def test_tolerates_corrupt_json(self, runs_dir):
@@ -239,8 +239,8 @@ class TestFindWaiting:
         assert WorkflowRun.find_waiting("approval") is None
 
     def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR",
-                            tmp_path / "nonexistent")
+        monkeypatch.setattr("modastack.workflow.state._runs_dir",
+                            lambda: tmp_path / "nonexistent")
         assert WorkflowRun.find_waiting("approval") is None
 
 
@@ -262,8 +262,8 @@ class TestFindCompleted:
         assert WorkflowRun.find_completed("test-wf", "42") is None
 
     def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR",
-                            tmp_path / "nonexistent")
+        monkeypatch.setattr("modastack.workflow.state._runs_dir",
+                            lambda: tmp_path / "nonexistent")
         assert WorkflowRun.find_completed("wf", "42") is None
 
 
@@ -290,8 +290,8 @@ class TestListRuns:
         assert WorkflowRun.list_runs() == []
 
     def test_returns_empty_when_dir_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR",
-                            tmp_path / "nonexistent")
+        monkeypatch.setattr("modastack.workflow.state._runs_dir",
+                            lambda: tmp_path / "nonexistent")
         assert WorkflowRun.list_runs() == []
 
     def test_tolerates_corrupt_files(self, runs_dir):

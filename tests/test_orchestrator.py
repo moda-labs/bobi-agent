@@ -449,6 +449,142 @@ class TestAwaitStep:
 
 
 # ---------------------------------------------------------------------------
+# QA phase in issue-lifecycle
+# ---------------------------------------------------------------------------
+
+class TestQAPhase:
+    """Tests for the QA phase added after the PR step."""
+
+    def test_issue_lifecycle_has_qa_step(self):
+        wf_path = Path(__file__).parent.parent / ".modastack" / "workflows" / "issue-lifecycle.yaml"
+        if not wf_path.exists():
+            pytest.skip("issue-lifecycle.yaml not in worktree")
+        wf = load_workflow(wf_path)
+
+        qa_step = wf.step_by_name("qa")
+        assert qa_step is not None, "qa step must exist"
+        assert qa_step.handoff.required == ["qa_status"]
+        assert "qa_findings" in qa_step.handoff.optional
+
+    def test_pickup_step_has_frontend_optional(self):
+        wf_path = Path(__file__).parent.parent / ".modastack" / "workflows" / "issue-lifecycle.yaml"
+        if not wf_path.exists():
+            pytest.skip("issue-lifecycle.yaml not in worktree")
+        wf = load_workflow(wf_path)
+
+        pickup = wf.step_by_name("pickup")
+        assert pickup is not None
+        assert "has_frontend" in pickup.handoff.optional
+
+    def test_qa_step_runs_after_pr(self):
+        wf_path = Path(__file__).parent.parent / ".modastack" / "workflows" / "issue-lifecycle.yaml"
+        if not wf_path.exists():
+            pytest.skip("issue-lifecycle.yaml not in worktree")
+        wf = load_workflow(wf_path)
+
+        pr_idx = wf.step_index("pr")
+        qa_idx = wf.step_index("qa")
+        assert qa_idx > pr_idx, "qa must come after pr"
+
+    def test_qa_workflow_with_frontend(self, tmp_path, monkeypatch):
+        """Full workflow: frontend project runs QA step."""
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        sessions = tmp_path / "_repo" / ".modastack" / "sessions"
+        sessions.mkdir(parents=True)
+
+        original_init = FakeClient.__init__
+
+        def _patched_init(self_client):
+            original_init(self_client)
+            d = sessions / "wf-t-r-1"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "handoff-pickup.yaml").write_text(
+                "complexity: medium\nneeds_spec: false\nhas_frontend: true\n"
+            )
+            (d / "handoff-implement.yaml").write_text("status: done\n")
+            (d / "handoff-pr.yaml").write_text("pr_url: https://github.com/test/pr/1\n")
+            (d / "handoff-qa.yaml").write_text("qa_status: pass\n")
+
+        monkeypatch.setattr(FakeClient, "__init__", _patched_init)
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="pickup", prompt="triage",
+                    handoff=HandoffContract(required=["complexity", "needs_spec"],
+                                            optional=["has_frontend"])),
+            StepDef(name="route", condition="needs_spec == true",
+                    goto="spec", else_goto="implement"),
+            StepDef(name="spec", prompt="write spec"),
+            StepDef(name="implement", prompt="build it",
+                    handoff=HandoffContract(required=["status"])),
+            StepDef(name="pr", prompt="open PR",
+                    handoff=HandoffContract(required=["pr_url"])),
+            StepDef(name="qa", prompt="run QA",
+                    handoff=HandoffContract(required=["qa_status"],
+                                            optional=["qa_findings"])),
+        ])
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+        assert result is True
+
+    def test_qa_step_skipped_by_agent_for_backend(self, tmp_path, monkeypatch):
+        """Backend project: QA step still runs but agent reports not_applicable."""
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        sessions = tmp_path / "_repo" / ".modastack" / "sessions"
+        sessions.mkdir(parents=True)
+
+        original_init = FakeClient.__init__
+
+        def _patched_init(self_client):
+            original_init(self_client)
+            d = sessions / "wf-t-r-1"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "handoff-pickup.yaml").write_text(
+                "complexity: small\nneeds_spec: false\nhas_frontend: false\n"
+            )
+            (d / "handoff-implement.yaml").write_text("status: done\n")
+            (d / "handoff-pr.yaml").write_text("pr_url: https://github.com/test/pr/2\n")
+            (d / "handoff-qa.yaml").write_text("qa_status: not_applicable\n")
+
+        monkeypatch.setattr(FakeClient, "__init__", _patched_init)
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="pickup", prompt="triage",
+                    handoff=HandoffContract(required=["complexity", "needs_spec"],
+                                            optional=["has_frontend"])),
+            StepDef(name="route", condition="needs_spec == true",
+                    goto="spec", else_goto="implement"),
+            StepDef(name="spec", prompt="write spec"),
+            StepDef(name="implement", prompt="build it",
+                    handoff=HandoffContract(required=["status"])),
+            StepDef(name="pr", prompt="open PR",
+                    handoff=HandoffContract(required=["pr_url"])),
+            StepDef(name="qa", prompt="run QA",
+                    handoff=HandoffContract(required=["qa_status"],
+                                            optional=["qa_findings"])),
+        ])
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+        assert result is True
+
+    def _mock_asyncio_run(self, workflow, **kwargs):
+        cwd = kwargs.get("cwd", "/tmp")
+        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("modastack.workflow.orchestrator.save_session_id"), \
+             patch("modastack.workflow.orchestrator.log_activity"), \
+             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+                 ClaudeSDKClient=lambda opts: FakeClient(),
+                 ClaudeAgentOptions=MagicMock,
+                 AssistantMessage=FakeAssistantMessage,
+                 ResultMessage=FakeResultMessage,
+                 TextBlock=FakeTextBlock,
+             )}):
+            mock_reg.return_value = MagicMock()
+            return run_workflow(workflow, **kwargs)
+
+
+# ---------------------------------------------------------------------------
 # try_resume_for_event
 # ---------------------------------------------------------------------------
 
@@ -546,6 +682,7 @@ class TestResumeWorkflowTimestamps:
 
         with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
              patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("modastack.workflow.orchestrator._setup_worktree", return_value="/tmp"), \
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \

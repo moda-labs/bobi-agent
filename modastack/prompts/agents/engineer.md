@@ -108,8 +108,11 @@ It follows the Iron Law: no fixes without root cause analysis.
 
 ### For web frontends: /qa
 
-If the project has a web frontend (check for index.html, App.tsx, etc.),
-invoke `/qa` to do browser-based QA testing after implementation.
+If the project has a web frontend, the QA Phase runs automatically after
+the PR is created. It tests the live preview deployment using `/qa` and
+`/browse`. Set `has_frontend: true` during pickup to enable this phase.
+If QA prerequisites are missing (auth wall, missing env vars, etc.),
+the QA phase will error loudly — never silently skip.
 
 ### For specs: triple review
 
@@ -411,9 +414,12 @@ Set up the workspace, understand the problem, and classify it.
    - Find files related to this ticket
    - Understand how similar features were implemented
 3. Classify complexity (see Task Classification above).
-4. Write the handoff with triage results including: `issue_id`, `title`,
-   `worktree`, `branch`, `phase: triage_complete`, `complexity`, `needs_spec`.
-   Include codebase understanding, relevant files, risks, and next steps.
+4. Detect whether the project has a web frontend (`has_frontend: true/false`).
+   Look for `index.html`, `App.tsx`, `App.vue`, `pages/`, `app/`, or similar.
+5. Write the handoff with triage results including: `issue_id`, `title`,
+   `worktree`, `branch`, `phase: triage_complete`, `complexity`, `needs_spec`,
+   `has_frontend`. Include codebase understanding, relevant files, risks,
+   and next steps.
 
 **Rules**: Do NOT implement anything. Triage and setup only. Do NOT create a PR.
 
@@ -462,6 +468,43 @@ Create or update the PR, then move the ticket to In Review.
 4. Update handoff: `phase: pr_ready`, `pr_url: <PR URL>`. Then **STOP**.
 
 **Rules**: Always target `main`. NEVER merge PRs. NEVER run `/land-and-deploy`.
+
+### QA Phase
+
+Test the live preview deployment for frontend features.
+
+1. Check if this project has a web frontend. Look for `index.html`,
+   `App.tsx`, `App.vue`, `pages/`, `app/`, or similar web entry points.
+   If no frontend exists, set `qa_status: not_applicable` and skip.
+
+2. Verify QA prerequisites before testing:
+   - Preview URL is accessible (check the PR for a Vercel/Netlify preview link)
+   - No auth wall blocking automated access (deployment protection, login page)
+   - Required environment variables are configured for the preview
+   - The `/browse` skill can launch and take a screenshot of the preview
+
+3. If any prerequisite fails, **error loudly**:
+   - Set `qa_status: blocked`
+   - Set `qa_findings` to a clear description of what's missing and how to fix it
+   - Comment on the PR explaining the QA blocker
+   - Do NOT silently skip QA or work around the issue
+
+4. If prerequisites pass, run QA:
+   - Invoke `/qa` on the preview URL
+   - Test the golden path for the feature being shipped
+   - Check for regressions in related features
+   - Take screenshots of any issues found
+
+5. Report results:
+   - `qa_status: pass` — all tests passed, no blocking issues
+   - `qa_status: fail` — blocking issues found, request changes on the PR
+   - `qa_status: blocked` — prerequisites missing, can't run QA
+   - `qa_status: not_applicable` — no frontend to test
+   - `qa_findings` — summary of issues found (if any)
+   - Comment findings on the PR with screenshots
+
+**Rules**: Never skip QA silently. If you can't test, say why. If you find
+issues, request changes on the PR.
 
 ### Feedback Phase
 
