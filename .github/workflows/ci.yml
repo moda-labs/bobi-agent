@@ -50,7 +50,7 @@ jobs:
 
   integration-claude:
     name: Integration tests (Claude)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
@@ -58,29 +58,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install Claude CLI
-        run: |
-          curl -fsSL https://claude.ai/install.sh | sh
-          echo "$HOME/.claude/bin" >> $GITHUB_PATH
-
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -e ".[dev]"
 
       - name: Agent launch
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: pytest tests/integration/test_agent_launch.py --timeout=180 -v
+        run: .venv/bin/pytest tests/integration/test_agent_launch.py --timeout=180 -v
 
       - name: Manager lifecycle
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: pytest tests/integration/test_manager_lifecycle.py --timeout=180 -v
+        run: .venv/bin/pytest tests/integration/test_manager_lifecycle.py --timeout=180 -v
 
       - name: End-to-end event flow
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: pytest tests/integration/test_e2e_event_flow.py --timeout=180 -v
+        run: .venv/bin/pytest tests/integration/test_e2e_event_flow.py --timeout=180 -v
