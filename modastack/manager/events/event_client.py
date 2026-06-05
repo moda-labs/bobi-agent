@@ -127,6 +127,27 @@ def _format_requester(requester: dict) -> str:
     return " ".join(parts)
 
 
+def _should_filter(event: dict) -> bool:
+    """Drop events that don't match the repo's project filter (if configured)."""
+    if event.get("source") != "linear":
+        return False
+    from modastack.sdk import get_repo_root
+    root = get_repo_root()
+    if not root:
+        return False
+    try:
+        from modastack.config import RepoConfig
+        rc = RepoConfig.from_file(root)
+        if rc.linear_project:
+            event_project = event.get("data", {}).get("project", "")
+            if event_project and event_project != rc.linear_project:
+                log.debug(f"Filtered Linear event: project={event_project}, want={rc.linear_project}")
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _normalize_event(event_data: dict) -> dict | None:
     """Convert a central server event into the local format."""
     payload = event_data.get("payload", {})
@@ -277,9 +298,9 @@ def _normalize_github(event_type: str, payload: dict) -> dict | None:
 
 def _normalize_linear(event_type: str, payload: dict) -> dict | None:
     data = payload.get("data", {})
-    # Best-effort human attribution: the assignee, falling back to the creator.
     actor = (data.get("assignee") or {}) or (data.get("creator") or {})
-    return {
+    project = data.get("project") or {}
+    normalized = {
         "type": event_type, "source": "linear",
         "data": {
             "issue_id": data.get("identifier", ""),
@@ -290,6 +311,9 @@ def _normalize_linear(event_type: str, payload: dict) -> dict | None:
             "from": actor.get("name", "") or actor.get("displayName", ""),
         },
     }
+    if project.get("name"):
+        normalized["data"]["project"] = project["name"]
+    return normalized
 
 
 def _normalize_slack(event_type: str, payload: dict, workspace: str) -> dict | None:
@@ -398,7 +422,7 @@ class EventServerClient:
                 seq = data.get("seq", 0)
 
                 normalized = _normalize_event(data)
-                if normalized:
+                if normalized and not _should_filter(normalized):
                     _log_event(normalized)
                     event_queue.put(normalized)
                     log.info(f"Event queued: {normalized['source']}/{normalized['type']}")

@@ -145,12 +145,13 @@ def run_workflow(
     # Session dir is created by the registry on register
 
     session_name = make_session_name(workflow.name, repo, issue_id)
-    worktree_cwd = _setup_worktree(cwd, session_name)
+    needs_worktree = any(s.worktree for s in workflow.steps)
+    work_cwd = _setup_worktree(cwd, session_name) if needs_worktree else cwd
     registry = get_registry()
     registry.register(SessionEntry(
         name=session_name, session_id="", role=role,
         issue_id=issue_id, title=task[:80], phase=workflow.name,
-        repo=repo, cwd=worktree_cwd, status="running", pid=os.getpid(),
+        repo=repo, cwd=work_cwd, status="running", pid=os.getpid(),
         requested_by=requested_by,
     ))
 
@@ -165,11 +166,12 @@ def run_workflow(
     ctx = VariableContext()
     ctx.set_scope("input", {"task": task, "repo": repo, "issue_id": issue_id})
 
-    ctx.set_scope("worktree", {"path": worktree_cwd})
+    if needs_worktree:
+        ctx.set_scope("worktree", {"path": work_cwd})
 
     success = asyncio.run(
         _run_workflow_async(
-            workflow, task, repo, worktree_cwd, issue_id, session_name,
+            workflow, task, repo, work_cwd, issue_id, session_name,
             registry, ctx, requested_by, timeout, interactive, role=role,
         )
     )
@@ -296,10 +298,10 @@ async def _run_workflow_async(
     )
 
     saved_id = load_session_id(session_name)
+    uses_worktree = any(s.worktree for s in workflow.steps)
 
     from modastack.prompts.resolver import resolve_agent_prompt
 
-    # Resolve the repo root for agent prompt loading (cwd may be a worktree)
     repo_root = _find_repo_root(cwd)
 
     def _make_options(resume_id=None, agent_name=""):
@@ -321,9 +323,11 @@ async def _run_workflow_async(
                 "preset": "claude_code",
                 "append": (
                     f"You are an agent working on issue #{issue_id}. "
-                    f"Your working directory is an isolated git worktree at {cwd}. "
-                    f"All changes go here — never modify the main repo checkout. "
-                    f"You will receive step-by-step instructions. Follow each one, "
+                    + (f"Your working directory is an isolated git worktree at {cwd}. "
+                       f"All changes go here — never modify the main repo checkout. "
+                       if uses_worktree else
+                       f"Your working directory is {cwd}. ")
+                    + f"You will receive step-by-step instructions. Follow each one, "
                     f"then write your handoff file when asked.\n\n"
                     + agent_prompt
                 ),

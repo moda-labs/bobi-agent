@@ -28,6 +28,7 @@ class StepDef:
     agent: str = ""
     handoff: HandoffContract = field(default_factory=HandoffContract)
     timeout: int = 1800
+    worktree: bool = False
 
     # Route step fields
     condition: str = ""
@@ -76,6 +77,7 @@ def load_workflow(path: Path) -> Workflow:
             agent=s.get("agent", ""),
             handoff=handoff,
             timeout=s.get("timeout", 1800),
+            worktree=s.get("worktree", False),
             condition=s.get("if", ""),
             goto=s.get("goto", ""),
             else_goto=s.get("else", ""),

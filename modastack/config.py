@@ -172,20 +172,22 @@ def _resolve_repo_config_path(repo_path: Path) -> Path:
 
 @dataclass
 class RepoConfig:
-    """Per-repo config from .modastack/config.yaml (or legacy .modastack.yaml)."""
+    """Per-repo config from .modastack/config.yaml."""
 
     path: Path
-    task_tracking: str = "github-issues"  # "github-issues" or "linear"
-    project: str = ""  # project prefix (e.g., BET, TESS) — used for both GitHub labels and Linear teams
-    trigger_labels: list[str] = field(default_factory=lambda: ["agent"])
-    skip_labels: list[str] = field(default_factory=lambda: ["blocked", "human-only"])
+    task_tracking: str = "github-issues"
     max_parallel: int = 2
     test_command: str = ""
-    review_required: bool = True
-    auto_merge: bool = False
-    credentials: str = "default"
     context: dict = field(default_factory=dict)
+
+    # github:
     github_repo: str = ""
+
+    # linear:
+    linear_team: str = ""
+    linear_project: str = ""
+
+    # slack:
     slack_workspace_id: str = ""
     slack_channel: str = ""
 
@@ -194,50 +196,22 @@ class RepoConfig:
         config_path = _resolve_repo_config_path(repo_path)
 
         raw = yaml.safe_load(config_path.read_text()) or {}
-        task_tracking_config = raw.get("task_tracking", {})
+        github = raw.get("github", {})
+        linear = raw.get("linear", {})
+        slack = raw.get("slack", {})
         agent = raw.get("agent", {})
         verify = raw.get("verify", {})
 
-        # Backwards compat: old configs use "linear:" section
-        if "linear" in raw and "task_tracking" not in raw:
-            linear = raw["linear"]
-            return cls(
-                path=repo_path,
-                task_tracking="linear",
-                project=linear.get("project", ""),
-                trigger_labels=linear.get("trigger_labels", ["agent"]),
-                skip_labels=linear.get("skip_labels", ["blocked", "human-only"]),
-                max_parallel=agent.get("max_parallel", 2),
-                test_command=verify.get("test_command", ""),
-                review_required=verify.get("review_required", True),
-                auto_merge=verify.get("auto_merge", False),
-                credentials=raw.get("credentials", "default"),
-                context=raw.get("context", {}),
-            )
-
-        slack = raw.get("slack", {})
         return cls(
             path=repo_path,
-            task_tracking=task_tracking_config.get("system", "github-issues"),
-            project=task_tracking_config.get("project", ""),
-            trigger_labels=task_tracking_config.get("trigger_labels", ["agent"]),
-            skip_labels=task_tracking_config.get("skip_labels", ["blocked", "human-only"]),
+            task_tracking=raw.get("task_tracking", {}).get("system", "github-issues"),
             max_parallel=agent.get("max_parallel", 2),
             test_command=verify.get("test_command", ""),
-            review_required=verify.get("review_required", True),
-            auto_merge=verify.get("auto_merge", False),
-            credentials=raw.get("credentials", "default"),
             context=raw.get("context", {}),
-            github_repo=raw.get("github", {}).get("repo", ""),
+            github_repo=github.get("repo", ""),
+            linear_team=linear.get("team", ""),
+            linear_project=linear.get("project", ""),
             slack_workspace_id=slack.get("workspace_id", ""),
             slack_channel=slack.get("channel", ""),
         )
 
-    def get_credentials(self) -> dict[str, str]:
-        creds = Credentials.load()
-        return creds.get(self.credentials)
-
-    @property
-    def linear_project(self) -> str:
-        """Backwards compat for code that still references linear_project."""
-        return self.project if self.task_tracking == "linear" else ""

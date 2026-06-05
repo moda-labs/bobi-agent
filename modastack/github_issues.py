@@ -118,7 +118,7 @@ def scan_github_issues(repo_config: RepoConfig) -> dict[str, list[dict]]:
         return {}
 
     issues = json.loads(result.stdout)
-    skip_labels = set(repo_config.skip_labels)
+    skip_labels = {"blocked", "human-only"}
     label_to_state = {
         "status:todo": "Todo",
         "status:in-progress": "In Progress",
@@ -139,7 +139,9 @@ def scan_github_issues(repo_config: RepoConfig) -> dict[str, list[dict]]:
                 state = state_name
                 break
 
-        project = repo_config.project or repo_config.path.name.upper()[:6]
+        repo_short = (repo_config.github_repo.split("/")[-1] if repo_config.github_repo
+                      else repo_config.path.name).upper()[:6]
+        project = repo_short
         identifier = f"{project}-{issue['number']}"
 
         normalized = {

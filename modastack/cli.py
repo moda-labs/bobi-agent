@@ -28,7 +28,8 @@ def _print_startup_info(repo_path: Path, pid: int, log_file: Path):
 
     try:
         rc = RepoConfig.from_file(repo_path)
-        lines.append(f"  tracker     {rc.task_tracking}" + (f" ({rc.project})" if rc.project else ""))
+        tracker_detail = rc.linear_team if rc.linear_team else ""
+        lines.append(f"  tracker     {rc.task_tracking}" + (f" ({tracker_detail})" if tracker_detail else ""))
         if rc.github_repo:
             lines.append(f"  github      {rc.github_repo}")
         if rc.slack_channel:
@@ -42,7 +43,9 @@ def _print_startup_info(repo_path: Path, pid: int, log_file: Path):
         local = LocalConfig.load(repo_path)
         if local.event_server_url:
             label = "remote" if not local.event_server_url.startswith("http://localhost") else "local"
-            lines.append(f"  events      {local.event_server_url} ({label})")
+            lines.append(f"  event server  {local.event_server_url} ({label})")
+        else:
+            lines.append(f"  event server  not configured")
         if local.operator_name:
             lines.append(f"  operator    {local.operator_name}")
         dashboard_port = local.dashboard_port or 8095
@@ -248,7 +251,8 @@ def _ensure_config(non_interactive: bool) -> None:
                 if dm_channel:
                     local.slack_dm_channel = dm_channel
         except (EOFError, click.Abort):
-            pass
+            click.echo("\nSetup cancelled.")
+            raise SystemExit(1)
         click.echo()
 
     local.save(repo_path)
@@ -679,7 +683,11 @@ def status():
         except (ValueError, ProcessLookupError, PermissionError):
             pass
 
-    mgr_name = f"moda-mgr-{repo_path.name}" if repo_path else "moda-manager"
+    if not repo_path:
+        click.echo("Not in a modastack-configured repo. Run `modastack start` to set one up.")
+        raise SystemExit(1)
+
+    mgr_name = f"moda-mgr-{repo_path.name}"
     session_id = load_session_id(mgr_name) or ""
     session_short = session_id[:8] if session_id else ""
 

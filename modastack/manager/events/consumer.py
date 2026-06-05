@@ -133,14 +133,12 @@ def _build_subscriptions(repo_path: Path) -> list[str]:
             log.warning("slack.workspace_id set but no slack.channel — "
                         "Slack events will not be routed to this manager. "
                         "Set slack.channel in .modastack/config.yaml.")
-        if rc.project and rc.task_tracking == "linear":
-            subs.append(f"linear:{rc.project}")
+        if rc.linear_team and rc.task_tracking == "linear":
+            subs.append(f"linear:{rc.linear_team}")
     except (FileNotFoundError, Exception) as e:
         log.warning(f"Could not read repo config for subscriptions: {e}")
     if not subs:
-        from modastack.subagent import _git_remote_name
-        remote = _git_remote_name(repo_path)
-        subs.append(remote if remote else repo_path.name)
+        subs.append(repo_path.name)
     return subs
 
 

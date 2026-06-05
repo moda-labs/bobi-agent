@@ -94,34 +94,15 @@ class TestParseIssueNumber:
 
 
 class TestResolveRepoName:
-    def test_explicit_repo_field_new_path(self, tmp_path):
+    def test_uses_github_repo_from_config(self, tmp_path):
         (tmp_path / ".modastack").mkdir()
-        (tmp_path / ".modastack" / "config.yaml").write_text("repo: moda-labs/jobtack\n")
-        assert _resolve_repo_name(str(tmp_path)) == "moda-labs/jobtack"
-
-    def test_explicit_repo_field_legacy(self, tmp_path):
-        (tmp_path / ".modastack.yaml").write_text("repo: moda-labs/jobtack\n")
-        assert _resolve_repo_name(str(tmp_path)) == "moda-labs/jobtack"
-
-    def test_new_path_preferred_over_legacy(self, tmp_path):
-        (tmp_path / ".modastack").mkdir()
-        (tmp_path / ".modastack" / "config.yaml").write_text("repo: owner/new\n")
-        (tmp_path / ".modastack.yaml").write_text("repo: owner/legacy\n")
-        assert _resolve_repo_name(str(tmp_path)) == "owner/new"
-
-    def test_git_remote_ssh(self, tmp_path):
-        with patch("modastack.subagent._git_remote_name", return_value="moda-labs/jobtack"):
-            assert _resolve_repo_name(str(tmp_path)) == "moda-labs/jobtack"
+        (tmp_path / ".modastack" / "config.yaml").write_text(
+            "task_tracking:\n  system: github-issues\ngithub:\n  repo: moda-labs/jobtack\n"
+        )
+        assert _resolve_repo_name(str(tmp_path)) == "jobtack"
 
     def test_falls_back_to_dirname(self, tmp_path):
-        with patch("modastack.subagent._git_remote_name", return_value=""):
-            assert _resolve_repo_name(str(tmp_path)) == tmp_path.name
-
-    def test_explicit_field_wins_over_remote(self, tmp_path):
-        (tmp_path / ".modastack").mkdir()
-        (tmp_path / ".modastack" / "config.yaml").write_text("repo: owner/explicit\n")
-        with patch("modastack.subagent._git_remote_name", return_value="owner/remote"):
-            assert _resolve_repo_name(str(tmp_path)) == "owner/explicit"
+        assert _resolve_repo_name(str(tmp_path)) == tmp_path.name
 
 
 class TestAgentLifecycle:

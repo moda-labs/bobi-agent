@@ -423,55 +423,19 @@ def _parse_issue_number(task: str) -> str | None:
     return None
 
 
-def _git_remote_name(path: Path) -> str:
-    """Return owner/repo from the origin git remote, or "" if unavailable."""
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, cwd=str(path),
-        )
-    except Exception:
-        return ""
-    if result.returncode != 0:
-        return ""
-    url = result.stdout.strip()
-    if not url:
-        return ""
-    # Handle SSH (git@github.com:owner/repo.git) and HTTPS URLs.
-    if ":" in url and "@" in url:
-        path_part = url.split(":")[-1]
-    else:
-        path_part = "/".join(url.split("/")[-2:])
-    return path_part.removesuffix(".git")
-
-
 def _resolve_repo_name(cwd: str) -> str:
-    """Resolve a human GitHub-style repo name (owner/repo) for a working dir.
+    """Resolve a repo name for session naming.
 
-    Prefers an explicit ``repo:`` field in .modastack.yaml, then the origin git
-    remote, and finally falls back to the directory basename so the value is
-    never empty.
+    Uses github.repo from config if available, otherwise the directory name.
     """
     path = Path(cwd)
-    for config_path in [
-        path / ".modastack" / "config.yaml",
-        path / ".modastack.yaml",
-    ]:
-        if config_path.exists():
-            try:
-                import yaml
-                raw = yaml.safe_load(config_path.read_text()) or {}
-                repo = raw.get("repo")
-                if repo:
-                    return str(repo)
-            except Exception:
-                pass
-            break
-    remote = _git_remote_name(path)
-    if remote:
-        return remote
+    try:
+        from modastack.config import RepoConfig
+        rc = RepoConfig.from_file(path)
+        if rc.github_repo:
+            return rc.github_repo.split("/")[-1]
+    except Exception:
+        pass
     return path.name or cwd
 
 

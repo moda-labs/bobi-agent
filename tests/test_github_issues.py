@@ -8,13 +8,11 @@ from modastack.github_issues import scan_github_issues, bootstrap_labels, WORKFL
 from modastack.config import RepoConfig
 
 
-def _make_repo_config(path, trigger_labels=None, skip_labels=None, project="TEST"):
+def _make_repo_config(path, github_repo="test-org/test-repo"):
     return RepoConfig(
         path=path,
         task_tracking="github-issues",
-        project=project,
-        trigger_labels=trigger_labels or ["agent"],
-        skip_labels=skip_labels or ["blocked", "human-only"],
+        github_repo=github_repo,
     )
 
 
@@ -48,8 +46,8 @@ class TestScanGithubIssues:
         assert "Todo" in result
         assert "In Progress" in result
         assert len(result["Todo"]) == 1
-        assert result["Todo"][0]["identifier"] == "TEST-1"
-        assert result["In Progress"][0]["identifier"] == "TEST-2"
+        assert result["Todo"][0]["identifier"] == "TEST-R-1"
+        assert result["In Progress"][0]["identifier"] == "TEST-R-2"
 
     @patch("modastack.github_issues.subprocess.run")
     def test_passes_assignee_me_to_gh(self, mock_run):
@@ -64,7 +62,7 @@ class TestScanGithubIssues:
 
     @patch("modastack.github_issues.subprocess.run")
     def test_filters_skip_labels(self, mock_run):
-        rc = _make_repo_config(Path("/repo"), skip_labels=["blocked"])
+        rc = _make_repo_config(Path("/repo"))
 
         issues = [
             {
@@ -135,7 +133,7 @@ class TestScanGithubIssues:
 
     @patch("modastack.github_issues.subprocess.run")
     def test_uses_path_name_when_no_project(self, mock_run):
-        rc = _make_repo_config(Path("/my-repo"), project="")
+        rc = _make_repo_config(Path("/my-repo"), github_repo="")
 
         issues = [
             {
