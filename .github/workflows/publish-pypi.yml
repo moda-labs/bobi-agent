@@ -28,6 +28,99 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
+  dogfood:
+    name: Dogfood smoke test
+    needs: publish
+    runs-on: self-hosted
+    steps:
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for PyPI availability
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          for i in $(seq 1 30); do
+            if pip index versions modastack 2>/dev/null | grep -q "$VERSION"; then
+              echo "modastack $VERSION available on PyPI"
+              exit 0
+            fi
+            echo "Waiting for PyPI to serve $VERSION... ($i/30)"
+            sleep 10
+          done
+          echo "Timed out waiting for PyPI"
+          exit 1
+
+      - name: Install release from PyPI
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          python3 -m venv /tmp/dogfood-venv
+          /tmp/dogfood-venv/bin/pip install "modastack==$VERSION"
+          /tmp/dogfood-venv/bin/modastack --version
+
+      - name: Clone or update dogfood repo
+        run: |
+          if [ -d ~/dev/modastack-dogfood ]; then
+            cd ~/dev/modastack-dogfood && git pull --ff-only
+          else
+            mkdir -p ~/dev
+            git clone https://github.com/moda-labs/modastack-dogfood ~/dev/modastack-dogfood
+          fi
+
+      - name: Run dogfood smoke tests
+        run: |
+          export PATH="/tmp/dogfood-venv/bin:$HOME/.claude/bin:$PATH"
+          cd ~/dev/modastack-dogfood
+
+          echo "=== Version ==="
+          modastack --version
+
+          echo "=== Config loading ==="
+          python3 -c "
+          from pathlib import Path
+          from modastack.config import RepoConfig
+          rc = RepoConfig.from_file(Path.cwd())
+          assert rc.task_tracking == 'github-issues', f'unexpected: {rc.task_tracking}'
+          assert rc.project == 'PLAYBOOK', f'unexpected: {rc.project}'
+          print('RepoConfig OK')
+          "
+
+          echo "=== Workflow list ==="
+          modastack workflows list 2>&1 | tee /dev/stderr | grep -q "content-lifecycle"
+
+          echo "=== Role list ==="
+          modastack roles list 2>&1
+
+          echo "=== Doctor ==="
+          modastack doctor 2>&1 || true
+
+          echo "=== Event server ==="
+          modastack event-server start
+          sleep 2
+          curl -sf http://localhost:8080/health | python3 -c "
+          import json,sys; d=json.load(sys.stdin)
+          assert d['status']=='ok', f'health failed: {d}'
+          print('Event server OK')
+          "
+          modastack event-server stop
+
+          echo "=== Start/stop lifecycle ==="
+          modastack start
+          sleep 3
+          test -f .modastack/state/manager.pid && echo "PID file OK"
+          modastack status
+          modastack stop
+          test ! -f .modastack/state/manager.pid && echo "PID cleanup OK"
+
+          echo "=== All dogfood smoke tests passed ==="
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd ~/dev/modastack-dogfood 2>/dev/null && modastack stop 2>/dev/null || true
+          cd ~/dev/modastack-dogfood 2>/dev/null && modastack event-server stop 2>/dev/null || true
+          rm -rf /tmp/dogfood-venv
+
   update-homebrew:
     needs: publish
     runs-on: ubuntu-latest
