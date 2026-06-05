@@ -32,6 +32,7 @@ jobs:
     name: Dogfood end-to-end
     needs: publish
     runs-on: self-hosted
+    timeout-minutes: 15
     env:
       DOGFOOD_REPO: moda-labs/modastack-dogfood
       DOGFOOD_DIR: /home/ubuntu/dev/modastack-dogfood
@@ -70,16 +71,11 @@ jobs:
             git clone "https://github.com/$DOGFOOD_REPO" "$DOGFOOD_DIR"
           fi
 
-      - name: Stop any running instance
-        run: |
-          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
-          cd "$DOGFOOD_DIR"
-          modastack stop 2>/dev/null || true
-
       - name: Start modastack
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
           cd "$DOGFOOD_DIR"
+          modastack stop 2>/dev/null || true
           modastack start
 
           LOG=".modastack/state/manager.log"
@@ -91,22 +87,24 @@ jobs:
           test -f .modastack/state/manager.pid
           echo "Modastack ready"
 
-      - name: File issue and trigger smoke-test workflow
-        id: smoke
+      - name: Create issue and assign to modastack
+        id: issue
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
           cd "$DOGFOOD_DIR"
+          VERSION="${{ steps.version.outputs.version }}"
 
           ISSUE_URL=$(gh issue create \
             --repo "$DOGFOOD_REPO" \
-            --title "[CI] Release smoke test v${{ steps.version.outputs.version }}" \
-            --body "Automated smoke test for release v${{ steps.version.outputs.version }}." \
-            --label "smoke-test,agent")
+            --title "[CI] Release smoke test v${VERSION}" \
+            --body "Automated smoke test for modastack v${VERSION}. Write a one-line file, commit, and close this issue." \
+            --label "smoke-test,agent" \
+            --assignee "modastack")
           ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
           echo "issue_num=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
           echo "Created issue #$ISSUE_NUM"
 
-          # Simulate the GitHub webhook so the manager sees it now
+          # Post webhook so the manager picks it up immediately
           curl -sf -X POST "http://localhost:8080/webhooks/github" \
             -H "Content-Type: application/json" \
             -H "x-github-event: issues" \
@@ -115,75 +113,39 @@ jobs:
               \"action\": \"assigned\",
               \"issue\": {
                 \"number\": $ISSUE_NUM,
-                \"title\": \"[CI] Release smoke test v${{ steps.version.outputs.version }}\",
+                \"title\": \"[CI] Release smoke test v${VERSION}\",
                 \"state\": \"open\",
                 \"labels\": [{\"name\": \"smoke-test\"}, {\"name\": \"agent\"}],
-                \"assignees\": [{\"login\": \"moda-bot\"}],
+                \"assignees\": [{\"login\": \"modastack\"}],
                 \"user\": {\"login\": \"github-actions\"},
-                \"body\": \"Automated smoke test.\",
+                \"body\": \"Automated smoke test. Write a one-line file, commit, and close this issue.\",
                 \"html_url\": \"$ISSUE_URL\"
               },
               \"repository\": {\"full_name\": \"$DOGFOOD_REPO\"},
               \"sender\": {\"login\": \"github-actions\"}
             }"
 
-      - name: Monitor workflow execution
+      - name: Wait for modastack to close the issue
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
-          cd "$DOGFOOD_DIR"
-          ISSUE_NUM="${{ steps.smoke.outputs.issue_num }}"
-          LOG=".modastack/state/manager.log"
+          ISSUE_NUM="${{ steps.issue.outputs.issue_num }}"
 
-          echo "Monitoring issue #$ISSUE_NUM..."
-
-          INJECTED=false
-          SESSION_FOUND=false
-          SESSION_DONE=false
-          DEADLINE=$((SECONDS + 180))
-
-          while [ $SECONDS -lt $DEADLINE ]; do
-            if ! $INJECTED && grep -q "Injecting" "$LOG" 2>/dev/null; then
-              echo "✓ Event injected into manager"
-              INJECTED=true
+          echo "Waiting for modastack to close issue #$ISSUE_NUM..."
+          for i in $(seq 1 60); do
+            STATE=$(gh issue view "$ISSUE_NUM" --repo "$DOGFOOD_REPO" --json state --jq '.state' 2>/dev/null)
+            if [ "$STATE" = "CLOSED" ]; then
+              echo "Issue #$ISSUE_NUM closed by modastack"
+              echo "=== SMOKE TEST PASSED ==="
+              exit 0
             fi
-
-            if ! $SESSION_FOUND; then
-              SESSION=$(ls -d .modastack/sessions/wf-*"$ISSUE_NUM" 2>/dev/null | head -1)
-              if [ -n "$SESSION" ]; then
-                echo "✓ Session created: $(basename $SESSION)"
-                SESSION_FOUND=true
-              fi
-            fi
-
-            if $SESSION_FOUND && [ -n "$SESSION" ]; then
-              STATUS=$(python3 -c "
-          import json; d=json.load(open('$SESSION/state.json'))
-          print(d.get('status','unknown'))" 2>/dev/null || echo unknown)
-              if [ "$STATUS" = "done" ]; then
-                echo "✓ Workflow completed"
-                SESSION_DONE=true
-                break
-              fi
-            fi
-
-            sleep 5
+            echo "  Poll $i/60: state=$STATE"
+            sleep 10
           done
 
-          if ! $INJECTED; then
-            echo "✗ Event never injected"
-            tail -30 "$LOG"
-            exit 1
-          fi
-
-          if $SESSION_DONE; then
-            echo "=== Smoke test PASSED: full workflow executed ==="
-          elif $SESSION_FOUND; then
-            echo "=== Smoke test PARTIAL: session created but did not complete in time ==="
-            cat "$SESSION/state.json" 2>/dev/null
-          else
-            echo "=== Smoke test PARTIAL: event injected, no session created ==="
-            echo "(Manager may have handled it directly without spawning)"
-          fi
+          echo "Issue #$ISSUE_NUM was not closed within 10 minutes"
+          echo "Final state: $(gh issue view $ISSUE_NUM --repo $DOGFOOD_REPO --json state,comments --jq '{state: .state, comments: (.comments | length)}')"
+          echo "=== SMOKE TEST FAILED ==="
+          exit 1
 
       - name: Cleanup
         if: always()
@@ -191,10 +153,14 @@ jobs:
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
           cd "$DOGFOOD_DIR" 2>/dev/null || true
           modastack stop 2>/dev/null || true
-          ISSUE_NUM="${{ steps.smoke.outputs.issue_num }}"
+          # If the issue is still open, close it so we don't leave orphans
+          ISSUE_NUM="${{ steps.issue.outputs.issue_num }}"
           if [ -n "$ISSUE_NUM" ]; then
-            gh issue close "$ISSUE_NUM" --repo "$DOGFOOD_REPO" \
-              --comment "Smoke test complete (v${{ steps.version.outputs.version }}). Closing." 2>/dev/null || true
+            STATE=$(gh issue view "$ISSUE_NUM" --repo "$DOGFOOD_REPO" --json state --jq '.state' 2>/dev/null)
+            if [ "$STATE" = "OPEN" ]; then
+              gh issue close "$ISSUE_NUM" --repo "$DOGFOOD_REPO" \
+                --comment "Smoke test did not complete. Closing (cleanup)." 2>/dev/null || true
+            fi
           fi
 
   update-homebrew:
