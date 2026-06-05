@@ -16,9 +16,9 @@ SESSIONS_DIR = CLAUDE_DIR / "sessions"
 def _db_path() -> Path:
     from modastack.sdk import get_repo_root
     root = get_repo_root()
-    if root:
-        return root / ".modastack" / "state" / "history.db"
-    return Path.home() / ".modastack" / "history.db"
+    if not root:
+        raise RuntimeError("repo root not set — call set_repo_root() first")
+    return root / ".modastack" / "state" / "history.db"
 
 
 def _init_db(conn: sqlite3.Connection):

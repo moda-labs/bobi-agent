@@ -2,7 +2,7 @@
 
 import time
 import threading
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, call
 from queue import SimpleQueue
 
 from modastack.manager.events.event_client import format_event_for_manager
@@ -126,14 +126,11 @@ class TestStartup:
     @patch("modastack.manager.events.consumer._kill_stale_instances")
     @patch("modastack.manager.events.consumer._wait_for_manager", return_value=True)
     @patch("modastack.manager.session.detect_state", return_value="waiting_input")
-    def test_run_starts_without_crash(self, mock_state, mock_wait, mock_kill, mock_start, tmp_path):
+    def test_run_starts_without_crash(self, mock_state, mock_wait, mock_kill, mock_start, modastack_install):
         """run() should get through startup without AttributeError or ImportError."""
         import signal
         from modastack.manager.events.consumer import run
 
-        started = threading.Event()
-
-        # Patch the blocking parts so run() returns quickly
         original_sleep = time.sleep
 
         call_count = {"sleep": 0}
@@ -144,11 +141,10 @@ class TestStartup:
             original_sleep(min(n, 0.01))
 
         with patch("time.sleep", side_effect=short_sleep), \
-             patch("modastack.manager.events.consumer.PID_PATH", MagicMock()), \
              patch("modastack.manager.session.ManagerSession.is_alive", return_value=True), \
              patch("signal.signal"):
             try:
-                run(repo_path=tmp_path)
+                run(repo_path=modastack_install.repo_path)
             except SystemExit:
                 pass
 

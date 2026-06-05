@@ -6,12 +6,11 @@ human-readable polling tasks that run on an interval, detect a condition,
 and inject a synthetic event into the manager's event stream — exactly
 like a webhook would.
 
-Three storage tiers, merged most-general to most-specific (later tiers
+Two storage tiers, merged most-general to most-specific (later tiers
 override earlier ones by `name`):
 
   1. Built-in defaults  — monitors/defaults.yaml (shipped, read-only)
-  2. User globals       — ~/.modastack/monitors.yaml (apply to all repos)
-  3. Repo-specific      — <repo>/.modastack.yaml under `monitors:`
+  2. Repo-specific      — <repo>/.modastack/monitors.yaml
 """
 
 from .schema import Monitor, parse_interval

@@ -11,10 +11,9 @@ from pathlib import Path
 def _runs_dir() -> Path:
     from modastack.sdk import get_repo_root
     root = get_repo_root()
-    if root:
-        d = root / ".modastack" / "state" / "workflow" / "runs"
-    else:
-        d = Path.home() / ".modastack" / "workflow" / "runs"
+    if not root:
+        raise RuntimeError("repo root not set — call set_repo_root() first")
+    d = root / ".modastack" / "state" / "workflow" / "runs"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

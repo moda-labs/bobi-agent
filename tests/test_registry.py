@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from modastack.sdk import SessionEntry, SessionRegistry, SESSION_DIR
+from modastack.sdk import SessionEntry, SessionRegistry
 
 
 @pytest.fixture

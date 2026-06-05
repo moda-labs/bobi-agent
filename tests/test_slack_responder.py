@@ -95,70 +95,48 @@ class TestSlackResponder:
         }
 
     @patch("modastack.manager.events.slack_responder._post_to_slack", return_value=True)
-    @patch("modastack.manager.events.slack_responder.GlobalConfig")
-    def test_replies_to_dm(self, mock_config, mock_post):
-        mock_config.load.return_value = MagicMock()
-        mock_config.load.return_value.slack_token_for.return_value = "xoxb-test"
-
-        responder = SlackResponder()
+    def test_replies_to_dm(self, mock_post):
+        responder = SlackResponder(slack_bot_token="xoxb-test")
         events = [self._make_slack_event()]
         responder.handle(events, "Hello back!")
 
         mock_post.assert_called_once_with("xoxb-test", "D123", "Hello back!", "")
 
     @patch("modastack.manager.events.slack_responder._post_to_slack", return_value=True)
-    @patch("modastack.manager.events.slack_responder.GlobalConfig")
-    def test_mention_replies_in_thread(self, mock_config, mock_post):
-        mock_config.load.return_value = MagicMock()
-        mock_config.load.return_value.slack_token_for.return_value = "xoxb-test"
-
-        responder = SlackResponder()
+    def test_mention_replies_in_thread(self, mock_post):
+        responder = SlackResponder(slack_bot_token="xoxb-test")
         events = [self._make_slack_event(etype="slack.mention", ts="200.001")]
         responder.handle(events, "On it!")
 
         mock_post.assert_called_once_with("xoxb-test", "D123", "On it!", "200.001")
 
     @patch("modastack.manager.events.slack_responder._post_to_slack", return_value=True)
-    @patch("modastack.manager.events.slack_responder.GlobalConfig")
-    def test_thread_reply_uses_thread_ts(self, mock_config, mock_post):
-        mock_config.load.return_value = MagicMock()
-        mock_config.load.return_value.slack_token_for.return_value = "xoxb-test"
-
-        responder = SlackResponder()
+    def test_thread_reply_uses_thread_ts(self, mock_post):
+        responder = SlackResponder(slack_bot_token="xoxb-test")
         events = [self._make_slack_event(etype="slack.thread_reply", thread_ts="300.001")]
         responder.handle(events, "Got it")
 
         mock_post.assert_called_once_with("xoxb-test", "D123", "Got it", "300.001")
 
     @patch("modastack.manager.events.slack_responder._post_to_slack")
-    @patch("modastack.manager.events.slack_responder.GlobalConfig")
-    def test_skips_non_slack_events(self, mock_config, mock_post):
-        mock_config.load.return_value = MagicMock()
-
-        responder = SlackResponder()
+    def test_skips_non_slack_events(self, mock_post):
+        responder = SlackResponder(slack_bot_token="xoxb-test")
         events = [self._make_github_event()]
         responder.handle(events, "Some response")
 
         mock_post.assert_not_called()
 
     @patch("modastack.manager.events.slack_responder._post_to_slack")
-    @patch("modastack.manager.events.slack_responder.GlobalConfig")
-    def test_skips_empty_response(self, mock_config, mock_post):
-        mock_config.load.return_value = MagicMock()
-
-        responder = SlackResponder()
+    def test_skips_empty_response(self, mock_post):
+        responder = SlackResponder(slack_bot_token="xoxb-test")
         events = [self._make_slack_event()]
         responder.handle(events, "")
 
         mock_post.assert_not_called()
 
     @patch("modastack.manager.events.slack_responder._post_to_slack", return_value=True)
-    @patch("modastack.manager.events.slack_responder.GlobalConfig")
-    def test_mixed_batch_only_replies_to_slack(self, mock_config, mock_post):
-        mock_config.load.return_value = MagicMock()
-        mock_config.load.return_value.slack_token_for.return_value = "xoxb-test"
-
-        responder = SlackResponder()
+    def test_mixed_batch_only_replies_to_slack(self, mock_post):
+        responder = SlackResponder(slack_bot_token="xoxb-test")
         events = [
             self._make_github_event(),
             self._make_slack_event(channel="D456"),
@@ -169,33 +147,8 @@ class TestSlackResponder:
         mock_post.assert_called_once_with("xoxb-test", "D456", "Response", "")
 
     @patch("modastack.manager.events.slack_responder._post_to_slack")
-    @patch("modastack.manager.events.slack_responder.GlobalConfig")
-    def test_uses_workspace_token(self, mock_config, mock_post):
-        mock_cfg = MagicMock()
-        mock_cfg.slack_token_for.side_effect = lambda w: {
-            "T_A": "xoxb-a", "T_B": "xoxb-b",
-        }.get(w, "")
-        mock_config.load.return_value = mock_cfg
-        mock_post.return_value = True
-
-        responder = SlackResponder()
-        events = [
-            self._make_slack_event(workspace="T_A", channel="D1"),
-            self._make_slack_event(workspace="T_B", channel="D2"),
-        ]
-        responder.handle(events, "Reply")
-
-        assert mock_post.call_count == 2
-        mock_post.assert_any_call("xoxb-a", "D1", "Reply", "")
-        mock_post.assert_any_call("xoxb-b", "D2", "Reply", "")
-
-    @patch("modastack.manager.events.slack_responder._post_to_slack")
-    @patch("modastack.manager.events.slack_responder.GlobalConfig")
-    def test_no_token_skips(self, mock_config, mock_post):
-        mock_config.load.return_value = MagicMock()
-        mock_config.load.return_value.slack_token_for.return_value = ""
-
-        responder = SlackResponder()
+    def test_no_token_skips(self, mock_post):
+        responder = SlackResponder(slack_bot_token="")
         events = [self._make_slack_event()]
         responder.handle(events, "Response")
 

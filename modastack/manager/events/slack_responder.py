@@ -13,8 +13,6 @@ import re
 import urllib.error
 import urllib.request
 
-from modastack.config import GlobalConfig
-
 log = logging.getLogger(__name__)
 
 
@@ -57,8 +55,8 @@ class SlackResponder:
     channel/thread.
     """
 
-    def __init__(self):
-        self._config = GlobalConfig.load()
+    def __init__(self, slack_bot_token: str = ""):
+        self._slack_bot_token = slack_bot_token
 
     def handle(self, events: list[dict], response: str) -> None:
         if not response:
@@ -69,14 +67,13 @@ class SlackResponder:
                 continue
 
             data = event["data"]
-            workspace = data.get("workspace", "")
             channel = data.get("channel", "")
             if not channel:
                 continue
 
-            token = self._config.slack_token_for(workspace)
+            token = self._slack_bot_token
             if not token:
-                log.warning(f"No bot token for workspace {workspace}")
+                log.warning("No bot token configured")
                 continue
 
             thread_ts = data.get("thread_ts", "")

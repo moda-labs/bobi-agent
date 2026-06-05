@@ -18,7 +18,7 @@ from typing import Any
 
 from modastack.sdk import (
     get_cli_path, save_session_id, load_session_id, log_activity,
-    get_registry, SessionEntry, SESSION_DIR,
+    get_registry, SessionEntry, _sessions_dir,
 )
 
 log = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class ManagerSession:
         self._last_inject_error: str = ""
         self._inject_lock = threading.Lock()
         self._response_callback: Any | None = None
-        self._prompt_hash_path = SESSION_DIR / self.session_name / "prompt_hash"
+        self._prompt_hash_path = _sessions_dir() / self.session_name / "prompt_hash"
 
     def _load_manager_prompt(self) -> str:
         core = MANAGER_BASE_PATH.read_text()

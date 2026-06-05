@@ -107,10 +107,11 @@ def test_workflow_list_no_errors():
 class TestAgentCommand:
     def test_adhoc_workflow(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-42") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-42") as mock, \
+             patch("modastack.cli._detect_repo_root", return_value=tmp_path):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "engineer",
-                "--repo", str(tmp_path), "--task", "Fix #42",
+                "--task", "Fix #42",
             ])
         assert result.exit_code == 0, result.output
         assert "wf-adhoc-42" in result.output
@@ -121,10 +122,11 @@ class TestAgentCommand:
 
     def test_issue_lifecycle_workflow(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-42") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-42") as mock, \
+             patch("modastack.cli._detect_repo_root", return_value=tmp_path):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "issue-lifecycle", "--role", "engineer",
-                "--repo", str(tmp_path), "--task", "Work on #42",
+                "--task", "Work on #42",
             ])
         assert result.exit_code == 0, result.output
         assert "wf-issue-lifecycle-42" in result.output
@@ -132,49 +134,53 @@ class TestAgentCommand:
 
     def test_workflow_required(self):
         runner = CliRunner()
-        result = runner.invoke(main, ["agents", "launch", "--role", "engineer", "--repo", "/tmp", "--task", "X"])
+        result = runner.invoke(main, ["agents", "launch", "--role", "engineer", "--task", "X"])
         assert result.exit_code != 0
 
     def test_role_required(self):
         runner = CliRunner()
-        result = runner.invoke(main, ["agents", "launch", "-w", "adhoc", "--repo", "/tmp", "--task", "X"])
+        result = runner.invoke(main, ["agents", "launch", "-w", "adhoc", "--task", "X"])
         assert result.exit_code != 0
         assert "--role" in result.output
 
     def test_invalid_role(self, tmp_path):
         runner = CliRunner()
-        result = runner.invoke(main, [
-            "agents", "launch", "-w", "adhoc", "--role", "nonexistent",
-            "--repo", str(tmp_path), "--task", "X",
-        ])
+        with patch("modastack.cli._detect_repo_root", return_value=tmp_path):
+            result = runner.invoke(main, [
+                "agents", "launch", "-w", "adhoc", "--role", "nonexistent",
+                "--task", "X",
+            ])
         assert result.exit_code != 0
         assert "Unknown role" in result.output
 
-    def test_wait_mode_runs_check(self):
+    def test_wait_mode_runs_check(self, tmp_path):
         runner = CliRunner()
         check = CheckResult(success=True, finding=False)
-        with patch("modastack.subagent.run_check_blocking", return_value=check):
+        with patch("modastack.subagent.run_check_blocking", return_value=check), \
+             patch("modastack.cli._detect_repo_root", return_value=tmp_path):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "engineer",
                 "--wait", "--task", "Check prod URL",
             ])
         assert result.exit_code == 0
 
-    def test_requires_repo(self, tmp_path):
+    def test_requires_repo(self):
         runner = CliRunner()
-        result = runner.invoke(main, [
-            "agents", "launch", "-w", "adhoc", "--role", "engineer", "--task", "do a thing",
-        ])
+        with patch("modastack.cli._detect_repo_root", return_value=None):
+            result = runner.invoke(main, [
+                "agents", "launch", "-w", "adhoc", "--role", "engineer", "--task", "do a thing",
+            ])
         assert result.exit_code != 0
-        assert "--repo is required" in result.output
+        assert "not inside a modastack repo" in result.output.lower()
 
     def test_passes_requested_by(self, tmp_path):
         runner = CliRunner()
         req = '{"from":"Alice","channel":"C1"}'
-        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-1") as mock:
+        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-1") as mock, \
+             patch("modastack.cli._detect_repo_root", return_value=tmp_path):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "engineer",
-                "--repo", str(tmp_path), "--task", "Fix #1",
+                "--task", "Fix #1",
                 "--requested-by", req,
             ])
         assert result.exit_code == 0

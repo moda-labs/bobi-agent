@@ -37,10 +37,9 @@ log = logging.getLogger(__name__)
 def _monitor_state_path() -> Path:
     from modastack.sdk import get_repo_root
     root = get_repo_root()
-    if root:
-        d = root / ".modastack" / "state"
-    else:
-        d = Path.home() / ".modastack"
+    if not root:
+        raise RuntimeError("repo root not set — call set_repo_root() first")
+    d = root / ".modastack" / "state"
     d.mkdir(parents=True, exist_ok=True)
     return d / "monitor_state.json"
 TICK_INTERVAL = 30  # seconds between scheduler ticks
@@ -72,7 +71,9 @@ def _default_spawn_check(monitor, cwd: str | None) -> None:
     try:
         from modastack.sdk import get_repo_root
         root = get_repo_root()
-        log_path = (root / ".modastack" / "state" / "manager.log") if root else (Path.home() / ".modastack" / "modastack.log")
+        if not root:
+            raise RuntimeError("repo root not set — call set_repo_root() first")
+        log_path = root / ".modastack" / "state" / "manager.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a") as lf:
             subprocess.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)

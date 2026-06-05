@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from modastack.config import GlobalConfig
 from modastack.monitors.schema import Monitor, parse_interval
 from modastack.monitors import registry as registry_mod
 from modastack.monitors.registry import MonitorRegistry
@@ -78,7 +77,7 @@ class TestRegistryMerge:
         _write(repo / ".modastack" / "monitors.yaml", [
             {"name": "deploy-health", "interval": "5m", "url": "https://j"},
         ])
-        reg = MonitorRegistry.load(GlobalConfig(repos=[repo]), repo_path=repo)
+        reg = MonitorRegistry.load(repo_path=repo)
         dh = [m for m in reg.effective_monitors() if m.name == "deploy-health"]
         assert len(dh) == 1
         assert dh[0].repo == str(repo)
@@ -87,7 +86,7 @@ class TestRegistryMerge:
     def test_repo_opt_out_of_default(self, tmp_path):
         repo = tmp_path / "jobtack"
         _write(repo / ".modastack" / "monitors.yaml", [{"name": "stale-pr-check", "enabled": False}])
-        reg = MonitorRegistry.load(GlobalConfig(repos=[repo]), repo_path=repo)
+        reg = MonitorRegistry.load(repo_path=repo)
         stale = [m for m in reg.effective_monitors() if m.name == "stale-pr-check"]
         for s in stale:
             assert reg.repos_for(s) == []
@@ -95,7 +94,7 @@ class TestRegistryMerge:
     def test_repo_override_of_default(self, tmp_path):
         repo = tmp_path / "jobtack"
         _write(repo / ".modastack" / "monitors.yaml", [{"name": "pr-conflict-check", "interval": "5m"}])
-        reg = MonitorRegistry.load(GlobalConfig(repos=[repo]), repo_path=repo)
+        reg = MonitorRegistry.load(repo_path=repo)
         glob = reg.globals.get("pr-conflict-check")
         if glob:
             assert reg.repos_for(glob) == []

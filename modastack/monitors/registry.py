@@ -16,7 +16,6 @@ from pathlib import Path
 
 import yaml
 
-from modastack.config import GlobalConfig
 from .schema import Monitor
 
 log = logging.getLogger(__name__)
@@ -40,16 +39,15 @@ def _read_records(path: Path) -> list[dict]:
 class MonitorRegistry:
     """The merged, resolved view of all monitors across the three tiers."""
 
-    def __init__(self, config: GlobalConfig | None = None, repo_path: Path | None = None):
-        self.config = config or GlobalConfig.load()
+    def __init__(self, repo_path: Path | None = None):
         self.repo_path = repo_path
         self.globals: dict[str, Monitor] = {}
         self.repo_monitors: list[Monitor] = []
         self.opt_outs: dict[str, set[str]] = {}
 
     @classmethod
-    def load(cls, config: GlobalConfig | None = None, repo_path: Path | None = None) -> "MonitorRegistry":
-        registry = cls(config, repo_path=repo_path)
+    def load(cls, repo_path: Path | None = None) -> "MonitorRegistry":
+        registry = cls(repo_path=repo_path)
         registry._load()
         return registry
 
@@ -63,7 +61,7 @@ class MonitorRegistry:
                 log.warning(f"Skipping bad default monitor: {e}")
 
         # 2. Repo-specific monitors
-        repo_paths = [self.repo_path] if self.repo_path else self.config.repos
+        repo_paths = [self.repo_path] if self.repo_path else []
         for repo_path in repo_paths:
             repo_key = str(repo_path)
             repo_sources = [
@@ -103,13 +101,12 @@ class MonitorRegistry:
         """
         if monitor.repo:
             return [Path(monitor.repo)]
-        if self.repo_path:
-            opted_out = self.opt_outs.get(monitor.name, set())
-            if str(self.repo_path) in opted_out:
-                return []
-            return [self.repo_path]
+        if not self.repo_path:
+            return []
         opted_out = self.opt_outs.get(monitor.name, set())
-        return [r for r in self.config.repos if str(r) not in opted_out]
+        if str(self.repo_path) in opted_out:
+            return []
+        return [self.repo_path]
 
     # --- Writes to user-writable tiers ---------------------------------
 

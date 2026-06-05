@@ -3,7 +3,7 @@
 from pathlib import Path
 from textwrap import dedent
 
-from modastack.config import RepoConfig, GlobalConfig
+from modastack.config import RepoConfig, LocalConfig
 
 
 def test_repo_config_new_path(tmp_path):
@@ -129,25 +129,35 @@ def test_repo_config_missing_file(tmp_path):
         pass
 
 
-def test_global_config_missing_file(tmp_path, monkeypatch):
-    monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_PATH", tmp_path / "nonexistent.yaml")
-    config = GlobalConfig.load()
-    assert config.slack_bot_token == ""
-    assert config.repos == []
+def test_local_config_from_file(tmp_path):
+    """LocalConfig loads from .modastack/local.yaml."""
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "local.yaml").write_text(dedent("""
+        operator:
+          name: test-user
+          email: test@test.com
+        slack:
+          bot_token: xoxb-test
+          dm_channel: D123
+        event_server:
+          url: http://localhost:8080
+          deployment_id: dep-1
+          api_key: key-1
+        dashboard_port: 9000
+    """))
+
+    local = LocalConfig.load(tmp_path)
+    assert local.operator_name == "test-user"
+    assert local.slack_bot_token == "xoxb-test"
+    assert local.slack_dm_channel == "D123"
+    assert local.event_server_url == "http://localhost:8080"
+    assert local.dashboard_port == 9000
 
 
-def test_global_config_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("modastack.config.GLOBAL_CONFIG_PATH", tmp_path / "config.yaml")
-
-    config = GlobalConfig(
-        slack_bot_token="xoxb-test",
-        repos=[Path("/tmp/repo1"), Path("/tmp/repo2")],
-        github_default_account="testuser",
-    )
-    config.save()
-
-    loaded = GlobalConfig.load()
-    assert loaded.slack_bot_token == "xoxb-test"
-    assert len(loaded.repos) == 2
-    assert loaded.github_default_account == "testuser"
+def test_local_config_missing_returns_empty(tmp_path):
+    """Missing local.yaml returns empty config, no GlobalConfig fallback."""
+    local = LocalConfig.load(tmp_path)
+    assert local.slack_bot_token == ""
+    assert local.event_server_url == ""
+    assert local.operator_name == ""

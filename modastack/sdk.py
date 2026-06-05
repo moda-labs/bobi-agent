@@ -38,17 +38,11 @@ def get_repo_root() -> Path | None:
 
 def _sessions_dir() -> Path:
     """Per-repo sessions directory."""
-    if _repo_root:
-        d = _repo_root / ".modastack" / "sessions"
-    else:
-        d = Path.home() / ".modastack" / "sessions"
+    if not _repo_root:
+        raise RuntimeError("repo root not set — call set_repo_root() first")
+    d = _repo_root / ".modastack" / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-# Backward compat — modules that import SESSION_DIR get the legacy path
-# at import time. Runtime code should use _sessions_dir() instead.
-SESSION_DIR = Path.home() / ".modastack" / "sessions"
 
 
 def get_cli_path() -> str:

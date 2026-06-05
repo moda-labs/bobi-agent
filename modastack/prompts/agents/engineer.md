@@ -87,7 +87,7 @@ PR title format: `[ISSUE-ID] type: description`
 
 ### Where to find ticket info
 
-The handoff file (`~/.modastack/handoffs/<ISSUE_ID>.md`) contains:
+The handoff file (`.modastack/sessions/<session-name>/handoff-<step>.yaml`) contains:
 - `issue_id`: the ticket identifier (e.g., BET-10)
 - `task_id`: the unique identifier needed for API calls
 - `title`: the ticket title

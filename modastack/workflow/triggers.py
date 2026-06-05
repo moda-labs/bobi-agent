@@ -10,8 +10,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from modastack.config import GlobalConfig
-
 from .schema import Workflow, load_workflow
 
 log = logging.getLogger(__name__)

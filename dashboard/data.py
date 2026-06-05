@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 
-from modastack.config import GLOBAL_CONFIG_DIR
 from modastack.sdk import get_registry, SessionRegistry
 from modastack.workflow.state import WorkflowRun
 from modastack.workflow.schema import load_workflow
@@ -15,9 +14,9 @@ from modastack.workflow.schema import load_workflow
 def _state_file(name: str) -> Path:
     from modastack.sdk import get_repo_root
     root = get_repo_root()
-    if root:
-        return root / ".modastack" / "state" / name
-    return GLOBAL_CONFIG_DIR / name
+    if not root:
+        raise RuntimeError("repo root not set — call set_repo_root() first")
+    return root / ".modastack" / "state" / name
 
 
 def _log_path() -> Path:

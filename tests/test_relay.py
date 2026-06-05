@@ -1,5 +1,6 @@
 """Tests for the chat relay module."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from modastack.relay import NullAdapter, SlackAdapter, ChatAdapter, build_adapter
@@ -66,22 +67,31 @@ class TestSlackAdapter:
 
 class TestBuildAdapter:
 
-    @patch("modastack.config.GlobalConfig.load")
-    def test_builds_slack_when_configured(self, mock_load):
-        mock_config = MagicMock()
-        mock_config.slack_bot_token = "xoxb-test"
-        mock_config.slack_dm_channel = "C123"
-        mock_load.return_value = mock_config
+    @patch("modastack.config.LocalConfig")
+    @patch("modastack.sdk.get_repo_root")
+    def test_builds_slack_when_configured(self, mock_root, mock_local):
+        mock_root.return_value = Path("/tmp/repo")
+        mock_local.load.return_value = MagicMock(
+            slack_bot_token="xoxb-test", slack_dm_channel="C123",
+        )
 
         adapter = build_adapter()
         assert isinstance(adapter, SlackAdapter)
 
-    @patch("modastack.config.GlobalConfig.load")
-    def test_returns_null_when_no_token(self, mock_load):
-        mock_config = MagicMock()
-        mock_config.slack_bot_token = ""
-        mock_config.slack_dm_channel = ""
-        mock_load.return_value = mock_config
+    @patch("modastack.config.LocalConfig")
+    @patch("modastack.sdk.get_repo_root")
+    def test_returns_null_when_no_token(self, mock_root, mock_local):
+        mock_root.return_value = Path("/tmp/repo")
+        mock_local.load.return_value = MagicMock(
+            slack_bot_token="", slack_dm_channel="",
+        )
+
+        adapter = build_adapter()
+        assert isinstance(adapter, NullAdapter)
+
+    @patch("modastack.sdk.get_repo_root")
+    def test_returns_null_when_no_repo(self, mock_root):
+        mock_root.return_value = None
 
         adapter = build_adapter()
         assert isinstance(adapter, NullAdapter)

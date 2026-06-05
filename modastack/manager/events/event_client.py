@@ -19,17 +19,14 @@ from queue import SimpleQueue
 import certifi
 import websocket
 
-from modastack.config import GlobalConfig
-
 log = logging.getLogger(__name__)
 
 def _state_path(name: str) -> Path:
     from modastack.sdk import get_repo_root
     root = get_repo_root()
-    if root:
-        d = root / ".modastack" / "state"
-    else:
-        d = Path.home() / ".modastack"
+    if not root:
+        raise RuntimeError("repo root not set — call set_repo_root() first")
+    d = root / ".modastack" / "state"
     d.mkdir(parents=True, exist_ok=True)
     return d / name
 
@@ -296,9 +293,16 @@ def _normalize_linear(event_type: str, payload: dict) -> dict | None:
 
 
 def _normalize_slack(event_type: str, payload: dict, workspace: str) -> dict | None:
-    config = GlobalConfig.load()
     user_id = payload.get("user_id", "")
-    token = config.slack_token_for(workspace)
+    token = ""
+    try:
+        from modastack.config import LocalConfig
+        from modastack.sdk import get_repo_root
+        root = get_repo_root()
+        if root:
+            token = LocalConfig.load(root).slack_bot_token
+    except Exception:
+        pass
     user_name = _resolve_slack_user(token, user_id)
     text = payload.get("text", "")
     if event_type == "slack.mention":

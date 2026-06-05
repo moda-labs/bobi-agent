@@ -1,9 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-06-05
+
+### Breaking
+- **All runtime state moved to per-repo `.modastack/`** — PID files, logs, sessions, event server state now live under `<repo>/.modastack/state/` instead of `~/.modastack/`. Credentials moved to `~/.config/modastack/credentials.yaml` (XDG standard); existing credentials are migrated automatically on first load
+- **`--repo` flag removed from all CLI commands** — modastack always detects the repo from the current directory. Commands like `agents launch`, `monitors add/pause/remove`, and `roles list` no longer accept `--repo`
+- **`GlobalConfig` class removed** — all configuration is per-repo via `LocalConfig` (`.modastack/local.yaml`) and `RepoConfig` (`.modastack/config.yaml`)
+
+### Removed
+- Legacy tmux session management (`modastack/tmux.py`, `modastack/session.py`) — all sessions now use the Claude Agent SDK
+- `~/.modastack/` global directory dependency — the framework no longer reads or writes to the home directory for runtime state
+
+### Fixed
+- Detached agent subprocesses now call `set_repo_root()` so they can find workflows and write session state to the correct per-repo directory
+- `workflows validate` command updated for the current step-based workflow schema (was referencing removed DAG attributes)
+- `monitors remove` now correctly finds monitors in the current repo when `--repo` is not specified
+- `modastack start` info display now shows per-repo log path instead of global
 
 ### Added
-- Auto-resolve merge conflicts: `monitor/pr.conflict_detected` now triggers the manager to auto-spawn an engineer (instead of just noting it) that follows a new `merge-conflict` skill — merge the base branch, resolve conflicts honoring both sides, verify build/tests, and push. If the conflict needs a human decision, the engineer comments on the PR and exits non-zero, and the manager escalates to the human via Slack (#117)
+- Auto-resolve merge conflicts: `monitor/pr.conflict_detected` now triggers the manager to auto-spawn an engineer that follows a `merge-conflict` skill (#117)
+- Comprehensive integration test suite (55 tests) running against a fully isolated temp install — CLI commands, agent launching, event server lifecycle, manager start/stop/message/ask, and full end-to-end webhook-to-manager pipeline
+
+## Unreleased
 
 ## 0.4.1 — 2026-06-01
 

@@ -20,10 +20,8 @@ def _make_repo_config(path, trigger_labels=None, skip_labels=None, project="TEST
 
 class TestScanGithubIssues:
 
-    @patch("modastack.config.GlobalConfig.load")
     @patch("modastack.github_issues.subprocess.run")
-    def test_groups_by_state(self, mock_run, mock_gc):
-        mock_gc.return_value = MagicMock(github_default_account="moda-bot")
+    def test_groups_by_state(self, mock_run):
         rc = _make_repo_config(Path("/repo"))
 
         issues = [
@@ -53,24 +51,19 @@ class TestScanGithubIssues:
         assert result["Todo"][0]["identifier"] == "TEST-1"
         assert result["In Progress"][0]["identifier"] == "TEST-2"
 
-    @patch("modastack.config.GlobalConfig.load")
     @patch("modastack.github_issues.subprocess.run")
-    def test_passes_assignee_to_gh(self, mock_run, mock_gc):
-        """Verifies gh is called with --assignee flag for the bot account."""
-        mock_gc.return_value = MagicMock(github_default_account="moda-bot")
+    def test_passes_assignee_me_to_gh(self, mock_run):
+        """Verifies gh is called with --assignee @me."""
         rc = _make_repo_config(Path("/repo"))
-
         mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps([]))
 
         scan_github_issues(rc)
         args = mock_run.call_args[0][0]
         assert "--assignee" in args
-        assert "moda-bot" in args
+        assert "@me" in args
 
-    @patch("modastack.config.GlobalConfig.load")
     @patch("modastack.github_issues.subprocess.run")
-    def test_filters_skip_labels(self, mock_run, mock_gc):
-        mock_gc.return_value = MagicMock(github_default_account="moda-bot")
+    def test_filters_skip_labels(self, mock_run):
         rc = _make_repo_config(Path("/repo"), skip_labels=["blocked"])
 
         issues = [
@@ -88,50 +81,16 @@ class TestScanGithubIssues:
         result = scan_github_issues(rc)
         assert result == {}
 
-    @patch("modastack.config.GlobalConfig.load")
     @patch("modastack.github_issues.subprocess.run")
-    def test_includes_bot_assigned_issues(self, mock_run, mock_gc):
-        mock_gc.return_value = MagicMock(github_default_account="moda-bot")
-        rc = _make_repo_config(Path("/repo"))
-
-        issues = [
-            {
-                "number": 3,
-                "title": "Bot assigned",
-                "body": "",
-                "labels": [],
-                "assignees": [{"login": "moda-bot"}],
-                "comments": [],
-            },
-        ]
-        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(issues))
-
-        result = scan_github_issues(rc)
-        all_issues = [i for issues in result.values() for i in issues]
-        assert len(all_issues) == 1
-
-    @patch("modastack.config.GlobalConfig.load")
-    @patch("modastack.github_issues.subprocess.run")
-    def test_no_bot_account_returns_empty(self, mock_run, mock_gc):
-        mock_gc.return_value = MagicMock(github_default_account="")
-        rc = _make_repo_config(Path("/repo"))
-
-        assert scan_github_issues(rc) == {}
-
-    @patch("modastack.config.GlobalConfig.load")
-    @patch("modastack.github_issues.subprocess.run")
-    def test_gh_failure_returns_empty(self, mock_run, mock_gc):
-        mock_gc.return_value = MagicMock(github_default_account="moda-bot")
+    def test_gh_failure_returns_empty(self, mock_run):
         rc = _make_repo_config(Path("/repo"))
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
 
         assert scan_github_issues(rc) == {}
 
-    @patch("modastack.config.GlobalConfig.load")
     @patch("modastack.github_issues.subprocess.run")
-    def test_default_state_is_todo(self, mock_run, mock_gc):
+    def test_default_state_is_todo(self, mock_run):
         """Issues without a status label default to Todo."""
-        mock_gc.return_value = MagicMock(github_default_account="moda-bot")
         rc = _make_repo_config(Path("/repo"))
 
         issues = [
@@ -149,10 +108,8 @@ class TestScanGithubIssues:
         result = scan_github_issues(rc)
         assert "Todo" in result
 
-    @patch("modastack.config.GlobalConfig.load")
     @patch("modastack.github_issues.subprocess.run")
-    def test_normalizes_comments(self, mock_run, mock_gc):
-        mock_gc.return_value = MagicMock(github_default_account="moda-bot")
+    def test_normalizes_comments(self, mock_run):
         rc = _make_repo_config(Path("/repo"))
 
         issues = [
@@ -176,10 +133,8 @@ class TestScanGithubIssues:
         assert len(comments) == 2
         assert comments[0]["body"] == "First comment"
 
-    @patch("modastack.config.GlobalConfig.load")
     @patch("modastack.github_issues.subprocess.run")
-    def test_uses_path_name_when_no_project(self, mock_run, mock_gc):
-        mock_gc.return_value = MagicMock(github_default_account="moda-bot")
+    def test_uses_path_name_when_no_project(self, mock_run):
         rc = _make_repo_config(Path("/my-repo"), project="")
 
         issues = [

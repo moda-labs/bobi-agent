@@ -658,7 +658,8 @@ class TestTryResumeForEvent:
 
 class TestResumeWorkflowTimestamps:
     def test_resume_sets_started_at_on_run(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path)
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
         monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
@@ -709,16 +710,20 @@ class TestResumeWorkflowTimestamps:
 
 class TestHandoffEdgeCases:
     def test_corrupted_yaml_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
-        session_dir = tmp_path / "wf-test-corrupt"
+        sessions_dir = tmp_path / ".modastack" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path)
+        session_dir = sessions_dir / "wf-test-corrupt"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text(": : : invalid yaml [[[")
         result = _read_handoff("wf-test-corrupt", "setup")
         assert result == {}
 
     def test_empty_file_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
-        session_dir = tmp_path / "wf-test-empty"
+        sessions_dir = tmp_path / ".modastack" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path)
+        session_dir = sessions_dir / "wf-test-empty"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("")
         result = _read_handoff("wf-test-empty", "setup")

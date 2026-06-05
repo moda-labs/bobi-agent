@@ -69,15 +69,18 @@ class SlackAdapter:
 
 
 def build_adapter() -> ChatAdapter:
-    """Build a chat adapter from global config. Returns NullAdapter if unconfigured."""
+    """Build a chat adapter from per-repo config. Returns NullAdapter if unconfigured."""
     try:
-        from modastack.config import GlobalConfig
-        config = GlobalConfig.load()
-        token = config.slack_bot_token
-        channel = getattr(config, "slack_dm_channel", "") or "D0B51JP1N4C"
-        if token:
+        from modastack.config import LocalConfig
+        from modastack.sdk import get_repo_root
+        root = get_repo_root()
+        if not root:
+            return NullAdapter()
+        local = LocalConfig.load(root)
+        if local.slack_bot_token:
+            channel = local.slack_dm_channel
             log.info(f"Relay: Slack adapter → {channel}")
-            return SlackAdapter(token, channel)
+            return SlackAdapter(local.slack_bot_token, channel)
     except Exception as e:
         log.debug(f"Relay: failed to build adapter: {e}")
     return NullAdapter()

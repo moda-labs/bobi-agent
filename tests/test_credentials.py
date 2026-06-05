@@ -1,18 +1,18 @@
 """Tests for Credentials management."""
 
-from modastack.config import Credentials, CREDENTIALS_PATH
+from modastack.config import Credentials
 
 
 class TestCredentials:
 
     def test_load_missing_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.config.CREDENTIALS_PATH", tmp_path / "nope.yaml")
+        monkeypatch.setattr("modastack.config._credentials_path", lambda: tmp_path / "nope.yaml")
         creds = Credentials.load()
         assert creds.entries == {}
 
     def test_save_and_load_roundtrip(self, tmp_path, monkeypatch):
         creds_path = tmp_path / "credentials.yaml"
-        monkeypatch.setattr("modastack.config.CREDENTIALS_PATH", creds_path)
+        monkeypatch.setattr("modastack.config._credentials_path", lambda: creds_path)
 
         creds = Credentials()
         creds.add("myproject", linear_api_key="lin_test_123")
@@ -34,20 +34,20 @@ class TestCredentials:
         assert creds.get("missing") == {}
 
     def test_add_creates_entry(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.config.CREDENTIALS_PATH", tmp_path / "c.yaml")
+        monkeypatch.setattr("modastack.config._credentials_path", lambda: tmp_path / "c.yaml")
         creds = Credentials()
         creds.add("new", api_key="k1", token="t1")
         assert creds.entries["new"]["api_key"] == "k1"
         assert creds.entries["new"]["token"] == "t1"
 
     def test_add_skips_empty_values(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.config.CREDENTIALS_PATH", tmp_path / "c.yaml")
+        monkeypatch.setattr("modastack.config._credentials_path", lambda: tmp_path / "c.yaml")
         creds = Credentials()
         creds.add("proj", api_key="k1", empty_val="")
         assert "empty_val" not in creds.entries["proj"]
 
     def test_add_merges_into_existing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.config.CREDENTIALS_PATH", tmp_path / "c.yaml")
+        monkeypatch.setattr("modastack.config._credentials_path", lambda: tmp_path / "c.yaml")
         creds = Credentials(entries={"proj": {"key1": "v1"}})
         creds.add("proj", key2="v2")
         assert creds.entries["proj"]["key1"] == "v1"

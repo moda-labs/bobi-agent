@@ -109,13 +109,8 @@ def scan_github_issues(repo_config: RepoConfig) -> dict[str, list[dict]]:
 
     Returns: {"Todo": [issue_data, ...], "In Progress": [...], ...}
     """
-    from .config import GlobalConfig
-    bot_account = GlobalConfig.load().github_default_account
-    if not bot_account:
-        return {}
-
     result = subprocess.run(
-        ["gh", "issue", "list", "--state", "open", "--assignee", bot_account,
+        ["gh", "issue", "list", "--state", "open", "--assignee", "@me",
          "--json", "number,title,body,labels,comments,assignees,url", "--limit", "50"],
         capture_output=True, text=True, cwd=repo_config.path,
     )

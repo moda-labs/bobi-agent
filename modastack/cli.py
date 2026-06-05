@@ -12,11 +12,8 @@ truststore.inject_into_ssl()
 
 import click
 
-from .config import GlobalConfig, GLOBAL_CONFIG_DIR
-
 from .__version__ import __version__
 
-LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
 REPO_ROOT = Path(__file__).parent.parent
 
 
@@ -113,20 +110,18 @@ def _get_dashboard_url(repo_path: Path | None = None) -> str:
 @click.version_option(version=__version__, prog_name="modastack")
 def main():
     """Modastack — AI engineering manager + engineer team."""
-    GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(LOG_PATH),
-        ],
+        handlers=[logging.StreamHandler()],
     )
     repo = _detect_repo_root()
     if repo:
         from modastack.sdk import set_repo_root
         set_repo_root(repo)
+        state = _repo_state_dir(repo)
+        logging.getLogger().addHandler(logging.FileHandler(state / "manager.log"))
 
 
 def _has_systemd_service() -> bool:
@@ -231,33 +226,33 @@ def start(foreground, fresh, non_interactive):
 
 
 def _ensure_config(non_interactive: bool) -> None:
-    """Ensure global config exists, running interactive setup if needed."""
-    config_path = GLOBAL_CONFIG_DIR / "config.yaml"
-    if config_path.exists():
+    """Ensure per-repo local config exists, running interactive setup if needed."""
+    repo_path = _detect_repo_root()
+    if not repo_path:
         return
 
-    GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config = GlobalConfig.load()
+    local_path = repo_path / ".modastack" / "local.yaml"
+    if local_path.exists():
+        return
 
-    import secrets
-    config.webhook_secret = f"whsec_{secrets.token_hex(24)}"
+    from .config import LocalConfig
+    local = LocalConfig()
 
     if not non_interactive:
-        click.echo("First-time setup — configuring modastack.\n")
+        click.echo("First-time setup — configuring operator config.\n")
         try:
-            gh_token = click.prompt("  GitHub token (or enter to skip)", default="", show_default=False)
-            if gh_token:
-                config.github_token = gh_token
             slack_token = click.prompt("  Slack bot token (or enter to skip)", default="", show_default=False)
             if slack_token:
-                config.slack_bot_token = slack_token
+                local.slack_bot_token = slack_token
+                dm_channel = click.prompt("  Slack DM channel (or enter to skip)", default="", show_default=False)
+                if dm_channel:
+                    local.slack_dm_channel = dm_channel
         except (EOFError, click.Abort):
             pass
         click.echo()
 
-    config.save()
-    click.echo(f"Config created at {config_path}")
-    click.echo(f"Webhook secret: {config.webhook_secret}")
+    local.save(repo_path)
+    click.echo(f"Config created at {local_path}")
 
 
 def _clear_manager_session(repo_path: Path) -> None:
@@ -275,9 +270,6 @@ def _find_pid_path() -> Path | None:
         p = _repo_state_dir(repo_path) / "manager.pid"
         if p.exists():
             return p
-    legacy = GLOBAL_CONFIG_DIR / "modastack.pid"
-    if legacy.exists():
-        return legacy
     return None
 
 
@@ -361,7 +353,9 @@ def restart(fresh):
             capture_output=True, text=True, timeout=5,
         )
         pid = result.stdout.strip()
-        click.echo(f"Modastack restarted (pid {pid}). Logs: {GLOBAL_CONFIG_DIR / 'modastack.log'}")
+        repo_path = _detect_repo_root()
+        log_path = _repo_state_dir(repo_path) / "manager.log" if repo_path else "stderr"
+        click.echo(f"Modastack restarted (pid {pid}). Logs: {log_path}")
         return
 
     ctx = click.get_current_context()
@@ -495,13 +489,10 @@ def slack_reply(text, workspace, channel, thread):
 
     token = ""
     repo_path = _detect_repo_root()
-    if repo_path and (repo_path / ".modastack" / "local.yaml").exists():
+    if repo_path:
         from .config import LocalConfig
         local = LocalConfig.load(repo_path)
         token = local.slack_bot_token
-    if not token:
-        config = GlobalConfig.load()
-        token = config.slack_token_for(workspace)
     if not token:
         click.echo(f"No bot token for workspace {workspace}", err=True)
         sys.exit(1)
@@ -916,8 +907,6 @@ def events(tail, decisions_only):
 
     if not decisions_only:
         events_path = (repo_path / ".modastack" / "state" / "events.jsonl") if repo_path else None
-        if not events_path or not events_path.exists():
-            events_path = Path.home() / ".modastack" / "manager" / "events.jsonl"
         if events_path and events_path.exists():
             for line in events_path.read_text().strip().splitlines():
                 entry = json.loads(line)
@@ -932,8 +921,6 @@ def events(tail, decisions_only):
                 ))
 
     decisions_path = (repo_path / ".modastack" / "state" / "decisions.jsonl") if repo_path else None
-    if not decisions_path or not decisions_path.exists():
-        decisions_path = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
     if decisions_path and decisions_path.exists():
         for line in decisions_path.read_text().strip().splitlines():
             entry = json.loads(line)
@@ -1178,26 +1165,16 @@ def workflow_validate(path):
     from .workflow.schema import load_workflow
     try:
         wf = load_workflow(Path(path))
-        order = wf.topological_order()
-        click.echo(f"Valid: {wf.name} v{wf.version} ({len(wf.nodes)} nodes)")
-        click.echo(f"Trigger: {wf.trigger.event}")
-        if wf.trigger.filter:
-            click.echo(f"Filter: {wf.trigger.filter}")
-        click.echo(f"Execution order: {' -> '.join(order)}")
+        step_names = [s.name for s in wf.steps]
+        click.echo(f"Valid: {wf.name} ({len(wf.steps)} steps)")
+        if wf.trigger:
+            click.echo(f"Trigger: {wf.trigger.strip()}")
+        click.echo(f"Steps: {' -> '.join(step_names)}")
 
-        # Report variable scopes referenced
         raw = Path(path).read_text()
         refs = set(re.findall(r'\$\{\{(\w+)\.', raw))
-        builtin_scopes = {"event", "config", "repo", "handoff"} | set(wf.nodes.keys())
-        unknown = refs - builtin_scopes
-        click.echo(f"Variable scopes: {', '.join(sorted(refs))}")
-        if unknown:
-            click.echo(f"Warning: unknown scopes (may be node outputs): {', '.join(sorted(unknown))}")
-
-        # Show node types breakdown
-        from collections import Counter
-        type_counts = Counter(n.type.value for n in wf.nodes.values())
-        click.echo(f"Node types: {', '.join(f'{t}={c}' for t, c in sorted(type_counts.items()))}")
+        if refs:
+            click.echo(f"Variable scopes: {', '.join(sorted(refs))}")
 
     except Exception as e:
         click.echo(f"Invalid: {e}", err=True)
@@ -1216,8 +1193,7 @@ def roles():
 
 
 @roles.command("list")
-@click.option("--repo", default=None, help="Include repo-specific roles from this repo")
-def role_list(repo):
+def role_list():
     """List available agent roles.
 
     Scans two tiers (repo overrides built-in):
@@ -1225,18 +1201,11 @@ def role_list(repo):
       2. Repo-local: <repo>/.modastack/agents/
 
     Usage:
-        modastack role list
-        modastack role list --repo jobtack
+        modastack roles list
     """
     from .prompts.resolver import discover_roles, format_role_list
 
-    repo_path = None
-    if repo:
-        repo_path = Path(_resolve_repo(repo))
-    else:
-        detected = _detect_repo_root()
-        if detected:
-            repo_path = detected
+    repo_path = _detect_repo_root()
     roles = discover_roles(repo_path)
     click.echo(format_role_list(roles))
 
@@ -1254,20 +1223,6 @@ def _slugify(text: str) -> str:
     import re
     slug = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
     return slug or "monitor"
-
-
-def _resolve_monitor_repo(repo: str) -> Path:
-    """Resolve a --repo argument (path or registered name) to a Path."""
-    candidate = Path(repo).expanduser()
-    if candidate.exists():
-        return candidate.resolve()
-    config = GlobalConfig.load()
-    for registered in config.repos:
-        if registered.name == repo or str(registered) == repo:
-            return registered
-        if "/" in repo and registered.name == repo.split("/")[-1]:
-            return registered
-    raise click.ClickException(f"Repo not found: {repo} (not a path or registered repo)")
 
 
 @monitors.command("list")
@@ -1306,21 +1261,22 @@ def monitor_list():
 @click.option("--event", default=None, help="Synthetic event type to inject (default monitor/<name>)")
 @click.option("--check", default="", help="Native check runner (pr_conflicts, stale_prs)")
 @click.option("--url", default=None, help="URL the description references (e.g. deploy health)")
-@click.option("--repo", default=None, help="Scope to a repo (path or name); else applies globally")
-def monitor_add(name, interval, description, event, check, url, repo):
-    """Add a monitor, routing it to the right writable storage tier.
-
-    With --repo it lands in that repo's .modastack.yaml; otherwise in
-    ~/.modastack/monitors.yaml (applies across all repos).
+def monitor_add(name, interval, description, event, check, url):
+    """Add a monitor to the current repo.
 
     Usage:
         modastack monitors add "PR conflict check" --interval 15m \\
             --description "Check open PRs for merge conflicts"
         modastack monitors add deploy-health --interval 5m \\
-            --url https://example.com --repo jobtack
+            --url https://example.com
     """
     from .monitors.schema import Monitor, parse_interval
     from .monitors.registry import MonitorRegistry
+
+    repo_path = _detect_repo_root()
+    if not repo_path:
+        click.echo("Not inside a modastack repo.", err=True)
+        raise SystemExit(1)
 
     slug = _slugify(name)
     try:
@@ -1341,13 +1297,6 @@ def monitor_add(name, interval, description, event, check, url, repo):
         extra=extra,
     )
 
-    if repo:
-        repo_path = _resolve_monitor_repo(repo)
-    else:
-        repo_path = _detect_repo_root()
-        if not repo_path:
-            click.echo("Not inside a modastack repo. Use --repo or run from inside a repo.", err=True)
-            raise SystemExit(1)
     MonitorRegistry.add_repo(m, repo_path)
     click.echo(f"Added monitor '{slug}' to {repo_path}/.modastack/monitors.yaml")
     click.echo(f"  interval={interval} event={m.event} "
@@ -1356,19 +1305,17 @@ def monitor_add(name, interval, description, event, check, url, repo):
 
 @monitors.command("pause")
 @click.argument("name")
-@click.option("--repo", default=None, help="Pause only for a specific repo")
-def monitor_pause(name, repo):
-    """Disable a monitor (writes enabled: false to a writable tier).
+def monitor_pause(name):
+    """Disable a monitor (writes enabled: false).
 
     Usage:
         modastack monitors pause stale-pr-check
-        modastack monitors pause pr-conflict-check --repo jobtack
     """
     from .monitors.registry import MonitorRegistry
 
-    repo_path = _resolve_monitor_repo(repo) if repo else None
+    repo_path = _detect_repo_root()
     if MonitorRegistry.pause(name, repo_path):
-        where = f"{repo_path}/.modastack/monitors.yaml" if repo_path else "~/.modastack/monitors.yaml"
+        where = f"{repo_path}/.modastack/monitors.yaml" if repo_path else ".modastack/monitors.yaml"
         click.echo(f"Paused monitor '{name}' (enabled: false in {where})")
     else:
         click.echo(f"No monitor named '{name}' found.", err=True)
@@ -1377,9 +1324,8 @@ def monitor_pause(name, repo):
 
 @monitors.command("remove")
 @click.argument("name")
-@click.option("--repo", default=None, help="Remove from a specific repo's config")
-def monitor_remove(name, repo):
-    """Remove a monitor from a user-writable tier.
+def monitor_remove(name):
+    """Remove a monitor from the current repo.
 
     Built-in defaults can't be deleted — pause them instead.
 
@@ -1388,7 +1334,7 @@ def monitor_remove(name, repo):
     """
     from .monitors.registry import MonitorRegistry
 
-    repo_path = _resolve_monitor_repo(repo) if repo else None
+    repo_path = _detect_repo_root()
     result = MonitorRegistry.remove(name, repo_path)
     if result == "removed":
         click.echo(f"Removed monitor '{name}'.")
@@ -1420,15 +1366,14 @@ def event_server_cmd():
 @click.option("--port", default=None, type=int, help="Override webhook port")
 def event_server_start(foreground, port):
     """Start the local event server."""
-    config = GlobalConfig.load()
-    es_port = port or config.webhook_port
+    es_port = port or 8080
 
     if foreground:
         from modastack.manager.events.event_server import run_server
-        run_server(es_port, config.webhook_secret, config.slack_signing_secret)
+        run_server(es_port)
     else:
         from modastack.manager.events.event_server import ensure_running
-        ensure_running(es_port, config.webhook_secret, config.slack_signing_secret)
+        ensure_running(es_port, repo_path=_detect_repo_root())
         click.echo(f"Event server running on port {es_port}")
         click.echo(f"  GitHub:  http://localhost:{es_port}/webhooks/github")
         click.echo(f"  Linear:  http://localhost:{es_port}/webhooks/linear")
@@ -1439,7 +1384,11 @@ def event_server_start(foreground, port):
 def event_server_stop():
     """Stop the local event server."""
     import signal
-    pid_file = GLOBAL_CONFIG_DIR / "event-server.pid"
+    repo_path = _detect_repo_root()
+    if not repo_path:
+        click.echo("Not inside a modastack repo.", err=True)
+        raise SystemExit(1)
+    pid_file = _repo_state_dir(repo_path) / "event-server.pid"
     if not pid_file.exists():
         click.echo("Event server is not running")
         return
@@ -1467,8 +1416,7 @@ def event_server_restart(ctx, port):
 def event_server_status():
     """Show event server status."""
     import urllib.request
-    config = GlobalConfig.load()
-    es_port = config.webhook_port
+    es_port = 8080
     try:
         req = urllib.request.Request(f"http://localhost:{es_port}/health")
         with urllib.request.urlopen(req, timeout=2) as resp:
@@ -1484,7 +1432,6 @@ main.add_command(event_server_cmd)
 
 
 @agents.command("launch")
-@click.option("--repo", default=None, help="Repo path or registered name")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
 @click.option("--role", required=True, help="Agent role (see 'modastack roles list')")
 @click.option("--task", default=None, help="Task description / context for the agent")
@@ -1496,24 +1443,23 @@ main.add_command(event_server_cmd)
               help='JSON identity of requester, e.g. \'{"from":"Alice","channel":"C1"}\'')
 @click.option("--non-interactive", "non_interactive", is_flag=True,
               help="Run without manager — agent makes all decisions autonomously")
-def agents_launch(repo, workflow, role, task, timeout, wait, post_event, requested_by, non_interactive):
+def agents_launch(workflow, role, task, timeout, wait, post_event, requested_by, non_interactive):
     """Launch an agent with a workflow and role.
 
     Every agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
     Use 'modastack roles list' to see available roles.
 
     Examples:
-        modastack agents launch -w issue-lifecycle --role engineer --repo jobtack --task "Work on #42"
-        modastack agents launch -w adhoc --role engineer --repo jobtack --task "Why is CI failing?"
-        modastack agents launch -w adhoc --role engineer --non-interactive --repo jobtack --task "Fix the bug"
+        modastack agents launch -w issue-lifecycle --role engineer --task "Work on #42"
+        modastack agents launch -w adhoc --role engineer --task "Why is CI failing?"
     """
-    _dispatch_agent(repo=repo, task=task, workflow=workflow, role=role,
+    _dispatch_agent(task=task, workflow=workflow, role=role,
                     timeout=timeout, wait=wait, post_event=post_event,
                     requested_by=requested_by,
                     interactive=not non_interactive)
 
 
-def _dispatch_agent(*, repo, task, workflow, role, timeout, wait, post_event, requested_by, interactive=True):
+def _dispatch_agent(*, task, workflow, role, timeout, wait, post_event, requested_by, interactive=True):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -1522,14 +1468,14 @@ def _dispatch_agent(*, repo, task, workflow, role, timeout, wait, post_event, re
     if not task:
         task = f"Run workflow {workflow}"
 
-    # --- Wait / check mode ---
-    if wait:
-        cwd = _resolve_repo(repo) if repo else os.getcwd()
-        _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
-        return
+    repo_path = _detect_repo_root()
+    if not repo_path:
+        click.echo("Not inside a modastack repo.", err=True)
+        raise SystemExit(1)
+    cwd = str(repo_path)
 
-    cwd = _resolve_repo(repo)
-    if not cwd:
+    if wait:
+        _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
         return
 
     # --- Validate role ---
@@ -1562,23 +1508,6 @@ def _dispatch_agent(*, repo, task, workflow, role, timeout, wait, post_event, re
     )
     click.echo(f"Agent started: {session_name}")
 
-
-def _resolve_repo(repo: str | None) -> str | None:
-    """Resolve a repo flag to a local path."""
-    if not repo:
-        click.echo("--repo is required.", err=True)
-        raise SystemExit(1)
-    path = Path(repo).expanduser()
-    if path.is_dir():
-        return str(path.resolve())
-    config = GlobalConfig.load()
-    for rp in config.repos:
-        if rp.name == repo or str(rp) == repo:
-            return str(rp)
-        if "/" in repo and rp.name == repo.split("/")[-1]:
-            return str(rp)
-    click.echo(f"Repo not found: {repo}", err=True)
-    raise SystemExit(1)
 
 
 def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> None:

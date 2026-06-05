@@ -21,7 +21,6 @@ from pathlib import Path
 import truststore
 truststore.inject_into_ssl()
 
-from modastack.config import GLOBAL_CONFIG_DIR
 from modastack.manager.events.slack_responder import _markdown_to_slack
 from modastack.manager.session import (
     ManagerSession, set_default_session,
@@ -32,11 +31,6 @@ log = logging.getLogger(__name__)
 
 HEALTH_CHECK_INTERVAL = 30
 DRAIN_INTERVAL = 2
-PID_PATH = GLOBAL_CONFIG_DIR / "modastack.pid"
-
-
-def _cleanup_pid():
-    PID_PATH.unlink(missing_ok=True)
 
 
 def _post_dm(token: str, channel: str, text: str) -> None:
@@ -126,15 +120,16 @@ def _drain_loop():
             inject(text)
 
 
-def _kill_stale_instances():
+def _kill_stale_instances(repo_path: Path):
     """Kill any running modastack start processes besides ourselves."""
     import subprocess as sp
     import signal as sig
     my_pid = os.getpid()
 
-    if PID_PATH.exists():
+    pid_file = repo_path / ".modastack" / "state" / "manager.pid"
+    if pid_file.exists():
         try:
-            old_pid = int(PID_PATH.read_text().strip())
+            old_pid = int(pid_file.read_text().strip())
             if old_pid != my_pid:
                 os.kill(old_pid, sig.SIGTERM)
                 log.info(f"Killed stale instance from PID file (pid {old_pid})")
@@ -196,12 +191,10 @@ def run(repo_path: Path | None = None, **kwargs):
     state_dir.mkdir(parents=True, exist_ok=True)
 
     log.info(f"Modastack starting for {repo_path.name}")
-    _kill_stale_instances()
+    _kill_stale_instances(repo_path)
 
-    # Write PID to both per-repo state dir and legacy path
     pid_str = str(os.getpid())
     (state_dir / "manager.pid").write_text(pid_str)
-    PID_PATH.write_text(pid_str)
 
     def _cleanup():
         pid_file = state_dir / "manager.pid"
@@ -211,7 +204,6 @@ def run(repo_path: Path | None = None, **kwargs):
         except OSError:
             pass
         (state_dir / "dashboard.port").unlink(missing_ok=True)
-        _cleanup_pid()
     atexit.register(_cleanup)
 
     def _handle_term(signum, frame):
@@ -265,7 +257,7 @@ def run(repo_path: Path | None = None, **kwargs):
             log.info("Saved event server credentials are stale — re-registering")
             from .event_server import ensure_running, register
             es_port = int(es_url.rsplit(":", 1)[-1].rstrip("/"))
-            ensure_running(es_port)
+            ensure_running(es_port, repo_path=repo_path)
             subs = _build_subscriptions(repo_path)
             es_deployment, es_key = register(es_url, repo_path.name, subs)
 
@@ -284,7 +276,7 @@ def run(repo_path: Path | None = None, **kwargs):
         es_port = 8080
         base_url = f"http://localhost:{es_port}"
 
-        ensure_running(es_port)
+        ensure_running(es_port, repo_path=repo_path)
 
         subs = _build_subscriptions(repo_path)
         deployment_id, api_key = register(base_url, repo_path.name, subs)

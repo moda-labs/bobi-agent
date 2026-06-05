@@ -1,6 +1,7 @@
 """Tests for event client — normalization, formatting, queue ingestion."""
 
 import json
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from modastack.manager.events.event_client import (
@@ -138,12 +139,12 @@ class TestNormalizeLinear:
 
 class TestNormalizeSlack:
 
-    @patch("modastack.manager.events.event_client.GlobalConfig")
+    @patch("modastack.config.LocalConfig")
+    @patch("modastack.sdk.get_repo_root", return_value=Path("/tmp/repo"))
     @patch("modastack.manager.events.event_client._resolve_slack_user")
-    def test_dm(self, mock_resolve, mock_config):
+    def test_dm(self, mock_resolve, mock_root, mock_local):
         mock_resolve.return_value = "Zach"
-        mock_config.load.return_value = MagicMock(slack_bot_token="xoxb-test")
-        mock_config.load.return_value.slack_token_for.return_value = "xoxb-test"
+        mock_local.load.return_value = MagicMock(slack_bot_token="xoxb-test")
 
         data = {
             "source": "slack", "type": "slack.dm", "workspace": "T123",
@@ -162,12 +163,12 @@ class TestNormalizeSlack:
         assert result["data"]["workspace"] == "T123"
         assert result["data"]["channel"] == "D456"
 
-    @patch("modastack.manager.events.event_client.GlobalConfig")
+    @patch("modastack.config.LocalConfig")
+    @patch("modastack.sdk.get_repo_root", return_value=Path("/tmp/repo"))
     @patch("modastack.manager.events.event_client._resolve_slack_user")
-    def test_mention_strips_bot_prefix(self, mock_resolve, mock_config):
+    def test_mention_strips_bot_prefix(self, mock_resolve, mock_root, mock_local):
         mock_resolve.return_value = "Zach"
-        mock_config.load.return_value = MagicMock(slack_bot_token="xoxb-test")
-        mock_config.load.return_value.slack_token_for.return_value = "xoxb-test"
+        mock_local.load.return_value = MagicMock(slack_bot_token="xoxb-test")
 
         data = {
             "source": "slack", "type": "slack.mention", "workspace": "T123",

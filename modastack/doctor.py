@@ -5,15 +5,14 @@ from __future__ import annotations
 import shutil
 
 from modastack.browser import CheckResult
-from modastack.config import GlobalConfig
 
 
 def run_doctor() -> list[CheckResult]:
     results = []
 
     results.append(_check_claude_cli())
-    results.append(_check_global_config())
-    results.append(_check_repos())
+    results.append(_check_repo_config())
+    results.append(_check_local_config())
     results.append(_check_workflows())
     results.append(_check_event_server())
     results.append(_check_recent_events())
@@ -29,31 +28,32 @@ def _check_claude_cli() -> CheckResult:
                        hint="Install Claude Code: https://docs.anthropic.com/en/docs/claude-code")
 
 
-def _check_global_config() -> CheckResult:
-    from modastack.config import GLOBAL_CONFIG_PATH
-    if GLOBAL_CONFIG_PATH.exists():
-        return CheckResult("Global config", ok=True,
-                           detail=str(GLOBAL_CONFIG_PATH))
-    return CheckResult("Global config", ok=False,
-                       detail="missing",
-                       hint="Run `modastack start` to create it")
+def _check_repo_config() -> CheckResult:
+    from modastack.sdk import get_repo_root
+    root = get_repo_root()
+    if not root:
+        return CheckResult("Repo config", ok=False,
+                           detail="not inside a modastack repo",
+                           hint="Run from a directory with .modastack/config.yaml")
+    config_path = root / ".modastack" / "config.yaml"
+    if config_path.exists():
+        return CheckResult("Repo config", ok=True, detail=str(config_path))
+    return CheckResult("Repo config", ok=False,
+                       detail="missing .modastack/config.yaml",
+                       hint="Run `modastack init` to create it")
 
 
-def _check_repos() -> CheckResult:
-    try:
-        config = GlobalConfig.load()
-        if not config.repos:
-            return CheckResult("Registered repos", ok=False,
-                               detail="none registered",
-                               hint="Run `modastack setup <repo-path>`")
-        missing = [p for p in config.repos if not p.exists()]
-        if missing:
-            return CheckResult("Registered repos", ok=False,
-                               detail=f"{len(missing)} missing: {', '.join(str(p) for p in missing)}")
-        return CheckResult("Registered repos", ok=True,
-                           detail=f"{len(config.repos)} registered")
-    except Exception as e:
-        return CheckResult("Registered repos", ok=False, detail=str(e))
+def _check_local_config() -> CheckResult:
+    from modastack.sdk import get_repo_root
+    root = get_repo_root()
+    if not root:
+        return CheckResult("Local config", ok=False, detail="no repo detected")
+    local_path = root / ".modastack" / "local.yaml"
+    if local_path.exists():
+        return CheckResult("Local config", ok=True, detail=str(local_path))
+    return CheckResult("Local config", ok=False,
+                       detail="missing .modastack/local.yaml",
+                       hint="Run `modastack init` to create operator config")
 
 
 def _check_workflows() -> CheckResult:
@@ -77,14 +77,17 @@ def _check_event_server() -> CheckResult:
     import json
     import urllib.request
 
-    config = GlobalConfig.load()
-    port = config.webhook_port
+    from modastack.config import LocalConfig
+    from modastack.sdk import get_repo_root
 
-    # If cloud config is present, report that instead
-    if config.event_server_url and config.event_server_api_key:
-        return CheckResult("Event server", ok=True,
-                           detail=f"cloud mode ({config.event_server_url})")
+    root = get_repo_root()
+    if root:
+        local = LocalConfig.load(root)
+        if local.event_server_url and local.event_server_api_key:
+            return CheckResult("Event server", ok=True,
+                               detail=f"remote ({local.event_server_url})")
 
+    port = 8080
     try:
         req = urllib.request.Request(f"http://localhost:{port}/health")
         with urllib.request.urlopen(req, timeout=2) as resp:
@@ -100,33 +103,12 @@ def _check_event_server() -> CheckResult:
 
 
 def _check_recent_events() -> CheckResult:
-    """Check if events have been received recently."""
-    import datetime
-    import json
-    import time
-
-    from modastack.manager.events.event_client import _state_path
-
-    events_file = _state_path("events.jsonl")
+    from modastack.sdk import get_repo_root
+    root = get_repo_root()
+    if not root:
+        return CheckResult("Recent events", ok=False, detail="no repo detected")
+    events_file = root / ".modastack" / "state" / "events.jsonl"
     if not events_file.exists():
-        return CheckResult("Recent events", ok=True,
-                           detail="no events yet (normal for new installs)")
-
-    one_hour_ago = time.time() - 3600
-    recent_count = 0
-    try:
-        for line in events_file.read_text().splitlines()[-100:]:
-            entry = json.loads(line)
-            ts = entry.get("timestamp", "")
-            if ts:
-                dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                if dt.timestamp() > one_hour_ago:
-                    recent_count += 1
-    except Exception:
-        pass
-
-    if recent_count > 0:
-        return CheckResult("Recent events", ok=True,
-                           detail=f"{recent_count} events in the last hour")
-    return CheckResult("Recent events", ok=True,
-                       detail="no events in the last hour")
+        return CheckResult("Recent events", ok=True, detail="no events yet")
+    lines = events_file.read_text().strip().splitlines()
+    return CheckResult("Recent events", ok=True, detail=f"{len(lines)} events logged")

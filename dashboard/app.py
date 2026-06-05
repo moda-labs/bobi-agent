@@ -64,7 +64,7 @@ async def api_log(limit: int = Query(50, ge=1, le=200), session: str = Query("")
 
 @app.get("/api/logs")
 async def api_logs(limit: int = Query(200, ge=1, le=2000)):
-    """Tail of the modastack process log (~/.modastack/modastack.log)."""
+    """Tail of the modastack process log (.modastack/state/manager.log)."""
     lines = await asyncio.to_thread(data.read_modastack_log, limit)
     return {"lines": lines}
 
@@ -143,7 +143,11 @@ def _do_ask(question, timeout, source, correlation_id):
 
 
 def _log_ask(correlation_id: str, source: str, question: str):
-    events_log = Path.home() / ".modastack" / "manager" / "events.jsonl"
+    from modastack.sdk import get_repo_root
+    root = get_repo_root()
+    if not root:
+        return
+    events_log = root / ".modastack" / "state" / "events.jsonl"
     events_log.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),

@@ -603,6 +603,12 @@ def _run_agent_entry(args: dict) -> None:
     interactive = args.get("interactive", True)
     role = args.get("role", "engineer")
 
+    from modastack.sdk import set_repo_root
+    from modastack.cli import _detect_repo_root
+    repo_root = _detect_repo_root(Path(cwd))
+    if repo_root:
+        set_repo_root(repo_root)
+
     dispatcher = WorkflowDispatcher()
     dispatcher.load_all_workflows()
     workflow = dispatcher.find_workflow(workflow_name)
