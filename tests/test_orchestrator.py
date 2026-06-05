@@ -483,13 +483,15 @@ class TestQAPhase:
 
     def test_qa_workflow_with_frontend(self, tmp_path, monkeypatch):
         """Full workflow: frontend project runs QA step."""
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        sessions = tmp_path / "_repo" / ".modastack" / "sessions"
+        sessions.mkdir(parents=True)
 
         original_init = FakeClient.__init__
 
         def _patched_init(self_client):
             original_init(self_client)
-            d = tmp_path / "wf-t-r-1"
+            d = sessions / "wf-t-r-1"
             d.mkdir(parents=True, exist_ok=True)
             (d / "handoff-pickup.yaml").write_text(
                 "complexity: medium\nneeds_spec: false\nhas_frontend: true\n"
@@ -520,13 +522,15 @@ class TestQAPhase:
 
     def test_qa_step_skipped_by_agent_for_backend(self, tmp_path, monkeypatch):
         """Backend project: QA step still runs but agent reports not_applicable."""
-        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        sessions = tmp_path / "_repo" / ".modastack" / "sessions"
+        sessions.mkdir(parents=True)
 
         original_init = FakeClient.__init__
 
         def _patched_init(self_client):
             original_init(self_client)
-            d = tmp_path / "wf-t-r-1"
+            d = sessions / "wf-t-r-1"
             d.mkdir(parents=True, exist_ok=True)
             (d / "handoff-pickup.yaml").write_text(
                 "complexity: small\nneeds_spec: false\nhas_frontend: false\n"
