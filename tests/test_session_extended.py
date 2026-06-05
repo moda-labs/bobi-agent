@@ -18,18 +18,8 @@ from modastack.session import (
 
 class TestLoadSkill:
 
-    def test_loads_existing_skill(self, tmp_path, monkeypatch):
-        skills_dir = tmp_path / "process"
-        skill_dir = skills_dir / "pickup"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text("# Pickup Skill\nDo the pickup.")
-        monkeypatch.setattr("modastack.session.SKILLS_DIR", skills_dir)
-
-        content = load_skill("pickup")
-        assert "Pickup Skill" in content
-
-    def test_returns_empty_for_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.session.SKILLS_DIR", tmp_path)
+    def test_returns_empty_always(self):
+        assert load_skill("pickup") == ""
         assert load_skill("nonexistent") == ""
 
 

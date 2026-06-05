@@ -1,8 +1,24 @@
 [project]
 name = "modastack"
-version = "0.2.0"
+version = "0.6.1"
 description = "AI engineering team: manager + engineer agents with Linear, GitHub, Slack"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Moda Labs", email = "zach@modalabs.ai" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
+
 dependencies = [
     "httpx>=0.27",
     "pyyaml>=6.0",
@@ -15,6 +31,11 @@ dependencies = [
     "jinja2>=3.1",
     "claude-agent-sdk>=0.2.87",
 ]
+
+[project.urls]
+Homepage = "https://github.com/moda-labs/modastack"
+Repository = "https://github.com/moda-labs/modastack"
+Issues = "https://github.com/moda-labs/modastack/issues"
 
 [project.optional-dependencies]
 dev = [

@@ -1,8 +1,11 @@
 """Session registry — persistent tracking for all Claude Code sessions.
 
 Every session (manager or engineer) is tracked here. Sessions persist
-across restarts via a JSON registry at ~/.modastack/sessions/registry.json.
+across restarts via state.json files in per-session directories.
 Each session wraps a ClaudeSDKClient with connect/resume/query/disconnect.
+
+All state lives under <repo>/.modastack/sessions/. The repo root is set
+at startup by consumer.run() via set_repo_root().
 """
 
 from __future__ import annotations
@@ -19,8 +22,33 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 CLAUDE_CLI = shutil.which("claude") or "/opt/homebrew/bin/claude"
+
+_repo_root: Path | None = None
+
+
+def set_repo_root(path: Path) -> None:
+    """Set the repo root for all session state paths."""
+    global _repo_root
+    _repo_root = path
+
+
+def get_repo_root() -> Path | None:
+    return _repo_root
+
+
+def _sessions_dir() -> Path:
+    """Per-repo sessions directory."""
+    if _repo_root:
+        d = _repo_root / ".modastack" / "sessions"
+    else:
+        d = Path.home() / ".modastack" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# Backward compat — modules that import SESSION_DIR get the legacy path
+# at import time. Runtime code should use _sessions_dir() instead.
 SESSION_DIR = Path.home() / ".modastack" / "sessions"
-REGISTRY_PATH = SESSION_DIR / "registry.json"
 
 
 def get_cli_path() -> str:
@@ -59,21 +87,21 @@ def _pid_alive(pid: int) -> bool:
 class SessionRegistry:
     """Directory-per-session registry.
 
-    Each session gets a directory at ~/.modastack/sessions/<name>/
+    Each session gets a directory at <repo>/.modastack/sessions/<name>/
     containing state.json, handoff-<step>.yaml files, and log.jsonl.
     Active sessions have a live pid; completed ones remain for history.
     """
 
     def __init__(self):
-        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        _sessions_dir()
 
     @staticmethod
     def session_dir(name: str) -> Path:
-        return SESSION_DIR / name
+        return _sessions_dir() / name
 
     @staticmethod
     def _state_path(name: str) -> Path:
-        return SESSION_DIR / name / "state.json"
+        return _sessions_dir() / name / "state.json"
 
     def register(self, entry: SessionEntry) -> None:
         d = self.session_dir(entry.name)
@@ -95,7 +123,6 @@ class SessionRegistry:
         path.write_text(json.dumps(data, indent=2))
 
     def mark_done(self, name: str) -> None:
-        """Mark a session as done — clear the pid so it's no longer active."""
         self.update(name, status="done", pid=0)
 
     def get(self, name: str) -> SessionEntry | None:
@@ -109,9 +136,9 @@ class SessionRegistry:
             return None
 
     def list_active(self) -> list[SessionEntry]:
-        """List sessions with a live process, reaping dead ones."""
         result = []
-        for d in SESSION_DIR.iterdir():
+        sd = _sessions_dir()
+        for d in sd.iterdir():
             if not d.is_dir():
                 continue
             state = d / "state.json"
@@ -132,7 +159,8 @@ class SessionRegistry:
 
     def list_all(self) -> list[SessionEntry]:
         result = []
-        for d in SESSION_DIR.iterdir():
+        sd = _sessions_dir()
+        for d in sd.iterdir():
             if not d.is_dir():
                 continue
             state = d / "state.json"
@@ -149,11 +177,11 @@ class SessionRegistry:
 
     @staticmethod
     def handoff_path(name: str, step: str) -> Path:
-        return SESSION_DIR / name / f"handoff-{step}.yaml"
+        return _sessions_dir() / name / f"handoff-{step}.yaml"
 
     @staticmethod
     def log_path(name: str) -> Path:
-        p = SESSION_DIR / name / "log.jsonl"
+        p = _sessions_dir() / name / "log.jsonl"
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -169,20 +197,20 @@ def get_registry() -> SessionRegistry:
 
 
 def save_session_id(name: str, session_id: str) -> None:
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    (SESSION_DIR / f"{name}.id").write_text(session_id)
+    sd = _sessions_dir()
+    (sd / f"{name}.id").write_text(session_id)
     registry = get_registry()
     registry.update(name, session_id=session_id)
 
 
 def load_session_id(name: str) -> str:
-    path = SESSION_DIR / f"{name}.id"
+    path = _sessions_dir() / f"{name}.id"
     if path.exists():
         return path.read_text().strip()
     return ""
 
 
-def log_activity(event: str, data: dict | None = None, session: str = "moda-manager") -> None:
+def log_activity(event: str, data: dict | None = None, session: str = "") -> None:
     entry = {"event": event, "ts": time.time()}
     if data:
         entry.update(data)

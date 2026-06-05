@@ -1,0 +1,16 @@
+# Built-in monitor defaults — shipped with modastack.
+#
+# READ-ONLY at runtime. The manager never writes here.
+# Override or disable in your repo's .modastack/monitors.yaml.
+monitors:
+  - name: pr-conflict-check
+    description: Check open PRs across all registered repos for merge conflicts
+    interval: 15m
+    event: monitor/pr.conflict_detected
+    check: pr_conflicts
+
+  - name: stale-pr-check
+    description: Flag open PRs with no activity in 48 hours
+    interval: 1h
+    event: monitor/pr.stale
+    check: stale_prs

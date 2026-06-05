@@ -1,0 +1,16 @@
+task_tracking:
+  system: github-issues
+  project: MODA
+  trigger_labels:
+  - agent
+  skip_labels:
+  - blocked
+  - human-only
+agent:
+  tool: claude
+  max_parallel: 2
+verify:
+  test_command: pytest tests/ --ignore=tests/integration/ --timeout=10
+  review_required: true
+  auto_merge: false
+credentials: modastack

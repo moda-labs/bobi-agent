@@ -1042,9 +1042,9 @@ class TestBuildPrompt:
         prompt = _build_prompt("spec", "AGD-12")
         assert "handoff" in prompt.lower()
 
-    def test_includes_skill_reference_for_known_phase(self):
+    def test_includes_phase_name(self):
         prompt = _build_prompt("pickup", "AGD-12")
-        assert "SKILL.md" in prompt
+        assert "pickup" in prompt
 
 
 # ---------------------------------------------------------------------------

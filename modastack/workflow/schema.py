@@ -25,6 +25,7 @@ class HandoffContract:
 class StepDef:
     name: str
     prompt: str = ""
+    agent: str = ""
     handoff: HandoffContract = field(default_factory=HandoffContract)
     timeout: int = 1800
 
@@ -72,6 +73,7 @@ def load_workflow(path: Path) -> Workflow:
         step = StepDef(
             name=s["name"],
             prompt=s.get("prompt", ""),
+            agent=s.get("agent", ""),
             handoff=handoff,
             timeout=s.get("timeout", 1800),
             condition=s.get("if", ""),
