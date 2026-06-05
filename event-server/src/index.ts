@@ -5,6 +5,17 @@ interface Env {
 	DEPLOYMENT_SESSION: DurableObjectNamespace;
 	WEBHOOK_SECRET?: string;
 	SLACK_SIGNING_SECRET?: string;
+	GITHUB_CLIENT_ID?: string;
+	GITHUB_CLIENT_SECRET?: string;
+}
+
+interface UserRecord {
+	github_user_id: number;
+	github_username: string;
+	github_token: string;
+	session_token: string;
+	created_at: string;
+	last_seen: string;
 }
 
 export default {
@@ -29,6 +40,15 @@ export default {
 		}
 		if (request.method === "PUT" && path.startsWith("/deployments/") && path.endsWith("/subscriptions")) {
 			return handleUpdateSubscriptions(request, env, path);
+		}
+		if (request.method === "DELETE" && path.match(/^\/deployments\/[^/]+$/)) {
+			return handleDeleteDeployment(request, env, path);
+		}
+		if (request.method === "GET" && path === "/auth/config") {
+			return Response.json({ client_id: env.GITHUB_CLIENT_ID || "" });
+		}
+		if (request.method === "POST" && path === "/auth/github/callback") {
+			return handleAuthCallback(request, env);
 		}
 		if (request.method === "GET" && path === "/health") {
 			return Response.json({ status: "ok" });
@@ -380,4 +400,178 @@ async function handleUpdateSubscriptions(request: Request, env: Env, path: strin
 async function findSubscribedDeployments(env: Env, key: string): Promise<string[]> {
 	const data = await env.EVENTS.get(`subscriptions:${key}`);
 	return data ? JSON.parse(data) : [];
+}
+
+// ---------------------------------------------------------------------------
+// Auth: GitHub OAuth callback
+// ---------------------------------------------------------------------------
+
+async function handleAuthCallback(request: Request, env: Env): Promise<Response> {
+	let body: Record<string, unknown>;
+	try {
+		body = await request.json() as Record<string, unknown>;
+	} catch {
+		return new Response("Invalid JSON", { status: 400 });
+	}
+
+	const code = body.code as string;
+	const redirectUri = body.redirect_uri as string;
+
+	if (!code) {
+		return Response.json({ error: "code is required" }, { status: 400 });
+	}
+
+	if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
+		return Response.json({ error: "GitHub OAuth not configured" }, { status: 500 });
+	}
+
+	// Exchange code for access token
+	const tokenResp = await fetch("https://github.com/login/oauth/access_token", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"Accept": "application/json",
+		},
+		body: JSON.stringify({
+			client_id: env.GITHUB_CLIENT_ID,
+			client_secret: env.GITHUB_CLIENT_SECRET,
+			code,
+			redirect_uri: redirectUri,
+		}),
+	});
+	const tokenData = await tokenResp.json() as Record<string, unknown>;
+	const accessToken = tokenData.access_token as string;
+
+	if (!accessToken) {
+		return Response.json(
+			{ error: "GitHub token exchange failed", detail: tokenData.error },
+			{ status: 400 },
+		);
+	}
+
+	// Fetch user info
+	const userResp = await fetch("https://api.github.com/user", {
+		headers: {
+			"Authorization": `Bearer ${accessToken}`,
+			"User-Agent": "modastack-event-server",
+		},
+	});
+	const userData = await userResp.json() as Record<string, unknown>;
+	const githubUserId = userData.id as number;
+	const githubUsername = userData.login as string;
+
+	if (!githubUserId || !githubUsername) {
+		return Response.json({ error: "Failed to fetch GitHub user info" }, { status: 400 });
+	}
+
+	// Create/update user + session
+	const sessionToken = `moda_sess_${crypto.randomUUID().replace(/-/g, "")}`;
+	const now = new Date().toISOString();
+
+	const userRecord: UserRecord = {
+		github_user_id: githubUserId,
+		github_username: githubUsername,
+		github_token: accessToken,
+		session_token: sessionToken,
+		created_at: now,
+		last_seen: now,
+	};
+
+	await env.EVENTS.put(`users:${githubUserId}`, JSON.stringify(userRecord));
+	await env.EVENTS.put(`session:${sessionToken}`, JSON.stringify({ github_user_id: githubUserId }));
+
+	return Response.json({
+		token: sessionToken,
+		github_username: githubUsername,
+		github_user_id: githubUserId,
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Auth helper: authenticate user from session token
+// ---------------------------------------------------------------------------
+
+async function authenticateUser(request: Request, env: Env): Promise<UserRecord | null> {
+	const token = extractBearerToken(request);
+	if (!token || !token.startsWith("moda_sess_")) return null;
+
+	const sessionData = await env.EVENTS.get(`session:${token}`);
+	if (!sessionData) return null;
+
+	const { github_user_id } = JSON.parse(sessionData);
+	const userData = await env.EVENTS.get(`users:${github_user_id}`);
+	return userData ? JSON.parse(userData) : null;
+}
+
+function extractBearerToken(request: Request): string | null {
+	const auth = request.headers.get("authorization") || "";
+	if (auth.startsWith("Bearer ")) return auth.slice(7);
+	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Auth helper: check GitHub repo access
+// ---------------------------------------------------------------------------
+
+async function checkGitHubRepoAccess(githubToken: string, repoFullName: string): Promise<boolean> {
+	try {
+		const resp = await fetch(`https://api.github.com/repos/${repoFullName}`, {
+			headers: {
+				"Authorization": `Bearer ${githubToken}`,
+				"User-Agent": "modastack-event-server",
+			},
+		});
+		return resp.status === 200;
+	} catch {
+		return false;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /deployments/{id}
+// ---------------------------------------------------------------------------
+
+async function handleDeleteDeployment(request: Request, env: Env, path: string): Promise<Response> {
+	const match = path.match(/^\/deployments\/([^/]+)$/);
+	if (!match) {
+		return new Response("Invalid path", { status: 400 });
+	}
+	const deploymentId = match[1];
+
+	const authHeader = request.headers.get("authorization");
+	if (!authHeader?.startsWith("Bearer ")) {
+		return new Response("Unauthorized", { status: 401 });
+	}
+	const apiKey = authHeader.slice(7);
+
+	const deploymentData = await env.EVENTS.get(`deployments:${apiKey}`);
+	if (!deploymentData) {
+		return new Response("Invalid API key", { status: 403 });
+	}
+	const deployment = JSON.parse(deploymentData);
+	if (deployment.id !== deploymentId) {
+		return new Response("API key does not match deployment", { status: 403 });
+	}
+
+	// Clean up subscription index
+	const subscriptions: string[] = deployment.subscriptions || [];
+	for (const sub of subscriptions) {
+		const key = `subscriptions:${sub}`;
+		const existing = await env.EVENTS.get(key);
+		if (existing) {
+			const ids: string[] = JSON.parse(existing);
+			const filtered = ids.filter(id => id !== deploymentId);
+			if (filtered.length > 0) {
+				await env.EVENTS.put(key, JSON.stringify(filtered));
+			} else {
+				await env.EVENTS.delete(key);
+			}
+		}
+	}
+
+	// Delete deployment records
+	await env.EVENTS.delete(`deployments:${apiKey}`);
+	await env.EVENTS.delete(`deployment_id:${deploymentId}`);
+
+	return Response.json({ deleted: true });
 }

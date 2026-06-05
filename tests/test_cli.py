@@ -1,7 +1,7 @@
 """Tests for CLI commands."""
 
 import json
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from click.testing import CliRunner
 
@@ -179,3 +179,43 @@ class TestAgentCommand:
             ])
         assert result.exit_code == 0
         assert mock.call_args[1]["requested_by"] == {"from": "Alice", "channel": "C1"}
+
+
+# --- modastack login / logout ------------------------------------------------
+
+
+class TestLoginLogout:
+    def test_login_triggers_oauth_flow(self, tmp_path):
+        runner = CliRunner()
+        auth_file = tmp_path / "auth.yaml"
+
+        mock_state = MagicMock()
+        mock_state.github_username = "testuser"
+
+        auth_config_resp = MagicMock()
+        auth_config_resp.read.return_value = json.dumps({"client_id": "cid", "mode": "remote"}).encode()
+        auth_config_resp.__enter__ = lambda s: s
+        auth_config_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("modastack.auth.github_login", return_value=mock_state) as mock_login, \
+             patch("modastack.auth.AUTH_PATH", auth_file), \
+             patch("urllib.request.urlopen", return_value=auth_config_resp):
+            result = runner.invoke(main, ["login", "--event-server", "https://events.example.com"])
+        assert result.exit_code == 0
+        assert "testuser" in result.output
+
+    def test_logout_clears_auth(self):
+        runner = CliRunner()
+        with patch("modastack.auth.is_authenticated", return_value=True), \
+             patch("modastack.auth.clear_auth") as mock_clear:
+            result = runner.invoke(main, ["logout"])
+        assert result.exit_code == 0
+        mock_clear.assert_called_once()
+        assert "Logged out" in result.output
+
+    def test_logout_when_not_logged_in(self):
+        runner = CliRunner()
+        with patch("modastack.auth.is_authenticated", return_value=False):
+            result = runner.invoke(main, ["logout"])
+        assert result.exit_code == 0
+        assert "Not logged in" in result.output

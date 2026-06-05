@@ -568,3 +568,86 @@ class TestWebSocket:
             ws.send_text(json.dumps({"type": "ping"}))
             msg = json.loads(ws.receive_text())
             assert msg["type"] == "pong"
+
+
+# ---------------------------------------------------------------------------
+# Auth config endpoint (local mode stubs)
+# ---------------------------------------------------------------------------
+
+
+class TestAuthConfig:
+    def test_auth_config_returns_local_mode(self, client):
+        resp = client.get("/auth/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["mode"] == "local"
+        assert "client_id" in data
+
+    def test_auth_callback_returns_dummy_session(self, client):
+        resp = client.post(
+            "/auth/github/callback",
+            json={"code": "test_code", "redirect_uri": "http://localhost:9999/callback"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "token" in data
+        assert data["token"].startswith("moda_sess_")
+        assert data["github_username"] == "local"
+        assert data["github_user_id"] == 0
+
+
+# ---------------------------------------------------------------------------
+# DELETE /deployments/{id}
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteDeployment:
+    def test_delete_deployment(self, client):
+        dep_id, api_key = _register(client, subscriptions=["org/repo"])
+        resp = client.delete(
+            f"/deployments/{dep_id}",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+
+        # Deployment should be gone
+        assert dep_id not in _deployments
+
+    def test_delete_cleans_subscription_index(self, client):
+        dep_id, api_key = _register(client, subscriptions=["org/repo", "slack:T123"])
+        client.delete(
+            f"/deployments/{dep_id}",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        # Subscription index should no longer reference this deployment
+        for sub_set in _subscription_index.values():
+            assert dep_id not in sub_set
+
+    def test_delete_cleans_api_key_index(self, client):
+        dep_id, api_key = _register(client)
+        client.delete(
+            f"/deployments/{dep_id}",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        assert api_key not in _api_key_index
+
+    def test_delete_bad_auth(self, client):
+        dep_id, _ = _register(client)
+        resp = client.delete(
+            f"/deployments/{dep_id}",
+            headers={"Authorization": "Bearer bad_key"},
+        )
+        assert resp.status_code == 403
+
+    def test_delete_no_auth(self, client):
+        dep_id, _ = _register(client)
+        resp = client.delete(f"/deployments/{dep_id}")
+        assert resp.status_code == 401
+
+    def test_delete_nonexistent(self, client):
+        resp = client.delete(
+            "/deployments/nonexistent",
+            headers={"Authorization": "Bearer bad_key"},
+        )
+        assert resp.status_code == 403

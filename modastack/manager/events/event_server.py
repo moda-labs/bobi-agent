@@ -129,6 +129,23 @@ async def health():
 
 
 # ---------------------------------------------------------------------------
+# Auth endpoints (local stubs — real OAuth handled by cloud event server)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/auth/config")
+async def auth_config():
+    return {"client_id": "local", "mode": "local"}
+
+
+@app.post("/auth/github/callback")
+async def auth_github_callback(request: Request):
+    """Local stub — skip OAuth, return a dummy session token."""
+    token = f"moda_sess_{uuid.uuid4().hex}"
+    return {"token": token, "github_username": "local", "github_user_id": 0}
+
+
+# ---------------------------------------------------------------------------
 # Webhook routes
 # ---------------------------------------------------------------------------
 
@@ -350,6 +367,21 @@ def _auth_deployment(deployment_id: str, request_or_token: Request | str) -> Dep
     return dep
 
 
+@app.delete("/deployments/{deployment_id}")
+async def delete_deployment(deployment_id: str, request: Request):
+    dep = _auth_deployment(deployment_id, request)
+
+    async with _lock:
+        for sub in dep.subscriptions:
+            sub_set = _subscription_index.get(sub)
+            if sub_set:
+                sub_set.discard(deployment_id)
+        _api_key_index.pop(dep.api_key, None)
+        _deployments.pop(deployment_id, None)
+
+    return {"deleted": True}
+
+
 @app.put("/deployments/{deployment_id}/subscriptions")
 async def update_subscriptions(deployment_id: str, request: Request):
     dep = _auth_deployment(deployment_id, request)
@@ -526,6 +558,47 @@ def register(base_url: str, name: str,
     with urllib.request.urlopen(req, timeout=5) as resp:
         result = json.loads(resp.read())
     return result["deployment_id"], result["api_key"]
+
+
+def register_authenticated(base_url: str, name: str,
+                           subscriptions: list[str],
+                           session_token: str) -> tuple[str, str]:
+    """Register a deployment using a session token (authenticated mode).
+
+    Returns (deployment_id, api_key).
+    """
+    import urllib.request
+
+    data = json.dumps({"name": name, "subscriptions": subscriptions}).encode()
+    req = urllib.request.Request(
+        f"{base_url}/deployments",
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {session_token}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        result = json.loads(resp.read())
+    return result["deployment_id"], result["api_key"]
+
+
+def unregister(base_url: str, deployment_id: str, api_key: str) -> bool:
+    """Unregister a deployment from the event server. Best-effort."""
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/deployments/{deployment_id}",
+            method="DELETE",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+        return result.get("deleted", False)
+    except Exception as e:
+        log.warning(f"Failed to unregister deployment {deployment_id}: {e}")
+        return False
 
 
 def run_server(port: int, webhook_secret: str = "",

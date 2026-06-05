@@ -156,6 +156,77 @@ def _systemctl(action: str) -> bool:
 
 
 @main.command()
+@click.option("--event-server", default=None, help="Event server URL (e.g. https://events.example.com)")
+def login(event_server):
+    """Authenticate with GitHub for the cloud event server.
+
+    Opens a browser for GitHub OAuth login. On success, stores
+    credentials in ~/.modastack/auth.yaml.
+
+    Usage:
+        modastack login
+        modastack login --event-server https://events.example.com
+    """
+    import urllib.request
+    from .auth import github_login, AUTH_PATH
+
+    es_url = event_server
+    if not es_url:
+        repo_path = _detect_repo_root()
+        if repo_path:
+            from .config import LocalConfig
+            local = LocalConfig.load(repo_path)
+            es_url = local.event_server_url
+    if not es_url:
+        click.echo("No event server URL. Use --event-server or configure local.yaml.", err=True)
+        raise SystemExit(1)
+
+    try:
+        req = urllib.request.Request(f"{es_url}/auth/config")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            config = json.loads(resp.read())
+    except Exception as e:
+        click.echo(f"Cannot reach event server at {es_url}: {e}", err=True)
+        raise SystemExit(1)
+
+    client_id = config.get("client_id", "")
+    if not client_id:
+        click.echo("Event server did not return a client_id.", err=True)
+        raise SystemExit(1)
+
+    if config.get("mode") == "local":
+        click.echo("Local event server — authentication not required.")
+        return
+
+    click.echo("Opening browser for GitHub login...")
+    try:
+        state = github_login(client_id=client_id, event_server_url=es_url)
+        click.echo(f"Authenticated as {state.github_username}")
+    except TimeoutError:
+        click.echo("Login timed out — no response from browser.", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Login failed: {e}", err=True)
+        raise SystemExit(1)
+
+
+@main.command()
+def logout():
+    """Clear stored authentication credentials.
+
+    Usage:
+        modastack logout
+    """
+    from .auth import clear_auth, is_authenticated, AUTH_PATH
+
+    if is_authenticated():
+        clear_auth()
+        click.echo("Logged out — credentials cleared.")
+    else:
+        click.echo("Not logged in.")
+
+
+@main.command()
 @click.option("--foreground", "-f", is_flag=True, help="Run in the foreground (default: daemonize)")
 @click.option("--fresh", is_flag=True, help="Wipe manager session and start clean")
 @click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip interactive setup prompts")
@@ -268,6 +339,25 @@ def _clear_manager_session(repo_path: Path) -> None:
     click.echo("Cleared manager session — starting fresh.")
 
 
+def _unregister_deployment() -> None:
+    """Best-effort unregister the deployment from the event server."""
+    repo_path = _detect_repo_root()
+    if not repo_path:
+        return
+    try:
+        from .config import LocalConfig
+        local = LocalConfig.load(repo_path)
+        es_url = local.event_server_url
+        dep_id = local.event_server_deployment_id
+        api_key = local.event_server_api_key
+        if es_url and dep_id and api_key:
+            from .manager.events.event_server import unregister
+            if unregister(es_url, dep_id, api_key):
+                click.echo("Unregistered deployment from event server.")
+    except Exception:
+        pass
+
+
 def _find_pid_path() -> Path | None:
     """Find the PID file for the current repo's manager."""
     repo_path = _detect_repo_root()
@@ -318,6 +408,9 @@ def stop(force):
     except PermissionError:
         click.echo(f"No permission to signal process {pid}.", err=True)
         return
+
+    # Best-effort unregister deployment before killing
+    _unregister_deployment()
 
     sig = signal.SIGKILL if force else signal.SIGTERM
     click.echo(f"Stopping modastack (pid {pid})...")
