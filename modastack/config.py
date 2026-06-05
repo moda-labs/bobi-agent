@@ -1,27 +1,35 @@
-"""Global and per-repo configuration.
+"""Global, per-repo, and per-operator configuration.
 
-Global config (~/.modastack/config.yaml): instance-level settings
-  - Slack tokens (one bot per modastack instance)
-  - Webhook server config
-  - GitHub accounts
-  - Registered repos
+Global config (~/.modastack/config.yaml): truly global settings
+  - Event server base URL (shared Cloudflare worker)
+  - GitHub SSH account mappings
+  - repos.json discovery cache
 
-Credentials (~/.modastack/credentials.yaml): API keys per workspace
-  - Referenced by .modastack.yaml "credentials:" field in each repo
-  - Keys depend on task tracker: linear_api_key for Linear, etc.
-  - GitHub Issues uses gh CLI auth (no key needed)
-
-Per-repo config (.modastack.yaml): repo-specific settings
-  - Task tracking system (github-issues or linear)
-  - Project prefix, trigger labels
+Per-repo config (.modastack/config.yaml): shared repo settings (checked in)
+  - Task tracking system, project prefix, trigger labels
+  - Slack workspace ID, shared channel
   - Test command, review policy
-  - Repo-specific context for engineers
+  - Repo-specific context for agents
+
+Per-operator config (.modastack/local.yaml): operator-specific (gitignored)
+  - Operator identity (name, email, slack_user_id)
+  - Slack bot token, DM channel
+  - Event server deployment_id + api_key
+  - API keys (Linear, etc.)
+
+Legacy:
+  - ~/.modastack/credentials.yaml — absorbed by local.yaml
+  - GlobalConfig.repos, slack_*, event_server_* — migrating to per-repo
 """
 
+import logging
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 GLOBAL_CONFIG_DIR = Path.home() / ".modastack"
 GLOBAL_CONFIG_PATH = GLOBAL_CONFIG_DIR / "config.yaml"
@@ -63,6 +71,99 @@ class Credentials:
 
 
 @dataclass
+class LocalConfig:
+    """Per-repo, per-operator config from .modastack/local.yaml (gitignored)."""
+
+    operator_name: str = ""
+    operator_email: str = ""
+    operator_slack_user_id: str = ""
+
+    slack_bot_token: str = ""
+    slack_dm_channel: str = ""
+
+    event_server_url: str = ""
+    event_server_deployment_id: str = ""
+    event_server_api_key: str = ""
+
+    credentials: dict[str, str] = field(default_factory=dict)
+    dashboard_port: int = 8095
+
+    @classmethod
+    def load(cls, repo_path: Path) -> "LocalConfig":
+        local_path = repo_path / ".modastack" / "local.yaml"
+        if not local_path.exists():
+            return cls._from_global_fallback(repo_path)
+        raw = yaml.safe_load(local_path.read_text()) or {}
+        operator = raw.get("operator", {})
+        slack = raw.get("slack", {})
+        event_server = raw.get("event_server", {})
+        return cls(
+            operator_name=operator.get("name", ""),
+            operator_email=operator.get("email", ""),
+            operator_slack_user_id=operator.get("slack_user_id", ""),
+            slack_bot_token=slack.get("bot_token", ""),
+            slack_dm_channel=slack.get("dm_channel", ""),
+            event_server_url=event_server.get("url", ""),
+            event_server_deployment_id=event_server.get("deployment_id", ""),
+            event_server_api_key=event_server.get("api_key", ""),
+            credentials=raw.get("credentials", {}),
+            dashboard_port=raw.get("dashboard_port", 8095),
+        )
+
+    @classmethod
+    def _from_global_fallback(cls, repo_path: Path) -> "LocalConfig":
+        """Fall back to GlobalConfig for pre-migration setups."""
+        try:
+            gc = GlobalConfig.load()
+        except Exception:
+            return cls()
+        cred_name = repo_path.name
+        creds = Credentials.load().get(cred_name)
+        return cls(
+            slack_bot_token=gc.slack_bot_token,
+            slack_dm_channel=gc.slack_dm_channel,
+            event_server_url=gc.event_server_url,
+            event_server_deployment_id=gc.event_server_deployment_id,
+            event_server_api_key=gc.event_server_api_key,
+            credentials=creds,
+        )
+
+    def save(self, repo_path: Path) -> None:
+        local_path = repo_path / ".modastack" / "local.yaml"
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        data: dict = {}
+        if self.operator_name or self.operator_email or self.operator_slack_user_id:
+            data["operator"] = {}
+            if self.operator_name:
+                data["operator"]["name"] = self.operator_name
+            if self.operator_email:
+                data["operator"]["email"] = self.operator_email
+            if self.operator_slack_user_id:
+                data["operator"]["slack_user_id"] = self.operator_slack_user_id
+        slack: dict = {}
+        if self.slack_bot_token:
+            slack["bot_token"] = self.slack_bot_token
+        if self.slack_dm_channel:
+            slack["dm_channel"] = self.slack_dm_channel
+        if slack:
+            data["slack"] = slack
+        if self.event_server_url or self.event_server_deployment_id:
+            data["event_server"] = {
+                "url": self.event_server_url,
+                "deployment_id": self.event_server_deployment_id,
+                "api_key": self.event_server_api_key,
+            }
+        if self.credentials:
+            data["credentials"] = self.credentials
+        if self.dashboard_port != 8095:
+            data["dashboard_port"] = self.dashboard_port
+        local_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    def slack_token_for(self, workspace_id: str = "") -> str:
+        return self.slack_bot_token
+
+
+@dataclass
 class GlobalConfig:
     """Instance-level config from ~/.modastack/config.yaml."""
 
@@ -76,6 +177,8 @@ class GlobalConfig:
     # Webhook server
     webhook_port: int = 8080
     public_url: str = ""
+    webhook_secret: str = ""
+    slack_signing_secret: str = ""
 
     # GitHub accounts
     github_default_account: str = ""
@@ -85,9 +188,6 @@ class GlobalConfig:
     event_server_url: str = ""
     event_server_deployment_id: str = ""
     event_server_api_key: str = ""
-
-    # Manager role (loads roles/manager/<role>.md)
-    manager_role: str = "engineering"
 
     @classmethod
     def load(cls) -> "GlobalConfig":
@@ -100,7 +200,6 @@ class GlobalConfig:
         webhooks = raw.get("webhooks", {})
         github = raw.get("github", {})
 
-        manager = raw.get("manager", {})
         event_server = raw.get("event_server", {})
 
         return cls(
@@ -110,12 +209,13 @@ class GlobalConfig:
             slack_workspaces=slack.get("workspaces", {}),
             webhook_port=webhooks.get("port", 8080),
             public_url=webhooks.get("public_url", ""),
+            webhook_secret=webhooks.get("secret", ""),
+            slack_signing_secret=webhooks.get("slack_signing_secret", ""),
             github_default_account=github.get("default_account", ""),
             github_accounts=github.get("accounts", {}),
             event_server_url=event_server.get("url", ""),
             event_server_deployment_id=event_server.get("deployment_id", ""),
             event_server_api_key=event_server.get("api_key", ""),
-            manager_role=manager.get("role", "engineering"),
         )
 
     def slack_token_for(self, workspace_id: str = "") -> str:
@@ -145,6 +245,10 @@ class GlobalConfig:
         }
         if self.public_url:
             data["webhooks"]["public_url"] = self.public_url
+        if self.webhook_secret:
+            data["webhooks"]["secret"] = self.webhook_secret
+        if self.slack_signing_secret:
+            data["webhooks"]["slack_signing_secret"] = self.slack_signing_secret
         if self.event_server_url:
             data["event_server"] = {
                 "url": self.event_server_url,
@@ -154,9 +258,28 @@ class GlobalConfig:
         GLOBAL_CONFIG_PATH.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
 
 
+def _resolve_repo_config_path(repo_path: Path) -> Path:
+    """Find the repo config file, preferring .modastack/config.yaml."""
+    new_path = repo_path / ".modastack" / "config.yaml"
+    if new_path.exists():
+        return new_path
+    legacy_path = repo_path / ".modastack.yaml"
+    if legacy_path.exists():
+        warnings.warn(
+            f"Using deprecated .modastack.yaml in {repo_path}; "
+            "migrate to .modastack/config.yaml",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return legacy_path
+    raise FileNotFoundError(
+        f"No .modastack/config.yaml or .modastack.yaml in {repo_path}"
+    )
+
+
 @dataclass
 class RepoConfig:
-    """Per-repo config from .modastack.yaml."""
+    """Per-repo config from .modastack/config.yaml (or legacy .modastack.yaml)."""
 
     path: Path
     task_tracking: str = "github-issues"  # "github-issues" or "linear"
@@ -169,12 +292,13 @@ class RepoConfig:
     auto_merge: bool = False
     credentials: str = "default"
     context: dict = field(default_factory=dict)
+    github_repo: str = ""
+    slack_workspace_id: str = ""
+    slack_channel: str = ""
 
     @classmethod
     def from_file(cls, repo_path: Path) -> "RepoConfig":
-        config_path = repo_path / ".modastack.yaml"
-        if not config_path.exists():
-            raise FileNotFoundError(f"No .modastack.yaml in {repo_path}")
+        config_path = _resolve_repo_config_path(repo_path)
 
         raw = yaml.safe_load(config_path.read_text()) or {}
         task_tracking_config = raw.get("task_tracking", {})
@@ -198,6 +322,7 @@ class RepoConfig:
                 context=raw.get("context", {}),
             )
 
+        slack = raw.get("slack", {})
         return cls(
             path=repo_path,
             task_tracking=task_tracking_config.get("system", "github-issues"),
@@ -210,6 +335,9 @@ class RepoConfig:
             auto_merge=verify.get("auto_merge", False),
             credentials=raw.get("credentials", "default"),
             context=raw.get("context", {}),
+            github_repo=raw.get("github", {}).get("repo", ""),
+            slack_workspace_id=slack.get("workspace_id", ""),
+            slack_channel=slack.get("channel", ""),
         )
 
     def get_credentials(self) -> dict[str, str]:

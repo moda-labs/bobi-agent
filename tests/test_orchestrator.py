@@ -14,8 +14,10 @@ from modastack.workflow.schema import (
 )
 from modastack.workflow.orchestrator import (
     _build_step_prompt, _read_handoff, _validate_handoff,
-    run_workflow, make_session_name,
+    run_workflow, resume_workflow, try_resume_for_event,
+    make_session_name,
 )
+from modastack.workflow.state import WorkflowRun
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +29,8 @@ class TestSchemaLoad:
         f = tmp_path / "test.yaml"
         f.write_text(textwrap.dedent("""\
             name: test-wf
-            trigger: task.assigned
+            trigger: >
+              When an issue is assigned and requires code changes.
             steps:
               - name: greet
                 prompt: "Say hello"
@@ -37,7 +40,7 @@ class TestSchemaLoad:
         """))
         wf = load_workflow(f)
         assert wf.name == "test-wf"
-        assert wf.trigger == "task.assigned"
+        assert "issue is assigned" in wf.trigger
         assert len(wf.steps) == 1
         assert wf.steps[0].name == "greet"
         assert wf.steps[0].prompt.strip() == "Say hello"
@@ -135,21 +138,33 @@ class TestHandoffValidation:
 
 
 class TestReadHandoff:
-    def test_reads_yaml_frontmatter(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.orchestrator.HANDOFF_DIR", tmp_path)
-        (tmp_path / "42.md").write_text("---\ncomplexity: medium\nneeds_spec: true\n---\nNotes here")
-        result = _read_handoff("42")
+    def test_reads_yaml(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        session_dir = tmp_path / "wf-test-42"
+        session_dir.mkdir()
+        (session_dir / "handoff-setup.yaml").write_text("complexity: medium\nneeds_spec: true\n")
+        result = _read_handoff("wf-test-42", "setup")
         assert result["complexity"] == "medium"
         assert result["needs_spec"] is True
 
     def test_missing_handoff_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.orchestrator.HANDOFF_DIR", tmp_path)
-        assert _read_handoff("999") == {}
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        assert _read_handoff("wf-test-999", "setup") == {}
 
-    def test_case_insensitive_lookup(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.orchestrator.HANDOFF_DIR", tmp_path)
-        (tmp_path / "abc.md").write_text("---\nstatus: done\n---\n")
-        assert _read_handoff("ABC")["status"] == "done"
+    def test_step_specific_handoffs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        session_dir = tmp_path / "wf-test-1"
+        session_dir.mkdir()
+        (session_dir / "handoff-setup.yaml").write_text("worktree: /tmp/wt\n")
+        (session_dir / "handoff-pickup.yaml").write_text("complexity: medium\n")
+        assert _read_handoff("wf-test-1", "setup")["worktree"] == "/tmp/wt"
+        assert _read_handoff("wf-test-1", "pickup")["complexity"] == "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -158,14 +173,15 @@ class TestReadHandoff:
 
 class TestBuildStepPrompt:
     def test_includes_handoff_contract(self):
-        step = StepDef(name="t", prompt="Do work",
+        step = StepDef(name="setup", prompt="Do work",
                        handoff=HandoffContract(required=["a"], optional=["b"]))
         from modastack.workflow.variables import VariableContext
         ctx = VariableContext()
-        prompt = _build_step_prompt(step, ctx)
+        prompt = _build_step_prompt(step, ctx, session_name="wf-test-42", step_name="setup")
         assert "Do work" in prompt
-        assert "`a` (required)" in prompt
-        assert "`b` (optional)" in prompt
+        assert "a: <value>" in prompt
+        assert "b: <value>" in prompt
+        assert "handoff-setup.yaml" in prompt
 
     def test_no_contract_when_empty(self):
         step = StepDef(name="t", prompt="Just do it")
@@ -280,8 +296,20 @@ class TestRunWorkflow:
         assert result is True
 
     def test_route_step_branches(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.orchestrator.HANDOFF_DIR", tmp_path)
-        (tmp_path / "1.md").write_text("---\nneeds_spec: true\n---\n")
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+
+        # Write handoff during the fake agent's response (simulating the
+        # agent writing it after the triage step runs, not before)
+        original_init = FakeClient.__init__
+        def _patched_init(self_client):
+            original_init(self_client)
+            # Write to the session dir handoff path
+            d = tmp_path / "wf-t-r-1"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "handoff-triage.yaml").write_text("needs_spec: true\n")
+        monkeypatch.setattr(FakeClient, "__init__", _patched_init)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="triage", prompt="triage",
@@ -316,3 +344,113 @@ class TestWorkflowRunCreate:
         from modastack.workflow.state import WorkflowRun
         ids = {WorkflowRun.create("t", {}).run_id for _ in range(50)}
         assert len(ids) == 50
+
+
+# ---------------------------------------------------------------------------
+# Await / resume
+# ---------------------------------------------------------------------------
+
+class TestAwaitStep:
+    def _mock_asyncio_run(self, workflow, **kwargs):
+        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("modastack.workflow.orchestrator.save_session_id"), \
+             patch("modastack.workflow.orchestrator.log_activity"), \
+             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+                 ClaudeSDKClient=lambda opts: FakeClient(),
+                 ClaudeAgentOptions=MagicMock,
+                 AssistantMessage=FakeAssistantMessage,
+                 ResultMessage=FakeResultMessage,
+                 TextBlock=FakeTextBlock,
+             )}):
+            mock_reg.return_value = MagicMock()
+            return run_workflow(workflow, **kwargs)
+
+    def test_await_suspends_workflow(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="spec", prompt="write spec"),
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+        assert result is True
+
+        run = WorkflowRun.find_waiting("approval")
+        assert run is not None
+        assert run.status == "waiting"
+        assert run.await_event == "approval"
+        assert run.suspended_at_step == 2
+        assert run.session_name == "wf-t-r-1"
+        assert run.issue_id == "1"
+
+    def test_resume_continues_from_suspended_step(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"issue_id": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {"input": {"task": "t", "repo": "r", "issue_id": "1"}}
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.issue_id = "1"
+        run.save()
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="spec", prompt="write spec"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+
+        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("modastack.workflow.orchestrator.save_session_id"), \
+             patch("modastack.workflow.orchestrator.log_activity"), \
+             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+                 ClaudeSDKClient=lambda opts: FakeClient(),
+                 ClaudeAgentOptions=MagicMock,
+                 AssistantMessage=FakeAssistantMessage,
+                 ResultMessage=FakeResultMessage,
+                 TextBlock=FakeTextBlock,
+             )}):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        reloaded = WorkflowRun.load(run.run_id)
+        assert reloaded.status == "completed"
+
+    def test_find_waiting_returns_none_when_no_match(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
+        assert WorkflowRun.find_waiting("approval") is None
+
+    def test_find_waiting_filters_by_issue(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk._repo_root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"issue_id": "42"}})
+        run.status = "waiting"
+        run.await_event = "approval"
+        run.save()
+
+        assert WorkflowRun.find_waiting("approval", "42") is not None
+        assert WorkflowRun.find_waiting("approval", "99") is None

@@ -11,6 +11,8 @@ worktrees/
 .dispatch/
 .dispatch.yaml
 .gstack/
-.modastack/
+.modastack/state/
+.modastack/sessions/
+.modastack/local.yaml
 .context/
 worktrees/

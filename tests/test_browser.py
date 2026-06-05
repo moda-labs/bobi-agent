@@ -187,7 +187,7 @@ def test_check_system_deps_all_present(tmp_path):
 
 def test_doctor_all_ok():
     results = [CheckResult("a", ok=True, detail="x"), CheckResult("b", ok=True, detail="y")]
-    with patch("modastack.browser.run_doctor", return_value=results):
+    with patch("modastack.doctor.run_doctor", return_value=results):
         result = CliRunner().invoke(main, ["doctor"])
     assert result.exit_code == 0
     assert "All checks passed" in result.output
@@ -198,40 +198,26 @@ def test_doctor_reports_failure_and_exits_nonzero():
         CheckResult("Chromium launches", ok=False,
                     detail="blocked", hint="run the fix", sandbox_error=True),
     ]
-    with patch("modastack.browser.run_doctor", return_value=results):
-        result = CliRunner().invoke(main, ["doctor"])
+    with patch("modastack.doctor.run_doctor", return_value=results), \
+         patch("modastack.browser.run_doctor", return_value=[]), \
+         patch("modastack.browser.is_linux", return_value=True):
+        result = CliRunner().invoke(main, ["doctor", "--browser"])
     assert result.exit_code == 1
     assert "✗" in result.output
     assert "run the fix" in result.output
     assert "--fix" in result.output
 
 
-def test_setup_browser_check_skips_on_non_linux():
-    from modastack.cli import _check_browser_sandbox
-    with patch("modastack.browser.is_linux", return_value=False), \
-         patch("modastack.browser.check_chromium_launch") as launch:
-        _check_browser_sandbox(non_interactive=True)
-    launch.assert_not_called()
-
-
-def test_setup_browser_check_non_interactive_prints_fix_only():
-    from modastack.cli import _check_browser_sandbox
-    bad = CheckResult("Chromium launches", ok=False, detail="blocked", sandbox_error=True)
-    with patch("modastack.browser.is_linux", return_value=True), \
-         patch("modastack.browser.check_chromium_launch", return_value=bad), \
-         patch("modastack.browser.apply_sandbox_fix") as apply_fix:
-        _check_browser_sandbox(non_interactive=True)
-    # Non-interactive setup must never run the sudo fix on its own.
-    apply_fix.assert_not_called()
-
 
 def test_doctor_fix_applies_when_confirmed():
     results = [CheckResult("Chromium launches", ok=False, detail="blocked",
                            sandbox_error=True)]
-    with patch("modastack.browser.run_doctor", return_value=results), \
+    with patch("modastack.doctor.run_doctor", return_value=results), \
+         patch("modastack.browser.run_doctor", return_value=[]), \
+         patch("modastack.browser.is_linux", return_value=True), \
          patch("modastack.browser.apply_sandbox_fix", return_value=(True, "Applied.")) as apply_fix, \
          patch("modastack.browser.check_chromium_launch",
                return_value=CheckResult("Chromium launches", ok=True)):
-        result = CliRunner().invoke(main, ["doctor", "--fix"], input="y\n")
+        result = CliRunner().invoke(main, ["doctor", "--browser", "--fix"], input="y\n")
     apply_fix.assert_called_once()
     assert "Verified" in result.output

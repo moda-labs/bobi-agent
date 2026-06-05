@@ -23,7 +23,6 @@ from modastack.tmux import (
 log = logging.getLogger(__name__)
 
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
-SKILLS_DIR = Path(__file__).parent.parent / "roles" / "engineer" / "process"
 
 
 _SLUG_RE = re.compile(r'[^a-z0-9]+')
@@ -40,12 +39,12 @@ def _slugify(title: str, max_len: int = 30) -> str:
 
 
 def _store_session_name(issue_id: str, name: str) -> None:
-    SESSION_IDS_DIR.mkdir(parents=True, exist_ok=True)
-    (SESSION_IDS_DIR / f"{issue_id}.name").write_text(name)
+    _session_ids_dir().mkdir(parents=True, exist_ok=True)
+    (_session_ids_dir() / f"{issue_id}.name").write_text(name)
 
 
 def _session_name(issue_id: str) -> str:
-    name_path = SESSION_IDS_DIR / f"{issue_id}.name"
+    name_path = _session_ids_dir() / f"{issue_id}.name"
     if name_path.exists():
         try:
             return name_path.read_text().strip()
@@ -58,7 +57,9 @@ def session_exists(issue_id: str) -> bool:
     return has_session(_session_name(issue_id))
 
 
-SESSION_IDS_DIR = Path.home() / ".modastack" / "sessions"
+def _session_ids_dir() -> Path:
+    from modastack.sdk import _sessions_dir
+    return _sessions_dir()
 
 
 def sync_main_branch(repo_path: Path) -> bool:
@@ -119,7 +120,7 @@ def cleanup_worktree(issue_id: str, repo_path: Path) -> None:
     )
 
     for suffix in (".id", ".name"):
-        p = SESSION_IDS_DIR / f"{issue_id}{suffix}"
+        p = _session_ids_dir() / f"{issue_id}{suffix}"
         if p.exists():
             p.unlink()
 
@@ -142,7 +143,7 @@ def spawn_session(issue_id: str, cwd: str, title: str = "") -> bool:
         name = f"moda-{issue_id.lower()}"
 
     # Check for a saved session ID to resume
-    saved_id_path = SESSION_IDS_DIR / f"{issue_id}.id"
+    saved_id_path = _session_ids_dir() / f"{issue_id}.id"
     cmd = [CLAUDE, "--dangerously-skip-permissions", "--name", name]
     if saved_id_path.exists():
         saved_id = saved_id_path.read_text().strip()
@@ -185,7 +186,7 @@ def capture(issue_id: str, lines: int = 80) -> str:
 
 
 def detect_state(issue_id: str) -> dict:
-    """Determine session state (sub-agent or legacy tmux).
+    """Determine session state (sub-agent or tmux).
 
     Checks sub-agents first, falls back to tmux pane analysis.
     """
@@ -201,7 +202,6 @@ def detect_state(issue_id: str) -> dict:
     except ImportError:
         pass
 
-    # Legacy tmux fallback
     name = _session_name(issue_id)
     if not has_session(name):
         return {"state": "exited"}
@@ -220,10 +220,7 @@ def kill_session(issue_id: str) -> None:
 
 
 def load_skill(skill_name: str) -> str:
-    """Load a SKILL.md file content."""
-    skill_path = SKILLS_DIR / skill_name / "SKILL.md"
-    if skill_path.exists():
-        return skill_path.read_text()
+    """Load a SKILL.md file content (legacy — skills now come from agent prompts)."""
     return ""
 
 
@@ -239,8 +236,8 @@ def inject_skill(issue_id: str, skill_name: str, context: str = "") -> None:
 def _build_reverse_name_map() -> dict[str, str]:
     """Build session_name → issue_id mapping from stored .name files."""
     reverse = {}
-    if SESSION_IDS_DIR.exists():
-        for f in SESSION_IDS_DIR.glob("*.name"):
+    if _session_ids_dir().exists():
+        for f in _session_ids_dir().glob("*.name"):
             try:
                 sname = f.read_text().strip()
                 reverse[sname] = f.stem
@@ -253,7 +250,7 @@ def list_sessions() -> list[str]:
     """List all active engineer sessions (tmux + sub-agents). Returns issue IDs."""
     sessions = set()
 
-    # Check tmux sessions (legacy, may still have some running)
+    # Check tmux sessions
     result = subprocess.run(
         [TMUX, "list-sessions", "-F", "#{session_name}"],
         capture_output=True, text=True,
@@ -261,7 +258,7 @@ def list_sessions() -> list[str]:
     if result.returncode == 0:
         reverse_map = _build_reverse_name_map()
         for name in result.stdout.strip().splitlines():
-            if not name.startswith("moda-") or name == "moda-manager":
+            if not name.startswith("moda-") or name.startswith("moda-mgr"):
                 continue
             iid = reverse_map.get(name)
             if iid is None:

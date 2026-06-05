@@ -25,22 +25,28 @@ PASTE_VERIFY_TIMEOUT = 3.0
 PASTE_VERIFY_INTERVAL = 0.3
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
-LOCK_DIR = Path.home() / ".modastack" / "locks"
-PAUSED_DIR = Path.home() / ".modastack" / "paused"
+def _state_dir(subdir: str) -> Path:
+    from modastack.sdk import get_repo_root
+    root = get_repo_root()
+    base = (root / ".modastack" / "state") if root else (Path.home() / ".modastack")
+    d = base / subdir
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
 
 
 def is_paused(session_name: str) -> bool:
-    return (PAUSED_DIR / session_name).exists()
+    return (_state_dir("paused") / session_name).exists()
 
 
 def pause_session(session_name: str) -> None:
-    PAUSED_DIR.mkdir(parents=True, exist_ok=True)
-    (PAUSED_DIR / session_name).touch()
+    _state_dir("paused").mkdir(parents=True, exist_ok=True)
+    (_state_dir("paused") / session_name).touch()
     log.info(f"Session {session_name} paused")
 
 
 def resume_session(session_name: str) -> None:
-    (PAUSED_DIR / session_name).unlink(missing_ok=True)
+    (_state_dir("paused") / session_name).unlink(missing_ok=True)
     log.info(f"Session {session_name} resumed")
 
 
@@ -173,8 +179,8 @@ def send_text(session_name: str, text: str, verify: bool = True) -> bool:
         return False
     collapsed = " ".join(text.splitlines())
 
-    LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    lock_path = LOCK_DIR / f"{session_name}.lock"
+    _state_dir("locks").mkdir(parents=True, exist_ok=True)
+    lock_path = _state_dir("locks") / f"{session_name}.lock"
 
     try:
         lock_file = open(lock_path, "w")
