@@ -1,16 +1,13 @@
-"""Integration tests for spawn_adhoc_background — subprocess-based spawning.
+"""Integration tests for background agent spawning via CLI.
 
-Verifies the full CLI → subprocess → spawn_adhoc pipeline:
-- The subprocess launches and runs independently
-- Lifecycle events (session.started, session.completed) are emitted
-- The subprocess survives the caller exiting
-- Errors in the subprocess are logged, not swallowed
+Verifies the full CLI → subprocess → launch_agent pipeline:
+- The subprocess launches and returns immediately
+- The agent runs in the background
+- The spawn alias routes to the adhoc workflow
 
 Requires the `claude` CLI to be installed. Skipped in CI.
 """
 
-import json
-import os
 import shutil
 import subprocess
 import sys
@@ -24,31 +21,45 @@ requires_claude = pytest.mark.skipif(
     reason="claude CLI not installed",
 )
 
+REPO_ROOT = Path(__file__).parent.parent.parent
+
 
 class TestSpawnBackgroundSubprocess:
-    """Test that spawn_adhoc_background launches a real subprocess."""
+    """Test that spawn / agent launch returns immediately."""
 
-    def test_cli_spawn_returns_immediately(self, tmp_path):
-        """modastack spawn should return in <5s, not block for the full agent."""
+    def test_cli_agent_returns_immediately(self, tmp_path):
+        """modastack agent should return in <5s, not block for the full agent."""
+        from modastack.sdk import SessionRegistry, get_registry, set_repo_root
+        session_name = f"wf-adhoc-{tmp_path.name}-99"
+        set_repo_root(REPO_ROOT)
+        registry = get_registry()
+        registry.mark_done(session_name)
+        session_dir = SessionRegistry.session_dir(session_name)
+        if session_dir.exists():
+            shutil.rmtree(session_dir)
+
         start = time.monotonic()
         result = subprocess.run(
-            [sys.executable, "-m", "modastack.cli", "spawn",
+            [sys.executable, "-m", "modastack.cli", "agent",
+             "-w", "adhoc", "--role", "engineer",
              "--repo", str(tmp_path), "--task", "say hello #99"],
             capture_output=True, text=True, timeout=10,
-            cwd=str(Path(__file__).parent.parent.parent),
+            cwd=str(REPO_ROOT),
         )
         elapsed = time.monotonic() - start
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "eng-99" in result.stdout
-        assert elapsed < 5, f"spawn took {elapsed:.1f}s — should return immediately"
+        assert elapsed < 5, f"agent took {elapsed:.1f}s — should return immediately"
+
+        registry.mark_done(session_name)
+        if session_dir.exists():
+            shutil.rmtree(session_dir)
 
     def test_subprocess_command_is_valid_python(self):
         """The -c script passed to the subprocess should parse without errors."""
-        from modastack.subagent import spawn_adhoc_background, _parse_issue_number
+        import json
+        from modastack.subagent import _parse_issue_number
 
-        # Build the same command spawn_adhoc_background would build, but don't run it
-        import hashlib
         task = "Fix issue #1"
         issue_id = _parse_issue_number(task) or "adhoc-test"
         args = json.dumps({
@@ -61,36 +72,37 @@ class TestSpawnBackgroundSubprocess:
         )
 
         # Verify it compiles
-        compile(script, "<spawn_adhoc_background>", "exec")
+        compile(script, "<spawn_adhoc>", "exec")
 
     @requires_claude
     def test_subprocess_runs_and_completes(self, tmp_path):
-        """A spawned engineer should run as a separate process and complete."""
-        from modastack.subagent import spawn_adhoc_background
+        """A spawned agent should run as a separate process and complete."""
+        from modastack.subagent import launch_agent
+        from modastack.sdk import SESSION_DIR
 
-        name = spawn_adhoc_background(
-            cwd=str(tmp_path),
+        name = launch_agent(
             task="Say 'hello world' and exit. Issue #997",
+            cwd=str(tmp_path),
+            workflow_name="adhoc",
             timeout=60,
+            interactive=False,
         )
 
-        assert name == "eng-997"
+        assert "997" in name
 
-        log_file = Path.home() / ".modastack" / "manager" / "logs" / f"{name}-adhoc.jsonl"
+        session_dir = SESSION_DIR / name
 
-        # Wait for the subprocess to complete (log file gets a "stop" entry)
+        # Wait for the subprocess to complete
         deadline = time.monotonic() + 90
         completed = False
         while time.monotonic() < deadline:
-            if log_file.exists():
-                content = log_file.read_text()
-                if '"stop"' in content:
+            state_path = session_dir / "state.json"
+            if state_path.exists():
+                import json
+                state = json.loads(state_path.read_text())
+                if state.get("status") == "done":
                     completed = True
                     break
             time.sleep(2)
 
-        assert completed, "Engineer subprocess did not complete within 90s"
-
-        content = log_file.read_text()
-        assert '"response"' in content, "No response logged"
-        assert '"stop"' in content, "No stop event logged"
+        assert completed, "Agent subprocess did not complete within 90s"

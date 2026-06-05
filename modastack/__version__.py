@@ -1,5 +1,6 @@
-from pathlib import Path
+from importlib.metadata import version, PackageNotFoundError
 
-_VERSION_FILE = Path(__file__).parent.parent / "VERSION"
-
-__version__ = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
+try:
+    __version__ = version("modastack")
+except PackageNotFoundError:
+    __version__ = "0.0.0-dev"

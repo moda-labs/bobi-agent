@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -22,20 +23,65 @@ import yaml
 
 from modastack.sdk import (
     get_cli_path, get_registry, save_session_id, load_session_id,
-    log_activity, SessionEntry,
+    log_activity, SessionEntry, SessionRegistry,
 )
 from modastack.subagent import (
-    HANDOFF_DIR,
     AgentResult,
     _emit_lifecycle_event,
     _parse_issue_number,
 )
 from modastack.workflow.schema import Workflow, StepDef
+from modastack.workflow.state import WorkflowRun
 from modastack.workflow.variables import VariableContext
 
 log = logging.getLogger(__name__)
 
 MAX_HANDOFF_RETRIES = 2
+
+
+def try_resume_for_event(event_type: str, issue_id: str = "", event: dict | None = None) -> bool:
+    """Check if any suspended workflow is waiting for this event type and resume it.
+
+    Called by the manager when it receives an event that might unblock a workflow.
+    Returns True if a workflow was resumed.
+    """
+    from modastack.workflow.triggers import WorkflowDispatcher
+
+    run = WorkflowRun.find_waiting(event_type, issue_id)
+    if not run:
+        return False
+
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    wf = dispatcher.find_workflow(run.workflow_name)
+    if not wf:
+        log.error(f"Cannot resume run {run.run_id}: workflow '{run.workflow_name}' not found")
+        return False
+
+    log.info(f"Resuming workflow {run.workflow_name} for {run.issue_id} "
+             f"(run {run.run_id}, awaited '{event_type}')")
+
+    import threading
+    t = threading.Thread(
+        target=resume_workflow,
+        args=(run, wf),
+        kwargs={"event": event},
+        daemon=True,
+        name=f"resume-{run.run_id}",
+    )
+    t.start()
+    return True
+
+
+def _find_repo_root(cwd: str) -> Path:
+    """Find the original repo root from a working directory or worktree."""
+    path = Path(cwd)
+    for candidate in [path, *path.parents]:
+        if (candidate / ".modastack" / "config.yaml").exists():
+            return candidate
+        if (candidate / ".modastack.yaml").exists():
+            return candidate
+    return path
 
 
 def make_session_name(workflow_name: str, repo: str, issue_id: str) -> str:
@@ -44,17 +90,17 @@ def make_session_name(workflow_name: str, repo: str, issue_id: str) -> str:
     return f"wf-{workflow_name}-{repo_name}-{issue_id}"
 
 
-def _setup_worktree(cwd: str, issue_id: str) -> str:
-    """Create a git worktree for the issue and return its path.
+def _setup_worktree(cwd: str, session_name: str) -> str:
+    """Create a git worktree for the session and return its path.
 
-    Worktrees live inside the repo at .claude/worktrees/<issue_id>.
+    Worktrees live inside the repo at .claude/worktrees/<session_name>.
     If the worktree already exists, just return its path.
     """
     import subprocess as sp
 
     repo_root = Path(cwd).resolve()
-    worktree_dir = repo_root / ".claude" / "worktrees" / str(issue_id)
-    branch = f"agent/{issue_id}"
+    worktree_dir = repo_root / ".claude" / "worktrees" / session_name
+    branch = session_name
 
     if worktree_dir.exists():
         return str(worktree_dir)
@@ -86,20 +132,23 @@ def run_workflow(
     issue_id: str | None = None,
     requested_by: dict | None = None,
     timeout: int = 3600,
+    interactive: bool = True,
+    role: str = "engineer",
 ) -> bool:
     """Execute a workflow end-to-end with a single agent session."""
     issue_id = issue_id or _parse_issue_number(task) or "adhoc"
     requested_by = requested_by or {}
     started_at = time.time()
 
-    worktree_cwd = _setup_worktree(cwd, issue_id)
+    # Session dir is created by the registry on register
 
     session_name = make_session_name(workflow.name, repo, issue_id)
+    worktree_cwd = _setup_worktree(cwd, session_name)
     registry = get_registry()
     registry.register(SessionEntry(
-        name=session_name, session_id="", role="engineer",
+        name=session_name, session_id="", role=role,
         issue_id=issue_id, title=task[:80], phase=workflow.name,
-        repo=repo, cwd=worktree_cwd, status="running",
+        repo=repo, cwd=worktree_cwd, status="running", pid=os.getpid(),
         requested_by=requested_by,
     ))
 
@@ -119,7 +168,7 @@ def run_workflow(
     success = asyncio.run(
         _run_workflow_async(
             workflow, task, repo, worktree_cwd, issue_id, session_name,
-            registry, ctx, requested_by, timeout,
+            registry, ctx, requested_by, timeout, interactive, role=role,
         )
     )
 
@@ -131,16 +180,90 @@ def run_workflow(
             "duration": round(duration, 1),
             "text": f"Workflow {workflow.name} completed for {issue_id} in {duration:.0f}s",
         }, blocking=True)
-        registry.update(session_name, status="done", phase="complete")
     else:
         _emit_lifecycle_event("engineer/workflow.failed", {
             "issue_id": issue_id,
             "workflow": workflow.name,
             "text": f"Workflow {workflow.name} failed for {issue_id}",
         }, blocking=True)
-        registry.update(session_name, status="error")
+
+    registry.mark_done(session_name)
 
     log.info(f"Workflow {workflow.name} {'completed' if success else 'failed'} "
+             f"in {duration:.0f}s")
+    return success
+
+
+def resume_workflow(
+    run: WorkflowRun,
+    workflow: Workflow,
+    event: dict | None = None,
+    timeout: int = 3600,
+    interactive: bool = True,
+) -> bool:
+    """Resume a suspended workflow from its await step.
+
+    Restores the variable context and session, then continues execution
+    from the step after the one that suspended.
+    """
+    session_name = run.session_name
+    issue_id = run.issue_id
+    repo = run.repo
+    cwd = run.cwd
+    step_idx = run.suspended_at_step
+    started_at = time.time()
+
+    registry = get_registry()
+    registry.update(session_name, status="running", phase=f"resuming")
+
+    ctx = VariableContext()
+    ctx.scopes = run.variable_scopes
+
+    if event:
+        ctx.set_scope("event", event.get("data", {}))
+
+    run.status = "running"
+    run.await_event = ""
+    run.suspended_at_step = -1
+    run.save()
+
+    _emit_lifecycle_event("engineer/workflow.resumed", {
+        "issue_id": issue_id,
+        "workflow": workflow.name,
+        "run_id": run.run_id,
+        "resume_step": workflow.steps[step_idx].name if step_idx < len(workflow.steps) else "end",
+        "text": f"Workflow {workflow.name} resumed for {issue_id}",
+    })
+
+    success = asyncio.run(
+        _run_workflow_async(
+            workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
+            issue_id, session_name, registry, ctx, {}, timeout, interactive,
+            start_step=step_idx,
+        )
+    )
+
+    duration = time.time() - started_at
+    if success:
+        run.status = "completed"
+        run.completed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        _emit_lifecycle_event("engineer/workflow.completed", {
+            "issue_id": issue_id,
+            "workflow": workflow.name,
+            "duration": round(duration, 1),
+            "text": f"Workflow {workflow.name} completed for {issue_id} in {duration:.0f}s",
+        }, blocking=True)
+    else:
+        run.status = "failed"
+        _emit_lifecycle_event("engineer/workflow.failed", {
+            "issue_id": issue_id,
+            "workflow": workflow.name,
+            "text": f"Workflow {workflow.name} failed for {issue_id}",
+        }, blocking=True)
+
+    run.save()
+    registry.mark_done(session_name)
+    log.info(f"Resumed workflow {workflow.name} {'completed' if success else 'failed'} "
              f"in {duration:.0f}s")
     return success
 
@@ -156,6 +279,9 @@ async def _run_workflow_async(
     ctx: VariableContext,
     requested_by: dict,
     timeout: int,
+    interactive: bool = True,
+    start_step: int = 0,
+    role: str = "engineer",
 ) -> bool:
     """Async core: one ClaudeSDKClient session for all steps."""
     from claude_agent_sdk import (
@@ -168,7 +294,18 @@ async def _run_workflow_async(
 
     saved_id = load_session_id(session_name)
 
-    def _make_options(resume_id=None):
+    from modastack.prompts.resolver import resolve_agent_prompt
+
+    # Resolve the repo root for agent prompt loading (cwd may be a worktree)
+    repo_root = _find_repo_root(cwd)
+
+    def _make_options(resume_id=None, agent_name=""):
+        agent_prompt = ""
+        if agent_name:
+            agent_prompt = resolve_agent_prompt(agent_name, repo_root, interactive)
+        else:
+            agent_prompt = resolve_agent_prompt("", repo_root, interactive)
+
         return ClaudeAgentOptions(
             cwd=cwd,
             permission_mode="bypassPermissions",
@@ -180,11 +317,12 @@ async def _run_workflow_async(
                 "type": "preset",
                 "preset": "claude_code",
                 "append": (
-                    f"You are an engineer agent working on issue #{issue_id}. "
+                    f"You are an agent working on issue #{issue_id}. "
                     f"Your working directory is an isolated git worktree at {cwd}. "
-                    f"All code changes go here — never modify the main repo checkout. "
+                    f"All changes go here — never modify the main repo checkout. "
                     f"You will receive step-by-step instructions. Follow each one, "
-                    f"then write your handoff file when asked."
+                    f"then write your handoff file when asked.\n\n"
+                    + agent_prompt
                 ),
             },
         )
@@ -194,10 +332,18 @@ async def _run_workflow_async(
         "text": f"Engineer started working on {issue_id}",
     })
 
+    # CLI --role always wins; fall back to workflow step's agent field
+    first_agent = role or ""
+    if not first_agent:
+        for s in workflow.steps[start_step:]:
+            if s.agent:
+                first_agent = s.agent
+                break
+
     # Try resume, fall back to fresh session
     for attempt in range(2):
         resume_id = saved_id if attempt == 0 else None
-        client = ClaudeSDKClient(_make_options(resume_id))
+        client = ClaudeSDKClient(_make_options(resume_id, agent_name=first_agent))
         try:
             initial_prompt = task if not resume_id else None
             await client.connect(initial_prompt)
@@ -221,7 +367,7 @@ async def _run_workflow_async(
         registry.update(session_name, status="running",
                         session_id=saved_id or "")
 
-        step_idx = 0
+        step_idx = start_step
         failed_step = ""
 
         while step_idx < len(workflow.steps):
@@ -240,10 +386,35 @@ async def _run_workflow_async(
                 step_idx += 1
                 continue
 
-            # Await step — suspend
+            # Await step — suspend and persist state for resume
             if step.await_event:
-                log.info(f"Await step {step.name}: suspended")
+                log.info(f"Await step {step.name}: suspending, waiting for '{step.await_event}'")
                 registry.update(session_name, status="waiting", phase=step.name)
+
+                run = WorkflowRun.create(workflow.name, {"data": {"issue_id": issue_id}})
+                run.status = "waiting"
+                run.suspended_at_step = step_idx + 1
+                run.await_event = step.await_event
+                run.session_name = session_name
+                run.variable_scopes = ctx.scopes
+                run.repo = repo
+                run.cwd = cwd
+                run.issue_id = issue_id
+                run.save()
+
+                _emit_lifecycle_event("engineer/workflow.suspended", {
+                    "issue_id": issue_id,
+                    "workflow": workflow.name,
+                    "step": step.name,
+                    "await_event": step.await_event,
+                    "run_id": run.run_id,
+                    "text": f"Workflow suspended at {step.name}, waiting for '{step.await_event}'",
+                })
+
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
                 return True
 
             # Prompt step — inject into the persistent session
@@ -258,7 +429,7 @@ async def _run_workflow_async(
                 "text": f"Step {step.name} started",
             })
 
-            prompt = _build_step_prompt(step, ctx)
+            prompt = _build_step_prompt(step, ctx, session_name, step.name)
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             await client.query(prompt)
@@ -271,7 +442,7 @@ async def _run_workflow_async(
                 return False
 
             # Validate handoff
-            handoff = _read_handoff(issue_id)
+            handoff = _read_handoff(session_name, step.name)
             missing = _validate_handoff(step, handoff)
 
             for retry in range(MAX_HANDOFF_RETRIES):
@@ -284,7 +455,7 @@ async def _run_workflow_async(
                 )
                 await client.query(fix_prompt)
                 await _drain_response(client, session_name, issue_id)
-                handoff = _read_handoff(issue_id)
+                handoff = _read_handoff(session_name, step.name)
                 missing = _validate_handoff(step, handoff)
 
             if missing:
@@ -369,36 +540,33 @@ def _emit_step_failed(issue_id, workflow_name, step_name, error):
     }, blocking=True)
 
 
-def _build_step_prompt(step: StepDef, ctx: VariableContext) -> str:
+def _build_step_prompt(step: StepDef, ctx: VariableContext, session_name: str = "", step_name: str = "") -> str:
     """Build the full prompt for a step, including handoff contract."""
     prompt = ctx.resolve(step.prompt)
 
     if step.handoff.required or step.handoff.optional:
-        prompt += "\n\nWhen complete, write your handoff file with:"
+        handoff_path = SessionRegistry.handoff_path(session_name, step_name) if session_name else "<session>/handoff-<step>.yaml"
+        prompt += f"\n\nWhen complete, write your handoff file at `{handoff_path}` as YAML:"
+        prompt += "\n```yaml"
         for field in step.handoff.required:
-            prompt += f"\n- `{field}` (required)"
+            prompt += f"\n{field}: <value>"
         for field in step.handoff.optional:
-            prompt += f"\n- `{field}` (optional)"
+            prompt += f"\n{field}: <value>  # optional"
+        prompt += "\n```"
 
     return prompt
 
 
-def _read_handoff(issue_id: str) -> dict:
-    """Read the handoff YAML for an issue."""
-    candidates = [
-        HANDOFF_DIR / f"{issue_id.lower()}.md",
-        HANDOFF_DIR / f"{issue_id}.md",
-    ]
-    for path in candidates:
-        if path.exists():
-            content = path.read_text()
-            if content.startswith("---"):
-                try:
-                    end = content.index("---", 3)
-                    return yaml.safe_load(content[3:end]) or {}
-                except (ValueError, yaml.YAMLError):
-                    pass
-    return {}
+def _read_handoff(session_name: str, step_name: str) -> dict:
+    """Read the handoff YAML for a step."""
+    path = SessionRegistry.handoff_path(session_name, step_name)
+    if not path.exists():
+        return {}
+    try:
+        content = path.read_text()
+        return yaml.safe_load(content) or {}
+    except yaml.YAMLError:
+        return {}
 
 
 def _validate_handoff(step: StepDef, handoff: dict) -> list[str]:

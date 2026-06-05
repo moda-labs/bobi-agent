@@ -91,6 +91,7 @@ def test_setup_repo_writes_file(tmp_path):
     output = setup_repo(tmp_path)
 
     assert output.exists()
-    assert output.name == ".modastack.yaml"
+    assert output.name == "config.yaml"
+    assert output.parent.name == ".modastack"
     content = output.read_text()
     assert "npm test" in content

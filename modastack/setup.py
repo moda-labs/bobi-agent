@@ -1,4 +1,4 @@
-"""Auto-generate .modastack.yaml by inspecting a repo."""
+"""Auto-generate .modastack/config.yaml by inspecting a repo."""
 
 import json
 import re
@@ -132,8 +132,10 @@ def generate_dispatch_yaml(repo_path: Path, task_tracking: str = "github-issues"
 
 
 def setup_repo(repo_path: Path) -> Path:
-    """Generate .modastack.yaml and return the path."""
+    """Generate .modastack/config.yaml and return the path."""
     config = generate_dispatch_yaml(repo_path)
-    output_path = repo_path / ".modastack.yaml"
+    output_dir = repo_path / ".modastack"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "config.yaml"
     output_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
     return output_path
