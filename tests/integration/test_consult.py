@@ -17,8 +17,8 @@ import uuid
 
 import pytest
 
-from modastack.manager import session
-from .test_inject import _start_test_session, _stop_test_session
+from modastack.manager.session import ManagerSession
+from .test_inject import _start_test_session, _stop_test_session, _test_session
 
 requires_claude = pytest.mark.skipif(
     not shutil.which("claude"),
@@ -71,25 +71,12 @@ def _post_consult(question: str, timeout: int = 60, port: int = TEST_PORT) -> di
 class TestConsultIntegration:
 
     def setup_method(self):
-        self._orig_client = session._client
-        self._orig_loop = session._loop
-        self._orig_state = session._state
-        self._orig_response = session._last_response
-        self._orig_thread = session._thread
-
         self._session_thread = _start_test_session()
-        session._thread = self._session_thread
         self._server, self._dashboard_thread = _start_dashboard()
 
     def teardown_method(self):
         self._server.should_exit = True
         _stop_test_session()
-
-        session._client = self._orig_client
-        session._loop = self._orig_loop
-        session._state = self._orig_state
-        session._last_response = self._orig_response
-        session._thread = self._orig_thread
 
     def test_consult_roundtrip(self):
         """Question goes in, matching response comes out."""
@@ -106,10 +93,11 @@ class TestConsultIntegration:
 
     def test_consult_concurrent_with_inject(self):
         """Consult serializes correctly when inject is in progress."""
+        from .test_inject import _test_session as ts
         inject_done = threading.Event()
 
         def _bg_inject():
-            session.inject("Reply with just: INJECTED", timeout=60)
+            ts.inject("Reply with just: INJECTED", timeout=60)
             inject_done.set()
 
         t = threading.Thread(target=_bg_inject, daemon=True)

@@ -73,6 +73,17 @@ def try_resume_for_event(event_type: str, issue_id: str = "", event: dict | None
     return True
 
 
+def _find_repo_root(cwd: str) -> Path:
+    """Find the original repo root from a working directory or worktree."""
+    path = Path(cwd)
+    for candidate in [path, *path.parents]:
+        if (candidate / ".modastack" / "config.yaml").exists():
+            return candidate
+        if (candidate / ".modastack.yaml").exists():
+            return candidate
+    return path
+
+
 def make_session_name(workflow_name: str, repo: str, issue_id: str) -> str:
     """Deterministic session name for a workflow run."""
     repo_name = repo.split("/")[-1] if "/" in repo else repo
@@ -122,6 +133,7 @@ def run_workflow(
     requested_by: dict | None = None,
     timeout: int = 3600,
     interactive: bool = True,
+    role: str = "engineer",
 ) -> bool:
     """Execute a workflow end-to-end with a single agent session."""
     issue_id = issue_id or _parse_issue_number(task) or "adhoc"
@@ -134,7 +146,7 @@ def run_workflow(
     worktree_cwd = _setup_worktree(cwd, session_name)
     registry = get_registry()
     registry.register(SessionEntry(
-        name=session_name, session_id="", role="engineer",
+        name=session_name, session_id="", role=role,
         issue_id=issue_id, title=task[:80], phase=workflow.name,
         repo=repo, cwd=worktree_cwd, status="running", pid=os.getpid(),
         requested_by=requested_by,
@@ -156,7 +168,7 @@ def run_workflow(
     success = asyncio.run(
         _run_workflow_async(
             workflow, task, repo, worktree_cwd, issue_id, session_name,
-            registry, ctx, requested_by, timeout, interactive,
+            registry, ctx, requested_by, timeout, interactive, role=role,
         )
     )
 
@@ -276,6 +288,7 @@ async def _run_workflow_async(
     timeout: int,
     interactive: bool = True,
     start_step: int = 0,
+    role: str = "engineer",
 ) -> bool:
     """Async core: one ClaudeSDKClient session for all steps."""
     from claude_agent_sdk import (
@@ -288,7 +301,18 @@ async def _run_workflow_async(
 
     saved_id = load_session_id(session_name)
 
-    def _make_options(resume_id=None):
+    from modastack.prompts.resolver import resolve_agent_prompt
+
+    # Resolve the repo root for agent prompt loading (cwd may be a worktree)
+    repo_root = _find_repo_root(cwd)
+
+    def _make_options(resume_id=None, agent_name=""):
+        agent_prompt = ""
+        if agent_name:
+            agent_prompt = resolve_agent_prompt(agent_name, repo_root, interactive)
+        else:
+            agent_prompt = resolve_agent_prompt("", repo_root, interactive)
+
         return ClaudeAgentOptions(
             cwd=cwd,
             permission_mode="bypassPermissions",
@@ -300,18 +324,12 @@ async def _run_workflow_async(
                 "type": "preset",
                 "preset": "claude_code",
                 "append": (
-                    f"You are an engineer agent working on issue #{issue_id}. "
+                    f"You are an agent working on issue #{issue_id}. "
                     f"Your working directory is an isolated git worktree at {cwd}. "
-                    f"All code changes go here — never modify the main repo checkout. "
+                    f"All changes go here — never modify the main repo checkout. "
                     f"You will receive step-by-step instructions. Follow each one, "
-                    f"then write your handoff file when asked. "
-                    + (
-                        "You can use `modastack consult \"question\"` to ask the manager "
-                        "for guidance on ambiguous decisions."
-                        if interactive else
-                        "You are running in non-interactive mode. Make your best judgment "
-                        "on all decisions — do not use `modastack consult`."
-                    )
+                    f"then write your handoff file when asked.\n\n"
+                    + agent_prompt
                 ),
             },
         )
@@ -321,10 +339,18 @@ async def _run_workflow_async(
         "text": f"Engineer started working on {issue_id}",
     })
 
+    # CLI --role always wins; fall back to workflow step's agent field
+    first_agent = role or ""
+    if not first_agent:
+        for s in workflow.steps[start_step:]:
+            if s.agent:
+                first_agent = s.agent
+                break
+
     # Try resume, fall back to fresh session
     for attempt in range(2):
         resume_id = saved_id if attempt == 0 else None
-        client = ClaudeSDKClient(_make_options(resume_id))
+        client = ClaudeSDKClient(_make_options(resume_id, agent_name=first_agent))
         try:
             initial_prompt = task if not resume_id else None
             await client.connect(initial_prompt)

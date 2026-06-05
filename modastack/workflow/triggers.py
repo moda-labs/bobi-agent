@@ -1,9 +1,8 @@
 """Workflow dispatcher — surfaces workflows to the manager for semantic matching.
 
 Workflow resolution order (most specific wins):
-  1. <target-repo>/.modastack/workflows/   — repo-specific
-  2. ~/.modastack/workflows/               — user overrides
-  3. <modastack>/workflows/                — built-in defaults
+  1. <repo>/.modastack/workflows/   — repo-specific overrides
+  2. <modastack>/workflows/         — built-in defaults
 """
 
 from __future__ import annotations
@@ -17,10 +16,7 @@ from .schema import Workflow, load_workflow
 
 log = logging.getLogger(__name__)
 
-WORKFLOWS_DIR = Path(__file__).parent.parent.parent / "workflows"
-USER_WORKFLOWS_DIR = Path.home() / ".modastack" / "workflows"
-
-_SOURCE_PRIORITY = {"default": 0, "user": 1}
+WORKFLOWS_DIR = Path(__file__).parent
 
 
 class WorkflowDispatcher:
@@ -28,17 +24,21 @@ class WorkflowDispatcher:
     def __init__(self):
         self.workflows: list[tuple[Workflow, str]] = []
 
-    def load_all_workflows(self):
+    def load_all_workflows(self, repo_path: Path | None = None):
         """Load workflows from all sources: repo-local, user, built-in defaults."""
-        config = GlobalConfig.load()
+        if repo_path is None:
+            from modastack.sdk import get_repo_root
+            repo_path = get_repo_root()
+        if repo_path is None:
+            from modastack.manager.session import get_default_session
+            session = get_default_session()
+            if session:
+                repo_path = session.repo_path
 
-        for repo_path in config.repos:
+        if repo_path:
             repo_wf_dir = repo_path / ".modastack" / "workflows"
             if repo_wf_dir.exists():
                 self._load_from(repo_wf_dir, source=str(repo_path))
-
-        if USER_WORKFLOWS_DIR.exists():
-            self._load_from(USER_WORKFLOWS_DIR, source="user")
 
         self._load_from(WORKFLOWS_DIR, source="default")
 
@@ -63,13 +63,13 @@ class WorkflowDispatcher:
     def format_workflow_menu(self) -> str:
         """Format all loaded workflows as a menu for the manager prompt.
 
-        Deduplicates by name — most-specific source wins (repo > user > default).
+        Deduplicates by name — most-specific source wins (repo > default).
         Returns a formatted string the manager can use to decide which workflow
         to run for a given event.
         """
         seen: dict[str, tuple[Workflow, int]] = {}
         for wf, source in self.workflows:
-            priority = _SOURCE_PRIORITY.get(source, 2)
+            priority = 0 if source == "default" else 1
             prev = seen.get(wf.name)
             if prev is None or priority > prev[1]:
                 seen[wf.name] = (wf, priority)

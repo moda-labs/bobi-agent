@@ -34,8 +34,15 @@ from .registry import MonitorRegistry
 
 log = logging.getLogger(__name__)
 
-STATE_PATH = Path.home() / ".modastack" / "monitor_state.json"
-MODASTACK_LOG = Path.home() / ".modastack" / "modastack.log"
+def _monitor_state_path() -> Path:
+    from modastack.sdk import get_repo_root
+    root = get_repo_root()
+    if root:
+        d = root / ".modastack" / "state"
+    else:
+        d = Path.home() / ".modastack"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "monitor_state.json"
 TICK_INTERVAL = 30  # seconds between scheduler ticks
 
 
@@ -63,19 +70,22 @@ def _default_spawn_check(monitor, cwd: str | None) -> None:
         cmd += ["--repo", cwd]
 
     try:
-        MODASTACK_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(MODASTACK_LOG, "a") as lf:
+        from modastack.sdk import get_repo_root
+        root = get_repo_root()
+        log_path = (root / ".modastack" / "state" / "manager.log") if root else (Path.home() / ".modastack" / "modastack.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as lf:
             subprocess.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
     except OSError as e:
         log.error(f"Failed to spawn check for monitor {monitor.name}: {e}")
 
 
 class MonitorScheduler:
-    def __init__(self, inject_event=None, state_path: Path = STATE_PATH,
+    def __init__(self, inject_event=None, state_path: Path | None = None,
                  now=None, registry_loader=None, spawn_check=None):
         self.inject_event = inject_event or _default_inject
         self.spawn_check = spawn_check or _default_spawn_check
-        self.state_path = Path(state_path)
+        self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._registry_loader = registry_loader or MonitorRegistry.load
         self.state: dict = self._load_state()

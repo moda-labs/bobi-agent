@@ -16,7 +16,6 @@ from modastack.subagent import (
     _build_prompt,
     _parse_issue_number,
     _resolve_repo_name,
-    _resolve_skill_path,
     cancel_agent,
     get_result,
     is_running,
@@ -39,22 +38,10 @@ def tmp_cwd():
     shutil.rmtree(d, ignore_errors=True)
 
 
-class TestResolveSkillPath:
-    def test_existing_skill(self):
-        path = _resolve_skill_path("pickup")
-        assert path is not None
-        assert path.name == "SKILL.md"
-        assert "pickup" in str(path)
-
-    def test_nonexistent_skill(self):
-        path = _resolve_skill_path("nonexistent-phase")
-        assert path is None
-
-
 class TestBuildPrompt:
-    def test_includes_skill_reference(self):
+    def test_includes_phase_and_issue(self):
         prompt = _build_prompt("pickup", "AGD-12")
-        assert "SKILL.md" in prompt
+        assert "pickup" in prompt
         assert "AGD-12" in prompt
 
     def test_includes_context(self):
@@ -65,7 +52,7 @@ class TestBuildPrompt:
         prompt = _build_prompt("spec", "AGD-12")
         assert "handoff" in prompt.lower()
 
-    def test_nonexistent_skill_still_works(self):
+    def test_nonexistent_phase_still_works(self):
         prompt = _build_prompt("nonexistent", "AGD-12")
         assert "AGD-12" in prompt
 
@@ -107,9 +94,20 @@ class TestParseIssueNumber:
 
 
 class TestResolveRepoName:
-    def test_explicit_repo_field(self, tmp_path):
+    def test_explicit_repo_field_new_path(self, tmp_path):
+        (tmp_path / ".modastack").mkdir()
+        (tmp_path / ".modastack" / "config.yaml").write_text("repo: moda-labs/jobtack\n")
+        assert _resolve_repo_name(str(tmp_path)) == "moda-labs/jobtack"
+
+    def test_explicit_repo_field_legacy(self, tmp_path):
         (tmp_path / ".modastack.yaml").write_text("repo: moda-labs/jobtack\n")
         assert _resolve_repo_name(str(tmp_path)) == "moda-labs/jobtack"
+
+    def test_new_path_preferred_over_legacy(self, tmp_path):
+        (tmp_path / ".modastack").mkdir()
+        (tmp_path / ".modastack" / "config.yaml").write_text("repo: owner/new\n")
+        (tmp_path / ".modastack.yaml").write_text("repo: owner/legacy\n")
+        assert _resolve_repo_name(str(tmp_path)) == "owner/new"
 
     def test_git_remote_ssh(self, tmp_path):
         with patch("modastack.subagent._git_remote_name", return_value="moda-labs/jobtack"):
@@ -120,7 +118,8 @@ class TestResolveRepoName:
             assert _resolve_repo_name(str(tmp_path)) == tmp_path.name
 
     def test_explicit_field_wins_over_remote(self, tmp_path):
-        (tmp_path / ".modastack.yaml").write_text("repo: owner/explicit\n")
+        (tmp_path / ".modastack").mkdir()
+        (tmp_path / ".modastack" / "config.yaml").write_text("repo: owner/explicit\n")
         with patch("modastack.subagent._git_remote_name", return_value="owner/remote"):
             assert _resolve_repo_name(str(tmp_path)) == "owner/explicit"
 
