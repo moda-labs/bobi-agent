@@ -178,7 +178,6 @@ cd ~/dev/modastack
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-modastack init
 ```
 
 ### Agent-assisted install
@@ -189,54 +188,54 @@ Paste this into Claude Code (or any AI coding agent):
 Follow the instructions at https://raw.githubusercontent.com/moda-labs/modastack/main/deploy/INSTALL.md to install modastack on this machine.
 ```
 
-## Running engineers
+## Running agents
 
-`modastack agent` is the single entrypoint for launching an engineer — either an ad-hoc task or a structured workflow.
+`modastack agents launch` is the entrypoint for launching an agent — either an ad-hoc task or a structured workflow.
 
 ```bash
 # Ad-hoc task
-modastack agent --repo myrepo --task "Fix the login bug"
+modastack agents launch -w adhoc --role engineer --repo myrepo --task "Fix the login bug"
 
 # Run a named workflow on an issue
-modastack agent --workflow issue-lifecycle --repo myrepo --issue 42
+modastack agents launch -w issue-lifecycle --role engineer --repo myrepo --task "Work on #42"
 
 # Blocking check (run, capture result, optionally post an event)
-modastack agent --wait --task "Check prod URL returns 200"
+modastack agents launch -w adhoc --role engineer --wait --task "Check prod URL returns 200"
 ```
 
-Key flags: `--repo`, `--task`, `-w`/`--workflow`, `--issue`, `--title`, `--event-json`, `--timeout`, `--wait`, `--post-event`, `--requested-by`. Run `modastack agent --help` for the full list.
+Key flags: `--repo`, `--task`, `-w`/`--workflow`, `--role`, `--timeout`, `--wait`, `--post-event`, `--requested-by`. Run `modastack agents launch --help` for the full list.
 
 ### Commands
 
 ```bash
 modastack start                    # start everything (manager + events + Slack + dashboard)
+modastack start --fresh            # wipe manager session and start clean
 modastack stop                     # stop a running instance
 modastack restart                  # stop and restart
 
-modastack agent ...                # launch an engineer — ad-hoc task or workflow (see above)
+modastack agents launch ...        # launch an agent with a workflow and role
+modastack agents list              # list active agents
+modastack agents show <id>         # inspect a specific agent
+modastack agents cancel <id>       # cancel a running agent
 modastack status                   # show active agents — manager + engineer sessions
-modastack engineers                # list active engineers, or inspect/cancel a specific one
-modastack message "text"           # send a message to the manager (or an engineer)
-modastack consult "question"       # ask the manager a question, block until it responds
+modastack message "text"           # send a message to the manager
+modastack ask "question"           # ask the manager a question, block until it responds
 
-modastack events                   # show recent events from the event bus
-modastack decisions                # show recent manager decisions
-modastack log <session>            # show the full transcript for a session
-modastack history                  # index and search Claude Code conversation history
+modastack events                   # show recent events and manager decisions
+modastack transcript show <sess>   # show the transcript for a session
+modastack transcript search <q>    # search conversation history
 
-modastack workflow list            # list available workflow definitions from all sources
-modastack workflow status          # show active and recent workflow runs
-modastack workflow validate <f>    # validate a workflow YAML file
+modastack workflows list           # list available workflow definitions
+modastack workflows status         # show active and recent workflow runs
+modastack workflows validate <f>   # validate a workflow YAML file
 
-modastack monitor list             # list background monitors (merged across tiers)
-modastack monitor add <name>       # add a monitor (--interval, --description, --repo)
-modastack monitor pause <name>     # disable a monitor
-modastack monitor remove <name>    # remove a user-added monitor
+modastack monitors list            # list background monitors (merged across tiers)
+modastack monitors add <name>      # add a monitor (--interval, --description, --repo)
+modastack monitors pause <name>    # disable a monitor
+modastack monitors remove <name>   # remove a user-added monitor
 
-modastack init                     # initialize global config
 modastack dashboard                # start the web dashboard
 modastack doctor                   # system health check
-modastack slack-reply              # post a message to Slack
 ```
 
 ### Web dashboard
@@ -287,7 +286,7 @@ Monitors are scheduled polling tasks that fill webhook gaps — conditions no we
 2. `~/.modastack/monitors.yaml` — user globals (apply to all repos)
 3. `<repo>/.modastack.yaml` under `monitors:` — repo-specific
 
-The scheduler runs each monitor on its interval, deduplicates detected conditions, and injects a synthetic event onto the same queue webhooks use — so the manager routes it like any other event. A monitor with a `check:` field uses a native runner in `modastack/monitors/checks.py`; without one, the scheduler launches a short-lived `modastack agent --wait` check that posts an event back only if it finds something. PR conflict detection ships as a default.
+The scheduler runs each monitor on its interval, deduplicates detected conditions, and injects a synthetic event onto the same queue webhooks use — so the manager routes it like any other event. A monitor with a `check:` field uses a native runner in `modastack/monitors/checks.py`; without one, the scheduler launches a short-lived `modastack agents launch --wait` check that posts an event back only if it finds something. PR conflict detection ships as a default.
 
 ## Issue lifecycle
 

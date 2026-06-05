@@ -373,7 +373,7 @@ Only write this if the user chose Linear:
 
 ```bash
 source "$INSTALL_DIR/.venv/bin/activate"
-modastack init --non-interactive
+modastack start --non-interactive
 ```
 
 ## Step 8: Start modastack (optional)

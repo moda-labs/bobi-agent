@@ -30,13 +30,13 @@ def resolve_agent_prompt(
 
     if interactive:
         parts.append(
-            "You can use `modastack consult \"question\"` to ask the manager "
+            "You can use `modastack ask \"question\"` to ask the manager "
             "for guidance on ambiguous decisions."
         )
     else:
         parts.append(
             "You are running in non-interactive mode. Make your best judgment "
-            "on all decisions — do not use `modastack consult`."
+            "on all decisions — do not use `modastack ask`."
         )
 
     return "\n\n".join(parts)

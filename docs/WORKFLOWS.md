@@ -7,8 +7,8 @@ Workflows aren't limited to software engineering. You can build workflows for co
 ## Quick start
 
 1. Create a YAML file in your repo at `.modastack/workflows/my-workflow.yaml`
-2. Run it: `modastack agent -w my-workflow --repo . --task "your context here"`
-3. Watch it: `modastack log <session-name>`
+2. Run it: `modastack agents launch -w my-workflow --role engineer --repo . --task "your context here"`
+3. Watch it: `modastack transcript show <session-name>`
 
 ## Workflow structure
 
@@ -32,9 +32,9 @@ steps:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | yes | Workflow name (used in `modastack agent -w <name>`) |
+| `name` | yes | Workflow name (used in `modastack agents launch -w <name>`) |
 | `trigger` | no | Event type that auto-triggers this workflow (e.g. `task.assigned`) |
-| `description` | no | Human-readable description shown in `modastack workflow list` |
+| `description` | no | Human-readable description shown in `modastack workflows list` |
 | `steps` | yes | Ordered list of steps |
 
 ## Step types
@@ -257,7 +257,7 @@ steps:
 
 Run it:
 ```bash
-modastack agent -w content-review --repo . \
+modastack agents launch -w content-review --role engineer --repo . \
   --task "Review docs/proposal.md for the Q3 board meeting" \
   --non-interactive
 ```

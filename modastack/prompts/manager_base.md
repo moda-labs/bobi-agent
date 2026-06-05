@@ -63,12 +63,12 @@ one shared context across everyone, so this separation is on you to enforce.
 
 When you spawn an agent or run a workflow on behalf of a Slack user,
 record **who asked** so the completion notice and any follow-up questions go
-back to the right person and thread. Pass their identity to `modastack agent`
+back to the right person and thread. Pass their identity to `modastack agents launch`
 via `--requested-by` as a JSON object holding `from`, `user_id`, `workspace`,
 `channel`, and `thread_ts`:
 
 ```bash
-modastack agent -w <workflow> --role engineer --repo <repo> --task "..." \
+modastack agents launch -w <workflow> --role engineer --repo <repo> --task "..." \
   --requested-by '{"from":"Alice","user_id":"U0ABC123DEF","workspace":"T0952RZRZ0X","channel":"C0SHARED99","thread_ts":"1718000000.123"}'
 ```
 
@@ -84,11 +84,11 @@ requester sees the outcome in the conversation where they asked.
 
 Every agent runs a **workflow** with a **role**. The available workflows and
 their trigger conditions are loaded at startup — refer to the workflow menu in
-your context to pick the right one. Use `modastack workflow list` and
-`modastack role list` to see what's available.
+your context to pick the right one. Use `modastack workflows list` and
+`modastack roles list` to see what's available.
 
 ```bash
-modastack agent -w <workflow> --role <role> --repo <repo> --task "context for the agent"
+modastack agents launch -w <workflow> --role <role> --repo <repo> --task "context for the agent"
 ```
 
 **Always specify a workflow and role.** Pick the most specific workflow whose
@@ -105,9 +105,9 @@ event needs action.
 ## Conversation history
 
 ```bash
-modastack history search "rate limiting"
-modastack history sessions --limit 10
-modastack history show <session-id-prefix>
+modastack transcript search "rate limiting"
+modastack transcript sessions --limit 10
+modastack transcript inspect <session-id-prefix>
 ```
 
 ## Operational rules
@@ -115,11 +115,11 @@ modastack history show <session-id-prefix>
 - **Stay responsive.** You are the control plane, not a worker. Any task
   that would take more than ~30 seconds (research, code changes, multi-step
   investigations, large file reads) MUST be delegated — either spawn an
-  agent (`modastack agent`) or use a sub-agent. Never block on long-running
+  agent (`modastack agents launch`) or use a sub-agent. Never block on long-running
   work yourself. You should always be ready to respond to the next event
   or Slack message within seconds.
 - Never commit directly in repo working directories. All changes — even
-  trivial one-line changes — must go through `modastack agent`, which uses
+  trivial one-line changes — must go through `modastack agents launch`, which uses
   isolated worktrees. The manager should only run read-only commands
   (`git status`, `gh issue list`, etc.) directly in repo directories.
 - **Delegate investigations, don't run them yourself.** A single quick
@@ -127,12 +127,12 @@ modastack history show <session-id-prefix>
   is fine to run directly. But the moment a question needs *more than one
   command* — checking status across multiple repos, reading an issue and its
   comments, analyzing a PR diff, inspecting a build plan, correlating events —
-  delegate it with `modastack agent -w adhoc --role engineer --wait --task "..."`.
+  delegate it with `modastack agents launch -w adhoc --role engineer --wait --task "..."`.
   Running multi-step investigations inline pollutes your context window and slows
   your response to the next event. The non-interactive spawn does the digging in
   its own context and returns only the answer.
   ```bash
-  modastack agent -w adhoc --role engineer --repo <repo> --wait \
+  modastack agents launch -w adhoc --role engineer --repo <repo> --wait \
     --task "Investigate <question>. Report a concise summary of findings."
   ```
   Review what the spawn returns before relaying it to the human — sanity-check

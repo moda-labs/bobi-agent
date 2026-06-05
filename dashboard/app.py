@@ -105,8 +105,8 @@ async def api_post_event(request: Request):
     return {"ok": True}
 
 
-@app.post("/api/consult")
-async def api_consult(request: Request):
+@app.post("/api/ask")
+async def api_ask(request: Request):
     body = await request.json()
     question = body.get("question", "").strip()
     timeout = body.get("timeout", 300)
@@ -121,18 +121,18 @@ async def api_consult(request: Request):
         return {"ok": False, "error": "manager not running"}
 
     result = await asyncio.to_thread(
-        _do_consult, question, timeout, source, correlation_id
+        _do_ask, question, timeout, source, correlation_id
     )
     return result
 
 
-def _do_consult(question, timeout, source, correlation_id):
+def _do_ask(question, timeout, source, correlation_id):
     from modastack.manager.session import inject_capture, last_inject_error
 
-    _log_consultation(correlation_id, source, question)
+    _log_ask(correlation_id, source, question)
 
     ok, response = inject_capture(
-        f"[CONSULTATION] {question}",
+        f"[QUESTION] {question}",
         timeout=timeout,
         wait_for_ready=timeout,
     )
@@ -142,12 +142,12 @@ def _do_consult(question, timeout, source, correlation_id):
     return {"ok": True, "response": response or "", "correlation_id": correlation_id}
 
 
-def _log_consultation(correlation_id: str, source: str, question: str):
+def _log_ask(correlation_id: str, source: str, question: str):
     events_log = Path.home() / ".modastack" / "manager" / "events.jsonl"
     events_log.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "type": "consultation.request",
+        "type": "ask.request",
         "source": source,
         "data": {
             "correlation_id": correlation_id,

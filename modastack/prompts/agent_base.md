@@ -14,7 +14,7 @@ here — never modify the main repo checkout.
 When you need a decision or guidance from the manager:
 
 ```bash
-modastack consult "your question"
+modastack ask "your question"
 ```
 
 The command blocks until the manager responds and prints the response

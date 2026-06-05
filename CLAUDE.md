@@ -19,7 +19,7 @@ cd ~/dev/modastack
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-modastack init --non-interactive
+modastack start --non-interactive
 ```
 
 ## Commands
@@ -28,21 +28,22 @@ modastack init --non-interactive
 modastack start                # start event loop
 modastack stop                 # stop the running instance
 modastack restart              # stop and restart
-modastack agent --repo R --task T   # launch an ad-hoc engineer agent
-modastack agent --workflow W --repo R --issue I  # run a workflow
-modastack workflow list        # list available workflows
-modastack monitor list         # list background monitors (merged across tiers)
-modastack monitor add <name>   # add a monitor (--interval, --description, --repo)
-modastack monitor pause <name> # disable a monitor
-modastack monitor remove <name>  # remove a user-added monitor
+modastack start --fresh        # wipe manager session and start clean
+modastack agents launch -w W --role R --repo P --task T  # launch an agent
+modastack agents list          # list active agents
+modastack agents show <id>     # inspect a specific agent
+modastack agents cancel <id>   # cancel a running agent
+modastack workflows list       # list available workflows
+modastack monitors list        # list background monitors (merged across tiers)
+modastack monitors add <name>  # add a monitor (--interval, --description, --repo)
+modastack monitors pause <name>  # disable a monitor
+modastack monitors remove <name> # remove a user-added monitor
 modastack status               # show active engineer sessions
-modastack engineers            # list active engineers
-modastack events               # show recent events from the bus
-modastack decisions            # show recent manager decisions
+modastack events               # show recent events and decisions
 modastack message "text"       # inject a message into the manager session
-modastack consult "question"   # ask the manager a question, block until response
-modastack log <session>        # show session transcript
-modastack init                 # initialize global config
+modastack ask "question"       # ask the manager a question, block until response
+modastack transcript show <session>  # show session transcript
+modastack transcript search <query>  # search conversation history
 modastack doctor               # system health check
 modastack dashboard            # start the web dashboard
 ```
@@ -190,7 +191,7 @@ same queue webhooks use — so the manager routes it like any other event.
 A monitor with a `check:` field uses a native runner in
 `modastack/monitors/checks.py` (deterministic, deduplicated). Without one,
 the scheduler launches a short-lived, non-interactive check agent out-of-band
-(`modastack agent --wait --task "..." --post-event <event>`): it performs the
+(`modastack agents launch -w adhoc --role engineer --wait --task "..." --post-event <event>`): it performs the
 check from the `description`, captures the result, and posts an event back to
 the bus *only* if it finds something. The manager never sees the check
 process — only the resulting finding — so its context stays clean and

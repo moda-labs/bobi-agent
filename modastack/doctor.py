@@ -36,7 +36,7 @@ def _check_global_config() -> CheckResult:
                            detail=str(GLOBAL_CONFIG_PATH))
     return CheckResult("Global config", ok=False,
                        detail="missing",
-                       hint="Run `modastack init` to create it")
+                       hint="Run `modastack start` to create it")
 
 
 def _check_repos() -> CheckResult:

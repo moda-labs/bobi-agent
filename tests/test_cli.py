@@ -18,15 +18,6 @@ def test_version_flag():
     assert __version__ in result.output
 
 
-def test_agent_version_flag():
-    runner = CliRunner()
-    result = runner.invoke(main, ["agent", "--version"])
-    assert result.exit_code == 0
-    assert "modastack" in result.output
-    assert __version__ in result.output
-
-
-
 def test_post_event_splits_source_and_type():
     """_post_event splits 'source/type' and POSTs the right payload."""
     from modastack.cli import _post_event
@@ -92,12 +83,12 @@ def test_post_event_returns_false_on_connection_error():
         assert _post_event("monitor/x", {}) is False
 
 
-# --- modastack workflow list ------------------------------------------------
+# --- modastack workflows list ------------------------------------------------
 
 
 def test_workflow_list_shows_workflows():
     runner = CliRunner()
-    result = runner.invoke(main, ["workflow", "list"])
+    result = runner.invoke(main, ["workflows", "list"])
     assert result.exit_code == 0
     assert "issue-lifecycle" in result.output
     assert "adhoc" in result.output
@@ -106,11 +97,11 @@ def test_workflow_list_shows_workflows():
 def test_workflow_list_no_errors():
     """Every workflow YAML should load without errors."""
     runner = CliRunner()
-    result = runner.invoke(main, ["workflow", "list"])
+    result = runner.invoke(main, ["workflows", "list"])
     assert result.exit_code == 0
 
 
-# --- modastack agent (unified command) --------------------------------------
+# --- modastack agents (unified command) --------------------------------------
 
 
 class TestAgentCommand:
@@ -118,7 +109,7 @@ class TestAgentCommand:
         runner = CliRunner()
         with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-42") as mock:
             result = runner.invoke(main, [
-                "agent", "-w", "adhoc", "--role", "engineer",
+                "agents", "launch", "-w", "adhoc", "--role", "engineer",
                 "--repo", str(tmp_path), "--task", "Fix #42",
             ])
         assert result.exit_code == 0, result.output
@@ -132,7 +123,7 @@ class TestAgentCommand:
         runner = CliRunner()
         with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-42") as mock:
             result = runner.invoke(main, [
-                "agent", "-w", "issue-lifecycle", "--role", "engineer",
+                "agents", "launch", "-w", "issue-lifecycle", "--role", "engineer",
                 "--repo", str(tmp_path), "--task", "Work on #42",
             ])
         assert result.exit_code == 0, result.output
@@ -141,19 +132,19 @@ class TestAgentCommand:
 
     def test_workflow_required(self):
         runner = CliRunner()
-        result = runner.invoke(main, ["agent", "--role", "engineer", "--repo", "/tmp", "--task", "X"])
+        result = runner.invoke(main, ["agents", "launch", "--role", "engineer", "--repo", "/tmp", "--task", "X"])
         assert result.exit_code != 0
 
     def test_role_required(self):
         runner = CliRunner()
-        result = runner.invoke(main, ["agent", "-w", "adhoc", "--repo", "/tmp", "--task", "X"])
+        result = runner.invoke(main, ["agents", "launch", "-w", "adhoc", "--repo", "/tmp", "--task", "X"])
         assert result.exit_code != 0
         assert "--role" in result.output
 
     def test_invalid_role(self, tmp_path):
         runner = CliRunner()
         result = runner.invoke(main, [
-            "agent", "-w", "adhoc", "--role", "nonexistent",
+            "agents", "launch", "-w", "adhoc", "--role", "nonexistent",
             "--repo", str(tmp_path), "--task", "X",
         ])
         assert result.exit_code != 0
@@ -164,7 +155,7 @@ class TestAgentCommand:
         check = CheckResult(success=True, finding=False)
         with patch("modastack.subagent.run_check_blocking", return_value=check):
             result = runner.invoke(main, [
-                "agent", "-w", "adhoc", "--role", "engineer",
+                "agents", "launch", "-w", "adhoc", "--role", "engineer",
                 "--wait", "--task", "Check prod URL",
             ])
         assert result.exit_code == 0
@@ -172,7 +163,7 @@ class TestAgentCommand:
     def test_requires_repo(self, tmp_path):
         runner = CliRunner()
         result = runner.invoke(main, [
-            "agent", "-w", "adhoc", "--role", "engineer", "--task", "do a thing",
+            "agents", "launch", "-w", "adhoc", "--role", "engineer", "--task", "do a thing",
         ])
         assert result.exit_code != 0
         assert "--repo is required" in result.output
@@ -182,10 +173,9 @@ class TestAgentCommand:
         req = '{"from":"Alice","channel":"C1"}'
         with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-1") as mock:
             result = runner.invoke(main, [
-                "agent", "-w", "adhoc", "--role", "engineer",
+                "agents", "launch", "-w", "adhoc", "--role", "engineer",
                 "--repo", str(tmp_path), "--task", "Fix #1",
                 "--requested-by", req,
             ])
         assert result.exit_code == 0
         assert mock.call_args[1]["requested_by"] == {"from": "Alice", "channel": "C1"}
-

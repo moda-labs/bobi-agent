@@ -368,25 +368,21 @@ TEST 7.2: Message command
   ACTION: cd ~/dev/modastack-dogfood && modastack message "dogfood integration test ping"
   EXPECT: Output contains "Sent"
 
-TEST 7.3: Consult command
-  ACTION: cd ~/dev/modastack-dogfood && modastack consult \
+TEST 7.3: Ask command
+  ACTION: cd ~/dev/modastack-dogfood && modastack ask \
     "Reply with exactly: DOGFOOD_TEST_OK" --timeout 60
   EXPECT: Output contains "DOGFOOD_TEST_OK"
 
 TEST 7.4: Events command
   ACTION: cd ~/dev/modastack-dogfood && modastack events
-  EXPECT: Output shows recent events (may include consultation events)
+  EXPECT: Output shows recent events and decisions
 
-TEST 7.5: Decisions command
-  ACTION: cd ~/dev/modastack-dogfood && modastack decisions
-  EXPECT: Command exits successfully (exit code 0)
+TEST 7.5: Agents list command (no active agents)
+  ACTION: cd ~/dev/modastack-dogfood && modastack agents list
+  EXPECT: Output contains "No active agents" or empty list
 
-TEST 7.6: Engineers command (no active engineers)
-  ACTION: cd ~/dev/modastack-dogfood && modastack engineers
-  EXPECT: Output contains "No active engineers" or empty list
-
-TEST 7.7: Log command
-  ACTION: cd ~/dev/modastack-dogfood && modastack log manager -n 5
+TEST 7.6: Transcript command
+  ACTION: cd ~/dev/modastack-dogfood && modastack transcript show manager -n 5
   EXPECT: Output shows manager activity (timestamps, messages)
 
 TEST 7.8: Dashboard port file

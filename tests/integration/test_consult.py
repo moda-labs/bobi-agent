@@ -1,7 +1,7 @@
-"""Integration tests for modastack consult — real Claude Code session + dashboard.
+"""Integration tests for modastack ask — real Claude Code session + dashboard.
 
 Starts an actual Claude Code session and the dashboard HTTP server,
-then exercises the full consultation round-trip: CLI/HTTP → dashboard →
+then exercises the full ask round-trip: CLI/HTTP → dashboard →
 inject → manager session → response → HTTP response.
 
 Requires the `claude` CLI to be installed. Skipped in CI.
@@ -50,7 +50,7 @@ def _start_dashboard(port: int = TEST_PORT):
     raise RuntimeError(f"Dashboard failed to start on port {port}")
 
 
-def _post_consult(question: str, timeout: int = 60, port: int = TEST_PORT) -> dict:
+def _post_ask(question: str, timeout: int = 60, port: int = TEST_PORT) -> dict:
     payload = json.dumps({
         "question": question,
         "correlation_id": str(uuid.uuid4()),
@@ -58,7 +58,7 @@ def _post_consult(question: str, timeout: int = 60, port: int = TEST_PORT) -> di
         "source": "test",
     }).encode()
     req = urllib.request.Request(
-        f"http://127.0.0.1:{port}/api/consult",
+        f"http://127.0.0.1:{port}/api/ask",
         data=payload,
         headers={"Content-Type": "application/json"},
     )
@@ -68,7 +68,7 @@ def _post_consult(question: str, timeout: int = 60, port: int = TEST_PORT) -> di
 
 @requires_claude
 @pytest.mark.timeout(180)
-class TestConsultIntegration:
+class TestAskIntegration:
 
     def setup_method(self):
         self._session_thread = _start_test_session()
@@ -78,21 +78,21 @@ class TestConsultIntegration:
         self._server.should_exit = True
         _stop_test_session()
 
-    def test_consult_roundtrip(self):
+    def test_ask_roundtrip(self):
         """Question goes in, matching response comes out."""
-        result = _post_consult("Reply with just: CONSULT_OK")
+        result = _post_ask("Reply with just: ASK_OK")
         assert result["ok"] is True
-        assert "CONSULT_OK" in result["response"]
+        assert "ASK_OK" in result["response"]
 
     def test_response_matches_question(self):
-        """Sequential consults get distinct, non-stale responses."""
-        _post_consult("Reply with just: ALPHA")
-        result = _post_consult("Reply with just: BETA")
+        """Sequential asks get distinct, non-stale responses."""
+        _post_ask("Reply with just: ALPHA")
+        result = _post_ask("Reply with just: BETA")
         assert result["ok"] is True
         assert "BETA" in result["response"]
 
-    def test_consult_concurrent_with_inject(self):
-        """Consult serializes correctly when inject is in progress."""
+    def test_ask_concurrent_with_inject(self):
+        """Ask serializes correctly when inject is in progress."""
         from .test_inject import _test_session as ts
         inject_done = threading.Event()
 
@@ -104,13 +104,13 @@ class TestConsultIntegration:
         t.start()
         time.sleep(0.5)
 
-        result = _post_consult("Reply with just: CONSULTED", timeout=120)
+        result = _post_ask("Reply with just: ASKED", timeout=120)
         t.join(timeout=120)
         assert result["ok"] is True
-        assert "CONSULTED" in result["response"]
+        assert "ASKED" in result["response"]
 
-    def test_consultation_prefix_included(self):
-        """The [CONSULTATION] prefix is included in the injected text."""
-        result = _post_consult("Reply with just: PREFIX_CHECK")
+    def test_question_prefix_included(self):
+        """The [QUESTION] prefix is included in the injected text."""
+        result = _post_ask("Reply with just: PREFIX_CHECK")
         assert result["ok"] is True
         assert "PREFIX_CHECK" in result["response"]

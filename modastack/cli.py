@@ -19,6 +19,62 @@ from .__version__ import __version__
 LOG_PATH = GLOBAL_CONFIG_DIR / "modastack.log"
 REPO_ROOT = Path(__file__).parent.parent
 
+
+def _print_startup_info(repo_path: Path, pid: int, log_file: Path):
+    """Print a startup summary with environment info."""
+    from .config import LocalConfig, RepoConfig
+
+    lines = []
+    lines.append(f"modastack v{__version__}")
+    lines.append(f"  repo        {repo_path.name} ({repo_path})")
+    lines.append(f"  pid         {pid}")
+
+    try:
+        rc = RepoConfig.from_file(repo_path)
+        lines.append(f"  tracker     {rc.task_tracking}" + (f" ({rc.project})" if rc.project else ""))
+        if rc.github_repo:
+            lines.append(f"  github      {rc.github_repo}")
+        if rc.slack_channel:
+            lines.append(f"  slack       #{rc.slack_channel}")
+        if rc.test_command:
+            lines.append(f"  tests       {rc.test_command}")
+    except Exception:
+        pass
+
+    try:
+        local = LocalConfig.load(repo_path)
+        if local.event_server_url:
+            label = "remote" if not local.event_server_url.startswith("http://localhost") else "local"
+            lines.append(f"  events      {local.event_server_url} ({label})")
+        if local.operator_name:
+            lines.append(f"  operator    {local.operator_name}")
+        dashboard_port = local.dashboard_port or 8095
+        lines.append(f"  dashboard   http://localhost:{dashboard_port}")
+    except Exception:
+        lines.append(f"  dashboard   http://localhost:8095")
+
+    wf_dir = repo_path / ".modastack" / "workflows"
+    if wf_dir.exists():
+        wf_names = sorted(p.stem for p in wf_dir.glob("*.yaml"))
+        if wf_names:
+            lines.append(f"  workflows   {', '.join(wf_names)}")
+
+    mon_file = repo_path / ".modastack" / "monitors.yaml"
+    if mon_file.exists():
+        try:
+            import yaml
+            raw = yaml.safe_load(mon_file.read_text()) or {}
+            monitors = raw.get("monitors", [])
+            active = [m["name"] for m in monitors if isinstance(m, dict) and m.get("enabled", True)]
+            if active:
+                lines.append(f"  monitors    {', '.join(active)}")
+        except Exception:
+            pass
+
+    lines.append(f"  logs        {log_file}")
+
+    click.echo("\n".join(lines))
+
 def _detect_repo_root(cwd: Path | None = None) -> Path | None:
     """Walk up from cwd to find a repo with .modastack/config.yaml."""
     path = (cwd or Path.cwd()).resolve()
@@ -101,17 +157,28 @@ def _systemctl(action: str) -> bool:
 
 @main.command()
 @click.option("--foreground", "-f", is_flag=True, help="Run in the foreground (default: daemonize)")
-def start(foreground):
+@click.option("--fresh", is_flag=True, help="Wipe manager session and start clean")
+@click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip interactive setup prompts")
+def start(foreground, fresh, non_interactive):
     """Start modastack for the repo in the current directory.
+
+    If no global config exists, runs interactive setup first (unless
+    --non-interactive is set, in which case defaults are used).
 
     Usage:
         cd myrepo && modastack start              # daemonize
         cd myrepo && modastack start --foreground  # run in foreground
+        cd myrepo && modastack start --fresh       # fresh manager session
     """
+    _ensure_config(non_interactive)
+
     repo_path = _detect_repo_root()
     if not repo_path:
-        click.echo("Not inside a modastack repo (no .modastack/config.yaml found). Run `modastack init` first.", err=True)
+        click.echo("Not inside a modastack repo (no .modastack/config.yaml found).", err=True)
         raise SystemExit(1)
+
+    if fresh:
+        _clear_manager_session(repo_path)
 
     if not foreground and _has_systemd_service():
         click.echo("Starting via systemd...")
@@ -120,8 +187,8 @@ def start(foreground):
                 ["systemctl", "--user", "show", "modastack", "--property=MainPID", "--value"],
                 capture_output=True, text=True, timeout=5,
             )
-            pid = result.stdout.strip()
-            click.echo(f"Modastack started (pid {pid}). Logs: {_repo_state_dir(repo_path) / 'manager.log'}")
+            pid = int(result.stdout.strip() or "0")
+            _print_startup_info(repo_path, pid, _repo_state_dir(repo_path) / "manager.log")
         return
 
     state_dir = _repo_state_dir(repo_path)
@@ -142,22 +209,63 @@ def start(foreground):
                          if isinstance(h, logging.FileHandler)]
 
         from modastack.manager.events.consumer import run
-        run(repo_path=repo_path)
+        run(repo_path=repo_path, fresh=fresh)
     else:
         log_file = state_dir / "manager.log"
         env = os.environ.copy()
         venv_bin = str(Path(sys.executable).parent)
         local_bin = str(Path.home() / ".local" / "bin")
         env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
+        cmd = [sys.executable, "-m", "modastack.cli", "start", "--foreground"]
+        if fresh:
+            cmd.append("--fresh")
         with open(log_file, "a") as lf:
             proc = subprocess.Popen(
-                [sys.executable, "-m", "modastack.cli", "start", "--foreground"],
+                cmd,
                 stdout=lf, stderr=lf,
                 cwd=str(repo_path),
                 env=env,
                 start_new_session=True,
             )
-        click.echo(f"Modastack started for {repo_path.name} (pid {proc.pid}). Logs: {log_file}")
+        _print_startup_info(repo_path, proc.pid, log_file)
+
+
+def _ensure_config(non_interactive: bool) -> None:
+    """Ensure global config exists, running interactive setup if needed."""
+    config_path = GLOBAL_CONFIG_DIR / "config.yaml"
+    if config_path.exists():
+        return
+
+    GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config = GlobalConfig.load()
+
+    import secrets
+    config.webhook_secret = f"whsec_{secrets.token_hex(24)}"
+
+    if not non_interactive:
+        click.echo("First-time setup — configuring modastack.\n")
+        try:
+            gh_token = click.prompt("  GitHub token (or enter to skip)", default="", show_default=False)
+            if gh_token:
+                config.github_token = gh_token
+            slack_token = click.prompt("  Slack bot token (or enter to skip)", default="", show_default=False)
+            if slack_token:
+                config.slack_bot_token = slack_token
+        except (EOFError, click.Abort):
+            pass
+        click.echo()
+
+    config.save()
+    click.echo(f"Config created at {config_path}")
+    click.echo(f"Webhook secret: {config.webhook_secret}")
+
+
+def _clear_manager_session(repo_path: Path) -> None:
+    """Wipe saved session ID so the manager starts a fresh conversation."""
+    from modastack.sdk import save_session_id
+    session_name = f"moda-mgr-{repo_path.name}"
+    save_session_id(session_name, "")
+    click.echo("Cleared manager session — starting fresh.")
 
 
 def _find_pid_path() -> Path | None:
@@ -233,13 +341,19 @@ def stop(force):
 
 
 @main.command()
-def restart():
+@click.option("--fresh", is_flag=True, help="Wipe manager session and start clean")
+def restart(fresh):
     """Stop and restart modastack.
 
     Usage:
         modastack restart
+        modastack restart --fresh   # fresh manager session
     """
     if _has_systemd_service():
+        if fresh:
+            repo_path = _detect_repo_root()
+            if repo_path:
+                _clear_manager_session(repo_path)
         click.echo("Restarting via systemd...")
         _systemctl("restart")
         result = subprocess.run(
@@ -252,7 +366,7 @@ def restart():
 
     ctx = click.get_current_context()
     ctx.invoke(stop)
-    ctx.invoke(start)
+    ctx.invoke(start, fresh=fresh)
 
 
 @main.command()
@@ -306,15 +420,15 @@ def message(text, to):
 @click.argument("question", required=True)
 @click.option("--timeout", default=300, type=int, help="Timeout in seconds")
 @click.option("--source", default="engineer", help="Source identifier")
-def consult(question, timeout, source):
+def ask(question, timeout, source):
     """Ask the manager a question and block until it responds.
 
     Used by engineer agents to get decisions, routing, or guidance
     from the manager. Prints the response to stdout.
 
     Usage:
-        modastack consult "Should we use regex or string matching?"
-        modastack consult "Draft a Slack message about the deploy" --timeout 60
+        modastack ask "Should we use regex or string matching?"
+        modastack ask "Draft a Slack message about the deploy" --timeout 60
     """
     import json as _json
     import uuid
@@ -342,7 +456,7 @@ def consult(question, timeout, source):
     dashboard = _get_dashboard_url()
     try:
         req = urllib.request.Request(
-            f"{dashboard}/api/consult",
+            f"{dashboard}/api/ask",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
@@ -352,14 +466,14 @@ def consult(question, timeout, source):
         if result.get("ok"):
             click.echo(result.get("response", ""))
         else:
-            click.echo(f"Consultation failed: {result.get('error', 'unknown')}", err=True)
+            click.echo(f"Failed: {result.get('error', 'unknown')}", err=True)
             raise SystemExit(1)
 
     except urllib.error.URLError as e:
         click.echo(f"Cannot reach manager dashboard: {e}", err=True)
         raise SystemExit(1)
     except TimeoutError:
-        click.echo(f"Consultation timed out after {timeout}s", err=True)
+        click.echo(f"Timed out after {timeout}s", err=True)
         raise SystemExit(1)
 
 
@@ -426,18 +540,24 @@ def slack_reply(text, workspace, channel, thread):
         sys.exit(1)
 
 
-@main.command()
+@main.group()
+def transcript():
+    """Session transcripts — view, search, and index conversation history."""
+    pass
+
+
+@transcript.command("show")
 @click.argument("session", default="manager")
 @click.option("-n", "--lines", default=30, help="Number of recent messages to show")
 @click.option("-f", "--follow", is_flag=True, help="Follow mode — stream new entries")
-def log(session, lines, follow):
-    """Show the full transcript for a session.
+def transcript_show(session, lines, follow):
+    """Show the transcript for a session.
 
     Usage:
-        modastack log manager             # manager transcript
-        modastack log eng-70              # engineer transcript
-        modastack log manager -n 50       # last 50 messages
-        modastack log manager -f          # follow mode
+        modastack transcript show manager        # manager transcript
+        modastack transcript show eng-70         # engineer transcript
+        modastack transcript show manager -n 50  # last 50 messages
+        modastack transcript show manager -f     # follow mode
     """
     transcript_path = _find_transcript(session)
     if not transcript_path:
@@ -712,121 +832,131 @@ def _offer_sandbox_fix(browser_mod, non_interactive: bool) -> None:
         click.echo(f"  Fix failed: {message}", err=True)
 
 
-@main.command()
-@click.argument("issue_id", required=False)
-@click.option("--cancel", is_flag=True, help="Cancel a running engineer agent")
-def engineers(issue_id, cancel):
-    """List active engineers, or inspect/cancel a specific one.
+@main.group()
+def agents():
+    """Agent management — launch, list, inspect, and cancel agents."""
+    pass
+
+
+@agents.command("list")
+def agents_list():
+    """List active agents.
 
     Usage:
-        modastack engineers              # list all active
-        modastack engineers AGD-12       # show details for AGD-12
-        modastack engineers AGD-12 --cancel  # cancel AGD-12
+        modastack agents list
     """
-    from modastack.subagent import list_agents, cancel_agent, is_running, get_result
+    from modastack.subagent import list_agents as _list_agents
 
-    if issue_id and cancel:
-        if cancel_agent(issue_id):
-            click.echo(f"Cancelled {issue_id}")
-        else:
-            click.echo(f"No running agent for {issue_id}")
+    active = _list_agents()
+    if not active:
+        click.echo("No active agents.")
         return
 
-    if issue_id:
-        if is_running(issue_id):
-            agents = list_agents()
-            for a in agents:
-                if a["issue_id"].lower() == issue_id.lower():
-                    click.echo(f"  Issue:   {a['issue_id']}")
-                    click.echo(f"  Phase:   {a['phase']}")
-                    click.echo(f"  Status:  running ({a['elapsed_s']}s)")
-                    click.echo(f"  CWD:     {a['cwd']}")
-                    return
-        result = get_result(issue_id)
-        if result:
-            click.echo(f"  Issue:   {result.issue_id}")
-            click.echo(f"  Phase:   {result.phase}")
-            click.echo(f"  Status:  {'success' if result.success else 'failed'}")
-            click.echo(f"  Turns:   {result.num_turns}")
-            click.echo(f"  Time:    {result.duration_ms / 1000:.1f}s")
-            if result.error:
-                click.echo(f"  Error:   {result.error}")
-        else:
-            click.echo(f"No agent found for {issue_id}")
-        return
+    for a in active:
+        state = "running" if a["running"] else "done"
+        click.echo(f"  {a['issue_id']}/{a['phase']} — {state} ({a['elapsed_s']}s)")
 
-    agents = list_agents()
-    if not agents:
-        click.echo("No active engineers.")
-        return
 
-    for agent in agents:
-        state = "running" if agent["running"] else "done"
-        click.echo(f"  {agent['issue_id']}/{agent['phase']} — {state} ({agent['elapsed_s']}s)")
+@agents.command("show")
+@click.argument("issue_id")
+def agents_show(issue_id):
+    """Show details for a specific agent.
+
+    Usage:
+        modastack agents show AGD-12
+    """
+    from modastack.subagent import list_agents as _list_agents, is_running, get_result
+
+    if is_running(issue_id):
+        for a in _list_agents():
+            if a["issue_id"].lower() == issue_id.lower():
+                click.echo(f"  Issue:   {a['issue_id']}")
+                click.echo(f"  Phase:   {a['phase']}")
+                click.echo(f"  Status:  running ({a['elapsed_s']}s)")
+                click.echo(f"  CWD:     {a['cwd']}")
+                return
+
+    result = get_result(issue_id)
+    if result:
+        click.echo(f"  Issue:   {result.issue_id}")
+        click.echo(f"  Phase:   {result.phase}")
+        click.echo(f"  Status:  {'success' if result.success else 'failed'}")
+        click.echo(f"  Turns:   {result.num_turns}")
+        click.echo(f"  Time:    {result.duration_ms / 1000:.1f}s")
+        if result.error:
+            click.echo(f"  Error:   {result.error}")
+    else:
+        click.echo(f"No agent found for {issue_id}")
+
+
+@agents.command("cancel")
+@click.argument("issue_id")
+def agents_cancel(issue_id):
+    """Cancel a running agent.
+
+    Usage:
+        modastack agents cancel AGD-12
+    """
+    from modastack.subagent import cancel_agent
+
+    if cancel_agent(issue_id):
+        click.echo(f"Cancelled {issue_id}")
+    else:
+        click.echo(f"No running agent for {issue_id}")
 
 
 @main.command()
-@click.option("--tail", default=20, help="Number of recent events to show")
-def events(tail):
-    """Show recent events from the event bus."""
+@click.option("--tail", default=20, help="Number of recent entries to show")
+@click.option("--decisions-only", is_flag=True, help="Show only manager decisions")
+def events(tail, decisions_only):
+    """Show recent events and manager decisions as a unified timeline."""
     repo_path = _detect_repo_root()
-    events_path = (repo_path / ".modastack" / "state" / "events.jsonl") if repo_path else None
-    if not events_path or not events_path.exists():
-        events_path = Path.home() / ".modastack" / "manager" / "events.jsonl"
-    if not events_path.exists():
-        click.echo("No events yet.")
-        return
 
-    lines = events_path.read_text().strip().splitlines()
-    for line in lines[-tail:]:
-        entry = json.loads(line)
-        data = entry.get("data", {})
-        detail = data.get("text", "") or data.get("title", "") or data.get("issue_id", "")
-        if len(detail) > 80:
-            detail = detail[:80] + "..."
-        click.echo(f"  {entry['timestamp']}  {entry['source']:8s}  {entry['type']}")
-        if detail:
-            click.echo(f"    {detail}")
+    entries = []
 
+    if not decisions_only:
+        events_path = (repo_path / ".modastack" / "state" / "events.jsonl") if repo_path else None
+        if not events_path or not events_path.exists():
+            events_path = Path.home() / ".modastack" / "manager" / "events.jsonl"
+        if events_path and events_path.exists():
+            for line in events_path.read_text().strip().splitlines():
+                entry = json.loads(line)
+                data = entry.get("data", {})
+                detail = data.get("text", "") or data.get("title", "") or data.get("issue_id", "")
+                if len(detail) > 80:
+                    detail = detail[:80] + "..."
+                entries.append((
+                    entry["timestamp"],
+                    f"  {entry['timestamp']}  {entry['source']:8s}  {entry['type']}"
+                    + (f"\n    {detail}" if detail else ""),
+                ))
 
-@main.command()
-def decisions():
-    """Show recent manager decisions."""
-    repo_path = _detect_repo_root()
     decisions_path = (repo_path / ".modastack" / "state" / "decisions.jsonl") if repo_path else None
     if not decisions_path or not decisions_path.exists():
         decisions_path = Path.home() / ".modastack" / "manager" / "decisions.jsonl"
-    if not decisions_path.exists():
-        click.echo("No decisions yet.")
+    if decisions_path and decisions_path.exists():
+        for line in decisions_path.read_text().strip().splitlines():
+            entry = json.loads(line)
+            actions = entry.get("actions", [])
+            types = ", ".join(a.get("type", "?") for a in actions)
+            reason = ""
+            if entry.get("reasoning"):
+                reason = f"\n    {entry['reasoning'][:200].replace(chr(10), ' ')}"
+            entries.append((
+                entry["timestamp"],
+                f"  {entry['timestamp']}  decision  {types}{reason}",
+            ))
+
+    if not entries:
+        click.echo("No events yet.")
         return
 
-    lines = decisions_path.read_text().strip().splitlines()
-    for line in lines[-5:]:
-        entry = json.loads(line)
-        actions = entry.get("actions", [])
-        types = ", ".join(a.get("type", "?") for a in actions)
-        click.echo(f"  {entry['timestamp']}  {types}")
-        if entry.get("reasoning"):
-            reason = entry["reasoning"][:200].replace("\n", " ")
-            click.echo(f"    {reason}")
-        click.echo()
+    entries.sort(key=lambda e: e[0])
+    for _, text in entries[-tail:]:
+        click.echo(text)
 
 
 
-@main.command()
-@click.option("--non-interactive", is_flag=True, envvar="CI")
-def init(non_interactive):
-    """Initialize global config."""
-    GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config = GlobalConfig.load()
-    config.save()
-    if not config.webhook_secret:
-        import secrets
-        config.webhook_secret = f"whsec_{secrets.token_hex(24)}"
-        config.save()
-    click.echo(f"Config initialized at {GLOBAL_CONFIG_DIR / 'config.yaml'}")
-    click.echo(f"Webhook secret: {config.webhook_secret}")
-    click.echo(f"  Use this as your GitHub webhook secret")
 
 
 
@@ -839,23 +969,17 @@ def dashboard(port):
     run_dashboard(port=port)
 
 
-@main.group()
-def history():
-    """Conversation history — index and search Claude Code sessions."""
-    pass
-
-
-@history.command("index")
+@transcript.command("index")
 @click.option("--project", default=None, help="Filter to project (substring match on path)")
-def history_index(project):
+def transcript_index(project):
     """Index conversation JSONL files into searchable SQLite.
 
     Scans ~/.claude/projects/*/conversations/ for JSONL files and indexes
     messages into a local SQLite database for fast searching.
 
     Usage:
-        modastack history index                # index all projects
-        modastack history index --project foo   # index only projects matching "foo"
+        modastack transcript index                # index all projects
+        modastack transcript index --project foo  # index only projects matching "foo"
     """
     from .history import index as do_index
     click.echo("Indexing conversations...")
@@ -865,24 +989,24 @@ def history_index(project):
     click.echo(f"  Total: {stats['total_conversations']} conversations, {stats['total_messages']} messages")
 
 
-@history.command("search")
+@transcript.command("search")
 @click.argument("query")
 @click.option("--limit", default=20, help="Max results")
 @click.option("--project", default=None, help="Filter to project")
-def history_search(query, limit, project):
+def transcript_search(query, limit, project):
     """Full-text search across indexed conversation history.
 
-    Searches message content using SQLite FTS. Requires `modastack history index`
+    Searches message content using SQLite FTS. Requires `modastack transcript index`
     to have been run first.
 
     Usage:
-        modastack history search "error handling"
-        modastack history search "deploy" --project modastack --limit 5
+        modastack transcript search "error handling"
+        modastack transcript search "deploy" --project modastack --limit 5
     """
     from .history import search as do_search
     results = do_search(query, limit=limit, project=project)
     if not results:
-        click.echo("No results. Run `modastack history index` first.")
+        click.echo("No results. Run `modastack transcript index` first.")
         return
     for r in results:
         branch = r.get("git_branch") or ""
@@ -894,41 +1018,41 @@ def history_search(query, limit, project):
         click.echo()
 
 
-@history.command("sessions")
+@transcript.command("sessions")
 @click.option("--limit", default=20)
 @click.option("--project", default=None)
-def history_sessions(limit, project):
+def transcript_sessions(limit, project):
     """List indexed conversations with metadata.
 
     Shows session ID, git branch, message count, and working directory for
-    each indexed conversation. Use session IDs with `modastack history show`.
+    each indexed conversation.
 
     Usage:
-        modastack history sessions
-        modastack history sessions --limit 5 --project modastack
+        modastack transcript sessions
+        modastack transcript sessions --limit 5 --project modastack
     """
     from .history import conversations
     convos = conversations(limit=limit, project=project)
     if not convos:
-        click.echo("No conversations indexed. Run `modastack history index` first.")
+        click.echo("No conversations indexed. Run `modastack transcript index` first.")
         return
     for c in convos:
         branch = c.get("git_branch") or ""
         click.echo(f"  {c['started_at'][:19]}  {c['session_id'][:8]}  {branch:20s}  {c['message_count']} msgs  {c.get('cwd', '')}")
 
 
-@history.command("show")
+@transcript.command("inspect")
 @click.argument("session_id")
 @click.option("--limit", default=50)
-def history_show(session_id, limit):
-    """Show messages from a specific session.
+def transcript_inspect(session_id, limit):
+    """Show messages from an indexed session.
 
     Accepts a full or partial session ID (prefix match). Use
-    `modastack history sessions` to find session IDs.
+    `modastack transcript sessions` to find session IDs.
 
     Usage:
-        modastack history show abc12345
-        modastack history show abc12345 --limit 10
+        modastack transcript inspect abc12345
+        modastack transcript inspect abc12345 --limit 10
     """
     from .history import session_messages, conversations
     convos = conversations(limit=1000)
@@ -945,16 +1069,13 @@ def history_show(session_id, limit):
         click.echo(f"  {role:10s}{tool}  {text}")
 
 
-main.add_command(history)
-
-
 @main.group()
-def workflow():
+def workflows():
     """Workflow engine — manage YAML-based DAG workflows."""
     pass
 
 
-@workflow.command("list")
+@workflows.command("list")
 def workflow_list():
     """List available workflow definitions.
 
@@ -963,7 +1084,7 @@ def workflow_list():
       2. Built-in: <modastack>/workflows/
 
     Usage:
-        modastack workflow list
+        modastack workflows list
     """
     from .workflow.triggers import WorkflowDispatcher
 
@@ -972,7 +1093,7 @@ def workflow_list():
     click.echo(dispatcher.format_workflow_menu())
 
 
-@workflow.command("status")
+@workflows.command("status")
 def workflow_status():
     """Show active and recent workflow runs.
 
@@ -980,7 +1101,7 @@ def workflow_status():
     node completion progress, and start time.
 
     Usage:
-        modastack workflow status
+        modastack workflows status
     """
     from .workflow.state import WorkflowRun
     runs = WorkflowRun.list_runs()
@@ -999,7 +1120,7 @@ def workflow_status():
                   f"issue={issue}  {completed}/{total} nodes  {run.started_at[:19]}{suffix}")
 
 
-@workflow.command("resume")
+@workflows.command("resume")
 @click.argument("run_id")
 @click.option("--timeout", default=3600, help="Max execution time in seconds")
 def workflow_resume(run_id, timeout):
@@ -1008,7 +1129,7 @@ def workflow_resume(run_id, timeout):
     Picks up from the step after the await that suspended it.
 
     Usage:
-        modastack workflow resume abc123
+        modastack workflows resume abc123
     """
     from .workflow.state import WorkflowRun
     from .workflow.triggers import WorkflowDispatcher
@@ -1041,7 +1162,7 @@ def workflow_resume(run_id, timeout):
         sys.exit(1)
 
 
-@workflow.command("validate")
+@workflows.command("validate")
 @click.argument("path", type=click.Path(exists=True))
 def workflow_validate(path):
     """Validate a workflow YAML file.
@@ -1050,8 +1171,8 @@ def workflow_validate(path):
     and prints the topological execution order if valid.
 
     Usage:
-        modastack workflow validate workflows/deploy.yaml
-        modastack workflow validate myrepo/.modastack/workflows/deploy.yaml
+        modastack workflows validate workflows/deploy.yaml
+        modastack workflows validate myrepo/.modastack/workflows/deploy.yaml
     """
     import re
     from .workflow.schema import load_workflow
@@ -1085,16 +1206,16 @@ def workflow_validate(path):
 
 
 
-main.add_command(workflow)
+main.add_command(workflows)
 
 
 @main.group()
-def role():
+def roles():
     """Agent roles — list available role prompts."""
     pass
 
 
-@role.command("list")
+@roles.command("list")
 @click.option("--repo", default=None, help="Include repo-specific roles from this repo")
 def role_list(repo):
     """List available agent roles.
@@ -1120,11 +1241,11 @@ def role_list(repo):
     click.echo(format_role_list(roles))
 
 
-main.add_command(role)
+main.add_command(roles)
 
 
 @main.group()
-def monitor():
+def monitors():
     """Background monitoring tasks — scheduled polling to fill webhook gaps."""
     pass
 
@@ -1149,12 +1270,12 @@ def _resolve_monitor_repo(repo: str) -> Path:
     raise click.ClickException(f"Repo not found: {repo} (not a path or registered repo)")
 
 
-@monitor.command("list")
+@monitors.command("list")
 def monitor_list():
     """Show the merged view of monitors across all tiers, with source.
 
     Usage:
-        modastack monitor list
+        modastack monitors list
     """
     from .monitors.registry import MonitorRegistry
 
@@ -1178,7 +1299,7 @@ def monitor_list():
                    f"{scope:16s} {m.event:30s} [{runner}]")
 
 
-@monitor.command("add")
+@monitors.command("add")
 @click.argument("name")
 @click.option("--interval", default="15m", help="How often to run (e.g. 5m, 15m, 1h)")
 @click.option("--description", default="", help="What the monitor checks (interpreted by the manager)")
@@ -1193,9 +1314,9 @@ def monitor_add(name, interval, description, event, check, url, repo):
     ~/.modastack/monitors.yaml (applies across all repos).
 
     Usage:
-        modastack monitor add "PR conflict check" --interval 15m \\
+        modastack monitors add "PR conflict check" --interval 15m \\
             --description "Check open PRs for merge conflicts"
-        modastack monitor add deploy-health --interval 5m \\
+        modastack monitors add deploy-health --interval 5m \\
             --url https://example.com --repo jobtack
     """
     from .monitors.schema import Monitor, parse_interval
@@ -1233,15 +1354,15 @@ def monitor_add(name, interval, description, event, check, url, repo):
                f"check={check or 'manager-interpreted'}")
 
 
-@monitor.command("pause")
+@monitors.command("pause")
 @click.argument("name")
 @click.option("--repo", default=None, help="Pause only for a specific repo")
 def monitor_pause(name, repo):
     """Disable a monitor (writes enabled: false to a writable tier).
 
     Usage:
-        modastack monitor pause stale-pr-check
-        modastack monitor pause pr-conflict-check --repo jobtack
+        modastack monitors pause stale-pr-check
+        modastack monitors pause pr-conflict-check --repo jobtack
     """
     from .monitors.registry import MonitorRegistry
 
@@ -1254,7 +1375,7 @@ def monitor_pause(name, repo):
         raise SystemExit(1)
 
 
-@monitor.command("remove")
+@monitors.command("remove")
 @click.argument("name")
 @click.option("--repo", default=None, help="Remove from a specific repo's config")
 def monitor_remove(name, repo):
@@ -1263,7 +1384,7 @@ def monitor_remove(name, repo):
     Built-in defaults can't be deleted — pause them instead.
 
     Usage:
-        modastack monitor remove deploy-health
+        modastack monitors remove deploy-health
     """
     from .monitors.registry import MonitorRegistry
 
@@ -1273,14 +1394,14 @@ def monitor_remove(name, repo):
         click.echo(f"Removed monitor '{name}'.")
     elif result == "default-only":
         click.echo(f"'{name}' is a built-in default and can't be removed. "
-                   f"Use `modastack monitor pause {name}` to disable it.", err=True)
+                   f"Use `modastack monitors pause {name}` to disable it.", err=True)
         raise SystemExit(1)
     else:
         click.echo(f"No monitor named '{name}' found in a writable tier.", err=True)
         raise SystemExit(1)
 
 
-main.add_command(monitor)
+main.add_command(monitors)
 
 
 # ---------------------------------------------------------------------------
@@ -1362,11 +1483,10 @@ def event_server_status():
 main.add_command(event_server_cmd)
 
 
-@main.command()
-@click.version_option(version=__version__, prog_name="modastack agent")
+@agents.command("launch")
 @click.option("--repo", default=None, help="Repo path or registered name")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
-@click.option("--role", required=True, help="Agent role (see 'modastack role list')")
+@click.option("--role", required=True, help="Agent role (see 'modastack roles list')")
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
 @click.option("--wait", is_flag=True, help="Block until the agent completes")
@@ -1376,16 +1496,16 @@ main.add_command(event_server_cmd)
               help='JSON identity of requester, e.g. \'{"from":"Alice","channel":"C1"}\'')
 @click.option("--non-interactive", "non_interactive", is_flag=True,
               help="Run without manager — agent makes all decisions autonomously")
-def agent(repo, workflow, role, task, timeout, wait, post_event, requested_by, non_interactive):
+def agents_launch(repo, workflow, role, task, timeout, wait, post_event, requested_by, non_interactive):
     """Launch an agent with a workflow and role.
 
     Every agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
-    Use 'modastack role list' to see available roles.
+    Use 'modastack roles list' to see available roles.
 
     Examples:
-        modastack agent -w issue-lifecycle --role engineer --repo jobtack --task "Work on #42"
-        modastack agent -w adhoc --role engineer --repo jobtack --task "Why is CI failing?"
-        modastack agent -w adhoc --role engineer --non-interactive --repo jobtack --task "Fix the bug"
+        modastack agents launch -w issue-lifecycle --role engineer --repo jobtack --task "Work on #42"
+        modastack agents launch -w adhoc --role engineer --repo jobtack --task "Why is CI failing?"
+        modastack agents launch -w adhoc --role engineer --non-interactive --repo jobtack --task "Fix the bug"
     """
     _dispatch_agent(repo=repo, task=task, workflow=workflow, role=role,
                     timeout=timeout, wait=wait, post_event=post_event,

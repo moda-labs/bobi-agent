@@ -117,7 +117,7 @@ class MonitorRegistry:
     def add_global(monitor: Monitor) -> None:
         """Deprecated — use add_repo instead. Global monitors are not supported."""
         raise NotImplementedError(
-            "Global monitors removed. Use `modastack monitor add --repo .` instead."
+            "Global monitors removed. Use `modastack monitors add --repo .` instead."
         )
 
     @staticmethod
