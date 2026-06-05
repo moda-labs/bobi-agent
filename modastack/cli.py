@@ -297,6 +297,11 @@ def stop(force):
 
     import signal
 
+    # Best-effort: unregister the deployment from the event server
+    repo_path = _detect_repo_root()
+    if repo_path:
+        _unregister_deployment(repo_path)
+
     pid_path = _find_pid_path()
     if not pid_path:
         click.echo("No PID file found — modastack is not running.")
@@ -340,6 +345,33 @@ def stop(force):
         click.echo("Killed.")
 
 
+def _unregister_deployment(repo_path: Path) -> None:
+    """Best-effort: DELETE the deployment from the event server on stop."""
+    try:
+        from .config import LocalConfig
+        local = LocalConfig.load(repo_path)
+        es_url = local.event_server_url
+        dep_id = local.event_server_deployment_id
+        api_key = local.event_server_api_key
+
+        if not es_url or not dep_id:
+            return
+
+        token = api_key
+        if not token:
+            from .auth import load_auth
+            auth = load_auth()
+            token = auth.event_server_token
+
+        if not token:
+            return
+
+        from .manager.events.event_server import unregister
+        unregister(es_url, dep_id, token)
+    except Exception:
+        pass
+
+
 @main.command()
 @click.option("--fresh", is_flag=True, help="Wipe manager session and start clean")
 def restart(fresh):
@@ -367,6 +399,88 @@ def restart(fresh):
     ctx = click.get_current_context()
     ctx.invoke(stop)
     ctx.invoke(start, fresh=fresh)
+
+
+@main.command()
+def login():
+    """Authenticate with GitHub for the cloud event server.
+
+    Opens a browser for GitHub OAuth login. The resulting session token
+    is stored in ~/.modastack/auth.yaml and used automatically by
+    `modastack start` when connecting to a remote event server.
+
+    Usage:
+        modastack login
+    """
+    from .auth import ensure_authenticated, load_auth, is_authenticated
+
+    if is_authenticated():
+        state = load_auth()
+        click.echo(f"Already authenticated as {state.github_username}")
+        if not click.confirm("Re-authenticate?", default=False):
+            return
+
+    repo_path = _detect_repo_root()
+    if repo_path:
+        from .config import LocalConfig
+        local = LocalConfig.load(repo_path)
+        es_url = local.event_server_url
+    else:
+        es_url = ""
+
+    if not es_url:
+        config = GlobalConfig.load()
+        es_url = config.event_server_url
+
+    if not es_url:
+        click.echo("No event server URL configured.", err=True)
+        click.echo("Set event_server.url in .modastack/local.yaml or ~/.modastack/config.yaml", err=True)
+        raise SystemExit(1)
+
+    import urllib.request
+    import json as _json
+    try:
+        req = urllib.request.Request(f"{es_url}/auth/config")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            auth_config = _json.loads(resp.read())
+    except Exception as e:
+        click.echo(f"Cannot reach event server at {es_url}: {e}", err=True)
+        raise SystemExit(1)
+
+    client_id = auth_config.get("client_id", "")
+    if not client_id:
+        click.echo("Event server did not return a client_id.", err=True)
+        raise SystemExit(1)
+
+    from .auth import github_login
+    try:
+        if auth_config.get("mode") == "local":
+            state = ensure_authenticated(es_url)
+        else:
+            state = github_login(client_id, es_url)
+        click.echo(f"Authenticated as {state.github_username}")
+    except Exception as e:
+        click.echo(f"Authentication failed: {e}", err=True)
+        raise SystemExit(1)
+
+
+@main.command()
+def logout():
+    """Clear stored GitHub authentication.
+
+    Removes the session token from ~/.modastack/auth.yaml.
+
+    Usage:
+        modastack logout
+    """
+    from .auth import clear_auth, is_authenticated
+
+    if not is_authenticated():
+        click.echo("Not authenticated.")
+        return
+
+    clear_auth()
+    click.echo("Logged out.")
 
 
 @main.command()

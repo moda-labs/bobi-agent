@@ -293,8 +293,70 @@ async def slack_webhook(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Auth endpoints (local stubs — skip real OAuth in local mode)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/auth/config")
+async def auth_config():
+    return {"client_id": "local", "mode": "local"}
+
+
+@app.post("/auth/github/callback")
+async def auth_callback(request: Request):
+    """Local stub: skip real GitHub OAuth, return a dummy session token."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON")
+
+    session_token = f"moda_sess_{uuid.uuid4().hex}"
+    return {
+        "token": session_token,
+        "github_username": "local-dev",
+        "github_user_id": 0,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Deployment management
 # ---------------------------------------------------------------------------
+
+
+@app.delete("/deployments/{deployment_id}")
+async def delete_deployment(deployment_id: str, request: Request):
+    """Remove a deployment and clean up subscription indexes."""
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "unauthorized")
+    token = auth[7:]
+
+    dep = _deployments.get(deployment_id)
+    if not dep:
+        # Try finding by API key match
+        dep_id = _api_key_index.get(token)
+        if dep_id and dep_id == deployment_id:
+            dep = _deployments.get(dep_id)
+        if not dep:
+            raise HTTPException(404, "deployment not found")
+
+    # Verify token matches (either API key or session token)
+    if token != dep.api_key:
+        dep_id = _api_key_index.get(token)
+        if dep_id != deployment_id:
+            raise HTTPException(403, "invalid credentials")
+
+    async with _lock:
+        for sub in dep.subscriptions:
+            ids = _subscription_index.get(sub, set())
+            ids.discard(deployment_id)
+            if not ids:
+                _subscription_index.pop(sub, None)
+
+        _api_key_index.pop(dep.api_key, None)
+        _deployments.pop(deployment_id, None)
+
+    return {"deleted": True}
 
 
 @app.post("/deployments", status_code=201)
@@ -526,6 +588,47 @@ def register(base_url: str, name: str,
     with urllib.request.urlopen(req, timeout=5) as resp:
         result = json.loads(resp.read())
     return result["deployment_id"], result["api_key"]
+
+
+def register_authenticated(base_url: str, name: str,
+                           subscriptions: list[str],
+                           session_token: str) -> tuple[str, str]:
+    """Register a deployment using a session token for auth.
+
+    Returns (deployment_id, api_key).
+    """
+    import urllib.request
+
+    data = json.dumps({"name": name, "subscriptions": subscriptions}).encode()
+    req = urllib.request.Request(
+        f"{base_url}/deployments",
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {session_token}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        result = json.loads(resp.read())
+    return result["deployment_id"], result["api_key"]
+
+
+def unregister(base_url: str, deployment_id: str, token: str) -> bool:
+    """Delete a deployment from the event server. Best-effort."""
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/deployments/{deployment_id}",
+            method="DELETE",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+        return bool(result.get("deleted"))
+    except Exception as e:
+        log.warning(f"Failed to unregister deployment {deployment_id}: {e}")
+        return False
 
 
 def run_server(port: int, webhook_secret: str = "",

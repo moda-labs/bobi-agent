@@ -568,3 +568,84 @@ class TestWebSocket:
             ws.send_text(json.dumps({"type": "ping"}))
             msg = json.loads(ws.receive_text())
             assert msg["type"] == "pong"
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints (local stubs)
+# ---------------------------------------------------------------------------
+
+
+class TestAuthConfig:
+    def test_returns_local_mode(self, client):
+        resp = client.get("/auth/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["client_id"] == "local"
+        assert data["mode"] == "local"
+
+
+class TestAuthCallback:
+    def test_returns_session_token(self, client):
+        resp = client.post("/auth/github/callback", json={
+            "code": "test-code",
+            "redirect_uri": "http://localhost:12345/callback",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["token"].startswith("moda_sess_")
+        assert data["github_username"] == "local-dev"
+        assert data["github_user_id"] == 0
+
+    def test_rejects_invalid_json(self, client):
+        resp = client.post("/auth/github/callback", content="not json",
+                          headers={"content-type": "application/json"})
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# DELETE /deployments/{id}
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteDeployment:
+    def test_delete_removes_deployment(self, client):
+        dep_id, api_key = _register(client, subscriptions=["org/repo"])
+
+        resp = client.delete(
+            f"/deployments/{dep_id}",
+            headers={"authorization": f"Bearer {api_key}"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+        assert dep_id not in _deployments
+
+    def test_delete_cleans_subscription_index(self, client):
+        dep_id, api_key = _register(client, subscriptions=["org/test-repo"])
+        assert "org/test-repo" in _subscription_index
+
+        client.delete(
+            f"/deployments/{dep_id}",
+            headers={"authorization": f"Bearer {api_key}"},
+        )
+        assert "org/test-repo" not in _subscription_index
+
+    def test_delete_without_auth_returns_401(self, client):
+        dep_id, _ = _register(client)
+        resp = client.delete(f"/deployments/{dep_id}")
+        assert resp.status_code == 401
+
+    def test_delete_wrong_key_returns_403(self, client):
+        dep_id, _ = _register(client)
+        resp = client.delete(
+            f"/deployments/{dep_id}",
+            headers={"authorization": "Bearer wrong_key"},
+        )
+        assert resp.status_code in (403, 404)
+
+    def test_delete_nonexistent_returns_404(self, client):
+        dep_id, api_key = _register(client)
+        resp = client.delete(
+            "/deployments/nonexistent-id",
+            headers={"authorization": f"Bearer {api_key}"},
+        )
+        assert resp.status_code in (403, 404)

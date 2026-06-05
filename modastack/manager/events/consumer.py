@@ -242,7 +242,7 @@ def run(repo_path: Path | None = None, **kwargs):
 
     event_client = None
     if es_url and es_key:
-        # Verify saved credentials still work (event server may have restarted)
+        # Remote + pre-configured key: verify saved credentials still work
         valid = False
         try:
             import json as _json, urllib.request
@@ -278,7 +278,38 @@ def run(repo_path: Path | None = None, **kwargs):
         event_client.start()
         log.info(f"Event client started -> {es_url}")
         atexit.register(event_client.stop)
+    elif es_url and not es_key:
+        # Remote + authenticated: use OAuth session token
+        from modastack.auth import ensure_authenticated
+        from .event_server import register_authenticated, unregister
+
+        log.info(f"Authenticating with event server at {es_url}")
+        auth_state = ensure_authenticated(es_url)
+        log.info(f"Authenticated as {auth_state.github_username}")
+
+        subs = _build_subscriptions(repo_path)
+        es_deployment, es_key = register_authenticated(
+            es_url, repo_path.name, subs, auth_state.event_server_token,
+        )
+        log.info(f"Registered deployment {es_deployment}")
+
+        # Save deployment credentials for future runs
+        local.event_server_deployment_id = es_deployment
+        local.event_server_api_key = es_key
+        local.save(repo_path)
+
+        from .event_client import EventServerClient
+        event_client = EventServerClient(
+            server_url=es_url,
+            deployment_id=es_deployment,
+            api_key=es_key,
+        )
+        event_client.start()
+        log.info(f"Event client started -> {es_url} (authenticated)")
+        atexit.register(event_client.stop)
+        atexit.register(lambda: unregister(es_url, es_deployment, es_key))
     else:
+        # Local: start local event server, anonymous registration
         from .event_server import ensure_running, register
 
         es_port = 8080

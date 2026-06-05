@@ -5,6 +5,8 @@ interface Env {
 	DEPLOYMENT_SESSION: DurableObjectNamespace;
 	WEBHOOK_SECRET?: string;
 	SLACK_SIGNING_SECRET?: string;
+	GITHUB_CLIENT_ID?: string;
+	GITHUB_CLIENT_SECRET?: string;
 }
 
 export default {
@@ -21,8 +23,17 @@ export default {
 		if (request.method === "POST" && path === "/webhooks/slack") {
 			return handleSlackWebhook(request, env);
 		}
+		if (request.method === "GET" && path === "/auth/config") {
+			return handleAuthConfig(env);
+		}
+		if (request.method === "POST" && path === "/auth/github/callback") {
+			return handleAuthCallback(request, env);
+		}
 		if (request.method === "POST" && path === "/deployments") {
 			return handleRegisterDeployment(request, env);
+		}
+		if (request.method === "DELETE" && path.startsWith("/deployments/")) {
+			return handleDeleteDeployment(request, env, path);
 		}
 		if (request.method === "GET" && path.startsWith("/deployments/") && path.endsWith("/subscribe")) {
 			return handleSubscribe(request, env, path);
@@ -239,6 +250,195 @@ async function handleSlackWebhook(request: Request, env: Env): Promise<Response>
 	return Response.json({ delivered_to: deploymentIds.length });
 }
 
+// ---------------------------------------------------------------------------
+// Auth endpoints
+// ---------------------------------------------------------------------------
+
+async function handleAuthConfig(env: Env): Promise<Response> {
+	return Response.json({ client_id: env.GITHUB_CLIENT_ID || "" });
+}
+
+async function handleAuthCallback(request: Request, env: Env): Promise<Response> {
+	let body: Record<string, unknown>;
+	try {
+		body = await request.json() as Record<string, unknown>;
+	} catch {
+		return new Response("Invalid JSON", { status: 400 });
+	}
+
+	const code = body.code as string;
+	const redirectUri = body.redirect_uri as string;
+
+	if (!code || !redirectUri) {
+		return Response.json({ error: "code and redirect_uri required" }, { status: 400 });
+	}
+
+	const clientId = env.GITHUB_CLIENT_ID;
+	const clientSecret = env.GITHUB_CLIENT_SECRET;
+	if (!clientId || !clientSecret) {
+		return Response.json({ error: "GitHub OAuth not configured" }, { status: 500 });
+	}
+
+	// Exchange code for access token
+	const tokenResp = await fetch("https://github.com/login/oauth/access_token", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"Accept": "application/json",
+		},
+		body: JSON.stringify({
+			client_id: clientId,
+			client_secret: clientSecret,
+			code,
+			redirect_uri: redirectUri,
+		}),
+	});
+
+	const tokenData = await tokenResp.json() as Record<string, unknown>;
+	const accessToken = tokenData.access_token as string;
+	if (!accessToken) {
+		const errorDesc = tokenData.error_description || tokenData.error || "unknown";
+		return Response.json({ error: `GitHub token exchange failed: ${errorDesc}` }, { status: 401 });
+	}
+
+	// Fetch user info
+	const userResp = await fetch("https://api.github.com/user", {
+		headers: {
+			"Authorization": `Bearer ${accessToken}`,
+			"Accept": "application/json",
+			"User-Agent": "modastack-event-server",
+		},
+	});
+
+	if (!userResp.ok) {
+		return Response.json({ error: "Failed to fetch GitHub user info" }, { status: 401 });
+	}
+
+	const userData = await userResp.json() as Record<string, unknown>;
+	const githubUserId = userData.id as number;
+	const githubUsername = userData.login as string;
+
+	// Create/update user record
+	const sessionToken = `moda_sess_${crypto.randomUUID().replace(/-/g, "")}`;
+
+	const userRecord = {
+		github_user_id: githubUserId,
+		github_username: githubUsername,
+		github_token: accessToken,
+		session_token: sessionToken,
+		created_at: new Date().toISOString(),
+		last_seen: new Date().toISOString(),
+	};
+
+	await env.EVENTS.put(`users:${githubUserId}`, JSON.stringify(userRecord));
+	await env.EVENTS.put(`session:${sessionToken}`, JSON.stringify({ github_user_id: githubUserId }));
+
+	return Response.json({
+		token: sessionToken,
+		github_username: githubUsername,
+		github_user_id: githubUserId,
+	});
+}
+
+interface UserRecord {
+	github_user_id: number;
+	github_username: string;
+	github_token: string;
+	session_token: string;
+	created_at: string;
+	last_seen: string;
+}
+
+async function authenticateUser(request: Request, env: Env): Promise<UserRecord | null> {
+	const authHeader = request.headers.get("authorization") || "";
+	const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+	if (!token) return null;
+
+	// Accept both old moda_ API keys and new moda_sess_ session tokens
+	if (!token.startsWith("moda_sess_")) return null;
+
+	const sessionData = await env.EVENTS.get(`session:${token}`);
+	if (!sessionData) return null;
+
+	const { github_user_id } = JSON.parse(sessionData) as { github_user_id: number };
+	const userData = await env.EVENTS.get(`users:${github_user_id}`);
+	return userData ? JSON.parse(userData) as UserRecord : null;
+}
+
+async function checkGitHubRepoAccess(githubToken: string, repoFullName: string): Promise<boolean> {
+	const resp = await fetch(`https://api.github.com/repos/${repoFullName}`, {
+		headers: {
+			"Authorization": `Bearer ${githubToken}`,
+			"Accept": "application/json",
+			"User-Agent": "modastack-event-server",
+		},
+	});
+	return resp.ok;
+}
+
+async function handleDeleteDeployment(request: Request, env: Env, path: string): Promise<Response> {
+	const match = path.match(/^\/deployments\/([^/]+)$/);
+	if (!match) {
+		return new Response("Invalid path", { status: 400 });
+	}
+	const deploymentId = match[1];
+
+	const user = await authenticateUser(request, env);
+	if (!user) {
+		// Fall back to API key auth for backward compat
+		const authHeader = request.headers.get("authorization") || "";
+		const apiKey = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+		if (!apiKey) {
+			return new Response("Unauthorized", { status: 401 });
+		}
+		const depData = await env.EVENTS.get(`deployments:${apiKey}`);
+		if (!depData) {
+			return new Response("Invalid API key", { status: 403 });
+		}
+		const dep = JSON.parse(depData);
+		if (dep.id !== deploymentId) {
+			return new Response("API key does not match deployment", { status: 403 });
+		}
+	}
+
+	// Load deployment by ID
+	const depData = await env.EVENTS.get(`deployment_id:${deploymentId}`);
+	if (!depData) {
+		return new Response("Deployment not found", { status: 404 });
+	}
+	const deployment = JSON.parse(depData);
+
+	if (user && deployment.user_id && deployment.user_id !== user.github_user_id) {
+		return new Response("Not your deployment", { status: 403 });
+	}
+
+	// Remove from subscription indexes
+	const subs = deployment.subscriptions as string[] || [];
+	for (const sub of subs) {
+		const key = `subscriptions:${sub}`;
+		const existing = await env.EVENTS.get(key);
+		if (existing) {
+			const ids: string[] = JSON.parse(existing);
+			const filtered = ids.filter(id => id !== deploymentId);
+			if (filtered.length > 0) {
+				await env.EVENTS.put(key, JSON.stringify(filtered));
+			} else {
+				await env.EVENTS.delete(key);
+			}
+		}
+	}
+
+	// Delete deployment records
+	await env.EVENTS.delete(`deployments:${deployment.api_key}`);
+	await env.EVENTS.delete(`deployment_id:${deploymentId}`);
+
+	return Response.json({ deleted: true });
+}
+
+// ---------------------------------------------------------------------------
+// Deployment management
+// ---------------------------------------------------------------------------
+
 async function handleRegisterDeployment(request: Request, env: Env): Promise<Response> {
 	let body: Record<string, unknown>;
 	try {
@@ -257,16 +457,39 @@ async function handleRegisterDeployment(request: Request, env: Env): Promise<Res
 		);
 	}
 
+	// Authenticate if session token provided (backward compat: moda_ keys still work)
+	const user = await authenticateUser(request, env);
+	let userId: number | undefined;
+
+	if (user) {
+		userId = user.github_user_id;
+		// Verify access to GitHub repos in subscriptions
+		for (const sub of subscriptions) {
+			if (sub.includes("/") && !sub.startsWith("slack:") && !sub.startsWith("linear:")) {
+				const hasAccess = await checkGitHubRepoAccess(user.github_token, sub);
+				if (!hasAccess) {
+					return Response.json(
+						{ error: `No access to repository: ${sub}` },
+						{ status: 403 },
+					);
+				}
+			}
+		}
+	}
+
 	const deploymentId = crypto.randomUUID();
 	const apiKey = `moda_${crypto.randomUUID().replace(/-/g, "")}`;
 
-	const deployment = {
+	const deployment: Record<string, unknown> = {
 		id: deploymentId,
 		name,
 		api_key: apiKey,
 		subscriptions,
 		created_at: new Date().toISOString(),
 	};
+	if (userId !== undefined) {
+		deployment.user_id = userId;
+	}
 
 	await env.EVENTS.put(`deployments:${apiKey}`, JSON.stringify(deployment));
 	await env.EVENTS.put(`deployment_id:${deploymentId}`, JSON.stringify(deployment));
