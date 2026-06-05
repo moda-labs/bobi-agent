@@ -147,13 +147,33 @@ jobs:
           echo "=== SMOKE TEST FAILED ==="
           exit 1
 
-      - name: Cleanup
+      - name: Restart modastack in all configured repos
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          for config in $(find ~/dev -maxdepth 3 -path '*/.modastack/config.yaml' 2>/dev/null); do
+            REPO_DIR=$(dirname $(dirname "$config"))
+            REPO_NAME=$(basename "$REPO_DIR")
+
+            # Skip repos without local.yaml (not bootstrapped)
+            if [ ! -f "$REPO_DIR/.modastack/local.yaml" ]; then
+              echo "[$REPO_NAME] skipped — no local.yaml"
+              continue
+            fi
+
+            echo "[$REPO_NAME] restarting with v$VERSION..."
+            cd "$REPO_DIR"
+            modastack stop 2>/dev/null || true
+            sleep 1
+            modastack start
+            echo "[$REPO_NAME] started"
+          done
+
+      - name: Cleanup smoke test
         if: always()
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
-          cd "$DOGFOOD_DIR" 2>/dev/null || true
-          modastack stop 2>/dev/null || true
-          # If the issue is still open, close it so we don't leave orphans
           ISSUE_NUM="${{ steps.issue.outputs.issue_num }}"
           if [ -n "$ISSUE_NUM" ]; then
             STATE=$(gh issue view "$ISSUE_NUM" --repo "$DOGFOOD_REPO" --json state --jq '.state' 2>/dev/null)
