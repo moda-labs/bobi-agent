@@ -454,11 +454,14 @@ class TestAwaitStep:
 
 class TestTryResumeForEvent:
     def test_returns_false_when_no_waiting_run(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
         assert try_resume_for_event("approval") is False
 
     def test_returns_false_when_workflow_not_found(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True)
+        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
 
         run = WorkflowRun.create("nonexistent-wf", {"data": {"issue_id": "1"}})
         run.status = "waiting"
@@ -475,7 +478,9 @@ class TestTryResumeForEvent:
         assert result is False
 
     def test_resumes_waiting_workflow(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True)
+        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
 
         run = WorkflowRun.create("test-wf", {"data": {"issue_id": "5"}})
         run.status = "waiting"
@@ -498,7 +503,9 @@ class TestTryResumeForEvent:
         assert result is True
 
     def test_filters_by_issue_id(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True)
+        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
 
         run = WorkflowRun.create("test-wf", {"data": {"issue_id": "10"}})
         run.status = "waiting"
@@ -516,7 +523,9 @@ class TestTryResumeForEvent:
 class TestResumeWorkflowTimestamps:
     def test_resume_sets_started_at_on_run(self, tmp_path, monkeypatch):
         monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
-        monkeypatch.setattr("modastack.workflow.state.RUNS_DIR", tmp_path / "runs")
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True)
+        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
 
         run = WorkflowRun.create("t", {"data": {"issue_id": "1"}})
         run.status = "waiting"
