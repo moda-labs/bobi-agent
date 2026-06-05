@@ -63,52 +63,27 @@ class TestAskEndpoint:
 
 
 class TestAskCLI:
-    """Tests for the modastack ask CLI command."""
+    """Tests for the modastack ask CLI command (now uses inbox.deliver)."""
 
-    @patch("urllib.request.urlopen")
-    def test_prints_response_to_stdout(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({
-            "ok": True,
-            "response": "Use regex for this case.",
-            "correlation_id": "test-123",
-        }).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-
+    @patch("modastack.inbox.deliver", return_value=(True, "Use regex for this case."))
+    @patch("modastack.cli._resolve_address", return_value="moda-mgr-test")
+    def test_prints_response_to_stdout(self, mock_resolve, mock_deliver):
         runner = CliRunner()
-        with patch("os.kill"):
-            with patch("pathlib.Path.exists", return_value=True):
-                with patch("pathlib.Path.read_text", return_value="12345"):
-                    result = runner.invoke(main, ["ask", "regex or string?"])
-
+        result = runner.invoke(main, ["ask", "regex or string?"])
         assert result.exit_code == 0
         assert "Use regex" in result.output
 
-    @patch("urllib.request.urlopen")
-    def test_exits_1_on_failure(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({
-            "ok": False,
-            "error": "manager not running",
-        }).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-
+    @patch("modastack.inbox.deliver", return_value=(False, "session not ready"))
+    @patch("modastack.cli._resolve_address", return_value="moda-mgr-test")
+    def test_exits_1_on_failure(self, mock_resolve, mock_deliver):
         runner = CliRunner()
-        with patch("os.kill"):
-            with patch("pathlib.Path.exists", return_value=True):
-                with patch("pathlib.Path.read_text", return_value="12345"):
-                    result = runner.invoke(main, ["ask", "hello?"])
-
+        result = runner.invoke(main, ["ask", "hello?"])
         assert result.exit_code == 1
-        assert "failed" in result.output.lower() or "failed" in (result.output + getattr(result, 'stderr', '')).lower()
+        assert "failed" in result.output.lower()
 
-    def test_exits_1_when_manager_not_running(self):
+    @patch("modastack.cli._resolve_address", return_value=None)
+    def test_exits_1_when_no_manager_session(self, mock_resolve):
         runner = CliRunner()
-        with patch("pathlib.Path.exists", return_value=False):
-            result = runner.invoke(main, ["ask", "hello?"])
+        result = runner.invoke(main, ["ask", "hello?"])
         assert result.exit_code == 1
-        assert "not running" in result.output.lower()
+        assert "no active manager" in result.output.lower()

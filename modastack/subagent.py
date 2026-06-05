@@ -346,42 +346,54 @@ def run_phase_blocking(
 ) -> AgentResult:
     """Run a sub-agent phase, blocking until completion.
 
-    Uses asyncio.run() with a fresh event loop — no shared state, no polling.
-    If on_input_needed is provided, AskUserQuestion calls are deferred
-    and routed through the callback for manager/human answers.
+    Creates a Session, starts with the phase prompt, and blocks until
+    the Claude session finishes processing. The session has an inbox
+    so other sessions can message it during execution.
     """
+    from modastack.session import Session
+
     prompt = _build_prompt(phase, issue_id, context, cwd=cwd)
     effective_timeout = timeout or PHASE_TIMEOUT.get(phase, 1800)
-
     name = _session_name(issue_id, phase)
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=name, session_id="", role="engineer",
-        issue_id=issue_id, title=title, phase=phase, repo=repo,
-        cwd=cwd, status="starting",
-    ))
 
     started_at = time.time()
     _emit_session_started(issue_id, repo, title or context, name, phase=phase)
 
-    try:
-        result = asyncio.run(
-            asyncio.wait_for(
-                _run_agent_supervised(
-                    prompt, cwd, issue_id, phase, effective_timeout,
-                    on_input_needed=on_input_needed,
-                    max_budget_usd=None,
-                ),
-                timeout=effective_timeout,
-            )
+    session = Session(
+        name=name,
+        cwd=cwd,
+        system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": (
+                f"You are an engineer agent working on issue #{issue_id}, "
+                f"phase: {phase}. Follow the skill file instructions exactly."
+            ),
+        },
+        extra_options={"skills": "all", "max_turns": 200},
+    )
+
+    ok = session.start(startup_prompt=prompt, timeout=effective_timeout)
+
+    if ok:
+        result = AgentResult(
+            session_id=session.get_session_id(),
+            issue_id=issue_id,
+            phase=phase,
+            success=not session._last_is_error,
+            duration_ms=session._total_duration_ms,
+            total_cost_usd=session._total_cost_usd,
+            num_turns=session._total_turns,
+            final_text=session._last_response,
+            error="" if not session._last_is_error else session._last_response,
         )
-    except asyncio.TimeoutError:
-        registry.update(name, status="error")
+    else:
         result = AgentResult(
             session_id="", issue_id=issue_id, phase=phase,
-            success=False, error=f"timeout after {effective_timeout}s",
+            success=False, error=f"session failed to start within {effective_timeout}s",
         )
 
+    session.stop()
     _emit_session_finished(result, repo, name, started_at)
     return result
 
@@ -472,48 +484,55 @@ def spawn_adhoc(
 ) -> AgentResult:
     """Spawn a one-off engineer agent with a freeform task prompt.
 
-    `requested_by` carries the originating identity (e.g. the Slack user and
-    thread that asked for the work) so completion notices can route back to
-    them; it is persisted on the SessionEntry and echoed on lifecycle events.
-
-    When the task references an issue (e.g. "issue #5"), that number is used as
-    the issue_id in lifecycle events so the manager can correlate activity back
-    to the issue. Otherwise we fall back to a stable auto-generated adhoc id.
+    Creates a Session with the task as the startup prompt. The session
+    has an inbox so other sessions can message it during execution.
     """
     import hashlib
+    from modastack.session import Session
+
     short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
     issue_id = name or _parse_issue_number(task) or f"adhoc-{short_hash}"
     repo = _resolve_repo_name(cwd)
     requested_by = requested_by or {}
 
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=issue_id, session_id="", role="engineer",
-        issue_id=issue_id, title=task[:80], phase="adhoc",
-        cwd=cwd, repo=repo, status="starting", requested_by=requested_by,
-    ))
-
     started_at = time.time()
     _emit_session_started(issue_id, repo, task, issue_id, phase="adhoc",
                           requested_by=requested_by)
 
-    try:
-        result = asyncio.run(
-            asyncio.wait_for(
-                _run_agent_supervised(
-                    prompt=task, cwd=cwd, issue_id=issue_id,
-                    phase="adhoc", timeout=timeout,
-                ),
-                timeout=timeout,
-            )
+    session = Session(
+        name=issue_id,
+        cwd=cwd,
+        system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": (
+                f"You are an engineer agent working on an adhoc task. "
+                f"Complete the task described in your initial prompt."
+            ),
+        },
+        extra_options={"skills": "all", "max_turns": 200},
+    )
+
+    ok = session.start(startup_prompt=task, timeout=timeout)
+
+    if ok:
+        result = AgentResult(
+            session_id=session.get_session_id(),
+            issue_id=issue_id,
+            phase="adhoc",
+            success=not session._last_is_error,
+            duration_ms=session._total_duration_ms,
+            total_cost_usd=session._total_cost_usd,
+            num_turns=session._total_turns,
+            final_text=session._last_response,
         )
-    except asyncio.TimeoutError:
-        registry.update(issue_id, status="error")
+    else:
         result = AgentResult(
             session_id="", issue_id=issue_id, phase="adhoc",
-            success=False, error=f"timeout after {timeout}s",
+            success=False, error=f"session failed to start within {timeout}s",
         )
 
+    session.stop()
     _emit_session_finished(result, repo, issue_id, started_at,
                            requested_by=requested_by)
     return result

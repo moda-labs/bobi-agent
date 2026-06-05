@@ -363,111 +363,83 @@ def restart(fresh):
     ctx.invoke(start, fresh=fresh)
 
 
+def _resolve_address(to: str | None) -> str | None:
+    """Resolve a friendly address to a session name.
+
+    'manager' or None → finds the manager session by role.
+    Anything else → used as-is (exact session name).
+    """
+    from modastack.sdk import get_registry, set_repo_root
+
+    repo_path = _detect_repo_root()
+    if repo_path:
+        set_repo_root(repo_path)
+
+    registry = get_registry()
+    if to is None or to == "manager":
+        managers = registry.get_by_role("manager")
+        active = [m for m in managers if m.status in ("idle", "running", "starting")]
+        if active:
+            return active[0].name
+        if managers:
+            return managers[0].name
+        return None
+    return to
+
+
 @main.command()
 @click.argument("text", required=True)
-@click.option("--to", default=None, help="Target an engineer by issue ID (e.g. --to AGD-12)")
-def message(text, to):
-    """Send a message to the manager or an engineer.
+@click.option("--to", default=None, help="Target session (default: manager)")
+@click.option("--wait", is_flag=True, help="Block until the session responds")
+@click.option("--timeout", default=300, type=int, help="Timeout in seconds (with --wait)")
+def message(text, to, wait, timeout):
+    """Send a message to any session via its inbox.
 
     Usage:
         modastack message "what are you working on?"
-        modastack message --to AGD-12 "try a different approach"
+        modastack message --to eng-42-implement "try a different approach"
+        modastack message --to manager "status?" --wait
     """
-    if to:
-        click.echo(f"Note: engineer sub-agents run autonomously. "
-                   f"To redirect {to}, cancel and re-run the phase.")
-        return
+    from modastack.inbox import deliver
 
-    import urllib.request
-    import urllib.error
+    address = _resolve_address(to)
+    if not address:
+        target = to or "manager"
+        click.echo(f"No active session found for '{target}'.", err=True)
+        raise SystemExit(1)
 
-    pid_path = _find_pid_path()
-    if not pid_path:
-        click.echo("Manager not running. Start with: modastack start")
-        return
-    try:
-        pid = int(pid_path.read_text().strip())
-        os.kill(pid, 0)
-    except (ProcessLookupError, ValueError):
-        click.echo("Manager not running. Start with: modastack start")
-        return
-
-    try:
-        import json as _json
-        dashboard = _get_dashboard_url()
-        req = urllib.request.Request(
-            f"{dashboard}/api/message",
-            data=_json.dumps({"text": text}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = _json.loads(resp.read())
-        if result.get("ok"):
-            click.echo(f"Sent: {text}")
+    ok, response = deliver(address, text, sender="cli", wait=wait, timeout=timeout)
+    if ok:
+        if wait and response:
+            click.echo(response)
         else:
-            click.echo(f"Failed: {result.get('error', 'unknown')}", err=True)
-    except urllib.error.URLError as e:
-        click.echo(f"Cannot reach manager dashboard: {e}", err=True)
+            click.echo(f"Sent to {address}")
+    else:
+        click.echo(f"Failed: {response}", err=True)
+        raise SystemExit(1)
 
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("question", required=True)
 @click.option("--timeout", default=300, type=int, help="Timeout in seconds")
 @click.option("--source", default="engineer", help="Source identifier")
 def ask(question, timeout, source):
-    """Ask the manager a question and block until it responds.
+    """Ask the manager a question (alias for: message --wait).
 
-    Used by engineer agents to get decisions, routing, or guidance
-    from the manager. Prints the response to stdout.
-
-    Usage:
-        modastack ask "Should we use regex or string matching?"
-        modastack ask "Draft a Slack message about the deploy" --timeout 60
+    Kept for backward compatibility with agents that call 'modastack ask'.
     """
-    import json as _json
-    import uuid
-    import urllib.request
-    import urllib.error
+    from modastack.inbox import deliver
 
-    pid_path = _find_pid_path()
-    if not pid_path:
-        click.echo("Manager not running. Start with: modastack start", err=True)
-        raise SystemExit(1)
-    try:
-        pid = int(pid_path.read_text().strip())
-        os.kill(pid, 0)
-    except (ProcessLookupError, ValueError):
-        click.echo("Manager not running. Start with: modastack start", err=True)
+    address = _resolve_address("manager")
+    if not address:
+        click.echo("No active manager session found.", err=True)
         raise SystemExit(1)
 
-    payload = _json.dumps({
-        "question": question,
-        "correlation_id": str(uuid.uuid4()),
-        "timeout": timeout,
-        "source": source,
-    }).encode()
-
-    dashboard = _get_dashboard_url()
-    try:
-        req = urllib.request.Request(
-            f"{dashboard}/api/ask",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout + 30) as resp:
-            result = _json.loads(resp.read())
-
-        if result.get("ok"):
-            click.echo(result.get("response", ""))
-        else:
-            click.echo(f"Failed: {result.get('error', 'unknown')}", err=True)
-            raise SystemExit(1)
-
-    except urllib.error.URLError as e:
-        click.echo(f"Cannot reach manager dashboard: {e}", err=True)
-        raise SystemExit(1)
-    except TimeoutError:
-        click.echo(f"Timed out after {timeout}s", err=True)
+    ok, response = deliver(address, question, sender=source, wait=True, timeout=timeout)
+    if ok:
+        click.echo(response)
+    else:
+        click.echo(f"Failed: {response}", err=True)
         raise SystemExit(1)
 
 

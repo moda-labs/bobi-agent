@@ -24,7 +24,6 @@ truststore.inject_into_ssl()
 from modastack.manager.events.slack_responder import _markdown_to_slack
 from modastack.manager.session import (
     ManagerSession, set_default_session,
-    start_or_resume, is_alive, detect_state,
 )
 
 log = logging.getLogger(__name__)
@@ -56,41 +55,12 @@ def _post_dm(token: str, channel: str, text: str) -> None:
 
 
 
-def _wait_for_manager(timeout: int = 300) -> bool:
-    """Block until the manager is in waiting_input state."""
-    from modastack.manager.session import detect_state
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if detect_state() == "waiting_input":
-            return True
-        time.sleep(2)
-    return False
-
-
-def _drain_loop():
-    """Drain the event queue and inject batched events into the manager."""
+def _drain_loop(manager_session_name: str):
+    """Event bus sidecar — batches events and delivers to the manager's inbox."""
     from .event_client import event_queue, format_event_for_manager
-    from modastack.manager.session import inject, detect_state, set_response_callback
+    from modastack.inbox import deliver
 
-    log.info("Drain loop waiting for manager to finish startup")
-    if not _wait_for_manager():
-        log.error("Manager never became ready — drain loop exiting")
-        return
-    log.info("Manager ready — drain loop active")
-
-    from modastack.manager.session import get_default_session
-    session = get_default_session()
-    if session:
-        from modastack.config import LocalConfig
-        local = LocalConfig.load(session.repo_path)
-        dm_token = local.slack_bot_token
-        dm_channel = local.slack_dm_channel
-    else:
-        dm_token = ""
-        dm_channel = ""
-    if dm_channel and dm_token:
-        set_response_callback(lambda t: _post_dm(dm_token, dm_channel, t))
-        log.info(f"Streaming all manager output to Slack DM {dm_channel}")
+    log.info("Drain loop active — delivering events to manager inbox")
 
     while True:
         event = event_queue.get()
@@ -103,21 +73,17 @@ def _drain_loop():
         slack_events = [e for e in batch if e.get("source") == "slack"]
         other_events = [e for e in batch if e.get("source") != "slack"]
 
-        for group, is_slack in [(other_events, False), (slack_events, True)]:
+        for group in [other_events, slack_events]:
             if not group:
                 continue
 
             lines = [format_event_for_manager(e) for e in group]
             text = "\n\n".join(lines)
 
-            if detect_state() != "waiting_input":
-                log.info(f"Manager busy — waiting before injecting {len(group)} event(s)")
-                if not _wait_for_manager():
-                    log.warning(f"Manager not ready after wait — dropping {len(group)} event(s)")
-                    continue
-
-            log.info(f"Injecting {len(group)} event(s)")
-            inject(text)
+            log.info(f"Delivering {len(group)} event(s) to {manager_session_name}")
+            ok, _ = deliver(manager_session_name, text, sender="event-bus")
+            if not ok:
+                log.warning(f"Event delivery failed for {len(group)} event(s)")
 
 
 def _kill_stale_instances(repo_path: Path):
@@ -220,6 +186,12 @@ def run(repo_path: Path | None = None, **kwargs):
     session = ManagerSession(repo_path=repo_path)
     set_default_session(session)
 
+    dm_token = local.slack_bot_token
+    dm_channel = local.slack_dm_channel
+    if dm_channel and dm_token:
+        session.set_response_callback(lambda t: _post_dm(dm_token, dm_channel, t))
+        log.info(f"Streaming all manager output to Slack DM {dm_channel}")
+
     if not session.start_or_resume():
         log.error("Failed to start manager session")
         return
@@ -300,8 +272,11 @@ def run(repo_path: Path | None = None, **kwargs):
         log.info(f"  Linear:  {base_url}/webhooks/linear")
         log.info(f"  Slack:   {base_url}/webhooks/slack")
 
-    # Start drain loop
-    drain_thread = threading.Thread(target=_drain_loop, daemon=True, name="drain-loop")
+    # Start drain loop (event bus sidecar)
+    drain_thread = threading.Thread(
+        target=_drain_loop, args=(session.session_name,),
+        daemon=True, name="drain-loop",
+    )
     drain_thread.start()
 
     from modastack.monitors.scheduler import MonitorScheduler

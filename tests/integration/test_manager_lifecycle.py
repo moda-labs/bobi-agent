@@ -217,7 +217,11 @@ class TestManagerNotRunning:
         pid_file.unlink(missing_ok=True)
 
         result = cli_run("message", "should fail", timeout=5)
-        assert "not running" in result.stdout.lower() or "cannot reach" in result.stderr.lower()
+        output = (result.stdout + result.stderr).lower()
+        assert result.returncode != 0
+        assert any(msg in output for msg in [
+            "not running", "no active session", "cannot reach", "process is dead",
+        ])
 
     def test_ask_when_not_running(self, modastack_env, cli_run):
         pid_file = modastack_env.state_dir / "manager.pid"

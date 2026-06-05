@@ -1,8 +1,7 @@
-"""Tests for ManagerSession.inject() — state checks, async scheduling, timeout."""
+"""Tests for ManagerSession.inject() — routes through inbox.deliver()."""
 
-import asyncio
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -14,145 +13,51 @@ class TestInject:
     def setup_method(self):
         self.session = ManagerSession(repo_path=Path("/tmp/test-repo"))
 
-    def test_returns_false_when_no_client(self):
-        self.session._client = None
-        self.session._loop = MagicMock()
-        self.session._state = "waiting_input"
-        assert self.session.inject("test") is False
-
-    def test_returns_false_when_no_loop(self):
-        self.session._client = MagicMock()
-        self.session._loop = None
-        self.session._state = "waiting_input"
-        assert self.session.inject("test") is False
-
-    def test_returns_false_when_not_waiting_input(self):
-        self.session._client = MagicMock()
-        self.session._loop = MagicMock()
-        self.session._state = "working"
-        assert self.session.inject("test") is False
-
-    def test_returns_false_when_stopped(self):
-        self.session._client = MagicMock()
-        self.session._loop = MagicMock()
-        self.session._state = "stopped"
-        assert self.session.inject("test") is False
-
-    @patch("modastack.manager.session.log_activity")
-    @patch("modastack.manager.session.asyncio.run_coroutine_threadsafe")
-    def test_success_returns_true(self, mock_schedule, mock_log):
-        self.session._client = MagicMock()
-        loop = asyncio.new_event_loop()
-        self.session._loop = loop
-        self.session._state = "waiting_input"
-
-        future = MagicMock()
-        future.result.return_value = None
-        mock_schedule.return_value = future
-
+    @patch("modastack.inbox.deliver", return_value=(True, ""))
+    def test_success_returns_true(self, mock_deliver):
         result = self.session.inject("hello manager")
         assert result is True
-        mock_schedule.assert_called_once()
-        future.result.assert_called_once_with(timeout=300)
-        loop.close()
+        mock_deliver.assert_called_once()
+        assert mock_deliver.call_args[0][0] == self.session.session_name
+        assert mock_deliver.call_args[0][1] == "hello manager"
 
-    @patch("modastack.manager.session.log_activity")
-    @patch("modastack.manager.session.asyncio.run_coroutine_threadsafe")
-    def test_timeout_returns_false(self, mock_schedule, mock_log):
-        self.session._client = MagicMock()
-        loop = asyncio.new_event_loop()
-        self.session._loop = loop
-        self.session._state = "waiting_input"
-
-        future = MagicMock()
-        future.result.side_effect = TimeoutError("timed out")
-        mock_schedule.return_value = future
-
-        result = self.session.inject("hello", timeout=5)
+    @patch("modastack.inbox.deliver", return_value=(False, "session not found"))
+    def test_failure_returns_false(self, mock_deliver):
+        result = self.session.inject("hello")
         assert result is False
-        loop.close()
 
-    @patch("modastack.manager.session.log_activity")
-    @patch("modastack.manager.session.asyncio.run_coroutine_threadsafe")
-    def test_custom_timeout(self, mock_schedule, mock_log):
-        self.session._client = MagicMock()
-        loop = asyncio.new_event_loop()
-        self.session._loop = loop
-        self.session._state = "waiting_input"
+    @patch("modastack.inbox.deliver", return_value=(True, ""))
+    def test_uses_non_blocking_mode(self, mock_deliver):
+        self.session.inject("test")
+        assert mock_deliver.call_args[1]["wait"] is False
 
-        future = MagicMock()
-        future.result.return_value = None
-        mock_schedule.return_value = future
+    @patch("modastack.inbox.deliver", return_value=(True, "the answer"))
+    def test_inject_capture_returns_response(self, mock_deliver):
+        ok, response = self.session.inject_capture("question?")
+        assert ok is True
+        assert response == "the answer"
+        assert mock_deliver.call_args[1]["wait"] is True
 
-        self.session.inject("test", timeout=60)
-        future.result.assert_called_once_with(timeout=60)
-        loop.close()
+    @patch("modastack.inbox.deliver", return_value=(False, "timeout"))
+    def test_inject_capture_failure(self, mock_deliver):
+        ok, response = self.session.inject_capture("question?")
+        assert ok is False
 
-    @patch("modastack.manager.session.log_activity")
-    @patch("modastack.manager.session.asyncio.run_coroutine_threadsafe")
-    def test_exception_returns_false(self, mock_schedule, mock_log):
-        self.session._client = MagicMock()
-        loop = asyncio.new_event_loop()
-        self.session._loop = loop
-        self.session._state = "waiting_input"
+    @patch("modastack.inbox.deliver", return_value=(True, ""))
+    def test_custom_timeout(self, mock_deliver):
+        self.session.inject_capture("test", timeout=60)
+        assert mock_deliver.call_args[1]["timeout"] == 60
 
-        future = MagicMock()
-        future.result.side_effect = RuntimeError("connection lost")
-        mock_schedule.return_value = future
+    @patch("modastack.inbox.deliver", return_value=(True, ""))
+    def test_wait_for_ready_extends_timeout(self, mock_deliver):
+        self.session.inject_capture("test", timeout=60, wait_for_ready=120)
+        assert mock_deliver.call_args[1]["timeout"] == 120
 
-        result = self.session.inject("test")
-        assert result is False
-        loop.close()
+    def test_detect_state_stopped_when_no_session(self):
+        assert self.session.detect_state() == "stopped"
 
-    def test_busy_drops_immediately_by_default(self):
-        self.session._client = MagicMock()
-        self.session._loop = MagicMock()
-        self.session._state = "working"
-        assert self.session.inject("test") is False
-        assert "busy" in self.session.last_inject_error()
+    def test_is_alive_false_when_no_session(self):
+        assert self.session.is_alive() is False
 
-    @patch("modastack.manager.session.time.sleep")
-    @patch("modastack.manager.session.log_activity")
-    @patch("modastack.manager.session.asyncio.run_coroutine_threadsafe")
-    def test_waits_for_busy_manager_then_injects(self, mock_schedule, mock_log, mock_sleep):
-        self.session._client = MagicMock()
-        loop = asyncio.new_event_loop()
-        self.session._loop = loop
-        self.session._state = "working"
-
-        future = MagicMock()
-        future.result.return_value = None
-        mock_schedule.return_value = future
-
-        def _flip(_seconds):
-            self.session._state = "waiting_input"
-        mock_sleep.side_effect = _flip
-
-        result = self.session.inject("hello", wait_for_ready=5)
-        assert result is True
-        mock_sleep.assert_called()
-        mock_schedule.assert_called_once()
-        loop.close()
-
-    def test_stopped_short_circuits_wait(self):
-        self.session._client = MagicMock()
-        self.session._loop = MagicMock()
-        self.session._state = "stopped"
-        assert self.session.inject("test", wait_for_ready=10) is False
-        assert "stopped" in self.session.last_inject_error()
-
-    @patch("modastack.manager.session.log_activity")
-    @patch("modastack.manager.session.asyncio.run_coroutine_threadsafe")
-    def test_success_clears_last_error(self, mock_schedule, mock_log):
-        self.session._client = MagicMock()
-        loop = asyncio.new_event_loop()
-        self.session._loop = loop
-        self.session._state = "waiting_input"
-
-        future = MagicMock()
-        future.result.return_value = None
-        mock_schedule.return_value = future
-
-        assert self.session.inject("hi") is True
+    def test_last_inject_error_always_empty(self):
         assert self.session.last_inject_error() == ""
-        loop.close()

@@ -97,7 +97,7 @@ class TestEndToEndEventFlow:
         injected = False
         while time.monotonic() < deadline:
             new_log = self._log_file.read_text()[self._log_pos:]
-            if "Injecting" in new_log and "event" in new_log:
+            if ("Injecting" in new_log or "Delivering" in new_log) and "event" in new_log:
                 injected = True
                 break
             time.sleep(1)

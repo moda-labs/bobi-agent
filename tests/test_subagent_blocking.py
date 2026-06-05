@@ -118,10 +118,55 @@ class FakeClient:
 
 
 # ---------------------------------------------------------------------------
+# Fake Session for run_phase_blocking / spawn_adhoc tests
+# ---------------------------------------------------------------------------
+
+class FakeSession:
+    """Mimics modastack.session.Session for unit tests."""
+
+    def __init__(self, success=True, response="done", session_id="sess-fake",
+                 cost=0.10, duration=2000, turns=3, start_ok=True,
+                 is_error=False):
+        self._success = success
+        self._response = response
+        self._start_ok = start_ok
+        self.name = ""
+        self.cwd = ""
+        self._last_response = response
+        self._last_is_error = is_error or (not success)
+        self._total_cost_usd = cost
+        self._total_duration_ms = duration
+        self._total_turns = turns
+        self._session_id = session_id
+        self.inbox = MagicMock()
+        self.inbox.port = 0
+
+    def start(self, startup_prompt=None, timeout=120):
+        return self._start_ok
+
+    def stop(self):
+        pass
+
+    def get_session_id(self):
+        return self._session_id
+
+
+def _make_fake_session_class(**kwargs):
+    """Return a Session class constructor that produces a FakeSession."""
+    def _cls(*args, **init_kwargs):
+        fs = FakeSession(**kwargs)
+        fs.name = init_kwargs.get("name", args[0] if args else "")
+        fs.cwd = init_kwargs.get("cwd", args[1] if len(args) > 1 else "")
+        return fs
+    return _cls
+
+
+# ---------------------------------------------------------------------------
 # Patch targets
 # ---------------------------------------------------------------------------
 
 SDK_PATCH = "modastack.subagent"
+SESSION_PATCH = "modastack.session.Session"
 
 
 # ---------------------------------------------------------------------------
@@ -645,16 +690,12 @@ class TestRunAgentSupervisedTracking:
 class TestRunPhaseBlocking:
     def test_normal_completion(self):
         """run_phase_blocking blocks and returns AgentResult."""
-        expected = AgentResult(
-            session_id="sess-sync", issue_id="SYNC-1", phase="implement",
-            success=True, duration_ms=2000, total_cost_usd=0.10, num_turns=3,
+        fake_cls = _make_fake_session_class(
+            success=True, session_id="sess-sync",
+            cost=0.10, duration=2000, turns=3,
         )
 
-        async def _mock(*a, **kw):
-            return expected
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+        with patch(SESSION_PATCH, side_effect=fake_cls):
             result = run_phase_blocking(
                 issue_id="SYNC-1", phase="implement",
                 cwd="/tmp/test", context="Build auth",
@@ -662,88 +703,20 @@ class TestRunPhaseBlocking:
 
         assert result.success is True
         assert result.session_id == "sess-sync"
+        assert result.total_cost_usd == 0.10
 
-    def test_timeout(self):
-        """run_phase_blocking returns timeout error on asyncio.TimeoutError."""
-        async def _slow(*args, **kwargs):
-            await asyncio.sleep(999)
+    def test_start_failure(self):
+        """run_phase_blocking returns error when session fails to start."""
+        fake_cls = _make_fake_session_class(start_ok=False)
 
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_slow), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
-            # Override timeout to something tiny
+        with patch(SESSION_PATCH, side_effect=fake_cls):
             result = run_phase_blocking(
-                issue_id="SLOW-1", phase="implement",
+                issue_id="FAIL-1", phase="implement",
                 cwd="/tmp/test", timeout=1,
             )
 
         assert result.success is False
-        assert "timeout" in result.error
-
-    def test_registers_session(self):
-        """run_phase_blocking registers the session before starting."""
-        expected = AgentResult(
-            session_id="s", issue_id="REG-1", phase="pickup",
-            success=True,
-        )
-        mock_registry = MagicMock()
-
-        async def _mock(*a, **kw):
-            return expected
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry):
-            run_phase_blocking(
-                issue_id="REG-1", phase="pickup",
-                cwd="/tmp/test", title="Fix auth", repo="moda-labs/app",
-            )
-
-        mock_registry.register.assert_called_once()
-        entry = mock_registry.register.call_args[0][0]
-        assert entry.name == "eng-reg-1-pickup"
-        assert entry.issue_id == "REG-1"
-        assert entry.title == "Fix auth"
-        assert entry.repo == "moda-labs/app"
-        assert entry.status == "starting"
-
-    def test_passes_on_input_needed(self):
-        """on_input_needed is passed through to _run_agent_supervised."""
-        calls = []
-
-        async def mock_supervised(*args, **kwargs):
-            calls.append(kwargs)
-            return AgentResult(
-                session_id="s", issue_id="INP-1", phase="implement",
-                success=True,
-            )
-
-        def my_handler(name, inp):
-            return "answer"
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=mock_supervised), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
-            run_phase_blocking(
-                issue_id="INP-1", phase="implement",
-                cwd="/tmp/test", on_input_needed=my_handler,
-            )
-
-        assert calls[0]["on_input_needed"] is my_handler
-
-    def test_default_timeout_from_phase(self):
-        """Timeout defaults to PHASE_TIMEOUT for the given phase."""
-        calls = []
-
-        async def mock_supervised(*args, **kwargs):
-            calls.append(args)
-            return AgentResult(session_id="s", issue_id="T-1", phase="pickup",
-                               success=True)
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=mock_supervised), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
-            run_phase_blocking(issue_id="T-1", phase="pickup", cwd="/tmp")
-
-        # pickup timeout is 1800 (from PHASE_TIMEOUT)
-        # The timeout arg is passed as the 5th positional arg
-        assert calls[0][4] == 1800
+        assert "failed to start" in result.error
 
 
 # ---------------------------------------------------------------------------
@@ -874,16 +847,9 @@ class TestSessionFinishedEvents:
 class TestSpawnAdhocLifecycle:
     def test_emits_started_and_completed(self):
         events = []
-        expected = AgentResult(
-            session_id="s", issue_id="adhoc-x", phase="adhoc",
-            success=True, final_text="done",
-        )
+        fake_cls = _make_fake_session_class(success=True, response="done")
 
-        async def _mock(*a, **kw):
-            return expected
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+        with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: events.append(et)):
             spawn_adhoc(cwd="/tmp/test", task="Fix the login bug", name="adhoc-x")
@@ -892,14 +858,9 @@ class TestSpawnAdhocLifecycle:
 
     def test_started_carries_task_and_repo(self):
         captured = []
-        expected = AgentResult(session_id="s", issue_id="adhoc-y",
-                               phase="adhoc", success=True)
+        fake_cls = _make_fake_session_class(success=True)
 
-        async def _mock(*a, **kw):
-            return expected
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+        with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
@@ -908,22 +869,16 @@ class TestSpawnAdhocLifecycle:
         et, data = captured[0]
         assert et == "engineer/session.started"
         assert data["task"] == "Investigate CI"
-        # repo is the GitHub-style name, not the filesystem path.
         assert data["repo"] == "moda-labs/jobtack"
         assert data["session_id"] == "adhoc-y"
 
     def test_requested_by_echoed_on_lifecycle_events(self):
         captured = []
-        expected = AgentResult(session_id="s", issue_id="adhoc-z",
-                               phase="adhoc", success=True, final_text="done")
+        fake_cls = _make_fake_session_class(success=True, response="done")
         requester = {"from": "Alice", "user_id": "U1", "channel": "C1",
                      "thread_ts": "171.42"}
 
-        async def _mock(*a, **kw):
-            return expected
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+        with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
             spawn_adhoc(cwd="/repo", task="Fix it", name="adhoc-z",
@@ -936,32 +891,21 @@ class TestSpawnAdhocLifecycle:
 
     def test_requested_by_absent_when_not_provided(self):
         captured = []
-        expected = AgentResult(session_id="s", issue_id="adhoc-w",
-                               phase="adhoc", success=True, final_text="done")
+        fake_cls = _make_fake_session_class(success=True, response="done")
 
-        async def _mock(*a, **kw):
-            return expected
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+        with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
             spawn_adhoc(cwd="/repo", task="Fix it", name="adhoc-w")
 
-        # No requester → the key is None and gets stripped by the emitter.
         started = next(d for et, d in captured if et.endswith("started"))
         assert started["requested_by"] is None
 
     def test_started_uses_parsed_issue_number_as_id(self):
         captured = []
-        expected = AgentResult(session_id="s", issue_id="5",
-                               phase="adhoc", success=True)
+        fake_cls = _make_fake_session_class(success=True)
 
-        async def _mock(*a, **kw):
-            return expected
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+        with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
@@ -970,19 +914,13 @@ class TestSpawnAdhocLifecycle:
 
         et, data = captured[0]
         assert et == "engineer/session.started"
-        # The parsed issue number, not an auto-generated adhoc-<hash> id.
         assert data["issue_id"] == "5"
 
     def test_started_falls_back_to_adhoc_id_without_issue_ref(self):
         captured = []
-        expected = AgentResult(session_id="s", issue_id="x",
-                               phase="adhoc", success=True)
+        fake_cls = _make_fake_session_class(success=True)
 
-        async def _mock(*a, **kw):
-            return expected
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+        with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
@@ -994,17 +932,14 @@ class TestSpawnAdhocLifecycle:
 
 
 class TestRunPhaseBlockingLifecycle:
-    def test_emits_failed_on_timeout(self):
+    def test_emits_failed_on_start_failure(self):
         events = []
+        fake_cls = _make_fake_session_class(start_ok=False)
 
-        async def _slow(*a, **kw):
-            await asyncio.sleep(999)
-
-        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_slow), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+        with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: events.append(et)):
-            run_phase_blocking(issue_id="SLOW-1", phase="implement",
+            run_phase_blocking(issue_id="FAIL-1", phase="implement",
                                cwd="/tmp", timeout=1)
 
         assert events == ["engineer/session.started", "engineer/session.failed"]

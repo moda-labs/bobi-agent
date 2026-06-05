@@ -61,6 +61,7 @@ class SessionEntry:
     cwd: str = ""
     status: str = "starting"
     pid: int = 0
+    inbox_port: int = 0
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     requested_by: dict = field(default_factory=dict)

@@ -16,9 +16,8 @@ class TestDrainLoop:
             data["text"] = text
         return {"type": etype, "source": source, "data": data}
 
-    @patch("modastack.manager.session.inject")
-    @patch("modastack.manager.session.detect_state", return_value="waiting_input")
-    def test_single_event_injected(self, mock_state, mock_inject):
+    @patch("modastack.inbox.deliver", return_value=(True, ""))
+    def test_single_event_delivered(self, mock_deliver):
         from modastack.manager.events.event_client import event_queue
         from modastack.manager.events.consumer import _drain_loop
 
@@ -28,23 +27,24 @@ class TestDrainLoop:
         event = self._make_event()
         event_queue.put(event)
 
-        def stop_after_inject(*args, **kwargs):
+        def stop_after_deliver(*args, **kwargs):
             raise SystemExit()
-        mock_inject.side_effect = stop_after_inject
+        mock_deliver.side_effect = stop_after_deliver
 
         try:
-            _drain_loop()
+            _drain_loop("moda-mgr-test")
         except SystemExit:
             pass
 
-        mock_inject.assert_called_once()
-        injected_text = mock_inject.call_args[0][0]
-        assert "Event: github/task.opened" in injected_text
+        mock_deliver.assert_called_once()
+        delivered_to = mock_deliver.call_args[0][0]
+        delivered_text = mock_deliver.call_args[0][1]
+        assert delivered_to == "moda-mgr-test"
+        assert "Event: github/task.opened" in delivered_text
 
-    @patch("modastack.manager.session.inject")
-    @patch("modastack.manager.session.detect_state", return_value="waiting_input")
+    @patch("modastack.inbox.deliver", return_value=(True, ""))
     @patch("modastack.manager.events.consumer.DRAIN_INTERVAL", 0.1)
-    def test_multiple_events_batched(self, mock_state, mock_inject):
+    def test_multiple_events_batched(self, mock_deliver):
         from modastack.manager.events.event_client import event_queue
         from modastack.manager.events.consumer import _drain_loop
 
@@ -57,61 +57,26 @@ class TestDrainLoop:
                                           text="hello", channel="D123", workspace="T123"))
 
         call_count = 0
-        def stop_after_slack_inject(*args, **kwargs):
+        def stop_after_slack(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
                 raise SystemExit()
             return True, ""
-        mock_inject.side_effect = stop_after_slack_inject
+        mock_deliver.side_effect = stop_after_slack
 
         try:
-            _drain_loop()
+            _drain_loop("moda-mgr-test")
         except SystemExit:
             pass
 
-        assert mock_inject.call_count == 2
-        github_text = mock_inject.call_args_list[0][0][0]
-        slack_text = mock_inject.call_args_list[1][0][0]
+        assert mock_deliver.call_count == 2
+        github_text = mock_deliver.call_args_list[0][0][1]
+        slack_text = mock_deliver.call_args_list[1][0][1]
         assert "task.opened" in github_text
         assert "task.assigned" in github_text
         assert "slack.dm" not in github_text
         assert "slack.dm" in slack_text
-
-    def test_drops_events_when_manager_busy(self):
-        from modastack.manager.events.event_client import event_queue
-        from modastack.manager.events import consumer
-
-        while not event_queue.empty():
-            event_queue.get_nowait()
-
-        event_queue.put(self._make_event())
-
-        inject_called = False
-
-        def fake_inject(text):
-            nonlocal inject_called
-            inject_called = True
-            return True
-
-        def fake_detect():
-            return "working"
-
-        # Run one iteration manually instead of the loop
-        import time
-        event = event_queue.get(timeout=1)
-        time.sleep(0.05)
-        batch = [event]
-        while not event_queue.empty():
-            batch.append(event_queue.get_nowait())
-
-        from modastack.manager.events.event_client import format_event_for_manager
-        lines = [format_event_for_manager(e) for e in batch]
-        text = "\n\n".join(lines)
-
-        # Manager is busy -- should not inject
-        assert fake_detect() != "waiting_input"
-        assert not inject_called
 
 
 class TestStartup:
@@ -124,9 +89,7 @@ class TestStartup:
 
     @patch("modastack.manager.session.ManagerSession.start_or_resume", return_value=True)
     @patch("modastack.manager.events.consumer._kill_stale_instances")
-    @patch("modastack.manager.events.consumer._wait_for_manager", return_value=True)
-    @patch("modastack.manager.session.detect_state", return_value="waiting_input")
-    def test_run_starts_without_crash(self, mock_state, mock_wait, mock_kill, mock_start, modastack_install):
+    def test_run_starts_without_crash(self, mock_kill, mock_start, modastack_install):
         """run() should get through startup without AttributeError or ImportError."""
         import signal
         from modastack.manager.events.consumer import run
