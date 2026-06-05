@@ -466,10 +466,18 @@ TEST 10.1: Start event server and manager
   EXPECT: Both running
 
 TEST 10.2: Webhook event reaches manager
-  ACTION: Send a GitHub issue event via local event server webhook,
-    wait 15 seconds, then check modastack log manager for evidence
-    the manager received and processed it
-  EXPECT: Manager log shows the event was received
+  ACTION: Send a signed GitHub issue event via local event server webhook.
+    The webhook MUST include a valid x-hub-signature-256 header computed
+    with the secret from ~/.modastack/config.yaml (webhooks.secret).
+    Compute HMAC-SHA256 of the raw JSON body with that secret.
+    Wait 15 seconds, then check modastack log manager for evidence
+    the manager received and processed it.
+    Example signing (shell):
+      SECRET=$(python3 -c "import yaml; print(yaml.safe_load(open('$HOME/.modastack/config.yaml')).get('webhooks',{}).get('secret',''))")
+      PAYLOAD='{"action":"opened",...}'
+      SIG=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
+      curl -H "x-hub-signature-256: sha256=$SIG" ...
+  EXPECT: delivered_to >= 1, manager log shows the event was received
 
 TEST 10.3: Clean up
   ACTION: cd ~/dev/modastack-dogfood && modastack stop && modastack event-server stop
@@ -510,3 +518,11 @@ After all tests complete:
   use in subsequent event server tests.
 - The event server runs on port 8080 by default.
 - The dogfood dashboard runs on port 8097 (configured in local.yaml).
+- **Webhook signatures**: When `~/.modastack/config.yaml` has a
+  `webhooks.secret` configured, the event server enforces GitHub webhook
+  signature verification (`x-hub-signature-256`). Tests 3.6-3.9 work
+  without signatures only when the event server is started fresh without
+  a secret. For Section 10 (pipeline tests), the manager auto-starts the
+  event server with the configured secret, so all webhook payloads MUST
+  be HMAC-SHA256 signed. Read the secret from config and compute the
+  signature before sending.

@@ -173,8 +173,9 @@ def _build_subscriptions(repo_path: Path) -> list[str]:
     except (FileNotFoundError, Exception) as e:
         log.warning(f"Could not read repo config for subscriptions: {e}")
     if not subs:
-        # Fallback: use the repo directory name
-        subs.append(repo_path.name)
+        from modastack.subagent import _git_remote_name
+        remote = _git_remote_name(repo_path)
+        subs.append(remote if remote else repo_path.name)
     return subs
 
 
@@ -241,6 +242,33 @@ def run(repo_path: Path | None = None, **kwargs):
 
     event_client = None
     if es_url and es_key:
+        # Verify saved credentials still work (event server may have restarted)
+        valid = False
+        try:
+            import json as _json, urllib.request
+            subs = _build_subscriptions(repo_path)
+            req = urllib.request.Request(
+                f"{es_url}/deployments/{es_deployment}/subscriptions",
+                data=_json.dumps({"add": subs}).encode(),
+                headers={
+                    "Authorization": f"Bearer {es_key}",
+                    "Content-Type": "application/json",
+                },
+                method="PUT",
+            )
+            with urllib.request.urlopen(req, timeout=3):
+                valid = True
+        except Exception:
+            pass
+
+        if not valid and es_url.startswith("http://localhost"):
+            log.info("Saved event server credentials are stale — re-registering")
+            from .event_server import ensure_running, register
+            es_port = int(es_url.rsplit(":", 1)[-1].rstrip("/"))
+            ensure_running(es_port)
+            subs = _build_subscriptions(repo_path)
+            es_deployment, es_key = register(es_url, repo_path.name, subs)
+
         from .event_client import EventServerClient
         event_client = EventServerClient(
             server_url=es_url,
