@@ -44,6 +44,7 @@ class WorkflowRun:
     repo: str = ""
     cwd: str = ""
     issue_id: str = ""
+    resumed_at: str = ""
 
     def save(self):
         path = _runs_dir() / f"{self.run_id}.json"
@@ -75,6 +76,7 @@ class WorkflowRun:
             repo=data.get("repo", ""),
             cwd=data.get("cwd", ""),
             issue_id=data.get("issue_id", ""),
+            resumed_at=data.get("resumed_at", ""),
         )
         for nid, ns_data in data.get("nodes", {}).items():
             run.nodes[nid] = NodeState(**ns_data)

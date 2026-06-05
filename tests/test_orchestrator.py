@@ -584,6 +584,151 @@ class TestQAPhase:
             return run_workflow(workflow, **kwargs)
 
 
+# ---------------------------------------------------------------------------
+# try_resume_for_event
+# ---------------------------------------------------------------------------
+
+class TestTryResumeForEvent:
+    def test_returns_false_when_no_waiting_run(self, tmp_path, monkeypatch):
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
+        assert try_resume_for_event("approval") is False
+
+    def test_returns_false_when_workflow_not_found(self, tmp_path, monkeypatch):
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True)
+        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
+
+        run = WorkflowRun.create("nonexistent-wf", {"data": {"issue_id": "1"}})
+        run.status = "waiting"
+        run.await_event = "approval"
+        run.issue_id = "1"
+        run.save()
+
+        with patch("modastack.workflow.triggers.WorkflowDispatcher") as mock_cls:
+            dispatcher = MagicMock()
+            dispatcher.find_workflow.return_value = None
+            mock_cls.return_value = dispatcher
+            result = try_resume_for_event("approval", "1")
+
+        assert result is False
+
+    def test_resumes_waiting_workflow(self, tmp_path, monkeypatch):
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True)
+        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
+
+        run = WorkflowRun.create("test-wf", {"data": {"issue_id": "5"}})
+        run.status = "waiting"
+        run.await_event = "approval"
+        run.issue_id = "5"
+        run.session_name = "wf-test-wf-r-5"
+        run.save()
+
+        fake_wf = Workflow(name="test-wf", steps=[
+            StepDef(name="impl", prompt="build it"),
+        ])
+
+        with patch("modastack.workflow.triggers.WorkflowDispatcher") as mock_cls, \
+             patch("modastack.workflow.orchestrator.resume_workflow") as mock_resume:
+            dispatcher = MagicMock()
+            dispatcher.find_workflow.return_value = fake_wf
+            mock_cls.return_value = dispatcher
+            result = try_resume_for_event("approval", "5", event={"data": {"approved": True}})
+
+        assert result is True
+
+    def test_filters_by_issue_id(self, tmp_path, monkeypatch):
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True)
+        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
+
+        run = WorkflowRun.create("test-wf", {"data": {"issue_id": "10"}})
+        run.status = "waiting"
+        run.await_event = "approval"
+        run.issue_id = "10"
+        run.save()
+
+        assert try_resume_for_event("approval", "999") is False
+
+
+# ---------------------------------------------------------------------------
+# resume_workflow started_at tracking
+# ---------------------------------------------------------------------------
+
+class TestResumeWorkflowTimestamps:
+    def test_resume_sets_started_at_on_run(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True)
+        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
+
+        run = WorkflowRun.create("t", {"data": {"issue_id": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {"input": {"task": "t", "repo": "r", "issue_id": "1"}}
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.issue_id = "1"
+        run.started_at = "2026-01-01T00:00:00"
+        run.save()
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="spec", prompt="write spec"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+
+        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("modastack.workflow.orchestrator._setup_worktree", return_value="/tmp"), \
+             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("modastack.workflow.orchestrator.save_session_id"), \
+             patch("modastack.workflow.orchestrator.log_activity"), \
+             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+                 ClaudeSDKClient=lambda opts: FakeClient(),
+                 ClaudeAgentOptions=MagicMock,
+                 AssistantMessage=FakeAssistantMessage,
+                 ResultMessage=FakeResultMessage,
+                 TextBlock=FakeTextBlock,
+             )}):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        reloaded = WorkflowRun.load(run.run_id)
+        assert reloaded.resumed_at != ""
+        assert reloaded.resumed_at != "2026-01-01T00:00:00"
+
+
+# ---------------------------------------------------------------------------
+# Handoff edge cases
+# ---------------------------------------------------------------------------
+
+class TestHandoffEdgeCases:
+    def test_corrupted_yaml_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        session_dir = tmp_path / "wf-test-corrupt"
+        session_dir.mkdir()
+        (session_dir / "handoff-setup.yaml").write_text(": : : invalid yaml [[[")
+        result = _read_handoff("wf-test-corrupt", "setup")
+        assert result == {}
+
+    def test_empty_file_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.sdk.SESSION_DIR", tmp_path)
+        session_dir = tmp_path / "wf-test-empty"
+        session_dir.mkdir()
+        (session_dir / "handoff-setup.yaml").write_text("")
+        result = _read_handoff("wf-test-empty", "setup")
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Worktree setup
+# ---------------------------------------------------------------------------
+
 class TestSetupWorktree:
     def test_worktree_creation(self, tmp_path):
         import subprocess as sp
