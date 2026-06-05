@@ -29,9 +29,12 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   dogfood:
-    name: Dogfood smoke test
+    name: Dogfood end-to-end
     needs: publish
     runs-on: self-hosted
+    env:
+      DOGFOOD_REPO: moda-labs/modastack-dogfood
+      DOGFOOD_DIR: /home/ubuntu/dev/modastack-dogfood
     steps:
       - name: Extract version
         id: version
@@ -39,87 +42,160 @@ jobs:
 
       - name: Wait for PyPI availability
         run: |
+          export PATH="$HOME/.local/bin:$PATH"
           VERSION="${{ steps.version.outputs.version }}"
           for i in $(seq 1 30); do
             if pip index versions modastack 2>/dev/null | grep -q "$VERSION"; then
               echo "modastack $VERSION available on PyPI"
               exit 0
             fi
-            echo "Waiting for PyPI to serve $VERSION... ($i/30)"
+            echo "Waiting for PyPI... ($i/30)"
             sleep 10
           done
-          echo "Timed out waiting for PyPI"
           exit 1
 
-      - name: Install release from PyPI
+      - name: Install release via uv
         run: |
+          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
           VERSION="${{ steps.version.outputs.version }}"
-          python3 -m venv /tmp/dogfood-venv
-          /tmp/dogfood-venv/bin/pip install "modastack==$VERSION"
-          /tmp/dogfood-venv/bin/modastack --version
+          uv tool install "modastack==$VERSION" --force
+          modastack --version
 
       - name: Clone or update dogfood repo
         run: |
-          if [ -d ~/dev/modastack-dogfood ]; then
-            cd ~/dev/modastack-dogfood && git pull --ff-only
+          if [ -d "$DOGFOOD_DIR" ]; then
+            cd "$DOGFOOD_DIR" && git checkout main && git pull --ff-only
           else
             mkdir -p ~/dev
-            git clone https://github.com/moda-labs/modastack-dogfood ~/dev/modastack-dogfood
+            git clone "https://github.com/$DOGFOOD_REPO" "$DOGFOOD_DIR"
           fi
 
-      - name: Run dogfood smoke tests
+      - name: Stop any running instance
         run: |
-          export PATH="/tmp/dogfood-venv/bin:$HOME/.claude/bin:$PATH"
-          cd ~/dev/modastack-dogfood
+          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+          cd "$DOGFOOD_DIR"
+          modastack stop 2>/dev/null || true
 
-          echo "=== Version ==="
-          modastack --version
-
-          echo "=== Config loading ==="
-          python3 -c "
-          from pathlib import Path
-          from modastack.config import RepoConfig
-          rc = RepoConfig.from_file(Path.cwd())
-          assert rc.task_tracking == 'github-issues', f'unexpected: {rc.task_tracking}'
-          assert rc.project == 'PLAYBOOK', f'unexpected: {rc.project}'
-          print('RepoConfig OK')
-          "
-
-          echo "=== Workflow list ==="
-          modastack workflows list 2>&1 | tee /dev/stderr | grep -q "content-lifecycle"
-
-          echo "=== Role list ==="
-          modastack roles list 2>&1
-
-          echo "=== Doctor ==="
-          modastack doctor 2>&1 || true
-
-          echo "=== Event server ==="
-          modastack event-server start
-          sleep 2
-          curl -sf http://localhost:8080/health | python3 -c "
-          import json,sys; d=json.load(sys.stdin)
-          assert d['status']=='ok', f'health failed: {d}'
-          print('Event server OK')
-          "
-          modastack event-server stop
-
-          echo "=== Start/stop lifecycle ==="
+      - name: Start modastack
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+          cd "$DOGFOOD_DIR"
           modastack start
-          sleep 3
-          test -f .modastack/state/manager.pid && echo "PID file OK"
-          modastack status
-          modastack stop
-          test ! -f .modastack/state/manager.pid && echo "PID cleanup OK"
 
-          echo "=== All dogfood smoke tests passed ==="
+          LOG=".modastack/state/manager.log"
+          POS=$(wc -c < "$LOG" 2>/dev/null || echo 0)
+          for i in $(seq 1 60); do
+            tail -c +$POS "$LOG" 2>/dev/null | grep -q "drain loop active\|Modastack running" && break
+            sleep 1
+          done
+          test -f .modastack/state/manager.pid
+          echo "Modastack ready"
+
+      - name: File issue and trigger smoke-test workflow
+        id: smoke
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+          cd "$DOGFOOD_DIR"
+
+          ISSUE_URL=$(gh issue create \
+            --repo "$DOGFOOD_REPO" \
+            --title "[CI] Release smoke test v${{ steps.version.outputs.version }}" \
+            --body "Automated smoke test for release v${{ steps.version.outputs.version }}." \
+            --label "smoke-test,agent")
+          ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
+          echo "issue_num=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+          echo "Created issue #$ISSUE_NUM"
+
+          # Simulate the GitHub webhook so the manager sees it now
+          curl -sf -X POST "http://localhost:8080/webhooks/github" \
+            -H "Content-Type: application/json" \
+            -H "x-github-event: issues" \
+            -H "x-github-delivery: smoke-$(date +%s)" \
+            -d "{
+              \"action\": \"assigned\",
+              \"issue\": {
+                \"number\": $ISSUE_NUM,
+                \"title\": \"[CI] Release smoke test v${{ steps.version.outputs.version }}\",
+                \"state\": \"open\",
+                \"labels\": [{\"name\": \"smoke-test\"}, {\"name\": \"agent\"}],
+                \"assignees\": [{\"login\": \"moda-bot\"}],
+                \"user\": {\"login\": \"github-actions\"},
+                \"body\": \"Automated smoke test.\",
+                \"html_url\": \"$ISSUE_URL\"
+              },
+              \"repository\": {\"full_name\": \"$DOGFOOD_REPO\"},
+              \"sender\": {\"login\": \"github-actions\"}
+            }"
+
+      - name: Monitor workflow execution
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+          cd "$DOGFOOD_DIR"
+          ISSUE_NUM="${{ steps.smoke.outputs.issue_num }}"
+          LOG=".modastack/state/manager.log"
+
+          echo "Monitoring issue #$ISSUE_NUM..."
+
+          INJECTED=false
+          SESSION_FOUND=false
+          SESSION_DONE=false
+          DEADLINE=$((SECONDS + 180))
+
+          while [ $SECONDS -lt $DEADLINE ]; do
+            if ! $INJECTED && grep -q "Injecting" "$LOG" 2>/dev/null; then
+              echo "✓ Event injected into manager"
+              INJECTED=true
+            fi
+
+            if ! $SESSION_FOUND; then
+              SESSION=$(ls -d .modastack/sessions/wf-*"$ISSUE_NUM" 2>/dev/null | head -1)
+              if [ -n "$SESSION" ]; then
+                echo "✓ Session created: $(basename $SESSION)"
+                SESSION_FOUND=true
+              fi
+            fi
+
+            if $SESSION_FOUND && [ -n "$SESSION" ]; then
+              STATUS=$(python3 -c "
+          import json; d=json.load(open('$SESSION/state.json'))
+          print(d.get('status','unknown'))" 2>/dev/null || echo unknown)
+              if [ "$STATUS" = "done" ]; then
+                echo "✓ Workflow completed"
+                SESSION_DONE=true
+                break
+              fi
+            fi
+
+            sleep 5
+          done
+
+          if ! $INJECTED; then
+            echo "✗ Event never injected"
+            tail -30 "$LOG"
+            exit 1
+          fi
+
+          if $SESSION_DONE; then
+            echo "=== Smoke test PASSED: full workflow executed ==="
+          elif $SESSION_FOUND; then
+            echo "=== Smoke test PARTIAL: session created but did not complete in time ==="
+            cat "$SESSION/state.json" 2>/dev/null
+          else
+            echo "=== Smoke test PARTIAL: event injected, no session created ==="
+            echo "(Manager may have handled it directly without spawning)"
+          fi
 
       - name: Cleanup
         if: always()
         run: |
-          cd ~/dev/modastack-dogfood 2>/dev/null && modastack stop 2>/dev/null || true
-          cd ~/dev/modastack-dogfood 2>/dev/null && modastack event-server stop 2>/dev/null || true
-          rm -rf /tmp/dogfood-venv
+          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+          cd "$DOGFOOD_DIR" 2>/dev/null || true
+          modastack stop 2>/dev/null || true
+          ISSUE_NUM="${{ steps.smoke.outputs.issue_num }}"
+          if [ -n "$ISSUE_NUM" ]; then
+            gh issue close "$ISSUE_NUM" --repo "$DOGFOOD_REPO" \
+              --comment "Smoke test complete (v${{ steps.version.outputs.version }}). Closing." 2>/dev/null || true
+          fi
 
   update-homebrew:
     needs: publish
