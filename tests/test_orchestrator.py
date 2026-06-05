@@ -14,6 +14,7 @@ from modastack.workflow.schema import (
 )
 from modastack.workflow.orchestrator import (
     _build_step_prompt, _read_handoff, _validate_handoff,
+    _setup_worktree,
     run_workflow, resume_workflow, try_resume_for_event,
     make_session_name,
 )
@@ -266,8 +267,10 @@ class FakeClient:
 class TestRunWorkflow:
     def _mock_asyncio_run(self, workflow, **kwargs):
         """Run the workflow with a mocked SDK client."""
+        cwd = kwargs.get("cwd", "/tmp")
         with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
              patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \
@@ -339,8 +342,10 @@ class TestRunWorkflow:
 
 class TestAwaitStep:
     def _mock_asyncio_run(self, workflow, **kwargs):
+        cwd = kwargs.get("cwd", "/tmp")
         with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
              patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \
@@ -560,8 +565,10 @@ class TestQAPhase:
         assert result is True
 
     def _mock_asyncio_run(self, workflow, **kwargs):
+        cwd = kwargs.get("cwd", "/tmp")
         with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
              patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \
@@ -575,3 +582,33 @@ class TestQAPhase:
              )}):
             mock_reg.return_value = MagicMock()
             return run_workflow(workflow, **kwargs)
+
+
+class TestSetupWorktree:
+    def test_worktree_creation(self, tmp_path):
+        import subprocess as sp
+        sp.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        sp.run(["git", "commit", "--allow-empty", "-m", "init"],
+               cwd=tmp_path, capture_output=True)
+
+        result = _setup_worktree(str(tmp_path), "test-session")
+        expected = tmp_path / ".claude" / "worktrees" / "test-session"
+        assert result == str(expected)
+        assert expected.exists()
+
+    def test_existing_worktree_reused(self, tmp_path):
+        import subprocess as sp
+        sp.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        sp.run(["git", "commit", "--allow-empty", "-m", "init"],
+               cwd=tmp_path, capture_output=True)
+
+        first = _setup_worktree(str(tmp_path), "reuse-session")
+        second = _setup_worktree(str(tmp_path), "reuse-session")
+        assert first == second
+
+    def test_worktree_failure_raises_not_fallback(self, tmp_path):
+        non_git = tmp_path / "not-a-repo"
+        non_git.mkdir()
+
+        with pytest.raises(RuntimeError, match="Failed to create worktree"):
+            _setup_worktree(str(non_git), "will-fail")

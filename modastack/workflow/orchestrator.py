@@ -117,8 +117,10 @@ def _setup_worktree(cwd: str, session_name: str) -> str:
             cwd=str(repo_root), capture_output=True, text=True,
         )
         if result.returncode != 0:
-            log.warning(f"Worktree creation failed: {result.stderr.strip()}")
-            return str(repo_root)
+            raise RuntimeError(
+                f"Failed to create worktree for {session_name}: "
+                f"{result.stderr.strip()}"
+            )
 
     log.info(f"Created worktree at {worktree_dir} on branch {branch}")
     return str(worktree_dir)

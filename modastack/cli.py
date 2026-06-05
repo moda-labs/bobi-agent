@@ -1112,6 +1112,10 @@ def role_list(repo):
     repo_path = None
     if repo:
         repo_path = Path(_resolve_repo(repo))
+    else:
+        detected = _detect_repo_root()
+        if detected:
+            repo_path = detected
     roles = discover_roles(repo_path)
     click.echo(format_role_list(roles))
 
