@@ -16,7 +16,7 @@ from .schema import Workflow, load_workflow
 
 log = logging.getLogger(__name__)
 
-WORKFLOWS_DIR = Path(__file__).parent.parent.parent / "workflows"
+WORKFLOWS_DIR = Path(__file__).parent
 
 
 class WorkflowDispatcher:

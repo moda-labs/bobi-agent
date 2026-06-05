@@ -21,9 +21,7 @@ from .schema import Monitor
 
 log = logging.getLogger(__name__)
 
-# Built-in defaults ship in the repo, resolved by path like workflows/ —
-# never written at runtime.
-DEFAULTS_PATH = Path(__file__).resolve().parent.parent.parent / "monitors" / "defaults.yaml"
+DEFAULTS_PATH = Path(__file__).resolve().parent / "defaults.yaml"
 
 
 def _read_records(path: Path) -> list[dict]:
