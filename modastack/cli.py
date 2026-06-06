@@ -153,20 +153,95 @@ def _systemctl(action: str) -> bool:
     return True
 
 
+def _load_agent_config(project_path: Path, config_path: str | None = None) -> dict | None:
+    """Load agent config from .modastack/agent.yaml or explicit path."""
+    import yaml
+    if config_path:
+        p = Path(config_path)
+    else:
+        p = project_path / ".modastack" / "agent.yaml"
+    if not p.exists():
+        return None
+    return yaml.safe_load(p.read_text()) or {}
+
+
+def _run_from_agent_config(project_path: Path, config: dict) -> None:
+    """Start an agent from a config dict — the new modastack start path."""
+    import atexit
+    import signal
+    import threading
+
+    from modastack.sdk import set_project_root
+    set_project_root(project_path)
+
+    role = config.get("role", "manager")
+    subscribe = config.get("subscribe", [])
+    persistent = config.get("persistent", True)
+    monitors_enabled = config.get("monitors", False)
+
+    state_dir = project_path / ".modastack" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    pid_str = str(os.getpid())
+    (state_dir / "manager.pid").write_text(pid_str)
+
+    def _cleanup():
+        pid_file = state_dir / "manager.pid"
+        try:
+            if pid_file.exists() and pid_file.read_text().strip() == pid_str:
+                pid_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        (state_dir / "dashboard.port").unlink(missing_ok=True)
+    atexit.register(_cleanup)
+
+    def _handle_term(signum, frame):
+        log.info("Received SIGTERM — shutting down")
+        _cleanup()
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, _handle_term)
+
+    log = logging.getLogger(__name__)
+    log.info(f"Modastack starting for {project_path.name} (role={role})")
+
+    if subscribe:
+        from modastack.subagent import _start_event_subscription
+        _start_event_subscription(f"moda-{role}-{project_path.name}", subscribe, project_path)
+
+    if monitors_enabled:
+        from modastack.monitors.scheduler import MonitorScheduler
+        monitor_scheduler = MonitorScheduler()
+        monitor_scheduler.start()
+        log.info("Monitor scheduler started")
+
+    from modastack.subagent import spawn_adhoc
+    log.info(f"Modastack running for {project_path.name}")
+    spawn_adhoc(
+        cwd=str(project_path),
+        task=config.get("task", f"You are a {role} agent. Respond to events and inbox messages."),
+        name=f"moda-{role}-{project_path.name}",
+        persistent=persistent,
+    )
+
+
 @main.command()
 @click.option("--foreground", "-f", is_flag=True, help="Run in the foreground (default: daemonize)")
 @click.option("--fresh", is_flag=True, help="Wipe manager session and start clean")
 @click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip interactive setup prompts")
-def start(foreground, fresh, non_interactive):
+@click.option("--config", "config_path", default=None, type=click.Path(exists=True),
+              help="Agent config file (default: .modastack/agent.yaml)")
+def start(foreground, fresh, non_interactive, config_path):
     """Start modastack for the project in the current directory.
 
-    If no global config exists, runs interactive setup first (unless
-    --non-interactive is set, in which case defaults are used).
+    Reads .modastack/agent.yaml (or --config) to determine which role,
+    subscriptions, and capabilities to start with. Falls back to the
+    legacy consumer.run() path if no agent config exists.
 
     Usage:
         cd myrepo && modastack start              # daemonize
         cd myrepo && modastack start --foreground  # run in foreground
         cd myrepo && modastack start --fresh       # fresh manager session
+        cd myrepo && modastack start --config path/to/agent.yaml
     """
     _ensure_config(non_interactive)
 
@@ -201,13 +276,18 @@ def start(foreground, fresh, non_interactive):
         except (ProcessLookupError, ValueError):
             pid_path.unlink(missing_ok=True)
 
+    agent_config = _load_agent_config(project_path, config_path)
+
     if foreground:
         root = logging.getLogger()
         root.handlers = [h for h in root.handlers
                          if isinstance(h, logging.FileHandler)]
 
-        from modastack.manager.events.consumer import run
-        run(project_path=project_path, fresh=fresh)
+        if agent_config:
+            _run_from_agent_config(project_path, agent_config)
+        else:
+            from modastack.manager.events.consumer import run
+            run(project_path=project_path, fresh=fresh)
     else:
         log_file = state_dir / "manager.log"
         env = os.environ.copy()
@@ -217,6 +297,8 @@ def start(foreground, fresh, non_interactive):
         cmd = [sys.executable, "-m", "modastack.cli", "start", "--foreground"]
         if fresh:
             cmd.append("--fresh")
+        if config_path:
+            cmd.extend(["--config", config_path])
         with open(log_file, "a") as lf:
             proc = subprocess.Popen(
                 cmd,
