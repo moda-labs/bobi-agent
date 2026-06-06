@@ -29,7 +29,7 @@ class TestEndToEndEventFlow:
         pid_file = modastack_env.state_dir / "manager.pid"
         log_pos = log_file.stat().st_size if log_file.exists() else 0
 
-        cli_run("start", timeout=15)
+        cli_run("start", "software_team", timeout=15)
 
         deadline = time.monotonic() + 60
         ready = False

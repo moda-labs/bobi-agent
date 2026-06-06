@@ -91,7 +91,7 @@ def deployment(event_server):
     base_url, _ = event_server
     result = _post_json(f"{base_url}/deployments", {
         "name": "test-deploy",
-        "subscriptions": ["test-org/test-repo", "linear:TEST", "slack:T_TEST"],
+        "subscriptions": ["github:test-org/test-repo", "linear:TEST", "slack:T_TEST"],
     })
     return base_url, result["deployment_id"], result["api_key"]
 
@@ -108,7 +108,7 @@ class TestEventServerLifecycle:
         base_url, _ = event_server
         result = _post_json(f"{base_url}/deployments", {
             "name": "lifecycle-test",
-            "subscriptions": ["test-org/test-repo"],
+            "subscriptions": ["github:test-org/test-repo"],
         })
         assert "deployment_id" in result
         assert "api_key" in result
@@ -118,7 +118,7 @@ class TestEventServerLifecycle:
         base_url, _ = event_server
         _post_json(f"{base_url}/deployments", {
             "name": "count-test",
-            "subscriptions": ["some-org/some-repo"],
+            "subscriptions": ["github:some-org/some-repo"],
         })
         data = _get_json(f"{base_url}/health")
         assert data["deployments"] >= 1

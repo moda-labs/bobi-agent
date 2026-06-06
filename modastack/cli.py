@@ -278,13 +278,8 @@ def start(agent_pack, foreground, fresh, subscribe):
     if subscribe:
         agent_config.setdefault("subscribe", []).extend(subscribe)
 
-    (project_path / ".modastack" / "state").mkdir(parents=True, exist_ok=True)
-    _ensure_config()
-
-    if fresh:
-        _clear_manager_session(project_path)
-
-    state_dir = _project_state_dir(project_path)
+    state_dir = project_path / ".modastack" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
     pid_path = state_dir / "manager.pid"
 
     if pid_path.exists():
@@ -295,6 +290,11 @@ def start(agent_pack, foreground, fresh, subscribe):
             return
         except (ProcessLookupError, ValueError):
             pid_path.unlink(missing_ok=True)
+
+    _ensure_config()
+
+    if fresh:
+        _clear_manager_session(project_path)
 
     if foreground:
         root = logging.getLogger()
@@ -347,9 +347,9 @@ def _register_event_server(url: str, project_path: Path, rc: "ProjectConfig") ->
     """Register with the event server and return (deployment_id, api_key)."""
     import urllib.request
     import urllib.error
-    from modastack.events.subscriptions import build_subscriptions
+    from modastack.events.subscriptions import discover_subscriptions
     try:
-        subs = build_subscriptions(project_path)
+        subs = discover_subscriptions(project_path)
         payload = json.dumps({
             "name": project_path.name,
             "subscriptions": subs,
