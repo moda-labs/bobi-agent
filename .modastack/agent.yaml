@@ -1,0 +1,6 @@
+role: manager
+persistent: true
+subscribe:
+  - moda-labs/modastack
+  - slack:T0952RZRZ0X
+monitors: true

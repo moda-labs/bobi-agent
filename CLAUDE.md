@@ -90,10 +90,10 @@ workflows/adhoc.yaml              # Only built-in workflow (generic pass-through
 monitors/defaults.yaml            # Empty — domain monitors go in repo config
 
 .modastack/                       # This repo's own config (dogfooding)
-├── config.yaml                   # Task tracking, test command, credentials
-├── manager.md                    # Engineering manager role prompt
-├── agents/
-│   └── engineer.md               # Engineer agent: standards, conventions, phases
+├── config.yaml                   # Connections, test command, event server URL
+├── agent.yaml                    # Agent startup config (role, subscriptions, monitors)
+├── agents/                       # Project-specific role prompt overrides (optional)
+│   └── <role>.md                 # Overrides built-in agents/<role>.md
 ├── workflows/                    # Engineering lifecycle workflows
 │   ├── issue-lifecycle.yaml      # triage → spec → implement → PR
 │   ├── pr-feedback.yaml          # address review comments
@@ -103,29 +103,30 @@ monitors/defaults.yaml            # Empty — domain monitors go in repo config
 └── monitors.yaml                 # PR conflict + stale PR checks
 ```
 
-### Per-repo configuration
+### Per-project configuration
 
-Repos bring their own `.modastack/` directory:
+Projects bring their own `.modastack/` directory:
 
 ```
-<repo>/.modastack/
+<project>/.modastack/
 ├── config.yaml                   # connections, tracker type/auth, test command
-├── manager.md                    # domain-specific manager role prompt
+├── agent.yaml                    # what role to start, what topics to subscribe to
 ├── agents/
-│   └── <role>.md                 # agent role prompt(s)
+│   └── <role>.md                 # project-specific role prompt overrides
 ├── workflows/
-│   └── <workflow>.yaml           # domain-specific workflow definitions
-└── monitors.yaml                 # domain-specific monitor definitions
+│   └── <workflow>.yaml           # project-specific workflow definitions
+└── monitors.yaml                 # project-specific monitor definitions
 ```
 
-The framework loads `manager_base.md` + repo `manager.md` for the manager,
-and `agent_base.md` + repo `agents/<role>.md` for each agent. Workflow
-steps specify `agent: <role>` to select which agent prompt to use.
+The framework loads `base.md` + `agents/<role>.md` for any agent.
+Project overrides in `.modastack/agents/<role>.md` replace the built-in
+role prompt. Workflow steps specify `agent: <role>` to select which
+agent prompt to use.
 
-## Issue lifecycle
+## Issue lifecycle (SDLC use case)
 
-The manager matches incoming events against workflow trigger descriptions
-(natural language conditions) to decide what to do:
+The manager agent matches incoming events against workflow trigger
+descriptions (natural language conditions) to decide what to do:
 
 | Condition | Action |
 |---|---|

@@ -8,5 +8,6 @@ verify:
   test_command: pytest tests/ --ignore=tests/integration/ --timeout=10
 slack:
   workspace_id: T0952RZRZ0X
+  channel: C08UFNLV3TL
 event_server:
   url: https://modastack-events.modalabs.workers.dev
