@@ -28,7 +28,7 @@ class TestBuildSubscriptions:
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text("github:\n  repo: org/myrepo\n")
         subs = build_subscriptions(tmp_path)
-        assert "org/myrepo" in subs
+        assert "github:org/myrepo" in subs
 
     def test_slack_channel_scoped(self, tmp_path):
         config_dir = tmp_path / ".modastack"
@@ -149,7 +149,7 @@ class TestCanonicalImports:
 
         from modastack.events.subscriptions import build_subscriptions
         subs = build_subscriptions(tmp_path)
-        assert "org/repo" in subs
+        assert "github:org/repo" in subs
 
 
 # ---------------------------------------------------------------------------

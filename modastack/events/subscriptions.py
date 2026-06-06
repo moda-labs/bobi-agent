@@ -13,7 +13,7 @@ def build_subscriptions(project_path: Path) -> list[str]:
         from modastack.config import ProjectConfig
         pc = ProjectConfig.from_file(project_path)
         if pc.github_repo:
-            subs.append(pc.github_repo)
+            subs.append(f"github:{pc.github_repo}")
         if pc.slack_workspace_id and pc.slack_channel:
             subs.append(f"slack:{pc.slack_workspace_id}:{pc.slack_channel}")
         elif pc.slack_workspace_id:

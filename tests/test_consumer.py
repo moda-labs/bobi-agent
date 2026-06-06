@@ -115,7 +115,7 @@ class TestBuildSubscriptions:
         )
         from modastack.events.subscriptions import build_subscriptions as _build_subscriptions
         subs = _build_subscriptions(tmp_path)
-        assert "org/myrepo" in subs
+        assert "github:org/myrepo" in subs
         assert not any("slack:" in s for s in subs)
 
 

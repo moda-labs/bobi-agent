@@ -214,7 +214,7 @@ describe("subscriptionKeysForEvent", () => {
 			timestamp: "",
 			payload: {},
 		});
-		expect(keys).toEqual(["org/repo"]);
+		expect(keys).toEqual(["github:org/repo"]);
 	});
 
 	it("returns linear key for linear events", () => {

@@ -135,7 +135,7 @@ export function normalizeSlackPayload(
 
 export function subscriptionKeysForEvent(event: NormalizedEvent): string[] {
 	const keys: string[] = [];
-	if (event.repo) keys.push(event.repo);
+	if (event.repo) keys.push(`github:${event.repo}`);
 	if (event.team_key) keys.push(`linear:${event.team_key}`);
 	if (event.workspace) {
 		keys.push(`slack:${event.workspace}`);
