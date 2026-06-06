@@ -221,6 +221,7 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
         task=task,
         name=f"moda-{role}-{project_path.name}",
         persistent=persistent,
+        role=role,
     )
 
 

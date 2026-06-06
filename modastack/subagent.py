@@ -446,6 +446,7 @@ def spawn_adhoc(
     name: str | None = None,
     requested_by: dict | None = None,
     persistent: bool = False,
+    role: str = "engineer",
 ) -> AgentResult:
     """Spawn an engineer agent with a freeform task prompt.
 
@@ -475,7 +476,7 @@ def spawn_adhoc(
             "type": "preset",
             "preset": "claude_code",
             "append": (
-                f"You are an engineer agent working on an adhoc task. "
+                f"You are a {role} agent working on an adhoc task. "
                 f"Complete the task described in your initial prompt."
                 + (" After completing the initial task, stay available — "
                    "you will receive follow-up messages via your inbox."
@@ -483,6 +484,7 @@ def spawn_adhoc(
             ),
         },
         extra_options={"skills": "all", "max_turns": 200},
+        role=role,
     )
 
     ok = session.start(startup_prompt=task, timeout=timeout)

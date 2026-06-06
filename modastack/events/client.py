@@ -50,7 +50,7 @@ def _log_event(event: dict) -> None:
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "type": event.get("type", ""),
         "source": event.get("source", ""),
-        "data": event.get("data", {}),
+        "payload": event.get("payload", event.get("data", {})),
     }
     with open(_state_path("events.jsonl"), "a") as f:
         f.write(json.dumps(entry) + "\n")
