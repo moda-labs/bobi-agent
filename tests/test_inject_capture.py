@@ -8,7 +8,7 @@ from modastack.manager import session as session_mod
 
 
 def test_inject_capture_returns_response():
-    s = ManagerSession(repo_path=Path("/tmp/test-repo"))
+    s = ManagerSession(project_path=Path("/tmp/test-repo"))
     with patch("modastack.inbox.deliver", return_value=(True, "reply-to-A")):
         ok, response = s.inject_capture("event A")
     assert ok is True
@@ -16,7 +16,7 @@ def test_inject_capture_returns_response():
 
 
 def test_inject_capture_failure_returns_empty():
-    s = ManagerSession(repo_path=Path("/tmp/test-repo"))
+    s = ManagerSession(project_path=Path("/tmp/test-repo"))
     with patch("modastack.inbox.deliver", return_value=(False, "session not found")):
         ok, response = s.inject_capture("event A")
     assert ok is False
@@ -24,14 +24,14 @@ def test_inject_capture_failure_returns_empty():
 
 
 def test_inject_wrapper_returns_bool():
-    s = ManagerSession(repo_path=Path("/tmp/test-repo"))
+    s = ManagerSession(project_path=Path("/tmp/test-repo"))
     with patch("modastack.inbox.deliver", return_value=(True, "")):
         result = s.inject("event A")
     assert result is True
 
 
 def test_module_level_wrappers_delegate():
-    s = ManagerSession(repo_path=Path("/tmp/test-repo"))
+    s = ManagerSession(project_path=Path("/tmp/test-repo"))
     set_default_session(s)
     try:
         with patch("modastack.inbox.deliver", return_value=(True, "reply-via-wrapper")):

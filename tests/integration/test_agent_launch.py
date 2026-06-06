@@ -20,7 +20,7 @@ from .conftest import requires_claude
 class TestAdhocAgentLaunch:
 
     def test_adhoc_cli_returns_immediately(self, modastack_env, cli_run, clean_session):
-        clean_session("wf-adhoc-repo-101")
+        clean_session("wf-adhoc-test-repo-101")
 
         start = time.monotonic()
         result = cli_run(
@@ -37,7 +37,7 @@ class TestAdhocAgentLaunch:
 
     def test_adhoc_agent_completes(self, modastack_env, cli_run, clean_session):
         """Launch via CLI (subprocess finds repo from cwd) and poll for completion."""
-        clean_session("wf-adhoc-repo-102")
+        clean_session("wf-adhoc-test-repo-102")
 
         result = cli_run(
             "agents", "launch",
@@ -48,7 +48,7 @@ class TestAdhocAgentLaunch:
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
 
-        session_dir = _sessions_dir() / "wf-adhoc-repo-102"
+        session_dir = _sessions_dir() / "wf-adhoc-test-repo-102"
 
         deadline = time.monotonic() + 90
         completed = False
@@ -67,7 +67,7 @@ class TestAdhocAgentLaunch:
 
     def test_adhoc_session_state_fields(self, modastack_env, cli_run, clean_session):
         """Verify the session state file has the expected fields after completion."""
-        clean_session("wf-adhoc-repo-103")
+        clean_session("wf-adhoc-test-repo-103")
 
         cli_run(
             "agents", "launch",
@@ -77,7 +77,7 @@ class TestAdhocAgentLaunch:
             timeout=10,
         )
 
-        session_dir = _sessions_dir() / "wf-adhoc-repo-103"
+        session_dir = _sessions_dir() / "wf-adhoc-test-repo-103"
 
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
@@ -102,7 +102,7 @@ class TestAdhocAgentLaunch:
 class TestMultiStepWorkflowLaunch:
 
     def test_two_step_cli_returns_immediately(self, modastack_env, cli_run, clean_session):
-        clean_session("wf-two-step-repo-201")
+        clean_session("wf-two-step-test-repo-201")
 
         start = time.monotonic()
         result = cli_run(
@@ -121,15 +121,15 @@ class TestMultiStepWorkflowLaunch:
         from modastack.workflow.schema import load_workflow
         from modastack.workflow.orchestrator import run_workflow, make_session_name
 
-        session_name = make_session_name("two-step", "repo", "202")
+        session_name = make_session_name("two-step", "test-repo", "202")
         clean_session(session_name)
 
         wf_file = modastack_env.workflows_dir / "two-step.yaml"
         wf = load_workflow(wf_file)
 
         result = run_workflow(
-            wf, task="Run two-step test #202", repo="repo",
-            cwd=str(modastack_env.repo_path), issue_id="202",
+            wf, task="Run two-step test #202", repo="test-repo",
+            cwd=str(modastack_env.project_path), issue_id="202",
             timeout=120, interactive=False,
         )
 

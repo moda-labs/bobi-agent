@@ -15,7 +15,7 @@ from modastack.subagent import (
     AgentResult,
     _build_prompt,
     _parse_issue_number,
-    _resolve_repo_name,
+    _resolve_project_name,
     cancel_agent,
     get_result,
     is_running,
@@ -93,16 +93,16 @@ class TestParseIssueNumber:
         assert _parse_issue_number("bump version to 5 today") is None
 
 
-class TestResolveRepoName:
+class TestResolveProjectName:
     def test_uses_github_repo_from_config(self, tmp_path):
         (tmp_path / ".modastack").mkdir()
         (tmp_path / ".modastack" / "config.yaml").write_text(
             "task_tracking:\n  system: github-issues\ngithub:\n  repo: moda-labs/jobtack\n"
         )
-        assert _resolve_repo_name(str(tmp_path)) == "jobtack"
+        assert _resolve_project_name(str(tmp_path)) == "jobtack"
 
     def test_falls_back_to_dirname(self, tmp_path):
-        assert _resolve_repo_name(str(tmp_path)) == tmp_path.name
+        assert _resolve_project_name(str(tmp_path)) == tmp_path.name
 
 
 class TestAgentLifecycle:

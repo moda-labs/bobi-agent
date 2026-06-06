@@ -31,7 +31,7 @@ PACKAGE_ROOT = Path(__file__).parent.parent.parent
 @dataclass
 class ModastackEnv:
     """Paths for an isolated modastack installation."""
-    repo_path: Path
+    project_path: Path
     state_dir: Path
     sessions_dir: Path
     workflows_dir: Path
@@ -53,9 +53,9 @@ def modastack_env(tmp_path_factory):
     workflows, and empty credentials.
     """
     base = tmp_path_factory.mktemp("modastack")
-    repo_path = base / "repo"
+    project_path = base / "repo"
 
-    config_dir = repo_path / ".modastack"
+    config_dir = project_path / ".modastack"
     state_dir = config_dir / "state"
     sessions_dir = config_dir / "sessions"
     workflows_dir = config_dir / "workflows"
@@ -89,12 +89,12 @@ def modastack_env(tmp_path_factory):
 
     # Initialize a real git repo (needed for worktree-based workflows)
     subprocess.run(
-        ["git", "init"], cwd=str(repo_path),
+        ["git", "init"], cwd=str(project_path),
         capture_output=True, check=True,
     )
     subprocess.run(
         ["git", "commit", "--allow-empty", "-m", "init"],
-        cwd=str(repo_path), capture_output=True, check=True,
+        cwd=str(project_path), capture_output=True, check=True,
         env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@test.com",
              "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@test.com"},
     )
@@ -121,8 +121,8 @@ def modastack_env(tmp_path_factory):
     )
 
     # Set repo root so all per-repo path resolution works
-    from modastack.sdk import set_repo_root
-    set_repo_root(repo_path)
+    from modastack.sdk import set_project_root
+    set_project_root(project_path)
 
     # Redirect credentials path
     from modastack import config as _cfg
@@ -130,7 +130,7 @@ def modastack_env(tmp_path_factory):
     _cfg._credentials_path = lambda: creds_dir / "credentials.yaml"
 
     yield ModastackEnv(
-        repo_path=repo_path,
+        project_path=project_path,
         state_dir=state_dir,
         sessions_dir=sessions_dir,
         workflows_dir=workflows_dir,
@@ -139,7 +139,7 @@ def modastack_env(tmp_path_factory):
 
     # Teardown: restore
     _cfg._credentials_path = _orig_creds
-    set_repo_root(None)
+    set_project_root(None)
 
 
 requires_claude = pytest.mark.skipif(
@@ -158,7 +158,7 @@ def manager_session(modastack_env):
     from modastack.sdk import get_cli_path
     from modastack.manager.session import ManagerSession, set_default_session
 
-    s = ManagerSession(repo_path=modastack_env.repo_path)
+    s = ManagerSession(project_path=modastack_env.project_path)
     set_default_session(s)
 
     s._client = None
@@ -171,7 +171,7 @@ def manager_session(modastack_env):
 
     async def _run():
         options = ClaudeAgentOptions(
-            cwd=str(modastack_env.repo_path),
+            cwd=str(modastack_env.project_path),
             permission_mode="bypassPermissions",
             cli_path=get_cli_path(),
             system_prompt="You are a test agent. Reply concisely. No tools.",
@@ -242,7 +242,7 @@ def manager_session_with_prompt(modastack_env):
         "Always take action — never just describe what you would do."
     )
 
-    s = ManagerSession(repo_path=modastack_env.repo_path)
+    s = ManagerSession(project_path=modastack_env.project_path)
     set_default_session(s)
 
     s._client = None
@@ -255,7 +255,7 @@ def manager_session_with_prompt(modastack_env):
 
     async def _run():
         options = ClaudeAgentOptions(
-            cwd=str(modastack_env.repo_path),
+            cwd=str(modastack_env.project_path),
             permission_mode="bypassPermissions",
             cli_path=get_cli_path(),
             system_prompt=prompt,
@@ -308,13 +308,13 @@ def cli_run(modastack_env):
     """Helper to run modastack CLI commands against the isolated install.
 
     Returns a function that runs the CLI subprocess with the correct
-    cwd and environment so _detect_repo_root() finds the temp repo.
+    cwd and environment so _detect_project_root() finds the temp repo.
     """
     def _run(*args, timeout=10):
         return subprocess.run(
             [sys.executable, "-m", "modastack.cli", *args],
             capture_output=True, text=True, timeout=timeout,
-            cwd=str(modastack_env.repo_path),
+            cwd=str(modastack_env.project_path),
         )
     return _run
 

@@ -1,4 +1,4 @@
-"""Tests for auto-setup / repo inspection."""
+"""Tests for auto-setup / project inspection."""
 
 import json
 from pathlib import Path
@@ -8,7 +8,7 @@ from modastack.setup import (
     detect_package_manager,
     detect_skills,
     generate_dispatch_yaml,
-    setup_repo,
+    setup_project,
 )
 
 
@@ -86,9 +86,9 @@ def test_generate_dispatch_yaml(tmp_path):
     assert "review" in config["agent"]["skills"]
 
 
-def test_setup_repo_writes_file(tmp_path):
+def test_setup_project_writes_file(tmp_path):
     (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": "jest"}}))
-    output = setup_repo(tmp_path)
+    output = setup_project(tmp_path)
 
     assert output.exists()
     assert output.name == "config.yaml"

@@ -20,12 +20,12 @@ MANAGER_BASE_PATH = _PROMPTS_DIR / "manager_base.md"
 
 
 class ManagerSession:
-    """A manager session bound to one repo — wraps a Session."""
+    """A manager session bound to one project — wraps a Session."""
 
-    def __init__(self, repo_path: Path, session_name: str | None = None):
-        self.repo_path = repo_path
-        self.session_name = session_name or f"moda-mgr-{repo_path.name}"
-        self.cwd = str(repo_path)
+    def __init__(self, project_path: Path, session_name: str | None = None):
+        self.project_path = project_path
+        self.session_name = session_name or f"moda-mgr-{project_path.name}"
+        self.cwd = str(project_path)
         self._session: Session | None = None
         self._response_callback = None
 
@@ -36,9 +36,9 @@ class ManagerSession:
         if builtin_role.exists():
             core += "\n\n" + builtin_role.read_text()
 
-        repo_mgr = self.repo_path / ".modastack" / "manager.md"
+        repo_mgr = self.project_path / ".modastack" / "manager.md"
         if repo_mgr.exists():
-            core += f"\n\n## {self.repo_path.name} policies\n\n" + repo_mgr.read_text()
+            core += f"\n\n## {self.project_path.name} policies\n\n" + repo_mgr.read_text()
 
         return core
 
@@ -48,7 +48,7 @@ class ManagerSession:
             from modastack.workflow.schema import load_workflow
 
             sources = [WORKFLOWS_DIR]
-            repo_wf = self.repo_path / ".modastack" / "workflows"
+            repo_wf = self.project_path / ".modastack" / "workflows"
             if repo_wf.exists():
                 sources.append(repo_wf)
 
@@ -72,9 +72,9 @@ class ManagerSession:
         prompt = self._load_manager_prompt()
         workflows = self._list_workflows()
         return (
-            f"You are the Modastack manager for {self.repo_path.name}. "
-            f"You manage this repo only — no other repos. "
-            f"All agents you launch run in this repo. "
+            f"You are the Modastack manager for {self.project_path.name}. "
+            f"You manage this project only — no other projects. "
+            f"All agents you launch run in this project. "
             f"Act directly using your tools.\n\n{prompt}\n\n"
             f"## Available workflows\n\n{workflows}"
         )

@@ -140,7 +140,7 @@ class TestNormalizeLinear:
 class TestNormalizeSlack:
 
     @patch("modastack.config.LocalConfig")
-    @patch("modastack.sdk.get_repo_root", return_value=Path("/tmp/repo"))
+    @patch("modastack.sdk.get_project_root", return_value=Path("/tmp/repo"))
     @patch("modastack.manager.events.event_client._resolve_slack_user")
     def test_dm(self, mock_resolve, mock_root, mock_local):
         mock_resolve.return_value = "Zach"
@@ -164,7 +164,7 @@ class TestNormalizeSlack:
         assert result["data"]["channel"] == "D456"
 
     @patch("modastack.config.LocalConfig")
-    @patch("modastack.sdk.get_repo_root", return_value=Path("/tmp/repo"))
+    @patch("modastack.sdk.get_project_root", return_value=Path("/tmp/repo"))
     @patch("modastack.manager.events.event_client._resolve_slack_user")
     def test_mention_strips_bot_prefix(self, mock_resolve, mock_root, mock_local):
         mock_resolve.return_value = "Zach"

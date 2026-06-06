@@ -14,10 +14,10 @@ CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
 def _db_path() -> Path:
-    from modastack.sdk import get_repo_root
-    root = get_repo_root()
+    from modastack.sdk import get_project_root
+    root = get_project_root()
     if not root:
-        raise RuntimeError("repo root not set — call set_repo_root() first")
+        raise RuntimeError("project root not set — call set_project_root() first")
     return root / ".modastack" / "state" / "history.db"
 
 

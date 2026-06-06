@@ -5,11 +5,11 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from modastack.github_issues import scan_github_issues, bootstrap_labels, WORKFLOW_LABELS
-from modastack.config import RepoConfig
+from modastack.config import ProjectConfig
 
 
-def _make_repo_config(path, github_repo="test-org/test-repo"):
-    return RepoConfig(
+def _make_project_config(path, github_repo="test-org/test-repo"):
+    return ProjectConfig(
         path=path,
         task_tracking="github-issues",
         github_repo=github_repo,
@@ -20,7 +20,7 @@ class TestScanGithubIssues:
 
     @patch("modastack.github_issues.subprocess.run")
     def test_groups_by_state(self, mock_run):
-        rc = _make_repo_config(Path("/repo"))
+        rc = _make_project_config(Path("/repo"))
 
         issues = [
             {
@@ -52,7 +52,7 @@ class TestScanGithubIssues:
     @patch("modastack.github_issues.subprocess.run")
     def test_passes_assignee_me_to_gh(self, mock_run):
         """Verifies gh is called with --assignee @me."""
-        rc = _make_repo_config(Path("/repo"))
+        rc = _make_project_config(Path("/repo"))
         mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps([]))
 
         scan_github_issues(rc)
@@ -62,7 +62,7 @@ class TestScanGithubIssues:
 
     @patch("modastack.github_issues.subprocess.run")
     def test_filters_skip_labels(self, mock_run):
-        rc = _make_repo_config(Path("/repo"))
+        rc = _make_project_config(Path("/repo"))
 
         issues = [
             {
@@ -81,7 +81,7 @@ class TestScanGithubIssues:
 
     @patch("modastack.github_issues.subprocess.run")
     def test_gh_failure_returns_empty(self, mock_run):
-        rc = _make_repo_config(Path("/repo"))
+        rc = _make_project_config(Path("/repo"))
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
 
         assert scan_github_issues(rc) == {}
@@ -89,7 +89,7 @@ class TestScanGithubIssues:
     @patch("modastack.github_issues.subprocess.run")
     def test_default_state_is_todo(self, mock_run):
         """Issues without a status label default to Todo."""
-        rc = _make_repo_config(Path("/repo"))
+        rc = _make_project_config(Path("/repo"))
 
         issues = [
             {
@@ -108,7 +108,7 @@ class TestScanGithubIssues:
 
     @patch("modastack.github_issues.subprocess.run")
     def test_normalizes_comments(self, mock_run):
-        rc = _make_repo_config(Path("/repo"))
+        rc = _make_project_config(Path("/repo"))
 
         issues = [
             {
@@ -133,7 +133,7 @@ class TestScanGithubIssues:
 
     @patch("modastack.github_issues.subprocess.run")
     def test_uses_path_name_when_no_project(self, mock_run):
-        rc = _make_repo_config(Path("/my-repo"), github_repo="")
+        rc = _make_project_config(Path("/my-repo"), github_repo="")
 
         issues = [
             {

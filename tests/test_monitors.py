@@ -53,9 +53,9 @@ class TestMonitor:
         assert Monitor(name="x", event="monitor/pr.conflict").event_parts == ("monitor", "pr.conflict")
         assert Monitor(name="x", event="bare").event_parts == ("monitor", "bare")
 
-    def test_state_key_namespaces_repo_scoped(self):
+    def test_state_key_namespaces_project_scoped(self):
         assert Monitor(name="dh").state_key == "dh"
-        assert Monitor(name="dh", repo="/r/jobtack").state_key == "dh@/r/jobtack"
+        assert Monitor(name="dh", project="/r/jobtack").state_key == "dh@/r/jobtack"
 
     def test_to_dict_roundtrip_disabled(self):
         m = Monitor.from_dict({"name": "x", "enabled": False, "url": "u"})
@@ -72,43 +72,43 @@ def _write(path: Path, monitors: list[dict]):
 
 
 class TestRegistryMerge:
-    def test_repo_specific_monitor_scoped(self, tmp_path):
-        repo = tmp_path / "jobtack"
-        _write(repo / ".modastack" / "monitors.yaml", [
+    def test_project_specific_monitor_scoped(self, tmp_path):
+        project = tmp_path / "jobtack"
+        _write(project / ".modastack" / "monitors.yaml", [
             {"name": "deploy-health", "interval": "5m", "url": "https://j"},
         ])
-        reg = MonitorRegistry.load(repo_path=repo)
+        reg = MonitorRegistry.load(project_path=project)
         dh = [m for m in reg.effective_monitors() if m.name == "deploy-health"]
         assert len(dh) == 1
-        assert dh[0].repo == str(repo)
-        assert reg.repos_for(dh[0]) == [repo]
+        assert dh[0].project == str(project)
+        assert reg.projects_for(dh[0]) == [project]
 
-    def test_repo_opt_out_of_default(self, tmp_path):
-        repo = tmp_path / "jobtack"
-        _write(repo / ".modastack" / "monitors.yaml", [{"name": "stale-pr-check", "enabled": False}])
-        reg = MonitorRegistry.load(repo_path=repo)
+    def test_project_opt_out_of_default(self, tmp_path):
+        project = tmp_path / "jobtack"
+        _write(project / ".modastack" / "monitors.yaml", [{"name": "stale-pr-check", "enabled": False}])
+        reg = MonitorRegistry.load(project_path=project)
         stale = [m for m in reg.effective_monitors() if m.name == "stale-pr-check"]
         for s in stale:
-            assert reg.repos_for(s) == []
+            assert reg.projects_for(s) == []
 
-    def test_repo_override_of_default(self, tmp_path):
-        repo = tmp_path / "jobtack"
-        _write(repo / ".modastack" / "monitors.yaml", [{"name": "pr-conflict-check", "interval": "5m"}])
-        reg = MonitorRegistry.load(repo_path=repo)
+    def test_project_override_of_default(self, tmp_path):
+        project = tmp_path / "jobtack"
+        _write(project / ".modastack" / "monitors.yaml", [{"name": "pr-conflict-check", "interval": "5m"}])
+        reg = MonitorRegistry.load(project_path=project)
         glob = reg.globals.get("pr-conflict-check")
         if glob:
-            assert reg.repos_for(glob) == []
-        scoped = [m for m in reg.repo_monitors if m.name == "pr-conflict-check"][0]
-        assert reg.repos_for(scoped) == [repo]
+            assert reg.projects_for(glob) == []
+        scoped = [m for m in reg.project_monitors if m.name == "pr-conflict-check"][0]
+        assert reg.projects_for(scoped) == [project]
 
 
 # === Registry writes ===
 
 class TestRegistryWrites:
-    def test_add_repo_writes_monitors_file(self, tmp_path):
+    def test_add_project_writes_monitors_file(self, tmp_path):
         repo = tmp_path / "r"
         repo.mkdir()
-        MonitorRegistry.add_repo(Monitor(name="dh", extra={"url": "u"}), repo)
+        MonitorRegistry.add_project(Monitor(name="dh", extra={"url": "u"}), repo)
         monitors_path = repo / ".modastack" / "monitors.yaml"
         assert monitors_path.exists()
         raw = yaml.safe_load(monitors_path.read_text())
@@ -136,7 +136,7 @@ def _scheduler(tmp_path, monitors, check_results=None, spawned=None):
         def effective_monitors(self):
             return monitors
 
-        def repos_for(self, m):
+        def projects_for(self, m):
             return [Path("/repo")]
 
     sched = MonitorScheduler(
@@ -235,7 +235,7 @@ class TestSchedulerRun:
         assert len(spawned) == 1
         mon, cwd = spawned[0]
         assert mon is m
-        assert cwd == "/repo"  # first applicable repo
+        assert cwd == "/repo"  # first applicable project
         assert sched.state["custom"]["last_run"] == _fixed_now().isoformat()
 
     def test_unknown_check_is_skipped_gracefully(self, tmp_path):

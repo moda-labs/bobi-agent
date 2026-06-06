@@ -134,7 +134,7 @@ class TestMonitors:
         assert result.returncode == 0
         assert "test-monitor" in result.stdout
 
-        monitors_file = modastack_env.repo_path / ".modastack" / "monitors.yaml"
+        monitors_file = modastack_env.project_path / ".modastack" / "monitors.yaml"
         assert monitors_file.exists()
         assert "test-monitor" in monitors_file.read_text()
 

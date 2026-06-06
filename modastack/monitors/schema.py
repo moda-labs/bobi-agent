@@ -37,9 +37,9 @@ def parse_interval(value: str | int) -> int:
 class Monitor:
     """One monitoring task, resolved from a single YAML record.
 
-    `source` is the tier it came from ("default", "user", or a repo path).
-    `repo` is set only for repo-specific monitors — it scopes the check to
-    that repo.
+    `source` is the tier it came from ("default", "user", or a project path).
+    `project` is set only for project-specific monitors — it scopes the check to
+    that project.
     """
 
     name: str
@@ -50,10 +50,10 @@ class Monitor:
     enabled: bool = True
     extra: dict = field(default_factory=dict)
     source: str = "user"
-    repo: str = ""
+    project: str = ""
 
     @classmethod
-    def from_dict(cls, raw: dict, source: str = "user", repo: str = "") -> "Monitor":
+    def from_dict(cls, raw: dict, source: str = "user", project: str = "") -> "Monitor":
         if not raw.get("name"):
             raise ValueError("Monitor record requires a 'name'")
         extra = {k: v for k, v in raw.items() if k not in _RESERVED}
@@ -66,7 +66,7 @@ class Monitor:
             enabled=raw.get("enabled", True),
             extra=extra,
             source=source,
-            repo=repo,
+            project=project,
         )
 
     def to_dict(self) -> dict:
@@ -90,10 +90,10 @@ class Monitor:
 
     @property
     def state_key(self) -> str:
-        """Unique key for scheduler state — namespaced for repo-scoped monitors
-        so a global and a repo-specific monitor of the same name don't collide.
+        """Unique key for scheduler state — namespaced for project-scoped monitors
+        so a global and a project-specific monitor of the same name don't collide.
         """
-        return f"{self.name}@{self.repo}" if self.repo else self.name
+        return f"{self.name}@{self.project}" if self.project else self.name
 
     @property
     def event_parts(self) -> tuple[str, str]:

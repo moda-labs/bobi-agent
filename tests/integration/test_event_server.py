@@ -48,7 +48,7 @@ def event_server(modastack_env):
     for attempt in range(3):
         port = _free_port()
         base_url = f"http://localhost:{port}"
-        ensure_running(port, repo_path=modastack_env.repo_path)
+        ensure_running(port, project_path=modastack_env.project_path)
 
         deadline = time.monotonic() + 10
         started = False
@@ -277,7 +277,7 @@ class TestEventServerCLI:
 
         port = _free_port()
         base_url = f"http://localhost:{port}"
-        ensure_running(port, repo_path=modastack_env.repo_path)
+        ensure_running(port, project_path=modastack_env.project_path)
 
         data = _get_json(f"{base_url}/health")
         assert data["status"] == "ok"
@@ -290,7 +290,7 @@ class TestEventServerCLI:
         with pytest.raises(Exception):
             _get_json(f"{base_url}/health")
 
-        ensure_running(port, repo_path=modastack_env.repo_path)
+        ensure_running(port, project_path=modastack_env.project_path)
         deadline = time.monotonic() + 10
         running = False
         while time.monotonic() < deadline:

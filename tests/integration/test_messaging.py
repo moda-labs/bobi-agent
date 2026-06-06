@@ -21,7 +21,7 @@ class TestSessionMessaging:
         from modastack.session import Session
         from modastack.inbox import deliver
 
-        session = Session("test-nb-msg", cwd=str(modastack_env.repo_path))
+        session = Session("test-nb-msg", cwd=str(modastack_env.project_path))
         try:
             assert session.start("You are a test agent. Respond briefly to any message.")
 
@@ -38,7 +38,7 @@ class TestSessionMessaging:
         from modastack.session import Session
         from modastack.inbox import deliver
 
-        session = Session("test-block-msg", cwd=str(modastack_env.repo_path))
+        session = Session("test-block-msg", cwd=str(modastack_env.project_path))
         try:
             assert session.start(
                 "You are a test agent. When asked a math question, "
@@ -58,7 +58,7 @@ class TestSessionMessaging:
         from modastack.session import Session
         from modastack.inbox import deliver
 
-        session = Session("test-multi-msg", cwd=str(modastack_env.repo_path))
+        session = Session("test-multi-msg", cwd=str(modastack_env.project_path))
         try:
             assert session.start("You are a test agent. Respond briefly to any message.")
 
@@ -79,8 +79,8 @@ class TestSessionMessaging:
         from modastack.session import Session
         from modastack.inbox import deliver
 
-        agent_a = Session("test-agent-a", cwd=str(modastack_env.repo_path))
-        agent_b = Session("test-agent-b", cwd=str(modastack_env.repo_path))
+        agent_a = Session("test-agent-a", cwd=str(modastack_env.project_path))
+        agent_b = Session("test-agent-b", cwd=str(modastack_env.project_path))
 
         try:
             assert agent_a.start(
@@ -109,7 +109,7 @@ class TestSessionMessaging:
         from modastack.session import Session
         from modastack.inbox import deliver
 
-        session = Session("test-timeout-msg", cwd=str(modastack_env.repo_path))
+        session = Session("test-timeout-msg", cwd=str(modastack_env.project_path))
         try:
             assert session.start("You are a test agent.")
 
@@ -131,7 +131,7 @@ class TestSessionMessaging:
         responses = []
         session = Session(
             "test-callback-msg",
-            cwd=str(modastack_env.repo_path),
+            cwd=str(modastack_env.project_path),
             on_response=lambda text: responses.append(text),
         )
         try:

@@ -35,10 +35,10 @@ from .registry import MonitorRegistry
 log = logging.getLogger(__name__)
 
 def _monitor_state_path() -> Path:
-    from modastack.sdk import get_repo_root
-    root = get_repo_root()
+    from modastack.sdk import get_project_root
+    root = get_project_root()
     if not root:
-        raise RuntimeError("repo root not set — call set_repo_root() first")
+        raise RuntimeError("project root not set — call set_project_root() first")
     d = root / ".modastack" / "state"
     d.mkdir(parents=True, exist_ok=True)
     return d / "monitor_state.json"
@@ -69,10 +69,10 @@ def _default_spawn_check(monitor, cwd: str | None) -> None:
         cmd += ["--repo", cwd]
 
     try:
-        from modastack.sdk import get_repo_root
-        root = get_repo_root()
+        from modastack.sdk import get_project_root
+        root = get_project_root()
         if not root:
-            raise RuntimeError("repo root not set — call set_repo_root() first")
+            raise RuntimeError("project root not set — call set_project_root() first")
         log_path = root / ".modastack" / "state" / "manager.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a") as lf:
@@ -145,12 +145,12 @@ class MonitorScheduler:
                             f"'{monitor.check}' — skipping")
             else:
                 try:
-                    conditions = check(monitor, registry.repos_for(monitor))
+                    conditions = check(monitor, registry.projects_for(monitor))
                     self._reconcile(monitor, conditions)
                 except Exception as e:
                     log.error(f"Check '{monitor.check}' for {monitor.name} failed: {e}")
         else:
-            self._spawn_check(monitor, registry.repos_for(monitor))
+            self._spawn_check(monitor, registry.projects_for(monitor))
 
         self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
         self._save_state()
@@ -178,7 +178,7 @@ class MonitorScheduler:
         log.info(f"Monitor {monitor.name} fired {monitor.event} ({condition.key})")
         self.inject_event(event)
 
-    def _spawn_check(self, monitor, repos: list[Path]) -> None:
+    def _spawn_check(self, monitor, projects: list[Path]) -> None:
         """No native check — run the description as a non-interactive check.
 
         Rather than injecting a check-due event into the manager (which would
@@ -189,10 +189,10 @@ class MonitorScheduler:
         an actionable finding, never the check itself.
 
         The check just needs a working directory to run read-only commands in;
-        it runs once in the first applicable repo (or no repo for a pure URL/
-        API check).
+        it runs once in the first applicable project (or no project for a pure
+        URL/API check).
         """
-        cwd = str(repos[0]) if repos else None
+        cwd = str(projects[0]) if projects else None
         log.info(f"Monitor {monitor.name} due — spawning non-interactive check")
         self.spawn_check(monitor, cwd)
 

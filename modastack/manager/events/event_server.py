@@ -465,7 +465,7 @@ async def subscribe_ws(websocket: WebSocket, deployment_id: str):
 
 def ensure_running(port: int, webhook_secret: str = "",
                    slack_signing_secret: str = "",
-                   repo_path: "Path | None" = None) -> None:
+                   project_path: "Path | None" = None) -> None:
     """Start the event server daemon if not already running."""
     import urllib.request
 
@@ -481,11 +481,11 @@ def ensure_running(port: int, webhook_secret: str = "",
 
     import subprocess
     import sys
-    from modastack.sdk import get_repo_root
+    from modastack.sdk import get_project_root
 
-    rp = repo_path or get_repo_root()
+    rp = project_path or get_project_root()
     if rp is None:
-        raise RuntimeError("repo_path required for event server")
+        raise RuntimeError("project_path required for event server")
     state = rp / ".modastack" / "state"
     state.mkdir(parents=True, exist_ok=True)
     log_file = state / "event-server.log"

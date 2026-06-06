@@ -861,7 +861,7 @@ class TestSpawnAdhocLifecycle:
         fake_cls = _make_fake_session_class(success=True)
 
         with patch(SESSION_PATCH, side_effect=fake_cls), \
-             patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
+             patch(f"{SDK_PATCH}._resolve_project_name", return_value="moda-labs/jobtack"), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
             spawn_adhoc(cwd="/repo/path", task="Investigate CI", name="adhoc-y")
@@ -906,7 +906,7 @@ class TestSpawnAdhocLifecycle:
         fake_cls = _make_fake_session_class(success=True)
 
         with patch(SESSION_PATCH, side_effect=fake_cls), \
-             patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
+             patch(f"{SDK_PATCH}._resolve_project_name", return_value="moda-labs/jobtack"), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
             spawn_adhoc(cwd="/repo/path",
@@ -921,7 +921,7 @@ class TestSpawnAdhocLifecycle:
         fake_cls = _make_fake_session_class(success=True)
 
         with patch(SESSION_PATCH, side_effect=fake_cls), \
-             patch(f"{SDK_PATCH}._resolve_repo_name", return_value="moda-labs/jobtack"), \
+             patch(f"{SDK_PATCH}._resolve_project_name", return_value="moda-labs/jobtack"), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
             spawn_adhoc(cwd="/repo/path", task="Fix the login bug")

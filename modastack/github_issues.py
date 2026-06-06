@@ -8,7 +8,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from .config import RepoConfig
+from .config import ProjectConfig
 
 WORKFLOW_LABELS = [
     ("status:todo", "Ready to be picked up", "0e8a16"),
@@ -19,13 +19,13 @@ WORKFLOW_LABELS = [
 ]
 
 
-def bootstrap_labels(repo_path: Path) -> list[str]:
+def bootstrap_labels(project_path: Path) -> list[str]:
     """Ensure all workflow labels exist in the GitHub repo."""
     actions = []
 
     existing = subprocess.run(
         ["gh", "label", "list", "--json", "name", "--limit", "200"],
-        capture_output=True, text=True, cwd=repo_path,
+        capture_output=True, text=True, cwd=project_path,
     )
     if existing.returncode != 0:
         return [f"Failed to list labels: {existing.stderr.strip()}"]
@@ -37,7 +37,7 @@ def bootstrap_labels(repo_path: Path) -> list[str]:
             continue
         result = subprocess.run(
             ["gh", "label", "create", name, "--description", description, "--color", color],
-            capture_output=True, text=True, cwd=repo_path,
+            capture_output=True, text=True, cwd=project_path,
         )
         if result.returncode == 0:
             actions.append(f"Created label '{name}'")
@@ -53,7 +53,7 @@ def bootstrap_labels(repo_path: Path) -> list[str]:
 WEBHOOK_EVENTS = ["issues", "issue_comment", "pull_request", "pull_request_review", "check_run", "workflow_run"]
 
 
-def setup_webhook(repo_path: Path, public_url: str) -> list[str]:
+def setup_webhook(project_path: Path, public_url: str) -> list[str]:
     """Create a GitHub webhook for the repo pointing at the modastack webhook server.
 
     Skips if a webhook already exists for this URL.  Requires the gh CLI
@@ -65,7 +65,7 @@ def setup_webhook(repo_path: Path, public_url: str) -> list[str]:
     # Check existing webhooks
     existing = subprocess.run(
         ["gh", "api", "repos/{owner}/{repo}/hooks", "--jq", ".[].config.url"],
-        capture_output=True, text=True, cwd=repo_path,
+        capture_output=True, text=True, cwd=project_path,
     )
     if existing.returncode == 0:
         for line in existing.stdout.strip().splitlines():
@@ -84,7 +84,7 @@ def setup_webhook(repo_path: Path, public_url: str) -> list[str]:
     for event in WEBHOOK_EVENTS:
         cmd += ["-f", f"events[]={event}"]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_path)
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=project_path)
     if result.returncode == 0:
         actions.append(f"Created webhook: {webhook_url}")
         actions.append(f"  Events: {', '.join(WEBHOOK_EVENTS)}")
@@ -101,7 +101,7 @@ def setup_webhook(repo_path: Path, public_url: str) -> list[str]:
     return actions
 
 
-def scan_github_issues(repo_config: RepoConfig) -> dict[str, list[dict]]:
+def scan_github_issues(project_config: ProjectConfig) -> dict[str, list[dict]]:
     """Fetch open issues assigned to the bot account, grouped by workflow state label.
 
     Only returns issues assigned to the bot (from config github.default_account).
@@ -112,7 +112,7 @@ def scan_github_issues(repo_config: RepoConfig) -> dict[str, list[dict]]:
     result = subprocess.run(
         ["gh", "issue", "list", "--state", "open", "--assignee", "@me",
          "--json", "number,title,body,labels,comments,assignees,url", "--limit", "50"],
-        capture_output=True, text=True, cwd=repo_config.path,
+        capture_output=True, text=True, cwd=project_config.path,
     )
     if result.returncode != 0:
         return {}
@@ -139,8 +139,8 @@ def scan_github_issues(repo_config: RepoConfig) -> dict[str, list[dict]]:
                 state = state_name
                 break
 
-        repo_short = (repo_config.github_repo.split("/")[-1] if repo_config.github_repo
-                      else repo_config.path.name).upper()[:6]
+        repo_short = (project_config.github_repo.split("/")[-1] if project_config.github_repo
+                      else project_config.path.name).upper()[:6]
         project = repo_short
         identifier = f"{project}-{issue['number']}"
 

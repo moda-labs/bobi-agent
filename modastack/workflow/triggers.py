@@ -1,8 +1,8 @@
 """Workflow dispatcher — surfaces workflows to the manager for semantic matching.
 
 Workflow resolution order (most specific wins):
-  1. <repo>/.modastack/workflows/   — repo-specific overrides
-  2. <modastack>/workflows/         — built-in defaults
+  1. <project>/.modastack/workflows/   — project-specific overrides
+  2. <modastack>/workflows/            — built-in defaults
 """
 
 from __future__ import annotations
@@ -22,21 +22,21 @@ class WorkflowDispatcher:
     def __init__(self):
         self.workflows: list[tuple[Workflow, str]] = []
 
-    def load_all_workflows(self, repo_path: Path | None = None):
-        """Load workflows from all sources: repo-local, user, built-in defaults."""
-        if repo_path is None:
-            from modastack.sdk import get_repo_root
-            repo_path = get_repo_root()
-        if repo_path is None:
+    def load_all_workflows(self, project_path: Path | None = None):
+        """Load workflows from all sources: project-local, user, built-in defaults."""
+        if project_path is None:
+            from modastack.sdk import get_project_root
+            project_path = get_project_root()
+        if project_path is None:
             from modastack.manager.session import get_default_session
             session = get_default_session()
             if session:
-                repo_path = session.repo_path
+                project_path = session.project_path
 
-        if repo_path:
-            repo_wf_dir = repo_path / ".modastack" / "workflows"
-            if repo_wf_dir.exists():
-                self._load_from(repo_wf_dir, source=str(repo_path))
+        if project_path:
+            project_wf_dir = project_path / ".modastack" / "workflows"
+            if project_wf_dir.exists():
+                self._load_from(project_wf_dir, source=str(project_path))
 
         self._load_from(WORKFLOWS_DIR, source="default")
 
@@ -61,7 +61,7 @@ class WorkflowDispatcher:
     def format_workflow_menu(self) -> str:
         """Format all loaded workflows as a menu for the manager prompt.
 
-        Deduplicates by name — most-specific source wins (repo > default).
+        Deduplicates by name — most-specific source wins (project > default).
         Returns a formatted string the manager can use to decide which workflow
         to run for a given event.
         """

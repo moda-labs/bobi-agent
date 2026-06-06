@@ -2,11 +2,11 @@
 
 Load order (most general to most specific), later tiers override by `name`:
 
-    built-in defaults  ->  user globals  ->  repo-specific
+    built-in defaults  ->  user globals  ->  project-specific
 
-A repo-specific entry with `enabled: false` opts that repo out of an
-inherited monitor. A repo-specific entry that shares a name with a global
-monitor overrides it for that repo (the global one skips that repo).
+A project-specific entry with `enabled: false` opts that project out of an
+inherited monitor. A project-specific entry that shares a name with a global
+monitor overrides it for that project (the global one skips that project).
 """
 
 from __future__ import annotations
@@ -39,15 +39,15 @@ def _read_records(path: Path) -> list[dict]:
 class MonitorRegistry:
     """The merged, resolved view of all monitors across the three tiers."""
 
-    def __init__(self, repo_path: Path | None = None):
-        self.repo_path = repo_path
+    def __init__(self, project_path: Path | None = None):
+        self.project_path = project_path
         self.globals: dict[str, Monitor] = {}
-        self.repo_monitors: list[Monitor] = []
+        self.project_monitors: list[Monitor] = []
         self.opt_outs: dict[str, set[str]] = {}
 
     @classmethod
-    def load(cls, repo_path: Path | None = None) -> "MonitorRegistry":
-        registry = cls(repo_path=repo_path)
+    def load(cls, project_path: Path | None = None) -> "MonitorRegistry":
+        registry = cls(project_path=project_path)
         registry._load()
         return registry
 
@@ -60,67 +60,67 @@ class MonitorRegistry:
             except ValueError as e:
                 log.warning(f"Skipping bad default monitor: {e}")
 
-        # 2. Repo-specific monitors
-        repo_paths = [self.repo_path] if self.repo_path else []
-        for repo_path in repo_paths:
-            repo_key = str(repo_path)
-            repo_sources = [
-                repo_path / ".modastack" / "monitors.yaml",
-                repo_path / ".modastack" / "config.yaml",
-                repo_path / ".modastack.yaml",
+        # 2. Project-specific monitors
+        project_paths = [self.project_path] if self.project_path else []
+        for project_path in project_paths:
+            project_key = str(project_path)
+            project_sources = [
+                project_path / ".modastack" / "monitors.yaml",
+                project_path / ".modastack" / "config.yaml",
+                project_path / ".modastack.yaml",
             ]
-            for config_path in repo_sources:
+            for config_path in project_sources:
                 for raw in _read_records(config_path):
                     try:
-                        m = Monitor.from_dict(raw, source=repo_key, repo=repo_key)
+                        m = Monitor.from_dict(raw, source=project_key, project=project_key)
                     except ValueError as e:
                         log.warning(f"Skipping bad monitor in {config_path}: {e}")
                         continue
                     if not m.enabled:
-                        self.opt_outs.setdefault(m.name, set()).add(repo_key)
+                        self.opt_outs.setdefault(m.name, set()).add(project_key)
                         continue
-                    self.repo_monitors.append(m)
+                    self.project_monitors.append(m)
                     if m.name in self.globals:
-                        self.opt_outs.setdefault(m.name, set()).add(repo_key)
+                        self.opt_outs.setdefault(m.name, set()).add(project_key)
 
     def effective_monitors(self) -> list[Monitor]:
         """All enabled monitors that should actually be scheduled."""
         result = [m for m in self.globals.values() if m.enabled]
-        result.extend(self.repo_monitors)
+        result.extend(self.project_monitors)
         return result
 
     def all_monitors(self) -> list[Monitor]:
         """Every resolved monitor, including paused (enabled: false) ones."""
-        return list(self.globals.values()) + self.repo_monitors
+        return list(self.globals.values()) + self.project_monitors
 
-    def repos_for(self, monitor: Monitor) -> list[Path]:
-        """Which repos a monitor's check should run against.
+    def projects_for(self, monitor: Monitor) -> list[Path]:
+        """Which projects a monitor's check should run against.
 
-        Repo-scoped monitors run only on their repo; global monitors run on
-        every registered repo except those that opted out or overrode them.
+        Project-scoped monitors run only on their project; global monitors run on
+        every registered project except those that opted out or overrode them.
         """
-        if monitor.repo:
-            return [Path(monitor.repo)]
-        if not self.repo_path:
+        if monitor.project:
+            return [Path(monitor.project)]
+        if not self.project_path:
             return []
         opted_out = self.opt_outs.get(monitor.name, set())
-        if str(self.repo_path) in opted_out:
+        if str(self.project_path) in opted_out:
             return []
-        return [self.repo_path]
+        return [self.project_path]
 
     # --- Writes to user-writable tiers ---------------------------------
 
     @staticmethod
     def add_global(monitor: Monitor) -> None:
-        """Deprecated — use add_repo instead. Global monitors are not supported."""
+        """Deprecated — use add_project instead. Global monitors are not supported."""
         raise NotImplementedError(
-            "Global monitors removed. Use `modastack monitors add --repo .` instead."
+            "Global monitors removed. Use `modastack monitors add --project .` instead."
         )
 
     @staticmethod
-    def add_repo(monitor: Monitor, repo_path: Path) -> None:
+    def add_project(monitor: Monitor, project_path: Path) -> None:
         """Append or replace a monitor in .modastack/monitors.yaml."""
-        monitors_path = repo_path / ".modastack" / "monitors.yaml"
+        monitors_path = project_path / ".modastack" / "monitors.yaml"
         monitors_path.parent.mkdir(parents=True, exist_ok=True)
         records = _read_records(monitors_path)
         records = [r for r in records if r.get("name") != monitor.name]
@@ -130,38 +130,38 @@ class MonitorRegistry:
         )
 
     @classmethod
-    def pause(cls, name: str, repo_path: Path | None = None) -> bool:
+    def pause(cls, name: str, project_path: Path | None = None) -> bool:
         """Disable a monitor by writing `enabled: false` to a writable tier.
 
         Works for built-in defaults too — the override lands in user globals
-        (or the given repo's config) and wins by load order.
+        (or the given project's config) and wins by load order.
         """
         registry = cls.load()
         existing = registry.globals.get(name)
-        if repo_path is not None:
+        if project_path is not None:
             base = existing or Monitor(name=name)
             base.enabled = False
-            cls.add_repo(base, repo_path)
+            cls.add_project(base, project_path)
             return True
         if existing is None:
             return False
-        from modastack.sdk import get_repo_root
-        rp = get_repo_root()
+        from modastack.sdk import get_project_root
+        rp = get_project_root()
         if rp:
             existing.enabled = False
-            cls.add_repo(existing, rp)
+            cls.add_project(existing, rp)
             return True
         return False
 
     @classmethod
-    def remove(cls, name: str, repo_path: Path | None = None) -> str:
+    def remove(cls, name: str, project_path: Path | None = None) -> str:
         """Remove a monitor from a user-writable tier.
 
         Returns: "removed", "default-only" (can't delete a built-in — pause
         it instead), or "not-found".
         """
-        if repo_path is not None:
-            monitors_path = repo_path / ".modastack" / "monitors.yaml"
+        if project_path is not None:
+            monitors_path = project_path / ".modastack" / "monitors.yaml"
             records = _read_records(monitors_path)
             kept = [r for r in records if r.get("name") != name]
             if len(kept) == len(records):

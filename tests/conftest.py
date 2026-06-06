@@ -32,7 +32,7 @@ def _free_port() -> int:
 def modastack_install(tmp_path, monkeypatch):
     """Create a fully isolated modastack installation in a temp directory.
 
-    Sets sdk._repo_root so all per-repo path resolution points at tmp_path.
+    Sets sdk._project_root so all per-project path resolution points at tmp_path.
     No global ~/.modastack directory is created or referenced.
     """
     repo_path = tmp_path / "repo"
@@ -63,7 +63,7 @@ def modastack_install(tmp_path, monkeypatch):
     creds_path = tmp_path / "credentials.yaml"
     creds_path.write_text("{}")
 
-    monkeypatch.setattr("modastack.sdk._repo_root", repo_path)
+    monkeypatch.setattr("modastack.sdk._project_root", repo_path)
     monkeypatch.setattr("modastack.config._credentials_path", lambda: creds_path)
 
     return ModastackInstall(

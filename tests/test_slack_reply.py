@@ -11,7 +11,7 @@ from modastack.cli import main
 from modastack.config import LocalConfig
 
 
-def _setup_repo(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
+def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
     """Create a repo with local.yaml and point the CLI at it."""
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir(parents=True)
@@ -25,7 +25,7 @@ class TestSlackReplyCommand:
 
     @patch("urllib.request.urlopen")
     def test_success(self, mock_urlopen, tmp_path, monkeypatch):
-        _setup_repo(tmp_path, monkeypatch)
+        _setup_project(tmp_path, monkeypatch)
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"ok": True}).encode()
@@ -48,7 +48,7 @@ class TestSlackReplyCommand:
 
     @patch("urllib.request.urlopen")
     def test_with_thread(self, mock_urlopen, tmp_path, monkeypatch):
-        _setup_repo(tmp_path, monkeypatch)
+        _setup_project(tmp_path, monkeypatch)
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"ok": True}).encode()
@@ -68,7 +68,7 @@ class TestSlackReplyCommand:
         assert body["thread_ts"] == "1780165787.159589"
 
     def test_missing_token(self, tmp_path, monkeypatch):
-        _setup_repo(tmp_path, monkeypatch, slack_bot_token="")
+        _setup_project(tmp_path, monkeypatch, slack_bot_token="")
 
         runner = CliRunner()
         result = runner.invoke(main, [
@@ -79,7 +79,7 @@ class TestSlackReplyCommand:
 
     @patch("urllib.request.urlopen")
     def test_markdown_conversion(self, mock_urlopen, tmp_path, monkeypatch):
-        _setup_repo(tmp_path, monkeypatch)
+        _setup_project(tmp_path, monkeypatch)
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"ok": True}).encode()
@@ -101,7 +101,7 @@ class TestSlackReplyCommand:
 
     @patch("urllib.request.urlopen")
     def test_escaped_newlines_become_real(self, mock_urlopen, tmp_path, monkeypatch):
-        _setup_repo(tmp_path, monkeypatch)
+        _setup_project(tmp_path, monkeypatch)
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"ok": True}).encode()
@@ -123,7 +123,7 @@ class TestSlackReplyCommand:
 
     @patch("urllib.request.urlopen")
     def test_real_newlines_preserved(self, mock_urlopen, tmp_path, monkeypatch):
-        _setup_repo(tmp_path, monkeypatch)
+        _setup_project(tmp_path, monkeypatch)
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"ok": True}).encode()
@@ -143,7 +143,7 @@ class TestSlackReplyCommand:
 
     @patch("urllib.request.urlopen")
     def test_slack_api_error(self, mock_urlopen, tmp_path, monkeypatch):
-        _setup_repo(tmp_path, monkeypatch)
+        _setup_project(tmp_path, monkeypatch)
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"ok": False, "error": "channel_not_found"}).encode()

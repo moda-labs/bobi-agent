@@ -3,10 +3,10 @@
 from pathlib import Path
 from textwrap import dedent
 
-from modastack.config import RepoConfig, LocalConfig
+from modastack.config import ProjectConfig, LocalConfig
 
 
-def test_repo_config_new_path(tmp_path):
+def test_project_config_new_path(tmp_path):
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir()
     (config_dir / "config.yaml").write_text(dedent("""
@@ -22,7 +22,7 @@ def test_repo_config_new_path(tmp_path):
           github_org: myorg
     """))
 
-    config = RepoConfig.from_file(tmp_path)
+    config = ProjectConfig.from_file(tmp_path)
 
     assert config.path == tmp_path
     assert config.task_tracking == "github-issues"
@@ -32,7 +32,7 @@ def test_repo_config_new_path(tmp_path):
     assert config.context["github_org"] == "myorg"
 
 
-def test_repo_config_linear(tmp_path):
+def test_project_config_linear(tmp_path):
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir()
     (config_dir / "config.yaml").write_text(dedent("""
@@ -45,7 +45,7 @@ def test_repo_config_linear(tmp_path):
           repo: myorg/myrepo
     """))
 
-    config = RepoConfig.from_file(tmp_path)
+    config = ProjectConfig.from_file(tmp_path)
 
     assert config.task_tracking == "linear"
     assert config.linear_team == "MOD"
@@ -53,37 +53,14 @@ def test_repo_config_linear(tmp_path):
     assert config.github_repo == "myorg/myrepo"
 
 
-def test_repo_config_legacy_path(tmp_path):
-    import warnings
-    config_file = tmp_path / ".modastack.yaml"
-    config_file.write_text(dedent("""
-        task_tracking:
-          system: "github-issues"
-    """))
-
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        config = RepoConfig.from_file(tmp_path)
-        assert config.task_tracking == "github-issues"
-        assert any("deprecated" in str(warning.message).lower() for warning in w)
 
 
-def test_repo_config_new_path_preferred(tmp_path):
-    config_dir = tmp_path / ".modastack"
-    config_dir.mkdir()
-    (config_dir / "config.yaml").write_text("task_tracking:\n  system: github-issues\n")
-    (tmp_path / ".modastack.yaml").write_text("task_tracking:\n  system: linear\n")
-
-    config = RepoConfig.from_file(tmp_path)
-    assert config.task_tracking == "github-issues"
-
-
-def test_repo_config_defaults(tmp_path):
+def test_project_config_defaults(tmp_path):
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir()
     (config_dir / "config.yaml").write_text("task_tracking:\n  system: github-issues\n")
 
-    config = RepoConfig.from_file(tmp_path)
+    config = ProjectConfig.from_file(tmp_path)
 
     assert config.task_tracking == "github-issues"
     assert config.max_parallel == 2
@@ -93,9 +70,9 @@ def test_repo_config_defaults(tmp_path):
     assert config.context == {}
 
 
-def test_repo_config_missing_file(tmp_path):
+def test_project_config_missing_file(tmp_path):
     try:
-        RepoConfig.from_file(tmp_path)
+        ProjectConfig.from_file(tmp_path)
         assert False, "Should have raised"
     except FileNotFoundError:
         pass
@@ -112,9 +89,7 @@ def test_local_config_load(tmp_path):
           email: test@test.com
         slack:
           bot_token: xoxb-test
-          dm_channel: D123
         event_server:
-          url: http://localhost:8080
           deployment_id: abc
           api_key: moda_test
         dashboard_port: 9000
@@ -125,8 +100,8 @@ def test_local_config_load(tmp_path):
     assert local.operator_name == "test"
     assert local.operator_email == "test@test.com"
     assert local.slack_bot_token == "xoxb-test"
-    assert local.slack_dm_channel == "D123"
-    assert local.event_server_url == "http://localhost:8080"
+    assert local.event_server_deployment_id == "abc"
+    assert local.event_server_api_key == "moda_test"
     assert local.dashboard_port == 9000
 
 
@@ -135,8 +110,22 @@ def test_local_config_defaults_when_missing(tmp_path):
 
     assert local.operator_name == ""
     assert local.slack_bot_token == ""
-    assert local.event_server_url == ""
+    assert local.event_server_deployment_id == ""
     assert local.dashboard_port == 8095
+
+
+def test_project_config_event_server(tmp_path):
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(dedent("""
+        task_tracking:
+          system: github-issues
+        event_server:
+          url: https://modastack-events.example.com
+    """))
+
+    config = ProjectConfig.from_file(tmp_path)
+    assert config.event_server_url == "https://modastack-events.example.com"
 
 
 def test_local_config_save_roundtrip(tmp_path):
@@ -145,11 +134,12 @@ def test_local_config_save_roundtrip(tmp_path):
 
     local = LocalConfig(
         operator_name="test",
+        operator_email="test@test.com",
         slack_bot_token="xoxb-test",
-        slack_dm_channel="D123",
     )
     local.save(tmp_path)
 
     loaded = LocalConfig.load(tmp_path)
     assert loaded.operator_name == "test"
+    assert loaded.operator_email == "test@test.com"
     assert loaded.slack_bot_token == "xoxb-test"

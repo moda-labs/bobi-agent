@@ -143,8 +143,8 @@ def _do_ask(question, timeout, source, correlation_id):
 
 
 def _log_ask(correlation_id: str, source: str, question: str):
-    from modastack.sdk import get_repo_root
-    root = get_repo_root()
+    from modastack.sdk import get_project_root
+    root = get_project_root()
     if not root:
         return
     events_log = root / ".modastack" / "state" / "events.jsonl"

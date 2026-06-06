@@ -16,13 +16,13 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def _repo_root(tmp_path, monkeypatch):
+def _project_root(tmp_path, monkeypatch):
     """Point all state to a temp dir for test isolation."""
     state_dir = tmp_path / ".modastack" / "state"
     state_dir.mkdir(parents=True)
     sessions_dir = tmp_path / ".modastack" / "sessions"
     sessions_dir.mkdir(parents=True)
-    monkeypatch.setattr(sdk, "_repo_root", tmp_path)
+    monkeypatch.setattr(sdk, "_project_root", tmp_path)
 
 
 @pytest.fixture

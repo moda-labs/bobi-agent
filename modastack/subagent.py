@@ -74,8 +74,8 @@ def _build_prompt(phase: str, issue_id: str, context: str = "", cwd: str = "") -
 
     if cwd:
         modastack_root = Path(__file__).parent.parent
-        repo_name = Path(cwd).name
-        worktree_base = modastack_root / "worktrees" / repo_name
+        project_name = Path(cwd).name
+        worktree_base = modastack_root / "worktrees" / project_name
         parts.append(f"Worktree base: {worktree_base}")
 
     if context:
@@ -148,12 +148,12 @@ def _emit_lifecycle_event(
 
 
 def _emit_session_started(
-    issue_id: str, repo: str, task: str, session_id: str, phase: str = "",
+    issue_id: str, project: str, task: str, session_id: str, phase: str = "",
     requested_by: dict | None = None,
 ) -> None:
     _emit_lifecycle_event("engineer/session.started", {
         "issue_id": issue_id,
-        "repo": repo,
+        "repo": project,
         "task": (task or "")[:500],
         "session_id": session_id,
         "phase": phase,
@@ -163,7 +163,7 @@ def _emit_session_started(
 
 
 def _emit_session_finished(
-    result: "AgentResult", repo: str, session_id: str, started_at: float,
+    result: "AgentResult", project: str, session_id: str, started_at: float,
     requested_by: dict | None = None,
 ) -> None:
     duration = round(time.time() - started_at, 1)
@@ -172,7 +172,7 @@ def _emit_session_finished(
         summary = _summarize_output(result.final_text)
         _emit_lifecycle_event("engineer/session.completed", {
             "issue_id": result.issue_id,
-            "repo": repo,
+            "repo": project,
             "session_id": session_id,
             "phase": result.phase,
             "duration": duration,
@@ -184,7 +184,7 @@ def _emit_session_finished(
         error = result.error or "unknown error"
         _emit_lifecycle_event("engineer/session.failed", {
             "issue_id": result.issue_id,
-            "repo": repo,
+            "repo": project,
             "session_id": session_id,
             "phase": result.phase,
             "duration": duration,
@@ -340,7 +340,7 @@ def run_phase_blocking(
     cwd: str,
     context: str = "",
     title: str = "",
-    repo: str = "",
+    project: str = "",
     timeout: int | None = None,
     on_input_needed: InputHandler | None = None,
 ) -> AgentResult:
@@ -357,7 +357,7 @@ def run_phase_blocking(
     name = _session_name(issue_id, phase)
 
     started_at = time.time()
-    _emit_session_started(issue_id, repo, title or context, name, phase=phase)
+    _emit_session_started(issue_id, project, title or context, name, phase=phase)
 
     session = Session(
         name=name,
@@ -394,7 +394,7 @@ def run_phase_blocking(
         )
 
     session.stop()
-    _emit_session_finished(result, repo, name, started_at)
+    _emit_session_finished(result, project, name, started_at)
     return result
 
 
@@ -423,15 +423,15 @@ def _parse_issue_number(task: str) -> str | None:
     return None
 
 
-def _resolve_repo_name(cwd: str) -> str:
-    """Resolve a repo name for session naming.
+def _resolve_project_name(cwd: str) -> str:
+    """Resolve a project name for session naming.
 
     Uses github.repo from config if available, otherwise the directory name.
     """
     path = Path(cwd)
     try:
-        from modastack.config import RepoConfig
-        rc = RepoConfig.from_file(path)
+        from modastack.config import ProjectConfig
+        rc = ProjectConfig.from_file(path)
         if rc.github_repo:
             return rc.github_repo.split("/")[-1]
     except Exception:
@@ -445,22 +445,27 @@ def spawn_adhoc(
     timeout: int = 3600,
     name: str | None = None,
     requested_by: dict | None = None,
+    persistent: bool = False,
 ) -> AgentResult:
-    """Spawn a one-off engineer agent with a freeform task prompt.
+    """Spawn an engineer agent with a freeform task prompt.
 
     Creates a Session with the task as the startup prompt. The session
     has an inbox so other sessions can message it during execution.
+
+    With ``persistent=True`` the session stays alive after the initial
+    task completes, accepting messages via its inbox until explicitly
+    stopped. The caller blocks for the lifetime of the session.
     """
     import hashlib
     from modastack.session import Session
 
     short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
     issue_id = name or _parse_issue_number(task) or f"adhoc-{short_hash}"
-    repo = _resolve_repo_name(cwd)
+    project = _resolve_project_name(cwd)
     requested_by = requested_by or {}
 
     started_at = time.time()
-    _emit_session_started(issue_id, repo, task, issue_id, phase="adhoc",
+    _emit_session_started(issue_id, project, task, issue_id, phase="adhoc",
                           requested_by=requested_by)
 
     session = Session(
@@ -472,12 +477,37 @@ def spawn_adhoc(
             "append": (
                 f"You are an engineer agent working on an adhoc task. "
                 f"Complete the task described in your initial prompt."
+                + (" After completing the initial task, stay available — "
+                   "you will receive follow-up messages via your inbox."
+                   if persistent else "")
             ),
         },
         extra_options={"skills": "all", "max_turns": 200},
     )
 
     ok = session.start(startup_prompt=task, timeout=timeout)
+
+    if persistent and ok:
+        try:
+            session._thread.join()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            session.stop()
+
+        result = AgentResult(
+            session_id=session.get_session_id(),
+            issue_id=issue_id,
+            phase="adhoc",
+            success=True,
+            duration_ms=session._total_duration_ms,
+            total_cost_usd=session._total_cost_usd,
+            num_turns=session._total_turns,
+            final_text=session._last_response,
+        )
+        _emit_session_finished(result, project, issue_id, started_at,
+                               requested_by=requested_by)
+        return result
 
     if ok:
         result = AgentResult(
@@ -497,7 +527,7 @@ def spawn_adhoc(
         )
 
     session.stop()
-    _emit_session_finished(result, repo, issue_id, started_at,
+    _emit_session_finished(result, project, issue_id, started_at,
                            requested_by=requested_by)
     return result
 
@@ -519,20 +549,28 @@ def launch_agent(
     requested_by: dict | None = None,
     interactive: bool = True,
     role: str = "engineer",
+    persistent: bool = False,
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
-    Session name is deterministic: wf-{workflow}-{repo}-{issue}.
+    Session name is deterministic: wf-{workflow}-{project}-{issue}.
     - If an active run exists for the same session → reject
     - If a failed/stale run exists → resume (same session ID)
     - If completed or new → fresh start
+
+    With ``persistent=True``, the agent stays alive after its initial
+    task, accepting messages via its inbox. Uses spawn_adhoc() directly
+    instead of the workflow orchestrator.
     """
     import uuid
     issue_id = _parse_issue_number(task) or f"adhoc-{uuid.uuid4().hex[:8]}"
-    repo = _resolve_repo_name(cwd)
+    project = _resolve_project_name(cwd)
 
-    from modastack.workflow.orchestrator import make_session_name
-    session_name = make_session_name(workflow_name, repo, issue_id)
+    if persistent:
+        session_name = issue_id
+    else:
+        from modastack.workflow.orchestrator import make_session_name
+        session_name = make_session_name(workflow_name, project, issue_id)
 
     registry = get_registry()
     existing = registry.get(session_name)
@@ -551,6 +589,7 @@ def launch_agent(
         "issue_id": issue_id,
         "interactive": interactive,
         "role": role,
+        "persistent": persistent,
     })
     script = (
         "import json, sys; "
@@ -562,7 +601,7 @@ def launch_agent(
     registry.register(SessionEntry(
         name=session_name, session_id="", role=role,
         issue_id=issue_id, title=task[:80], phase=workflow_name,
-        repo=repo, cwd=cwd, status="starting",
+        project=project, cwd=cwd, status="starting",
         requested_by=requested_by or {},
     ))
 
@@ -574,9 +613,6 @@ def launch_agent(
 
 def _run_agent_entry(args: dict) -> None:
     """Entry point for the detached subprocess. Runs the orchestrator."""
-    from modastack.workflow.orchestrator import run_workflow
-    from modastack.workflow.triggers import WorkflowDispatcher
-
     task = args["task"]
     cwd = args["cwd"]
     workflow_name = args["workflow_name"]
@@ -585,12 +621,27 @@ def _run_agent_entry(args: dict) -> None:
     issue_id = args.get("issue_id", "adhoc")
     interactive = args.get("interactive", True)
     role = args.get("role", "engineer")
+    persistent = args.get("persistent", False)
 
-    from modastack.sdk import set_repo_root
-    from modastack.cli import _detect_repo_root
-    repo_root = _detect_repo_root(Path(cwd))
-    if repo_root:
-        set_repo_root(repo_root)
+    from modastack.sdk import set_project_root
+    from modastack.cli import _detect_project_root
+    project_root = _detect_project_root(Path(cwd))
+    if project_root:
+        set_project_root(project_root)
+
+    if persistent:
+        spawn_adhoc(
+            cwd=cwd,
+            task=task,
+            timeout=timeout,
+            name=issue_id,
+            requested_by=requested_by,
+            persistent=True,
+        )
+        return
+
+    from modastack.workflow.orchestrator import run_workflow
+    from modastack.workflow.triggers import WorkflowDispatcher
 
     dispatcher = WorkflowDispatcher()
     dispatcher.load_all_workflows()
@@ -599,11 +650,11 @@ def _run_agent_entry(args: dict) -> None:
         print(f"Workflow '{workflow_name}' not found")
         return
 
-    repo = _resolve_repo_name(cwd)
+    project = _resolve_project_name(cwd)
     run_workflow(
         workflow=workflow,
         task=task,
-        repo=repo,
+        repo=project,
         cwd=cwd,
         issue_id=issue_id,
         requested_by=requested_by,
@@ -884,7 +935,7 @@ def run_phase(
     context: str = "",
     max_budget_usd: float | None = None,
     title: str = "",
-    repo: str = "",
+    project: str = "",
 ) -> str:
     key = issue_id.lower()
     if key in _running:
@@ -900,14 +951,14 @@ def run_phase(
     registry = get_registry()
     registry.register(SessionEntry(
         name=name, session_id="", role="engineer",
-        issue_id=issue_id, title=title, phase=phase, repo=repo,
+        issue_id=issue_id, title=title, phase=phase, project=project,
         cwd=cwd, status="starting",
     ))
 
     loop = _ensure_loop()
 
     started_at = time.time()
-    _emit_session_started(issue_id, repo, title or context, name, phase=phase)
+    _emit_session_started(issue_id, project, title or context, name, phase=phase)
 
     async def _wrapped():
         try:
@@ -924,7 +975,7 @@ def run_phase(
                 success=False,
                 error=f"timeout after {timeout}s",
             )
-        _emit_session_finished(result, repo, name, started_at)
+        _emit_session_finished(result, project, name, started_at)
         return result
 
     future = asyncio.run_coroutine_threadsafe(_wrapped(), loop)

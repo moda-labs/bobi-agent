@@ -11,7 +11,7 @@ from modastack.manager.session import ManagerSession
 class TestInject:
 
     def setup_method(self):
-        self.session = ManagerSession(repo_path=Path("/tmp/test-repo"))
+        self.session = ManagerSession(project_path=Path("/tmp/test-repo"))
 
     @patch("modastack.inbox.deliver", return_value=(True, ""))
     def test_success_returns_true(self, mock_deliver):

@@ -1,6 +1,6 @@
 """Native check runners for built-in monitors.
 
-A check runner takes a Monitor and the list of repos it applies to and
+A check runner takes a Monitor and the list of projects it applies to and
 returns the set of *conditions* currently true. Each condition carries a
 stable `key` (used by the scheduler to deduplicate) and an event `data`
 payload. The scheduler diffs conditions against prior state and only
@@ -73,12 +73,12 @@ def _gh_pr_list(repo: Path, fields: list[str]) -> list[dict]:
         return []
 
 
-def pr_conflicts(monitor, repos: list[Path]) -> list[Condition]:
+def pr_conflicts(monitor, projects: list[Path]) -> list[Condition]:
     """Open PRs whose mergeable status is CONFLICTING."""
     conditions: list[Condition] = []
-    for repo in repos:
-        slug = _repo_slug(repo)
-        for pr in _gh_pr_list(repo, ["number", "title", "url", "mergeable", "headRefName"]):
+    for project in projects:
+        slug = _repo_slug(project)
+        for pr in _gh_pr_list(project, ["number", "title", "url", "mergeable", "headRefName"]):
             if pr.get("mergeable") != "CONFLICTING":
                 continue
             num = pr.get("number")
@@ -95,14 +95,14 @@ def pr_conflicts(monitor, repos: list[Path]) -> list[Condition]:
     return conditions
 
 
-def stale_prs(monitor, repos: list[Path]) -> list[Condition]:
+def stale_prs(monitor, projects: list[Path]) -> list[Condition]:
     """Open, non-draft PRs with no activity within the threshold (default 48h)."""
     threshold_hours = int(monitor.extra.get("threshold_hours", 48))
     now = datetime.now(timezone.utc)
     conditions: list[Condition] = []
-    for repo in repos:
-        slug = _repo_slug(repo)
-        for pr in _gh_pr_list(repo, ["number", "title", "url", "updatedAt", "isDraft"]):
+    for project in projects:
+        slug = _repo_slug(project)
+        for pr in _gh_pr_list(project, ["number", "title", "url", "updatedAt", "isDraft"]):
             if pr.get("isDraft"):
                 continue
             updated = _parse_iso(pr.get("updatedAt", ""))

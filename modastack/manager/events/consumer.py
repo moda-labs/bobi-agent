@@ -86,13 +86,16 @@ def _drain_loop(manager_session_name: str):
                 log.warning(f"Event delivery failed for {len(group)} event(s)")
 
 
-def _kill_stale_instances(repo_path: Path):
-    """Kill any running modastack start processes besides ourselves."""
-    import subprocess as sp
+def _kill_stale_instances(project_path: Path):
+    """Kill any previous modastack manager for THIS project only.
+
+    Only uses the project's own PID file — never scans for other modastack
+    processes, since multiple projects run independent managers.
+    """
     import signal as sig
     my_pid = os.getpid()
 
-    pid_file = repo_path / ".modastack" / "state" / "manager.pid"
+    pid_file = project_path / ".modastack" / "state" / "manager.pid"
     if pid_file.exists():
         try:
             old_pid = int(pid_file.read_text().strip())
@@ -102,64 +105,48 @@ def _kill_stale_instances(repo_path: Path):
         except (ProcessLookupError, ValueError, PermissionError):
             pass
 
-    try:
-        result = sp.run(
-            ["pgrep", "-f", "modastack.*start"],
-            capture_output=True, text=True, timeout=5,
-        )
-        for line in result.stdout.strip().splitlines():
-            try:
-                pid = int(line.strip())
-                if pid != my_pid:
-                    os.kill(pid, sig.SIGTERM)
-                    log.info(f"Killed orphaned modastack process {pid}")
-            except (ProcessLookupError, ValueError, PermissionError):
-                pass
-    except (FileNotFoundError, sp.TimeoutExpired):
-        pass
 
-
-def _build_subscriptions(repo_path: Path) -> list[str]:
-    """Build subscription keys from repo config for event server registration."""
+def _build_subscriptions(project_path: Path) -> list[str]:
+    """Build subscription keys from project config for event server registration."""
     subs: list[str] = []
     try:
-        from modastack.config import RepoConfig
-        rc = RepoConfig.from_file(repo_path)
-        if rc.github_repo:
-            subs.append(rc.github_repo)
-        if rc.slack_workspace_id and rc.slack_channel:
-            subs.append(f"slack:{rc.slack_workspace_id}:{rc.slack_channel}")
-        elif rc.slack_workspace_id:
+        from modastack.config import ProjectConfig
+        pc = ProjectConfig.from_file(project_path)
+        if pc.github_repo:
+            subs.append(pc.github_repo)
+        if pc.slack_workspace_id and pc.slack_channel:
+            subs.append(f"slack:{pc.slack_workspace_id}:{pc.slack_channel}")
+        elif pc.slack_workspace_id:
             log.warning("slack.workspace_id set but no slack.channel — "
                         "Slack events will not be routed to this manager. "
                         "Set slack.channel in .modastack/config.yaml.")
-        if rc.linear_team and rc.task_tracking == "linear":
-            subs.append(f"linear:{rc.linear_team}")
+        if pc.linear_team and pc.task_tracking == "linear":
+            subs.append(f"linear:{pc.linear_team}")
     except (FileNotFoundError, Exception) as e:
-        log.warning(f"Could not read repo config for subscriptions: {e}")
+        log.warning(f"Could not read project config for subscriptions: {e}")
     if not subs:
-        subs.append(repo_path.name)
+        subs.append(project_path.name)
     return subs
 
 
-def run(repo_path: Path | None = None, **kwargs):
-    """Start modastack for a single repo."""
+def run(project_path: Path | None = None, **kwargs):
+    """Start modastack for a single project."""
     import atexit
     import signal
-    from modastack.config import LocalConfig
+    from modastack.config import LocalConfig, resolve_slack_identity
 
-    if repo_path is None:
-        raise RuntimeError("repo_path is required — run from a repo with .modastack/config.yaml")
+    if project_path is None:
+        raise RuntimeError("project_path is required — run from a project with .modastack/config.yaml")
 
-    from modastack.sdk import set_repo_root
-    set_repo_root(repo_path)
+    from modastack.sdk import set_project_root
+    set_project_root(project_path)
 
-    local = LocalConfig.load(repo_path)
-    state_dir = repo_path / ".modastack" / "state"
+    local = LocalConfig.load(project_path)
+    state_dir = project_path / ".modastack" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    log.info(f"Modastack starting for {repo_path.name}")
-    _kill_stale_instances(repo_path)
+    log.info(f"Modastack starting for {project_path.name}")
+    _kill_stale_instances(project_path)
 
     pid_str = str(os.getpid())
     (state_dir / "manager.pid").write_text(pid_str)
@@ -181,11 +168,16 @@ def run(repo_path: Path | None = None, **kwargs):
 
     signal.signal(signal.SIGTERM, _handle_term)
 
-    session = ManagerSession(repo_path=repo_path)
+    # Resolve Slack identity from bot token + operator email
+    slack_identity = resolve_slack_identity(local.slack_bot_token, local.operator_email)
+    dm_token = local.slack_bot_token
+    dm_channel = slack_identity.dm_channel
+    if dm_channel:
+        log.info(f"Slack identity resolved: user={slack_identity.user_id} dm={dm_channel}")
+
+    session = ManagerSession(project_path=project_path)
     set_default_session(session)
 
-    dm_token = local.slack_bot_token
-    dm_channel = local.slack_dm_channel
     if dm_channel and dm_token:
         session.set_response_callback(lambda t: _post_dm(dm_token, dm_channel, t))
         log.info(f"Streaming all manager output to Slack DM {dm_channel}")
@@ -201,8 +193,10 @@ def run(repo_path: Path | None = None, **kwargs):
     dispatcher.load_all_workflows()
     log.info(f"Loaded {len(dispatcher.workflows)} workflow(s)")
 
-    # Event server — all config from per-repo local.yaml
-    es_url = local.event_server_url
+    # Event server — URL from project config, credentials from local config
+    from modastack.config import ProjectConfig
+    project_config = ProjectConfig.from_file(project_path)
+    es_url = project_config.event_server_url
     es_deployment = local.event_server_deployment_id
     es_key = local.event_server_api_key
 
@@ -212,7 +206,7 @@ def run(repo_path: Path | None = None, **kwargs):
         valid = False
         try:
             import json as _json, urllib.request
-            subs = _build_subscriptions(repo_path)
+            subs = _build_subscriptions(project_path)
             req = urllib.request.Request(
                 f"{es_url}/deployments/{es_deployment}/subscriptions",
                 data=_json.dumps({"add": subs}).encode(),
@@ -231,9 +225,9 @@ def run(repo_path: Path | None = None, **kwargs):
             log.info("Saved event server credentials are stale — re-registering")
             from .event_server import ensure_running, register
             es_port = int(es_url.rsplit(":", 1)[-1].rstrip("/"))
-            ensure_running(es_port, repo_path=repo_path)
-            subs = _build_subscriptions(repo_path)
-            es_deployment, es_key = register(es_url, repo_path.name, subs)
+            ensure_running(es_port, project_path=project_path)
+            subs = _build_subscriptions(project_path)
+            es_deployment, es_key = register(es_url, project_path.name, subs)
 
         from .event_client import EventServerClient
         event_client = EventServerClient(
@@ -250,10 +244,10 @@ def run(repo_path: Path | None = None, **kwargs):
         es_port = 8080
         base_url = f"http://localhost:{es_port}"
 
-        ensure_running(es_port, repo_path=repo_path)
+        ensure_running(es_port, project_path=project_path)
 
-        subs = _build_subscriptions(repo_path)
-        deployment_id, api_key = register(base_url, repo_path.name, subs)
+        subs = _build_subscriptions(project_path)
+        deployment_id, api_key = register(base_url, project_path.name, subs)
 
         from .event_client import EventServerClient
         event_client = EventServerClient(
@@ -292,12 +286,10 @@ def run(repo_path: Path | None = None, **kwargs):
     (state_dir / "dashboard.port").write_text(str(dashboard_port))
     log.info(f"Dashboard started on http://localhost:{dashboard_port}")
 
-    dm_token = local.slack_bot_token
-    dm_channel = local.slack_dm_channel
     if dm_token and dm_channel:
-        _post_dm(dm_token, dm_channel, f"Modastack started for {repo_path.name}.")
+        _post_dm(dm_token, dm_channel, f"Modastack started for {project_path.name}.")
 
-    log.info(f"Modastack running for {repo_path.name}")
+    log.info(f"Modastack running for {project_path.name}")
 
     while True:
         time.sleep(HEALTH_CHECK_INTERVAL)

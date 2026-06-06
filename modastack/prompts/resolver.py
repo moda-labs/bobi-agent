@@ -9,22 +9,22 @@ from . import AGENT_BASE_PATH, AGENTS_DIR
 
 def resolve_agent_prompt(
     agent_name: str,
-    repo_path: Path | str,
+    project_path: Path | str,
     interactive: bool = True,
 ) -> str:
     """Build the full system prompt for an agent.
 
-    Resolution: framework base + built-in role + repo override.
-    Repo override replaces the built-in role if present.
+    Resolution: framework base + built-in role + project override.
+    Project override replaces the built-in role if present.
     """
     parts = [AGENT_BASE_PATH.read_text()]
 
-    repo = Path(repo_path)
-    repo_agent = repo / ".modastack" / "agents" / f"{agent_name}.md"
+    project = Path(project_path)
+    project_agent = project / ".modastack" / "agents" / f"{agent_name}.md"
     builtin_agent = AGENTS_DIR / f"{agent_name}.md"
 
-    if repo_agent.exists():
-        parts.append(repo_agent.read_text())
+    if project_agent.exists():
+        parts.append(project_agent.read_text())
     elif builtin_agent.exists():
         parts.append(builtin_agent.read_text())
 
@@ -77,11 +77,11 @@ def _extract_description(path: Path) -> str:
     return paragraph
 
 
-def discover_roles(repo_path: Path | str | None = None) -> list[dict]:
-    """List available agent roles from built-in and repo tiers.
+def discover_roles(project_path: Path | str | None = None) -> list[dict]:
+    """List available agent roles from built-in and project tiers.
 
     Returns a list of dicts: [{"name", "source", "description", "path"}].
-    Repo roles override built-in roles with the same name.
+    Project roles override built-in roles with the same name.
     """
     roles: dict[str, dict] = {}
 
@@ -93,13 +93,13 @@ def discover_roles(repo_path: Path | str | None = None) -> list[dict]:
             "path": str(md),
         }
 
-    if repo_path:
-        repo_agents = Path(repo_path) / ".modastack" / "agents"
-        if repo_agents.is_dir():
-            for md in sorted(repo_agents.glob("*.md")):
+    if project_path:
+        project_agents = Path(project_path) / ".modastack" / "agents"
+        if project_agents.is_dir():
+            for md in sorted(project_agents.glob("*.md")):
                 roles[md.stem] = {
                     "name": md.stem,
-                    "source": "repo",
+                    "source": "project",
                     "description": _extract_description(md),
                     "path": str(md),
                 }
@@ -118,12 +118,12 @@ def format_role_list(roles: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def validate_role(role_name: str, repo_path: Path | str | None = None) -> bool:
+def validate_role(role_name: str, project_path: Path | str | None = None) -> bool:
     """Check whether a role exists in either tier."""
     if (AGENTS_DIR / f"{role_name}.md").exists():
         return True
-    if repo_path:
-        repo_agent = Path(repo_path) / ".modastack" / "agents" / f"{role_name}.md"
-        if repo_agent.exists():
+    if project_path:
+        project_agent = Path(project_path) / ".modastack" / "agents" / f"{role_name}.md"
+        if project_agent.exists():
             return True
     return False

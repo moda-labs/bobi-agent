@@ -107,7 +107,7 @@ class TestStartup:
              patch("modastack.manager.session.ManagerSession.is_alive", return_value=True), \
              patch("signal.signal"):
             try:
-                run(repo_path=modastack_install.repo_path)
+                run(project_path=modastack_install.repo_path)
             except SystemExit:
                 pass
 

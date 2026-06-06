@@ -73,8 +73,8 @@ def try_resume_for_event(event_type: str, issue_id: str = "", event: dict | None
     return True
 
 
-def _find_repo_root(cwd: str) -> Path:
-    """Find the original repo root from a working directory or worktree."""
+def _find_project_root(cwd: str) -> Path:
+    """Find the original project root from a working directory or worktree."""
     path = Path(cwd)
     for candidate in [path, *path.parents]:
         if (candidate / ".modastack" / "config.yaml").exists():
@@ -151,7 +151,7 @@ def run_workflow(
     registry.register(SessionEntry(
         name=session_name, session_id="", role=role,
         issue_id=issue_id, title=task[:80], phase=workflow.name,
-        repo=repo, cwd=work_cwd, status="running", pid=os.getpid(),
+        project=repo, cwd=work_cwd, status="running", pid=os.getpid(),
         requested_by=requested_by,
     ))
 
@@ -302,14 +302,14 @@ async def _run_workflow_async(
 
     from modastack.prompts.resolver import resolve_agent_prompt
 
-    repo_root = _find_repo_root(cwd)
+    project_root = _find_project_root(cwd)
 
     def _make_options(resume_id=None, agent_name=""):
         agent_prompt = ""
         if agent_name:
-            agent_prompt = resolve_agent_prompt(agent_name, repo_root, interactive)
+            agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive)
         else:
-            agent_prompt = resolve_agent_prompt("", repo_root, interactive)
+            agent_prompt = resolve_agent_prompt("", project_root, interactive)
 
         return ClaudeAgentOptions(
             cwd=cwd,

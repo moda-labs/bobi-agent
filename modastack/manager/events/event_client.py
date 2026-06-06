@@ -22,10 +22,10 @@ import websocket
 log = logging.getLogger(__name__)
 
 def _state_path(name: str) -> Path:
-    from modastack.sdk import get_repo_root
-    root = get_repo_root()
+    from modastack.sdk import get_project_root
+    root = get_project_root()
     if not root:
-        raise RuntimeError("repo root not set — call set_repo_root() first")
+        raise RuntimeError("project root not set — call set_project_root() first")
     d = root / ".modastack" / "state"
     d.mkdir(parents=True, exist_ok=True)
     return d / name
@@ -131,13 +131,13 @@ def _should_filter(event: dict) -> bool:
     """Drop events that don't match the repo's project filter (if configured)."""
     if event.get("source") != "linear":
         return False
-    from modastack.sdk import get_repo_root
-    root = get_repo_root()
+    from modastack.sdk import get_project_root
+    root = get_project_root()
     if not root:
         return False
     try:
-        from modastack.config import RepoConfig
-        rc = RepoConfig.from_file(root)
+        from modastack.config import ProjectConfig
+        rc = ProjectConfig.from_file(root)
         if rc.linear_project:
             event_project = event.get("data", {}).get("project", "")
             if event_project and event_project != rc.linear_project:
@@ -321,8 +321,8 @@ def _normalize_slack(event_type: str, payload: dict, workspace: str) -> dict | N
     token = ""
     try:
         from modastack.config import LocalConfig
-        from modastack.sdk import get_repo_root
-        root = get_repo_root()
+        from modastack.sdk import get_project_root
+        root = get_project_root()
         if root:
             token = LocalConfig.load(root).slack_bot_token
     except Exception:

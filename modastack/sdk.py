@@ -4,8 +4,8 @@ Every session (manager or engineer) is tracked here. Sessions persist
 across restarts via state.json files in per-session directories.
 Each session wraps a ClaudeSDKClient with connect/resume/query/disconnect.
 
-All state lives under <repo>/.modastack/sessions/. The repo root is set
-at startup by consumer.run() via set_repo_root().
+All state lives under <project>/.modastack/sessions/. The project root
+is set at startup by consumer.run() via set_project_root().
 """
 
 from __future__ import annotations
@@ -23,24 +23,24 @@ log = logging.getLogger(__name__)
 
 CLAUDE_CLI = shutil.which("claude") or "/opt/homebrew/bin/claude"
 
-_repo_root: Path | None = None
+_project_root: Path | None = None
 
 
-def set_repo_root(path: Path) -> None:
-    """Set the repo root for all session state paths."""
-    global _repo_root
-    _repo_root = path
+def set_project_root(path: Path) -> None:
+    """Set the project root for all session state paths."""
+    global _project_root
+    _project_root = path
 
 
-def get_repo_root() -> Path | None:
-    return _repo_root
+def get_project_root() -> Path | None:
+    return _project_root
 
 
 def _sessions_dir() -> Path:
-    """Per-repo sessions directory."""
-    if not _repo_root:
-        raise RuntimeError("repo root not set — call set_repo_root() first")
-    d = _repo_root / ".modastack" / "sessions"
+    """Per-project sessions directory."""
+    if not _project_root:
+        raise RuntimeError("project root not set — call set_project_root() first")
+    d = _project_root / ".modastack" / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -57,7 +57,7 @@ class SessionEntry:
     issue_id: str = ""
     title: str = ""
     phase: str = ""
-    repo: str = ""
+    project: str = ""
     cwd: str = ""
     status: str = "starting"
     pid: int = 0
@@ -82,7 +82,7 @@ def _pid_alive(pid: int) -> bool:
 class SessionRegistry:
     """Directory-per-session registry.
 
-    Each session gets a directory at <repo>/.modastack/sessions/<name>/
+    Each session gets a directory at <project>/.modastack/sessions/<name>/
     containing state.json, handoff-<step>.yaml files, and log.jsonl.
     Active sessions have a live pid; completed ones remain for history.
     """

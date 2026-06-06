@@ -14,7 +14,7 @@ class TestRunDoctor:
     @patch("modastack.doctor._check_event_server")
     @patch("modastack.doctor._check_workflows")
     @patch("modastack.doctor._check_local_config")
-    @patch("modastack.doctor._check_repo_config")
+    @patch("modastack.doctor._check_project_config")
     @patch("modastack.doctor._check_claude_cli")
     def test_returns_all_checks(self, m1, m2, m3, m4, m5, m6):
         for m in (m1, m2, m3, m4, m5, m6):
@@ -41,21 +41,21 @@ class TestCheckClaudeCli:
         assert "not found" in r.detail
 
 
-class TestCheckRepoConfig:
+class TestCheckProjectConfig:
 
     def test_passes_when_exists(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text("task_tracking:\n  project: TEST\n")
-        with patch("modastack.sdk.get_repo_root", return_value=tmp_path):
-            from modastack.doctor import _check_repo_config
-            r = _check_repo_config()
+        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
+            from modastack.doctor import _check_project_config
+            r = _check_project_config()
         assert r.ok
 
     def test_fails_when_no_repo(self):
-        with patch("modastack.sdk.get_repo_root", return_value=None):
-            from modastack.doctor import _check_repo_config
-            r = _check_repo_config()
+        with patch("modastack.sdk.get_project_root", return_value=None):
+            from modastack.doctor import _check_project_config
+            r = _check_project_config()
         assert not r.ok
         assert "not inside" in r.detail
 
@@ -66,13 +66,13 @@ class TestCheckLocalConfig:
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "local.yaml").write_text("operator:\n  name: test\n")
-        with patch("modastack.sdk.get_repo_root", return_value=tmp_path):
+        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
             from modastack.doctor import _check_local_config
             r = _check_local_config()
         assert r.ok
 
     def test_fails_when_missing(self, tmp_path):
-        with patch("modastack.sdk.get_repo_root", return_value=tmp_path):
+        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
             from modastack.doctor import _check_local_config
             r = _check_local_config()
         assert not r.ok

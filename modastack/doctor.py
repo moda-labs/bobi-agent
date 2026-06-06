@@ -1,4 +1,4 @@
-"""System health checks — manager, event server, repos, workflows."""
+"""System health checks — manager, event server, projects, workflows."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ def run_doctor() -> list[CheckResult]:
     results = []
 
     results.append(_check_claude_cli())
-    results.append(_check_repo_config())
+    results.append(_check_project_config())
     results.append(_check_local_config())
     results.append(_check_workflows())
     results.append(_check_event_server())
@@ -28,26 +28,26 @@ def _check_claude_cli() -> CheckResult:
                        hint="Install Claude Code: https://docs.anthropic.com/en/docs/claude-code")
 
 
-def _check_repo_config() -> CheckResult:
-    from modastack.sdk import get_repo_root
-    root = get_repo_root()
+def _check_project_config() -> CheckResult:
+    from modastack.sdk import get_project_root
+    root = get_project_root()
     if not root:
-        return CheckResult("Repo config", ok=False,
-                           detail="not inside a modastack repo",
+        return CheckResult("Project config", ok=False,
+                           detail="not inside a modastack project",
                            hint="Run from a directory with .modastack/config.yaml")
     config_path = root / ".modastack" / "config.yaml"
     if config_path.exists():
-        return CheckResult("Repo config", ok=True, detail=str(config_path))
-    return CheckResult("Repo config", ok=False,
+        return CheckResult("Project config", ok=True, detail=str(config_path))
+    return CheckResult("Project config", ok=False,
                        detail="missing .modastack/config.yaml",
                        hint="Run `modastack init` to create it")
 
 
 def _check_local_config() -> CheckResult:
-    from modastack.sdk import get_repo_root
-    root = get_repo_root()
+    from modastack.sdk import get_project_root
+    root = get_project_root()
     if not root:
-        return CheckResult("Local config", ok=False, detail="no repo detected")
+        return CheckResult("Local config", ok=False, detail="no project detected")
     local_path = root / ".modastack" / "local.yaml"
     if local_path.exists():
         return CheckResult("Local config", ok=True, detail=str(local_path))
@@ -77,15 +77,19 @@ def _check_event_server() -> CheckResult:
     import json
     import urllib.request
 
-    from modastack.config import LocalConfig
-    from modastack.sdk import get_repo_root
+    from modastack.config import LocalConfig, ProjectConfig
+    from modastack.sdk import get_project_root
 
-    root = get_repo_root()
+    root = get_project_root()
     if root:
-        local = LocalConfig.load(root)
-        if local.event_server_url and local.event_server_api_key:
-            return CheckResult("Event server", ok=True,
-                               detail=f"remote ({local.event_server_url})")
+        try:
+            rc = ProjectConfig.from_file(root)
+            local = LocalConfig.load(root)
+            if rc.event_server_url and local.event_server_api_key:
+                return CheckResult("Event server", ok=True,
+                                   detail=f"remote ({rc.event_server_url})")
+        except FileNotFoundError:
+            pass
 
     port = 8080
     try:
@@ -103,10 +107,10 @@ def _check_event_server() -> CheckResult:
 
 
 def _check_recent_events() -> CheckResult:
-    from modastack.sdk import get_repo_root
-    root = get_repo_root()
+    from modastack.sdk import get_project_root
+    root = get_project_root()
     if not root:
-        return CheckResult("Recent events", ok=False, detail="no repo detected")
+        return CheckResult("Recent events", ok=False, detail="no project detected")
     events_file = root / ".modastack" / "state" / "events.jsonl"
     if not events_file.exists():
         return CheckResult("Recent events", ok=True, detail="no events yet")
