@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from modastack.manager.events.event_client import (
+from modastack.events.client import (
     _normalize_event,
     _normalize_slack,
     format_event_for_manager,

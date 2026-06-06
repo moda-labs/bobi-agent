@@ -127,8 +127,8 @@ class TestDrainLoop:
 
 class TestBackwardCompat:
 
-    def test_event_client_shim(self):
-        from modastack.manager.events.event_client import (
+    def test_direct_imports_work(self):
+        from modastack.events.client import (
             EventServerClient,
             event_queue as eq,
             format_event_for_manager as fmt,
@@ -137,28 +137,56 @@ class TestBackwardCompat:
         assert eq is event_queue
         assert fmt is format_event_for_manager
 
-    def test_event_server_shim(self):
-        from modastack.manager.events.event_server import ensure_running, register
-        from modastack.events.server import (
-            ensure_running as er,
-            register as reg,
-        )
-        assert ensure_running is er
-        assert register is reg
+    def test_server_imports_work(self):
+        from modastack.events.server import ensure_running, register
+        assert callable(ensure_running)
+        assert callable(register)
 
-    def test_consumer_build_subscriptions_delegates(self, tmp_path):
+    def test_build_subscriptions_direct(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text("github:\n  repo: org/repo\n")
 
-        from modastack.manager.events.consumer import _build_subscriptions
-        subs = _build_subscriptions(tmp_path)
+        from modastack.events.subscriptions import build_subscriptions
+        subs = build_subscriptions(tmp_path)
         assert "org/repo" in subs
 
 
 # ---------------------------------------------------------------------------
 # agent config loading (Phase 3)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# prompt resolver (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+class TestPromptResolver:
+
+    def test_resolve_manager_prompt_loads_base(self, tmp_path):
+        from modastack.prompts.resolver import resolve_manager_prompt
+        prompt = resolve_manager_prompt(tmp_path)
+        assert len(prompt) > 0
+
+    def test_resolve_manager_prompt_includes_repo_override(self, tmp_path):
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir()
+        (config_dir / "manager.md").write_text("Custom policy: always review PRs.")
+        from modastack.prompts.resolver import resolve_manager_prompt
+        prompt = resolve_manager_prompt(tmp_path)
+        assert "Custom policy: always review PRs." in prompt
+        assert f"{tmp_path.name} policies" in prompt
+
+    def test_list_workflows_returns_string(self, tmp_path):
+        from modastack.prompts.resolver import list_workflows
+        result = list_workflows(tmp_path)
+        assert isinstance(result, str)
+
+    def test_list_workflows_finds_builtin(self):
+        from modastack.prompts.resolver import list_workflows
+        result = list_workflows(Path("/tmp/nonexistent"))
+        assert isinstance(result, str)
 
 
 class TestAgentConfig:

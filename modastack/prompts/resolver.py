@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from . import AGENT_BASE_PATH, AGENTS_DIR
+from . import AGENT_BASE_PATH, AGENTS_DIR, MANAGER_BASE_PATH
+
+log = logging.getLogger(__name__)
 
 
 def resolve_agent_prompt(
@@ -40,6 +43,55 @@ def resolve_agent_prompt(
         )
 
     return "\n\n".join(parts)
+
+
+def resolve_manager_prompt(project_path: Path | str) -> str:
+    """Build the full system prompt for a manager agent.
+
+    Resolution: manager_base.md + manager_engineering.md (if exists)
+    + project .modastack/manager.md (if exists).
+    """
+    project = Path(project_path)
+    parts = [MANAGER_BASE_PATH.read_text()]
+
+    builtin_role = MANAGER_BASE_PATH.parent / "manager_engineering.md"
+    if builtin_role.exists():
+        parts.append(builtin_role.read_text())
+
+    repo_mgr = project / ".modastack" / "manager.md"
+    if repo_mgr.exists():
+        parts.append(f"## {project.name} policies\n\n" + repo_mgr.read_text())
+
+    return "\n\n".join(parts)
+
+
+def list_workflows(project_path: Path | str) -> str:
+    """List available workflows as a formatted string for agent prompts."""
+    try:
+        from modastack.workflow.triggers import WORKFLOWS_DIR
+        from modastack.workflow.schema import load_workflow
+
+        project = Path(project_path)
+        sources = [WORKFLOWS_DIR]
+        repo_wf = project / ".modastack" / "workflows"
+        if repo_wf.exists():
+            sources.append(repo_wf)
+
+        seen: set[str] = set()
+        lines: list[str] = []
+        for d in reversed(sources):
+            for f in sorted(d.glob("*.yaml")):
+                if f.stem in seen:
+                    continue
+                seen.add(f.stem)
+                try:
+                    wf = load_workflow(f)
+                    lines.append(f"- {wf.name}: trigger={wf.trigger.event}, {len(wf.nodes)} nodes")
+                except Exception:
+                    continue
+        return "\n".join(lines) if lines else "No workflows found."
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------

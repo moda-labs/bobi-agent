@@ -75,7 +75,7 @@ async def api_send_message(request: Request):
     text = body.get("text", "").strip()
     if not text:
         return {"ok": False, "error": "empty message"}
-    from modastack.manager.session import inject, is_alive
+    from modastack.manager.session import inject, is_alive  # TODO: replace with registry lookup
     if not is_alive():
         return {"ok": False, "error": "manager not running"}
     inject(text)
@@ -95,7 +95,7 @@ async def api_post_event(request: Request):
     if not etype:
         return {"ok": False, "error": "missing event type"}
 
-    from modastack.manager.events.event_client import event_queue
+    from modastack.events.client import event_queue
     event = {
         "type": etype,
         "source": (body.get("source") or "monitor").strip(),
@@ -177,7 +177,7 @@ async def api_send_engineer_message(issue_id: str, request: Request):
     if inject_message(issue_id, text):
         return {"ok": True, "delivery": "direct"}
 
-    from modastack.manager.session import inject, is_alive
+    from modastack.manager.session import inject, is_alive  # TODO: replace with registry lookup
     if not is_alive():
         return {"ok": False, "error": "manager not running and no live engineer session"}
 

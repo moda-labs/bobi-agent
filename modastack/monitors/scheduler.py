@@ -47,7 +47,7 @@ TICK_INTERVAL = 30  # seconds between scheduler ticks
 
 def _default_inject(event: dict) -> None:
     """Push a synthetic event onto the webhook event queue."""
-    from modastack.manager.events.event_client import event_queue
+    from modastack.events.client import event_queue
     event_queue.put(event)
 
 

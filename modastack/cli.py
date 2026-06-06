@@ -1487,10 +1487,18 @@ def event_server_start(foreground, port):
     es_port = port or 8080
 
     if foreground:
-        from modastack.manager.events.event_server import run_server
-        run_server(es_port)
+        from modastack.events.server import ensure_running
+        ensure_running(es_port, project_path=_detect_project_root())
+        click.echo(f"Event server running on port {es_port} (foreground)")
+        try:
+            import time
+            while True:
+                time.sleep(60)
+        except KeyboardInterrupt:
+            pass
+        return
     else:
-        from modastack.manager.events.event_server import ensure_running
+        from modastack.events.server import ensure_running
         ensure_running(es_port, project_path=_detect_project_root())
         click.echo(f"Event server running on port {es_port}")
         click.echo(f"  GitHub:  http://localhost:{es_port}/webhooks/github")

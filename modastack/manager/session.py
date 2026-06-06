@@ -3,6 +3,9 @@
 The manager is just a Session configured with the manager prompt,
 Slack callback, and strict MCP config. All communication goes
 through the inbox.
+
+Prompt loading and workflow listing have moved to
+modastack.prompts.resolver — this module delegates to them.
 """
 
 from __future__ import annotations
@@ -14,9 +17,6 @@ from modastack.session import Session
 from modastack.sdk import _sessions_dir, load_session_id
 
 log = logging.getLogger(__name__)
-
-_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
-MANAGER_BASE_PATH = _PROMPTS_DIR / "manager_base.md"
 
 
 class ManagerSession:
@@ -30,43 +30,12 @@ class ManagerSession:
         self._response_callback = None
 
     def _load_manager_prompt(self) -> str:
-        core = MANAGER_BASE_PATH.read_text()
-
-        builtin_role = MANAGER_BASE_PATH.parent / "manager_engineering.md"
-        if builtin_role.exists():
-            core += "\n\n" + builtin_role.read_text()
-
-        repo_mgr = self.project_path / ".modastack" / "manager.md"
-        if repo_mgr.exists():
-            core += f"\n\n## {self.project_path.name} policies\n\n" + repo_mgr.read_text()
-
-        return core
+        from modastack.prompts.resolver import resolve_manager_prompt
+        return resolve_manager_prompt(self.project_path)
 
     def _list_workflows(self) -> str:
-        try:
-            from modastack.workflow.triggers import WORKFLOWS_DIR
-            from modastack.workflow.schema import load_workflow
-
-            sources = [WORKFLOWS_DIR]
-            repo_wf = self.project_path / ".modastack" / "workflows"
-            if repo_wf.exists():
-                sources.append(repo_wf)
-
-            seen: set[str] = set()
-            lines: list[str] = []
-            for d in reversed(sources):
-                for f in sorted(d.glob("*.yaml")):
-                    if f.stem in seen:
-                        continue
-                    seen.add(f.stem)
-                    try:
-                        wf = load_workflow(f)
-                        lines.append(f"- {wf.name}: trigger={wf.trigger.event}, {len(wf.nodes)} nodes")
-                    except Exception:
-                        continue
-            return "\n".join(lines) if lines else "No workflows found."
-        except Exception:
-            return ""
+        from modastack.prompts.resolver import list_workflows
+        return list_workflows(self.project_path)
 
     def _build_startup_prompt(self) -> str:
         prompt = self._load_manager_prompt()

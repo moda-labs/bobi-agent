@@ -43,7 +43,7 @@ def _get_json(url: str) -> dict:
 @pytest.fixture(scope="module")
 def event_server(modastack_env):
     """Start the event server on a free port, yield the base URL, then stop it."""
-    from modastack.manager.events.event_server import ensure_running
+    from modastack.events.server import ensure_running
 
     for attempt in range(3):
         port = _free_port()
@@ -273,7 +273,7 @@ class TestEventServerCLI:
         assert data["status"] == "ok"
 
     def test_stop_and_restart(self, modastack_env):
-        from modastack.manager.events.event_server import ensure_running
+        from modastack.events.server import ensure_running
 
         port = _free_port()
         base_url = f"http://localhost:{port}"

@@ -5,7 +5,7 @@ import threading
 from unittest.mock import patch, call
 from queue import SimpleQueue
 
-from modastack.manager.events.event_client import format_event_for_manager
+from modastack.events.client import format_event_for_manager
 
 
 class TestDrainLoop:
@@ -18,8 +18,8 @@ class TestDrainLoop:
 
     @patch("modastack.inbox.deliver", return_value=(True, ""))
     def test_single_event_delivered(self, mock_deliver):
-        from modastack.manager.events.event_client import event_queue
-        from modastack.manager.events.consumer import _drain_loop
+        from modastack.events.client import event_queue
+        from modastack.events.drain import drain_loop as _drain_loop
 
         while not event_queue.empty():
             event_queue.get_nowait()
@@ -45,8 +45,8 @@ class TestDrainLoop:
     @patch("modastack.inbox.deliver", return_value=(True, ""))
     @patch("modastack.manager.events.consumer.DRAIN_INTERVAL", 0.1)
     def test_multiple_events_batched(self, mock_deliver):
-        from modastack.manager.events.event_client import event_queue
-        from modastack.manager.events.consumer import _drain_loop
+        from modastack.events.client import event_queue
+        from modastack.events.drain import drain_loop as _drain_loop
 
         while not event_queue.empty():
             event_queue.get_nowait()
@@ -92,7 +92,7 @@ class TestStartup:
     def test_run_starts_without_crash(self, mock_kill, mock_start, modastack_install):
         """run() should get through startup without AttributeError or ImportError."""
         import signal
-        from modastack.manager.events.consumer import run
+        from modastack.manager.events.consumer import run  # legacy path, still tested
 
         original_sleep = time.sleep
 
@@ -123,7 +123,7 @@ class TestBuildSubscriptions:
             "github:\n  repo: org/myrepo\n"
             "slack:\n  workspace_id: T123\n  channel: C456\n"
         )
-        from modastack.manager.events.consumer import _build_subscriptions
+        from modastack.events.subscriptions import build_subscriptions as _build_subscriptions
         subs = _build_subscriptions(tmp_path)
         assert "slack:T123:C456" in subs
         assert "slack:T123" not in subs
@@ -135,7 +135,7 @@ class TestBuildSubscriptions:
             "github:\n  repo: org/myrepo\n"
             "slack:\n  workspace_id: T123\n"
         )
-        from modastack.manager.events.consumer import _build_subscriptions
+        from modastack.events.subscriptions import build_subscriptions as _build_subscriptions
         import logging
         with caplog.at_level(logging.WARNING):
             subs = _build_subscriptions(tmp_path)
@@ -148,7 +148,7 @@ class TestBuildSubscriptions:
         (config_dir / "config.yaml").write_text(
             "github:\n  repo: org/myrepo\n"
         )
-        from modastack.manager.events.consumer import _build_subscriptions
+        from modastack.events.subscriptions import build_subscriptions as _build_subscriptions
         subs = _build_subscriptions(tmp_path)
         assert "org/myrepo" in subs
         assert not any("slack:" in s for s in subs)

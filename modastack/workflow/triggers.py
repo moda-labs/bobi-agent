@@ -27,11 +27,6 @@ class WorkflowDispatcher:
         if project_path is None:
             from modastack.sdk import get_project_root
             project_path = get_project_root()
-        if project_path is None:
-            from modastack.manager.session import get_default_session
-            session = get_default_session()
-            if session:
-                project_path = session.project_path
 
         if project_path:
             project_wf_dir = project_path / ".modastack" / "workflows"

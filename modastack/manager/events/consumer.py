@@ -21,7 +21,7 @@ from pathlib import Path
 import truststore
 truststore.inject_into_ssl()
 
-from modastack.manager.events.slack_responder import _markdown_to_slack
+from .slack_responder import _markdown_to_slack
 from modastack.manager.session import (
     ManagerSession, set_default_session,
 )
@@ -181,13 +181,13 @@ def run(project_path: Path | None = None, **kwargs):
 
         if not valid and es_url.startswith("http://localhost"):
             log.info("Saved event server credentials are stale — re-registering")
-            from .event_server import ensure_running, register
+            from modastack.events.server import ensure_running, register
             es_port = int(es_url.rsplit(":", 1)[-1].rstrip("/"))
             ensure_running(es_port, project_path=project_path)
             subs = _build_subscriptions(project_path)
             es_deployment, es_key = register(es_url, project_path.name, subs)
 
-        from .event_client import EventServerClient
+        from modastack.events.client import EventServerClient
         event_client = EventServerClient(
             server_url=es_url,
             deployment_id=es_deployment,
@@ -197,7 +197,7 @@ def run(project_path: Path | None = None, **kwargs):
         log.info(f"Event client started -> {es_url}")
         atexit.register(event_client.stop)
     else:
-        from .event_server import ensure_running, register
+        from modastack.events.server import ensure_running, register
 
         es_port = 8080
         base_url = f"http://localhost:{es_port}"
@@ -207,7 +207,7 @@ def run(project_path: Path | None = None, **kwargs):
         subs = _build_subscriptions(project_path)
         deployment_id, api_key = register(base_url, project_path.name, subs)
 
-        from .event_client import EventServerClient
+        from modastack.events.client import EventServerClient
         event_client = EventServerClient(
             server_url=base_url,
             deployment_id=deployment_id,
