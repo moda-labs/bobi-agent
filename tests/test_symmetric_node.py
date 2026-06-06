@@ -11,7 +11,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 import yaml
 
-from modastack.events.subscriptions import build_subscriptions
+from modastack.events.subscriptions import discover_subscriptions
 from modastack.events.drain import drain_loop, DRAIN_INTERVAL
 from modastack.events.client import format_event_for_manager, event_queue
 
@@ -29,13 +29,13 @@ class TestBuildSubscriptions:
         (config_dir / "agent.yaml").write_text(
             "subscribe:\n  - github:org/repo\n  - slack:T123\n  - linear:MOD\n"
         )
-        subs = build_subscriptions(tmp_path)
+        subs = discover_subscriptions(tmp_path)
         assert "github:org/repo" in subs
         assert "slack:T123" in subs
         assert "linear:MOD" in subs
 
     def test_fallback_to_dir_name(self, tmp_path):
-        subs = build_subscriptions(tmp_path)
+        subs = discover_subscriptions(tmp_path)
         assert tmp_path.name in subs
 
 
@@ -118,13 +118,13 @@ class TestCanonicalImports:
         assert callable(ensure_running)
         assert callable(register)
 
-    def test_build_subscriptions_direct(self, tmp_path):
+    def test_discover_subscriptions_direct(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text("subscribe:\n  - slack:T999\n")
 
-        from modastack.events.subscriptions import build_subscriptions
-        subs = build_subscriptions(tmp_path)
+        from modastack.events.subscriptions import discover_subscriptions
+        subs = discover_subscriptions(tmp_path)
         assert "slack:T999" in subs
 
 

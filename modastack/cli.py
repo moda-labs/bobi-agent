@@ -59,10 +59,10 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     click.echo("\n".join(lines))
 
 def _detect_project_root(cwd: Path | None = None) -> Path | None:
-    """Walk up from cwd to find a project with .modastack/agent.yaml."""
+    """Walk up from cwd to find a project with a .modastack/ directory."""
     path = (cwd or Path.cwd()).resolve()
     for candidate in [path, *path.parents]:
-        if (candidate / ".modastack" / "agent.yaml").exists():
+        if (candidate / ".modastack").is_dir():
             return candidate
     return None
 
@@ -120,16 +120,6 @@ def _systemctl(action: str) -> bool:
     return True
 
 
-def _generate_default_agent_config(project_path: Path) -> dict:
-    """Generate a default agent config from project settings."""
-    from modastack.events.subscriptions import build_subscriptions
-    subs = build_subscriptions(project_path)
-    return {
-        "role": "manager",
-        "persistent": True,
-        "subscribe": subs,
-        "monitors": True,
-    }
 
 
 def _load_agent_config(project_path: Path, config_path: str | None = None) -> dict | None:
@@ -163,7 +153,8 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
             defaults = _yaml.safe_load(defaults_path.read_text()) or {}
             role = defaults.get("role", "manager")
     role = role or "manager"
-    subscribe = config.get("subscribe", [])
+    from modastack.events.subscriptions import discover_subscriptions
+    subscribe = config.get("subscribe") or discover_subscriptions(project_path, agent_name)
 
     state_dir = project_path / ".modastack" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -219,44 +210,44 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
 
 
 @main.command()
+@click.argument("agent_pack", default=None, required=False)
 @click.option("--foreground", "-f", is_flag=True, help="Run in the foreground (default: daemonize)")
-@click.option("--fresh", is_flag=True, help="Wipe manager session and start clean")
-@click.option("--non-interactive", is_flag=True, envvar="CI", help="Skip interactive setup prompts")
-@click.option("--config", "config_path", default=None, type=click.Path(exists=True),
-              help="Agent config file (default: .modastack/agent.yaml)")
-def start(foreground, fresh, non_interactive, config_path):
-    """Start modastack for the project in the current directory.
+@click.option("--fresh", is_flag=True, help="Wipe session and start clean")
+@click.option("--subscribe", multiple=True, help="Additional subscriptions (e.g. linear:MOD)")
+def start(agent_pack, foreground, fresh, subscribe):
+    """Start a modastack agent.
 
-    Reads .modastack/agent.yaml (or --config) to determine which role,
-    subscriptions, and capabilities to start with. If no agent.yaml exists,
-    a default config is generated from project settings.
+    The agent pack defines roles, workflows, and monitors. Subscriptions
+    are auto-discovered from the environment (git remote, Slack bot token)
+    or specified in .modastack/agent.yaml.
 
     Usage:
-        cd myrepo && modastack start              # daemonize
-        cd myrepo && modastack start --foreground  # run in foreground
-        cd myrepo && modastack start --fresh       # fresh manager session
-        cd myrepo && modastack start --config path/to/agent.yaml
+        modastack start software_team
+        modastack start software_team --foreground
+        modastack start software_team --subscribe linear:MOD
     """
-    _ensure_config(non_interactive)
+    project_path = _detect_project_root() or Path.cwd()
 
-    project_path = _detect_project_root()
-    if not project_path:
-        click.echo("Not inside a modastack project (no .modastack/config.yaml found).", err=True)
+    agent_config = _load_agent_config(project_path) or {}
+    if not agent_pack:
+        agent_pack = agent_config.get("agent")
+    if not agent_pack:
+        from modastack.prompts import AGENTS_DIR
+        packs = [d.name for d in AGENTS_DIR.iterdir() if d.is_dir()] if AGENTS_DIR.is_dir() else []
+        click.echo("Usage: modastack start <agent_pack>", err=True)
+        if packs:
+            click.echo(f"Available: {', '.join(packs)}", err=True)
         raise SystemExit(1)
+
+    agent_config["agent"] = agent_pack
+    if subscribe:
+        agent_config.setdefault("subscribe", []).extend(subscribe)
+
+    (project_path / ".modastack" / "state").mkdir(parents=True, exist_ok=True)
+    _ensure_config()
 
     if fresh:
         _clear_manager_session(project_path)
-
-    if not foreground and _has_systemd_service():
-        click.echo("Starting via systemd...")
-        if _systemctl("start"):
-            result = subprocess.run(
-                ["systemctl", "--user", "show", "modastack", "--property=MainPID", "--value"],
-                capture_output=True, text=True, timeout=5,
-            )
-            pid = int(result.stdout.strip() or "0")
-            _print_startup_info(project_path, pid, _project_state_dir(project_path) / "manager.log")
-        return
 
     state_dir = _project_state_dir(project_path)
     pid_path = state_dir / "manager.pid"
@@ -265,20 +256,15 @@ def start(foreground, fresh, non_interactive, config_path):
         try:
             pid = int(pid_path.read_text().strip())
             os.kill(pid, 0)
-            click.echo(f"Modastack already running for {project_path.name} (pid {pid}). Use `modastack restart`.")
+            click.echo(f"Already running (pid {pid}). Use `modastack restart`.")
             return
         except (ProcessLookupError, ValueError):
             pid_path.unlink(missing_ok=True)
-
-    agent_config = _load_agent_config(project_path, config_path)
-    if not agent_config:
-        agent_config = _generate_default_agent_config(project_path)
 
     if foreground:
         root = logging.getLogger()
         root.handlers = [h for h in root.handlers
                          if isinstance(h, logging.FileHandler)]
-
         _run_from_agent_config(project_path, agent_config)
     else:
         log_file = state_dir / "manager.log"
@@ -286,23 +272,21 @@ def start(foreground, fresh, non_interactive, config_path):
         venv_bin = str(Path(sys.executable).parent)
         local_bin = str(Path.home() / ".local" / "bin")
         env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
-        cmd = [sys.executable, "-m", "modastack.cli", "start", "--foreground"]
+        cmd = [sys.executable, "-m", "modastack.cli", "start", agent_pack, "--foreground"]
         if fresh:
             cmd.append("--fresh")
-        if config_path:
-            cmd.extend(["--config", config_path])
+        for s in subscribe:
+            cmd.extend(["--subscribe", s])
         with open(log_file, "a") as lf:
             proc = subprocess.Popen(
-                cmd,
-                stdout=lf, stderr=lf,
-                cwd=str(project_path),
-                env=env,
+                cmd, stdout=lf, stderr=lf,
+                cwd=str(project_path), env=env,
                 start_new_session=True,
             )
         _print_startup_info(project_path, proc.pid, log_file)
 
 
-def _ensure_config(non_interactive: bool) -> None:
+def _ensure_config() -> None:
     """Auto-register with event server on first run if needed."""
     project_path = _detect_project_root()
     if not project_path:

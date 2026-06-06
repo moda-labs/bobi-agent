@@ -1,1 +1,11 @@
+# this is the role that the entry point agent will assume
+# when you run
+#   modastack start <agent_name>
 role: manager
+
+# event event_sources this agent needs — resolved to concrete subscriptions at startup
+#   github: detected from git remote
+#   slack: detected from bot token (auth.test)
+event_sources:
+  - github
+  - slack

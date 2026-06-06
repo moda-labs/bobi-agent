@@ -87,14 +87,14 @@ class TestBuildSubscriptions:
         (config_dir / "agent.yaml").write_text(
             "subscribe:\n  - github:org/repo\n  - slack:T123\n"
         )
-        from modastack.events.subscriptions import build_subscriptions
-        subs = build_subscriptions(tmp_path)
+        from modastack.events.subscriptions import discover_subscriptions
+        subs = discover_subscriptions(tmp_path)
         assert "github:org/repo" in subs
         assert "slack:T123" in subs
 
     def test_fallback_to_dirname(self, tmp_path):
-        from modastack.events.subscriptions import build_subscriptions
-        subs = build_subscriptions(tmp_path)
+        from modastack.events.subscriptions import discover_subscriptions
+        subs = discover_subscriptions(tmp_path)
         assert tmp_path.name in subs
 
 

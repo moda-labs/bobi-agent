@@ -12,7 +12,7 @@ from modastack.events.client import (
 )
 from modastack.events.drain import drain_loop
 from modastack.events.server import ensure_running, register
-from modastack.events.subscriptions import build_subscriptions
+from modastack.events.subscriptions import discover_subscriptions
 
 __all__ = [
     "EventServerClient",
@@ -22,5 +22,5 @@ __all__ = [
     "drain_loop",
     "ensure_running",
     "register",
-    "build_subscriptions",
+    "discover_subscriptions",
 ]
