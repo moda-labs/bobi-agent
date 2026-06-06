@@ -141,7 +141,7 @@ class TestNormalizeSlack:
 
     @patch("modastack.config.LocalConfig")
     @patch("modastack.sdk.get_project_root", return_value=Path("/tmp/repo"))
-    @patch("modastack.manager.events.event_client._resolve_slack_user")
+    @patch("modastack.events.client._resolve_slack_user")
     def test_dm(self, mock_resolve, mock_root, mock_local):
         mock_resolve.return_value = "Zach"
         mock_local.load.return_value = MagicMock(slack_bot_token="xoxb-test")
@@ -165,7 +165,7 @@ class TestNormalizeSlack:
 
     @patch("modastack.config.LocalConfig")
     @patch("modastack.sdk.get_project_root", return_value=Path("/tmp/repo"))
-    @patch("modastack.manager.events.event_client._resolve_slack_user")
+    @patch("modastack.events.client._resolve_slack_user")
     def test_mention_strips_bot_prefix(self, mock_resolve, mock_root, mock_local):
         mock_resolve.return_value = "Zach"
         mock_local.load.return_value = MagicMock(slack_bot_token="xoxb-test")

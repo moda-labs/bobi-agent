@@ -56,34 +56,9 @@ def _post_dm(token: str, channel: str, text: str) -> None:
 
 
 def _drain_loop(manager_session_name: str):
-    """Event bus sidecar — batches events and delivers to the manager's inbox."""
-    from .event_client import event_queue, format_event_for_manager
-    from modastack.inbox import deliver
-
-    log.info("Drain loop active — delivering events to manager inbox")
-
-    while True:
-        event = event_queue.get()
-
-        time.sleep(DRAIN_INTERVAL)
-        batch = [event]
-        while not event_queue.empty():
-            batch.append(event_queue.get_nowait())
-
-        slack_events = [e for e in batch if e.get("source") == "slack"]
-        other_events = [e for e in batch if e.get("source") != "slack"]
-
-        for group in [other_events, slack_events]:
-            if not group:
-                continue
-
-            lines = [format_event_for_manager(e) for e in group]
-            text = "\n\n".join(lines)
-
-            log.info(f"Delivering {len(group)} event(s) to {manager_session_name}")
-            ok, _ = deliver(manager_session_name, text, sender="event-bus")
-            if not ok:
-                log.warning(f"Event delivery failed for {len(group)} event(s)")
+    """Event bus sidecar — delegates to modastack.events.drain."""
+    from modastack.events.drain import drain_loop
+    drain_loop(manager_session_name)
 
 
 def _kill_stale_instances(project_path: Path):
@@ -107,26 +82,9 @@ def _kill_stale_instances(project_path: Path):
 
 
 def _build_subscriptions(project_path: Path) -> list[str]:
-    """Build subscription keys from project config for event server registration."""
-    subs: list[str] = []
-    try:
-        from modastack.config import ProjectConfig
-        pc = ProjectConfig.from_file(project_path)
-        if pc.github_repo:
-            subs.append(pc.github_repo)
-        if pc.slack_workspace_id and pc.slack_channel:
-            subs.append(f"slack:{pc.slack_workspace_id}:{pc.slack_channel}")
-        elif pc.slack_workspace_id:
-            log.warning("slack.workspace_id set but no slack.channel — "
-                        "Slack events will not be routed to this manager. "
-                        "Set slack.channel in .modastack/config.yaml.")
-        if pc.linear_team and pc.task_tracking == "linear":
-            subs.append(f"linear:{pc.linear_team}")
-    except (FileNotFoundError, Exception) as e:
-        log.warning(f"Could not read project config for subscriptions: {e}")
-    if not subs:
-        subs.append(project_path.name)
-    return subs
+    """Backward compat — delegates to modastack.events.subscriptions."""
+    from modastack.events.subscriptions import build_subscriptions
+    return build_subscriptions(project_path)
 
 
 def run(project_path: Path | None = None, **kwargs):
