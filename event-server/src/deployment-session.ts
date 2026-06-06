@@ -1,22 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
+import type { NormalizedEvent } from "./core";
 
 interface Env {
 	EVENTS: KVNamespace;
 }
 
-interface StoredEvent {
-	seq: number;
-	id: string;
-	source: string;
-	type: string;
-	timestamp: string;
-	repo?: string;
-	team_key?: string;
-	workspace?: string;
-	payload: Record<string, unknown>;
-}
+type StoredEvent = NormalizedEvent & { seq: number };
 
-const EVENT_BUFFER_TTL = 48 * 60 * 60; // 48 hours in seconds
+const EVENT_BUFFER_TTL = 48 * 60 * 60;
 
 export class DeploymentSession extends DurableObject<Env> {
 	private deploymentId: string = "";
@@ -42,7 +33,7 @@ export class DeploymentSession extends DurableObject<Env> {
 	}
 
 	private async handleInit(request: Request): Promise<Response> {
-		const body = await request.json() as { deployment_id: string; subscriptions: string[] };
+		const body = (await request.json()) as { deployment_id: string; subscriptions: string[] };
 		this.deploymentId = body.deployment_id;
 		await this.ctx.storage.put("deployment_id", body.deployment_id);
 		await this.ctx.storage.put("subscriptions", body.subscriptions);
@@ -50,10 +41,10 @@ export class DeploymentSession extends DurableObject<Env> {
 	}
 
 	private async handleIncomingEvent(request: Request): Promise<Response> {
-		const event = await request.json() as Record<string, unknown>;
+		const event = (await request.json()) as NormalizedEvent;
 
 		if (!this.deploymentId) {
-			this.deploymentId = (await this.ctx.storage.get("deployment_id")) as string || "";
+			this.deploymentId = ((await this.ctx.storage.get("deployment_id")) as string) || "";
 		}
 
 		const savedSeq = (await this.ctx.storage.get("next_seq")) as number | undefined;
@@ -64,23 +55,11 @@ export class DeploymentSession extends DurableObject<Env> {
 		const seq = this.nextSeq++;
 		await this.ctx.storage.put("next_seq", this.nextSeq);
 
-		const storedEvent: StoredEvent = {
-			seq,
-			id: event.id as string,
-			source: event.source as string,
-			type: event.type as string,
-			timestamp: event.timestamp as string,
-			repo: event.repo as string | undefined,
-			team_key: event.team_key as string | undefined,
-			workspace: event.workspace as string | undefined,
-			payload: event.payload as Record<string, unknown>,
-		};
+		const storedEvent: StoredEvent = { ...event, seq };
 
-		await this.env.EVENTS.put(
-			`events:${this.deploymentId}:${seq}`,
-			JSON.stringify(storedEvent),
-			{ expirationTtl: EVENT_BUFFER_TTL },
-		);
+		await this.env.EVENTS.put(`events:${this.deploymentId}:${seq}`, JSON.stringify(storedEvent), {
+			expirationTtl: EVENT_BUFFER_TTL,
+		});
 
 		const message = JSON.stringify({ type: "event", data: storedEvent });
 		for (const ws of this.ctx.getWebSockets()) {
@@ -96,7 +75,7 @@ export class DeploymentSession extends DurableObject<Env> {
 
 	private async handleWebSocketUpgrade(request: Request): Promise<Response> {
 		if (!this.deploymentId) {
-			this.deploymentId = (await this.ctx.storage.get("deployment_id")) as string || "";
+			this.deploymentId = ((await this.ctx.storage.get("deployment_id")) as string) || "";
 		}
 
 		const savedSeq = (await this.ctx.storage.get("next_seq")) as number | undefined;
@@ -116,11 +95,13 @@ export class DeploymentSession extends DurableObject<Env> {
 			this.replayEvents(server, lastSeen);
 		}
 
-		server.send(JSON.stringify({
-			type: "connected",
-			deployment_id: this.deploymentId,
-			next_seq: this.nextSeq,
-		}));
+		server.send(
+			JSON.stringify({
+				type: "connected",
+				deployment_id: this.deploymentId,
+				next_seq: this.nextSeq,
+			}),
+		);
 
 		return new Response(null, { status: 101, webSocket: client });
 	}

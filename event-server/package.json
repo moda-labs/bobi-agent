@@ -6,11 +6,18 @@
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
+		"build:local": "esbuild src/local.ts --bundle --platform=node --target=node20 --outfile=dist/local.js --packages=external",
+		"start:local": "node dist/local.js",
 		"test": "vitest",
 		"cf-typegen": "wrangler types"
 	},
+	"dependencies": {
+		"ws": "^8.18.0"
+	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.12.4",
+		"@types/ws": "^8.5.0",
+		"esbuild": "^0.25.0",
 		"typescript": "^5.5.2",
 		"vitest": "~3.2.0",
 		"wrangler": "^4.95.0"
