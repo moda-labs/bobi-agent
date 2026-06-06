@@ -1,12 +1,12 @@
-"""Event consumer — thin orchestrator.
+"""Event consumer — project lead orchestrator.
 
 Three components:
-1. Manager session (Claude Code via Agent SDK)
+1. Lead session (Claude Code via Agent SDK)
 2. Event client (WebSocket to event server → pushes to queue)
-3. Drain loop (batches queued events → injects into manager)
+3. Drain loop (batches queued events → injects into lead)
 
-The manager handles all response routing (Slack replies, etc.) using
-its own tools. The consumer never touches transport-specific logic.
+The lead handles event processing, workflow dispatch, and agent
+management. All human communication goes through the assistant.
 """
 
 import json
@@ -21,7 +21,6 @@ from pathlib import Path
 import truststore
 truststore.inject_into_ssl()
 
-from modastack.manager.events.slack_responder import _markdown_to_slack
 from modastack.manager.session import (
     ManagerSession, set_default_session,
 )
@@ -30,28 +29,6 @@ log = logging.getLogger(__name__)
 
 HEALTH_CHECK_INTERVAL = 30
 DRAIN_INTERVAL = 2
-
-
-def _post_dm(token: str, channel: str, text: str) -> None:
-    """Post a manager text response to the configured Slack DM channel."""
-    if not text.strip():
-        return
-    text = _markdown_to_slack(text)
-    payload = json.dumps({"channel": channel, "text": text}).encode()
-    try:
-        req = urllib.request.Request(
-            "https://slack.com/api/chat.postMessage",
-            data=payload,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read())
-        if result.get("ok"):
-            log.info(f"Slack reply sent to {channel}")
-        else:
-            log.warning(f"Slack DM error: {result.get('error')}")
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
-        log.warning(f"Slack DM failed: {e}")
 
 
 
@@ -133,7 +110,7 @@ def run(project_path: Path | None = None, **kwargs):
     """Start modastack for a single project."""
     import atexit
     import signal
-    from modastack.config import LocalConfig, resolve_slack_identity
+    from modastack.config import LocalConfig
 
     if project_path is None:
         raise RuntimeError("project_path is required — run from a project with .modastack/config.yaml")
@@ -168,19 +145,8 @@ def run(project_path: Path | None = None, **kwargs):
 
     signal.signal(signal.SIGTERM, _handle_term)
 
-    # Resolve Slack identity from bot token + operator email
-    slack_identity = resolve_slack_identity(local.slack_bot_token, local.operator_email)
-    dm_token = local.slack_bot_token
-    dm_channel = slack_identity.dm_channel
-    if dm_channel:
-        log.info(f"Slack identity resolved: user={slack_identity.user_id} dm={dm_channel}")
-
     session = ManagerSession(project_path=project_path)
     set_default_session(session)
-
-    if dm_channel and dm_token:
-        session.set_response_callback(lambda t: _post_dm(dm_token, dm_channel, t))
-        log.info(f"Streaming all manager output to Slack DM {dm_channel}")
 
     if not session.start_or_resume():
         log.error("Failed to start manager session")
@@ -285,9 +251,6 @@ def run(project_path: Path | None = None, **kwargs):
     dashboard_thread.start()
     (state_dir / "dashboard.port").write_text(str(dashboard_port))
     log.info(f"Dashboard started on http://localhost:{dashboard_port}")
-
-    if dm_token and dm_channel:
-        _post_dm(dm_token, dm_channel, f"Modastack started for {project_path.name}.")
 
     log.info(f"Modastack running for {project_path.name}")
 

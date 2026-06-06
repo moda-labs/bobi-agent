@@ -84,11 +84,6 @@ def test_local_config_load(tmp_path):
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir()
     (config_dir / "local.yaml").write_text(dedent("""
-        operator:
-          name: test
-          email: test@test.com
-        slack:
-          bot_token: xoxb-test
         event_server:
           deployment_id: abc
           api_key: moda_test
@@ -97,9 +92,6 @@ def test_local_config_load(tmp_path):
 
     local = LocalConfig.load(tmp_path)
 
-    assert local.operator_name == "test"
-    assert local.operator_email == "test@test.com"
-    assert local.slack_bot_token == "xoxb-test"
     assert local.event_server_deployment_id == "abc"
     assert local.event_server_api_key == "moda_test"
     assert local.dashboard_port == 9000
@@ -108,8 +100,6 @@ def test_local_config_load(tmp_path):
 def test_local_config_defaults_when_missing(tmp_path):
     local = LocalConfig.load(tmp_path)
 
-    assert local.operator_name == ""
-    assert local.slack_bot_token == ""
     assert local.event_server_deployment_id == ""
     assert local.dashboard_port == 8095
 
@@ -133,13 +123,11 @@ def test_local_config_save_roundtrip(tmp_path):
     config_dir.mkdir()
 
     local = LocalConfig(
-        operator_name="test",
-        operator_email="test@test.com",
-        slack_bot_token="xoxb-test",
+        event_server_deployment_id="abc",
+        event_server_api_key="moda_test",
     )
     local.save(tmp_path)
 
     loaded = LocalConfig.load(tmp_path)
-    assert loaded.operator_name == "test"
-    assert loaded.operator_email == "test@test.com"
-    assert loaded.slack_bot_token == "xoxb-test"
+    assert loaded.event_server_deployment_id == "abc"
+    assert loaded.event_server_api_key == "moda_test"

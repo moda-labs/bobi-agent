@@ -3,21 +3,21 @@
 import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from textwrap import dedent
 
 from click.testing import CliRunner
 
 from modastack.cli import main
-from modastack.config import LocalConfig
 
 
-def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
-    """Create a repo with local.yaml and point the CLI at it."""
+def _setup_project(tmp_path, monkeypatch, bot_token="xoxb-test"):
+    """Create a project dir and set SLACK_BOT_TOKEN env var."""
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir(parents=True)
     (config_dir / "config.yaml").write_text("task_tracking:\n  project: TEST\n")
-    local = LocalConfig(slack_bot_token=slack_bot_token)
-    local.save(tmp_path)
+    if bot_token:
+        monkeypatch.setenv("SLACK_BOT_TOKEN", bot_token)
+    else:
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     monkeypatch.chdir(tmp_path)
 
 
@@ -68,14 +68,14 @@ class TestSlackReplyCommand:
         assert body["thread_ts"] == "1780165787.159589"
 
     def test_missing_token(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch, slack_bot_token="")
+        _setup_project(tmp_path, monkeypatch, bot_token="")
 
         runner = CliRunner()
         result = runner.invoke(main, [
             "slack-reply", "-w", "T_NONE", "-c", "D456", "Hello",
         ])
         assert result.exit_code != 0
-        assert "No bot token" in result.output
+        assert "SLACK_BOT_TOKEN" in result.output
 
     @patch("urllib.request.urlopen")
     def test_markdown_conversion(self, mock_urlopen, tmp_path, monkeypatch):

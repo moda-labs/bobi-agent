@@ -67,33 +67,6 @@ class TestSlackAdapter:
 
 class TestBuildAdapter:
 
-    @patch("modastack.config.resolve_slack_identity")
-    @patch("modastack.config.LocalConfig")
-    @patch("modastack.sdk.get_project_root")
-    def test_builds_slack_when_configured(self, mock_root, mock_local, mock_resolve):
-        mock_root.return_value = Path("/tmp/repo")
-        mock_local.load.return_value = MagicMock(
-            slack_bot_token="xoxb-test", operator_email="test@test.com",
-        )
-        mock_resolve.return_value = MagicMock(user_id="U123", dm_channel="C123")
-
-        adapter = build_adapter()
-        assert isinstance(adapter, SlackAdapter)
-
-    @patch("modastack.config.LocalConfig")
-    @patch("modastack.sdk.get_project_root")
-    def test_returns_null_when_no_token(self, mock_root, mock_local):
-        mock_root.return_value = Path("/tmp/repo")
-        mock_local.load.return_value = MagicMock(
-            slack_bot_token="", operator_email="",
-        )
-
-        adapter = build_adapter()
-        assert isinstance(adapter, NullAdapter)
-
-    @patch("modastack.sdk.get_project_root")
-    def test_returns_null_when_no_repo(self, mock_root):
-        mock_root.return_value = None
-
+    def test_always_returns_null_adapter(self):
         adapter = build_adapter()
         assert isinstance(adapter, NullAdapter)
