@@ -139,9 +139,6 @@ export function subscriptionKeysForEvent(event: NormalizedEvent): string[] {
 	if (event.team_key) keys.push(`linear:${event.team_key}`);
 	if (event.workspace) {
 		keys.push(`slack:${event.workspace}`);
-		if (event.channel) {
-			keys.push(`slack:${event.workspace}:${event.channel}`);
-		}
 	}
 	return keys;
 }

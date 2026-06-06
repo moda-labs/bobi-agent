@@ -30,16 +30,15 @@ class TestBuildSubscriptions:
         subs = build_subscriptions(tmp_path)
         assert "github:org/myrepo" in subs
 
-    def test_slack_channel_scoped(self, tmp_path):
+    def test_slack_workspace(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text(
             "github:\n  repo: org/myrepo\n"
-            "slack:\n  workspace_id: T123\n  channel: C456\n"
+            "slack:\n  workspace_id: T123\n"
         )
         subs = build_subscriptions(tmp_path)
-        assert "slack:T123:C456" in subs
-        assert "slack:T123" not in subs
+        assert "slack:T123" in subs
 
     def test_linear_team(self, tmp_path):
         config_dir = tmp_path / ".modastack"

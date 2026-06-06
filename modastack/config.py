@@ -54,7 +54,6 @@ class Config:
     # task tracking
     task_tracking: str = "github-issues"
     max_parallel: int = 2
-    test_command: str = ""
     context: dict = field(default_factory=dict)
 
     # github
@@ -67,7 +66,6 @@ class Config:
 
     # slack
     slack_workspace_id: str = ""
-    slack_channel: str = ""
     slack_bot_token: str = ""
 
     # event server
@@ -98,14 +96,12 @@ class Config:
             path=project_path,
             task_tracking=raw.get("task_tracking", {}).get("system", "github-issues"),
             max_parallel=agent.get("max_parallel", 2),
-            test_command=verify.get("test_command", ""),
             context=raw.get("context", {}),
             github_repo=github.get("repo", ""),
             linear_team=linear.get("team", ""),
             linear_project=linear.get("project", ""),
             linear_api_key=linear.get("api_key", ""),
             slack_workspace_id=slack.get("workspace_id", ""),
-            slack_channel=slack.get("channel", ""),
             slack_bot_token=slack.get("bot_token", ""),
             event_server_url=event_server.get("url", ""),
         )

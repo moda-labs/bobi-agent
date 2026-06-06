@@ -229,25 +229,13 @@ describe("subscriptionKeysForEvent", () => {
 		expect(keys).toEqual(["linear:PROJ"]);
 	});
 
-	it("returns workspace and channel keys for slack events", () => {
+	it("returns workspace key for slack events", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "slack",
 			type: "slack.mention",
 			workspace: "T123",
 			channel: "C456",
-			timestamp: "",
-			payload: {},
-		});
-		expect(keys).toEqual(["slack:T123", "slack:T123:C456"]);
-	});
-
-	it("returns only workspace key when no channel", () => {
-		const keys = subscriptionKeysForEvent({
-			id: "1",
-			source: "slack",
-			type: "slack.dm",
-			workspace: "T123",
 			timestamp: "",
 			payload: {},
 		});

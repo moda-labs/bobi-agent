@@ -29,7 +29,6 @@ def test_project_config_loads(tmp_path):
     assert config.task_tracking == "github-issues"
     assert config.github_repo == "myorg/myrepo"
     assert config.max_parallel == 3
-    assert config.test_command == "pytest -x"
     assert config.context["github_org"] == "myorg"
 
 

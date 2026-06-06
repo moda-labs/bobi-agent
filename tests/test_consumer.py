@@ -81,19 +81,7 @@ class TestDrainLoop:
 
 class TestBuildSubscriptions:
 
-    def test_slack_channel_scoped(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
-            "github:\n  repo: org/myrepo\n"
-            "slack:\n  workspace_id: T123\n  channel: C456\n"
-        )
-        from modastack.events.subscriptions import build_subscriptions as _build_subscriptions
-        subs = _build_subscriptions(tmp_path)
-        assert "slack:T123:C456" in subs
-        assert "slack:T123" not in subs
-
-    def test_slack_workspace_only_warns(self, tmp_path, caplog):
+    def test_slack_workspace(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text(
@@ -101,11 +89,8 @@ class TestBuildSubscriptions:
             "slack:\n  workspace_id: T123\n"
         )
         from modastack.events.subscriptions import build_subscriptions as _build_subscriptions
-        import logging
-        with caplog.at_level(logging.WARNING):
-            subs = _build_subscriptions(tmp_path)
-        assert not any("slack:" in s for s in subs)
-        assert "slack.channel" in caplog.text
+        subs = _build_subscriptions(tmp_path)
+        assert "slack:T123" in subs
 
     def test_no_slack_config(self, tmp_path):
         config_dir = tmp_path / ".modastack"

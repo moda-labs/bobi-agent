@@ -32,10 +32,6 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
         lines.append(f"  tracker     {cfg.task_tracking}" + (f" ({tracker_detail})" if tracker_detail else ""))
         if cfg.github_repo:
             lines.append(f"  github      {cfg.github_repo}")
-        if cfg.slack_channel:
-            lines.append(f"  slack       #{cfg.slack_channel}")
-        if cfg.test_command:
-            lines.append(f"  tests       {cfg.test_command}")
         if cfg.event_server_url:
             label = "remote" if not cfg.event_server_url.startswith("http://localhost") else "local"
             lines.append(f"  event server  {cfg.event_server_url} ({label})")
