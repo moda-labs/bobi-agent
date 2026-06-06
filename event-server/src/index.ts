@@ -135,6 +135,12 @@ async function handleSlackWebhook(request: Request, env: Env): Promise<Response>
 		return new Response("Invalid JSON", { status: 400 });
 	}
 
+	// URL verification must be handled before signature check — Slack's
+	// url_verification request does not include signing headers.
+	if (payload.type === "url_verification") {
+		return Response.json({ challenge: payload.challenge });
+	}
+
 	if (env.SLACK_SIGNING_SECRET) {
 		const timestamp = request.headers.get("x-slack-request-timestamp") || "";
 		const signature = request.headers.get("x-slack-signature") || "";

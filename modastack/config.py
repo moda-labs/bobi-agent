@@ -76,7 +76,6 @@ class LocalConfig:
     event_server_api_key: str = ""
 
     credentials: dict[str, str] = field(default_factory=dict)
-    dashboard_port: int = 8095
 
     @classmethod
     def load(cls, project_path: Path) -> "LocalConfig":
@@ -94,7 +93,6 @@ class LocalConfig:
             event_server_deployment_id=event_server.get("deployment_id", ""),
             event_server_api_key=event_server.get("api_key", ""),
             credentials=raw.get("credentials", {}),
-            dashboard_port=raw.get("dashboard_port", 8095),
         )
 
     def save(self, project_path: Path) -> None:
@@ -116,8 +114,6 @@ class LocalConfig:
             }
         if self.credentials:
             data["credentials"] = self.credentials
-        if self.dashboard_port != 8095:
-            data["dashboard_port"] = self.dashboard_port
         local_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
 
     def slack_token_for(self, workspace_id: str = "") -> str:

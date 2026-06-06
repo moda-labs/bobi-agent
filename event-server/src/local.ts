@@ -160,6 +160,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			return json(res, { error: "invalid JSON" }, 400);
 		}
 
+		if ((payload as Record<string, unknown>).type === "url_verification") {
+			return json(res, { challenge: (payload as Record<string, unknown>).challenge });
+		}
+
 		if (slackSigningSecret) {
 			const timestamp = (req.headers["x-slack-request-timestamp"] as string) || "";
 			const signature = (req.headers["x-slack-signature"] as string) || "";

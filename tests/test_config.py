@@ -92,7 +92,6 @@ def test_local_config_load(tmp_path):
         event_server:
           deployment_id: abc
           api_key: moda_test
-        dashboard_port: 9000
     """))
 
     local = LocalConfig.load(tmp_path)
@@ -102,7 +101,6 @@ def test_local_config_load(tmp_path):
     assert local.slack_bot_token == "xoxb-test"
     assert local.event_server_deployment_id == "abc"
     assert local.event_server_api_key == "moda_test"
-    assert local.dashboard_port == 9000
 
 
 def test_local_config_defaults_when_missing(tmp_path):
@@ -111,7 +109,6 @@ def test_local_config_defaults_when_missing(tmp_path):
     assert local.operator_name == ""
     assert local.slack_bot_token == ""
     assert local.event_server_deployment_id == ""
-    assert local.dashboard_port == 8095
 
 
 def test_project_config_event_server(tmp_path):

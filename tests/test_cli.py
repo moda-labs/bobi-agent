@@ -32,7 +32,7 @@ def test_post_event_posts_to_event_server():
             return False
 
         def read(self):
-            return json.dumps({"delivered_to": 1}).encode()
+            return json.dumps({"delivered_to": 0}).encode()
 
     def fake_urlopen(req, timeout=10):
         captured["url"] = req.full_url

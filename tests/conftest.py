@@ -5,7 +5,6 @@ installation in a temp directory so tests never touch production
 config, Slack channels, event servers, or session state.
 """
 
-import socket
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,13 +18,6 @@ class ModastackInstall:
     repo_path: Path
     state_dir: Path
     sessions_dir: Path
-    dashboard_port: int
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 @pytest.fixture
@@ -44,8 +36,6 @@ def modastack_install(tmp_path, monkeypatch):
     for d in [config_dir, state_dir, sessions_dir, config_dir / "workflows"]:
         d.mkdir(parents=True)
 
-    dashboard_port = _free_port()
-
     (config_dir / "config.yaml").write_text(yaml.dump({
         "task_tracking": {"system": "github-issues", "project": "TEST"},
         "github": {"repo": "test-org/test-repo"},
@@ -57,7 +47,6 @@ def modastack_install(tmp_path, monkeypatch):
         "operator": {"name": "test", "email": "test@test.com"},
         "slack": {"bot_token": "", "dm_channel": ""},
         "event_server": {"url": "", "deployment_id": "", "api_key": ""},
-        "dashboard_port": dashboard_port,
     }))
 
     creds_path = tmp_path / "credentials.yaml"
@@ -70,5 +59,4 @@ def modastack_install(tmp_path, monkeypatch):
         repo_path=repo_path,
         state_dir=state_dir,
         sessions_dir=sessions_dir,
-        dashboard_port=dashboard_port,
     )

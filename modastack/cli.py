@@ -190,13 +190,14 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
             pass
     atexit.register(_cleanup)
 
+    log = logging.getLogger(__name__)
+
     def _handle_term(signum, frame):
         log.info("Received SIGTERM — shutting down")
         _cleanup()
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, _handle_term)
 
-    log = logging.getLogger(__name__)
     log.info(f"Modastack starting for {project_path.name} (role={role})")
 
     if subscribe:
@@ -229,8 +230,8 @@ def start(foreground, fresh, non_interactive, config_path):
     """Start modastack for the project in the current directory.
 
     Reads .modastack/agent.yaml (or --config) to determine which role,
-    subscriptions, and capabilities to start with. Falls back to the
-    If no agent.yaml exists, a default config is generated from project settings.
+    subscriptions, and capabilities to start with. If no agent.yaml exists,
+    a default config is generated from project settings.
 
     Usage:
         cd myrepo && modastack start              # daemonize
@@ -369,9 +370,9 @@ def _register_event_server(url: str, project_path: Path, rc: "ProjectConfig") ->
     """Register with the event server and return (deployment_id, api_key)."""
     import urllib.request
     import urllib.error
-    from .manager.events.consumer import _build_subscriptions
+    from modastack.events.subscriptions import build_subscriptions
     try:
-        subs = _build_subscriptions(project_path)
+        subs = build_subscriptions(project_path)
         payload = json.dumps({
             "name": project_path.name,
             "subscriptions": subs,
@@ -1699,7 +1700,7 @@ def _post_event(event_type: str, data: dict) -> bool:
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read())
-        return result.get("delivered_to", 0) > 0
+        return True
     except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError) as e:
         logging.getLogger(__name__).warning(f"Failed to post event {event_type}: {e}")
         return False
