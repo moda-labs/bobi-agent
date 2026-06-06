@@ -48,6 +48,8 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
             lines.append(f"  event server  {es_url} ({label})")
         else:
             lines.append(f"  event server  not configured")
+        if local.operator_name:
+            lines.append(f"  operator    {local.operator_name}")
         dashboard_port = local.dashboard_port or 8095
         lines.append(f"  dashboard   http://localhost:{dashboard_port}")
     except Exception:
@@ -227,7 +229,7 @@ def start(foreground, fresh, non_interactive):
 
 
 def _ensure_config(non_interactive: bool) -> None:
-    """Ensure per-project local config exists, auto-registering with event server."""
+    """Ensure per-project local config exists, running interactive setup if needed."""
     project_path = _detect_project_root()
     if not project_path:
         return
@@ -238,6 +240,34 @@ def _ensure_config(non_interactive: bool) -> None:
 
     from .config import LocalConfig, ProjectConfig
     local = LocalConfig()
+
+    if not non_interactive:
+        click.echo("First-time setup — configuring operator config.\n")
+        try:
+            name = click.prompt("  Your name", default="", show_default=False)
+            if name:
+                local.operator_name = name
+            email = click.prompt("  Your email", default="", show_default=False)
+            if email:
+                local.operator_email = email
+
+            token = click.prompt("  Slack bot token (or enter to skip)", default="", show_default=False)
+            if token:
+                local.slack_bot_token = token
+
+            if local.slack_bot_token and email:
+                from .config import resolve_slack_identity
+                click.echo("  Verifying Slack connection...")
+                identity = resolve_slack_identity(local.slack_bot_token, email)
+                if identity.user_id:
+                    click.echo(f"  Slack account found: {identity.user_id}")
+                else:
+                    click.echo(f"  No Slack user found for {email}")
+
+        except (EOFError, click.Abort):
+            click.echo("\nSetup cancelled.")
+            raise SystemExit(1)
+        click.echo()
 
     # Auto-register with event server if URL is configured in project config
     try:
@@ -489,10 +519,14 @@ def slack_reply(text, workspace, channel, thread):
     import urllib.error
     import urllib.request
 
-    # TODO: Route through event server POST /slack/send once available (Phase 2)
-    token = os.environ.get("SLACK_BOT_TOKEN", "")
+    token = ""
+    project_path = _detect_project_root()
+    if project_path:
+        from .config import LocalConfig
+        local = LocalConfig.load(project_path)
+        token = local.slack_bot_token
     if not token:
-        click.echo("No SLACK_BOT_TOKEN set. Slack replies will route through the event server in a future release.", err=True)
+        click.echo(f"No bot token for workspace {workspace}", err=True)
         sys.exit(1)
 
     # The manager invokes this command through a shell, where newlines in the

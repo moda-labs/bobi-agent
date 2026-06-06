@@ -7,7 +7,6 @@ Pushes normalized events to a thread-safe queue for the consumer to drain.
 
 import json
 import logging
-import os
 import re
 import ssl
 import threading
@@ -319,7 +318,15 @@ def _normalize_linear(event_type: str, payload: dict) -> dict | None:
 
 def _normalize_slack(event_type: str, payload: dict, workspace: str) -> dict | None:
     user_id = payload.get("user_id", "")
-    token = os.environ.get("SLACK_BOT_TOKEN", "")
+    token = ""
+    try:
+        from modastack.config import LocalConfig
+        from modastack.sdk import get_project_root
+        root = get_project_root()
+        if root:
+            token = LocalConfig.load(root).slack_bot_token
+    except Exception:
+        pass
     user_name = _resolve_slack_user(token, user_id)
     text = payload.get("text", "")
     if event_type == "slack.mention":
