@@ -32,15 +32,14 @@ def _check_project_config() -> CheckResult:
     from modastack.sdk import get_project_root
     root = get_project_root()
     if not root:
-        return CheckResult("Project config", ok=False,
-                           detail="not inside a modastack project",
-                           hint="Run from a directory with .modastack/config.yaml")
-    config_path = root / ".modastack" / "config.yaml"
-    if config_path.exists():
-        return CheckResult("Project config", ok=True, detail=str(config_path))
-    return CheckResult("Project config", ok=False,
-                       detail="missing .modastack/config.yaml",
-                       hint="Run `modastack init` to create it")
+        return CheckResult("Project", ok=False,
+                           detail="project root not set",
+                           hint="Run `modastack start <agent>` from a project directory")
+    modastack_dir = root / ".modastack"
+    if modastack_dir.is_dir():
+        return CheckResult("Project", ok=True, detail=str(root))
+    return CheckResult("Project", ok=True,
+                       detail=f"{root} (no .modastack/ yet — created on first start)")
 
 
 def _check_local_config() -> CheckResult:

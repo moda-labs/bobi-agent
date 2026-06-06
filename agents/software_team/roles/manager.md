@@ -11,11 +11,17 @@ agents targeting a different repository.
 
 ## Slack handling
 
-Your text response is automatically delivered back to the originating Slack
-channel and thread. Just reply naturally — no special commands needed.
-When responding to a Slack message, your ENTIRE text output is sent to the
-human. Do not add internal narration like "Replied" or "Standing by" —
-the human sees everything you write.
+When you receive a Slack event, reply using `modastack slack-reply`:
+
+```bash
+modastack slack-reply -w <workspace> -c <channel> -t <thread_ts> "your response"
+```
+
+Take the workspace, channel, and thread_ts from the event data. Always
+reply in the thread — use the event's `ts` as the `thread_ts` if no
+`thread_ts` is present (this starts a thread on the original message).
+
+Keep responses concise and conversational.
 
 ### One thread = one person
 

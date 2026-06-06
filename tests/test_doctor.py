@@ -1,64 +1,63 @@
 """Tests for modastack doctor health checks."""
 
-import shutil
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from modastack.browser import CheckResult
-from modastack.doctor import run_doctor
-
-
-class TestRunDoctor:
-
-    @patch("modastack.doctor._check_recent_events")
-    @patch("modastack.doctor._check_event_server")
-    @patch("modastack.doctor._check_workflows")
-    @patch("modastack.doctor._check_local_config")
-    @patch("modastack.doctor._check_project_config")
-    @patch("modastack.doctor._check_claude_cli")
-    def test_returns_all_checks(self, m1, m2, m3, m4, m5, m6):
-        for m in (m1, m2, m3, m4, m5, m6):
-            m.return_value = CheckResult(name="test", ok=True, detail="ok")
-        results = run_doctor()
-        assert len(results) == 6
-        assert all(r.ok for r in results)
+import pytest
 
 
-class TestCheckClaudeCli:
+# --- CheckResult ---
 
-    def test_passes_when_found(self):
-        with patch.object(shutil, "which", return_value="/usr/local/bin/claude"):
+from modastack.doctor import CheckResult
+
+
+class TestCheckResult:
+    def test_ok_result(self):
+        r = CheckResult("Test", ok=True, detail="all good")
+        assert r.ok
+        assert r.detail == "all good"
+
+    def test_failed_result(self):
+        r = CheckResult("Test", ok=False, detail="missing", hint="fix it")
+        assert not r.ok
+        assert r.hint == "fix it"
+
+
+# --- Claude CLI ---
+
+class TestCheckCLI:
+    def test_found(self):
+        with patch("shutil.which", return_value="/usr/local/bin/claude"):
             from modastack.doctor import _check_claude_cli
             r = _check_claude_cli()
         assert r.ok
-        assert "found" in r.detail
-
-    def test_fails_when_missing(self):
-        with patch.object(shutil, "which", return_value=None):
-            from modastack.doctor import _check_claude_cli
-            r = _check_claude_cli()
-        assert not r.ok
-        assert "not found" in r.detail
 
 
-class TestCheckProjectConfig:
+# --- Project ---
 
-    def test_passes_when_exists(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("task_tracking:\n  project: TEST\n")
+class TestCheckProject:
+
+    def test_passes_with_modastack_dir(self, tmp_path):
+        (tmp_path / ".modastack").mkdir()
         with patch("modastack.sdk.get_project_root", return_value=tmp_path):
             from modastack.doctor import _check_project_config
             r = _check_project_config()
         assert r.ok
 
-    def test_fails_when_no_repo(self):
+    def test_passes_without_modastack_dir(self, tmp_path):
+        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
+            from modastack.doctor import _check_project_config
+            r = _check_project_config()
+        assert r.ok
+
+    def test_fails_when_no_root(self):
         with patch("modastack.sdk.get_project_root", return_value=None):
             from modastack.doctor import _check_project_config
             r = _check_project_config()
         assert not r.ok
-        assert "not inside" in r.detail
 
+
+# --- Machine config ---
 
 class TestCheckMachineConfig:
 

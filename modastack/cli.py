@@ -21,40 +21,55 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     """Print a startup summary with environment info."""
     from .config import Config
 
+    W = 16  # column width for labels
     lines = []
     lines.append(f"modastack v{__version__}")
-    lines.append(f"  project     {project_path.name} ({project_path})")
-    lines.append(f"  pid         {pid}")
+    lines.append(f"  {'project':<{W}}{project_path.name} ({project_path})")
+    lines.append(f"  {'pid':<{W}}{pid}")
 
     try:
         cfg = Config.load(project_path)
         if cfg.event_server_url:
             label = "remote" if not cfg.event_server_url.startswith("http://localhost") else "local"
-            lines.append(f"  event server  {cfg.event_server_url} ({label})")
+            lines.append(f"  {'event server':<{W}}{cfg.event_server_url} ({label})")
         else:
-            lines.append(f"  event server  not configured")
+            lines.append(f"  {'event server':<{W}}not configured")
     except Exception:
         pass
 
-    wf_dir = project_path / ".modastack" / "workflows"
-    if wf_dir.exists():
-        wf_names = sorted(p.stem for p in wf_dir.glob("*.yaml"))
+    # Workflows from agent pack + project
+    try:
+        import logging as _lg
+        _lg.getLogger("modastack.workflow").setLevel(_lg.WARNING)
+        from modastack.workflow.triggers import WorkflowDispatcher
+        agent_config = _load_agent_config(project_path)
+        agent_name = (agent_config or {}).get("agent")
+        dispatcher = WorkflowDispatcher()
+        dispatcher.load_all_workflows(project_path, agent_name=agent_name)
+        wf_names = sorted(set(wf.name for wf, _ in dispatcher.workflows))
         if wf_names:
-            lines.append(f"  workflows   {', '.join(wf_names)}")
+            lines.append(f"  {'workflows':<{W}}{', '.join(wf_names)}")
+    except Exception:
+        pass
 
-    mon_file = project_path / ".modastack" / "monitors.yaml"
-    if mon_file.exists():
-        try:
-            import yaml
-            raw = yaml.safe_load(mon_file.read_text()) or {}
-            monitors = raw.get("monitors", [])
-            active = [m["name"] for m in monitors if isinstance(m, dict) and m.get("enabled", True)]
-            if active:
-                lines.append(f"  monitors    {', '.join(active)}")
-        except Exception:
-            pass
+    # Monitors from agent pack
+    try:
+        from modastack.monitors.registry import MonitorRegistry
+        if not agent_name:
+            from modastack.prompts import AGENTS_DIR
+            if AGENTS_DIR.is_dir():
+                for pack in AGENTS_DIR.iterdir():
+                    if pack.is_dir() and (pack / "monitors").is_dir():
+                        agent_name = pack.name
+                        break
+        registry = MonitorRegistry.load(agent_name=agent_name)
+        mon_names = sorted(m.name for m in registry.all_monitors())
+        if mon_names:
+            lines.append(f"  {'monitors':<{W}}{', '.join(mon_names)}")
+    except Exception:
+        pass
 
-    lines.append(f"  logs        {log_file}")
+    lines.append(f"  {'logs':<{W}}{log_file}")
 
     click.echo("\n".join(lines))
 
@@ -1297,7 +1312,17 @@ def monitor_list():
     """
     from .monitors.registry import MonitorRegistry
 
-    registry = MonitorRegistry.load()
+    project_path = _detect_project_root()
+    agent_config = _load_agent_config(project_path)
+    agent_name = (agent_config or {}).get("agent")
+    if not agent_name:
+        from modastack.prompts import AGENTS_DIR
+        if AGENTS_DIR.is_dir():
+            for pack in AGENTS_DIR.iterdir():
+                if pack.is_dir() and (pack / "monitors").is_dir():
+                    agent_name = pack.name
+                    break
+    registry = MonitorRegistry.load(agent_name=agent_name)
     monitors = sorted(registry.all_monitors(), key=lambda m: (m.name, m.project))
     if not monitors:
         click.echo("No monitors found.")
