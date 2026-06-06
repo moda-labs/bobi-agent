@@ -1,30 +1,30 @@
-"""Resolve agent prompts: built-in defaults + repo overrides."""
+"""Resolve agent prompts: base + role + project override."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
-from . import AGENT_BASE_PATH, AGENTS_DIR, MANAGER_BASE_PATH
+from . import BASE_PATH, AGENTS_DIR
 
 log = logging.getLogger(__name__)
 
 
 def resolve_agent_prompt(
-    agent_name: str,
+    role: str,
     project_path: Path | str,
     interactive: bool = True,
 ) -> str:
-    """Build the full system prompt for an agent.
+    """Build the full prompt for an agent with a given role.
 
-    Resolution: framework base + built-in role + project override.
-    Project override replaces the built-in role if present.
+    Resolution: base.md + agents/{role}.md (built-in) or
+    .modastack/agents/{role}.md (project override replaces built-in).
     """
-    parts = [AGENT_BASE_PATH.read_text()]
+    parts = [BASE_PATH.read_text()]
 
     project = Path(project_path)
-    project_agent = project / ".modastack" / "agents" / f"{agent_name}.md"
-    builtin_agent = AGENTS_DIR / f"{agent_name}.md"
+    project_agent = project / ".modastack" / "agents" / f"{role}.md"
+    builtin_agent = AGENTS_DIR / f"{role}.md"
 
     if project_agent.exists():
         parts.append(project_agent.read_text())
@@ -33,8 +33,8 @@ def resolve_agent_prompt(
 
     if interactive:
         parts.append(
-            "You can use `modastack ask \"question\"` to ask the manager "
-            "for guidance on ambiguous decisions."
+            "You can use `modastack ask \"question\"` to ask for guidance "
+            "on ambiguous decisions."
         )
     else:
         parts.append(
@@ -45,24 +45,23 @@ def resolve_agent_prompt(
     return "\n\n".join(parts)
 
 
-def resolve_manager_prompt(project_path: Path | str) -> str:
-    """Build the full system prompt for a manager agent.
+def build_startup_prompt(
+    role: str,
+    project_path: Path | str,
+) -> str:
+    """Build the startup prompt for a persistent agent.
 
-    Resolution: manager_base.md + manager_engineering.md (if exists)
-    + project .modastack/manager.md (if exists).
+    Includes the role prompt and a list of available workflows.
     """
+    prompt = resolve_agent_prompt(role, project_path, interactive=True)
+    workflows = list_workflows(project_path)
+
     project = Path(project_path)
-    parts = [MANAGER_BASE_PATH.read_text()]
-
-    builtin_role = MANAGER_BASE_PATH.parent / "manager_engineering.md"
-    if builtin_role.exists():
-        parts.append(builtin_role.read_text())
-
-    repo_mgr = project / ".modastack" / "manager.md"
-    if repo_mgr.exists():
-        parts.append(f"## {project.name} policies\n\n" + repo_mgr.read_text())
-
-    return "\n\n".join(parts)
+    return (
+        f"You are a modastack {role} for {project.name}. "
+        f"Act directly using your tools.\n\n{prompt}\n\n"
+        f"## Available workflows\n\n{workflows}"
+    )
 
 
 def list_workflows(project_path: Path | str) -> str:
@@ -104,7 +103,6 @@ def _extract_description(path: Path) -> str:
         text = path.read_text()
     except OSError:
         return ""
-    # Collect the first non-heading paragraph
     lines: list[str] = []
     found_content = False
     for line in text.splitlines():
@@ -118,7 +116,6 @@ def _extract_description(path: Path) -> str:
         found_content = True
         lines.append(stripped)
     paragraph = " ".join(lines)
-    # Take the first sentence
     dot = paragraph.find(". ")
     if dot >= 0:
         return paragraph[: dot + 1]
@@ -130,11 +127,7 @@ def _extract_description(path: Path) -> str:
 
 
 def discover_roles(project_path: Path | str | None = None) -> list[dict]:
-    """List available agent roles from built-in and project tiers.
-
-    Returns a list of dicts: [{"name", "source", "description", "path"}].
-    Project roles override built-in roles with the same name.
-    """
+    """List available agent roles from built-in and project tiers."""
     roles: dict[str, dict] = {}
 
     for md in sorted(AGENTS_DIR.glob("*.md")):

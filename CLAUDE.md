@@ -45,49 +45,46 @@ modastack ask "question"       # ask the manager a question, block until respons
 modastack transcript show <session>  # show session transcript
 modastack transcript search <query>  # search conversation history
 modastack doctor               # system health check
-modastack dashboard            # start the web dashboard
 ```
 
 ## Architecture
 
-Modastack is a generic event-driven agent framework. Events from
-GitHub, Linear, Slack, and other sources flow through a Cloudflare
-event server to a persistent Claude Code manager session. The manager
-receives ALL events and decides what to do — spawn an agent, run a
-structured workflow, or handle it directly.
+Modastack is a generic event-driven agent framework. Every agent is a
+symmetric node — any agent can subscribe to event topics and receive
+events. The framework has no topology opinions. All domain-specific
+behavior comes from role prompts and per-project `.modastack/` configuration.
 
-The framework has no domain opinions. All domain-specific behavior
-(what kind of work to do, how to do it, what workflows to run) comes
-from per-repo `.modastack/` configuration.
+Events flow through a centralized event server (Cloudflare Worker or
+local Node.js) to subscribing agents via WebSocket. The event server
+supports generic topic-based pub/sub (`POST /events/{topic}`) plus
+webhook ingestion for GitHub, Linear, and Slack.
 
 ```
 modastack/                        # Framework (Python package)
 ├── cli.py                        # Click CLI entrypoint
-├── config.py                     # Global + per-repo config loading
-├── session.py                    # Legacy tmux session management
-├── setup.py                      # Repo setup — auto-detection
-├── board_setup.py                # Bootstrap Linear board with workflow states
-├── prompts/                      # Framework base prompts (no domain logic)
-│   ├── manager_base.md           # Event format, Slack threading, agent spawning
-│   ├── agent_base.md             # Handoff mechanics, manager communication
-│   └── resolver.py               # Agent prompt resolution from repo config
-├── manager/                      # Persistent manager + event system
-│   ├── session.py                # Manager SDK session (start, resume, inject)
-│   └── events/
-│       ├── bus.py                # Thread-safe in-process event queue
-│       ├── consumer.py           # Drain bus → write events file → trigger manager
-│       ├── pollers.py            # Background threads: workers (5s), Linear (30s), Slack (10s)
-│       ├── webhook_server.py     # HTTP endpoints: /webhooks/github, /linear, /slack
-│       └── slack_socket.py       # Slack Socket Mode WebSocket client
+├── config.py                     # Per-project config loading
+├── session.py                    # Claude Code SDK session wrapper
+├── subagent.py                   # Agent executor (blocking + detached)
+├── prompts/                      # Agent prompts (no domain logic in framework)
+│   ├── base.md                   # Generic capabilities shared by all agents
+│   ├── agents/                   # Role-specific prompts
+│   │   ├── manager.md            # Engineering manager role
+│   │   └── engineer.md           # Staff engineer role
+│   └── resolver.py               # Prompt resolution: base + role + project override
+├── events/                       # Generic event infrastructure
+│   ├── client.py                 # WebSocket client (connects to event server)
+│   ├── server.py                 # Local event server launcher (Node.js)
+│   ├── drain.py                  # Event queue → session inbox delivery
+│   └── subscriptions.py          # Subscription key builder from project config
 ├── workflow/
 │   ├── orchestrator.py           # DAG executor with deterministic routing
 │   ├── triggers.py               # Workflow discovery, three-tier resolution
-│   └── schema.py                 # WorkflowDef, StepDef (with agent: field), YAML parsing
+│   └── schema.py                 # WorkflowDef, StepDef, YAML parsing
 └── monitors/                     # Background polling to fill webhook gaps
     ├── schema.py                 # Monitor record + interval parsing
     ├── registry.py               # Three-tier load/merge + writes
     ├── checks.py                 # Native check runners (pr_conflicts, stale_prs)
-    └── scheduler.py              # Interval scheduler, dedup, synthetic event injection
+    └── scheduler.py              # Interval scheduler, dedup, event injection
 
 workflows/adhoc.yaml              # Only built-in workflow (generic pass-through)
 monitors/defaults.yaml            # Empty — domain monitors go in repo config

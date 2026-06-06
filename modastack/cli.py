@@ -210,11 +210,15 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
         monitor_scheduler.start()
         log.info("Monitor scheduler started")
 
+    from modastack.prompts.resolver import build_startup_prompt
     from modastack.subagent import spawn_adhoc
+
+    task = config.get("task") or build_startup_prompt(role, project_path)
+
     log.info(f"Modastack running for {project_path.name}")
     spawn_adhoc(
         cwd=str(project_path),
-        task=config.get("task", f"You are a {role} agent. Respond to events and inbox messages."),
+        task=task,
         name=f"moda-{role}-{project_path.name}",
         persistent=persistent,
     )
