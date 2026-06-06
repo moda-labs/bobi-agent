@@ -25,6 +25,7 @@ class ModastackEnv:
     state_dir: Path
     sessions_dir: Path
     workflows_dir: Path
+    machine_config: Path
 
 
 @pytest.fixture(scope="session")
@@ -56,6 +57,9 @@ def modastack_env(tmp_path_factory):
     creds_dir.mkdir(parents=True)
     (creds_dir / "credentials.yaml").write_text("{}")
 
+    machine_config = base / "machine_config.yaml"
+    machine_config.write_text("{}")
+
     subprocess.run(
         ["git", "init"], cwd=str(project_path),
         capture_output=True, check=True,
@@ -65,6 +69,10 @@ def modastack_env(tmp_path_factory):
         cwd=str(project_path), capture_output=True, check=True,
         env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@test.com",
              "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@test.com"},
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/test-org/test-repo.git"],
+        cwd=str(project_path), capture_output=True, check=True,
     )
 
     adhoc_src = PACKAGE_ROOT / "modastack" / "workflow" / "adhoc.yaml"
@@ -98,6 +106,7 @@ def modastack_env(tmp_path_factory):
         state_dir=state_dir,
         sessions_dir=sessions_dir,
         workflows_dir=workflows_dir,
+        machine_config=machine_config,
     )
 
     _cfg._credentials_path = _orig_creds
@@ -113,11 +122,13 @@ requires_claude = pytest.mark.skipif(
 @pytest.fixture
 def cli_run(modastack_env):
     """Run modastack CLI commands against the isolated install."""
+    env = {**os.environ, "MODASTACK_CONFIG": str(modastack_env.machine_config)}
     def _run(*args, timeout=10):
         return subprocess.run(
             [sys.executable, "-m", "modastack.cli", *args],
             capture_output=True, text=True, timeout=timeout,
             cwd=str(modastack_env.project_path),
+            env=env,
         )
     return _run
 

@@ -5,6 +5,7 @@ Not checked in — contains secrets.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +15,9 @@ log = logging.getLogger(__name__)
 
 
 def _machine_config_path() -> Path:
+    override = os.environ.get("MODASTACK_CONFIG")
+    if override:
+        return Path(override)
     return Path.home() / ".modastack" / "config.yaml"
 
 
