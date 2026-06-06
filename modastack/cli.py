@@ -58,13 +58,9 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
 
     click.echo("\n".join(lines))
 
-def _detect_project_root(cwd: Path | None = None) -> Path | None:
-    """Walk up from cwd to find a project with a .modastack/ directory."""
-    path = (cwd or Path.cwd()).resolve()
-    for candidate in [path, *path.parents]:
-        if (candidate / ".modastack").is_dir():
-            return candidate
-    return None
+def _detect_project_root(cwd: Path | None = None) -> Path:
+    """Return the project root — always the current working directory."""
+    return (cwd or Path.cwd()).resolve()
 
 
 def _project_state_dir(project_path: Path) -> Path:
@@ -226,7 +222,7 @@ def start(agent_pack, foreground, fresh, subscribe):
         modastack start software_team --foreground
         modastack start software_team --subscribe linear:MOD
     """
-    project_path = _detect_project_root() or Path.cwd()
+    project_path = _detect_project_root()
 
     agent_config = _load_agent_config(project_path) or {}
     if not agent_pack:

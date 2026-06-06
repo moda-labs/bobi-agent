@@ -74,12 +74,9 @@ def try_resume_for_event(event_type: str, issue_id: str = "", event: dict | None
 
 
 def _find_project_root(cwd: str) -> Path:
-    """Find the original project root from a working directory or worktree."""
-    path = Path(cwd)
-    for candidate in [path, *path.parents]:
-        if (candidate / ".modastack").is_dir():
-            return candidate
-    return path
+    """Return the project root — the directory modastack was started in."""
+    from modastack.sdk import get_project_root
+    return get_project_root() or Path(cwd)
 
 
 def make_session_name(workflow_name: str, repo: str, issue_id: str) -> str:
