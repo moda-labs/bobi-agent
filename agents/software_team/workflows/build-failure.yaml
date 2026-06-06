@@ -1,0 +1,14 @@
+name: build-failure
+trigger: When a CI check run or workflow fails on an engineer's branch.
+description: >
+  Investigate and fix a CI build failure. Use when a check run or
+  workflow fails on an engineer's branch.
+
+steps:
+  - name: fix
+    agent: engineer
+    prompt: |
+      A CI build failed. Investigate the failure, fix it, and push.
+    handoff:
+      required: [status]
+    timeout: 1800

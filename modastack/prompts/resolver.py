@@ -1,4 +1,4 @@
-"""Resolve agent prompts: base + role + project override."""
+"""Resolve agent prompts: base + agent pack role + project override."""
 
 from __future__ import annotations
 
@@ -10,26 +10,38 @@ from . import BASE_PATH, AGENTS_DIR
 log = logging.getLogger(__name__)
 
 
+def _resolve_agent_dir(agent_name: str | None) -> Path | None:
+    """Find the agent pack directory."""
+    if not agent_name:
+        return None
+    d = AGENTS_DIR / agent_name
+    return d if d.is_dir() else None
+
+
 def resolve_agent_prompt(
     role: str,
     project_path: Path | str,
+    agent_name: str | None = None,
     interactive: bool = True,
 ) -> str:
     """Build the full prompt for an agent with a given role.
 
-    Resolution: base.md + agents/{role}.md (built-in) or
-    .modastack/agents/{role}.md (project override replaces built-in).
+    Resolution: base.md + agent pack role (agents/{agent}/roles/{role}.md)
+    or project override (.modastack/roles/{role}.md replaces pack role).
     """
     parts = [BASE_PATH.read_text()]
 
     project = Path(project_path)
-    project_agent = project / ".modastack" / "agents" / f"{role}.md"
-    builtin_agent = AGENTS_DIR / f"{role}.md"
+    project_role = project / ".modastack" / "roles" / f"{role}.md"
 
-    if project_agent.exists():
-        parts.append(project_agent.read_text())
-    elif builtin_agent.exists():
-        parts.append(builtin_agent.read_text())
+    if project_role.exists():
+        parts.append(project_role.read_text())
+    else:
+        agent_dir = _resolve_agent_dir(agent_name)
+        if agent_dir:
+            pack_role = agent_dir / "roles" / f"{role}.md"
+            if pack_role.exists():
+                parts.append(pack_role.read_text())
 
     if interactive:
         parts.append(
@@ -48,13 +60,11 @@ def resolve_agent_prompt(
 def build_startup_prompt(
     role: str,
     project_path: Path | str,
+    agent_name: str | None = None,
 ) -> str:
-    """Build the startup prompt for a persistent agent.
-
-    Includes the role prompt and a list of available workflows.
-    """
-    prompt = resolve_agent_prompt(role, project_path, interactive=True)
-    workflows = list_workflows(project_path)
+    """Build the startup prompt for a persistent agent."""
+    prompt = resolve_agent_prompt(role, project_path, agent_name=agent_name, interactive=True)
+    workflows = list_workflows(project_path, agent_name=agent_name)
 
     project = Path(project_path)
     return (
@@ -64,14 +74,20 @@ def build_startup_prompt(
     )
 
 
-def list_workflows(project_path: Path | str) -> str:
+def list_workflows(project_path: Path | str, agent_name: str | None = None) -> str:
     """List available workflows as a formatted string for agent prompts."""
     try:
-        from modastack.workflow.triggers import WORKFLOWS_DIR
         from modastack.workflow.schema import load_workflow
 
         project = Path(project_path)
-        sources = [WORKFLOWS_DIR]
+        sources: list[Path] = []
+
+        agent_dir = _resolve_agent_dir(agent_name)
+        if agent_dir:
+            wf_dir = agent_dir / "workflows"
+            if wf_dir.exists():
+                sources.append(wf_dir)
+
         repo_wf = project / ".modastack" / "workflows"
         if repo_wf.exists():
             sources.append(repo_wf)
@@ -126,22 +142,44 @@ def _extract_description(path: Path) -> str:
     return paragraph
 
 
-def discover_roles(project_path: Path | str | None = None) -> list[dict]:
-    """List available agent roles from built-in and project tiers."""
+def discover_roles(
+    project_path: Path | str | None = None,
+    agent_name: str | None = None,
+) -> list[dict]:
+    """List available agent roles from agent pack and project tiers."""
     roles: dict[str, dict] = {}
 
-    for md in sorted(AGENTS_DIR.glob("*.md")):
-        roles[md.stem] = {
-            "name": md.stem,
-            "source": "built-in",
-            "description": _extract_description(md),
-            "path": str(md),
-        }
+    if agent_name:
+        agent_dir = _resolve_agent_dir(agent_name)
+        if agent_dir:
+            roles_dir = agent_dir / "roles"
+            if roles_dir.is_dir():
+                for md in sorted(roles_dir.glob("*.md")):
+                    roles[md.stem] = {
+                        "name": md.stem,
+                        "source": agent_name,
+                        "description": _extract_description(md),
+                        "path": str(md),
+                    }
+    elif AGENTS_DIR.is_dir():
+        for pack in sorted(AGENTS_DIR.iterdir()):
+            if not pack.is_dir():
+                continue
+            roles_dir = pack / "roles"
+            if roles_dir.is_dir():
+                for md in sorted(roles_dir.glob("*.md")):
+                    if md.stem not in roles:
+                        roles[md.stem] = {
+                            "name": md.stem,
+                            "source": pack.name,
+                            "description": _extract_description(md),
+                            "path": str(md),
+                        }
 
     if project_path:
-        project_agents = Path(project_path) / ".modastack" / "agents"
-        if project_agents.is_dir():
-            for md in sorted(project_agents.glob("*.md")):
+        project_roles = Path(project_path) / ".modastack" / "roles"
+        if project_roles.is_dir():
+            for md in sorted(project_roles.glob("*.md")):
                 roles[md.stem] = {
                     "name": md.stem,
                     "source": "project",
@@ -158,17 +196,26 @@ def format_role_list(roles: list[dict]) -> str:
         return "No roles found."
     lines = ["Available roles:\n"]
     for r in roles:
-        source = "repo" if r["source"] == "repo" else "built-in"
+        source = "project" if r["source"] == "project" else "built-in"
         lines.append(f"  {r['name']:20s} [{source:8s}]  {r['description']}")
     return "\n".join(lines)
 
 
-def validate_role(role_name: str, project_path: Path | str | None = None) -> bool:
-    """Check whether a role exists in either tier."""
-    if (AGENTS_DIR / f"{role_name}.md").exists():
+def validate_role(
+    role_name: str,
+    project_path: Path | str | None = None,
+    agent_name: str | None = None,
+) -> bool:
+    """Check whether a role exists in any tier."""
+    agent_dir = _resolve_agent_dir(agent_name)
+    if agent_dir and (agent_dir / "roles" / f"{role_name}.md").exists():
         return True
     if project_path:
-        project_agent = Path(project_path) / ".modastack" / "agents" / f"{role_name}.md"
-        if project_agent.exists():
+        project_role = Path(project_path) / ".modastack" / "roles" / f"{role_name}.md"
+        if project_role.exists():
             return True
+    if not agent_name and AGENTS_DIR.is_dir():
+        for pack in AGENTS_DIR.iterdir():
+            if pack.is_dir() and (pack / "roles" / f"{role_name}.md").exists():
+                return True
     return False

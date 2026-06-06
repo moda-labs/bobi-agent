@@ -1,3 +1,4 @@
+agent: software_team
 role: manager
 persistent: true
 subscribe:

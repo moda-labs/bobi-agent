@@ -1,0 +1,76 @@
+name: issue-lifecycle
+trigger: When an issue is assigned and requires code changes.
+description: >
+  Full engineering lifecycle for code changes: worktree setup, triage
+  complexity, optional spec phase with approval gate, implement with
+  tests, open PR, and QA for frontend features. Use for any assigned
+  issue that requires code.
+
+steps:
+  - name: setup
+    agent: engineer
+    prompt: |
+      Create a git worktree for this issue and set up the workspace.
+      Read the issue to understand the full context.
+    handoff:
+      required: [worktree]
+    timeout: 300
+
+  - name: pickup
+    agent: engineer
+    prompt: |
+      Move the issue to In Progress status.
+      Follow the Pickup Phase instructions in your role prompt:
+      explore the codebase, classify complexity, write the handoff.
+    handoff:
+      required: [complexity, needs_spec]
+      optional: [blocked_by, notes, has_frontend]
+    timeout: 1800
+
+  - name: route
+    if: "needs_spec == true"
+    goto: spec
+    else: implement
+
+  - name: spec
+    agent: engineer
+    prompt: |
+      Follow the Spec Phase instructions in your role prompt.
+      Write the implementation spec, review it, publish to the issue.
+      Do NOT proceed to implementation — stop after the spec is written.
+    handoff:
+      required: [spec_url]
+    timeout: 3000
+
+  - name: await_approval
+    await: approval
+    timeout: 86400
+
+  - name: implement
+    agent: engineer
+    prompt: |
+      Follow the Implement Phase instructions in your role prompt.
+      Build the feature with TDD — write tests first, then implement.
+    handoff:
+      required: [status]
+    timeout: 3600
+
+  - name: pr
+    agent: engineer
+    prompt: |
+      Follow the Prepare-PR Phase instructions in your role prompt.
+      Create the pull request, link it to the issue, move ticket to In Review.
+    handoff:
+      required: [pr_url]
+    timeout: 1800
+
+  - name: qa
+    agent: engineer
+    prompt: |
+      Follow the QA Phase instructions in your role prompt.
+      If this project has a web frontend, run QA on the preview deployment.
+      If no frontend exists, report qa_status as 'not_applicable' and skip.
+    handoff:
+      required: [qa_status]
+      optional: [qa_findings]
+    timeout: 1800

@@ -161,6 +161,7 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
     from modastack.sdk import set_project_root
     set_project_root(project_path)
 
+    agent_name = config.get("agent")
     role = config.get("role", "manager")
     subscribe = config.get("subscribe", [])
     persistent = config.get("persistent", True)
@@ -197,14 +198,14 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
 
     if monitors_enabled:
         from modastack.monitors.scheduler import MonitorScheduler
-        monitor_scheduler = MonitorScheduler()
+        monitor_scheduler = MonitorScheduler(agent_name=agent_name)
         monitor_scheduler.start()
         log.info("Monitor scheduler started")
 
     from modastack.prompts.resolver import build_startup_prompt
     from modastack.subagent import spawn_adhoc
 
-    task = config.get("task") or build_startup_prompt(role, project_path)
+    task = config.get("task") or build_startup_prompt(role, project_path, agent_name=agent_name)
 
     log.info(f"Modastack running for {project_path.name}")
     spawn_adhoc(

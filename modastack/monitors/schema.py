@@ -1,9 +1,17 @@
-"""Monitor definition: the small YAML record that describes one check."""
+"""Monitor definition and condition types."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+
+
+@dataclass
+class Condition:
+    """One detected condition: a dedup key plus the event payload."""
+
+    key: str
+    data: dict = field(default_factory=dict)
 
 # Reserved keys parsed into named fields; everything else is free-form and
 # kept in `extra` (e.g. `url:` for a deploy-health check) so new check types

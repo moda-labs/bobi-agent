@@ -9,16 +9,25 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from modastack.monitors.checks import (
-    CHECKS,
-    Condition,
-    _parse_iso,
-    _repo_slug,
-    _gh_pr_list,
-    _slug_cache,
-    pr_conflicts,
-    stale_prs,
-)
+import importlib.util
+import sys
+from pathlib import Path
+
+from modastack.monitors.schema import Condition
+
+_checks_path = Path(__file__).parent.parent / "agents" / "software_team" / "monitors" / "github_checks.py"
+_spec = importlib.util.spec_from_file_location("modastack.monitors.checks", _checks_path)
+_mod = importlib.util.module_from_spec(_spec)
+sys.modules["modastack.monitors.checks"] = _mod
+_spec.loader.exec_module(_mod)
+
+CHECKS = _mod.CHECKS
+_parse_iso = _mod._parse_iso
+_repo_slug = _mod._repo_slug
+_gh_pr_list = _mod._gh_pr_list
+_slug_cache = _mod._slug_cache
+pr_conflicts = _mod.pr_conflicts
+stale_prs = _mod.stale_prs
 
 
 @pytest.fixture(autouse=True)

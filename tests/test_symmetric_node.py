@@ -166,36 +166,43 @@ class TestPromptResolver:
 
     def test_resolve_agent_prompt_loads_base_and_role(self, tmp_path):
         from modastack.prompts.resolver import resolve_agent_prompt
-        prompt = resolve_agent_prompt("manager", tmp_path)
+        prompt = resolve_agent_prompt("manager", tmp_path, agent_name="software_team")
         assert "Modastack Agent" in prompt
         assert "Engineering Manager" in prompt
 
     def test_resolve_agent_prompt_includes_project_override(self, tmp_path):
-        agents_dir = tmp_path / ".modastack" / "agents"
-        agents_dir.mkdir(parents=True)
-        (agents_dir / "manager.md").write_text("Custom policy: always review PRs.")
+        roles_dir = tmp_path / ".modastack" / "roles"
+        roles_dir.mkdir(parents=True)
+        (roles_dir / "manager.md").write_text("Custom policy: always review PRs.")
         from modastack.prompts.resolver import resolve_agent_prompt
-        prompt = resolve_agent_prompt("manager", tmp_path)
+        prompt = resolve_agent_prompt("manager", tmp_path, agent_name="software_team")
         assert "Custom policy: always review PRs." in prompt
         assert "Engineering Manager" not in prompt
 
     def test_resolve_agent_prompt_engineer(self, tmp_path):
         from modastack.prompts.resolver import resolve_agent_prompt
-        prompt = resolve_agent_prompt("engineer", tmp_path)
+        prompt = resolve_agent_prompt("engineer", tmp_path, agent_name="software_team")
         assert "Modastack Agent" in prompt
         assert "staff engineer" in prompt
 
     def test_build_startup_prompt_includes_workflows(self, tmp_path):
         from modastack.prompts.resolver import build_startup_prompt
-        prompt = build_startup_prompt("manager", tmp_path)
+        prompt = build_startup_prompt("manager", tmp_path, agent_name="software_team")
         assert "Available workflows" in prompt
 
     def test_list_workflows_returns_string(self, tmp_path):
         from modastack.prompts.resolver import list_workflows
-        result = list_workflows(tmp_path)
+        result = list_workflows(tmp_path, agent_name="software_team")
         assert isinstance(result, str)
 
     def test_discover_roles_finds_manager_and_engineer(self):
+        from modastack.prompts.resolver import discover_roles
+        roles = discover_roles(agent_name="software_team")
+        names = [r["name"] for r in roles]
+        assert "manager" in names
+        assert "engineer" in names
+
+    def test_discover_roles_scans_all_packs_without_agent_name(self):
         from modastack.prompts.resolver import discover_roles
         roles = discover_roles()
         names = [r["name"] for r in roles]

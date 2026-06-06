@@ -1,13 +1,8 @@
-"""Native check runners for built-in monitors.
+"""GitHub SDLC checks — PR conflict detection and stale PR monitoring.
 
-A check runner takes a Monitor and the list of projects it applies to and
-returns the set of *conditions* currently true. Each condition carries a
-stable `key` (used by the scheduler to deduplicate) and an event `data`
-payload. The scheduler diffs conditions against prior state and only
-injects events for newly-appeared ones.
-
-Monitors that name no `check` are interpreted by the manager instead
-(see scheduler._manager_interpreted).
+These are domain-specific checks shipped with modastack's SDLC use case.
+Custom checks follow the same pattern: define functions that return
+lists of Condition objects, then register them in a CHECKS dict.
 """
 
 from __future__ import annotations
@@ -15,21 +10,14 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from modastack.monitors.schema import Condition
 
 log = logging.getLogger(__name__)
 
 GH_TIMEOUT = 30
-
-
-@dataclass
-class Condition:
-    """One detected condition: a dedup key plus the event payload."""
-
-    key: str
-    data: dict = field(default_factory=dict)
 
 
 _slug_cache: dict[str, str] = {}

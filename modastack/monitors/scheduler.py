@@ -29,7 +29,41 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .checks import CHECKS, _parse_iso
+import importlib.util
+import sys
+
+def _load_checks(agent_name: str | None = None) -> dict:
+    """Load check runners from agent pack monitors/*_checks.py files."""
+    all_checks: dict = {}
+    search_dirs: list[Path] = []
+    if agent_name:
+        from modastack.prompts import AGENTS_DIR
+        search_dirs.append(AGENTS_DIR / agent_name / "monitors")
+    for checks_dir in search_dirs:
+        if not checks_dir.exists():
+            continue
+        for py_file in checks_dir.glob("*_checks.py"):
+            module_name = f"modastack_checks.{py_file.stem}"
+            spec = importlib.util.spec_from_file_location(module_name, py_file)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = mod
+                spec.loader.exec_module(mod)
+                if hasattr(mod, "CHECKS"):
+                    all_checks.update(mod.CHECKS)
+    return all_checks
+
+def _parse_iso(value: str):
+    from datetime import datetime as _dt, timezone as _tz
+    if not value:
+        return None
+    try:
+        dt = _dt.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_tz.utc)
+    return dt
 from .registry import MonitorRegistry
 
 log = logging.getLogger(__name__)
@@ -83,12 +117,17 @@ def _default_spawn_check(monitor, cwd: str | None) -> None:
 
 class MonitorScheduler:
     def __init__(self, inject_event=None, state_path: Path | None = None,
-                 now=None, registry_loader=None, spawn_check=None):
+                 now=None, registry_loader=None, spawn_check=None,
+                 agent_name: str | None = None):
         self.inject_event = inject_event or _default_inject
         self.spawn_check = spawn_check or _default_spawn_check
         self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
-        self._registry_loader = registry_loader or MonitorRegistry.load
+        self._agent_name = agent_name
+        self._checks = _load_checks(agent_name)
+        self._registry_loader = registry_loader or (
+            lambda **kw: MonitorRegistry.load(agent_name=agent_name, **kw)
+        )
         self.state: dict = self._load_state()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -139,7 +178,7 @@ class MonitorScheduler:
 
     def run_monitor(self, monitor, registry: MonitorRegistry, now: datetime) -> None:
         if monitor.check:
-            check = CHECKS.get(monitor.check)
+            check = self._checks.get(monitor.check)
             if check is None:
                 log.warning(f"Monitor {monitor.name} names unknown check "
                             f"'{monitor.check}' — skipping")

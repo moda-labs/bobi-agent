@@ -305,9 +305,9 @@ async def _run_workflow_async(
     def _make_options(resume_id=None, agent_name=""):
         agent_prompt = ""
         if agent_name:
-            agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive)
+            agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive=interactive)
         else:
-            agent_prompt = resolve_agent_prompt("", project_root, interactive)
+            agent_prompt = resolve_agent_prompt("", project_root, interactive=interactive)
 
         return ClaudeAgentOptions(
             cwd=cwd,

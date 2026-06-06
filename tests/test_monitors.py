@@ -9,7 +9,7 @@ import yaml
 from modastack.monitors.schema import Monitor, parse_interval
 from modastack.monitors import registry as registry_mod
 from modastack.monitors.registry import MonitorRegistry
-from modastack.monitors.checks import Condition
+from modastack.monitors.schema import Condition
 from modastack.monitors.scheduler import MonitorScheduler
 
 
@@ -212,14 +212,10 @@ class TestSchedulerRun:
         m = Monitor(name="x", event="monitor/x", check="pr_conflicts")
         sched, injected = _scheduler(tmp_path, [m])
 
-        import modastack.monitors.scheduler as sm
-        sm.CHECKS["__test_check"] = lambda mon, repos: [Condition(key="k", data={"a": 1})]
+        sched._checks["__test_check"] = lambda mon, repos: [Condition(key="k", data={"a": 1})]
         m.check = "__test_check"
-        try:
-            reg = sched._registry_loader()
-            sched.run_monitor(m, reg, _fixed_now())
-        finally:
-            del sm.CHECKS["__test_check"]
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
         assert len(injected) == 1
         assert sched.state["x"]["last_run"] == _fixed_now().isoformat()
 

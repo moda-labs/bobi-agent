@@ -48,7 +48,7 @@ dev = [
 modastack = "modastack.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["modastack", "dashboard"]
+packages = ["modastack"]
 
 [build-system]
 requires = ["hatchling"]
