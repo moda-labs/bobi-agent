@@ -1,6 +1,6 @@
 """GitHub Issues adapter — scan issues and bootstrap labels via gh CLI.
 
-Used when task_tracking.system == "github-issues" in .modastack.yaml.
+Used when task_tracking.system == "github-issues" in .modastack/config.yaml.
 No API key needed — uses gh CLI's existing authentication.
 """
 

@@ -5,7 +5,7 @@
 # the engineer session acts as a content editor instead.
 #
 # To use: copy this into <your-repo>/.modastack/workflows/ and customize.
-# Add context to your .modastack.yaml:
+# Add context to your .modastack/config.yaml:
 #
 #   context:
 #     content_dir: content/blog

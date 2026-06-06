@@ -101,7 +101,7 @@ def detect_skills(project_path: Path) -> list[str]:
 
 
 def generate_dispatch_yaml(project_path: Path, task_tracking: str = "github-issues") -> dict:
-    """Generate a .modastack.yaml config for the repo."""
+    """Generate a .modastack/config.yaml for the project."""
     test_cmd = detect_test_command(project_path)
     project = detect_linear_project(project_path)
     skills = detect_skills(project_path)

@@ -79,8 +79,6 @@ def _find_project_root(cwd: str) -> Path:
     for candidate in [path, *path.parents]:
         if (candidate / ".modastack" / "config.yaml").exists():
             return candidate
-        if (candidate / ".modastack.yaml").exists():
-            return candidate
     return path
 
 
