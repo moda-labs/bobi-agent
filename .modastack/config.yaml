@@ -1,11 +1,5 @@
 # Project config for modastack (checked in)
 
-task_tracking:
-  system: github-issues
-
-github:
-  repo: moda-labs/modastack
-
 agent:
   max_parallel: 2
 

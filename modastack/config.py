@@ -51,13 +51,9 @@ class Config:
 
     path: Path
 
-    # task tracking
-    task_tracking: str = "github-issues"
     max_parallel: int = 2
     context: dict = field(default_factory=dict)
 
-    # github
-    github_repo: str = ""
 
     # linear
     linear_team: str = ""
@@ -94,10 +90,8 @@ class Config:
 
         return cls(
             path=project_path,
-            task_tracking=raw.get("task_tracking", {}).get("system", "github-issues"),
             max_parallel=agent.get("max_parallel", 2),
             context=raw.get("context", {}),
-            github_repo=github.get("repo", ""),
             linear_team=linear.get("team", ""),
             linear_project=linear.get("project", ""),
             linear_api_key=linear.get("api_key", ""),

@@ -11,14 +11,8 @@ def test_project_config_loads(tmp_path):
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir()
     (config_dir / "config.yaml").write_text(dedent("""
-        task_tracking:
-          system: "github-issues"
-        github:
-          repo: "myorg/myrepo"
         agent:
           max_parallel: 3
-        verify:
-          test_command: "pytest -x"
         context:
           github_org: myorg
     """))
@@ -26,8 +20,6 @@ def test_project_config_loads(tmp_path):
     config = Config.load(tmp_path)
 
     assert config.path == tmp_path
-    assert config.task_tracking == "github-issues"
-    assert config.github_repo == "myorg/myrepo"
     assert config.max_parallel == 3
     assert config.context["github_org"] == "myorg"
 
@@ -36,49 +28,27 @@ def test_project_config_linear(tmp_path):
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir()
     (config_dir / "config.yaml").write_text(dedent("""
-        task_tracking:
-          system: linear
         linear:
           team: MOD
           project: Baohua
-        github:
-          repo: myorg/myrepo
     """))
 
     config = Config.load(tmp_path)
-
-    assert config.task_tracking == "linear"
     assert config.linear_team == "MOD"
     assert config.linear_project == "Baohua"
-    assert config.github_repo == "myorg/myrepo"
 
 
 def test_project_config_defaults(tmp_path):
-    config_dir = tmp_path / ".modastack"
-    config_dir.mkdir()
-    (config_dir / "config.yaml").write_text("task_tracking:\n  system: github-issues\n")
-
     config = Config.load(tmp_path)
-
-    assert config.task_tracking == "github-issues"
     assert config.max_parallel == 2
-    assert config.github_repo == ""
     assert config.linear_team == ""
     assert config.context == {}
-
-
-def test_project_config_missing_returns_defaults(tmp_path):
-    config = Config.load(tmp_path)
-    assert config.task_tracking == "github-issues"
-    assert config.github_repo == ""
 
 
 def test_project_config_event_server(tmp_path):
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir()
     (config_dir / "config.yaml").write_text(dedent("""
-        task_tracking:
-          system: github-issues
         event_server:
           url: https://modastack-events.example.com
     """))
@@ -99,17 +69,13 @@ def test_machine_config_provides_defaults(tmp_path):
     project_dir = tmp_path / "project"
     config_dir = project_dir / ".modastack"
     config_dir.mkdir(parents=True)
-    (config_dir / "config.yaml").write_text(dedent("""
-        github:
-          repo: org/repo
-    """))
+    (config_dir / "config.yaml").write_text("{}")
 
     with patch("modastack.config._machine_config_path", return_value=machine_yaml):
         config = Config.load(project_dir)
 
     assert config.slack_bot_token == "xoxb-machine-token"
     assert config.event_server_url == "https://events.example.com"
-    assert config.github_repo == "org/repo"
 
 
 def test_project_overrides_machine(tmp_path):
@@ -136,10 +102,10 @@ def test_project_overrides_machine(tmp_path):
 def test_from_file_alias_works(tmp_path):
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir()
-    (config_dir / "config.yaml").write_text("github:\n  repo: org/repo\n")
+    (config_dir / "config.yaml").write_text("{}")
 
     config = Config.from_file(tmp_path)
-    assert config.github_repo == "org/repo"
+    assert config.path == tmp_path
 
 
 # --- Deployment state (ephemeral) ---

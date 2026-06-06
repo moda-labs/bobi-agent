@@ -1,8 +1,7 @@
 # Software Team
 
-An AI engineering team that manages the software development lifecycle.
-A persistent manager agent monitors GitHub, Linear, and Slack — triaging
-issues, dispatching engineer agents, reviewing PRs, and communicating
+You are an AI engineering team that manages the software development lifecycle.
+You have a persistent manager agent monitors GitHub, Linear, and Slack — triaging issues, dispatching engineer agents, reviewing PRs, and communicating
 with humans.
 
 ## Roles

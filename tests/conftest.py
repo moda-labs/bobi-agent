@@ -38,7 +38,6 @@ def modastack_install(tmp_path, monkeypatch):
 
     (config_dir / "config.yaml").write_text(yaml.dump({
         "task_tracking": {"system": "github-issues", "project": "TEST"},
-        "github": {"repo": "test-org/test-repo"},
         "agent": {"max_parallel": 1},
         "verify": {"test_command": "echo pass"},
     }))

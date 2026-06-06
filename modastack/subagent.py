@@ -424,19 +424,8 @@ def _parse_issue_number(task: str) -> str | None:
 
 
 def _resolve_project_name(cwd: str) -> str:
-    """Resolve a project name for session naming.
-
-    Uses github.repo from config if available, otherwise the directory name.
-    """
-    path = Path(cwd)
-    try:
-        from modastack.config import ProjectConfig
-        rc = ProjectConfig.from_file(path)
-        if rc.github_repo:
-            return rc.github_repo.split("/")[-1]
-    except Exception:
-        pass
-    return path.name or cwd
+    """Resolve a project name for session naming from the directory name."""
+    return Path(cwd).name or cwd
 
 
 def spawn_adhoc(

@@ -28,10 +28,6 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
 
     try:
         cfg = Config.load(project_path)
-        tracker_detail = cfg.linear_team if cfg.linear_team else ""
-        lines.append(f"  tracker     {cfg.task_tracking}" + (f" ({tracker_detail})" if tracker_detail else ""))
-        if cfg.github_repo:
-            lines.append(f"  github      {cfg.github_repo}")
         if cfg.event_server_url:
             label = "remote" if not cfg.event_server_url.startswith("http://localhost") else "local"
             lines.append(f"  event server  {cfg.event_server_url} ({label})")

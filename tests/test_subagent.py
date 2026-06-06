@@ -94,14 +94,7 @@ class TestParseIssueNumber:
 
 
 class TestResolveProjectName:
-    def test_uses_github_repo_from_config(self, tmp_path):
-        (tmp_path / ".modastack").mkdir()
-        (tmp_path / ".modastack" / "config.yaml").write_text(
-            "task_tracking:\n  system: github-issues\ngithub:\n  repo: moda-labs/jobtack\n"
-        )
-        assert _resolve_project_name(str(tmp_path)) == "jobtack"
-
-    def test_falls_back_to_dirname(self, tmp_path):
+    def test_uses_dirname(self, tmp_path):
         assert _resolve_project_name(str(tmp_path)) == tmp_path.name
 
 

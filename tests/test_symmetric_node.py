@@ -23,20 +23,10 @@ from modastack.events.client import format_event_for_manager, event_queue
 
 class TestBuildSubscriptions:
 
-    def test_github_repo(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("github:\n  repo: org/myrepo\n")
-        subs = build_subscriptions(tmp_path)
-        assert "github:org/myrepo" in subs
-
     def test_slack_workspace(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
-            "github:\n  repo: org/myrepo\n"
-            "slack:\n  workspace_id: T123\n"
-        )
+        (config_dir / "config.yaml").write_text("slack:\n  workspace_id: T123\n")
         subs = build_subscriptions(tmp_path)
         assert "slack:T123" in subs
 
@@ -144,11 +134,11 @@ class TestCanonicalImports:
     def test_build_subscriptions_direct(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("github:\n  repo: org/repo\n")
+        (config_dir / "config.yaml").write_text("slack:\n  workspace_id: T999\n")
 
         from modastack.events.subscriptions import build_subscriptions
         subs = build_subscriptions(tmp_path)
-        assert "github:org/repo" in subs
+        assert "slack:T999" in subs
 
 
 # ---------------------------------------------------------------------------

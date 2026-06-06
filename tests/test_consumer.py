@@ -84,10 +84,7 @@ class TestBuildSubscriptions:
     def test_slack_workspace(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
-            "github:\n  repo: org/myrepo\n"
-            "slack:\n  workspace_id: T123\n"
-        )
+        (config_dir / "config.yaml").write_text("slack:\n  workspace_id: T123\n")
         from modastack.events.subscriptions import build_subscriptions as _build_subscriptions
         subs = _build_subscriptions(tmp_path)
         assert "slack:T123" in subs
@@ -95,12 +92,9 @@ class TestBuildSubscriptions:
     def test_no_slack_config(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
-            "github:\n  repo: org/myrepo\n"
-        )
+        (config_dir / "config.yaml").write_text("{}\n")
         from modastack.events.subscriptions import build_subscriptions as _build_subscriptions
         subs = _build_subscriptions(tmp_path)
-        assert "github:org/myrepo" in subs
         assert not any("slack:" in s for s in subs)
 
 
