@@ -121,11 +121,11 @@ class TestDrainLoop:
 
 
 # ---------------------------------------------------------------------------
-# backward compat: old imports still work
+# canonical imports
 # ---------------------------------------------------------------------------
 
 
-class TestBackwardCompat:
+class TestCanonicalImports:
 
     def test_direct_imports_work(self):
         from modastack.events.client import (

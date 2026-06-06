@@ -61,8 +61,8 @@ def _log_event(event: dict) -> None:
 def format_event_for_manager(event: dict) -> str:
     """Format an event as a concise message for the consuming agent.
 
-    Works with both raw server events (type/source/payload at top level)
-    and legacy normalized events (type/source/data at top level).
+    Works with raw server events (type/source/payload at top level)
+    and internal events (type/source/data at top level).
     """
     etype = event.get("type", "unknown")
     source = event.get("source", "")

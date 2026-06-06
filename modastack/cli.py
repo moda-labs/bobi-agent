@@ -50,10 +50,8 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
             lines.append(f"  event server  not configured")
         if local.operator_name:
             lines.append(f"  operator    {local.operator_name}")
-        dashboard_port = local.dashboard_port or 8095
-        lines.append(f"  dashboard   http://localhost:{dashboard_port}")
     except Exception:
-        lines.append(f"  dashboard   http://localhost:8095")
+        pass
 
     wf_dir = project_path / ".modastack" / "workflows"
     if wf_dir.exists():
@@ -92,20 +90,6 @@ def _project_state_dir(project_path: Path) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     return d
 
-
-def _get_dashboard_url(project_path: Path | None = None) -> str:
-    """Read the dashboard port from the project's state dir."""
-    if project_path is None:
-        project_path = _detect_project_root()
-    if project_path:
-        port_file = project_path / ".modastack" / "state" / "dashboard.port"
-        if port_file.exists():
-            try:
-                port = int(port_file.read_text().strip())
-                return f"http://localhost:{port}"
-            except (ValueError, OSError):
-                pass
-    return "http://localhost:8095"
 
 
 
@@ -153,6 +137,18 @@ def _systemctl(action: str) -> bool:
     return True
 
 
+def _generate_default_agent_config(project_path: Path) -> dict:
+    """Generate a default agent config from project settings."""
+    from modastack.events.subscriptions import build_subscriptions
+    subs = build_subscriptions(project_path)
+    return {
+        "role": "manager",
+        "persistent": True,
+        "subscribe": subs,
+        "monitors": True,
+    }
+
+
 def _load_agent_config(project_path: Path, config_path: str | None = None) -> dict | None:
     """Load agent config from .modastack/agent.yaml or explicit path."""
     import yaml
@@ -192,7 +188,6 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
                 pid_file.unlink(missing_ok=True)
         except OSError:
             pass
-        (state_dir / "dashboard.port").unlink(missing_ok=True)
     atexit.register(_cleanup)
 
     def _handle_term(signum, frame):
@@ -235,7 +230,7 @@ def start(foreground, fresh, non_interactive, config_path):
 
     Reads .modastack/agent.yaml (or --config) to determine which role,
     subscriptions, and capabilities to start with. Falls back to the
-    legacy consumer.run() path if no agent config exists.
+    If no agent.yaml exists, a default config is generated from project settings.
 
     Usage:
         cd myrepo && modastack start              # daemonize
@@ -277,17 +272,15 @@ def start(foreground, fresh, non_interactive, config_path):
             pid_path.unlink(missing_ok=True)
 
     agent_config = _load_agent_config(project_path, config_path)
+    if not agent_config:
+        agent_config = _generate_default_agent_config(project_path)
 
     if foreground:
         root = logging.getLogger()
         root.handlers = [h for h in root.handlers
                          if isinstance(h, logging.FileHandler)]
 
-        if agent_config:
-            _run_from_agent_config(project_path, agent_config)
-        else:
-            from modastack.manager.events.consumer import run
-            run(project_path=project_path, fresh=fresh)
+        _run_from_agent_config(project_path, agent_config)
     else:
         log_file = state_dir / "manager.log"
         env = os.environ.copy()
@@ -566,10 +559,7 @@ def message(text, to, wait, timeout):
 @click.option("--timeout", default=300, type=int, help="Timeout in seconds")
 @click.option("--source", default="engineer", help="Source identifier")
 def ask(question, timeout, source):
-    """Ask the manager a question (alias for: message --wait).
-
-    Kept for backward compatibility with agents that call 'modastack ask'.
-    """
+    """Ask the manager a question (alias for: message --wait)."""
     from modastack.inbox import deliver
 
     address = _resolve_address("manager")
@@ -1066,12 +1056,6 @@ def events(tail, decisions_only):
 
 
 
-@main.command()
-@click.option("--port", default=8095, help="Dashboard server port")
-def dashboard(port):
-    """Start the web dashboard."""
-    from dashboard.app import run_dashboard
-    run_dashboard(port=port)
 
 
 @transcript.command("index")
@@ -1686,12 +1670,7 @@ def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> Non
 
 
 def _post_event(event_type: str, data: dict) -> bool:
-    """Post a synthetic event onto the running manager's event bus over HTTP.
-
-    The check runs in its own process, so it can't reach the in-memory event
-    queue directly — it posts to the local dashboard, which enqueues it on the
-    same queue webhooks use.
-    """
+    """Post a synthetic event to the event server's generic topic endpoint."""
     import urllib.error
     import urllib.request
 
@@ -1700,17 +1679,27 @@ def _post_event(event_type: str, data: dict) -> bool:
     else:
         source, etype = "monitor", event_type
 
-    payload = json.dumps({"type": etype, "source": source, "data": data}).encode()
+    project_path = _detect_project_root()
+    if not project_path:
+        return False
+
     try:
-        dashboard = _get_dashboard_url()
+        from modastack.config import ProjectConfig
+        pc = ProjectConfig.from_file(project_path)
+        es_url = pc.event_server_url or "http://localhost:8080"
+    except Exception:
+        es_url = "http://localhost:8080"
+
+    payload = json.dumps({"source": source, "payload": data}).encode()
+    try:
         req = urllib.request.Request(
-            f"{dashboard}/api/event",
+            f"{es_url}/events/{etype}",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read())
-        return bool(result.get("ok"))
+        return result.get("delivered_to", 0) > 0
     except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError) as e:
         logging.getLogger(__name__).warning(f"Failed to post event {event_type}: {e}")
         return False

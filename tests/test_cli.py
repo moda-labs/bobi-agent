@@ -1,6 +1,7 @@
 """Tests for CLI commands."""
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -18,8 +19,7 @@ def test_version_flag():
     assert __version__ in result.output
 
 
-def test_post_event_splits_source_and_type():
-    """_post_event splits 'source/type' and POSTs the right payload."""
+def test_post_event_posts_to_event_server():
     from modastack.cli import _post_event
 
     captured = {}
@@ -32,21 +32,23 @@ def test_post_event_splits_source_and_type():
             return False
 
         def read(self):
-            return json.dumps({"ok": True}).encode()
+            return json.dumps({"delivered_to": 1}).encode()
 
     def fake_urlopen(req, timeout=10):
         captured["url"] = req.full_url
         captured["body"] = json.loads(req.data)
         return FakeResp()
 
-    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+         patch("modastack.cli._detect_project_root", return_value=Path("/tmp/repo")), \
+         patch("modastack.config.ProjectConfig.from_file") as mock_pc:
+        mock_pc.return_value = type("PC", (), {"event_server_url": "https://events.test"})()
         ok = _post_event("monitor/deploy.down", {"summary": "down"})
 
     assert ok is True
-    assert captured["url"] == "http://localhost:8095/api/event"
+    assert captured["url"] == "https://events.test/events/deploy.down"
     assert captured["body"]["source"] == "monitor"
-    assert captured["body"]["type"] == "deploy.down"
-    assert captured["body"]["data"] == {"summary": "down"}
+    assert captured["body"]["payload"] == {"summary": "down"}
 
 
 def test_post_event_defaults_source_when_no_slash():
@@ -62,24 +64,31 @@ def test_post_event_defaults_source_when_no_slash():
             return False
 
         def read(self):
-            return json.dumps({"ok": True}).encode()
+            return json.dumps({"delivered_to": 1}).encode()
 
     def fake_urlopen(req, timeout=10):
+        captured["url"] = req.full_url
         captured["body"] = json.loads(req.data)
         return FakeResp()
 
-    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+         patch("modastack.cli._detect_project_root", return_value=Path("/tmp/repo")), \
+         patch("modastack.config.ProjectConfig.from_file") as mock_pc:
+        mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
         _post_event("deploy_down", {})
 
     assert captured["body"]["source"] == "monitor"
-    assert captured["body"]["type"] == "deploy_down"
+    assert "deploy_down" in captured["url"]
 
 
 def test_post_event_returns_false_on_connection_error():
     from modastack.cli import _post_event
     import urllib.error
 
-    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("nope")):
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("nope")), \
+         patch("modastack.cli._detect_project_root", return_value=Path("/tmp/repo")), \
+         patch("modastack.config.ProjectConfig.from_file") as mock_pc:
+        mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
         assert _post_event("monitor/x", {}) is False
 
 
@@ -95,7 +104,6 @@ def test_workflow_list_shows_workflows():
 
 
 def test_workflow_list_no_errors():
-    """Every workflow YAML should load without errors."""
     runner = CliRunner()
     result = runner.invoke(main, ["workflows", "list"])
     assert result.exit_code == 0

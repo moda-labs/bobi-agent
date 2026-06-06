@@ -15,7 +15,6 @@ Per-operator config (.modastack/local.yaml): operator-specific (gitignored)
 """
 
 import logging
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,13 +25,7 @@ log = logging.getLogger(__name__)
 
 def _credentials_path() -> Path:
     """XDG-standard credentials path (~/.config/modastack/credentials.yaml)."""
-    xdg = Path.home() / ".config" / "modastack" / "credentials.yaml"
-    if not xdg.exists():
-        legacy = Path.home() / ".modastack" / "credentials.yaml"
-        if legacy.exists():
-            xdg.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(legacy, xdg)
-    return xdg
+    return Path.home() / ".config" / "modastack" / "credentials.yaml"
 
 
 @dataclass
@@ -89,7 +82,7 @@ class LocalConfig:
     def load(cls, project_path: Path) -> "LocalConfig":
         local_path = project_path / ".modastack" / "local.yaml"
         if not local_path.exists():
-            return cls._from_global_fallback(project_path)
+            return cls()
         raw = yaml.safe_load(local_path.read_text()) or {}
         operator = raw.get("operator", {})
         slack = raw.get("slack", {})
@@ -103,11 +96,6 @@ class LocalConfig:
             credentials=raw.get("credentials", {}),
             dashboard_port=raw.get("dashboard_port", 8095),
         )
-
-    @classmethod
-    def _from_global_fallback(cls, project_path: Path) -> "LocalConfig":
-        """Return empty config when no local.yaml exists."""
-        return cls()
 
     def save(self, project_path: Path) -> None:
         local_path = project_path / ".modastack" / "local.yaml"

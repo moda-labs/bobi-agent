@@ -43,7 +43,7 @@ class TestDrainLoop:
         assert "Event: github/task.opened" in delivered_text
 
     @patch("modastack.inbox.deliver", return_value=(True, ""))
-    @patch("modastack.manager.events.consumer.DRAIN_INTERVAL", 0.1)
+    @patch("modastack.events.drain.DRAIN_INTERVAL", 0.1)
     def test_multiple_events_batched(self, mock_deliver):
         from modastack.events.client import event_queue
         from modastack.events.drain import drain_loop as _drain_loop
@@ -77,41 +77,6 @@ class TestDrainLoop:
         assert "task.assigned" in github_text
         assert "slack.dm" not in github_text
         assert "slack.dm" in slack_text
-
-
-class TestStartup:
-    """Test that consumer.run() initializes without crashing.
-
-    This exercises the full startup path — manager session, workflow
-    dispatcher, event client, drain loop — with all heavy deps mocked.
-    Catches import errors and missing method calls.
-    """
-
-    @patch("modastack.manager.session.ManagerSession.start_or_resume", return_value=True)
-    @patch("modastack.manager.events.consumer._kill_stale_instances")
-    def test_run_starts_without_crash(self, mock_kill, mock_start, modastack_install):
-        """run() should get through startup without AttributeError or ImportError."""
-        import signal
-        from modastack.manager.events.consumer import run  # legacy path, still tested
-
-        original_sleep = time.sleep
-
-        call_count = {"sleep": 0}
-        def short_sleep(n):
-            call_count["sleep"] += 1
-            if call_count["sleep"] > 5:
-                raise SystemExit(0)
-            original_sleep(min(n, 0.01))
-
-        with patch("time.sleep", side_effect=short_sleep), \
-             patch("modastack.manager.session.ManagerSession.is_alive", return_value=True), \
-             patch("signal.signal"):
-            try:
-                run(project_path=modastack_install.repo_path)
-            except SystemExit:
-                pass
-
-        assert mock_start.called
 
 
 class TestBuildSubscriptions:

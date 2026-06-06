@@ -75,7 +75,7 @@ class TestFormatEventForManager:
         text = format_event_for_manager(event)
         assert "thread_ts" not in text
 
-    def test_legacy_data_format_still_works(self):
+    def test_internal_data_format(self):
         event = {
             "type": "task.opened", "source": "github",
             "data": {"issue_id": "42", "title": "Bug", "repo": "moda-labs/test"},
