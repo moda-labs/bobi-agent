@@ -154,10 +154,16 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
     set_project_root(project_path)
 
     agent_name = config.get("agent")
-    role = config.get("role", "manager")
+    role = config.get("role")
+    if not role and agent_name:
+        from modastack.prompts import AGENTS_DIR
+        defaults_path = AGENTS_DIR / agent_name / "defaults.yaml"
+        if defaults_path.exists():
+            import yaml as _yaml
+            defaults = _yaml.safe_load(defaults_path.read_text()) or {}
+            role = defaults.get("role", "manager")
+    role = role or "manager"
     subscribe = config.get("subscribe", [])
-    persistent = config.get("persistent", True)
-    monitors_enabled = config.get("monitors", False)
 
     state_dir = project_path / ".modastack" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -188,11 +194,14 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
         from modastack.subagent import _start_event_subscription
         _start_event_subscription(f"moda-{role}-{project_path.name}", subscribe, project_path)
 
-    if monitors_enabled:
-        from modastack.monitors.scheduler import MonitorScheduler
-        monitor_scheduler = MonitorScheduler(agent_name=agent_name)
-        monitor_scheduler.start()
-        log.info("Monitor scheduler started")
+    if agent_name:
+        from modastack.prompts import AGENTS_DIR
+        monitors_dir = AGENTS_DIR / agent_name / "monitors"
+        if monitors_dir.is_dir():
+            from modastack.monitors.scheduler import MonitorScheduler
+            monitor_scheduler = MonitorScheduler(agent_name=agent_name)
+            monitor_scheduler.start()
+            log.info("Monitor scheduler started")
 
     from modastack.prompts.resolver import build_startup_prompt
     from modastack.subagent import spawn_adhoc
@@ -204,7 +213,7 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
         cwd=str(project_path),
         task=task,
         name=f"moda-{role}-{project_path.name}",
-        persistent=persistent,
+        persistent=True,
         role=role,
     )
 

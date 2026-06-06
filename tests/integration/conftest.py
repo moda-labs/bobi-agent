@@ -47,15 +47,9 @@ def modastack_env(tmp_path_factory):
               state_dir / "workflow" / "runs", state_dir / "logs"]:
         d.mkdir(parents=True)
 
-    (config_dir / "config.yaml").write_text(yaml.dump({
-        "task_tracking": {"system": "github-issues", "project": "TEST"},
-        "github": {"repo": "test-org/test-repo"},
-        "agent": {"max_parallel": 2},
-        "verify": {"test_command": "echo pass"},
-    }))
-
-    (config_dir / "local.yaml").write_text(yaml.dump({
-        "event_server": {"url": "", "deployment_id": "", "api_key": ""},
+    (config_dir / "agent.yaml").write_text(yaml.dump({
+        "agent": "software_team",
+        "role": "manager",
     }))
 
     creds_dir = base / "config" / "modastack"

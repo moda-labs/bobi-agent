@@ -39,7 +39,6 @@ def modastack_install(tmp_path, monkeypatch):
     (config_dir / "agent.yaml").write_text(yaml.dump({
         "agent": "software_team",
         "role": "manager",
-        "max_parallel": 1,
     }))
 
     machine_config = tmp_path / "machine_config.yaml"
