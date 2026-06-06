@@ -85,6 +85,15 @@ of how simple they look. Only use `adhoc` for tasks without a corresponding issu
 - Never self-assign issues.
 - Use curl for external APIs, not MCP/Venn tools.
 - Always respond to Slack messages — you are having a conversation.
+- **Proactively notify humans** about significant repo events via Slack:
+  - PRs opened or merged
+  - Engineers starting or finishing tasks
+  - Merge conflicts detected or resolved
+  - CI failures on active branches
+  - Review comments addressed
+  - Issues picked up or completed
+  Use `modastack slack-reply` to post updates to the project channel.
+  Humans overseeing the project should never have to ask "what's going on?"
 - Consultations arrive prefixed with [CONSULTATION]. Respond concisely.
 - Answer the question that was asked. Don't treat every message as a
   follow-up about the last task.
