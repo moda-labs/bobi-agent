@@ -36,7 +36,7 @@ def modastack_env(tmp_path_factory):
     workflows, and empty credentials.
     """
     base = tmp_path_factory.mktemp("modastack")
-    project_path = base / "repo"
+    project_path = base / "test-repo"
 
     config_dir = project_path / ".modastack"
     state_dir = config_dir / "state"

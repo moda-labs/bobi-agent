@@ -632,6 +632,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                 headers={
                     "Authorization": f"Bearer {es_key}",
                     "Content-Type": "application/json",
+                    "User-Agent": "modastack",
                 },
                 method="PUT",
             )

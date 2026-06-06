@@ -59,7 +59,7 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     click.echo("\n".join(lines))
 
 def _detect_project_root(cwd: Path | None = None) -> Path:
-    """Return the project root — always the current working directory."""
+    """Return the project root — the given directory or cwd."""
     return (cwd or Path.cwd()).resolve()
 
 
@@ -322,25 +322,8 @@ def start(agent_pack, foreground, fresh, subscribe):
 
 
 def _ensure_config() -> None:
-    """Auto-register with event server on first run if needed."""
-    project_path = _detect_project_root()
-    if not project_path:
-        return
-
-    from .config import Config, load_deployment_state, save_deployment_state
-    cfg = Config.load(project_path)
-    state = load_deployment_state(project_path)
-
-    if cfg.event_server_url and not state.get("api_key"):
-        click.echo("  Registering with event server...")
-        deployment_id, api_key = _register_event_server(
-            cfg.event_server_url, project_path, cfg,
-        )
-        if deployment_id:
-            save_deployment_state(project_path, deployment_id, api_key)
-            click.echo(f"  Registered: {deployment_id[:8]}...")
-        else:
-            click.echo("  Could not register (will retry on next start)")
+    """Placeholder — registration happens at agent startup via _start_event_subscription."""
+    pass
 
 
 def _register_event_server(url: str, project_path: Path, rc: "ProjectConfig") -> tuple[str, str]:
@@ -1673,7 +1656,7 @@ def _post_event(event_type: str, data: dict) -> bool:
         req = urllib.request.Request(
             f"{es_url}/events/{etype}",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "User-Agent": "modastack"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read())

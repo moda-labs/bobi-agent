@@ -111,7 +111,7 @@ def register(base_url: str, name: str,
     req = urllib.request.Request(
         f"{base_url}/deployments",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": "modastack"},
     )
     with urllib.request.urlopen(req, timeout=5) as resp:
         result = json.loads(resp.read())
