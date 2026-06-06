@@ -550,6 +550,7 @@ def launch_agent(
     interactive: bool = True,
     role: str = "engineer",
     persistent: bool = False,
+    subscribe: list[str] | None = None,
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
@@ -590,6 +591,7 @@ def launch_agent(
         "interactive": interactive,
         "role": role,
         "persistent": persistent,
+        "subscribe": subscribe or [],
     })
     script = (
         "import json, sys; "
@@ -611,6 +613,56 @@ def launch_agent(
     return session_name
 
 
+def _start_event_subscription(session_name: str, subscribe: list[str],
+                               project_path: Path) -> None:
+    """Start event client + drain loop for a subscribing agent."""
+    from modastack.config import LocalConfig, ProjectConfig
+    from modastack.events.client import EventServerClient
+    from modastack.events.drain import drain_loop
+    from modastack.events.server import ensure_running, register
+
+    pc = ProjectConfig.from_file(project_path)
+    local = LocalConfig.load(project_path)
+    es_url = pc.event_server_url
+    es_key = local.event_server_api_key
+    es_deployment = local.event_server_deployment_id
+
+    if not es_url or not es_key:
+        es_port = 8080
+        es_url = f"http://localhost:{es_port}"
+        ensure_running(es_port, project_path=project_path)
+        es_deployment, es_key = register(es_url, session_name, subscribe)
+    else:
+        import json as _json, urllib.request
+        try:
+            req = urllib.request.Request(
+                f"{es_url}/deployments/{es_deployment}/subscriptions",
+                data=_json.dumps({"add": subscribe}).encode(),
+                headers={
+                    "Authorization": f"Bearer {es_key}",
+                    "Content-Type": "application/json",
+                },
+                method="PUT",
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            es_deployment, es_key = register(es_url, session_name, subscribe)
+
+    client = EventServerClient(
+        server_url=es_url,
+        deployment_id=es_deployment,
+        api_key=es_key,
+    )
+    client.start()
+
+    drain_thread = threading.Thread(
+        target=drain_loop, args=(session_name,),
+        daemon=True, name="agent-drain",
+    )
+    drain_thread.start()
+    log.info(f"Event subscription started for {session_name}: {subscribe}")
+
+
 def _run_agent_entry(args: dict) -> None:
     """Entry point for the detached subprocess. Runs the orchestrator."""
     task = args["task"]
@@ -622,12 +674,16 @@ def _run_agent_entry(args: dict) -> None:
     interactive = args.get("interactive", True)
     role = args.get("role", "engineer")
     persistent = args.get("persistent", False)
+    subscribe = args.get("subscribe", [])
 
     from modastack.sdk import set_project_root
     from modastack.cli import _detect_project_root
     project_root = _detect_project_root(Path(cwd))
     if project_root:
         set_project_root(project_root)
+
+    if subscribe and project_root:
+        _start_event_subscription(issue_id, subscribe, project_root)
 
     if persistent:
         spawn_adhoc(

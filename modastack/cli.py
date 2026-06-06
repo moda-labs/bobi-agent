@@ -1481,7 +1481,9 @@ main.add_command(event_server_cmd)
               help="Run without manager — agent makes all decisions autonomously")
 @click.option("--persistent", is_flag=True,
               help="Keep the agent alive after initial task, accepting inbox messages")
-def agents_launch(workflow, role, task, timeout, wait, post_event, requested_by, non_interactive, persistent):
+@click.option("--subscribe", multiple=True,
+              help="Subscribe to event topics (e.g. moda-labs/modastack, slack:T123)")
+def agents_launch(workflow, role, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe):
     """Launch an agent with a workflow and role.
 
     Every agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -1491,16 +1493,20 @@ def agents_launch(workflow, role, task, timeout, wait, post_event, requested_by,
         modastack agents launch -w issue-lifecycle --role engineer --task "Work on #42"
         modastack agents launch -w adhoc --role engineer --task "Why is CI failing?"
         modastack agents launch -w adhoc --role engineer --task "Be a team lead" --persistent
+        modastack agents launch -w adhoc --role manager --subscribe moda-labs/modastack --persistent
     """
+    if subscribe:
+        persistent = True
     _dispatch_agent(task=task, workflow=workflow, role=role,
                     timeout=timeout, wait=wait, post_event=post_event,
                     requested_by=requested_by,
                     interactive=not non_interactive,
-                    persistent=persistent)
+                    persistent=persistent,
+                    subscribe=list(subscribe))
 
 
 def _dispatch_agent(*, task, workflow, role, timeout, wait, post_event, requested_by,
-                    interactive=True, persistent=False):
+                    interactive=True, persistent=False, subscribe=None):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -1547,6 +1553,7 @@ def _dispatch_agent(*, task, workflow, role, timeout, wait, post_event, requeste
         interactive=interactive,
         role=role,
         persistent=persistent,
+        subscribe=subscribe or [],
     )
     click.echo(f"Agent started: {session_name}")
 
