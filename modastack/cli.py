@@ -118,6 +118,34 @@ def _systemctl(action: str) -> bool:
 
 
 
+def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
+    """Find an agent pack: .modastack/agents/{name} → built-in agents/{name}."""
+    local = project_path / ".modastack" / "agents" / name
+    if local.is_dir():
+        return local
+    from modastack.prompts import AGENTS_DIR
+    builtin = AGENTS_DIR / name
+    if builtin.is_dir():
+        return builtin
+    return None
+
+
+def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
+    """List available agent packs with their source."""
+    packs: dict[str, str] = {}
+    from modastack.prompts import AGENTS_DIR
+    if AGENTS_DIR.is_dir():
+        for d in sorted(AGENTS_DIR.iterdir()):
+            if d.is_dir():
+                packs[d.name] = "built-in"
+    local_agents = project_path / ".modastack" / "agents"
+    if local_agents.is_dir():
+        for d in sorted(local_agents.iterdir()):
+            if d.is_dir():
+                packs[d.name] = "local"
+    return [(name, source) for name, source in sorted(packs.items())]
+
+
 def _load_agent_config(project_path: Path, config_path: str | None = None) -> dict | None:
     """Load agent config from .modastack/agent.yaml or explicit path."""
     import yaml
@@ -228,11 +256,22 @@ def start(agent_pack, foreground, fresh, subscribe):
     if not agent_pack:
         agent_pack = agent_config.get("agent")
     if not agent_pack:
-        from modastack.prompts import AGENTS_DIR
-        packs = [d.name for d in AGENTS_DIR.iterdir() if d.is_dir()] if AGENTS_DIR.is_dir() else []
-        click.echo("Usage: modastack start <agent_pack>", err=True)
-        if packs:
-            click.echo(f"Available: {', '.join(packs)}", err=True)
+        available = _list_agent_packs(project_path)
+        click.echo("Usage: modastack start <agent>", err=True)
+        if available:
+            click.echo("Available agents:", err=True)
+            for name, source in available:
+                click.echo(f"  {name:20s} [{source}]", err=True)
+        raise SystemExit(1)
+
+    resolved = _resolve_agent_pack(agent_pack, project_path)
+    if not resolved:
+        available = _list_agent_packs(project_path)
+        click.echo(f"Unknown agent '{agent_pack}'.", err=True)
+        if available:
+            click.echo("Available agents:", err=True)
+            for name, source in available:
+                click.echo(f"  {name:20s} [{source}]", err=True)
         raise SystemExit(1)
 
     agent_config["agent"] = agent_pack

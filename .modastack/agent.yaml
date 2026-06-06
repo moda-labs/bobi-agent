@@ -1,4 +1,0 @@
-agent: software_team
-subscribe:
-  - github:moda-labs/modastack
-  - slack:T0952RZRZ0X

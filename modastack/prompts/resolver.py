@@ -10,10 +10,14 @@ from . import BASE_PATH, AGENTS_DIR
 log = logging.getLogger(__name__)
 
 
-def _resolve_agent_dir(agent_name: str | None) -> Path | None:
-    """Find the agent pack directory."""
+def _resolve_agent_dir(agent_name: str | None, project_path: Path | None = None) -> Path | None:
+    """Find the agent pack: .modastack/agents/{name} → built-in agents/{name}."""
     if not agent_name:
         return None
+    if project_path:
+        local = Path(project_path) / ".modastack" / "agents" / agent_name
+        if local.is_dir():
+            return local
     d = AGENTS_DIR / agent_name
     return d if d.is_dir() else None
 
@@ -37,7 +41,7 @@ def resolve_agent_prompt(
     if project_role.exists():
         parts.append(project_role.read_text())
     else:
-        agent_dir = _resolve_agent_dir(agent_name)
+        agent_dir = _resolve_agent_dir(agent_name, project)
         if agent_dir:
             pack_role = agent_dir / "roles" / f"{role}.md"
             if pack_role.exists():
@@ -82,7 +86,7 @@ def list_workflows(project_path: Path | str, agent_name: str | None = None) -> s
         project = Path(project_path)
         sources: list[Path] = []
 
-        agent_dir = _resolve_agent_dir(agent_name)
+        agent_dir = _resolve_agent_dir(agent_name, project)
         if agent_dir:
             wf_dir = agent_dir / "workflows"
             if wf_dir.exists():
@@ -150,7 +154,7 @@ def discover_roles(
     roles: dict[str, dict] = {}
 
     if agent_name:
-        agent_dir = _resolve_agent_dir(agent_name)
+        agent_dir = _resolve_agent_dir(agent_name, Path(project_path) if project_path else None)
         if agent_dir:
             roles_dir = agent_dir / "roles"
             if roles_dir.is_dir():
@@ -207,7 +211,7 @@ def validate_role(
     agent_name: str | None = None,
 ) -> bool:
     """Check whether a role exists in any tier."""
-    agent_dir = _resolve_agent_dir(agent_name)
+    agent_dir = _resolve_agent_dir(agent_name, Path(project_path) if project_path else None)
     if agent_dir and (agent_dir / "roles" / f"{role_name}.md").exists():
         return True
     if project_path:
