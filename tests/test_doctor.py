@@ -60,19 +60,19 @@ class TestCheckProjectConfig:
         assert "not inside" in r.detail
 
 
-class TestCheckLocalConfig:
+class TestCheckMachineConfig:
 
     def test_passes_when_exists(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
-        config_dir.mkdir()
-        (config_dir / "local.yaml").write_text("operator:\n  name: test\n")
-        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
+        machine_config = tmp_path / "config.yaml"
+        machine_config.write_text("event_server:\n  url: https://events.test\n")
+        with patch("modastack.config._machine_config_path", return_value=machine_config):
             from modastack.doctor import _check_local_config
             r = _check_local_config()
         assert r.ok
 
     def test_fails_when_missing(self, tmp_path):
-        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
+        missing = tmp_path / "nonexistent.yaml"
+        with patch("modastack.config._machine_config_path", return_value=missing):
             from modastack.doctor import _check_local_config
             r = _check_local_config()
         assert not r.ok

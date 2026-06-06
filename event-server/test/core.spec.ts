@@ -114,6 +114,22 @@ describe("normalizeSlackPayload", () => {
 		expect(result.event!.type).toBe("slack.dm");
 	});
 
+	it("normalizes group DM (mpim)", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "G789",
+				channel_type: "mpim",
+				text: "hello group",
+				ts: "123",
+			},
+		});
+		expect(result.event!.type).toBe("slack.dm");
+	});
+
 	it("normalizes thread reply", () => {
 		const result = normalizeSlackPayload({
 			type: "event_callback",

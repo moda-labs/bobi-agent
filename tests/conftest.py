@@ -43,16 +43,14 @@ def modastack_install(tmp_path, monkeypatch):
         "verify": {"test_command": "echo pass"},
     }))
 
-    (config_dir / "local.yaml").write_text(yaml.dump({
-        "operator": {"name": "test", "email": "test@test.com"},
-        "slack": {"bot_token": "", "dm_channel": ""},
-        "event_server": {"url": "", "deployment_id": "", "api_key": ""},
-    }))
+    machine_config = tmp_path / "machine_config.yaml"
+    machine_config.write_text("{}")
 
     creds_path = tmp_path / "credentials.yaml"
     creds_path.write_text("{}")
 
     monkeypatch.setattr("modastack.sdk._project_root", repo_path)
+    monkeypatch.setattr("modastack.config._machine_config_path", lambda: machine_config)
     monkeypatch.setattr("modastack.config._credentials_path", lambda: creds_path)
 
     return ModastackInstall(

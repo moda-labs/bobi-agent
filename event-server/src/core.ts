@@ -101,7 +101,7 @@ export function normalizeSlackPayload(
 	let slackEventType: string;
 	if (eventType === "app_mention") {
 		slackEventType = "slack.mention";
-	} else if (channelType === "im") {
+	} else if (channelType === "im" || channelType === "mpim") {
 		slackEventType = "slack.dm";
 	} else if (threadTs) {
 		slackEventType = "slack.thread_reply";

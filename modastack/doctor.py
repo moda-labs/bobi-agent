@@ -44,16 +44,13 @@ def _check_project_config() -> CheckResult:
 
 
 def _check_local_config() -> CheckResult:
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        return CheckResult("Local config", ok=False, detail="no project detected")
-    local_path = root / ".modastack" / "local.yaml"
-    if local_path.exists():
-        return CheckResult("Local config", ok=True, detail=str(local_path))
-    return CheckResult("Local config", ok=False,
-                       detail="missing .modastack/local.yaml",
-                       hint="Run `modastack init` to create operator config")
+    from modastack.config import _machine_config_path
+    machine = _machine_config_path()
+    if machine.exists():
+        return CheckResult("Machine config", ok=True, detail=str(machine))
+    return CheckResult("Machine config", ok=False,
+                       detail="missing ~/.modastack/config.yaml",
+                       hint="Create ~/.modastack/config.yaml with event_server, slack, and linear credentials")
 
 
 def _check_workflows() -> CheckResult:
@@ -77,17 +74,17 @@ def _check_event_server() -> CheckResult:
     import json
     import urllib.request
 
-    from modastack.config import LocalConfig, ProjectConfig
+    from modastack.config import Config, load_deployment_state
     from modastack.sdk import get_project_root
 
     root = get_project_root()
     if root:
         try:
-            rc = ProjectConfig.from_file(root)
-            local = LocalConfig.load(root)
-            if rc.event_server_url and local.event_server_api_key:
+            cfg = Config.load(root)
+            state = load_deployment_state(root)
+            if cfg.event_server_url and state.get("api_key"):
                 return CheckResult("Event server", ok=True,
-                                   detail=f"remote ({rc.event_server_url})")
+                                   detail=f"remote ({cfg.event_server_url})")
         except FileNotFoundError:
             pass
 

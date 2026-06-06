@@ -618,18 +618,18 @@ def launch_agent(
 def _start_event_subscription(session_name: str, subscribe: list[str],
                                project_path: Path) -> None:
     """Start event client + drain loop for a subscribing agent."""
-    from modastack.config import LocalConfig, ProjectConfig
+    from modastack.config import Config, load_deployment_state, save_deployment_state
     from modastack.events.client import EventServerClient
     from modastack.events.drain import drain_loop
     from modastack.events.server import ensure_running, register
 
-    pc = ProjectConfig.from_file(project_path)
-    local = LocalConfig.load(project_path)
-    es_url = pc.event_server_url
-    es_key = local.event_server_api_key
-    es_deployment = local.event_server_deployment_id
+    cfg = Config.load(project_path)
+    es_url = cfg.event_server_url
+    state = load_deployment_state(project_path)
+    es_key = state.get("api_key", "")
+    es_deployment = state.get("deployment_id", "")
 
-    if not es_url or not es_key:
+    if not es_url:
         es_port = 8080
         es_url = f"http://localhost:{es_port}"
         ensure_running(es_port, project_path=project_path)
