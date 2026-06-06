@@ -36,10 +36,10 @@ def modastack_install(tmp_path, monkeypatch):
     for d in [config_dir, state_dir, sessions_dir, config_dir / "workflows"]:
         d.mkdir(parents=True)
 
-    (config_dir / "config.yaml").write_text(yaml.dump({
-        "task_tracking": {"system": "github-issues", "project": "TEST"},
-        "agent": {"max_parallel": 1},
-        "verify": {"test_command": "echo pass"},
+    (config_dir / "agent.yaml").write_text(yaml.dump({
+        "agent": "software_team",
+        "role": "manager",
+        "max_parallel": 1,
     }))
 
     machine_config = tmp_path / "machine_config.yaml"

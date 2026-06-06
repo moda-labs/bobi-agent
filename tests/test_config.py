@@ -1,4 +1,4 @@
-"""Tests for config loading — machine → project resolution."""
+"""Tests for machine config loading from ~/.modastack/config.yaml."""
 
 from pathlib import Path
 from textwrap import dedent
@@ -7,105 +7,38 @@ from unittest.mock import patch
 from modastack.config import Config, load_deployment_state, save_deployment_state
 
 
-def test_project_config_loads(tmp_path):
-    config_dir = tmp_path / ".modastack"
-    config_dir.mkdir()
-    (config_dir / "config.yaml").write_text(dedent("""
-        agent:
-          max_parallel: 3
-        context:
-          github_org: myorg
-    """))
-
-    config = Config.load(tmp_path)
-
-    assert config.path == tmp_path
-    assert config.max_parallel == 3
-    assert config.context["github_org"] == "myorg"
-
-
-def test_project_config_linear(tmp_path):
-    config_dir = tmp_path / ".modastack"
-    config_dir.mkdir()
-    (config_dir / "config.yaml").write_text(dedent("""
-        linear:
-          team: MOD
-          project: Baohua
-    """))
-
-    config = Config.load(tmp_path)
-    assert config.linear_team == "MOD"
-    assert config.linear_project == "Baohua"
-
-
-def test_project_config_defaults(tmp_path):
-    config = Config.load(tmp_path)
-    assert config.max_parallel == 2
-    assert config.linear_team == ""
-    assert config.context == {}
-
-
-def test_project_config_event_server(tmp_path):
-    config_dir = tmp_path / ".modastack"
-    config_dir.mkdir()
-    (config_dir / "config.yaml").write_text(dedent("""
-        event_server:
-          url: https://modastack-events.example.com
-    """))
-
-    config = Config.load(tmp_path)
-    assert config.event_server_url == "https://modastack-events.example.com"
-
-
-def test_machine_config_provides_defaults(tmp_path):
-    machine_yaml = tmp_path / "machine_config.yaml"
+def test_loads_machine_config(tmp_path):
+    machine_yaml = tmp_path / "config.yaml"
     machine_yaml.write_text(dedent("""
-        slack:
-          bot_token: xoxb-machine-token
         event_server:
           url: https://events.example.com
-    """))
-
-    project_dir = tmp_path / "project"
-    config_dir = project_dir / ".modastack"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.yaml").write_text("{}")
-
-    with patch("modastack.config._machine_config_path", return_value=machine_yaml):
-        config = Config.load(project_dir)
-
-    assert config.slack_bot_token == "xoxb-machine-token"
-    assert config.event_server_url == "https://events.example.com"
-
-
-def test_project_overrides_machine(tmp_path):
-    machine_yaml = tmp_path / "machine_config.yaml"
-    machine_yaml.write_text(dedent("""
-        event_server:
-          url: https://machine-default.example.com
-    """))
-
-    project_dir = tmp_path / "project"
-    config_dir = project_dir / ".modastack"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.yaml").write_text(dedent("""
-        event_server:
-          url: https://project-specific.example.com
+        slack:
+          bot_token: xoxb-test
+        linear:
+          api_key: lin_api_test
     """))
 
     with patch("modastack.config._machine_config_path", return_value=machine_yaml):
-        config = Config.load(project_dir)
+        cfg = Config.load()
 
-    assert config.event_server_url == "https://project-specific.example.com"
+    assert cfg.event_server_url == "https://events.example.com"
+    assert cfg.slack_bot_token == "xoxb-test"
+    assert cfg.linear_api_key == "lin_api_test"
 
 
-def test_from_file_alias_works(tmp_path):
-    config_dir = tmp_path / ".modastack"
-    config_dir.mkdir()
-    (config_dir / "config.yaml").write_text("{}")
+def test_defaults_when_no_config():
+    with patch("modastack.config._machine_config_path", return_value=Path("/nonexistent")):
+        cfg = Config.load()
 
-    config = Config.from_file(tmp_path)
-    assert config.path == tmp_path
+    assert cfg.event_server_url == ""
+    assert cfg.slack_bot_token == ""
+    assert cfg.linear_api_key == ""
+
+
+def test_from_file_alias():
+    with patch("modastack.config._machine_config_path", return_value=Path("/nonexistent")):
+        cfg = Config.from_file(Path("/tmp"))
+    assert cfg.event_server_url == ""
 
 
 # --- Deployment state (ephemeral) ---

@@ -100,28 +100,8 @@ class TestFormatEventForManager:
 
 class TestShouldFilter:
 
-    @patch("modastack.sdk.get_project_root", return_value=Path("/tmp/repo"))
-    @patch("modastack.config.ProjectConfig.from_file")
-    def test_filters_linear_by_project(self, mock_config, mock_root):
-        mock_config.return_value = MagicMock(linear_project="MyProject")
-        event = {
-            "source": "linear", "type": "linear.Issue.update",
-            "payload": {
-                "data": {"project": {"name": "OtherProject"}},
-            },
-        }
-        assert _should_filter(event) is True
-
-    @patch("modastack.sdk.get_project_root", return_value=Path("/tmp/repo"))
-    @patch("modastack.config.ProjectConfig.from_file")
-    def test_passes_matching_project(self, mock_config, mock_root):
-        mock_config.return_value = MagicMock(linear_project="MyProject")
-        event = {
-            "source": "linear", "type": "linear.Issue.update",
-            "payload": {
-                "data": {"project": {"name": "MyProject"}},
-            },
-        }
+    def test_passes_everything_through(self):
+        event = {"source": "linear", "type": "linear.Issue.update", "payload": {}}
         assert _should_filter(event) is False
 
     def test_passes_non_linear_events(self):

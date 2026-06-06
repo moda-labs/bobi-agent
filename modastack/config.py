@@ -1,14 +1,7 @@
-"""Configuration with machine → project resolution.
+"""Machine-wide configuration from ~/.modastack/config.yaml.
 
-Machine-wide config (~/.modastack/config.yaml): service credentials (not checked in)
-  - Event server URL
-  - Slack bot token
-  - Linear API key
-
-Project config (.modastack/config.yaml): project settings (checked in)
-  - GitHub repo, Slack channel, task tracking
-  - Test command, max parallel agents
-  - Overrides machine-wide values for any overlapping key
+Service credentials and connection URLs shared across all projects.
+Not checked in — contains secrets.
 """
 
 import logging
@@ -30,78 +23,33 @@ def _load_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Merge override into base, recursing into nested dicts."""
-    result = dict(base)
-    for key, val in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
-            result[key] = _deep_merge(result[key], val)
-        else:
-            result[key] = val
-    return result
-
-
 @dataclass
 class Config:
-    """Resolved config — machine defaults merged with project overrides.
+    """Machine-wide config from ~/.modastack/config.yaml."""
 
-    Resolution order: ~/.modastack/config.yaml → .modastack/config.yaml
-    Project values override machine values at every key.
-    """
-
-    path: Path
-
-    max_parallel: int = 2
-    context: dict = field(default_factory=dict)
-
-
-    # linear
-    linear_team: str = ""
-    linear_project: str = ""
+    event_server_url: str = ""
+    slack_bot_token: str = ""
     linear_api_key: str = ""
 
-    # slack
-    slack_workspace_id: str = ""
-    slack_bot_token: str = ""
-
-    # event server
-    event_server_url: str = ""
-
     @classmethod
-    def from_file(cls, project_path: Path) -> "Config":
-        """Load config with machine → project resolution."""
-        return cls.load(project_path)
-
-    @classmethod
-    def load(cls, project_path: Path) -> "Config":
-        """Load config with machine → project resolution."""
-        machine = _load_yaml(_machine_config_path())
-        project_yaml = project_path / ".modastack" / "config.yaml"
-        project = _load_yaml(project_yaml)
-
-        raw = _deep_merge(machine, project)
-
-        github = raw.get("github", {})
-        linear = raw.get("linear", {})
+    def load(cls, project_path: Path | None = None) -> "Config":
+        """Load machine config. project_path is accepted for API compat but ignored."""
+        raw = _load_yaml(_machine_config_path())
         slack = raw.get("slack", {})
-        agent = raw.get("agent", {})
-        verify = raw.get("verify", {})
+        linear = raw.get("linear", {})
         event_server = raw.get("event_server", {})
 
         return cls(
-            path=project_path,
-            max_parallel=agent.get("max_parallel", 2),
-            context=raw.get("context", {}),
-            linear_team=linear.get("team", ""),
-            linear_project=linear.get("project", ""),
-            linear_api_key=linear.get("api_key", ""),
-            slack_workspace_id=slack.get("workspace_id", ""),
-            slack_bot_token=slack.get("bot_token", ""),
             event_server_url=event_server.get("url", ""),
+            slack_bot_token=slack.get("bot_token", ""),
+            linear_api_key=linear.get("api_key", ""),
         )
 
+    @classmethod
+    def from_file(cls, project_path: Path) -> "Config":
+        return cls.load(project_path)
 
-# Keep these aliases so existing code doesn't break during transition
+
 ProjectConfig = Config
 
 
@@ -145,25 +93,15 @@ class Credentials:
         return list(self.entries.keys())
 
 
-def _resolve_project_config_path(project_path: Path) -> Path:
-    """Find the project config file at .modastack/config.yaml."""
-    path = project_path / ".modastack" / "config.yaml"
-    if path.exists():
-        return path
-    raise FileNotFoundError(
-        f"No .modastack/config.yaml in {project_path}"
-    )
-
-
 # --- Event server deployment state (ephemeral, auto-registered) ---
 
 
 def load_deployment_state(project_path: Path) -> dict:
     """Load event server deployment_id + api_key from state dir."""
+    import json
     state_file = project_path / ".modastack" / "state" / "deployment.json"
     if not state_file.exists():
         return {}
-    import json
     try:
         return json.loads(state_file.read_text())
     except (json.JSONDecodeError, OSError):

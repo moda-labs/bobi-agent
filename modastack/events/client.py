@@ -116,27 +116,7 @@ def _format_requester(requester: dict) -> str:
 
 
 def _should_filter(event: dict) -> bool:
-    """Drop events that don't match the repo's project filter (if configured)."""
-    if event.get("source") != "linear":
-        return False
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        return False
-    try:
-        from modastack.config import ProjectConfig
-        rc = ProjectConfig.from_file(root)
-        if rc.linear_project:
-            payload = event.get("payload", event.get("data", {}))
-            data = payload.get("data", payload) if isinstance(payload, dict) else {}
-            event_project = data.get("project", "")
-            if isinstance(event_project, dict):
-                event_project = event_project.get("name", "")
-            if event_project and event_project != rc.linear_project:
-                log.debug(f"Filtered Linear event: project={event_project}, want={rc.linear_project}")
-                return True
-    except Exception:
-        pass
+    """Framework-level event filter. Currently passes everything through."""
     return False
 
 

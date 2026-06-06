@@ -77,7 +77,7 @@ def _find_project_root(cwd: str) -> Path:
     """Find the original project root from a working directory or worktree."""
     path = Path(cwd)
     for candidate in [path, *path.parents]:
-        if (candidate / ".modastack" / "config.yaml").exists():
+        if (candidate / ".modastack" / "agent.yaml").exists():
             return candidate
     return path
 

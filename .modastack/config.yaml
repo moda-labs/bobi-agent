@@ -1,7 +1,0 @@
-# Project config for modastack (checked in)
-
-agent:
-  max_parallel: 2
-
-slack:
-  workspace_id: T0952RZRZ0X

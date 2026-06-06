@@ -59,10 +59,10 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     click.echo("\n".join(lines))
 
 def _detect_project_root(cwd: Path | None = None) -> Path | None:
-    """Walk up from cwd to find a project with .modastack/config.yaml."""
+    """Walk up from cwd to find a project with .modastack/agent.yaml."""
     path = (cwd or Path.cwd()).resolve()
     for candidate in [path, *path.parents]:
-        if (candidate / ".modastack" / "config.yaml").exists():
+        if (candidate / ".modastack" / "agent.yaml").exists():
             return candidate
     return None
 

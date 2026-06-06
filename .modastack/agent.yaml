@@ -1,6 +1,7 @@
 agent: software_team
 role: manager
 persistent: true
+max_parallel: 2
 subscribe:
   - github:moda-labs/modastack
   - slack:T0952RZRZ0X

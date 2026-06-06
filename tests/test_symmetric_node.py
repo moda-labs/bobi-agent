@@ -23,31 +23,18 @@ from modastack.events.client import format_event_for_manager, event_queue
 
 class TestBuildSubscriptions:
 
-    def test_slack_workspace(self, tmp_path):
+    def test_reads_agent_yaml(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("slack:\n  workspace_id: T123\n")
-        subs = build_subscriptions(tmp_path)
-        assert "slack:T123" in subs
-
-    def test_linear_team(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text(
-            "task_tracking:\n  system: linear\n"
-            "linear:\n  team: MOD\n"
+        (config_dir / "agent.yaml").write_text(
+            "subscribe:\n  - github:org/repo\n  - slack:T123\n  - linear:MOD\n"
         )
         subs = build_subscriptions(tmp_path)
+        assert "github:org/repo" in subs
+        assert "slack:T123" in subs
         assert "linear:MOD" in subs
 
     def test_fallback_to_dir_name(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("{}\n")
-        subs = build_subscriptions(tmp_path)
-        assert tmp_path.name in subs
-
-    def test_missing_config(self, tmp_path):
         subs = build_subscriptions(tmp_path)
         assert tmp_path.name in subs
 
@@ -134,7 +121,7 @@ class TestCanonicalImports:
     def test_build_subscriptions_direct(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("slack:\n  workspace_id: T999\n")
+        (config_dir / "agent.yaml").write_text("subscribe:\n  - slack:T999\n")
 
         from modastack.events.subscriptions import build_subscriptions
         subs = build_subscriptions(tmp_path)
