@@ -69,4 +69,44 @@ describe("event-server", () => {
 		);
 		expect(response.status).toBe(403);
 	});
+
+	it("accepts generic topic event", async () => {
+		const response = await SELF.fetch("https://example.com/events/deploy.complete", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				source: "ci",
+				payload: { status: "success", sha: "abc123" },
+			}),
+		});
+		expect(response.status).toBe(200);
+		const body = await response.json() as { delivered_to: number };
+		expect(typeof body.delivered_to).toBe("number");
+	});
+
+	it("rejects generic topic with invalid JSON", async () => {
+		const response = await SELF.fetch("https://example.com/events/test", {
+			method: "POST",
+			body: "not json",
+		});
+		expect(response.status).toBe(400);
+	});
+
+	it("rejects slack workspace registration without required fields", async () => {
+		const response = await SELF.fetch("https://example.com/slack/workspaces", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ workspace_id: "T123" }),
+		});
+		expect(response.status).toBe(400);
+	});
+
+	it("rejects slack send without channel or text", async () => {
+		const response = await SELF.fetch("https://example.com/slack/send", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ text: "hello" }),
+		});
+		expect(response.status).toBe(400);
+	});
 });

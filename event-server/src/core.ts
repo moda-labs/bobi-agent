@@ -17,6 +17,23 @@ export interface SlackNormalizationResult {
 	skip: boolean;
 }
 
+export function createTopicEvent(
+	topic: string,
+	body: Record<string, unknown>,
+): NormalizedEvent {
+	return {
+		id: (body.id as string) || crypto.randomUUID(),
+		source: (body.source as string) || "custom",
+		type: topic,
+		timestamp: new Date().toISOString(),
+		payload: (body.payload as Record<string, unknown>) || body,
+		repo: body.repo as string | undefined,
+		team_key: body.team_key as string | undefined,
+		workspace: body.workspace as string | undefined,
+		channel: body.channel as string | undefined,
+	};
+}
+
 export function normalizeGitHubPayload(
 	eventHeader: string,
 	deliveryId: string,

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+	createTopicEvent,
 	normalizeGitHubPayload,
 	normalizeLinearPayload,
 	normalizeSlackPayload,
@@ -246,5 +247,46 @@ describe("subscriptionKeysForEvent", () => {
 			payload: {},
 		});
 		expect(keys).toEqual([]);
+	});
+});
+
+describe("createTopicEvent", () => {
+	it("creates event with topic as type", () => {
+		const event = createTopicEvent("my-topic", {
+			source: "my-app",
+			payload: { key: "value" },
+		});
+		expect(event.type).toBe("my-topic");
+		expect(event.source).toBe("my-app");
+		expect(event.payload).toEqual({ key: "value" });
+		expect(event.id).toBeTruthy();
+		expect(event.timestamp).toBeTruthy();
+	});
+
+	it("uses body as payload when no payload field", () => {
+		const event = createTopicEvent("test", { foo: "bar" });
+		expect(event.payload).toEqual({ foo: "bar" });
+	});
+
+	it("preserves routing fields from body", () => {
+		const event = createTopicEvent("deploy.complete", {
+			repo: "org/repo",
+			workspace: "T123",
+			channel: "C456",
+			payload: { status: "success" },
+		});
+		expect(event.repo).toBe("org/repo");
+		expect(event.workspace).toBe("T123");
+		expect(event.channel).toBe("C456");
+	});
+
+	it("uses provided id when present", () => {
+		const event = createTopicEvent("test", { id: "custom-id" });
+		expect(event.id).toBe("custom-id");
+	});
+
+	it("defaults source to custom", () => {
+		const event = createTopicEvent("test", {});
+		expect(event.source).toBe("custom");
 	});
 });

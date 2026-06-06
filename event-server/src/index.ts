@@ -1,6 +1,7 @@
 export { DeploymentSession } from "./deployment-session";
 import {
 	type NormalizedEvent,
+	createTopicEvent,
 	normalizeGitHubPayload,
 	normalizeLinearPayload,
 	normalizeSlackPayload,
@@ -37,6 +38,19 @@ export default {
 		}
 		if (request.method === "PUT" && path.startsWith("/deployments/") && path.endsWith("/subscriptions")) {
 			return handleUpdateSubscriptions(request, env, path);
+		}
+		// Generic topic: POST /events/{topic}
+		const topicMatch = request.method === "POST" && path.match(/^\/events\/(.+)$/);
+		if (topicMatch) {
+			return handleTopicEvent(request, env, topicMatch[1]);
+		}
+		// Slack send-through: POST /slack/send
+		if (request.method === "POST" && path === "/slack/send") {
+			return handleSlackSend(request, env);
+		}
+		// Slack workspace registry: POST /slack/workspaces
+		if (request.method === "POST" && path === "/slack/workspaces") {
+			return handleSlackWorkspaceRegister(request, env);
 		}
 		if (request.method === "GET" && path === "/health") {
 			return Response.json({ status: "ok" });
@@ -278,4 +292,80 @@ async function handleUpdateSubscriptions(request: Request, env: Env, path: strin
 	await env.EVENTS.put(`deployment_id:${deploymentId}`, JSON.stringify(deployment));
 
 	return Response.json({ subscriptions: existingSubs, added });
+}
+
+async function handleTopicEvent(request: Request, env: Env, topic: string): Promise<Response> {
+	let body: Record<string, unknown>;
+	try {
+		body = (await request.json()) as Record<string, unknown>;
+	} catch {
+		return new Response("Invalid JSON", { status: 400 });
+	}
+
+	const event = createTopicEvent(topic, body);
+	const delivered = await routeToDeployments(env, event);
+	return Response.json({ delivered_to: delivered });
+}
+
+async function handleSlackWorkspaceRegister(request: Request, env: Env): Promise<Response> {
+	let body: Record<string, unknown>;
+	try {
+		body = (await request.json()) as Record<string, unknown>;
+	} catch {
+		return new Response("Invalid JSON", { status: 400 });
+	}
+
+	const workspaceId = body.workspace_id as string;
+	const botToken = body.bot_token as string;
+	if (!workspaceId || !botToken) {
+		return Response.json({ error: "workspace_id and bot_token required" }, { status: 400 });
+	}
+
+	await env.EVENTS.put(`slack_workspace:${workspaceId}`, JSON.stringify({ bot_token: botToken }));
+	return Response.json({ ok: true, workspace_id: workspaceId });
+}
+
+async function handleSlackSend(request: Request, env: Env): Promise<Response> {
+	let body: Record<string, unknown>;
+	try {
+		body = (await request.json()) as Record<string, unknown>;
+	} catch {
+		return new Response("Invalid JSON", { status: 400 });
+	}
+
+	const workspaceId = body.workspace as string;
+	const channel = body.channel as string;
+	const text = body.text as string;
+	if (!channel || !text) {
+		return Response.json({ error: "channel and text required" }, { status: 400 });
+	}
+
+	let botToken = "";
+	if (workspaceId) {
+		const wsData = await env.EVENTS.get(`slack_workspace:${workspaceId}`);
+		if (wsData) {
+			botToken = (JSON.parse(wsData) as Record<string, string>).bot_token || "";
+		}
+	}
+	if (!botToken) {
+		return Response.json({ error: "no bot token for workspace" }, { status: 400 });
+	}
+
+	const payload: Record<string, unknown> = { channel, text };
+	if (body.thread_ts) payload.thread_ts = body.thread_ts;
+
+	const resp = await fetch("https://slack.com/api/chat.postMessage", {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${botToken}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(payload),
+	});
+	const result = (await resp.json()) as Record<string, unknown>;
+
+	if (!result.ok) {
+		return Response.json({ ok: false, error: result.error }, { status: 502 });
+	}
+	return Response.json({ ok: true, ts: result.ts });
 }

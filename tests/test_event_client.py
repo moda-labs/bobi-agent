@@ -1,207 +1,81 @@
-"""Tests for event client — normalization, formatting, queue ingestion."""
+"""Tests for event client — formatting, filtering, queue ingestion."""
 
 import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from modastack.events.client import (
-    _normalize_event,
-    _normalize_slack,
     format_event_for_manager,
     event_queue,
+    _should_filter,
 )
 
 
-class TestNormalizeGitHub:
-
-    def test_issues_opened(self):
-        data = {
-            "source": "github", "type": "github.issues",
-            "payload": {
-                "action": "opened",
-                "repository": {"full_name": "moda-labs/test"},
-                "issue": {
-                    "number": 42, "title": "Bug", "body": "details",
-                    "labels": [{"name": "bug"}], "assignees": [{"login": "zach"}],
-                    "state": "open", "html_url": "https://github.com/...",
-                },
-            },
-        }
-        result = _normalize_event(data)
-        assert result["type"] == "task.opened"
-        assert result["source"] == "github"
-        assert result["data"]["issue_id"] == "42"
-        assert result["data"]["title"] == "Bug"
-        assert result["data"]["labels"] == ["bug"]
-
-    def test_pull_request_merged(self):
-        data = {
-            "source": "github", "type": "github.pull_request",
-            "payload": {
-                "action": "closed",
-                "repository": {"full_name": "moda-labs/test"},
-                "pull_request": {
-                    "number": 10, "title": "Fix", "state": "closed",
-                    "merged": True, "head": {"ref": "fix-branch"},
-                    "html_url": "https://github.com/...",
-                },
-            },
-        }
-        result = _normalize_event(data)
-        assert result["type"] == "pr.closed"
-        assert result["data"]["merged"] is True
-
-    def test_push_event(self):
-        data = {
-            "source": "github", "type": "github.push",
-            "payload": {"ref": "refs/heads/main", "sender": {"login": "zach"},
-                        "repository": {"full_name": "moda-labs/test"}},
-        }
-        result = _normalize_event(data)
-        assert result["type"] == "git.push"
-
-    def test_push_maps_sender_to_from(self):
-        data = {
-            "source": "github", "type": "github.push",
-            "payload": {"ref": "refs/heads/main", "sender": {"login": "zach"},
-                        "repository": {"full_name": "moda-labs/test"}},
-        }
-        result = _normalize_event(data)
-        assert result["data"]["from"] == "zach"
-
-    def test_issue_attributes_sender_as_from(self):
-        data = {
-            "source": "github", "type": "github.issues",
-            "payload": {
-                "action": "opened",
-                "sender": {"login": "alice"},
-                "repository": {"full_name": "moda-labs/test"},
-                "issue": {"number": 7, "title": "Bug", "labels": [],
-                          "assignees": [], "state": "open"},
-            },
-        }
-        result = _normalize_event(data)
-        assert result["data"]["from"] == "alice"
-
-    def test_pr_falls_back_to_author_when_no_sender(self):
-        data = {
-            "source": "github", "type": "github.pull_request",
-            "payload": {
-                "action": "opened",
-                "repository": {"full_name": "moda-labs/test"},
-                "pull_request": {"number": 3, "title": "Fix", "state": "open",
-                                 "user": {"login": "bob"}, "head": {"ref": "fix"}},
-            },
-        }
-        result = _normalize_event(data)
-        assert result["data"]["from"] == "bob"
-
-    def test_unknown_github_event(self):
-        data = {
-            "source": "github", "type": "github.star",
-            "payload": {"action": "created", "repository": {"full_name": "moda-labs/test"}},
-        }
-        result = _normalize_event(data)
-        assert result["type"] == "github.star"
-
-
-class TestNormalizeLinear:
-
-    def test_issue_update(self):
-        data = {
-            "source": "linear", "type": "linear.Issue.update",
-            "payload": {
-                "data": {
-                    "identifier": "ENG-42", "title": "Add caching",
-                    "state": {"name": "In Progress"},
-                    "team": {"key": "ENG"},
-                },
-            },
-        }
-        result = _normalize_event(data)
-        assert result["type"] == "linear.Issue.update"
-        assert result["data"]["issue_id"] == "ENG-42"
-        assert result["data"]["state"] == "In Progress"
-
-    def test_attributes_assignee_as_from(self):
-        data = {
-            "source": "linear", "type": "linear.Issue.update",
-            "payload": {
-                "data": {
-                    "identifier": "ENG-9", "title": "Caching",
-                    "assignee": {"name": "Dana"},
-                },
-            },
-        }
-        result = _normalize_event(data)
-        assert result["data"]["from"] == "Dana"
-
-
-class TestNormalizeSlack:
-
-    @patch("modastack.config.LocalConfig")
-    @patch("modastack.sdk.get_project_root", return_value=Path("/tmp/repo"))
-    @patch("modastack.events.client._resolve_slack_user")
-    def test_dm(self, mock_resolve, mock_root, mock_local):
-        mock_resolve.return_value = "Zach"
-        mock_local.load.return_value = MagicMock(slack_bot_token="xoxb-test")
-
-        data = {
-            "source": "slack", "type": "slack.dm", "workspace": "T123",
-            "payload": {
-                "user_id": "U123", "channel": "D456",
-                "channel_type": "im", "text": "hello",
-                "ts": "123.456", "thread_ts": "",
-            },
-        }
-        result = _normalize_event(data)
-        assert result["type"] == "slack.dm"
-        assert result["data"]["from"] == "Zach"
-        # The stable identity is preserved alongside the resolved name.
-        assert result["data"]["user_id"] == "U123"
-        assert result["data"]["text"] == "hello"
-        assert result["data"]["workspace"] == "T123"
-        assert result["data"]["channel"] == "D456"
-
-    @patch("modastack.config.LocalConfig")
-    @patch("modastack.sdk.get_project_root", return_value=Path("/tmp/repo"))
-    @patch("modastack.events.client._resolve_slack_user")
-    def test_mention_strips_bot_prefix(self, mock_resolve, mock_root, mock_local):
-        mock_resolve.return_value = "Zach"
-        mock_local.load.return_value = MagicMock(slack_bot_token="xoxb-test")
-
-        data = {
-            "source": "slack", "type": "slack.mention", "workspace": "T123",
-            "payload": {
-                "user_id": "U123", "channel": "C789",
-                "channel_type": "channel", "text": "<@UBOTID> check deploy",
-                "ts": "123.456", "thread_ts": "",
-            },
-        }
-        result = _normalize_event(data)
-        assert result["data"]["text"] == "check deploy"
-
-    def test_unknown_source_returns_none(self):
-        data = {"source": "jira", "type": "jira.issue", "payload": {}}
-        assert _normalize_event(data) is None
-
-
 class TestFormatEventForManager:
+    """format_event_for_manager works with raw server events (type/source/payload)."""
+
+    def test_github_event(self):
+        event = {
+            "source": "github", "type": "github.issues",
+            "repo": "moda-labs/test",
+            "payload": {
+                "action": "opened",
+                "issue": {"number": 42, "title": "Bug"},
+                "repository": {"full_name": "moda-labs/test"},
+            },
+        }
+        text = format_event_for_manager(event)
+        assert "Event: github/github.issues" in text
+        assert "repo: moda-labs/test" in text
+        assert "action: opened" in text
 
     def test_slack_event(self):
         event = {
-            "type": "slack.dm", "source": "slack",
-            "data": {"from": "Zach", "text": "hello", "channel": "D456",
-                     "workspace": "T123", "thread_ts": ""},
+            "source": "slack", "type": "slack.dm",
+            "workspace": "T123", "channel": "D456",
+            "payload": {
+                "user_id": "U123", "text": "hello",
+                "channel": "D456", "ts": "123.456",
+            },
         }
         text = format_event_for_manager(event)
         assert "Event: slack/slack.dm" in text
-        assert "from: Zach" in text
-        assert "text: hello" in text
-        assert "channel: D456" in text
         assert "workspace: T123" in text
+        assert "channel: D456" in text
+        assert "text: hello" in text
+        assert "user_id: U123" in text
 
-    def test_github_event(self):
+    def test_linear_event(self):
+        event = {
+            "source": "linear", "type": "linear.Issue.update",
+            "team_key": "ENG",
+            "payload": {
+                "data": {"identifier": "ENG-42", "title": "Add caching"},
+            },
+        }
+        text = format_event_for_manager(event)
+        assert "Event: linear/linear.Issue.update" in text
+        assert "team_key: ENG" in text
+
+    def test_generic_topic_event(self):
+        event = {
+            "source": "ci", "type": "deploy.complete",
+            "repo": "org/repo",
+            "payload": {"status": "success", "sha": "abc123"},
+        }
+        text = format_event_for_manager(event)
+        assert "Event: ci/deploy.complete" in text
+        assert "repo: org/repo" in text
+
+    def test_empty_fields_omitted(self):
+        event = {
+            "source": "slack", "type": "slack.dm",
+            "payload": {"text": "hi", "thread_ts": ""},
+        }
+        text = format_event_for_manager(event)
+        assert "thread_ts" not in text
+
+    def test_legacy_data_format_still_works(self):
         event = {
             "type": "task.opened", "source": "github",
             "data": {"issue_id": "42", "title": "Bug", "repo": "moda-labs/test"},
@@ -209,24 +83,6 @@ class TestFormatEventForManager:
         text = format_event_for_manager(event)
         assert "Event: github/task.opened" in text
         assert "issue_id: 42" in text
-
-    def test_empty_fields_omitted(self):
-        event = {
-            "type": "slack.dm", "source": "slack",
-            "data": {"from": "Zach", "text": "hi", "channel": "D456",
-                     "workspace": "T123", "thread_ts": ""},
-        }
-        text = format_event_for_manager(event)
-        assert "thread_ts" not in text
-
-    def test_renders_user_id(self):
-        event = {
-            "type": "slack.dm", "source": "slack",
-            "data": {"from": "Alice", "user_id": "U0ABC", "text": "hi",
-                     "channel": "D456", "workspace": "T123"},
-        }
-        text = format_event_for_manager(event)
-        assert "user_id: U0ABC" in text
 
     def test_renders_requested_by(self):
         event = {
@@ -240,7 +96,37 @@ class TestFormatEventForManager:
         text = format_event_for_manager(event)
         assert "requested_by: Alice" in text
         assert "channel C0SHARED" in text
-        assert "thread 171.42" in text
+
+
+class TestShouldFilter:
+
+    @patch("modastack.sdk.get_project_root", return_value=Path("/tmp/repo"))
+    @patch("modastack.config.ProjectConfig.from_file")
+    def test_filters_linear_by_project(self, mock_config, mock_root):
+        mock_config.return_value = MagicMock(linear_project="MyProject")
+        event = {
+            "source": "linear", "type": "linear.Issue.update",
+            "payload": {
+                "data": {"project": {"name": "OtherProject"}},
+            },
+        }
+        assert _should_filter(event) is True
+
+    @patch("modastack.sdk.get_project_root", return_value=Path("/tmp/repo"))
+    @patch("modastack.config.ProjectConfig.from_file")
+    def test_passes_matching_project(self, mock_config, mock_root):
+        mock_config.return_value = MagicMock(linear_project="MyProject")
+        event = {
+            "source": "linear", "type": "linear.Issue.update",
+            "payload": {
+                "data": {"project": {"name": "MyProject"}},
+            },
+        }
+        assert _should_filter(event) is False
+
+    def test_passes_non_linear_events(self):
+        event = {"source": "github", "type": "github.issues", "payload": {}}
+        assert _should_filter(event) is False
 
 
 class TestEventQueue:

@@ -2,6 +2,7 @@ import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
 	type NormalizedEvent,
+	createTopicEvent,
 	normalizeGitHubPayload,
 	normalizeLinearPayload,
 	normalizeSlackPayload,
@@ -28,6 +29,7 @@ const subscriptionIndex = new Map<string, Set<string>>();
 
 const webhookSecret = process.env.MODASTACK_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.MODASTACK_ES_SLACK_SIGNING_SECRET || "";
+const slackWorkspaces = new Map<string, string>(); // workspace_id -> bot_token
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -242,6 +244,83 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		}
 
 		return json(res, { subscriptions: dep.subscriptions, added });
+	}
+
+	// Generic topic: POST /events/{topic}
+	const topicMatch = method === "POST" && path.match(/^\/events\/(.+)$/);
+	if (topicMatch) {
+		const body = await readBody(req);
+		let data: Record<string, unknown>;
+		try {
+			data = JSON.parse(body);
+		} catch {
+			return json(res, { error: "invalid JSON" }, 400);
+		}
+
+		const event = createTopicEvent(topicMatch[1], data);
+		return json(res, { delivered_to: routeEvent(event) });
+	}
+
+	// Slack workspace registry: POST /slack/workspaces
+	if (method === "POST" && path === "/slack/workspaces") {
+		const body = await readBody(req);
+		let data: Record<string, unknown>;
+		try {
+			data = JSON.parse(body);
+		} catch {
+			return json(res, { error: "invalid JSON" }, 400);
+		}
+
+		const workspaceId = data.workspace_id as string;
+		const botToken = data.bot_token as string;
+		if (!workspaceId || !botToken) {
+			return json(res, { error: "workspace_id and bot_token required" }, 400);
+		}
+		slackWorkspaces.set(workspaceId, botToken);
+		return json(res, { ok: true, workspace_id: workspaceId });
+	}
+
+	// Slack send-through: POST /slack/send
+	if (method === "POST" && path === "/slack/send") {
+		const body = await readBody(req);
+		let data: Record<string, unknown>;
+		try {
+			data = JSON.parse(body);
+		} catch {
+			return json(res, { error: "invalid JSON" }, 400);
+		}
+
+		const channel = data.channel as string;
+		const text = data.text as string;
+		if (!channel || !text) {
+			return json(res, { error: "channel and text required" }, 400);
+		}
+
+		const botToken = slackWorkspaces.get((data.workspace as string) || "");
+		if (!botToken) {
+			return json(res, { error: "no bot token for workspace" }, 400);
+		}
+
+		const slackPayload: Record<string, unknown> = { channel, text };
+		if (data.thread_ts) slackPayload.thread_ts = data.thread_ts;
+
+		try {
+			const resp = await fetch("https://slack.com/api/chat.postMessage", {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${botToken}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify(slackPayload),
+			});
+			const result = (await resp.json()) as Record<string, unknown>;
+			if (!result.ok) {
+				return json(res, { ok: false, error: result.error }, 502);
+			}
+			return json(res, { ok: true, ts: result.ts });
+		} catch (err) {
+			return json(res, { ok: false, error: String(err) }, 502);
+		}
 	}
 
 	res.writeHead(404);
