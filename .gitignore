@@ -5,6 +5,9 @@ dist/
 .pytest_cache/
 *.pyc
 .env
+.idea/
+.wrangler/
+node_modules/
 .claude/settings.local.json
 .claude/projects/
 .claude/memory/
