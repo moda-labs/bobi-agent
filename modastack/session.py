@@ -100,10 +100,13 @@ class Session:
                     self._total_cost_usd += msg.total_cost_usd or 0.0
                     self._total_duration_ms += msg.duration_ms
                     self._total_turns += msg.num_turns
-                    self._state = "waiting_input"
-                    registry.update(
-                        self.name, status="idle", session_id=msg.session_id
-                    )
+                    if msg.is_error:
+                        self._state = "error"
+                        log.error(f"Session '{self.name}' error: {self._last_response[:200]}")
+                        registry.update(self.name, status="error", session_id=msg.session_id)
+                    else:
+                        self._state = "waiting_input"
+                        registry.update(self.name, status="idle", session_id=msg.session_id)
         except Exception as e:
             log.error(f"Drain failed for '{self.name}': {e}")
             self._state = "error"

@@ -11,6 +11,7 @@ def run_doctor() -> list[CheckResult]:
     results = []
 
     results.append(_check_claude_cli())
+    results.append(_check_claude_auth())
     results.append(_check_project_config())
     results.append(_check_local_config())
     results.append(_check_workflows())
@@ -26,6 +27,32 @@ def _check_claude_cli() -> CheckResult:
     return CheckResult("Claude CLI", ok=False,
                        detail="not found in PATH",
                        hint="Install Claude Code: https://docs.anthropic.com/en/docs/claude-code")
+
+
+def _check_claude_auth() -> CheckResult:
+    """Verify Claude can authenticate by running a minimal query."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["claude", "--print", "hi"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return CheckResult("Claude auth", ok=True, detail="authenticated")
+        stderr = result.stderr.strip()
+        if "401" in stderr or "auth" in stderr.lower():
+            return CheckResult("Claude auth", ok=False,
+                               detail="authentication failed (401)",
+                               hint="Run `claude auth login` to re-authenticate")
+        return CheckResult("Claude auth", ok=False,
+                           detail=f"failed: {stderr[:100]}",
+                           hint="Run `claude auth login`")
+    except FileNotFoundError:
+        return CheckResult("Claude auth", ok=False, detail="claude not installed")
+    except subprocess.TimeoutExpired:
+        return CheckResult("Claude auth", ok=False,
+                           detail="timed out",
+                           hint="Check network connectivity")
 
 
 def _check_project_config() -> CheckResult:

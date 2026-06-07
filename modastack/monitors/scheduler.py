@@ -90,19 +90,20 @@ def _default_inject(event: dict) -> None:
 def _default_spawn_check(monitor, cwd: str | None) -> None:
     """Launch a non-interactive check as a background subprocess.
 
-    Reuses the `modastack spawn` CLI path (`--non-interactive --post-event`)
-    so the check runs out-of-band exactly like an engineer process. It's
-    fire-and-forget: the scheduler thread is never blocked by a check, and the
-    subprocess posts a result event back to the bus only on a finding.
+    Uses `modastack agents launch --wait --post-event` so the check runs
+    out-of-band. Fire-and-forget: the scheduler thread is never blocked,
+    and the subprocess posts a result event back to the bus only on a finding.
     """
     cmd = [
-        sys.executable, "-m", "modastack.cli", "spawn",
+        sys.executable, "-m", "modastack.cli",
+        "agents", "launch",
+        "-w", "adhoc",
+        "--role", "engineer",
         "--non-interactive",
+        "--wait",
         "--task", monitor.description or monitor.name,
         "--post-event", monitor.event,
     ]
-    if cwd:
-        cmd += ["--repo", cwd]
 
     try:
         from modastack.sdk import get_project_root
