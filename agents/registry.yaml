@@ -1,0 +1,4 @@
+agents:
+  eng-org:
+    version: "1.0.0"
+    description: "Multi-repo engineering org — director, project leads, engineers"

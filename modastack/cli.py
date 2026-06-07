@@ -55,14 +55,17 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     # Monitors from agent pack
     try:
         from modastack.monitors.registry import MonitorRegistry
+        from modastack.prompts import AGENTS_CACHE_DIR
         if not agent_name:
-            from modastack.prompts import AGENTS_DIR
-            if AGENTS_DIR.is_dir():
-                for pack in AGENTS_DIR.iterdir():
-                    if pack.is_dir() and (pack / "monitors").is_dir():
-                        agent_name = pack.name
-                        break
-        registry = MonitorRegistry.load(agent_name=agent_name)
+            for search_dir in [project_path / "agents", AGENTS_CACHE_DIR]:
+                if search_dir and search_dir.is_dir():
+                    for pack in search_dir.iterdir():
+                        if pack.is_dir() and (pack / "monitors").is_dir():
+                            agent_name = pack.name
+                            break
+                if agent_name:
+                    break
+        registry = MonitorRegistry.load(agent_name=agent_name, project_path=project_path)
         mon_names = sorted(m.name for m in registry.all_monitors())
         if mon_names:
             lines.append(f"  {'monitors':<{W}}{', '.join(mon_names)}")
@@ -134,30 +137,42 @@ def _systemctl(action: str) -> bool:
 
 
 def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
-    """Find an agent pack: .modastack/agents/{name} → built-in agents/{name}."""
-    local = project_path / ".modastack" / "agents" / name
-    if local.is_dir():
-        return local
-    from modastack.prompts import AGENTS_DIR
-    builtin = AGENTS_DIR / name
-    if builtin.is_dir():
-        return builtin
+    """Find an agent pack.
+
+    Resolution:
+      1. <project>/agents/{name}
+      2. <project>/.modastack/agents/{name}
+      3. ~/.modastack/agents/{name}  (user cache)
+    """
+    visible = project_path / "agents" / name
+    if visible.is_dir():
+        return visible
+    hidden = project_path / ".modastack" / "agents" / name
+    if hidden.is_dir():
+        return hidden
+    from modastack.prompts import AGENTS_CACHE_DIR
+    cached = AGENTS_CACHE_DIR / name
+    if cached.is_dir():
+        return cached
     return None
 
 
 def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
     """List available agent packs with their source."""
     packs: dict[str, str] = {}
-    from modastack.prompts import AGENTS_DIR
-    if AGENTS_DIR.is_dir():
-        for d in sorted(AGENTS_DIR.iterdir()):
-            if d.is_dir():
-                packs[d.name] = "built-in"
-    local_agents = project_path / ".modastack" / "agents"
-    if local_agents.is_dir():
-        for d in sorted(local_agents.iterdir()):
-            if d.is_dir():
-                packs[d.name] = "local"
+    from modastack.prompts import AGENTS_CACHE_DIR
+    if AGENTS_CACHE_DIR.is_dir():
+        for d in sorted(AGENTS_CACHE_DIR.iterdir()):
+            if d.is_dir() and (d / "defaults.yaml").exists():
+                packs[d.name] = "cached"
+    for agents_dir, label in [
+        (project_path / "agents", "local"),
+        (project_path / ".modastack" / "agents", "local"),
+    ]:
+        if agents_dir.is_dir():
+            for d in sorted(agents_dir.iterdir()):
+                if d.is_dir():
+                    packs[d.name] = label
     return [(name, source) for name, source in sorted(packs.items())]
 
 
@@ -185,12 +200,14 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
     agent_name = config.get("agent")
     role = config.get("role")
     if not role and agent_name:
-        from modastack.prompts import AGENTS_DIR
-        defaults_path = AGENTS_DIR / agent_name / "defaults.yaml"
-        if defaults_path.exists():
-            import yaml as _yaml
-            defaults = _yaml.safe_load(defaults_path.read_text()) or {}
-            role = defaults.get("role", "manager")
+        from modastack.prompts.resolver import _resolve_agent_dir
+        agent_dir = _resolve_agent_dir(agent_name, project_path)
+        if agent_dir:
+            defaults_path = agent_dir / "defaults.yaml"
+            if defaults_path.exists():
+                import yaml as _yaml
+                defaults = _yaml.safe_load(defaults_path.read_text()) or {}
+                role = defaults.get("role", "manager")
     role = role or "manager"
     from modastack.events.subscriptions import discover_subscriptions
     subscribe = config.get("subscribe") or discover_subscriptions(project_path, agent_name)
@@ -225,9 +242,10 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
         _start_event_subscription(f"moda-{role}-{project_path.name}", subscribe, project_path)
 
     if agent_name:
-        from modastack.prompts import AGENTS_DIR
-        monitors_dir = AGENTS_DIR / agent_name / "monitors"
-        if monitors_dir.is_dir():
+        from modastack.prompts.resolver import _resolve_agent_dir as _rad
+        agent_dir = _rad(agent_name, project_path)
+        monitors_dir = agent_dir / "monitors" if agent_dir else None
+        if monitors_dir and monitors_dir.is_dir():
             from modastack.monitors.scheduler import MonitorScheduler
             monitor_scheduler = MonitorScheduler(agent_name=agent_name)
             monitor_scheduler.start()
@@ -281,13 +299,37 @@ def start(agent_pack, foreground, fresh, subscribe):
 
     resolved = _resolve_agent_pack(agent_pack, project_path)
     if not resolved:
-        available = _list_agent_packs(project_path)
-        click.echo(f"Unknown agent '{agent_pack}'.", err=True)
-        if available:
-            click.echo("Available agents:", err=True)
-            for name, source in available:
-                click.echo(f"  {name:20s} [{source}]", err=True)
-        raise SystemExit(1)
+        # Not found locally — try fetching from remote registry
+        from modastack.registry import fetch
+        try:
+            click.echo(f"Agent '{agent_pack}' not found locally, fetching from remote...")
+            fetch(agent_pack)
+            resolved = _resolve_agent_pack(agent_pack, project_path)
+        except Exception as e:
+            click.echo(f"Failed to fetch '{agent_pack}': {e}", err=True)
+        if not resolved:
+            available = _list_agent_packs(project_path)
+            click.echo(f"Unknown agent '{agent_pack}'.", err=True)
+            if available:
+                click.echo("Available agents:", err=True)
+                for name, source in available:
+                    click.echo(f"  {name:20s} [{source}]", err=True)
+            raise SystemExit(1)
+    else:
+        # Found locally — background version check
+        import threading
+        def _check_update():
+            try:
+                from modastack.registry import check_update
+                local_v, remote_v = check_update(agent_pack)
+                if local_v and remote_v and remote_v != local_v:
+                    click.echo(
+                        f"  update        {agent_pack} v{local_v} installed, "
+                        f"v{remote_v} available — run: modastack agents update {agent_pack}"
+                    )
+            except Exception:
+                pass
+        threading.Thread(target=_check_update, daemon=True).start()
 
     agent_config["agent"] = agent_pack
     if subscribe:
@@ -1007,6 +1049,33 @@ def agents_cancel(issue_id):
         click.echo(f"No running agent for {issue_id}")
 
 
+@agents.command("create")
+@click.argument("name", required=False)
+def agents_create(name):
+    """Design a new agent pack through conversation.
+
+    Opens a Claude Code session with the builder agent, which guides you
+    through designing roles, workflows, and monitors for your use case.
+
+    The generated pack is written to agents/<name>/ in the current directory.
+
+    Examples:
+        modastack agents create
+        modastack agents create customer-support
+    """
+    project_path = _detect_project_root()
+
+    from modastack.prompts.resolver import resolve_agent_prompt
+    builder_prompt = resolve_agent_prompt("builder", project_path)
+
+    prompt = "Help me design a new agent pack."
+    if name:
+        prompt = f"Help me design a new agent pack called '{name}'."
+
+    cmd = ["claude", "--append-system-prompt", builder_prompt, prompt]
+    os.execvp("claude", cmd)
+
+
 @main.command()
 @click.option("--tail", default=20, help="Number of recent entries to show")
 @click.option("--decisions-only", is_flag=True, help="Show only manager decisions")
@@ -1343,9 +1412,9 @@ def monitor_list():
     agent_config = _load_agent_config(project_path)
     agent_name = (agent_config or {}).get("agent")
     if not agent_name:
-        from modastack.prompts import AGENTS_DIR
-        if AGENTS_DIR.is_dir():
-            for pack in AGENTS_DIR.iterdir():
+        from modastack.prompts import AGENTS_CACHE_DIR
+        if AGENTS_CACHE_DIR.is_dir():
+            for pack in AGENTS_CACHE_DIR.iterdir():
                 if pack.is_dir() and (pack / "monitors").is_dir():
                     agent_name = pack.name
                     break
@@ -1716,6 +1785,52 @@ def _post_event(event_type: str, data: dict) -> bool:
     except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError) as e:
         logging.getLogger(__name__).warning(f"Failed to post event {event_type}: {e}")
         return False
+
+
+@agents.command("update")
+@click.argument("name", default=None, required=False)
+def agents_update(name):
+    """Update agent packs from the remote registry.
+
+    Usage:
+        modastack agents update eng-org    # update one pack
+        modastack agents update            # update all cached packs
+    """
+    from modastack.registry import fetch, list_cached, check_update
+
+    if name:
+        try:
+            local_v, remote_v = check_update(name)
+            if local_v and remote_v and remote_v == local_v:
+                click.echo(f"{name} v{local_v} is already up to date.")
+                return
+            path = fetch(name)
+            from modastack.registry import _read_local_version
+            new_v = _read_local_version(name) or "unknown"
+            if local_v:
+                click.echo(f"Updated {name}: v{local_v} → v{new_v}")
+            else:
+                click.echo(f"Installed {name} v{new_v} → {path}")
+        except Exception as e:
+            click.echo(f"Failed: {e}", err=True)
+            raise SystemExit(1)
+    else:
+        cached = list_cached()
+        if not cached:
+            click.echo("No cached agent packs to update.")
+            return
+        for pack in cached:
+            try:
+                local_v, remote_v = check_update(pack["name"])
+                if local_v and remote_v and remote_v == local_v:
+                    click.echo(f"  {pack['name']} v{local_v} — up to date")
+                elif remote_v:
+                    fetch(pack["name"])
+                    click.echo(f"  {pack['name']} v{local_v} → v{remote_v}")
+                else:
+                    click.echo(f"  {pack['name']} v{local_v} — could not check remote")
+            except Exception as e:
+                click.echo(f"  {pack['name']} — failed: {e}", err=True)
 
 
 if __name__ == "__main__":

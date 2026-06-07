@@ -5,20 +5,30 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from . import BASE_PATH, AGENTS_DIR
+from . import BASE_PATH, AGENTS_CACHE_DIR, PROMPTS_DIR
 
 log = logging.getLogger(__name__)
 
 
 def _resolve_agent_dir(agent_name: str | None, project_path: Path | None = None) -> Path | None:
-    """Find the agent pack: .modastack/agents/{name} → built-in agents/{name}."""
+    """Find the agent pack directory.
+
+    Resolution order:
+      1. <project>/agents/{name}             — project-level (visible)
+      2. <project>/.modastack/agents/{name}  — project override (hidden)
+      3. ~/.modastack/agents/{name}          — user cache (fetched from remote)
+    """
     if not agent_name:
         return None
     if project_path:
-        local = Path(project_path) / ".modastack" / "agents" / agent_name
-        if local.is_dir():
-            return local
-    d = AGENTS_DIR / agent_name
+        project = Path(project_path)
+        visible = project / "agents" / agent_name
+        if visible.is_dir():
+            return visible
+        hidden = project / ".modastack" / "agents" / agent_name
+        if hidden.is_dir():
+            return hidden
+    d = AGENTS_CACHE_DIR / agent_name
     return d if d.is_dir() else None
 
 
@@ -30,8 +40,9 @@ def resolve_agent_prompt(
 ) -> str:
     """Build the full prompt for an agent with a given role.
 
-    Resolution: base.md + agent pack role (agents/{agent}/roles/{role}.md)
-    or project override (.modastack/roles/{role}.md replaces pack role).
+    Resolution order for role prompts:
+      1. <project>/.modastack/roles/{role}.md — project override
+      2. Agent pack roles/{role}.md (resolved via _resolve_agent_dir)
     """
     parts = [BASE_PATH.read_text()]
 
@@ -105,7 +116,8 @@ def list_workflows(project_path: Path | str, agent_name: str | None = None) -> s
                 seen.add(f.stem)
                 try:
                     wf = load_workflow(f)
-                    lines.append(f"- {wf.name}: trigger={wf.trigger.event}, {len(wf.nodes)} nodes")
+                    trigger = getattr(wf.trigger, 'event', None) or str(wf.trigger)[:60]
+                    lines.append(f"- {wf.name}: {trigger}")
                 except Exception:
                     continue
         return "\n".join(lines) if lines else "No workflows found."
@@ -165,8 +177,8 @@ def discover_roles(
                         "description": _extract_description(md),
                         "path": str(md),
                     }
-    elif AGENTS_DIR.is_dir():
-        for pack in sorted(AGENTS_DIR.iterdir()):
+    elif AGENTS_CACHE_DIR.is_dir():
+        for pack in sorted(AGENTS_CACHE_DIR.iterdir()):
             if not pack.is_dir():
                 continue
             roles_dir = pack / "roles"
@@ -181,7 +193,24 @@ def discover_roles(
                         }
 
     if project_path:
-        project_roles = Path(project_path) / ".modastack" / "roles"
+        project = Path(project_path)
+        for agents_dir in [project / "agents", project / ".modastack" / "agents"]:
+            if agents_dir.is_dir():
+                for pack in sorted(agents_dir.iterdir()):
+                    if not pack.is_dir():
+                        continue
+                    roles_dir = pack / "roles"
+                    if roles_dir.is_dir():
+                        for md in sorted(roles_dir.glob("*.md")):
+                            if md.stem not in roles:
+                                roles[md.stem] = {
+                                    "name": md.stem,
+                                    "source": pack.name,
+                                    "description": _extract_description(md),
+                                    "path": str(md),
+                                }
+
+        project_roles = project / ".modastack" / "roles"
         if project_roles.is_dir():
             for md in sorted(project_roles.glob("*.md")):
                 roles[md.stem] = {
@@ -218,8 +247,8 @@ def validate_role(
         project_role = Path(project_path) / ".modastack" / "roles" / f"{role_name}.md"
         if project_role.exists():
             return True
-    if not agent_name and AGENTS_DIR.is_dir():
-        for pack in AGENTS_DIR.iterdir():
+    if not agent_name and AGENTS_CACHE_DIR.is_dir():
+        for pack in AGENTS_CACHE_DIR.iterdir():
             if pack.is_dir() and (pack / "roles" / f"{role_name}.md").exists():
                 return True
     return False

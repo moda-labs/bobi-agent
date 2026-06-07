@@ -140,49 +140,55 @@ class TestCanonicalImports:
 
 class TestPromptResolver:
 
-    def test_resolve_agent_prompt_loads_base_and_role(self, tmp_path):
+    def test_resolve_agent_prompt_loads_base_and_role(self, modastack_install):
         from modastack.prompts.resolver import resolve_agent_prompt
-        prompt = resolve_agent_prompt("manager", tmp_path, agent_name="software_team")
+        mi = modastack_install
+        prompt = resolve_agent_prompt("director", mi.repo_path, agent_name=mi.agent_name)
         assert "Modastack Agent" in prompt
-        assert "Engineering Manager" in prompt
+        assert "Engineering Director" in prompt
 
-    def test_resolve_agent_prompt_includes_project_override(self, tmp_path):
-        roles_dir = tmp_path / ".modastack" / "roles"
-        roles_dir.mkdir(parents=True)
-        (roles_dir / "manager.md").write_text("Custom policy: always review PRs.")
+    def test_resolve_agent_prompt_includes_project_override(self, modastack_install):
+        mi = modastack_install
+        roles_dir = mi.repo_path / ".modastack" / "roles"
+        roles_dir.mkdir(parents=True, exist_ok=True)
+        (roles_dir / "director.md").write_text("Custom policy: always review PRs.")
         from modastack.prompts.resolver import resolve_agent_prompt
-        prompt = resolve_agent_prompt("manager", tmp_path, agent_name="software_team")
+        prompt = resolve_agent_prompt("director", mi.repo_path, agent_name=mi.agent_name)
         assert "Custom policy: always review PRs." in prompt
-        assert "Engineering Manager" not in prompt
+        assert "Engineering Director" not in prompt
 
-    def test_resolve_agent_prompt_engineer(self, tmp_path):
+    def test_resolve_agent_prompt_engineer(self, modastack_install):
         from modastack.prompts.resolver import resolve_agent_prompt
-        prompt = resolve_agent_prompt("engineer", tmp_path, agent_name="software_team")
+        mi = modastack_install
+        prompt = resolve_agent_prompt("engineer", mi.repo_path, agent_name=mi.agent_name)
         assert "Modastack Agent" in prompt
         assert "staff engineer" in prompt
 
-    def test_build_startup_prompt_includes_workflows(self, tmp_path):
+    def test_build_startup_prompt_includes_workflows(self, modastack_install):
         from modastack.prompts.resolver import build_startup_prompt
-        prompt = build_startup_prompt("manager", tmp_path, agent_name="software_team")
+        mi = modastack_install
+        prompt = build_startup_prompt("director", mi.repo_path, agent_name=mi.agent_name)
         assert "Available workflows" in prompt
 
-    def test_list_workflows_returns_string(self, tmp_path):
+    def test_list_workflows_returns_string(self, modastack_install):
         from modastack.prompts.resolver import list_workflows
-        result = list_workflows(tmp_path, agent_name="software_team")
+        mi = modastack_install
+        result = list_workflows(mi.repo_path, agent_name=mi.agent_name)
         assert isinstance(result, str)
 
-    def test_discover_roles_finds_manager_and_engineer(self):
+    def test_discover_roles_finds_director_and_engineer(self, modastack_install):
         from modastack.prompts.resolver import discover_roles
-        roles = discover_roles(agent_name="software_team")
+        mi = modastack_install
+        roles = discover_roles(agent_name=mi.agent_name)
         names = [r["name"] for r in roles]
-        assert "manager" in names
+        assert "director" in names
         assert "engineer" in names
 
-    def test_discover_roles_scans_all_packs_without_agent_name(self):
+    def test_discover_roles_scans_all_packs_without_agent_name(self, modastack_install):
         from modastack.prompts.resolver import discover_roles
         roles = discover_roles()
         names = [r["name"] for r in roles]
-        assert "manager" in names
+        assert "director" in names
         assert "engineer" in names
 
 
