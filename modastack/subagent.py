@@ -1118,17 +1118,55 @@ def cancel_agent(issue_id: str) -> bool:
 
 
 def list_agents() -> list[dict[str, Any]]:
+    """List active agents from both the in-memory _running dict and the
+    on-disk SessionRegistry.
+
+    The in-memory dict only contains agents launched within this process.
+    Detached agents (launched via launch_agent into child repos) register
+    in the SessionRegistry on disk. We merge both sources, deduplicating
+    by session name so an agent that appears in both is listed once.
+    """
+    seen: set[str] = set()
     result = []
+
+    # In-memory agents first (most detailed info).
     for key, agent in list(_running.items()):
         done = agent.task.done()
         elapsed = time.time() - agent.started_at
+        name = _session_name(agent.issue_id, agent.phase)
+        seen.add(name)
         result.append({
             "issue_id": agent.issue_id,
             "phase": agent.phase,
             "cwd": agent.cwd,
             "running": not done,
             "elapsed_s": int(elapsed),
+            "name": name,
+            "source": "in-process",
         })
+
+    # On-disk registry — picks up detached/cross-project agents.
+    try:
+        registry = get_registry()
+        for entry in registry.list_active():
+            if entry.name in seen:
+                continue
+            if entry.role == "manager":
+                continue  # managers are shown separately in `modastack status`
+            seen.add(entry.name)
+            elapsed = time.time() - entry.started_at
+            result.append({
+                "issue_id": entry.issue_id or entry.name,
+                "phase": entry.phase,
+                "cwd": entry.cwd,
+                "running": True,
+                "elapsed_s": int(elapsed),
+                "name": entry.name,
+                "source": "registry",
+            })
+    except Exception:
+        pass  # registry may not be initialized yet
+
     return result
 
 

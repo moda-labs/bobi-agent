@@ -306,6 +306,25 @@ def start(agent_pack, foreground, fresh, subscribe):
         except (ProcessLookupError, ValueError):
             pid_path.unlink(missing_ok=True)
 
+    # Prevent nested runtimes: if an ancestor directory already has a
+    # running manager, starting a second one here would create an
+    # isolated registry that can't see its parent's agents.
+    from modastack.sdk import find_runtime_root, _pid_file_alive
+    ancestor = find_runtime_root(project_path.parent)
+    if ancestor and ancestor != project_path:
+        ancestor_pid_path = ancestor / ".modastack" / "state" / "manager.pid"
+        try:
+            anc_pid = int(ancestor_pid_path.read_text().strip())
+        except (ValueError, OSError):
+            anc_pid = 0
+        click.echo(
+            f"A manager is already running at {ancestor} (pid {anc_pid}). "
+            f"Sub-agents in {project_path.name} will register with that runtime. "
+            f"Stop the ancestor first if you need an independent instance here.",
+            err=True,
+        )
+        raise SystemExit(1)
+
     _ensure_config()
 
     if fresh:
@@ -915,7 +934,11 @@ def agents():
 
 @agents.command("list")
 def agents_list():
-    """List active agents.
+    """List active agents from both in-process and on-disk registry.
+
+    Detached agents launched into child repos are discovered via the
+    SessionRegistry's walk-up resolution — they register in the runtime
+    root's .modastack/sessions/.
 
     Usage:
         modastack agents list
@@ -929,7 +952,11 @@ def agents_list():
 
     for a in active:
         state = "running" if a["running"] else "done"
-        click.echo(f"  {a['issue_id']}/{a['phase']} — {state} ({a['elapsed_s']}s)")
+        name = a.get("name", "")
+        source = a.get("source", "")
+        suffix = f"  [{source}]" if source == "registry" else ""
+        label = name or f"{a['issue_id']}/{a['phase']}"
+        click.echo(f"  {label} — {state} ({a['elapsed_s']}s){suffix}")
 
 
 @agents.command("show")
