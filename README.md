@@ -1,6 +1,8 @@
 # Modastack
 
-Modastack is a general-purpose CLI tool that allows you to build teams of interactive event-driven agents that can respond to both outside world events like updates to tickets or inbound emails, while remaining interactive to human questions.  Agents can leave messages for each other or ask blocking questions, and can recursively spin up their own interactive or task-based agents.
+Modastack is a general-purpose CLI tool that allows you to build teams of interactive event-driven agents that can respond to both outside world events like updates to tickets or inbound emails, while remaining interactive to human questions. Agents can leave messages for each other or ask blocking questions, and can recursively spin up their own interactive or task-based agents.
+
+Under the hood, every agent is a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) session — which means the entire system runs on a flat-rate Claude Pro or Max plan with no per-token API costs. API key usage is also supported if you prefer.
 
 Unlike other agent harnesses that either only let you run a single siloed agent, or come with pre-defined agent layouts, Modastack lets you define any agent topology that best matches the problem you are solving. Here's some examples:
 
