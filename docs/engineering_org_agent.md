@@ -8,7 +8,7 @@ each running independently in their own repo.
 ```
 Human (Slack)
     ↓
-Director (engineering_org)
+Director (eng-org)
     ├── Project Lead (jobtack)     → Engineers
     ├── Project Lead (memorize)    → Engineers
     └── Project Lead (modastack)   → Engineers
@@ -31,7 +31,7 @@ Director (engineering_org)
 
 ```bash
 cd ~/dev
-modastack start engineering_org
+modastack start eng-org
 ```
 
 The director starts with no projects. Repos are onboarded via Slack:
@@ -104,28 +104,28 @@ Human: "Stop managing memorize"
 ## Agent Pack Structure
 
 ```
-agents/
-  engineering_org/
-    defaults.yaml
-    roles/
-      director.md           # org-level, talks to humans, manages project leads
-      project_lead.md        # per-repo, manages issues/PRs, dispatches engineers
-      engineer.md            # executes work (reuse from software_team or extend)
-    workflows/
-      issue-lifecycle.yaml   # reuse from software_team
-      pr-feedback.yaml
-      build-failure.yaml
-      pr-merged.yaml
-      stall-recovery.yaml
-      adhoc.yaml
-    monitors/
-      defaults.yaml
-      github_checks.py
+agents/eng-org/
+├── defaults.yaml             # version, entry role (director), event sources
+├── agent.md                  # shared base prompt for all roles
+├── roles/
+│   ├── director.md           # org-level, talks to humans, manages project leads
+│   ├── project_lead.md       # per-repo, manages issues/PRs, dispatches engineers
+│   └── engineer.md           # executes work
+├── workflows/
+│   ├── adhoc.yaml
+│   ├── build-failure.yaml
+│   ├── issue-lifecycle.yaml
+│   ├── pr-feedback.yaml
+│   ├── pr-merged.yaml
+│   └── stall-recovery.yaml
+└── monitors/
+    ├── defaults.yaml
+    └── github_checks.py
 ```
 
 ## Key Differences from software_team
 
-| Aspect | software_team | engineering_org |
+| Aspect | software_team | eng-org |
 |--------|--------------|-----------------|
 | Scope | Single repo | Multiple repos |
 | Entry point | Manager in repo dir | Director in parent dir |

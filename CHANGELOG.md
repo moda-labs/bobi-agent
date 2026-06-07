@@ -15,7 +15,7 @@
 ### Breaking
 - **All runtime state moved to per-repo `.modastack/`** — PID files, logs, sessions, event server state now live under `<repo>/.modastack/state/` instead of `~/.modastack/`. Credentials moved to `~/.config/modastack/credentials.yaml` (XDG standard); existing credentials are migrated automatically on first load
 - **`--repo` flag removed from all CLI commands** — modastack always detects the repo from the current directory. Commands like `agents launch`, `monitors add/pause/remove`, and `roles list` no longer accept `--repo`
-- **`GlobalConfig` class removed** — all configuration is per-repo via `LocalConfig` (`.modastack/local.yaml`) and `RepoConfig` (`.modastack/config.yaml`)
+- **`GlobalConfig` class removed** — machine-wide config via `Config` (`~/.modastack/config.yaml`); `RepoConfig` and `LocalConfig` later consolidated into `Config`
 
 ### Removed
 - Legacy tmux session management (`modastack/tmux.py`, `modastack/session.py`) — all sessions now use the Claude Agent SDK

@@ -6,8 +6,8 @@ Workflows aren't limited to software engineering. You can build workflows for co
 
 ## Quick start
 
-1. Create a YAML file in your repo at `.modastack/workflows/my-workflow.yaml`
-2. Run it: `modastack agents launch -w my-workflow --role engineer --repo . --task "your context here"`
+1. Create a YAML file in your project at `.modastack/workflows/my-workflow.yaml` or in your agent pack at `agents/<pack>/workflows/my-workflow.yaml`
+2. Run it: `modastack agents launch -w my-workflow --role engineer --task "your context here"`
 3. Watch it: `modastack transcript show <session-name>`
 
 ## Workflow structure
@@ -15,7 +15,7 @@ Workflows aren't limited to software engineering. You can build workflows for co
 ```yaml
 name: my-workflow
 trigger: task.assigned          # optional: event that auto-triggers this workflow
-description: >                  # shown in `modastack workflow list`
+description: >                  # shown in `modastack workflows list`
   One-line description of what this workflow does.
 
 steps:
@@ -153,7 +153,7 @@ The agent session persists across all steps — context accumulates. What the ag
 ### 1. Validate the YAML
 
 ```bash
-modastack workflow list
+modastack workflows list
 ```
 
 This loads all workflows and shows parse errors. Your workflow should appear with no errors.
@@ -161,7 +161,7 @@ This loads all workflows and shows parse errors. Your workflow should appear wit
 ### 2. Run it non-interactively
 
 ```bash
-modastack agent -w my-workflow --repo . --task "test task" --non-interactive
+modastack agents launch -w my-workflow --role engineer --task "test task" --non-interactive
 ```
 
 `--non-interactive` means the agent won't try to ask the manager questions — it makes all decisions autonomously. Good for testing without a running manager.
@@ -172,11 +172,11 @@ modastack agent -w my-workflow --repo . --task "test task" --non-interactive
 # Check status
 modastack status
 
-# Stream the log
-modastack log <session-name>
+# Stream the transcript
+modastack transcript show <session-name>
 
 # Follow mode (streams new output as it arrives)
-modastack log <session-name> -f
+modastack transcript show <session-name> -f
 ```
 
 ### 4. Inspect handoffs
@@ -196,11 +196,11 @@ Session names are deterministic, so a second run for the same issue reuses the n
 
 Workflows are loaded from three tiers (most specific wins):
 
-1. **Repo-specific:** `<repo>/.modastack/workflows/` — overrides for this repo
-2. **User-level:** `~/.modastack/workflows/` — your personal workflows
-3. **Built-in:** `<modastack>/workflows/` — shipped defaults
+1. **Project-specific:** `<project>/.modastack/workflows/` — overrides for this project
+2. **Agent pack:** `agents/<pack>/workflows/` — pack-specific definitions
+3. **User-level:** `~/.modastack/workflows/` — your personal workflows
 
-Use `modastack workflow list` to see all loaded workflows and their sources.
+Use `modastack workflows list` to see all loaded workflows and their sources.
 
 ## Examples
 
@@ -257,7 +257,7 @@ steps:
 
 Run it:
 ```bash
-modastack agents launch -w content-review --role engineer --repo . \
+modastack agents launch -w content-review --role engineer \
   --task "Review docs/proposal.md for the Q3 board meeting" \
   --non-interactive
 ```

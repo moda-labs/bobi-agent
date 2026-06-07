@@ -19,32 +19,41 @@ cd ~/dev/modastack
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-modastack start --non-interactive
+modastack start eng-org
 ```
 
 ## Commands
 
 ```bash
-modastack start                # start event loop
+modastack start <agent>        # start an agent pack (e.g. modastack start eng-org)
 modastack stop                 # stop the running instance
 modastack restart              # stop and restart
-modastack start --fresh        # wipe manager session and start clean
-modastack agents launch -w W --role R --repo P --task T  # launch an agent
+modastack start <agent> --fresh  # wipe manager session and start clean
+modastack agents launch -w W --role R --task T  # launch an agent
 modastack agents list          # list active agents
 modastack agents show <id>     # inspect a specific agent
 modastack agents cancel <id>   # cancel a running agent
+modastack agents create        # design a new agent pack interactively
+modastack agents browse        # browse remote agent registry
+modastack agents update <name> # update agent packs from remote
+modastack agents add-registry <repo>  # add a remote registry
 modastack workflows list       # list available workflows
+modastack workflows status     # show active workflow runs
+modastack workflows validate <file>   # validate a workflow YAML
 modastack monitors list        # list background monitors (merged across tiers)
-modastack monitors add <name>  # add a monitor (--interval, --description, --repo)
+modastack monitors add <name>  # add a monitor (--interval, --description)
 modastack monitors pause <name>  # disable a monitor
 modastack monitors remove <name> # remove a user-added monitor
+modastack roles list           # list available agent roles
 modastack status               # show active engineer sessions
 modastack events               # show recent events and decisions
-modastack message "text"       # inject a message into the manager session
+modastack message "text"       # inject a message into any session
 modastack ask "question"       # ask the manager a question, block until response
 modastack transcript show <session>  # show session transcript
 modastack transcript search <query>  # search conversation history
 modastack doctor               # system health check
+modastack event-server start   # start the local event server
+modastack event-server stop    # stop the local event server
 ```
 
 ## Architecture
@@ -52,7 +61,7 @@ modastack doctor               # system health check
 Modastack is a generic event-driven agent framework. Every agent is a
 symmetric node — any agent can subscribe to event topics and receive
 events. The framework has no topology opinions. All domain-specific
-behavior comes from role prompts and per-project `.modastack/` configuration.
+behavior comes from agent packs (role prompts, workflows, monitors).
 
 Events flow through a centralized event server (Cloudflare Worker or
 local Node.js) to subscribing agents via WebSocket. The event server
@@ -62,66 +71,91 @@ webhook ingestion for GitHub, Linear, and Slack.
 ```
 modastack/                        # Framework (Python package)
 ├── cli.py                        # Click CLI entrypoint
-├── config.py                     # Per-project config loading
+├── config.py                     # Machine-wide config (~/.modastack/config.yaml)
 ├── session.py                    # Claude Code SDK session wrapper
 ├── subagent.py                   # Agent executor (blocking + detached)
+├── sdk.py                        # Session registry, activity logging
+├── registry.py                   # Agent pack registry (fetch, update, browse)
+├── inbox.py                      # Per-session message delivery
 ├── prompts/                      # Agent prompts (no domain logic in framework)
+│   ├── __init__.py               # AGENTS_CACHE_DIR, BASE_PATH exports
 │   ├── base.md                   # Generic capabilities shared by all agents
-│   ├── agents/                   # Role-specific prompts
-│   │   ├── manager.md            # Engineering manager role
-│   │   └── engineer.md           # Staff engineer role
-│   └── resolver.py               # Prompt resolution: base + role + project override
+│   ├── agents/                   # Built-in agent prompts
+│   │   └── builder.md            # Agent pack builder prompt
+│   └── resolver.py               # Prompt resolution: base + agent pack role
 ├── events/                       # Generic event infrastructure
 │   ├── client.py                 # WebSocket client (connects to event server)
 │   ├── server.py                 # Local event server launcher (Node.js)
 │   ├── drain.py                  # Event queue → session inbox delivery
-│   └── subscriptions.py          # Subscription key builder from project config
+│   └── subscriptions.py          # Subscription key builder
 ├── workflow/
 │   ├── orchestrator.py           # DAG executor with deterministic routing
 │   ├── triggers.py               # Workflow discovery, three-tier resolution
-│   └── schema.py                 # WorkflowDef, StepDef, YAML parsing
+│   ├── schema.py                 # WorkflowDef, StepDef, YAML parsing
+│   ├── state.py                  # JSON persistence for workflow runs
+│   └── variables.py              # Variable resolution, safe condition evaluation
 └── monitors/                     # Background polling to fill webhook gaps
     ├── schema.py                 # Monitor record + interval parsing
     ├── registry.py               # Three-tier load/merge + writes
     ├── checks.py                 # Native check runners (pr_conflicts, stale_prs)
     └── scheduler.py              # Interval scheduler, dedup, event injection
 
-workflows/adhoc.yaml              # Only built-in workflow (generic pass-through)
-monitors/defaults.yaml            # Empty — domain monitors go in repo config
+agents/                           # Agent packs (portable agent definitions)
+├── registry.yaml                 # Local pack index
+└── eng-org/                      # Example: engineering org agent pack
+    ├── defaults.yaml             # Pack metadata (version, entry role, event sources)
+    ├── agent.md                  # Shared base prompt for all roles
+    ├── roles/                    # Role-specific prompts
+    │   ├── director.md
+    │   ├── project_lead.md
+    │   └── engineer.md
+    ├── workflows/                # Pack-specific workflow definitions
+    │   ├── issue-lifecycle.yaml
+    │   ├── pr-feedback.yaml
+    │   └── ...
+    └── monitors/                 # Pack-specific monitors
+        ├── defaults.yaml
+        └── github_checks.py
 
-.modastack/                       # This repo's own config (dogfooding)
-├── config.yaml                   # Connections, test command, event server URL
-├── agent.yaml                    # Agent startup config (role, subscriptions, monitors)
-├── agents/                       # Project-specific role prompt overrides (optional)
-│   └── <role>.md                 # Overrides built-in agents/<role>.md
-├── workflows/                    # Engineering lifecycle workflows
-│   ├── issue-lifecycle.yaml      # triage → spec → implement → PR
-│   ├── pr-feedback.yaml          # address review comments
-│   ├── build-failure.yaml        # fix CI failures
-│   ├── pr-merged.yaml            # post-merge cleanup
-│   └── stall-recovery.yaml       # recover stuck agents
-└── monitors.yaml                 # PR conflict + stale PR checks
+.modastack/                       # Per-project runtime state (not config)
+├── sessions/                     # Agent session state
+└── state/                        # PID files, logs, event server state
 ```
 
-### Per-project configuration
+### Agent Packs
 
-Projects bring their own `.modastack/` directory:
+An agent pack is a portable bundle containing everything an agent needs:
+role prompts, workflows, monitors, and check functions. Packs are the
+distribution unit for agents.
 
+**Resolution order for agent packs:**
+1. `<project>/agents/<name>/` — project-level (visible)
+2. `<project>/.modastack/agents/<name>/` — project override (hidden)
+3. `~/.modastack/agents/<name>/` — user cache (fetched from remote registry)
+
+**Resolution order for role prompts:**
+1. `<project>/.modastack/roles/<role>.md` — project override
+2. Agent pack `roles/<role>.md` — from resolved agent pack
+
+### Machine-wide config (`~/.modastack/config.yaml`)
+
+Service credentials and connection URLs shared across all projects.
+Not checked in — contains secrets.
+
+```yaml
+slack:
+  bot_token: xoxb-...
+event_server:
+  url: https://modastack-events.example.workers.dev
+linear:
+  api_key: lin_api_...
+registries:
+  - moda-labs/modastack-agents
 ```
-<project>/.modastack/
-├── config.yaml                   # connections, tracker type/auth, test command
-├── agent.yaml                    # what role to start, what topics to subscribe to
-├── agents/
-│   └── <role>.md                 # project-specific role prompt overrides
-├── workflows/
-│   └── <workflow>.yaml           # project-specific workflow definitions
-└── monitors.yaml                 # project-specific monitor definitions
-```
 
-The framework loads `base.md` + `agents/<role>.md` for any agent.
-Project overrides in `.modastack/agents/<role>.md` replace the built-in
-role prompt. Workflow steps specify `agent: <role>` to select which
-agent prompt to use.
+### Credentials (`~/.config/modastack/credentials.yaml`)
+
+Per-workspace API keys (Linear, etc.). GitHub Issues uses `gh` CLI auth.
 
 ## Issue lifecycle (SDLC use case)
 
@@ -140,12 +174,11 @@ descriptions (natural language conditions) to decide what to do:
 
 Internal phases (triage, spec, implement) happen within "In Progress".
 Per-step handoff files in the session directory track sub-phase state.
-Linear doesn't need to know.
 
 ## Handoff contract
 
 Each workflow step writes a handoff file at
-`~/.modastack/sessions/<session-name>/handoff-<step>.yaml`:
+`<project>/.modastack/sessions/<session-name>/handoff-<step>.yaml`:
 
 ```yaml
 complexity: medium
@@ -159,42 +192,27 @@ the next skill.
 
 ## Custom workflows
 
-Workflows are YAML DAGs loaded from three tiers (most specific wins):
-1. `<repo>/.modastack/workflows/` — repo-specific overrides
-2. `~/.modastack/workflows/` — user-level overrides
-3. `<modastack>/workflows/` — built-in defaults
+Workflows are YAML DAGs loaded from multiple tiers (most specific wins):
+1. Agent pack `workflows/` — pack-specific definitions
+2. `<project>/.modastack/workflows/` — project-specific overrides
+3. `~/.modastack/workflows/` — user-level overrides
 
-Per-repo context from `.modastack/config.yaml`'s `context:` section is
-available as `${{repo.key}}` in workflow templates. See `docs/CUSTOM_WORKFLOWS.md`
-for the full reference and `workflows/examples/` for non-dev examples
-(content review, research).
+See `docs/CUSTOM_WORKFLOWS.md` for the full reference.
 
 ## Background monitors
 
 Monitors are scheduled polling tasks that fill webhook gaps — conditions
 no webhook fires for (merge conflicts, stale PRs, deploy health). A monitor
 is a small human-readable YAML record (`name`, `description`, `interval`,
-`event`) loaded from three tiers, later tiers overriding earlier by `name`:
+`event`) loaded from the agent pack's `monitors/` directory and project
+overrides.
 
-1. `monitors/defaults.yaml` — built-in, shipped, read-only (empty by default)
-2. `~/.modastack/monitors.yaml` — user globals (apply to all repos)
-3. `<repo>/.modastack/monitors.yaml` — repo-specific
-
-Set `enabled: false` on a repo-specific entry to opt that repo out of an
-inherited monitor. The scheduler (a thread in the manager process) runs each
-monitor on its interval, deduplicates detected conditions against
-`~/.modastack/monitor_state.json`, and injects a synthetic event onto the
-same queue webhooks use — so the manager routes it like any other event.
-
-A monitor with a `check:` field uses a native runner in
-`modastack/monitors/checks.py` (deterministic, deduplicated). Without one,
-the scheduler launches a short-lived, non-interactive check agent out-of-band
-(`modastack agents launch -w adhoc --role engineer --wait --task "..." --post-event <event>`): it performs the
-check from the `description`, captures the result, and posts an event back to
-the bus *only* if it finds something. The manager never sees the check
-process — only the resulting finding — so its context stays clean and
-responsive. Engineering-specific monitors (PR conflicts, stale PRs) are
-configured in `.modastack/monitors.yaml` — see this repo's own config.
+A monitor with a `check:` field uses a native runner (deterministic,
+deduplicated). Without one, the scheduler launches a short-lived,
+non-interactive check agent out-of-band
+(`modastack agents launch -w adhoc --role engineer --wait --task "..." --post-event <event>`):
+it performs the check from the `description`, captures the result, and
+posts an event back to the bus *only* if it finds something.
 
 ## Releasing
 

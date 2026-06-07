@@ -23,26 +23,15 @@ modastack init
 Or for named credentials:
 
 ```yaml
-# ~/.modastack/credentials.yaml
+# ~/.config/modastack/credentials.yaml
 default:
   linear_api_key: "lin_api_..."
 ```
 
-## 3. Configure your repo
+## 3. Configure your project
 
-Register the repo with its Linear project key:
-
-```bash
-modastack register /path/to/repo --linear-project PROJ
-```
-
-This adds an entry to `~/.modastack/config.yaml`:
-
-```yaml
-repos:
-  - path: /path/to/repo
-    linear_project: PROJ        # The short key (visible in issue IDs like PROJ-42)
-```
+The project key is used for event routing so workflows can match events
+to the correct project.
 
 ## Finding your project key
 
@@ -61,7 +50,7 @@ Dispatch only picks up issues in `Triage` or `Unstarted` states. Once it starts 
 If you work across different Linear organizations, create separate API keys for each and store them as named credentials:
 
 ```yaml
-# ~/.modastack/credentials.yaml
+# ~/.config/modastack/credentials.yaml
 work:
   linear_api_key: "lin_api_work_org_key"
 
@@ -69,17 +58,7 @@ personal:
   linear_api_key: "lin_api_personal_org_key"
 ```
 
-Each repo entry in `~/.modastack/config.yaml` references its credential set:
-
-```yaml
-repos:
-  - path: /path/to/work-repo
-    linear_project: ENG
-    credentials: work
-  - path: /path/to/side-project
-    linear_project: SIDE
-    credentials: personal
-```
+Then reference the appropriate workspace when configuring your projects.
 
 ## Troubleshooting
 

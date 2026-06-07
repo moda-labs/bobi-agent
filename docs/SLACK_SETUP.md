@@ -47,7 +47,7 @@ Or for named credentials (multiple workspaces):
 
 ```bash
 # Edit directly
-cat >> ~/.modastack/credentials.yaml << 'EOF'
+cat >> ~/.config/modastack/credentials.yaml << 'EOF'
 my-workspace:
   linear_api_key: "lin_api_..."
   slack_bot_token: "xoxb-..."
@@ -83,7 +83,7 @@ No OAuth redirect server. No ngrok. No callback URL. The bot token is a static c
 If you have repos across different Slack workspaces, create one app per workspace and store each token as a named credential:
 
 ```yaml
-# ~/.modastack/credentials.yaml
+# ~/.config/modastack/credentials.yaml
 workspace-a:
   slack_bot_token: "xoxb-workspace-a-token"
   linear_api_key: "lin_api_team_a"
@@ -93,13 +93,7 @@ workspace-b:
   linear_api_key: "lin_api_team_b"
 ```
 
-Then each repo entry in `~/.modastack/config.yaml` references its credential set:
-
-```yaml
-repos:
-  - path: /path/to/repo
-    credentials: workspace-a
-```
+Then reference the appropriate workspace when configuring your project.
 
 ## Troubleshooting
 

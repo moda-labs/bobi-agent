@@ -11,9 +11,9 @@ The engine loads workflows from three directories, most-specific first:
 
 | Priority | Location | Scope |
 |----------|----------|-------|
-| 1 (highest) | `<repo>/.modastack/workflows/` | Only matches events from that repo |
-| 2 | `~/.modastack/workflows/` | Matches events from any repo |
-| 3 (lowest) | `<modastack>/workflows/` | Built-in defaults |
+| 1 (highest) | `<project>/.modastack/workflows/` | Only matches events from that project |
+| 2 | Agent pack `workflows/` | Pack-specific workflow definitions |
+| 3 | `~/.modastack/workflows/` | Matches events from any project |
 
 When an event fires, the engine finds the most specific matching workflow.
 A repo-specific workflow **overrides** a built-in with the same trigger.
@@ -23,20 +23,20 @@ A repo-specific workflow **overrides** a built-in with the same trigger.
 To customize how a specific repo handles issues:
 
 ```bash
-mkdir -p <your-repo>/.modastack/workflows/
-cp workflows/issue-lifecycle.yaml <your-repo>/.modastack/workflows/
+mkdir -p <your-project>/.modastack/workflows/
+cp agents/eng-org/workflows/issue-lifecycle.yaml <your-project>/.modastack/workflows/
 # Edit the copy to customize
-modastack workflow validate <your-repo>/.modastack/workflows/issue-lifecycle.yaml
+modastack workflows validate <your-project>/.modastack/workflows/issue-lifecycle.yaml
 ```
 
-The repo's version takes priority over the built-in for events from that repo.
+The project's version takes priority over the agent pack default for events from that project.
 
 ## Quick start: non-dev workflow
 
 1. Create a workflow YAML (see examples below)
-2. Put it in `<repo>/.modastack/workflows/` or `~/.modastack/workflows/`
+2. Put it in `<project>/.modastack/workflows/` or `~/.modastack/workflows/`
 3. Use trigger filters to match only specific events (e.g., by label)
-4. Validate: `modastack workflow validate path/to/workflow.yaml`
+4. Validate: `modastack workflows validate path/to/workflow.yaml`
 
 ## Workflow YAML reference
 
@@ -184,29 +184,15 @@ Variables use `${{scope.key}}` syntax. Available scopes:
 | Scope | Source | Example |
 |-------|--------|---------|
 | `event` | Trigger event data | `${{event.issue_id}}`, `${{event.title}}` |
-| `config` | Global config | `${{config.slack_dm_channel}}` |
-| `repo` | Per-repo `.modastack.yaml` | `${{repo.project}}`, `${{repo.test_command}}` |
+| `config` | Machine-wide config | `${{config.slack_dm_channel}}` |
+| `repo` | Per-project context | `${{repo.project}}`, `${{repo.test_command}}` |
 | `handoff` | Handoff file (in prompt nodes) | `${{handoff.phase}}`, `${{handoff.pr_url}}` |
 | `<node_id>` | Output of a completed node | `${{my_step.stdout}}`, `${{assess.output}}` |
 
 #### The `repo` scope
 
-The `repo` scope pulls from two sources:
-
-1. **Built-in fields** from `.modastack.yaml`: `path`, `task_tracking`, `project`, `test_command`
-2. **Custom fields** from the `context:` section of `.modastack.yaml`
-
-```yaml
-# .modastack.yaml
-context:
-  content_dir: content/blog
-  publish_command: npm run publish
-  deploy_env: staging
-  review_channel: C0CONTENT
-```
-
-These become `${{repo.content_dir}}`, `${{repo.publish_command}}`, etc.
-in your workflow YAML.
+The `repo` scope provides project-level context variables for use in
+workflow templates.
 
 ### Filters
 
@@ -230,28 +216,12 @@ when: "${{gate.branch}} == 'a' or ${{gate.branch}} == 'b'"
 
 Supported operators: `==`, `!=`, `in`, `not in`, `and`, `or`, `not`
 
-## Per-repo context
+## Per-project context
 
-Add arbitrary key-value pairs to `.modastack.yaml` under `context:`.
-These are available as `${{repo.key}}` in any workflow triggered by
-events from that repo.
+Context variables can be referenced in workflow templates as `${{repo.key}}`.
 
 ```yaml
-# .modastack.yaml for a docs repo
-task_tracking:
-  system: github-issues
-  project: DOCS
-  trigger_labels: [agent]
-
-context:
-  content_dir: docs/
-  style_guide: docs/STYLE.md
-  publish_command: mkdocs build && mkdocs gh-deploy
-  slack_channel: C0DOCS
-```
-
-```yaml
-# .modastack/workflows/docs-update.yaml
+# <project>/.modastack/workflows/docs-update.yaml
 name: docs-update
 version: 1
 trigger: >
@@ -281,13 +251,13 @@ See `workflows/examples/` for complete workflow files:
 
 ```bash
 # List all workflows (shows source tier for each)
-modastack workflow list
+modastack workflows list
 
 # Validate a workflow file
-modastack workflow validate path/to/workflow.yaml
+modastack workflows validate path/to/workflow.yaml
 
 # Show active workflow runs
-modastack workflow status
+modastack workflows status
 ```
 
 ## Tips
@@ -306,40 +276,27 @@ modastack workflow status
 - **Start simple.** A three-node workflow (spawn → prompt → cleanup) is
   a valid workflow. Add complexity only when you need it.
 
-- **Test with `modastack workflow validate`** before deploying. It checks
+- **Test with `modastack workflows validate`** before deploying. It checks
   the DAG structure, reports variable scopes, and catches typos.
 
-- **Override, don't fork.** Put your custom version in the repo's
+- **Override, don't fork.** Put your custom version in the project's
   `.modastack/workflows/` directory. The engine picks it up automatically
-  without touching the built-in defaults.
+  without touching the agent pack defaults.
 
-## Manager roles
+## Agent roles
 
-The manager's prompt is split into three layers:
+Roles are defined in agent packs under `roles/<role>.md`. The prompt
+system loads `base.md` (framework capabilities) plus the role prompt.
 
-| Layer | File | Purpose |
-|-------|------|---------|
-| Core | `roles/manager/prompt.md` | General: Slack communication, workflow engine interaction, event handling, tools |
-| Role | `roles/manager/<role>.md` | Domain: engineering policies, escalation rules, spec gates, lifecycle |
-| Repo | `.modastack.yaml` + tool skills | Specific: label conventions, deploy configs, API patterns |
-
-The role is configured in `~/.modastack/config.yaml`:
+The entry role for an agent pack is set in `defaults.yaml`:
 
 ```yaml
-manager:
-  role: engineering    # loads roles/manager/engineering.md
+role: director    # loads roles/director.md on startup
 ```
-
-### Built-in roles
-
-- **`engineering`** (default) — Software engineering manager. Spec policy,
-  PR lifecycle, technical decision-making, escalation rules.
 
 ### Custom roles
 
-Create `roles/manager/<name>.md` with domain-specific policies and set
-`manager.role: <name>` in the config. The core prompt handles communication,
-event processing, and tool use — your role file adds the domain knowledge.
+Add role prompts to your agent pack's `roles/` directory, or override
+at the project level in `<project>/.modastack/roles/<role>.md`.
 
-Example: a support manager role would define ticket triage rules, SLA
-policies, and escalation criteria instead of spec gates and PR lifecycle.
+Use `modastack roles list` to see all available roles.

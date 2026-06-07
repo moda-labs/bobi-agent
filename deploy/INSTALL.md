@@ -341,7 +341,7 @@ Check that `"ok": true` in the response.
 Create the config directory and files based on user answers from Step 6.
 
 ```bash
-mkdir -p ~/.modastack/manager ~/.modastack/handoffs ~/.modastack/logs
+mkdir -p ~/.modastack ~/.config/modastack
 ```
 
 ### ~/.modastack/config.yaml
@@ -360,7 +360,7 @@ github:
 repos: []
 ```
 
-### ~/.modastack/credentials.yaml
+### ~/.config/modastack/credentials.yaml
 
 Only write this if the user chose Linear:
 
@@ -373,7 +373,7 @@ Only write this if the user chose Linear:
 
 ```bash
 source "$INSTALL_DIR/.venv/bin/activate"
-modastack start --non-interactive
+modastack start eng-org --foreground
 ```
 
 ## Step 8: Start modastack (optional)
@@ -562,9 +562,9 @@ The user needs a GitHub Personal Access Token with `repo` and
 If the tmux session exits right away:
 1. Try running the command directly (without tmux) to see the error:
    ```bash
-   cd ~/dev/modastack && source .venv/bin/activate && modastack start
+   cd ~/dev/modastack && source .venv/bin/activate && modastack start eng-org --foreground
    ```
-2. Check the log: `cat ~/.modastack/modastack.log`
+2. Check the log in `.modastack/state/manager.log`
 3. Common causes: missing Slack tokens, missing event server config,
    Claude Code not authenticated
 
