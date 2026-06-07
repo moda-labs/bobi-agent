@@ -104,26 +104,35 @@ jobs:
           echo "issue_num=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
           echo "Created issue #$ISSUE_NUM"
 
-          # Post webhook so the manager picks it up immediately
-          curl -sf -X POST "http://localhost:8080/webhooks/github" \
+          # Notify the manager about the new issue.
+          # Try the event server webhook first; fall back to the CLI
+          # inbox if the local event server isn't running (fixes #157).
+          WEBHOOK_PAYLOAD="{
+            \"action\": \"assigned\",
+            \"issue\": {
+              \"number\": $ISSUE_NUM,
+              \"title\": \"[CI] Release smoke test v${VERSION}\",
+              \"state\": \"open\",
+              \"labels\": [{\"name\": \"smoke-test\"}, {\"name\": \"agent\"}],
+              \"assignees\": [{\"login\": \"modastack\"}],
+              \"user\": {\"login\": \"github-actions\"},
+              \"body\": \"Automated smoke test. Write a one-line file, commit, and close this issue.\",
+              \"html_url\": \"$ISSUE_URL\"
+            },
+            \"repository\": {\"full_name\": \"$DOGFOOD_REPO\"},
+            \"sender\": {\"login\": \"github-actions\"}
+          }"
+
+          if curl -sf -X POST "http://localhost:8080/webhooks/github" \
             -H "Content-Type: application/json" \
             -H "x-github-event: issues" \
             -H "x-github-delivery: smoke-$(date +%s)" \
-            -d "{
-              \"action\": \"assigned\",
-              \"issue\": {
-                \"number\": $ISSUE_NUM,
-                \"title\": \"[CI] Release smoke test v${VERSION}\",
-                \"state\": \"open\",
-                \"labels\": [{\"name\": \"smoke-test\"}, {\"name\": \"agent\"}],
-                \"assignees\": [{\"login\": \"modastack\"}],
-                \"user\": {\"login\": \"github-actions\"},
-                \"body\": \"Automated smoke test. Write a one-line file, commit, and close this issue.\",
-                \"html_url\": \"$ISSUE_URL\"
-              },
-              \"repository\": {\"full_name\": \"$DOGFOOD_REPO\"},
-              \"sender\": {\"login\": \"github-actions\"}
-            }"
+            -d "$WEBHOOK_PAYLOAD" 2>/dev/null; then
+            echo "Event delivered via webhook"
+          else
+            echo "Event server not reachable — delivering via CLI inbox"
+            modastack message "GitHub issue assigned: issue #${ISSUE_NUM} '[CI] Release smoke test v${VERSION}' in ${DOGFOOD_REPO} was assigned to modastack. Action: assigned. Labels: smoke-test, agent. Body: Automated smoke test. Write a one-line file, commit, and close this issue. URL: ${ISSUE_URL}"
+          fi
 
       - name: Wait for modastack to close the issue
         run: |
