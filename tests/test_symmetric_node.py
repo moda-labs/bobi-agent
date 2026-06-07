@@ -308,18 +308,3 @@ class TestSubscribeFlag:
             script_arg = mock_det.call_args[0][1][0]
             args = json.loads(script_arg)
             assert args["subscribe"] == ["org/repo", "slack:T123"]
-
-
-class TestNoStaleImports:
-    """Guard against importing removed symbols."""
-
-    def test_no_agents_dir_references(self):
-        """AGENTS_DIR was removed — ensure nothing still imports it."""
-        import subprocess
-        result = subprocess.run(
-            ["grep", "-rn", "AGENTS_DIR", "modastack/", "--include=*.py"],
-            capture_output=True, text=True, cwd=str(Path(__file__).parent.parent),
-        )
-        assert result.stdout == "", (
-            f"Found stale AGENTS_DIR references:\n{result.stdout}"
-        )

@@ -10,6 +10,19 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for removed symbols
+        run: |
+          if grep -rn "AGENTS_DIR" modastack/ --include="*.py"; then
+            echo "::error::AGENTS_DIR was removed — use _resolve_agent_dir() instead"
+            exit 1
+          fi
+
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
