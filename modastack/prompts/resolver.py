@@ -1,13 +1,69 @@
-"""Resolve agent prompts: base + agent pack role + project override."""
+"""Resolve agent prompts: base + agent pack role + tools + project override."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
-from . import BASE_PATH, AGENTS_CACHE_DIR, PROMPTS_DIR
+from . import BASE_PATH, AGENTS_CACHE_DIR, BUILTIN_AGENTS_DIR, PROMPTS_DIR
 
 log = logging.getLogger(__name__)
+
+
+def _resolve_role_prompt(role: str, agent_dir: Path | None, project: Path | None) -> str | None:
+    """Find the role prompt.
+
+    Resolution order:
+      1. <project>/.modastack/roles/{role}/ROLE.md — project override
+      2. Agent pack roles/{role}/ROLE.md           — from resolved agent pack
+      3. Built-in: modastack/prompts/agents/{role}/ROLE.md — framework-shipped
+    """
+    if project:
+        folder = project / ".modastack" / "roles" / role / "ROLE.md"
+        if folder.exists():
+            return folder.read_text()
+
+    if agent_dir:
+        folder = agent_dir / "roles" / role / "ROLE.md"
+        if folder.exists():
+            return folder.read_text()
+
+    builtin = BUILTIN_AGENTS_DIR / role / "ROLE.md"
+    if builtin.exists():
+        return builtin.read_text()
+
+    return None
+
+
+def _resolve_tools(agent_dir: Path | None, project: Path | None) -> str:
+    """Load all tool markdown files from the pack and project overrides.
+
+    Tools are service interaction guides (e.g. gmail.md, jira.md) that
+    describe how to interact with external services.
+
+    Project-level tools override pack tools with the same filename.
+    """
+    tools: dict[str, str] = {}
+
+    if agent_dir:
+        tools_dir = agent_dir / "tools"
+        if tools_dir.is_dir():
+            for md in sorted(tools_dir.glob("*.md")):
+                tools[md.stem] = md.read_text()
+
+    if project:
+        project_tools = project / ".modastack" / "tools"
+        if project_tools.is_dir():
+            for md in sorted(project_tools.glob("*.md")):
+                tools[md.stem] = md.read_text()
+
+    if not tools:
+        return ""
+
+    parts = ["## Tools\n"]
+    for name, content in sorted(tools.items()):
+        parts.append(f"### {name}\n\n{content.strip()}")
+    return "\n\n".join(parts)
 
 
 def _resolve_agent_dir(agent_name: str | None, project_path: Path | None = None) -> Path | None:
@@ -40,23 +96,24 @@ def resolve_agent_prompt(
 ) -> str:
     """Build the full prompt for an agent with a given role.
 
-    Resolution order for role prompts:
-      1. <project>/.modastack/roles/{role}.md — project override
-      2. Agent pack roles/{role}.md (resolved via _resolve_agent_dir)
+    Assembly order:
+      1. Base framework prompt
+      2. Role prompt (folder or flat, project override or pack)
+      3. Tools (service interaction guides from pack + project)
+      4. Interactive/non-interactive notice
     """
     parts = [BASE_PATH.read_text()]
 
     project = Path(project_path)
-    project_role = project / ".modastack" / "roles" / f"{role}.md"
+    agent_dir = _resolve_agent_dir(agent_name, project)
 
-    if project_role.exists():
-        parts.append(project_role.read_text())
-    else:
-        agent_dir = _resolve_agent_dir(agent_name, project)
-        if agent_dir:
-            pack_role = agent_dir / "roles" / f"{role}.md"
-            if pack_role.exists():
-                parts.append(pack_role.read_text())
+    role_prompt = _resolve_role_prompt(role, agent_dir, project)
+    if role_prompt:
+        parts.append(role_prompt)
+
+    tools_section = _resolve_tools(agent_dir, project)
+    if tools_section:
+        parts.append(tools_section)
 
     if interactive:
         parts.append(
@@ -129,6 +186,27 @@ def list_workflows(project_path: Path | str, agent_name: str | None = None) -> s
 # Role discovery
 # ---------------------------------------------------------------------------
 
+def _resolve_role_path(role_name: str, roles_dir: Path) -> Path | None:
+    """Find the role prompt file in a roles/ directory."""
+    folder = roles_dir / role_name / "ROLE.md"
+    if folder.exists():
+        return folder
+    return None
+
+
+def _discover_roles_in_dir(roles_dir: Path) -> list[tuple[str, Path]]:
+    """Discover all roles in a roles/ directory."""
+    found: list[tuple[str, Path]] = []
+    if not roles_dir.is_dir():
+        return found
+    for entry in sorted(roles_dir.iterdir()):
+        if entry.is_dir():
+            role_file = entry / "ROLE.md"
+            if role_file.exists():
+                found.append((entry.name, role_file))
+    return found
+
+
 def _extract_description(path: Path) -> str:
     """Extract a one-sentence description from a role markdown file."""
     try:
@@ -168,29 +246,25 @@ def discover_roles(
     if agent_name:
         agent_dir = _resolve_agent_dir(agent_name, Path(project_path) if project_path else None)
         if agent_dir:
-            roles_dir = agent_dir / "roles"
-            if roles_dir.is_dir():
-                for md in sorted(roles_dir.glob("*.md")):
-                    roles[md.stem] = {
-                        "name": md.stem,
-                        "source": agent_name,
-                        "description": _extract_description(md),
-                        "path": str(md),
-                    }
+            for name, path in _discover_roles_in_dir(agent_dir / "roles"):
+                roles[name] = {
+                    "name": name,
+                    "source": agent_name,
+                    "description": _extract_description(path),
+                    "path": str(path),
+                }
     elif AGENTS_CACHE_DIR.is_dir():
         for pack in sorted(AGENTS_CACHE_DIR.iterdir()):
             if not pack.is_dir():
                 continue
-            roles_dir = pack / "roles"
-            if roles_dir.is_dir():
-                for md in sorted(roles_dir.glob("*.md")):
-                    if md.stem not in roles:
-                        roles[md.stem] = {
-                            "name": md.stem,
-                            "source": pack.name,
-                            "description": _extract_description(md),
-                            "path": str(md),
-                        }
+            for name, path in _discover_roles_in_dir(pack / "roles"):
+                if name not in roles:
+                    roles[name] = {
+                        "name": name,
+                        "source": pack.name,
+                        "description": _extract_description(path),
+                        "path": str(path),
+                    }
 
     if project_path:
         project = Path(project_path)
@@ -199,26 +273,23 @@ def discover_roles(
                 for pack in sorted(agents_dir.iterdir()):
                     if not pack.is_dir():
                         continue
-                    roles_dir = pack / "roles"
-                    if roles_dir.is_dir():
-                        for md in sorted(roles_dir.glob("*.md")):
-                            if md.stem not in roles:
-                                roles[md.stem] = {
-                                    "name": md.stem,
-                                    "source": pack.name,
-                                    "description": _extract_description(md),
-                                    "path": str(md),
-                                }
+                    for name, path in _discover_roles_in_dir(pack / "roles"):
+                        if name not in roles:
+                            roles[name] = {
+                                "name": name,
+                                "source": pack.name,
+                                "description": _extract_description(path),
+                                "path": str(path),
+                            }
 
         project_roles = project / ".modastack" / "roles"
-        if project_roles.is_dir():
-            for md in sorted(project_roles.glob("*.md")):
-                roles[md.stem] = {
-                    "name": md.stem,
-                    "source": "project",
-                    "description": _extract_description(md),
-                    "path": str(md),
-                }
+        for name, path in _discover_roles_in_dir(project_roles):
+            roles[name] = {
+                "name": name,
+                "source": "project",
+                "description": _extract_description(path),
+                "path": str(path),
+            }
 
     return list(roles.values())
 
@@ -241,14 +312,22 @@ def validate_role(
 ) -> bool:
     """Check whether a role exists in any tier."""
     agent_dir = _resolve_agent_dir(agent_name, Path(project_path) if project_path else None)
-    if agent_dir and (agent_dir / "roles" / f"{role_name}.md").exists():
+    if agent_dir and _resolve_role_path(role_name, agent_dir / "roles"):
         return True
     if project_path:
-        project_role = Path(project_path) / ".modastack" / "roles" / f"{role_name}.md"
-        if project_role.exists():
+        project = Path(project_path)
+        project_roles = project / ".modastack" / "roles"
+        if _resolve_role_path(role_name, project_roles):
             return True
+        for agents_dir in [project / "agents", project / ".modastack" / "agents"]:
+            if agents_dir.is_dir():
+                for pack in agents_dir.iterdir():
+                    if pack.is_dir() and _resolve_role_path(role_name, pack / "roles"):
+                        return True
     if not agent_name and AGENTS_CACHE_DIR.is_dir():
         for pack in AGENTS_CACHE_DIR.iterdir():
-            if pack.is_dir() and (pack / "roles" / f"{role_name}.md").exists():
+            if pack.is_dir() and _resolve_role_path(role_name, pack / "roles"):
                 return True
+    if _resolve_role_path(role_name, BUILTIN_AGENTS_DIR):
+        return True
     return False

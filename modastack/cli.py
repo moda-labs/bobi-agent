@@ -940,7 +940,7 @@ def _offer_sandbox_fix(browser_mod, non_interactive: bool) -> None:
     click.echo()
     click.echo("  Security tradeoff: this lets any local process create user")
     click.echo("  namespaces, a historical local-privilege-escalation surface.")
-    click.echo("  Acceptable on dedicated dev machines. See deploy/INSTALL.md for")
+    click.echo("  Acceptable on dedicated dev machines. See scripts/install.sh for")
     click.echo("  a narrower per-binary AppArmor alternative and the --no-sandbox fallback.")
     click.echo()
 
@@ -1048,32 +1048,6 @@ def agents_cancel(issue_id):
     else:
         click.echo(f"No running agent for {issue_id}")
 
-
-@agents.command("create")
-@click.argument("name", required=False)
-def agents_create(name):
-    """Design a new agent pack through conversation.
-
-    Opens a Claude Code session with the builder agent, which guides you
-    through designing roles, workflows, and monitors for your use case.
-
-    The generated pack is written to agents/<name>/ in the current directory.
-
-    Examples:
-        modastack agents create
-        modastack agents create customer-support
-    """
-    project_path = _detect_project_root()
-
-    from modastack.prompts.resolver import resolve_agent_prompt
-    builder_prompt = resolve_agent_prompt("builder", project_path)
-
-    prompt = "Help me design a new agent pack."
-    if name:
-        prompt = f"Help me design a new agent pack called '{name}'."
-
-    cmd = ["claude", "--append-system-prompt", builder_prompt, prompt]
-    os.execvp("claude", cmd)
 
 
 @main.command()

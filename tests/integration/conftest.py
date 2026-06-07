@@ -53,6 +53,23 @@ def modastack_env(tmp_path_factory):
         "role": "manager",
     }))
 
+    # Create a minimal software_team agent pack in the project
+    pack_dir = config_dir / "agents" / "software_team"
+    for role_name in ["manager", "engineer", "project_lead"]:
+        (pack_dir / "roles" / role_name).mkdir(parents=True)
+    (pack_dir / "defaults.yaml").write_text(
+        "version: \"1.0.0\"\nrole: manager\nevent_sources:\n  - github\n"
+    )
+    (pack_dir / "roles" / "manager" / "ROLE.md").write_text(
+        "# Manager\n\nYou are a test manager agent.\n"
+    )
+    (pack_dir / "roles" / "engineer" / "ROLE.md").write_text(
+        "# Engineer\n\nYou are a test engineer agent. Complete tasks quickly.\n"
+    )
+    (pack_dir / "roles" / "project_lead" / "ROLE.md").write_text(
+        "# Project Lead\n\nYou are a test project lead agent.\n"
+    )
+
     creds_dir = base / "config" / "modastack"
     creds_dir.mkdir(parents=True)
     (creds_dir / "credentials.yaml").write_text("{}")

@@ -149,9 +149,9 @@ class TestPromptResolver:
 
     def test_resolve_agent_prompt_includes_project_override(self, modastack_install):
         mi = modastack_install
-        roles_dir = mi.repo_path / ".modastack" / "roles"
-        roles_dir.mkdir(parents=True, exist_ok=True)
-        (roles_dir / "director.md").write_text("Custom policy: always review PRs.")
+        role_dir = mi.repo_path / ".modastack" / "roles" / "director"
+        role_dir.mkdir(parents=True, exist_ok=True)
+        (role_dir / "ROLE.md").write_text("Custom policy: always review PRs.")
         from modastack.prompts.resolver import resolve_agent_prompt
         prompt = resolve_agent_prompt("director", mi.repo_path, agent_name=mi.agent_name)
         assert "Custom policy: always review PRs." in prompt

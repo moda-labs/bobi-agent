@@ -17,7 +17,9 @@ TEST_AGENT_NAME = "test-agent"
 def _create_test_agent(agents_dir: Path) -> Path:
     """Create a minimal self-contained agent pack for testing."""
     pack = agents_dir / TEST_AGENT_NAME
-    (pack / "roles").mkdir(parents=True)
+    (pack / "roles" / "director").mkdir(parents=True)
+    (pack / "roles" / "project_lead").mkdir(parents=True)
+    (pack / "roles" / "engineer").mkdir(parents=True)
     (pack / "workflows").mkdir()
     (pack / "monitors").mkdir()
 
@@ -29,15 +31,15 @@ def _create_test_agent(agents_dir: Path) -> Path:
 
     (pack / "agent.md").write_text("# Test Agent\nMinimal agent for testing.")
 
-    (pack / "roles" / "director.md").write_text(
+    (pack / "roles" / "director" / "ROLE.md").write_text(
         "# Engineering Director\n\n"
         "You are a director of engineering managing multiple software projects."
     )
-    (pack / "roles" / "project_lead.md").write_text(
+    (pack / "roles" / "project_lead" / "ROLE.md").write_text(
         "# Project Lead\n\n"
         "You are a project lead managing a single software project."
     )
-    (pack / "roles" / "engineer.md").write_text(
+    (pack / "roles" / "engineer" / "ROLE.md").write_text(
         "# Engineer Agent\n\n"
         "You are a staff engineer who ships production-quality code."
     )

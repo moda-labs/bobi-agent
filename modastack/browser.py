@@ -243,7 +243,7 @@ def check_browse_daemon(timeout: int = 60) -> CheckResult:
         return CheckResult(
             name, ok=False,
             detail=f"browse binary not found at {BROWSE_BINARY}",
-            hint="Install gstack skills (see deploy/INSTALL.md step 4)",
+            hint="Install gstack skills (see scripts/install.sh)",
         )
 
     def _browse(*args: str) -> subprocess.CompletedProcess:

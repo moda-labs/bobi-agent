@@ -33,7 +33,6 @@ modastack agents launch -w W --role R --task T  # launch an agent
 modastack agents list          # list active agents
 modastack agents show <id>     # inspect a specific agent
 modastack agents cancel <id>   # cancel a running agent
-modastack agents create        # design a new agent pack interactively
 modastack agents browse        # browse remote agent registry
 modastack agents update <name> # update agent packs from remote
 modastack agents add-registry <repo>  # add a remote registry
@@ -80,8 +79,6 @@ modastack/                        # Framework (Python package)
 ├── prompts/                      # Agent prompts (no domain logic in framework)
 │   ├── __init__.py               # AGENTS_CACHE_DIR, BASE_PATH exports
 │   ├── base.md                   # Generic capabilities shared by all agents
-│   ├── agents/                   # Built-in agent prompts
-│   │   └── builder.md            # Agent pack builder prompt
 │   └── resolver.py               # Prompt resolution: base + agent pack role
 ├── events/                       # Generic event infrastructure
 │   ├── client.py                 # WebSocket client (connects to event server)
@@ -100,15 +97,26 @@ modastack/                        # Framework (Python package)
     ├── checks.py                 # Native check runners (pr_conflicts, stale_prs)
     └── scheduler.py              # Interval scheduler, dedup, event injection
 
+skills/                           # Claude Code skill files for working with modastack
+├── create-agent.md               # Guide for designing new agent packs
+└── modastack.md                  # Guide for using modastack day-to-day
+
 agents/                           # Agent packs (portable agent definitions)
 ├── registry.yaml                 # Local pack index
 └── eng-org/                      # Example: engineering org agent pack
     ├── defaults.yaml             # Pack metadata (version, entry role, event sources)
     ├── agent.md                  # Shared base prompt for all roles
-    ├── roles/                    # Role-specific prompts
-    │   ├── director.md
-    │   ├── project_lead.md
-    │   └── engineer.md
+    ├── roles/                    # Role-specific prompts (folder format)
+    │   ├── director/
+    │   │   └── ROLE.md           # Main role prompt
+    │   ├── project_lead/
+    │   │   └── ROLE.md
+    │   └── engineer/
+    │       └── ROLE.md
+    ├── tools/                    # Service interaction guides (loaded into all roles)
+    │   ├── github.md             # How to interact with GitHub
+    │   ├── linear.md             # How to interact with Linear
+    │   └── slack.md              # How to interact with Slack
     ├── workflows/                # Pack-specific workflow definitions
     │   ├── issue-lifecycle.yaml
     │   ├── pr-feedback.yaml
@@ -134,8 +142,20 @@ distribution unit for agents.
 3. `~/.modastack/agents/<name>/` — user cache (fetched from remote registry)
 
 **Resolution order for role prompts:**
-1. `<project>/.modastack/roles/<role>.md` — project override
-2. Agent pack `roles/<role>.md` — from resolved agent pack
+1. `<project>/.modastack/roles/<role>/ROLE.md` — project override
+2. Agent pack `roles/<role>/ROLE.md` — from resolved agent pack
+3. Built-in `modastack/prompts/agents/<role>/ROLE.md` — framework-shipped
+
+Roles are folders — `roles/<name>/ROLE.md` is the main prompt, and the folder
+can contain additional resources (extra prompts, scripts, reference data) that
+the role may need.
+
+**Tools (service interaction guides):**
+
+Tools are markdown files that describe how to interact with external services
+(e.g. `github.md`, `linear.md`, `gmail.md`). All tools from the pack's `tools/`
+directory are loaded into every agent's context. Project-level tools in
+`.modastack/tools/` override pack tools with the same filename.
 
 ### Machine-wide config (`~/.modastack/config.yaml`)
 
@@ -197,7 +217,7 @@ Workflows are YAML DAGs loaded from multiple tiers (most specific wins):
 2. `<project>/.modastack/workflows/` — project-specific overrides
 3. `~/.modastack/workflows/` — user-level overrides
 
-See `docs/CUSTOM_WORKFLOWS.md` for the full reference.
+See `skills/create-agent.md` for the workflow YAML reference.
 
 ## Background monitors
 

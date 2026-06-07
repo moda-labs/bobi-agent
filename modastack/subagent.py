@@ -458,19 +458,28 @@ def spawn_adhoc(
     _emit_session_started(issue_id, project, task, issue_id, phase="adhoc",
                           requested_by=requested_by)
 
+    from modastack.prompts.resolver import _resolve_role_prompt, _resolve_agent_dir
+    agent_dir = _resolve_agent_dir(None, Path(cwd))
+    role_prompt = _resolve_role_prompt(role, agent_dir, Path(cwd))
+    append_parts = [
+        f"You are a {role} agent working on an adhoc task. "
+        f"Complete the task described in your initial prompt."
+    ]
+    if persistent:
+        append_parts.append(
+            "After completing the initial task, stay available — "
+            "you will receive follow-up messages via your inbox."
+        )
+    if role_prompt:
+        append_parts.append(role_prompt)
+
     session = Session(
         name=issue_id,
         cwd=cwd,
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
-            "append": (
-                f"You are a {role} agent working on an adhoc task. "
-                f"Complete the task described in your initial prompt."
-                + (" After completing the initial task, stay available — "
-                   "you will receive follow-up messages via your inbox."
-                   if persistent else "")
-            ),
+            "append": "\n\n".join(append_parts),
         },
         extra_options={"skills": "all", "max_turns": 200},
         role=role,

@@ -173,7 +173,7 @@ pip install -e .
 Paste this into Claude Code (or any AI coding agent):
 
 ```
-Follow the instructions at https://raw.githubusercontent.com/moda-labs/modastack/main/deploy/INSTALL.md to install modastack on this machine.
+Follow the instructions at https://raw.githubusercontent.com/moda-labs/modastack/main/scripts/install.sh to install modastack on this machine.
 ```
 
 ## Running agents

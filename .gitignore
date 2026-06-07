@@ -13,11 +13,6 @@ dist/
 .claude/hooks/
 .claude/scheduled_tasks.lock
 worktrees/
-.dispatch/
-.dispatch.yaml
 .gstack/
-.modastack/state/
-.modastack/sessions/
-.modastack/local.yaml
+.modastack/
 .context/
-worktrees/
