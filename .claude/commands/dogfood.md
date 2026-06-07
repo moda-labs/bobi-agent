@@ -15,7 +15,7 @@ at `~/dev/modastack-dogfood` with custom (non-engineering) roles and workflows.
    gh repo clone moda-labs/modastack-dogfood ~/dev/modastack-dogfood
    ```
 
-2. Check if `.modastack/config.yaml` exists in the dogfood repo. If not,
+2. Check if `agents/registry.yaml` exists in the dogfood repo. If not,
    report that the repo is misconfigured and stop.
 
 3. Ensure modastack is installed (dev or uv tool):
@@ -38,7 +38,7 @@ is current. Compare the test sections below against the actual codebase.
    to get the current command list. Compare against the test battery below.
    Note any commands that were added or removed.
 
-2. **Scan event server endpoints**: Read `modastack/manager/events/event_server.py`
+2. **Scan event server endpoints**: Read the event server source
    and list all routes. Compare against test battery.
 
 3. **Scan config classes**: Read `modastack/config.py` and check field lists
@@ -59,74 +59,106 @@ Run each test section in order. For each test:
 
 Track results in a summary table at the end.
 
-### Section 1: Repo Detection and Config Loading
+### Section 1: Project Detection and Config Loading
 
 ```
-TEST 1.1: Repo detection from cwd
+TEST 1.1: Project detection from cwd
   ACTION: cd ~/dev/modastack-dogfood && python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
-    from modastack.cli import _detect_repo_root
+    from modastack.cli import _detect_project_root
     from pathlib import Path
-    result = _detect_repo_root(Path('$HOME/dev/modastack-dogfood'))
+    result = _detect_project_root(Path('$HOME/dev/modastack-dogfood'))
     print(result)
   "
   EXPECT: Output contains "modastack-dogfood"
 
-TEST 1.2: Repo detection fails outside repo
+TEST 1.2: Project detection returns given path (no None for non-repos)
   ACTION: cd /tmp && python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
-    from modastack.cli import _detect_repo_root
+    from modastack.cli import _detect_project_root
     from pathlib import Path
-    result = _detect_repo_root(Path('/tmp'))
+    result = _detect_project_root(Path('/tmp'))
+    print(result)
+  "
+  EXPECT: Output contains "/tmp" (returns the resolved path as-is)
+
+TEST 1.3: Config loads machine-wide settings
+  ACTION: python3 -c "
+    import sys; sys.path.insert(0, '$HOME/dev/modastack')
+    from pathlib import Path
+    from modastack.config import Config
+    cfg = Config.load()
+    print(f'url={cfg.event_server_url!r} registries={cfg.registries}')
+  "
+  EXPECT: Config loads without error, fields are present
+
+TEST 1.4: Agent pack defaults.yaml loads correctly
+  ACTION: python3 -c "
+    import sys; sys.path.insert(0, '$HOME/dev/modastack')
+    from pathlib import Path
+    import yaml
+    defaults = yaml.safe_load(Path('$HOME/dev/modastack-dogfood/agents/content-team/defaults.yaml').read_text())
+    print(f'role={defaults[\"role\"]} tracking={defaults[\"task_tracking\"][\"system\"]} project={defaults[\"task_tracking\"][\"project\"]}')
+  "
+  EXPECT: Output contains "github-issues" and "PLAYBOOK"
+
+TEST 1.5: Agent pack registry.yaml lists packs
+  ACTION: python3 -c "
+    import sys; sys.path.insert(0, '$HOME/dev/modastack')
+    from pathlib import Path
+    import yaml
+    registry = yaml.safe_load(Path('$HOME/dev/modastack-dogfood/agents/registry.yaml').read_text())
+    agents = list(registry.get('agents', {}).keys())
+    print(f'packs={agents}')
+  "
+  EXPECT: Output contains "content-team"
+
+TEST 1.6: Agent pack resolution finds local pack
+  ACTION: python3 -c "
+    import sys; sys.path.insert(0, '$HOME/dev/modastack')
+    from pathlib import Path
+    from modastack.cli import _resolve_agent_pack
+    result = _resolve_agent_pack('content-team', Path('$HOME/dev/modastack-dogfood'))
+    print(result)
+  "
+  EXPECT: Output contains "modastack-dogfood/agents/content-team"
+
+TEST 1.7: Agent pack resolution returns None for missing pack
+  ACTION: python3 -c "
+    import sys; sys.path.insert(0, '$HOME/dev/modastack')
+    from pathlib import Path
+    from modastack.cli import _resolve_agent_pack
+    result = _resolve_agent_pack('nonexistent-pack', Path('$HOME/dev/modastack-dogfood'))
     print(result)
   "
   EXPECT: Output is "None"
 
-TEST 1.3: RepoConfig loads from dogfood
+TEST 1.8: List agent packs discovers local packs
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
-    from modastack.config import RepoConfig
-    rc = RepoConfig.from_file(Path('$HOME/dev/modastack-dogfood'))
-    print(f'tracking={rc.task_tracking} project={rc.project} labels={rc.trigger_labels}')
+    from modastack.cli import _list_agent_packs
+    packs = _list_agent_packs(Path('$HOME/dev/modastack-dogfood'))
+    for name, source in packs:
+        print(f'{name} [{source}]')
   "
-  EXPECT: Output contains "github-issues" and "PLAYBOOK"
-
-TEST 1.4: LocalConfig loads nested YAML correctly
-  ACTION: python3 -c "
-    import sys; sys.path.insert(0, '$HOME/dev/modastack')
-    from pathlib import Path
-    from modastack.config import LocalConfig
-    local = LocalConfig.load(Path('$HOME/dev/modastack-dogfood'))
-    print(f'url={local.event_server_url} port={local.dashboard_port}')
-  "
-  EXPECT: url is not empty, dashboard_port is an integer > 0
-
-TEST 1.5: LocalConfig returns defaults when local.yaml missing
-  ACTION: python3 -c "
-    import sys; sys.path.insert(0, '$HOME/dev/modastack')
-    from pathlib import Path
-    from modastack.config import LocalConfig
-    local = LocalConfig.load(Path('/tmp'))
-    print(f'url={local.event_server_url!r} port={local.dashboard_port}')
-  "
-  EXPECT: url is empty string, port is 8095
+  EXPECT: Output contains "content-team [local]"
 ```
 
 ### Section 2: CLI Lifecycle (start/stop/restart)
 
 ```
 TEST 2.1: Start modastack
-  ACTION: cd ~/dev/modastack-dogfood && modastack start
-  EXPECT: Output contains "started for modastack-dogfood" and a PID
+  ACTION: cd ~/dev/modastack-dogfood && modastack start content-team
+  EXPECT: Output contains "modastack-dogfood" and a PID (or "modastack v")
 
 TEST 2.2: PID file exists after start
   ACTION: cat ~/dev/modastack-dogfood/.modastack/state/manager.pid
   EXPECT: Output is a numeric PID, process is alive (kill -0 PID succeeds)
 
 TEST 2.3: Double-start is rejected
-  ACTION: cd ~/dev/modastack-dogfood && modastack start
-  EXPECT: Output contains "already running"
+  ACTION: cd ~/dev/modastack-dogfood && modastack start content-team
+  EXPECT: Output contains "Already running"
 
 TEST 2.4: Status shows running
   ACTION: cd ~/dev/modastack-dogfood && modastack status
@@ -147,16 +179,16 @@ TEST 2.7: Stop when already stopped
 
 TEST 2.8: Restart from stopped
   ACTION: cd ~/dev/modastack-dogfood && modastack restart
-  EXPECT: Output contains "started for modastack-dogfood"
+  EXPECT: Output contains "modastack-dogfood" or "modastack v"
 
 TEST 2.9: Restart while running
   ACTION: cd ~/dev/modastack-dogfood && modastack restart
   WAIT: 3 seconds
   EXPECT: Output contains "Stopped" or "Stopping" AND "started"
 
-TEST 2.10: Start outside modastack repo
+TEST 2.10: Start without agent pack shows usage
   ACTION: cd /tmp && modastack start 2>&1
-  EXPECT: Exit code non-zero, output contains "Not inside a modastack repo"
+  EXPECT: Exit code non-zero, output contains "Usage: modastack start <agent>"
 
 TEST 2.11: Clean up — stop for next sections
   ACTION: cd ~/dev/modastack-dogfood && modastack stop 2>/dev/null; true
@@ -269,16 +301,16 @@ TEST 3.19: Restart event server
 ### Section 4: Workflow System
 
 ```
-TEST 4.1: Workflow list shows repo-specific workflows
-  ACTION: cd ~/dev/modastack-dogfood && modastack workflow list 2>&1
+TEST 4.1: Workflow list shows agent pack workflows
+  ACTION: cd ~/dev/modastack-dogfood && modastack workflows list 2>&1
   EXPECT: Output contains "content-lifecycle" AND "research-task" AND "content-review"
 
 TEST 4.2: Built-in workflows also loaded
-  ACTION: cd ~/dev/modastack-dogfood && modastack workflow list 2>&1
-  EXPECT: Output contains "adhoc" AND "issue-lifecycle"
+  ACTION: cd ~/dev/modastack-dogfood && modastack workflows list 2>&1
+  EXPECT: Output contains "adhoc"
 
-TEST 4.3: Repo workflows override built-in by name
-  ACTION: If dogfood has a workflow with same name as built-in, repo version wins
+TEST 4.3: Agent pack workflows override built-in by name
+  ACTION: If dogfood agent pack has a workflow with same name as built-in, pack version wins
   EXPECT: Verify via WorkflowDispatcher.format_workflow_menu() dedup logic
 
 TEST 4.4: Workflow YAML parsing
@@ -286,14 +318,14 @@ TEST 4.4: Workflow YAML parsing
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from modastack.workflow.schema import load_workflow
     from pathlib import Path
-    wf = load_workflow(Path('$HOME/dev/modastack-dogfood/.modastack/workflows/content-lifecycle.yaml'))
+    wf = load_workflow(Path('$HOME/dev/modastack-dogfood/agents/content-team/workflows/content-lifecycle.yaml'))
     print(f'name={wf.name} steps={len(wf.steps)} trigger={wf.trigger[:40]}')
   "
   EXPECT: name=content-lifecycle, steps > 0
 
 TEST 4.5: Workflow validate command
-  ACTION: cd ~/dev/modastack-dogfood && modastack workflow validate \
-    .modastack/workflows/content-lifecycle.yaml 2>&1
+  ACTION: cd ~/dev/modastack-dogfood && modastack workflows validate \
+    agents/content-team/workflows/content-lifecycle.yaml 2>&1
   EXPECT: No errors, shows step names
 
 TEST 4.6: Workflow state directory exists
@@ -304,29 +336,29 @@ TEST 4.6: Workflow state directory exists
 ### Section 5: Role System
 
 ```
-TEST 5.1: Role list shows custom roles
-  ACTION: cd ~/dev/modastack-dogfood && modastack role list 2>&1
+TEST 5.1: Role list shows custom roles from agent pack
+  ACTION: cd ~/dev/modastack-dogfood && modastack roles list 2>&1
   EXPECT: Output contains "researcher" AND "editor" AND "fact-checker"
 
-TEST 5.2: Built-in engineer role also available
-  ACTION: cd ~/dev/modastack-dogfood && modastack role list 2>&1
-  EXPECT: Output contains "engineer"
+TEST 5.2: Manager role from agent pack also available
+  ACTION: cd ~/dev/modastack-dogfood && modastack roles list 2>&1
+  EXPECT: Output contains "manager"
 
-TEST 5.3: Role files exist and are readable
-  ACTION: ls ~/dev/modastack-dogfood/.modastack/agents/
-  EXPECT: Contains researcher.md, editor.md, fact-checker.md
+TEST 5.3: Role files exist in agent pack
+  ACTION: ls ~/dev/modastack-dogfood/agents/content-team/roles/
+  EXPECT: Contains researcher.md, editor.md, fact-checker.md, manager.md
 ```
 
 ### Section 6: SDK and Session Registry
 
 ```
-TEST 6.1: set_repo_root / get_repo_root roundtrip
+TEST 6.1: set_project_root / get_project_root roundtrip
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
-    from modastack.sdk import set_repo_root, get_repo_root
-    set_repo_root(Path('$HOME/dev/modastack-dogfood'))
-    print(get_repo_root())
+    from modastack.sdk import set_project_root, get_project_root
+    set_project_root(Path('$HOME/dev/modastack-dogfood'))
+    print(get_project_root())
   "
   EXPECT: Output ends with "modastack-dogfood"
 
@@ -334,8 +366,8 @@ TEST 6.2: SessionRegistry register and get
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
-    from modastack.sdk import set_repo_root, SessionEntry, SessionRegistry
-    set_repo_root(Path('$HOME/dev/modastack-dogfood'))
+    from modastack.sdk import set_project_root, SessionEntry, SessionRegistry
+    set_project_root(Path('$HOME/dev/modastack-dogfood'))
     reg = SessionRegistry()
     reg.register(SessionEntry(name='test-session', role='editor', status='running'))
     got = reg.get('test-session')
@@ -345,12 +377,12 @@ TEST 6.2: SessionRegistry register and get
   "
   EXPECT: name=test-session role=editor status=running, after_done=done
 
-TEST 6.3: Sessions dir is per-repo
+TEST 6.3: Sessions dir is per-project
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
-    from modastack.sdk import set_repo_root, _sessions_dir
-    set_repo_root(Path('$HOME/dev/modastack-dogfood'))
+    from modastack.sdk import set_project_root, _sessions_dir
+    set_project_root(Path('$HOME/dev/modastack-dogfood'))
     print(_sessions_dir())
   "
   EXPECT: Path contains "modastack-dogfood/.modastack/sessions"
@@ -360,7 +392,7 @@ TEST 6.3: Sessions dir is per-repo
 
 ```
 TEST 7.1: Start manager for communication tests
-  ACTION: cd ~/dev/modastack-dogfood && modastack start
+  ACTION: cd ~/dev/modastack-dogfood && modastack start content-team
   WAIT: 8 seconds for initialization
   EXPECT: Manager started
 
@@ -426,7 +458,7 @@ TEST 8.3: Init command (non-interactive)
 
 ```
 TEST 9.1: Monitor list
-  ACTION: cd ~/dev/modastack-dogfood && modastack monitor list 2>&1
+  ACTION: cd ~/dev/modastack-dogfood && modastack monitors list 2>&1
   EXPECT: Command exits successfully
 
 TEST 9.2: Parse interval
@@ -457,7 +489,7 @@ TEST 10.1: Start event server and manager
   ACTION:
     cd ~/dev/modastack-dogfood
     modastack event-server start 2>/dev/null
-    modastack start
+    modastack start content-team
   WAIT: 10 seconds
   EXPECT: Both running
 
@@ -478,6 +510,58 @@ TEST 10.2: Webhook event reaches manager
 TEST 10.3: Clean up
   ACTION: cd ~/dev/modastack-dogfood && modastack stop && modastack event-server stop
   EXPECT: Both stopped
+```
+
+### Section 11: Agent Pack Registry and Resolution
+
+```
+TEST 11.1: Registry module loads without error
+  ACTION: python3 -c "
+    import sys; sys.path.insert(0, '$HOME/dev/modastack')
+    from modastack.registry import list_cached, is_cached, CACHE_DIR
+    print(f'cache_dir={CACHE_DIR}')
+    cached = list_cached()
+    print(f'cached_count={len(cached)}')
+    for p in cached:
+        print(f'  {p[\"name\"]} v{p[\"version\"]}')
+  "
+  EXPECT: Command runs without error, prints cache dir and any cached packs
+
+TEST 11.2: Agent pack resolution order (project > .modastack > cache)
+  ACTION: python3 -c "
+    import sys; sys.path.insert(0, '$HOME/dev/modastack')
+    from pathlib import Path
+    from modastack.prompts.resolver import _resolve_agent_dir
+    # content-team is under <project>/agents/ so it should resolve there
+    result = _resolve_agent_dir('content-team', Path('$HOME/dev/modastack-dogfood'))
+    print(result)
+  "
+  EXPECT: Output contains "modastack-dogfood/agents/content-team"
+
+TEST 11.3: Agent browse command (remote registry)
+  ACTION: cd ~/dev/modastack-dogfood && modastack agents browse 2>&1
+  EXPECT: Output contains "Available agent packs" or exits with registry info
+
+TEST 11.4: Multi-registry config in Config.registries
+  ACTION: python3 -c "
+    import sys; sys.path.insert(0, '$HOME/dev/modastack')
+    from modastack.config import Config
+    cfg = Config.load()
+    print(f'registries={cfg.registries}')
+    print(f'type={type(cfg.registries).__name__}')
+  "
+  EXPECT: registries is a list (may be empty)
+
+TEST 11.5: Prompt resolver builds startup prompt with agent pack
+  ACTION: python3 -c "
+    import sys; sys.path.insert(0, '$HOME/dev/modastack')
+    from pathlib import Path
+    from modastack.prompts.resolver import build_startup_prompt
+    prompt = build_startup_prompt('manager', Path('$HOME/dev/modastack-dogfood'), agent_name='content-team')
+    print(f'length={len(prompt)}')
+    print('has_workflows=' + str('content-lifecycle' in prompt or 'Available workflows' in prompt))
+  "
+  EXPECT: length > 100, has_workflows=True
 ```
 
 ## Phase 4: Results and Coverage Gaps
