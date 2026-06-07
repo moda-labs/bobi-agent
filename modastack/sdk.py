@@ -4,8 +4,13 @@ Every session (manager or engineer) is tracked here. Sessions persist
 across restarts via state.json files in per-session directories.
 Each session wraps a ClaudeSDKClient with connect/resume/query/disconnect.
 
-All state lives under <project>/.modastack/sessions/. The project root
-is set at startup by consumer.run() via set_project_root().
+All state lives under <runtime_root>/.modastack/sessions/. The runtime
+root is the nearest ancestor (including self) whose .modastack/ has a
+live manager.pid — i.e. the directory where `modastack start` was
+invoked. This walk-up resolution lets sub-agents launched into child
+repos register in the same registry as the director that spawned them.
+When no live manager is found, the project root itself is used (the
+single-project, no-manager case).
 """
 
 from __future__ import annotations
@@ -36,11 +41,51 @@ def get_project_root() -> Path | None:
     return _project_root
 
 
+def _pid_file_alive(pid_path: Path) -> bool:
+    """Check whether a manager.pid file points to a running process."""
+    if not pid_path.exists():
+        return False
+    try:
+        pid = int(pid_path.read_text().strip())
+    except (ValueError, OSError):
+        return False
+    return _pid_alive(pid)
+
+
+def find_runtime_root(start: Path | None = None) -> Path | None:
+    """Walk up from *start* to find the nearest .modastack/ with a live manager.
+
+    Returns the directory containing the live .modastack/, or None if no
+    ancestor has one. The search starts at *start* (defaulting to
+    _project_root) and stops at the filesystem root.
+    """
+    current = (start or _project_root)
+    if current is None:
+        return None
+    current = current.resolve()
+    while True:
+        candidate = current / ".modastack" / "state" / "manager.pid"
+        if _pid_file_alive(candidate):
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
 def _sessions_dir() -> Path:
-    """Per-project sessions directory."""
+    """Per-project sessions directory, resolved via walk-up to runtime root.
+
+    If a live manager is running in an ancestor directory, sessions are
+    stored under that ancestor's .modastack/sessions/ so all agents in the
+    runtime are visible to each other. Falls back to the local project
+    root when no ancestor manager is found.
+    """
     if not _project_root:
         raise RuntimeError("project root not set — call set_project_root() first")
-    d = _project_root / ".modastack" / "sessions"
+    runtime = find_runtime_root(_project_root) or _project_root
+    d = runtime / ".modastack" / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
