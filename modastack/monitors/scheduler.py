@@ -37,8 +37,10 @@ def _load_checks(agent_name: str | None = None) -> dict:
     all_checks: dict = {}
     search_dirs: list[Path] = []
     if agent_name:
-        from modastack.prompts import AGENTS_DIR
-        search_dirs.append(AGENTS_DIR / agent_name / "monitors")
+        from modastack.prompts.resolver import _resolve_agent_dir
+        agent_dir = _resolve_agent_dir(agent_name)
+        if agent_dir:
+            search_dirs.append(agent_dir / "monitors")
     for checks_dir in search_dirs:
         if not checks_dir.exists():
             continue

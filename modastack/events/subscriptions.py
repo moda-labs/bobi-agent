@@ -29,7 +29,7 @@ def discover_subscriptions(project_path: Path, agent_name: str | None = None) ->
         except Exception:
             pass
 
-    event_sources = _load_event_sources(agent_name)
+    event_sources = _load_event_sources(agent_name, project_path)
     if event_sources:
         subs = []
         for source in event_sources:
@@ -41,12 +41,15 @@ def discover_subscriptions(project_path: Path, agent_name: str | None = None) ->
     return [project_path.name]
 
 
-def _load_event_sources(agent_name: str | None) -> list[str]:
+def _load_event_sources(agent_name: str | None, project_path: Path | None = None) -> list[str]:
     """Load the event_sources list from an agent pack's defaults.yaml."""
     if not agent_name:
         return []
-    from modastack.prompts import AGENTS_DIR
-    defaults = AGENTS_DIR / agent_name / "defaults.yaml"
+    from modastack.prompts.resolver import _resolve_agent_dir
+    agent_dir = _resolve_agent_dir(agent_name, project_path)
+    if not agent_dir:
+        return []
+    defaults = agent_dir / "defaults.yaml"
     if not defaults.exists():
         return []
     try:

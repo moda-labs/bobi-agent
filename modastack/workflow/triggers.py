@@ -35,10 +35,12 @@ class WorkflowDispatcher:
                 self._load_from(project_wf_dir, source=str(project_path))
 
         if agent_name:
-            from modastack.prompts import AGENTS_DIR
-            agent_wf = AGENTS_DIR / agent_name / "workflows"
-            if agent_wf.exists():
-                self._load_from(agent_wf, source=agent_name)
+            from modastack.prompts.resolver import _resolve_agent_dir
+            agent_dir = _resolve_agent_dir(agent_name, project_path)
+            if agent_dir:
+                agent_wf = agent_dir / "workflows"
+                if agent_wf.exists():
+                    self._load_from(agent_wf, source=agent_name)
 
         self._load_from(WORKFLOWS_DIR, source="default")
 

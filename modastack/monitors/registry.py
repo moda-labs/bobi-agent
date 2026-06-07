@@ -23,10 +23,12 @@ log = logging.getLogger(__name__)
 def _defaults_path(agent_name: str | None = None) -> Path:
     """Find the monitors defaults.yaml — from agent pack or fallback."""
     if agent_name:
-        from modastack.prompts import AGENTS_DIR
-        p = AGENTS_DIR / agent_name / "monitors" / "defaults.yaml"
-        if p.exists():
-            return p
+        from modastack.prompts.resolver import _resolve_agent_dir
+        agent_dir = _resolve_agent_dir(agent_name)
+        if agent_dir:
+            p = agent_dir / "monitors" / "defaults.yaml"
+            if p.exists():
+                return p
     return Path(__file__).resolve().parent / "defaults.yaml"
 
 
