@@ -56,6 +56,15 @@ def ensure_running(port: int, webhook_secret: str = "",
 
     es_dir = _find_event_server_dir()
 
+    if not (es_dir / "node_modules").exists():
+        log.info("Installing event server dependencies...")
+        subprocess.run(
+            ["npm", "install", "--no-audit", "--no-fund"],
+            cwd=str(es_dir),
+            check=True,
+            capture_output=True,
+        )
+
     if _needs_build(es_dir):
         log.info("Building local event server...")
         subprocess.run(
