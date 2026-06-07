@@ -34,6 +34,7 @@ class Config:
     event_server_url: str = ""
     slack_bot_token: str = ""
     linear_api_key: str = ""
+    registries: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, project_path: Path | None = None) -> "Config":
@@ -47,6 +48,7 @@ class Config:
             event_server_url=event_server.get("url", ""),
             slack_bot_token=slack.get("bot_token", ""),
             linear_api_key=linear.get("api_key", ""),
+            registries=raw.get("registries", []),
         )
 
     @classmethod

@@ -1833,5 +1833,102 @@ def agents_update(name):
                 click.echo(f"  {pack['name']} — failed: {e}", err=True)
 
 
+@agents.command("add-registry")
+@click.argument("repo")
+def agents_add_registry(repo):
+    """Add a registry to fetch agent packs from.
+
+    A registry is a GitHub repo containing an agents/ directory
+    with agent packs and a registry.yaml index.
+
+    Usage:
+        modastack agents add-registry myorg/my-agents
+    """
+    from modastack.config import _machine_config_path, _load_yaml
+    import yaml as _yaml
+
+    config_path = _machine_config_path()
+    raw = _load_yaml(config_path) if config_path.exists() else {}
+    registries = raw.get("registries", [])
+
+    if repo in registries:
+        click.echo(f"Registry '{repo}' is already configured.")
+        return
+
+    registries.append(repo)
+    raw["registries"] = registries
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(_yaml.dump(raw, default_flow_style=False))
+    click.echo(f"Added registry: {repo}")
+
+
+@agents.command("remove-registry")
+@click.argument("repo")
+def agents_remove_registry(repo):
+    """Remove a registry.
+
+    Usage:
+        modastack agents remove-registry myorg/my-agents
+    """
+    from modastack.config import _machine_config_path, _load_yaml
+    import yaml as _yaml
+
+    config_path = _machine_config_path()
+    raw = _load_yaml(config_path) if config_path.exists() else {}
+    registries = raw.get("registries", [])
+
+    if repo not in registries:
+        click.echo(f"Registry '{repo}' is not configured.", err=True)
+        raise SystemExit(1)
+
+    registries.remove(repo)
+    raw["registries"] = registries
+    config_path.write_text(_yaml.dump(raw, default_flow_style=False))
+    click.echo(f"Removed registry: {repo}")
+
+
+@agents.command("browse")
+def agents_browse():
+    """Browse available agent packs from the remote registry.
+
+    Shows all packs available for install, along with their versions
+    and whether they're already cached locally.
+
+    Usage:
+        modastack agents browse
+    """
+    from modastack.registry import list_remote, list_cached, DEFAULT_REPO
+
+    remote = list_remote()
+    if not remote:
+        click.echo("Could not fetch remote registry.", err=True)
+        raise SystemExit(1)
+
+    cached = {p["name"]: p["version"] for p in list_cached()}
+
+    click.echo("Available agent packs:\n")
+    for pack in remote:
+        name = pack["name"]
+        version = pack.get("version", "?")
+        desc = pack.get("description", "")
+        registry = pack.get("registry", DEFAULT_REPO)
+        local_v = cached.get(name)
+        if local_v:
+            if local_v == version:
+                status = "installed"
+            else:
+                status = f"v{local_v} → v{version} available"
+        else:
+            status = "not installed"
+        click.echo(f"  {name:20s} v{version:8s} [{status}]")
+        if desc:
+            click.echo(f"  {'':20s} {desc}")
+        if registry != DEFAULT_REPO:
+            click.echo(f"  {'':20s} registry: {registry}")
+        click.echo()
+
+    click.echo("Install with: modastack agents update <name>")
+
+
 if __name__ == "__main__":
     main()

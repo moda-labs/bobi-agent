@@ -116,7 +116,8 @@ class TestAgentCommand:
     def test_adhoc_workflow(self, tmp_path):
         runner = CliRunner()
         with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-42") as mock, \
-             patch("modastack.cli._detect_project_root", return_value=tmp_path):
+             patch("modastack.cli._detect_project_root", return_value=tmp_path), \
+             patch("modastack.prompts.resolver.validate_role", return_value=True):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "engineer",
                 "--task", "Fix #42",
@@ -131,7 +132,8 @@ class TestAgentCommand:
     def test_issue_lifecycle_workflow(self, tmp_path):
         runner = CliRunner()
         with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-42") as mock, \
-             patch("modastack.cli._detect_project_root", return_value=tmp_path):
+             patch("modastack.cli._detect_project_root", return_value=tmp_path), \
+             patch("modastack.prompts.resolver.validate_role", return_value=True):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "issue-lifecycle", "--role", "engineer",
                 "--task", "Work on #42",
@@ -185,7 +187,8 @@ class TestAgentCommand:
         runner = CliRunner()
         req = '{"from":"Alice","channel":"C1"}'
         with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-1") as mock, \
-             patch("modastack.cli._detect_project_root", return_value=tmp_path):
+             patch("modastack.cli._detect_project_root", return_value=tmp_path), \
+             patch("modastack.prompts.resolver.validate_role", return_value=True):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "engineer",
                 "--task", "Fix #1",

@@ -34,6 +34,23 @@ CACHE_DIR = Path.home() / ".modastack" / "agents"
 GITHUB_RAW = "https://raw.githubusercontent.com"
 
 
+def _all_registries() -> list[str]:
+    """Get all configured registries (default + user-added)."""
+    try:
+        from modastack.config import Config
+        cfg = Config.load()
+        user_registries = cfg.registries or []
+    except Exception:
+        user_registries = []
+    seen = set()
+    result = []
+    for repo in [DEFAULT_REPO] + user_registries:
+        if repo not in seen:
+            seen.add(repo)
+            result.append(repo)
+    return result
+
+
 def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
@@ -115,21 +132,39 @@ def is_cached(name: str) -> bool:
     return (CACHE_DIR / name / "defaults.yaml").exists()
 
 
-def check_update(name: str, repo: str = DEFAULT_REPO) -> tuple[str | None, str | None]:
+def check_update(name: str, repo: str | None = None) -> tuple[str | None, str | None]:
     """Compare local vs remote version. Returns (local_version, remote_version).
 
+    Searches all registries if repo is not specified.
     If remote is None, the check failed (network error, pack not found).
     """
     local = _read_local_version(name)
-    remote = _read_remote_version(name, repo)
-    return local, remote
+    registries = [repo] if repo else _all_registries()
+    for r in registries:
+        remote = _read_remote_version(name, r)
+        if remote:
+            return local, remote
+    return local, None
 
 
-def fetch(name: str, repo: str = DEFAULT_REPO) -> Path:
+def fetch(name: str, repo: str | None = None) -> Path:
     """Download an agent pack from GitHub and install to cache.
 
+    Searches all registries if repo is not specified.
     Downloads the repo tarball and extracts just the named pack directory.
     """
+    if not repo:
+        registries = _all_registries()
+        for r in registries:
+            if _read_remote_version(name, r):
+                repo = r
+                break
+        if not repo:
+            raise RuntimeError(
+                f"Agent pack '{name}' not found in any registry. "
+                f"Searched: {', '.join(registries)}"
+            )
+
     url = f"https://api.github.com/repos/{repo}/tarball/main"
     log.info(f"Fetching agent pack '{name}' from {repo}")
 
@@ -186,8 +221,8 @@ def fetch(name: str, repo: str = DEFAULT_REPO) -> Path:
     return dest
 
 
-def list_remote(repo: str = DEFAULT_REPO) -> list[dict]:
-    """List agent packs available in the remote registry."""
+def _list_remote_single(repo: str) -> list[dict]:
+    """List agent packs from a single registry."""
     url = f"{GITHUB_RAW}/{repo}/main/agents/registry.yaml"
     try:
         with _urlopen(url, timeout=5) as resp:
@@ -197,9 +232,23 @@ def list_remote(repo: str = DEFAULT_REPO) -> list[dict]:
     if not data or "agents" not in data:
         return []
     return [
-        {"name": name, **info}
+        {"name": name, "registry": repo, **info}
         for name, info in data["agents"].items()
     ]
+
+
+def list_remote(repo: str | None = None) -> list[dict]:
+    """List agent packs available across all registries."""
+    if repo:
+        return _list_remote_single(repo)
+    seen: set[str] = set()
+    results: list[dict] = []
+    for r in _all_registries():
+        for pack in _list_remote_single(r):
+            if pack["name"] not in seen:
+                seen.add(pack["name"])
+                results.append(pack)
+    return results
 
 
 def list_cached() -> list[dict]:
