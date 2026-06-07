@@ -150,6 +150,84 @@ def _scheduler(tmp_path, monitors, check_results=None, spawned=None):
     return sched, injected
 
 
+# === status-rollup monitor definition ===
+
+class TestStatusRollupMonitor:
+    """Verify the status-rollup monitor loads from the eng-org agent pack."""
+
+    def _load_defaults_directly(self) -> list[Monitor]:
+        """Load monitors from the real agents/eng-org/monitors/defaults.yaml."""
+        defaults = Path(__file__).resolve().parent.parent / "agents" / "eng-org" / "monitors" / "defaults.yaml"
+        if not defaults.exists():
+            pytest.skip("agents/eng-org/monitors/defaults.yaml not found")
+        raw = yaml.safe_load(defaults.read_text()) or {}
+        records = raw.get("monitors", [])
+        return [Monitor.from_dict(r, source="default") for r in records]
+
+    def test_status_rollup_present_in_defaults(self):
+        monitors = self._load_defaults_directly()
+        names = [m.name for m in monitors]
+        assert "status-rollup" in names
+
+    def test_status_rollup_fields(self):
+        monitors = self._load_defaults_directly()
+        sr = next(m for m in monitors if m.name == "status-rollup")
+        assert sr.interval == "12h"
+        assert sr.interval_seconds == 43200
+        assert sr.event == "monitor/director.status_rollup"
+        assert sr.check == ""  # agent-based, no native check
+        assert sr.enabled is True
+
+    def test_status_rollup_event_parts(self):
+        monitors = self._load_defaults_directly()
+        sr = next(m for m in monitors if m.name == "status-rollup")
+        source, etype = sr.event_parts
+        assert source == "monitor"
+        assert etype == "director.status_rollup"
+
+    def test_status_rollup_has_description(self):
+        monitors = self._load_defaults_directly()
+        sr = next(m for m in monitors if m.name == "status-rollup")
+        assert "project leads" in sr.description.lower()
+        assert "slack" in sr.description.lower()
+
+    def test_status_rollup_loads_via_registry(self, tmp_path):
+        """Verify the monitor loads through the registry when agent dir is set up."""
+        # Create an agent pack structure pointing to the real defaults.yaml
+        agent_dir = tmp_path / "agents" / "eng-org" / "monitors"
+        agent_dir.mkdir(parents=True)
+        # Copy the real defaults.yaml into the fake agent pack
+        real_defaults = Path(__file__).resolve().parent.parent / "agents" / "eng-org" / "monitors" / "defaults.yaml"
+        if not real_defaults.exists():
+            pytest.skip("agents/eng-org/monitors/defaults.yaml not found")
+        (agent_dir / "defaults.yaml").write_text(real_defaults.read_text())
+
+        # Patch _resolve_agent_dir to return our tmp agent dir
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(registry_mod, "_defaults_path",
+                        lambda agent_name=None: agent_dir / "defaults.yaml")
+            reg = MonitorRegistry.load()
+        names = [m.name for m in reg.effective_monitors()]
+        assert "status-rollup" in names
+
+    def test_status_rollup_spawns_check_not_native(self, tmp_path):
+        """Since status-rollup has no check: field, it should spawn an agent."""
+        m = Monitor(name="status-rollup", description="Poll project leads",
+                    interval="12h", event="monitor/director.status_rollup")
+        spawned = []
+        sched, injected = _scheduler(tmp_path, [m], spawned=spawned)
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        # No direct injection — the agent posts its own event
+        assert injected == []
+        assert len(spawned) == 1
+        mon, cwd = spawned[0]
+        assert mon.name == "status-rollup"
+        assert sched.state["status-rollup"]["last_run"] == _fixed_now().isoformat()
+
+
+# === Scheduler ===
+
 class TestSchedulerDue:
     def test_due_when_never_run(self, tmp_path):
         m = Monitor(name="x", interval="5m")

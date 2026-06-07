@@ -14,3 +14,11 @@ monitors:
     interval: 1h
     event: monitor/pr.stale
     check: stale_prs
+
+  - name: status-rollup
+    description: >
+      Poll all active project leads for status. Collect in-progress tickets,
+      completed since last check-in, open/stalled issues, and blockers.
+      Post a consolidated per-repo breakdown to Slack.
+    interval: 12h
+    event: monitor/director.status_rollup
