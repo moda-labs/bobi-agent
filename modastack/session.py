@@ -234,8 +234,11 @@ class Session:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._run(startup_prompt))
+        except (KeyboardInterrupt, SystemExit) as e:
+            log.info(f"Session '{self.name}' exiting: {type(e).__name__}")
+            raise
         except Exception as e:
-            log.error(f"Session '{self.name}' crashed: {e}")
+            log.error(f"Session '{self.name}' crashed: {e}", exc_info=True)
             self._state = "error"
         finally:
             self._loop.close()

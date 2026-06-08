@@ -1,5 +1,9 @@
 # Modastack
 
+[![CI](https://github.com/moda-labs/modastack/actions/workflows/ci.yml/badge.svg)](https://github.com/moda-labs/modastack/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/modastack)](https://pypi.org/project/modastack/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Modastack is a general-purpose CLI tool that allows you to build teams of interactive event-driven agents that can respond to both outside world events like updates to tickets or inbound emails, while remaining interactive to human questions. Agents can leave messages for each other or ask blocking questions, and can recursively spin up their own interactive or task-based agents.
 
 Under the hood, every agent is a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) session — which means the entire system runs on a flat-rate Claude Pro or Max plan with no per-token API costs. API key usage is also supported if you prefer.
@@ -37,6 +41,12 @@ Or install manually:
 
 ```bash
 uv tool install modastack
+```
+
+On macOS you can also use Homebrew:
+
+```bash
+brew install moda-labs/modastack/modastack
 ```
 
 See [scripts/install.sh](scripts/install.sh) for what the installer does.
@@ -145,6 +155,19 @@ The topology of agents, including their roles, relationships to each other, and 
 │                              └──────────────┘          │
 └────────────────────────────────────────────────────────┘
 ```
+
+## Event Server
+
+Agents receive real-world events (GitHub, Slack, Linear, custom webhooks) through a centralized event server. Three options:
+
+| | Local | Self-hosted Cloudflare | Hosted (coming soon) |
+|---|---|---|---|
+| Setup | `modastack event-server start` | Deploy the worker yourself | Sign up at [modastack.dev](https://modastack.dev) |
+| Hosting | Runs on your machine | Your Cloudflare account, always on | Managed by Moda Labs |
+| Webhook routing | Requires [ngrok](https://ngrok.com/) or similar tunnel | Stable URL, no tunnel | Stable URL, no tunnel |
+| GitHub/Slack apps | Create your own | Create your own | Install our pre-built apps |
+| Storage | In-memory | Durable Objects (persistent) | Durable Objects (persistent) |
+| Best for | Local dev, quick experimentation | Self-hosted production | Fastest path to production |
 
 ## Monitors
 

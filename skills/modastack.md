@@ -43,7 +43,15 @@ modastack agents cancel <id>
 ```bash
 modastack message "text"       # inject into any session
 modastack ask "question"       # ask and block for response
+
+# Slack
+modastack slack-reply -w <workspace> -c <channel> "message"
+modastack slack-reply -w <workspace> -c <channel> -t <thread-ts> "threaded reply"
 ```
+
+`slack-reply` converts Markdown to Slack formatting (`**bold**` → `*bold*`,
+links, headings). Messages over 3000 chars are truncated. Requires
+`slack.bot_token` in `~/.modastack/config.yaml`.
 
 ### Observability
 
@@ -80,6 +88,28 @@ modastack agents browse                 # browse remote registry
 modastack agents update <name>          # update from remote
 modastack agents add-registry <repo>    # add a remote registry
 ```
+
+### Knowledge base
+
+```bash
+modastack kb create <name>                  # create a named KB
+modastack kb add <name> --file <path>       # index a file
+modastack kb add <name> --text "..."        # add inline text
+modastack kb search <name> "query"          # hybrid FTS + semantic search
+modastack kb search <name> "q" --mode fts   # keyword-only search
+modastack kb list                           # list all KBs
+modastack kb info <name>                    # show stats
+modastack kb remove <name>                  # delete a KB
+```
+
+Each KB is a separate SQLite database at `.modastack/kb/<name>.db` with
+FTS5 for keyword search and sqlite-vec for semantic search. An embedding
+sidecar (sentence-transformers) auto-starts on first use and stays alive
+between commands. `modastack stop` tears it down.
+
+Agent packs use KBs for domain-specific retrieval — index Google Docs,
+Slack history, emails, or any text source into a named KB, then search
+it from agent tools.
 
 ### Event server
 

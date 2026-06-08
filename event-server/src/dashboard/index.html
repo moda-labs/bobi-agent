@@ -1,0 +1,1208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>modastack</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --bg-surface: #1c2128;
+  --border: #30363d;
+  --border-light: #3d444d;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+  --accent-blue: #58a6ff;
+  --accent-green: #3fb950;
+  --accent-red: #f85149;
+  --accent-yellow: #d29922;
+  --accent-purple: #bc8cff;
+  --accent-orange: #f0883e;
+  --accent-cyan: #39d2c0;
+  --glow-blue: rgba(88, 166, 255, 0.3);
+  --glow-green: rgba(63, 185, 80, 0.3);
+  --glow-red: rgba(248, 81, 73, 0.3);
+  --glow-purple: rgba(188, 140, 255, 0.3);
+  --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+
+html, body { height: 100%; overflow: hidden; }
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Layout */
+#app {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  grid-template-rows: 48px 1fr;
+  height: 100vh;
+  gap: 0;
+}
+
+/* Header */
+#header {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  z-index: 10;
+}
+
+#header h1 {
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  letter-spacing: 0.5px;
+}
+
+#header h1 span { color: var(--accent-blue); }
+
+#connection-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+#connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-red);
+  transition: background 0.3s;
+}
+
+#connection-dot.connected { background: var(--accent-green); box-shadow: 0 0 6px var(--glow-green); }
+
+#agent-count {
+  color: var(--text-muted);
+  margin-left: 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* Graph canvas */
+#graph-container {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(88, 166, 255, 0.02) 0%, transparent 70%),
+    var(--bg-primary);
+}
+
+#graph-container svg {
+  width: 100%;
+  height: 100%;
+}
+
+.grid-pattern { stroke: var(--border); stroke-width: 0.5; opacity: 0.3; }
+
+/* Event bus node (center) */
+.event-bus-node rect {
+  fill: var(--bg-tertiary);
+  stroke: var(--border-light);
+  stroke-width: 1.5;
+  rx: 6;
+}
+
+.event-bus-node text {
+  fill: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-anchor: middle;
+}
+
+/* Agent nodes */
+.agent-node { cursor: pointer; }
+
+.agent-node .node-bg {
+  fill: var(--bg-surface);
+  stroke: var(--border);
+  stroke-width: 1.5;
+  rx: 10;
+  transition: stroke 0.3s, filter 0.3s;
+}
+
+.agent-node:hover .node-bg {
+  stroke: var(--accent-blue);
+  filter: drop-shadow(0 0 8px var(--glow-blue));
+}
+
+.agent-node.selected .node-bg {
+  stroke: var(--accent-blue);
+  stroke-width: 2;
+  filter: drop-shadow(0 0 12px var(--glow-blue));
+}
+
+.agent-node .status-indicator {
+  transition: fill 0.3s;
+}
+
+.agent-node[data-status="running"] .status-indicator { fill: var(--accent-green); }
+.agent-node[data-status="starting"] .status-indicator { fill: var(--accent-yellow); }
+.agent-node[data-status="idle"] .status-indicator { fill: var(--accent-blue); }
+.agent-node[data-status="error"] .status-indicator { fill: var(--accent-red); }
+.agent-node[data-status="done"] .status-indicator { fill: var(--text-muted); }
+.agent-node[data-status="stopped"] .status-indicator { fill: var(--text-muted); }
+
+.agent-node[data-status="running"] .node-bg {
+  stroke: var(--accent-green);
+  filter: drop-shadow(0 0 4px var(--glow-green));
+}
+
+.node-role {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--text-primary);
+}
+
+.node-name {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  fill: var(--text-secondary);
+}
+
+.node-phase {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  fill: var(--accent-cyan);
+}
+
+/* Edges */
+.edge {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.5;
+  opacity: 0.6;
+  transition: stroke 0.3s, opacity 0.3s;
+}
+
+.edge.active {
+  stroke: var(--accent-blue);
+  opacity: 1;
+  stroke-dasharray: 6 3;
+  animation: dash 1s linear infinite;
+}
+
+@keyframes dash {
+  to { stroke-dashoffset: -9; }
+}
+
+/* Particles */
+.particle {
+  fill: var(--accent-blue);
+  opacity: 0;
+}
+
+.particle.github { fill: var(--accent-green); }
+.particle.linear { fill: var(--accent-purple); }
+.particle.slack { fill: var(--accent-orange); }
+.particle.topology { fill: var(--accent-cyan); }
+
+@keyframes particleFade {
+  0% { opacity: 0; r: 2; }
+  10% { opacity: 0.9; r: 4; }
+  90% { opacity: 0.6; r: 3; }
+  100% { opacity: 0; r: 2; }
+}
+
+/* Pulsing glow for running agents */
+@keyframes pulse {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.5; }
+}
+
+.pulse-ring {
+  fill: none;
+  stroke: var(--accent-green);
+  stroke-width: 2;
+  opacity: 0;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* Event stream sidebar */
+#event-stream {
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#event-stream-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+#event-stream-header .pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-green);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+#event-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+#event-list::-webkit-scrollbar { width: 4px; }
+#event-list::-webkit-scrollbar-track { background: transparent; }
+#event-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.event-item {
+  padding: 8px 16px;
+  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+  animation: slideIn 0.3s ease-out;
+  transition: background 0.15s;
+}
+
+.event-item:hover { background: var(--bg-tertiary); }
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.event-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-right: 6px;
+}
+
+.event-source.github { color: var(--accent-green); background: rgba(63, 185, 80, 0.1); }
+.event-source.linear { color: var(--accent-purple); background: rgba(188, 140, 255, 0.1); }
+.event-source.slack { color: var(--accent-orange); background: rgba(240, 136, 62, 0.1); }
+.event-source.custom { color: var(--accent-cyan); background: rgba(57, 210, 192, 0.1); }
+.event-source.topology { color: var(--accent-blue); background: rgba(88, 166, 255, 0.1); }
+
+.event-type {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.event-time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  float: right;
+}
+
+.event-detail {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Chat panel */
+#chat-panel {
+  position: fixed;
+  top: 48px;
+  right: 320px;
+  bottom: 0;
+  width: 420px;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.25s ease;
+  z-index: 20;
+}
+
+#chat-panel.open { transform: translateX(0); }
+
+#chat-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+#chat-agent-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+#chat-agent-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#chat-agent-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+#chat-close {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: background 0.15s, color 0.15s;
+}
+
+#chat-close:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+
+#chat-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+
+#chat-log::-webkit-scrollbar { width: 4px; }
+#chat-log::-webkit-scrollbar-track { background: transparent; }
+#chat-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.log-entry {
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(48, 54, 61, 0.3);
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.log-event {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent-cyan);
+  margin-bottom: 2px;
+}
+
+.log-event.inbox { color: var(--accent-purple); }
+.log-event.response { color: var(--accent-green); }
+.log-event.error { color: var(--accent-red); }
+
+.log-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow: hidden;
+}
+
+.log-time {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+#chat-input-area {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+#chat-input {
+  flex: 1;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+#chat-input:focus { border-color: var(--accent-blue); }
+#chat-input::placeholder { color: var(--text-muted); }
+
+#chat-send {
+  background: var(--accent-blue);
+  border: none;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+#chat-send:hover { opacity: 0.9; }
+#chat-send:disabled { opacity: 0.4; cursor: default; }
+
+/* Empty state */
+#empty-state {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+#empty-state .icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+  opacity: 0.3;
+}
+
+#empty-state p {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <h1><span>moda</span>stack</h1>
+    <div style="display:flex;align-items:center;gap:16px">
+      <span id="agent-count"></span>
+      <div id="connection-status">
+        <div id="connection-dot"></div>
+        <span id="connection-text">connecting</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="graph-container">
+    <div id="empty-state">
+      <div class="icon">&#9673;</div>
+      <p>waiting for agents...</p>
+    </div>
+  </div>
+
+  <div id="event-stream">
+    <div id="event-stream-header">
+      <div class="pulse"></div>
+      events
+    </div>
+    <div id="event-list"></div>
+  </div>
+</div>
+
+<div id="chat-panel">
+  <div id="chat-header">
+    <div id="chat-agent-info">
+      <div id="chat-agent-name"></div>
+      <div id="chat-agent-meta"></div>
+    </div>
+    <button id="chat-close">&times;</button>
+  </div>
+  <div id="chat-log"></div>
+  <div id="chat-input-area">
+    <input id="chat-input" type="text" placeholder="send a message..." autocomplete="off">
+    <button id="chat-send">Send</button>
+  </div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  // -----------------------------------------------------------------------
+  // State
+  // -----------------------------------------------------------------------
+  const agents = new Map();
+  let selectedAgent = null;
+  const chatLogs = new Map();
+  const MAX_EVENTS = 100;
+  const eventItems = [];
+
+  // -----------------------------------------------------------------------
+  // WebSocket Manager
+  // -----------------------------------------------------------------------
+  let ws = null;
+  let reconnectDelay = 1000;
+
+  function connectWebSocket() {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${protocol}//${location.host}/dashboard`);
+
+    ws.onopen = () => {
+      reconnectDelay = 1000;
+      document.getElementById('connection-dot').classList.add('connected');
+      document.getElementById('connection-text').textContent = 'connected';
+    };
+
+    ws.onclose = () => {
+      document.getElementById('connection-dot').classList.remove('connected');
+      document.getElementById('connection-text').textContent = 'reconnecting...';
+      setTimeout(connectWebSocket, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
+    };
+
+    ws.onerror = () => ws.close();
+
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        handleMessage(msg);
+      } catch {}
+    };
+  }
+
+  function handleMessage(msg) {
+    switch (msg.type) {
+      case 'topology_snapshot':
+        for (const agent of msg.agents || []) {
+          agents.set(agent.name, agent);
+        }
+        updateGraph();
+        break;
+
+      case 'topology.agent.registered':
+        agents.set(msg.data.name, msg.data);
+        updateGraph();
+        animateNodeEntry(msg.data.name);
+        break;
+
+      case 'topology.agent.updated':
+        agents.set(msg.data.name, msg.data);
+        updateNodeState(msg.data);
+        break;
+
+      case 'topology.agent.removed':
+        if (msg.data) {
+          agents.set(msg.data.name, { ...msg.data, status: 'done' });
+          updateNodeState(msg.data);
+          setTimeout(() => fadeOutNode(msg.data.name), 5000);
+        }
+        break;
+
+      case 'topology.log':
+        if (msg.data) {
+          addLogEntry(msg.data.session, msg.data);
+        }
+        break;
+
+      case 'event':
+        if (msg.data) {
+          addEventToStream(msg.data);
+          if (msg.data.type && !msg.data.type.startsWith('topology.')) {
+            animateEventParticle(msg.data);
+          }
+        }
+        break;
+    }
+    updateAgentCount();
+  }
+
+  // -----------------------------------------------------------------------
+  // Graph Rendering (D3)
+  // -----------------------------------------------------------------------
+  let svg, simulation, nodeGroup, edgeGroup, particleGroup;
+  let width, height;
+
+  function initGraph() {
+    const container = document.getElementById('graph-container');
+    width = container.clientWidth;
+    height = container.clientHeight;
+
+    svg = d3.select('#graph-container')
+      .append('svg')
+      .attr('width', width)
+      .attr('height', height);
+
+    // Defs for glow filters
+    const defs = svg.append('defs');
+
+    const glowFilter = defs.append('filter')
+      .attr('id', 'glow')
+      .attr('x', '-50%').attr('y', '-50%')
+      .attr('width', '200%').attr('height', '200%');
+    glowFilter.append('feGaussianBlur')
+      .attr('stdDeviation', '3')
+      .attr('result', 'blur');
+    const merge = glowFilter.append('feMerge');
+    merge.append('feMergeNode').attr('in', 'blur');
+    merge.append('feMergeNode').attr('in', 'SourceGraphic');
+
+    // Subtle grid
+    const gridSize = 30;
+    const gridGroup = svg.append('g').attr('class', 'grid');
+    for (let x = 0; x < width; x += gridSize) {
+      gridGroup.append('line')
+        .attr('class', 'grid-pattern')
+        .attr('x1', x).attr('y1', 0)
+        .attr('x2', x).attr('y2', height);
+    }
+    for (let y = 0; y < height; y += gridSize) {
+      gridGroup.append('line')
+        .attr('class', 'grid-pattern')
+        .attr('x1', 0).attr('y1', y)
+        .attr('x2', width).attr('y2', y);
+    }
+
+    edgeGroup = svg.append('g').attr('class', 'edges');
+    particleGroup = svg.append('g').attr('class', 'particles');
+    nodeGroup = svg.append('g').attr('class', 'nodes');
+
+    simulation = d3.forceSimulation()
+      .force('charge', d3.forceManyBody().strength(-400))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('collision', d3.forceCollide().radius(80))
+      .force('link', d3.forceLink().id(d => d.id).distance(180).strength(0.5))
+      .force('y', d3.forceY().y(d => {
+        const tier = { director: 0.2, manager: 0.2, project_lead: 0.45, engineer: 0.7, monitor: 0.85 };
+        return height * (tier[d.role] || 0.5);
+      }).strength(0.3))
+      .on('tick', ticked);
+
+    // Resize handler
+    window.addEventListener('resize', () => {
+      width = container.clientWidth;
+      height = container.clientHeight;
+      svg.attr('width', width).attr('height', height);
+      simulation.force('center', d3.forceCenter(width / 2, height / 2));
+      simulation.alpha(0.3).restart();
+    });
+  }
+
+  function buildGraphData() {
+    const nodes = [];
+    const links = [];
+
+    for (const [name, agent] of agents) {
+      nodes.push({
+        id: name,
+        ...agent,
+      });
+      if (agent.parent_session && agents.has(agent.parent_session)) {
+        links.push({ source: agent.parent_session, target: name });
+      }
+    }
+
+    return { nodes, links };
+  }
+
+  function updateGraph() {
+    const { nodes, links } = buildGraphData();
+    const emptyState = document.getElementById('empty-state');
+    emptyState.style.display = nodes.length === 0 ? 'block' : 'none';
+
+    // Preserve existing positions
+    for (const node of nodes) {
+      const existing = simulation.nodes().find(n => n.id === node.id);
+      if (existing) {
+        node.x = existing.x;
+        node.y = existing.y;
+        node.vx = existing.vx;
+        node.vy = existing.vy;
+      }
+    }
+
+    // Update edges
+    const edgeSelection = edgeGroup.selectAll('.edge')
+      .data(links, d => `${d.source.id || d.source}-${d.target.id || d.target}`);
+
+    edgeSelection.exit().transition().duration(300).attr('opacity', 0).remove();
+
+    edgeSelection.enter()
+      .append('path')
+      .attr('class', 'edge')
+      .attr('opacity', 0)
+      .transition().duration(300).attr('opacity', 0.6);
+
+    // Update nodes
+    const nodeSelection = nodeGroup.selectAll('.agent-node')
+      .data(nodes, d => d.id);
+
+    nodeSelection.exit()
+      .transition().duration(500)
+      .attr('opacity', 0)
+      .attr('transform', d => `translate(${d.x || 0},${d.y || 0}) scale(0.5)`)
+      .remove();
+
+    const enter = nodeSelection.enter()
+      .append('g')
+      .attr('class', 'agent-node')
+      .attr('data-status', d => d.status)
+      .attr('opacity', 0)
+      .call(d3.drag()
+        .on('start', dragStarted)
+        .on('drag', dragged)
+        .on('end', dragEnded))
+      .on('click', (e, d) => {
+        e.stopPropagation();
+        selectAgent(d.id);
+      });
+
+    // Node background
+    enter.append('rect')
+      .attr('class', 'node-bg')
+      .attr('x', -70).attr('y', -30)
+      .attr('width', 140).attr('height', 60);
+
+    // Pulse ring for running agents
+    enter.append('rect')
+      .attr('class', 'pulse-ring')
+      .attr('x', -74).attr('y', -34)
+      .attr('width', 148).attr('height', 68)
+      .attr('rx', 14);
+
+    // Status indicator
+    enter.append('circle')
+      .attr('class', 'status-indicator')
+      .attr('cx', -55).attr('cy', -15)
+      .attr('r', 4);
+
+    // Role label
+    enter.append('text')
+      .attr('class', 'node-role')
+      .attr('x', -45).attr('y', -11);
+
+    // Name label
+    enter.append('text')
+      .attr('class', 'node-name')
+      .attr('x', -60).attr('y', 5);
+
+    // Phase label
+    enter.append('text')
+      .attr('class', 'node-phase')
+      .attr('x', -60).attr('y', 19);
+
+    enter.transition().duration(500)
+      .attr('opacity', 1);
+
+    // Update all (enter + existing)
+    const allNodes = nodeGroup.selectAll('.agent-node').data(nodes, d => d.id);
+    allNodes.attr('data-status', d => d.status);
+    allNodes.select('.node-role').text(d => d.role);
+    allNodes.select('.node-name').text(d => truncate(d.name, 20));
+    allNodes.select('.node-phase').text(d => d.phase ? `[${d.phase}]` : '');
+    allNodes.select('.pulse-ring')
+      .style('animation', d => d.status === 'running' ? 'pulse 2s ease-in-out infinite' : 'none')
+      .style('stroke', d => d.status === 'running' ? 'var(--accent-green)' : 'transparent');
+
+    // Update simulation
+    simulation.nodes(nodes);
+    simulation.force('link').links(links);
+    simulation.alpha(0.5).restart();
+  }
+
+  function updateNodeState(agent) {
+    const node = nodeGroup.selectAll('.agent-node')
+      .filter(d => d.id === agent.name);
+
+    if (node.empty()) return;
+
+    node.attr('data-status', agent.status);
+    node.select('.node-phase').text(agent.phase ? `[${agent.phase}]` : '');
+    node.select('.pulse-ring')
+      .style('animation', agent.status === 'running' ? 'pulse 2s ease-in-out infinite' : 'none')
+      .style('stroke', agent.status === 'running' ? 'var(--accent-green)' : 'transparent');
+
+    // Update stored data
+    const d = node.datum();
+    Object.assign(d, agent);
+  }
+
+  function animateNodeEntry(name) {
+    const node = nodeGroup.selectAll('.agent-node')
+      .filter(d => d.id === name);
+
+    node.select('.node-bg')
+      .attr('filter', 'url(#glow)')
+      .transition().duration(1000)
+      .attr('filter', null);
+  }
+
+  function fadeOutNode(name) {
+    const agent = agents.get(name);
+    if (agent && agent.status === 'done') {
+      agents.delete(name);
+      updateGraph();
+    }
+  }
+
+  function ticked() {
+    edgeGroup.selectAll('.edge')
+      .attr('d', d => {
+        const dx = d.target.x - d.source.x;
+        const dy = d.target.y - d.source.y;
+        const mx = (d.source.x + d.target.x) / 2;
+        const my = (d.source.y + d.target.y) / 2 - Math.abs(dx) * 0.1;
+        return `M${d.source.x},${d.source.y} Q${mx},${my} ${d.target.x},${d.target.y}`;
+      });
+
+    nodeGroup.selectAll('.agent-node')
+      .attr('transform', d => `translate(${d.x},${d.y})`);
+  }
+
+  function dragStarted(event, d) {
+    if (!event.active) simulation.alphaTarget(0.3).restart();
+    d.fx = d.x;
+    d.fy = d.y;
+  }
+
+  function dragged(event, d) {
+    d.fx = event.x;
+    d.fy = event.y;
+  }
+
+  function dragEnded(event, d) {
+    if (!event.active) simulation.alphaTarget(0);
+    d.fx = null;
+    d.fy = null;
+  }
+
+  // -----------------------------------------------------------------------
+  // Event Particles
+  // -----------------------------------------------------------------------
+  function animateEventParticle(event) {
+    const source = event.source || 'custom';
+    const nodes = nodeGroup.selectAll('.agent-node');
+    if (nodes.empty()) return;
+
+    // Pick random target node to animate toward
+    const targets = nodes.data();
+    if (targets.length === 0) return;
+    const target = targets[Math.floor(Math.random() * targets.length)];
+
+    // Start from edge of viewport based on source
+    let sx, sy;
+    switch (source) {
+      case 'github': sx = 40; sy = height * 0.3; break;
+      case 'linear': sx = 40; sy = height * 0.5; break;
+      case 'slack': sx = 40; sy = height * 0.7; break;
+      default: sx = width / 2; sy = 40; break;
+    }
+
+    const particle = particleGroup.append('circle')
+      .attr('class', `particle ${source}`)
+      .attr('cx', sx).attr('cy', sy)
+      .attr('r', 3);
+
+    particle
+      .transition().duration(100)
+      .attr('opacity', 0.8)
+      .attr('r', 4)
+      .transition().duration(800)
+      .ease(d3.easeCubicOut)
+      .attr('cx', target.x)
+      .attr('cy', target.y)
+      .attr('r', 3)
+      .transition().duration(200)
+      .attr('opacity', 0)
+      .attr('r', 6)
+      .remove();
+
+    // Flash target node
+    const nodeEl = nodeGroup.selectAll('.agent-node')
+      .filter(d => d.id === target.id);
+    nodeEl.select('.node-bg')
+      .transition().duration(100)
+      .attr('filter', 'url(#glow)')
+      .transition().duration(600)
+      .attr('filter', null);
+  }
+
+  // -----------------------------------------------------------------------
+  // Event Stream
+  // -----------------------------------------------------------------------
+  function addEventToStream(event) {
+    const list = document.getElementById('event-list');
+    const source = event.source || event.type?.split('.')[0] || 'custom';
+    const type = event.type || 'unknown';
+    const ts = event.timestamp || new Date().toISOString();
+    const payload = event.payload || {};
+
+    let detail = '';
+    if (source === 'github') {
+      detail = payload.action ? `${payload.action}` : '';
+      if (payload.pull_request) detail += ` PR #${payload.pull_request.number}`;
+      else if (payload.issue) detail += ` #${payload.issue.number}`;
+    } else if (source === 'slack') {
+      detail = payload.text ? truncate(String(payload.text), 60) : '';
+    } else if (source === 'linear') {
+      detail = payload.data?.title ? truncate(String(payload.data.title), 60) : '';
+    } else if (source === 'topology') {
+      const inner = payload.payload || payload;
+      detail = inner.name ? `${inner.action || ''} ${inner.name}` : '';
+    } else if (source === 'custom') {
+      detail = type;
+    }
+
+    const item = document.createElement('div');
+    item.className = 'event-item';
+    item.innerHTML = `
+      <span class="event-time">${relativeTime(ts)}</span>
+      <span class="event-source ${source}">${source}</span>
+      <span class="event-type">${formatEventType(type)}</span>
+      ${detail ? `<div class="event-detail">${escapeHtml(detail)}</div>` : ''}
+    `;
+
+    list.insertBefore(item, list.firstChild);
+
+    // Cap event count
+    while (list.children.length > MAX_EVENTS) {
+      list.removeChild(list.lastChild);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Chat Panel
+  // -----------------------------------------------------------------------
+  function selectAgent(name) {
+    // Deselect previous
+    nodeGroup.selectAll('.agent-node').classed('selected', false);
+
+    if (selectedAgent === name) {
+      selectedAgent = null;
+      document.getElementById('chat-panel').classList.remove('open');
+      return;
+    }
+
+    selectedAgent = name;
+    const agent = agents.get(name);
+    if (!agent) return;
+
+    nodeGroup.selectAll('.agent-node')
+      .filter(d => d.id === name)
+      .classed('selected', true);
+
+    document.getElementById('chat-agent-name').textContent = agent.name;
+    document.getElementById('chat-agent-meta').textContent =
+      `${agent.role} | ${agent.status}${agent.phase ? ` | ${agent.phase}` : ''}${agent.project ? ` | ${agent.project}` : ''}`;
+
+    document.getElementById('chat-panel').classList.add('open');
+
+    renderChatLog(name);
+    fetchSessionLog(name);
+  }
+
+  function addLogEntry(session, entry) {
+    if (!chatLogs.has(session)) chatLogs.set(session, []);
+    const logs = chatLogs.get(session);
+    logs.push(entry);
+    if (logs.length > 200) logs.shift();
+
+    if (selectedAgent === session) {
+      appendLogEntryDOM(entry);
+    }
+  }
+
+  function renderChatLog(session) {
+    const container = document.getElementById('chat-log');
+    container.innerHTML = '';
+    const logs = chatLogs.get(session) || [];
+    for (const entry of logs) {
+      appendLogEntryDOM(entry);
+    }
+  }
+
+  function appendLogEntryDOM(entry) {
+    const container = document.getElementById('chat-log');
+    const el = document.createElement('div');
+    el.className = 'log-entry';
+    const eventClass = entry.event === 'inbox' ? 'inbox' :
+                        entry.event === 'response' ? 'response' :
+                        entry.event === 'error' ? 'error' : '';
+    el.innerHTML = `
+      <div class="log-event ${eventClass}">${escapeHtml(entry.event || '')}</div>
+      ${entry.text ? `<div class="log-text">${escapeHtml(truncate(entry.text, 500))}</div>` : ''}
+      <div class="log-time">${relativeTime(entry.ts)}</div>
+    `;
+    container.appendChild(el);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  async function fetchSessionLog(session) {
+    try {
+      const resp = await fetch(`/topology/sessions/${encodeURIComponent(session)}/log`);
+      const data = await resp.json();
+      if (data.logs && data.logs.length > 0) {
+        if (!chatLogs.has(session)) chatLogs.set(session, []);
+        const existing = chatLogs.get(session);
+        const existingTs = new Set(existing.map(e => e.ts));
+        for (const log of data.logs) {
+          if (!existingTs.has(log.ts)) {
+            existing.push(log);
+          }
+        }
+        existing.sort((a, b) => a.ts - b.ts);
+        if (selectedAgent === session) renderChatLog(session);
+      }
+    } catch {}
+  }
+
+  async function sendMessage() {
+    if (!selectedAgent) return;
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if (!text) return;
+
+    input.value = '';
+    const btn = document.getElementById('chat-send');
+    btn.disabled = true;
+
+    addLogEntry(selectedAgent, {
+      event: 'inbox',
+      text: text,
+      ts: Date.now() / 1000,
+      sender: 'dashboard',
+    });
+
+    try {
+      await fetch('/topology/msg', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session: selectedAgent, text }),
+      });
+    } catch (err) {
+      addLogEntry(selectedAgent, {
+        event: 'error',
+        text: `Failed to send: ${err.message}`,
+        ts: Date.now() / 1000,
+      });
+    }
+
+    btn.disabled = false;
+    input.focus();
+  }
+
+  // -----------------------------------------------------------------------
+  // Helpers
+  // -----------------------------------------------------------------------
+  function truncate(s, n) {
+    if (!s) return '';
+    return s.length > n ? s.slice(0, n) + '...' : s;
+  }
+
+  function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  function relativeTime(ts) {
+    let t;
+    if (typeof ts === 'number') {
+      t = ts > 1e12 ? ts : ts * 1000;
+    } else {
+      t = new Date(ts).getTime();
+    }
+    const diff = (Date.now() - t) / 1000;
+    if (diff < 5) return 'now';
+    if (diff < 60) return `${Math.floor(diff)}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+  }
+
+  function formatEventType(type) {
+    return (type || '').replace(/\./g, ' ').replace(/[_-]/g, ' ');
+  }
+
+  function updateAgentCount() {
+    const active = Array.from(agents.values()).filter(a =>
+      ['running', 'starting', 'idle'].includes(a.status)
+    ).length;
+    const el = document.getElementById('agent-count');
+    el.textContent = active > 0 ? `${active} agent${active !== 1 ? 's' : ''} active` : '';
+  }
+
+  // -----------------------------------------------------------------------
+  // Init
+  // -----------------------------------------------------------------------
+  document.getElementById('chat-close').addEventListener('click', () => {
+    selectedAgent = null;
+    document.getElementById('chat-panel').classList.remove('open');
+    nodeGroup.selectAll('.agent-node').classed('selected', false);
+  });
+
+  document.getElementById('chat-send').addEventListener('click', sendMessage);
+  document.getElementById('chat-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sendMessage();
+  });
+
+  // Click background to deselect
+  document.getElementById('graph-container').addEventListener('click', () => {
+    if (selectedAgent) {
+      selectedAgent = null;
+      document.getElementById('chat-panel').classList.remove('open');
+      nodeGroup.selectAll('.agent-node').classed('selected', false);
+    }
+  });
+
+  initGraph();
+  connectWebSocket();
+
+  // Bootstrap: fetch existing topology
+  fetch('/topology')
+    .then(r => r.json())
+    .then(data => {
+      for (const agent of data.agents || []) {
+        agents.set(agent.name, agent);
+      }
+      updateGraph();
+      updateAgentCount();
+    })
+    .catch(() => {});
+
+})();
+</script>
+</body>
+</html>

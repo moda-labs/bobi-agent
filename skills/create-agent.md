@@ -224,6 +224,17 @@ monitors:
 Monitors without `check:` are executed by a short-lived agent that
 evaluates the description and posts an event only if something is found.
 
+## Built-in CLI tools
+
+Every agent has access to the full `modastack` CLI — messaging
+(`message`, `ask`, `slack-reply`), agent management (`agents launch`,
+`agents list`, `agents cancel`), and observability (`status`, `events`,
+`transcript`). Reference these in role prompts so agents know how to
+communicate and delegate.
+
+See [`skills/modastack.md`](../skills/modastack.md) for the complete
+command reference.
+
 ## Design principles
 
 1. **Coordinator + workers**: Most packs have one persistent coordinator

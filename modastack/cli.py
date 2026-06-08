@@ -93,7 +93,7 @@ def _project_state_dir(project_path: Path) -> Path:
 @click.group()
 @click.version_option(version=__version__, prog_name="modastack")
 def main():
-    """Modastack — AI engineering manager + engineer team."""
+    """Modastack — build teams of event-driven AI agents."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -101,6 +101,14 @@ def main():
         handlers=[logging.StreamHandler()],
     )
     project = _detect_project_root()
+    dot_moda = project / ".modastack"
+    if dot_moda.is_dir():
+        click.echo(f"Using .modastack at {dot_moda}")
+    else:
+        click.echo(
+            click.style("Warning: ", fg="yellow")
+            + f"No .modastack/ found in {project} — some commands may not work as expected."
+        )
     if project:
         from modastack.sdk import set_project_root
         set_project_root(project)
@@ -383,6 +391,7 @@ def start(agent_pack, foreground, fresh, subscribe):
         venv_bin = str(Path(sys.executable).parent)
         local_bin = str(Path.home() / ".local" / "bin")
         env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
+        env["PYTHONUNBUFFERED"] = "1"
         cmd = [sys.executable, "-m", "modastack.cli", "start", agent_pack, "--foreground"]
         if fresh:
             cmd.append("--fresh")
@@ -445,26 +454,10 @@ def _find_pid_path() -> Path | None:
     return None
 
 
-@main.command()
-@click.option("--force", is_flag=True, help="Send SIGKILL if SIGTERM doesn't work")
-def stop(force):
-    """Stop the modastack instance for the current project.
-
-    Usage:
-        modastack stop
-        modastack stop --force
-    """
-    if _has_systemd_service() and not force:
-        click.echo("Stopping via systemd...")
-        _systemctl("stop")
-        return
-
+def _stop_manager_pid(pid_path: Path, force: bool) -> None:
+    """Kill the manager process at pid_path."""
     import signal
-
-    pid_path = _find_pid_path()
-    if not pid_path:
-        click.echo("No PID file found — modastack is not running.")
-        return
+    import time
 
     try:
         pid = int(pid_path.read_text().strip())
@@ -487,7 +480,6 @@ def stop(force):
     click.echo(f"Stopping modastack (pid {pid})...")
     os.kill(pid, sig)
 
-    import time
     for _ in range(30):
         time.sleep(0.2)
         try:
@@ -502,6 +494,33 @@ def stop(force):
     else:
         pid_path.unlink(missing_ok=True)
         click.echo("Killed.")
+
+
+@main.command()
+@click.option("--force", is_flag=True, help="Send SIGKILL if SIGTERM doesn't work")
+def stop(force):
+    """Stop the modastack instance for the current project.
+
+    Usage:
+        modastack stop
+        modastack stop --force
+    """
+    if _has_systemd_service() and not force:
+        click.echo("Stopping via systemd...")
+        _systemctl("stop")
+        return
+
+    pid_path = _find_pid_path()
+    if pid_path:
+        _stop_manager_pid(pid_path, force)
+    else:
+        click.echo("No PID file found — modastack is not running.")
+
+    from modastack.sdk import get_project_root, set_project_root
+    if not get_project_root():
+        set_project_root(_detect_project_root())
+    from modastack.kb.embedder import stop as stop_embedder
+    stop_embedder()
 
 
 @main.command()
@@ -1048,6 +1067,29 @@ def agents_cancel(issue_id):
     else:
         click.echo(f"No running agent for {issue_id}")
 
+
+
+@main.command()
+@click.argument("name", default="modastack")
+def skill(name):
+    """Print a skill guide to stdout.
+
+    Agents can bootstrap themselves with: modastack skill
+
+    Usage:
+        modastack skill                # print the modastack usage guide
+        modastack skill create-agent   # print the agent creation guide
+        modastack skill linear-setup   # print the Linear setup guide
+    """
+    skills_dir = REPO_ROOT / "skills"
+    path = skills_dir / f"{name}.md"
+    if not path.exists():
+        available = [f.stem for f in skills_dir.glob("*.md")] if skills_dir.exists() else []
+        click.echo(f"Skill '{name}' not found.", err=True)
+        if available:
+            click.echo(f"Available: {', '.join(sorted(available))}", err=True)
+        raise SystemExit(1)
+    click.echo(path.read_text())
 
 
 @main.command()
@@ -1902,6 +1944,192 @@ def agents_browse():
         click.echo()
 
     click.echo("Install with: modastack agents update <name>")
+
+
+# ---------------------------------------------------------------------------
+# kb group
+# ---------------------------------------------------------------------------
+
+@main.group()
+def kb():
+    """Knowledge base — create, populate, and search named KBs."""
+    pass
+
+
+@kb.command("create")
+@click.argument("name")
+def kb_create(name):
+    """Create a new knowledge base.
+
+    Usage:
+        modastack kb create docs
+    """
+    from modastack.kb.store import KBStore
+    from modastack.sdk import get_project_root, set_project_root
+    if not get_project_root():
+        set_project_root(_detect_project_root())
+    try:
+        store = KBStore.create(name)
+        click.echo(f"Created KB '{name}'")
+    except FileExistsError:
+        click.echo(f"KB '{name}' already exists.", err=True)
+        raise SystemExit(1)
+
+
+@kb.command("add")
+@click.argument("name")
+@click.option("--file", "-f", "file_path", type=click.Path(exists=True),
+              help="Path to file to add")
+@click.option("--text", "-t", "text", help="Inline text to add")
+def kb_add(name, file_path, text):
+    """Add content to a knowledge base.
+
+    Usage:
+        modastack kb add docs --file README.md
+        modastack kb add docs --text "Important fact"
+    """
+    from modastack.kb.store import KBStore
+    from modastack.kb.embedder import embed
+    from modastack.sdk import get_project_root, set_project_root
+    if not get_project_root():
+        set_project_root(_detect_project_root())
+
+    try:
+        store = KBStore(name)
+    except FileNotFoundError:
+        click.echo(f"KB '{name}' does not exist. Create it first: modastack kb create {name}", err=True)
+        raise SystemExit(1)
+
+    if file_path:
+        ids = store.add_file(Path(file_path), embed_fn=embed)
+        if not ids:
+            click.echo(f"File already indexed (unchanged)")
+        else:
+            click.echo(f"Added {len(ids)} chunks from {file_path}")
+    elif text:
+        ids = store.add_text(text, embed_fn=embed)
+        click.echo(f"Added {len(ids)} chunks")
+    else:
+        click.echo("Provide --file or --text", err=True)
+        raise SystemExit(1)
+
+
+@kb.command("search")
+@click.argument("name")
+@click.argument("query")
+@click.option("--limit", "-n", default=10, help="Max results")
+@click.option("--mode", type=click.Choice(["hybrid", "fts", "vector"]),
+              default="hybrid", help="Search mode")
+def kb_search(name, query, limit, mode):
+    """Search a knowledge base.
+
+    Usage:
+        modastack kb search docs "authentication flow"
+        modastack kb search docs "login bug" --limit 5
+        modastack kb search docs "exact phrase" --mode fts
+    """
+    from modastack.kb.store import KBStore
+    from modastack.kb.embedder import embed
+    from modastack.sdk import get_project_root, set_project_root
+    if not get_project_root():
+        set_project_root(_detect_project_root())
+
+    try:
+        store = KBStore(name)
+    except FileNotFoundError:
+        click.echo(f"KB '{name}' does not exist.", err=True)
+        raise SystemExit(1)
+
+    embed_fn = embed if mode in ("hybrid", "vector") else None
+    results = store.search(query, limit=limit, embed_fn=embed_fn)
+
+    if not results:
+        click.echo("No results.")
+        return
+
+    for i, r in enumerate(results, 1):
+        source = r.get("source", "")
+        score = r.get("score", 0)
+        content = r["content"][:200].replace("\n", " ")
+        click.echo(f"  {i}. [{score:.3f}] {source}")
+        click.echo(f"     {content}")
+        click.echo()
+
+
+@kb.command("list")
+def kb_list():
+    """List all knowledge bases.
+
+    Usage:
+        modastack kb list
+    """
+    from modastack.kb.store import KBStore
+    from modastack.sdk import get_project_root, set_project_root
+    if not get_project_root():
+        set_project_root(_detect_project_root())
+
+    kbs = KBStore.list_kbs()
+    if not kbs:
+        click.echo("No knowledge bases. Create one with: modastack kb create <name>")
+        return
+    for k in kbs:
+        click.echo(f"  {k['name']:20s} {k['entry_count']} entries  {k['created_at'][:19]}")
+
+
+@kb.command("info")
+@click.argument("name")
+def kb_info(name):
+    """Show knowledge base statistics.
+
+    Usage:
+        modastack kb info docs
+    """
+    from modastack.kb.store import KBStore
+    from modastack.sdk import get_project_root, set_project_root
+    if not get_project_root():
+        set_project_root(_detect_project_root())
+
+    try:
+        store = KBStore(name)
+    except FileNotFoundError:
+        click.echo(f"KB '{name}' does not exist.", err=True)
+        raise SystemExit(1)
+
+    info = store.info()
+    click.echo(f"  Name:       {info['name']}")
+    click.echo(f"  Entries:    {info['entry_count']}")
+    click.echo(f"  Sources:    {info['source_count']}")
+    click.echo(f"  Model:      {info['embedding_model']}")
+    click.echo(f"  Created:    {info['created_at']}")
+    if info.get("sources"):
+        click.echo(f"  Files:")
+        for s in info["sources"]:
+            click.echo(f"    {s['source']}: {s['count']} chunks")
+
+
+@kb.command("remove")
+@click.argument("name")
+@click.confirmation_option(prompt="Delete this knowledge base?")
+def kb_remove(name):
+    """Delete a knowledge base.
+
+    Usage:
+        modastack kb remove docs
+    """
+    from modastack.kb.store import KBStore
+    from modastack.sdk import get_project_root, set_project_root
+    if not get_project_root():
+        set_project_root(_detect_project_root())
+
+    try:
+        KBStore.remove(name)
+        click.echo(f"Removed KB '{name}'")
+    except FileNotFoundError:
+        click.echo(f"KB '{name}' does not exist.", err=True)
+        raise SystemExit(1)
+
+
+main.add_command(kb)
 
 
 if __name__ == "__main__":

@@ -51,6 +51,17 @@ modastack monitors pause <name>   # disable a monitor
 modastack monitors remove <name>  # remove a user-added monitor
 modastack roles list              # list available agent roles
 
+modastack kb create <name>        # create a named knowledge base
+modastack kb add <name> --file F  # index a file into a KB
+modastack kb add <name> --text T  # add inline text to a KB
+modastack kb search <name> "q"    # hybrid FTS + semantic search
+modastack kb list                 # list all knowledge bases
+modastack kb info <name>          # show KB statistics
+modastack kb remove <name>        # delete a knowledge base
+
+modastack skill                   # print the modastack usage guide
+modastack skill <name>            # print a specific skill guide
+
 modastack event-server start      # start the local event server
 modastack event-server stop       # stop the local event server
 ```
@@ -86,6 +97,10 @@ modastack/                        # Framework (Python package)
 │   ├── schema.py                 # WorkflowDef, StepDef, YAML parsing
 │   ├── state.py                  # JSON persistence for workflow runs
 │   └── variables.py              # Variable resolution, safe condition evaluation
+├── kb/                           # Knowledge base (FTS5 + semantic search)
+│   ├── store.py                  # SQLite + FTS5 + sqlite-vec per named KB
+│   ├── embedder.py               # Sidecar client (auto-start, embed())
+│   └── sidecar.py                # HTTP server holding sentence-transformers model
 └── monitors/                     # Background polling to fill webhook gaps
     ├── schema.py                 # Monitor record + interval parsing
     ├── registry.py               # Three-tier load/merge + writes
