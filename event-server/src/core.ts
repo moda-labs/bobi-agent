@@ -78,6 +78,7 @@ export function normalizeLinearPayload(
 
 export function normalizeSlackPayload(
 	payload: Record<string, unknown>,
+	selfBotId?: string,
 ): SlackNormalizationResult {
 	if (payload.type === "url_verification") {
 		return { event: null, challenge: payload.challenge as string, skip: true };
@@ -90,7 +91,13 @@ export function normalizeSlackPayload(
 	const event = payload.event as Record<string, unknown> | undefined;
 	if (!event) return { event: null, skip: true };
 
-	if (event.bot_id || event.subtype) {
+	if (event.subtype) {
+		return { event: null, skip: true };
+	}
+
+	// Only filter our own bot's messages to prevent loops.
+	// Messages from other bots (e.g. user-level Slack apps) pass through.
+	if (event.bot_id && selfBotId && event.bot_id === selfBotId) {
 		return { event: null, skip: true };
 	}
 

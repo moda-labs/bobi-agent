@@ -150,7 +150,16 @@ async function handleSlackWebhook(request: Request, env: Env): Promise<Response>
 		}
 	}
 
-	const result = normalizeSlackPayload(payload);
+	const teamId = (payload.team_id as string) || "";
+	let selfBotId: string | undefined;
+	if (teamId) {
+		const wsData = await env.EVENTS.get(`slack_workspace:${teamId}`);
+		if (wsData) {
+			selfBotId = (JSON.parse(wsData) as Record<string, string>).bot_id;
+		}
+	}
+
+	const result = normalizeSlackPayload(payload, selfBotId);
 
 	if (result.challenge !== undefined) {
 		return Response.json({ challenge: result.challenge });
@@ -327,8 +336,21 @@ async function handleSlackWorkspaceRegister(request: Request, env: Env): Promise
 		return Response.json({ error: "workspace_id and bot_token required" }, { status: 400 });
 	}
 
-	await env.EVENTS.put(`slack_workspace:${workspaceId}`, JSON.stringify({ bot_token: botToken }));
-	return Response.json({ ok: true, workspace_id: workspaceId });
+	let botId: string | undefined;
+	try {
+		const resp = await fetch("https://slack.com/api/auth.test", {
+			headers: { Authorization: `Bearer ${botToken}` },
+		});
+		const data = (await resp.json()) as Record<string, unknown>;
+		if (data.ok) {
+			botId = data.bot_id as string;
+		}
+	} catch {
+		// best-effort — self-loop filtering degrades gracefully without bot_id
+	}
+
+	await env.EVENTS.put(`slack_workspace:${workspaceId}`, JSON.stringify({ bot_token: botToken, bot_id: botId }));
+	return Response.json({ ok: true, workspace_id: workspaceId, bot_id: botId });
 }
 
 async function handleSlackSend(request: Request, env: Env): Promise<Response> {

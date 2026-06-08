@@ -4,17 +4,9 @@
 [![PyPI](https://img.shields.io/pypi/v/modastack)](https://pypi.org/project/modastack/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Modastack is a general-purpose CLI tool that allows you to build teams of interactive event-driven agents that can respond to both outside world events like updates to tickets or inbound emails, while remaining interactive to human questions. Agents can leave messages for each other or ask blocking questions, and can recursively spin up their own interactive or task-based agents.
+Modastack is a CLI toolkit that provides the building blocks for creating proactive agent teams: agents that are both human-responsive, and can act autonomously in response to real-world events like GitHub PRs, Slack messages, ticket updates, or incoming emails. You define the roles and functionality of your agent team, and Modastack builds and runs it for you.
 
-Under the hood, every agent is a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) session — which means the entire system runs on a flat-rate Claude Pro or Max plan with no per-token API costs. API key usage is also supported if you prefer.
-
-Unlike other agent harnesses that either only let you run a single siloed agent, or come with pre-defined agent layouts, Modastack lets you define any agent topology that best matches the problem you are solving. Here's some examples:
-
-- Want to build a multi-repo agentic engineering team with a director, project leads, and engineers?
-- How about a sales organization with a lead-router that watches your CRM, qualifies inbound leads, and dispatches research agents to prep briefs before your reps even see the notification?
-- Or a support team where a triage agent monitors Zendesk, routes tickets by domain, and spins up specialists that pull context from your docs and codebase?
-
-If you can describe the specialist roles and the events you want to monitor for, Modastack can build it and run it for you!
+Under the hood, every agent is a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) session — which means the entire system runs on a flat-rate Claude Pro or Max plan with no per-token API costs. API key usage is also supported.
 
 ## Installation
 
