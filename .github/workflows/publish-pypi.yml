@@ -76,7 +76,7 @@ jobs:
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
           cd "$DOGFOOD_DIR"
           modastack stop 2>/dev/null || true
-          modastack start eng-org
+          modastack start content-review
 
           LOG=".modastack/state/manager.log"
           POS=$(wc -c < "$LOG" 2>/dev/null || echo 0)
