@@ -101,14 +101,15 @@ def main():
         handlers=[logging.StreamHandler()],
     )
     project = _detect_project_root()
-    dot_moda = project / ".modastack"
-    if dot_moda.is_dir():
-        click.echo(f"Using .modastack at {dot_moda}")
-    else:
-        click.echo(
-            click.style("Warning: ", fg="yellow")
-            + f"No .modastack/ found in {project} — some commands may not work as expected."
-        )
+    if project:
+        dot_moda = project / ".modastack"
+        if dot_moda.is_dir():
+            click.echo(f"Using .modastack at {dot_moda}")
+        else:
+            click.echo(
+                click.style("Warning: ", fg="yellow")
+                + f"No .modastack/ found in {project} — some commands may not work as expected."
+            )
     if project:
         from modastack.sdk import set_project_root
         set_project_root(project)
