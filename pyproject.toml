@@ -1,6 +1,6 @@
 [project]
 name = "modastack"
-version = "0.9.1"
+version = "0.9.2"
 description = "AI engineering team: manager + engineer agents with Linear, GitHub, Slack"
 requires-python = ">=3.11"
 license = "MIT"
