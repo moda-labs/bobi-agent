@@ -196,8 +196,10 @@ pytest tests/                              # all tests (~5min)
 
 Integration tests drive real Claude Code sessions. Run before pushing.
 
-**Production bug = integration test gap.** Write a failing test before
-fixing the bug. No exceptions.
+**CI failure or production bug = integration test gap.** When a problem
+is found in CI or a deployed system, STOP and write an integration test
+that reproduces the failure BEFORE writing the fix. The test must fail
+first, then the fix makes it pass. No exceptions.
 
 ## Releasing
 
