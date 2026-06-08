@@ -14,16 +14,29 @@ If you can describe the specialist roles and the events you want to monitor for,
 
 ## Installation
 
-Modastack can be installed on your system via uv:
+### Prerequisites
+
+Install and authenticate [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — this is the reasoning engine that powers every agent:
 
 ```bash
-uv tool install modastack
+npm install -g @anthropic-ai/claude-code
+claude
 ```
 
-or simply paste this prompt into your coding assistant:
+Follow the prompts to log in with your Anthropic account (Pro, Max, or API key).
+
+### Install Modastack
+
+Once Claude Code is set up, paste this into your Claude Code session:
 
 ```plaintext
 Install modastack for me using https://raw.githubusercontent.com/moda-labs/modastack/main/scripts/install.sh
+```
+
+Or install manually:
+
+```bash
+uv tool install modastack
 ```
 
 See [scripts/install.sh](scripts/install.sh) for what the installer does.
