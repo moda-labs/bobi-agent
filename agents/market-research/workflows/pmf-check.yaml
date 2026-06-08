@@ -1,0 +1,65 @@
+name: pmf-check
+trigger: >
+  When an early product hypothesis needs pressure-testing before building
+  — "validate this idea", "is there a market for X", "should I build X".
+description: >
+  The four-function PMF investigation: validate the hypothesis is complete,
+  run signal / real-user access / demand tests / distribution, then issue a
+  verdict (HAS LEGS / VALIDATE-VIA-X / LIKELY NON-VIABLE) with the evidence.
+
+steps:
+  - name: intake
+    agent: pmf_navigator
+    prompt: |
+      Read the hypothesis in your task. Confirm it contains a target user,
+      a problem/JTBD, and a solution sketch. If any is missing, ask the
+      requester once and wait for the answer. Restate the hypothesis in
+      one paragraph. Search the research KB for prior signal on this space.
+    handoff:
+      required: [hypothesis_restated]
+      optional: [missing_input]
+    timeout: 1200
+
+  - name: signal
+    agent: pmf_navigator
+    prompt: |
+      Run Function 1 (signal scan) from your role prompt: pain reality,
+      workaround intensity, whitespace, with ≥3 verbatim user voices and
+      ≥3 named substitutes. Follow the web-research tool guide; cite
+      everything.
+    handoff:
+      required: [signal_rating]
+    timeout: 2400
+
+  - name: access_and_tests
+    agent: pmf_navigator
+    prompt: |
+      Run Function 2 (real-user access plan — 5–10 concrete ways to reach
+      10–20 users in 2 weeks, plus a recommended interview plan) and
+      Function 3 (2–3 demand tests, each with pre-committed pass/fail
+      thresholds).
+    handoff:
+      required: [access_plan, tests_designed]
+    timeout: 1800
+
+  - name: distribution
+    agent: pmf_navigator
+    prompt: |
+      Run Function 4 (distribution / channel viability): the 2–3 most
+      plausible channels, each pressure-tested for ICP volume, test cost,
+      and CAC-vs-LTV, plus a founder-channel-fit read.
+    handoff:
+      required: [channel_assessment]
+    timeout: 1800
+
+  - name: verdict
+    agent: pmf_navigator
+    prompt: |
+      Issue exactly one verdict (HAS LEGS / VALIDATE-VIA-X / LIKELY
+      NON-VIABLE) with a confidence level and reasoning. Write the full
+      report to research/pmf/<slug>-<date>.md, index it (pmf:: entry), and
+      deliver to the requester: restated hypothesis, verdict, and the one
+      decisive next experiment, with a path to the report.
+    handoff:
+      required: [verdict, delivered]
+    timeout: 1200

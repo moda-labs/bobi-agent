@@ -1,0 +1,59 @@
+name: weekly-landscape
+trigger: >
+  On the weekly cadence (the weekly-landscape monitor) or on request —
+  "run the landscape", "weekly content landscape", "update the landscape".
+description: >
+  The recurring content-landscape scan: orient on the current map, run the
+  fixed search battery across the coverage areas, map findings onto stable
+  themes with momentum and whitespace, update the map and write a dated
+  snapshot, then post a digest to Slack.
+
+steps:
+  - name: orient
+    agent: landscape_scanner
+    prompt: |
+      Read the current landscape:: map and the last 2–3 snapshot:: entries
+      from the research KB, and skim the context:: entries for the current
+      wedge. If no map exists yet, this is the first run — proceed to
+      establish the founding themes.
+    handoff:
+      required: [oriented]
+      optional: [first_run]
+    timeout: 600
+
+  - name: scan
+    agent: landscape_scanner
+    prompt: |
+      Run the fixed search battery across the six coverage areas per the
+      web-research tool guide, window of the last 7 days. Triage from
+      results, read full text only for what matters, cluster across
+      sources, and separate news from discourse.
+    handoff:
+      required: [scan_complete]
+      optional: [candidate_themes]
+    timeout: 2400
+
+  - name: synthesize
+    agent: landscape_scanner
+    prompt: |
+      Map findings onto the standing themes; tag each theme's momentum
+      (rising/steady/fading/saturated); name the whitespace. Create or
+      retire a theme only under the rules in your role prompt, logging any
+      structural change. Update the landscape:: map in place, mirror it to
+      research/content-landscape.md, write a dated snapshot:: entry, and
+      copy the file to research/landscape-snapshots/landscape-<date>.md.
+    handoff:
+      required: [landscape_updated]
+      optional: [changelog_note]
+    timeout: 1800
+
+  - name: brief
+    agent: landscape_scanner
+    prompt: |
+      Write the short prose readout — the 2–3 shifts that matter most for
+      the org's content and positioning this week, plus one whitespace
+      opening. Post it to the configured Slack channel (or the requester's
+      thread for a manual run). End on what changed, not a summary.
+    handoff:
+      required: [posted]
+    timeout: 600

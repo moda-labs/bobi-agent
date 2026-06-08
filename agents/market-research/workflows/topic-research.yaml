@@ -1,0 +1,54 @@
+name: topic-research
+trigger: >
+  When a deep, cited research brief is needed on a single topic —
+  "look into X", "what's the landscape on X", a research question.
+description: >
+  Full deep-research pipeline on one topic: check the corpus, run the
+  signal/voices/companies scan, synthesize use cases and a 3/6/12-month
+  forecast into a cited brief, index it, and deliver to the requester.
+
+steps:
+  - name: scan
+    agent: topic_researcher
+    prompt: |
+      Research the topic in your task. First search the research KB for
+      prior work. Then run the signal scan, key-voices, and key-companies
+      investigations from your role prompt, following the web-research
+      tool guide (anchored search battery, last 3–6 months, cite
+      everything). Do not write the final brief yet — gather and cluster.
+    handoff:
+      required: [findings_summary]
+      optional: [prior_brief, notes]
+    timeout: 2400
+
+  - name: synthesize
+    agent: topic_researcher
+    prompt: |
+      Synthesize your findings into the full brief: use cases and wedges,
+      a 3/6/12-month forecast with drivers, and a 2–3 point actionable
+      read (map, not plan). Write it to research/briefs/<slug>-<date>.md
+      in the structure from your role prompt, with a Sources section.
+    handoff:
+      required: [report_path]
+      optional: [recommendations]
+    timeout: 1800
+
+  - name: persist
+    agent: topic_researcher
+    prompt: |
+      Index the brief into the research KB (a topic:: summary entry plus
+      notable voice:: and company:: entries), per tools/research-corpus.md.
+    handoff:
+      required: [kb_indexed]
+    timeout: 600
+
+  - name: deliver
+    agent: topic_researcher
+    prompt: |
+      Deliver to the requester using the context in your task: post the
+      TL;DR and the single most useful finding to their Slack thread with
+      a path to the full brief. If no requester surface was given, message
+      the manager with the brief path and TL;DR.
+    handoff:
+      required: [delivered]
+    timeout: 600

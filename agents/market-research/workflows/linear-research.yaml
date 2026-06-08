@@ -1,0 +1,50 @@
+name: linear-research
+trigger: >
+  When a Linear ticket assigned to this agent (or labeled `research`) asks
+  a market/landscape research question.
+description: >
+  Research orchestrated from a Linear ticket: read the ticket into a brief,
+  run the investigation, index it, then comment the results back on the
+  issue and move its state.
+
+steps:
+  - name: parse
+    agent: topic_researcher
+    prompt: |
+      Read the Linear issue referenced in your task
+      (`modastack linear issue <id>`). Extract the research question into a
+      clear brief, and move the issue to In Progress. Search the research
+      KB for prior work on it.
+    handoff:
+      required: [research_brief]
+      optional: [prior_brief]
+    timeout: 900
+
+  - name: research
+    agent: topic_researcher
+    prompt: |
+      Run the full investigation from your role prompt (signal, voices,
+      companies, use cases, 3/6/12-month forecast, actionable read) and
+      write the cited brief to research/briefs/<slug>-<date>.md.
+    handoff:
+      required: [report_path]
+    timeout: 2400
+
+  - name: persist
+    agent: topic_researcher
+    prompt: |
+      Index the brief into the research KB (topic:: plus notable voice::
+      and company:: entries), per tools/research-corpus.md.
+    handoff:
+      required: [kb_indexed]
+    timeout: 600
+
+  - name: report_back
+    agent: topic_researcher
+    prompt: |
+      Comment the TL;DR and key findings on the Linear issue with a link
+      or path to the full brief (`modastack linear comment <id> ...`), and
+      move the issue to In Review (or Done if the ask is fully answered).
+    handoff:
+      required: [commented]
+    timeout: 600
