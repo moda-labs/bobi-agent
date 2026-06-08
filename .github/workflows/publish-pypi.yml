@@ -59,7 +59,7 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
           VERSION="${{ steps.version.outputs.version }}"
-          uv tool install "modastack==$VERSION" --force
+          uv tool install "modastack==$VERSION" --force --refresh
           modastack --version
 
       - name: Clone or update dogfood repo
