@@ -74,6 +74,8 @@ jobs:
       - name: Start modastack
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+          # Stop any ancestor manager (the parent ~/dev has a running instance)
+          cd "$(dirname "$DOGFOOD_DIR")" && modastack stop 2>/dev/null || true
           cd "$DOGFOOD_DIR"
           modastack stop 2>/dev/null || true
           modastack start content-review
