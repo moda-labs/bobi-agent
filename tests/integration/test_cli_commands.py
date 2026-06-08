@@ -6,6 +6,9 @@ parse arguments, read config, and produce sensible output without crashing.
 """
 
 import json
+import os
+import subprocess
+import sys
 import textwrap
 
 import pytest
@@ -175,3 +178,43 @@ class TestSlackReply:
         result = cli_run("slack-reply", "hello")
         assert result.returncode != 0
         assert "workspace" in result.stderr.lower() or "required" in result.stderr.lower()
+
+
+class TestOutsideProject:
+    """CLI commands run from a directory with no .modastack/."""
+
+    def _run_outside(self, *args, tmp_path_factory=None, tmp_dir=None):
+        cwd = str(tmp_dir)
+        return subprocess.run(
+            [sys.executable, "-m", "modastack.cli", *args],
+            capture_output=True, text=True, timeout=10,
+            cwd=cwd, env={**os.environ},
+        )
+
+    def test_status_outside_project(self, tmp_path):
+        result = subprocess.run(
+            [sys.executable, "-m", "modastack.cli", "status"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(tmp_path), env={**os.environ},
+        )
+        assert result.returncode == 0
+        combined = result.stdout + result.stderr
+        assert "no .modastack" in combined.lower() or "warning" in combined.lower()
+
+    def test_agents_list_outside_project(self, tmp_path):
+        result = subprocess.run(
+            [sys.executable, "-m", "modastack.cli", "agents", "list"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(tmp_path), env={**os.environ},
+        )
+        combined = result.stdout + result.stderr
+        assert "no .modastack" in combined.lower() or "warning" in combined.lower()
+
+    def test_doctor_outside_project(self, tmp_path):
+        result = subprocess.run(
+            [sys.executable, "-m", "modastack.cli", "doctor"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(tmp_path), env={**os.environ},
+        )
+        combined = result.stdout + result.stderr
+        assert "no .modastack" in combined.lower() or "warning" in combined.lower()
