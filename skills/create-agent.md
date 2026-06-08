@@ -1,7 +1,7 @@
-# Create Agent Pack
+# Create Agent Packages
 
-Guide the user through designing and generating a modastack agent pack.
-An agent pack is a portable bundle — role prompts, workflows, monitors,
+Guide the user through designing and generating a modastack agent package.
+An agent package is a portable bundle — role prompts, workflows, monitors,
 and tool guides — that defines a multi-agent system. The output is a
 runnable `agents/<pack-name>/` directory.
 
@@ -9,7 +9,7 @@ runnable `agents/<pack-name>/` directory.
 
 ```
 agents/<pack-name>/
-├── agent.md              # Human-readable pack description
+├── agent.md              # Human-readable packagedescription
 ├── defaults.yaml         # Entry point config (starting role, event sources)
 ├── roles/                # System prompts for each agent role
 │   └── <role>/
@@ -50,7 +50,7 @@ Write files in this order, explaining each as you go:
 1. `defaults.yaml`
 2. `agent.md`
 3. Role prompts (`roles/<name>/ROLE.md`)
-4. Tools (`tools/<service>.md`) — if the pack uses external services
+4. Tools (`tools/<service>.md`) — if the packageuses external services
 5. Workflows (`workflows/*.yaml`)
 6. Monitors (`monitors/defaults.yaml`) — if applicable
 
@@ -70,12 +70,12 @@ event_sources:
   - slack
 ```
 
-Only include event sources the pack actually needs.
+Only include event sources the packageactually needs.
 
 ### agent.md
 
 ```markdown
-# Pack Name
+# packageName
 
 One-paragraph description of what this agent system does.
 
@@ -243,7 +243,7 @@ evaluates the description and posts an event only if something is found.
 
 ## Important
 
-- Generate a complete, working pack — no placeholders or TODOs.
+- Generate a complete, working package— no placeholders or TODOs.
 - Role prompts should reference `modastack` CLI commands the agent will use.
 - Don't copy engineering-specific content into non-engineering packs.
 - Write files to `agents/<pack-name>/` in the current working directory.
