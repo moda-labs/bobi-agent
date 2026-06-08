@@ -11,16 +11,15 @@ from modastack.cli import main
 
 
 def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
-    """Set up machine config with a Slack bot token."""
+    """Set up project config with a Slack bot token."""
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir(parents=True)
     (config_dir / "agent.yaml").write_text("role: manager\n")
-    machine_config = tmp_path / "machine_config.yaml"
-    machine_config.write_text(
+    config_yaml = config_dir / "config.yaml"
+    config_yaml.write_text(
         f"slack:\n  bot_token: '{slack_bot_token}'\n"
         if slack_bot_token else "{}"
     )
-    monkeypatch.setattr("modastack.config._machine_config_path", lambda: machine_config)
     monkeypatch.chdir(tmp_path)
 
 

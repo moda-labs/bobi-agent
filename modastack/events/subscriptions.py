@@ -64,9 +64,9 @@ def _resolve_source(source: str, project_path: Path) -> list[str]:
     if source == "github":
         return _detect_github(project_path)
     elif source == "slack":
-        return _detect_slack()
+        return _detect_slack(project_path)
     elif source == "linear":
-        return _detect_linear()
+        return _detect_linear(project_path)
     else:
         return [source]
 
@@ -103,10 +103,10 @@ def _parse_github_url(url: str) -> str:
     return ""
 
 
-def _detect_slack() -> list[str]:
+def _detect_slack(project_path: Path) -> list[str]:
     """Detect slack:WORKSPACE_ID from the bot token via auth.test."""
     from modastack.config import Config
-    cfg = Config.load()
+    cfg = Config.load(project_path)
     if not cfg.slack_bot_token:
         return []
     try:
@@ -124,10 +124,10 @@ def _detect_slack() -> list[str]:
     return []
 
 
-def _detect_linear() -> list[str]:
+def _detect_linear(project_path: Path) -> list[str]:
     """Detect linear:TEAM from the Linear API."""
     from modastack.config import Config
-    cfg = Config.load()
+    cfg = Config.load(project_path)
     if not cfg.linear_api_key:
         return []
     try:

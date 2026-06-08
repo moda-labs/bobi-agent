@@ -55,10 +55,9 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     # Monitors from agent pack
     try:
         from modastack.monitors.registry import MonitorRegistry
-        from modastack.prompts import AGENTS_CACHE_DIR
         if not agent_name:
-            for search_dir in [project_path / "agents", AGENTS_CACHE_DIR]:
-                if search_dir and search_dir.is_dir():
+            for search_dir in [project_path / "agents", project_path / ".modastack" / "agents"]:
+                if search_dir.is_dir():
                     for pack in search_dir.iterdir():
                         if pack.is_dir() and (pack / "monitors").is_dir():
                             agent_name = pack.name
@@ -75,6 +74,38 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     lines.append(f"  {'logs':<{W}}{log_file}")
 
     click.echo("\n".join(lines))
+
+def _migrate_global_config(project_path: Path) -> None:
+    """One-time migration: copy ~/.modastack/ config and agents into the project.
+
+    Runs silently on start/restart. Only copies files that don't already
+    exist in the project — never overwrites.
+    """
+    import shutil
+
+    global_dir = Path.home() / ".modastack"
+    if not global_dir.is_dir():
+        return
+
+    config_dir = project_path / ".modastack"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    global_config = global_dir / "config.yaml"
+    local_config = config_dir / "config.yaml"
+    if global_config.exists() and not local_config.exists():
+        shutil.copy2(global_config, local_config)
+        click.echo(f"Migrated config from {global_config} → {local_config}")
+
+    global_agents = global_dir / "agents"
+    local_agents = config_dir / "agents"
+    if global_agents.is_dir():
+        for pack in global_agents.iterdir():
+            if pack.is_dir() and (pack / "defaults.yaml").exists():
+                dest = local_agents / pack.name
+                if not dest.exists():
+                    shutil.copytree(pack, dest)
+                    click.echo(f"Migrated agent pack '{pack.name}' → {dest}")
+
 
 def _detect_project_root(cwd: Path | None = None) -> Path:
     """Return the project root — the given directory or cwd."""
@@ -151,7 +182,6 @@ def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
     Resolution:
       1. <project>/agents/{name}
       2. <project>/.modastack/agents/{name}
-      3. ~/.modastack/agents/{name}  (user cache)
     """
     visible = project_path / "agents" / name
     if visible.is_dir():
@@ -159,24 +189,15 @@ def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
     hidden = project_path / ".modastack" / "agents" / name
     if hidden.is_dir():
         return hidden
-    from modastack.prompts import AGENTS_CACHE_DIR
-    cached = AGENTS_CACHE_DIR / name
-    if cached.is_dir():
-        return cached
     return None
 
 
 def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
     """List available agent packs with their source."""
     packs: dict[str, str] = {}
-    from modastack.prompts import AGENTS_CACHE_DIR
-    if AGENTS_CACHE_DIR.is_dir():
-        for d in sorted(AGENTS_CACHE_DIR.iterdir()):
-            if d.is_dir() and (d / "defaults.yaml").exists():
-                packs[d.name] = "cached"
     for agents_dir, label in [
+        (project_path / ".modastack" / "agents", "cached"),
         (project_path / "agents", "local"),
-        (project_path / ".modastack" / "agents", "local"),
     ]:
         if agents_dir.is_dir():
             for d in sorted(agents_dir.iterdir()):
@@ -294,6 +315,8 @@ def start(agent_pack, foreground, fresh, subscribe):
     """
     project_path = _detect_project_root()
 
+    _migrate_global_config(project_path)
+
     agent_config = _load_agent_config(project_path) or {}
     if not agent_pack:
         agent_pack = agent_config.get("agent")
@@ -312,7 +335,7 @@ def start(agent_pack, foreground, fresh, subscribe):
         from modastack.registry import fetch
         try:
             click.echo(f"Agent '{agent_pack}' not found locally, fetching from remote...")
-            fetch(agent_pack)
+            fetch(project_path, agent_pack)
             resolved = _resolve_agent_pack(agent_pack, project_path)
         except Exception as e:
             click.echo(f"Failed to fetch '{agent_pack}': {e}", err=True)
@@ -330,7 +353,7 @@ def start(agent_pack, foreground, fresh, subscribe):
         def _check_update():
             try:
                 from modastack.registry import check_update
-                local_v, remote_v = check_update(agent_pack)
+                local_v, remote_v = check_update(project_path, agent_pack)
                 if local_v and remote_v and remote_v != local_v:
                     click.echo(
                         f"  update        {agent_pack} v{local_v} installed, "
@@ -655,7 +678,7 @@ def slack_reply(text, workspace, channel, thread):
         cfg = Config.load(project_path)
         token = cfg.slack_bot_token
     if not token:
-        click.echo(f"No bot token configured (set slack.bot_token in ~/.modastack/config.yaml)", err=True)
+        click.echo("No bot token configured (set slack.bot_token in .modastack/config.yaml)", err=True)
         sys.exit(1)
 
     # The manager invokes this command through a shell, where newlines in the
@@ -1428,13 +1451,15 @@ def monitor_list():
     project_path = _detect_project_root()
     agent_config = _load_agent_config(project_path)
     agent_name = (agent_config or {}).get("agent")
-    if not agent_name:
-        from modastack.prompts import AGENTS_CACHE_DIR
-        if AGENTS_CACHE_DIR.is_dir():
-            for pack in AGENTS_CACHE_DIR.iterdir():
-                if pack.is_dir() and (pack / "monitors").is_dir():
-                    agent_name = pack.name
-                    break
+    if not agent_name and project_path:
+        for search_dir in [project_path / "agents", project_path / ".modastack" / "agents"]:
+            if search_dir.is_dir():
+                for pack in search_dir.iterdir():
+                    if pack.is_dir() and (pack / "monitors").is_dir():
+                        agent_name = pack.name
+                        break
+            if agent_name:
+                break
     registry = MonitorRegistry.load(agent_name=agent_name)
     monitors = sorted(registry.all_monitors(), key=lambda m: (m.name, m.project))
     if not monitors:
@@ -1815,15 +1840,20 @@ def agents_update(name):
     """
     from modastack.registry import fetch, list_cached, check_update
 
+    project_path = _detect_project_root()
+    if not project_path:
+        click.echo("No project detected. Run from a project directory.", err=True)
+        raise SystemExit(1)
+
     if name:
         try:
-            local_v, remote_v = check_update(name)
+            local_v, remote_v = check_update(project_path, name)
             if local_v and remote_v and remote_v == local_v:
                 click.echo(f"{name} v{local_v} is already up to date.")
                 return
-            path = fetch(name)
+            path = fetch(project_path, name)
             from modastack.registry import _read_local_version
-            new_v = _read_local_version(name) or "unknown"
+            new_v = _read_local_version(project_path, name) or "unknown"
             if local_v:
                 click.echo(f"Updated {name}: v{local_v} → v{new_v}")
             else:
@@ -1832,17 +1862,17 @@ def agents_update(name):
             click.echo(f"Failed: {e}", err=True)
             raise SystemExit(1)
     else:
-        cached = list_cached()
+        cached = list_cached(project_path)
         if not cached:
             click.echo("No cached agent packs to update.")
             return
         for pack in cached:
             try:
-                local_v, remote_v = check_update(pack["name"])
+                local_v, remote_v = check_update(project_path, pack["name"])
                 if local_v and remote_v and remote_v == local_v:
                     click.echo(f"  {pack['name']} v{local_v} — up to date")
                 elif remote_v:
-                    fetch(pack["name"])
+                    fetch(project_path, pack["name"])
                     click.echo(f"  {pack['name']} v{local_v} → v{remote_v}")
                 else:
                     click.echo(f"  {pack['name']} v{local_v} — could not check remote")
@@ -1861,10 +1891,15 @@ def agents_add_registry(repo):
     Usage:
         modastack agents add-registry myorg/my-agents
     """
-    from modastack.config import _machine_config_path, _load_yaml
+    from modastack.config import _project_config_path, _load_yaml
     import yaml as _yaml
 
-    config_path = _machine_config_path()
+    project_path = _detect_project_root()
+    if not project_path:
+        click.echo("No project detected. Run from a project directory.", err=True)
+        raise SystemExit(1)
+
+    config_path = _project_config_path(project_path)
     raw = _load_yaml(config_path) if config_path.exists() else {}
     registries = raw.get("registries", [])
 
@@ -1887,10 +1922,15 @@ def agents_remove_registry(repo):
     Usage:
         modastack agents remove-registry myorg/my-agents
     """
-    from modastack.config import _machine_config_path, _load_yaml
+    from modastack.config import _project_config_path, _load_yaml
     import yaml as _yaml
 
-    config_path = _machine_config_path()
+    project_path = _detect_project_root()
+    if not project_path:
+        click.echo("No project detected. Run from a project directory.", err=True)
+        raise SystemExit(1)
+
+    config_path = _project_config_path(project_path)
     raw = _load_yaml(config_path) if config_path.exists() else {}
     registries = raw.get("registries", [])
 
@@ -1916,12 +1956,14 @@ def agents_browse():
     """
     from modastack.registry import list_remote, list_cached, DEFAULT_REPO
 
-    remote = list_remote()
+    project_path = _detect_project_root()
+    remote = list_remote(project_path)
     if not remote:
         click.echo("Could not fetch remote registry.", err=True)
         raise SystemExit(1)
 
-    cached = {p["name"]: p["version"] for p in list_cached()}
+    cached_packs = list_cached(project_path) if project_path else []
+    cached = {p["name"]: p["version"] for p in cached_packs}
 
     click.echo("Available agent packs:\n")
     for pack in remote:

@@ -76,7 +76,7 @@ webhook ingestion for GitHub, Linear, Slack, and any custom source.
 ```
 modastack/                        # Framework (Python package)
 ├── cli.py                        # Click CLI entrypoint
-├── config.py                     # Machine-wide config (~/.modastack/config.yaml)
+├── config.py                     # Per-project config (.modastack/config.yaml)
 ├── session.py                    # Claude Code SDK session wrapper
 ├── subagent.py                   # Agent executor (blocking + detached)
 ├── sdk.py                        # Session registry, activity logging
@@ -145,9 +145,8 @@ Packs are the distribution unit — install one and get a working agent
 for a domain.
 
 **Resolution order:**
-1. `<project>/agents/<name>/` — project-level
-2. `<project>/.modastack/agents/<name>/` — project override
-3. `~/.modastack/agents/<name>/` — user cache (from remote registry)
+1. `<project>/agents/<name>/` — project-level (checked in)
+2. `<project>/.modastack/agents/<name>/` — local agents (overrides + cached)
 
 **Role prompts** resolve from:
 1. `<project>/.modastack/roles/<role>/ROLE.md` — project override
@@ -183,9 +182,11 @@ the variable context for downstream steps.
 
 ### Config
 
-Machine-wide credentials in `~/.modastack/config.yaml` (not checked in).
-Per-project overrides in `.modastack/` for roles, workflows, monitors,
-and tools.
+All config is per-project in `.modastack/config.yaml` (not checked in).
+No global `~/.modastack/` directory — each project is fully self-contained.
+Credentials, event server URLs, and registries live alongside the project
+they belong to. Per-project overrides in `.modastack/` for roles, workflows,
+monitors, and tools.
 
 ## Tests
 

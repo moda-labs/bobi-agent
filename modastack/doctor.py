@@ -70,13 +70,19 @@ def _check_project_config() -> CheckResult:
 
 
 def _check_local_config() -> CheckResult:
-    from modastack.config import _machine_config_path
-    machine = _machine_config_path()
-    if machine.exists():
-        return CheckResult("Machine config", ok=True, detail=str(machine))
-    return CheckResult("Machine config", ok=False,
-                       detail="missing ~/.modastack/config.yaml",
-                       hint="Create ~/.modastack/config.yaml with event_server, slack, and linear credentials")
+    from modastack.config import _project_config_path
+    from modastack.sdk import get_project_root
+    root = get_project_root()
+    if not root:
+        return CheckResult("Project config", ok=False,
+                           detail="no project detected",
+                           hint="Run from a project directory with .modastack/")
+    config_path = _project_config_path(root)
+    if config_path.exists():
+        return CheckResult("Project config", ok=True, detail=str(config_path))
+    return CheckResult("Project config", ok=False,
+                       detail=f"missing {config_path}",
+                       hint="Create .modastack/config.yaml with event_server, slack, and linear credentials")
 
 
 def _check_workflows() -> CheckResult:

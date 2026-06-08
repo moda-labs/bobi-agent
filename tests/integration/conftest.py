@@ -1,8 +1,8 @@
 """Integration test fixtures — fully isolated modastack installation.
 
 Every integration test runs against a temporary modastack installation
-in tmp_path. Nothing touches the real repo's .modastack/ directory,
-the user's ~/.config/modastack, or any production state.
+in tmp_path. Nothing touches the real repo's .modastack/ directory
+or any production state.
 """
 
 import os
@@ -25,7 +25,6 @@ class ModastackEnv:
     state_dir: Path
     sessions_dir: Path
     workflows_dir: Path
-    machine_config: Path
 
 
 @pytest.fixture(scope="session")
@@ -53,6 +52,8 @@ def modastack_env(tmp_path_factory):
         "role": "manager",
     }))
 
+    (config_dir / "config.yaml").write_text("{}")
+
     # Create a minimal software_team agent pack in the project
     pack_dir = config_dir / "agents" / "software_team"
     for role_name in ["manager", "engineer", "project_lead"]:
@@ -69,13 +70,6 @@ def modastack_env(tmp_path_factory):
     (pack_dir / "roles" / "project_lead" / "ROLE.md").write_text(
         "# Project Lead\n\nYou are a test project lead agent.\n"
     )
-
-    creds_dir = base / "config" / "modastack"
-    creds_dir.mkdir(parents=True)
-    (creds_dir / "credentials.yaml").write_text("{}")
-
-    machine_config = base / "machine_config.yaml"
-    machine_config.write_text("{}")
 
     subprocess.run(
         ["git", "init"], cwd=str(project_path),
@@ -114,19 +108,13 @@ def modastack_env(tmp_path_factory):
     from modastack.sdk import set_project_root
     set_project_root(project_path)
 
-    from modastack import config as _cfg
-    _orig_creds = _cfg._credentials_path
-    _cfg._credentials_path = lambda: creds_dir / "credentials.yaml"
-
     yield ModastackEnv(
         project_path=project_path,
         state_dir=state_dir,
         sessions_dir=sessions_dir,
         workflows_dir=workflows_dir,
-        machine_config=machine_config,
     )
 
-    _cfg._credentials_path = _orig_creds
     set_project_root(None)
 
 
@@ -139,13 +127,11 @@ requires_claude = pytest.mark.skipif(
 @pytest.fixture
 def cli_run(modastack_env):
     """Run modastack CLI commands against the isolated install."""
-    env = {**os.environ, "MODASTACK_CONFIG": str(modastack_env.machine_config)}
     def _run(*args, timeout=10):
         return subprocess.run(
             [sys.executable, "-m", "modastack.cli", *args],
             capture_output=True, text=True, timeout=timeout,
             cwd=str(modastack_env.project_path),
-            env=env,
         )
     return _run
 

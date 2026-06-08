@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from . import BASE_PATH, AGENTS_CACHE_DIR, BUILTIN_AGENTS_DIR, PROMPTS_DIR
+from . import BASE_PATH, BUILTIN_AGENTS_DIR, PROMPTS_DIR
 
 log = logging.getLogger(__name__)
 
@@ -70,9 +70,8 @@ def _resolve_agent_dir(agent_name: str | None, project_path: Path | None = None)
     """Find the agent pack directory.
 
     Resolution order:
-      1. <project>/agents/{name}             — project-level (visible)
-      2. <project>/.modastack/agents/{name}  — project override (hidden)
-      3. ~/.modastack/agents/{name}          — user cache (fetched from remote)
+      1. <project>/agents/{name}             — project-level (checked in)
+      2. <project>/.modastack/agents/{name}  — local agents (overrides + cached)
     """
     if not agent_name:
         return None
@@ -84,8 +83,7 @@ def _resolve_agent_dir(agent_name: str | None, project_path: Path | None = None)
         hidden = project / ".modastack" / "agents" / agent_name
         if hidden.is_dir():
             return hidden
-    d = AGENTS_CACHE_DIR / agent_name
-    return d if d.is_dir() else None
+    return None
 
 
 def resolve_agent_prompt(
@@ -253,18 +251,6 @@ def discover_roles(
                     "description": _extract_description(path),
                     "path": str(path),
                 }
-    elif AGENTS_CACHE_DIR.is_dir():
-        for pack in sorted(AGENTS_CACHE_DIR.iterdir()):
-            if not pack.is_dir():
-                continue
-            for name, path in _discover_roles_in_dir(pack / "roles"):
-                if name not in roles:
-                    roles[name] = {
-                        "name": name,
-                        "source": pack.name,
-                        "description": _extract_description(path),
-                        "path": str(path),
-                    }
 
     if project_path:
         project = Path(project_path)
@@ -324,10 +310,6 @@ def validate_role(
                 for pack in agents_dir.iterdir():
                     if pack.is_dir() and _resolve_role_path(role_name, pack / "roles"):
                         return True
-    if not agent_name and AGENTS_CACHE_DIR.is_dir():
-        for pack in AGENTS_CACHE_DIR.iterdir():
-            if pack.is_dir() and _resolve_role_path(role_name, pack / "roles"):
-                return True
     if _resolve_role_path(role_name, BUILTIN_AGENTS_DIR):
         return True
     return False

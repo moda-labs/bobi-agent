@@ -1,15 +1,15 @@
-"""Tests for machine config loading from ~/.modastack/config.yaml."""
+"""Tests for per-project config loading from .modastack/config.yaml."""
 
 from pathlib import Path
 from textwrap import dedent
-from unittest.mock import patch
 
 from modastack.config import Config, load_deployment_state, save_deployment_state
 
 
-def test_loads_machine_config(tmp_path):
-    machine_yaml = tmp_path / "config.yaml"
-    machine_yaml.write_text(dedent("""
+def test_loads_project_config(tmp_path):
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(dedent("""
         event_server:
           url: https://events.example.com
         slack:
@@ -18,26 +18,23 @@ def test_loads_machine_config(tmp_path):
           api_key: lin_api_test
     """))
 
-    with patch("modastack.config._machine_config_path", return_value=machine_yaml):
-        cfg = Config.load()
+    cfg = Config.load(tmp_path)
 
     assert cfg.event_server_url == "https://events.example.com"
     assert cfg.slack_bot_token == "xoxb-test"
     assert cfg.linear_api_key == "lin_api_test"
 
 
-def test_defaults_when_no_config():
-    with patch("modastack.config._machine_config_path", return_value=Path("/nonexistent")):
-        cfg = Config.load()
+def test_defaults_when_no_config(tmp_path):
+    cfg = Config.load(tmp_path)
 
     assert cfg.event_server_url == ""
     assert cfg.slack_bot_token == ""
     assert cfg.linear_api_key == ""
 
 
-def test_from_file_alias():
-    with patch("modastack.config._machine_config_path", return_value=Path("/nonexistent")):
-        cfg = Config.from_file(Path("/tmp"))
+def test_from_file_alias(tmp_path):
+    cfg = Config.from_file(tmp_path)
     assert cfg.event_server_url == ""
 
 
