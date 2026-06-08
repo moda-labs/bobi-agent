@@ -30,7 +30,7 @@ Follow the prompts to log in with your Anthropic account (Pro, Max, or API key).
 Once Claude Code is set up, paste this into your Claude Code session:
 
 ```plaintext
-Install modastack for me using https://raw.githubusercontent.com/moda-labs/modastack/main/scripts/install.sh
+Install modastack using https://raw.githubusercontent.com/moda-labs/modastack/main/scripts/install.sh
 ```
 
 Or install manually:
