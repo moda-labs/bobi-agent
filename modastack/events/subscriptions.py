@@ -12,11 +12,11 @@ log = logging.getLogger(__name__)
 
 
 def discover_subscriptions(project_path: Path, agent_name: str | None = None) -> list[str]:
-    """Build subscription keys by auto-detecting event event_sources.
+    """Build subscription keys by auto-detecting event sources.
 
     Resolution order:
-    1. .modastack/agent.yaml subscribe list (explicit override)
-    2. Agent pack defaults.yaml event_sources (auto-detected)
+    1. agent.yaml subscribe list (explicit override)
+    2. agent.yaml services with events: true (native services auto-detected)
     3. Fallback to project directory name
     """
     agent_yaml = project_path / ".modastack" / "agent.yaml"
@@ -29,44 +29,28 @@ def discover_subscriptions(project_path: Path, agent_name: str | None = None) ->
         except Exception:
             pass
 
-    event_sources = _load_event_sources(agent_name, project_path)
-    if event_sources:
+    from modastack.config import Config
+    cfg = Config.load(project_path, agent_name=agent_name)
+    if cfg.event_services:
         subs = []
-        for source in event_sources:
-            keys = _resolve_source(source, project_path)
-            subs.extend(keys)
+        for svc in cfg.event_services:
+            if svc.name in cfg.native_services:
+                keys = _resolve_source(svc.name, project_path, cfg)
+                subs.extend(keys)
         if subs:
             return subs
 
     return [project_path.name]
 
 
-def _load_event_sources(agent_name: str | None, project_path: Path | None = None) -> list[str]:
-    """Load the event_sources list from an agent pack's defaults.yaml."""
-    if not agent_name:
-        return []
-    from modastack.prompts.resolver import _resolve_agent_dir
-    agent_dir = _resolve_agent_dir(agent_name, project_path)
-    if not agent_dir:
-        return []
-    defaults = agent_dir / "defaults.yaml"
-    if not defaults.exists():
-        return []
-    try:
-        raw = yaml.safe_load(defaults.read_text()) or {}
-        return raw.get("event_sources", [])
-    except Exception:
-        return []
-
-
-def _resolve_source(source: str, project_path: Path) -> list[str]:
+def _resolve_source(source: str, project_path: Path, cfg=None) -> list[str]:
     """Resolve a source name to concrete subscription keys."""
     if source == "github":
         return _detect_github(project_path)
     elif source == "slack":
-        return _detect_slack()
+        return _detect_slack(project_path, cfg)
     elif source == "linear":
-        return _detect_linear()
+        return _detect_linear(project_path, cfg)
     else:
         return [source]
 
@@ -103,10 +87,11 @@ def _parse_github_url(url: str) -> str:
     return ""
 
 
-def _detect_slack() -> list[str]:
+def _detect_slack(project_path: Path, cfg=None) -> list[str]:
     """Detect slack:WORKSPACE_ID from the bot token via auth.test."""
-    from modastack.config import Config
-    cfg = Config.load()
+    if cfg is None:
+        from modastack.config import Config
+        cfg = Config.load(project_path)
     if not cfg.slack_bot_token:
         return []
     try:
@@ -124,10 +109,11 @@ def _detect_slack() -> list[str]:
     return []
 
 
-def _detect_linear() -> list[str]:
+def _detect_linear(project_path: Path, cfg=None) -> list[str]:
     """Detect linear:TEAM from the Linear API."""
-    from modastack.config import Config
-    cfg = Config.load()
+    if cfg is None:
+        from modastack.config import Config
+        cfg = Config.load(project_path)
     if not cfg.linear_api_key:
         return []
     try:

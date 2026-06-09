@@ -436,6 +436,7 @@ def spawn_adhoc(
     requested_by: dict | None = None,
     persistent: bool = False,
     role: str = "engineer",
+    mcp_servers: dict | None = None,
 ) -> AgentResult:
     """Spawn an engineer agent with a freeform task prompt.
 
@@ -481,7 +482,11 @@ def spawn_adhoc(
             "preset": "claude_code",
             "append": "\n\n".join(append_parts),
         },
-        extra_options={"skills": "all", "max_turns": 200},
+        extra_options={
+            "skills": "all",
+            "max_turns": 200,
+            **({"mcp_servers": mcp_servers} if mcp_servers else {}),
+        },
         role=role,
     )
 

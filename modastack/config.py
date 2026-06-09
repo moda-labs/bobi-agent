@@ -1,11 +1,17 @@
-"""Machine-wide configuration from ~/.modastack/config.yaml.
+"""Per-project configuration from agent.yaml.
 
-Service credentials and connection URLs shared across all projects.
-Not checked in — contains secrets.
+All config is scoped to a project directory — no global ~/.modastack/.
+Service credentials, event server URLs, and registry lists live alongside
+the project they belong to.
+
+agent.yaml is the single config file for an agent pack. It defines the
+agent's roles, services, monitors, and credentials. Secrets use ${ENV_VAR}
+references resolved from the environment at load time.
 """
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,12 +19,20 @@ import yaml
 
 log = logging.getLogger(__name__)
 
+_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
-def _machine_config_path() -> Path:
-    override = os.environ.get("MODASTACK_CONFIG")
-    if override:
-        return Path(override)
-    return Path.home() / ".modastack" / "config.yaml"
+
+def _interpolate_env(value):
+    """Recursively resolve ${ENV_VAR} references in strings, dicts, and lists."""
+    if isinstance(value, str):
+        return _ENV_VAR_RE.sub(
+            lambda m: os.environ.get(m.group(1), ""), value
+        )
+    if isinstance(value, dict):
+        return {k: _interpolate_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_interpolate_env(v) for v in value]
+    return value
 
 
 def _load_yaml(path: Path) -> dict:
@@ -27,76 +41,113 @@ def _load_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
+def _project_config_path(project_path: Path) -> Path:
+    return project_path / ".modastack" / "agent.yaml"
+
+
+@dataclass
+class ServiceConfig:
+    """One service declaration from agent.yaml."""
+
+    name: str
+    events: bool = False
+
+
 @dataclass
 class Config:
-    """Machine-wide config from ~/.modastack/config.yaml."""
+    """Per-project config from agent.yaml."""
+
+    version: str = ""
+    entry_point: str = ""
+    chat: str = ""
+    services: list[ServiceConfig] = field(default_factory=list)
 
     event_server_url: str = ""
-    slack_bot_token: str = ""
-    linear_api_key: str = ""
     registries: list[str] = field(default_factory=list)
 
+    slack_bot_token: str = ""
+    linear_api_key: str = ""
+
+    venn_api_key: str = ""
+
+    mcp_servers: dict[str, dict] = field(default_factory=dict)
+    monitors: list[dict] = field(default_factory=list)
+
     @classmethod
-    def load(cls, project_path: Path | None = None) -> "Config":
-        """Load machine config. project_path is accepted for API compat but ignored."""
-        raw = _load_yaml(_machine_config_path())
+    def load(cls, project_path: Path, **_kwargs) -> "Config":
+        """Load config from .modastack/agent.yaml."""
+        agent_yaml = _find_agent_yaml(project_path)
+        if not agent_yaml:
+            return cls()
+        return cls._parse(agent_yaml)
+
+    @classmethod
+    def _parse(cls, path: Path) -> "Config":
+        raw_uninterpolated = _load_yaml(path)
+        # Preserve monitor commands verbatim — they may contain ${VAR}
+        # intended for shell expansion, not config interpolation.
+        monitors_raw = raw_uninterpolated.get("monitors", [])
+        raw = _interpolate_env(raw_uninterpolated)
+        raw["monitors"] = monitors_raw
+
+        services = []
+        for s in raw.get("services", []):
+            if isinstance(s, str):
+                services.append(ServiceConfig(name=s))
+            elif isinstance(s, dict):
+                services.append(ServiceConfig(
+                    name=s.get("name", ""),
+                    events=s.get("events", False),
+                ))
+
         slack = raw.get("slack", {})
         linear = raw.get("linear", {})
         event_server = raw.get("event_server", {})
+        if isinstance(event_server, str):
+            event_server_url = event_server
+        else:
+            event_server_url = event_server.get("url", "")
 
         return cls(
-            event_server_url=event_server.get("url", ""),
-            slack_bot_token=slack.get("bot_token", ""),
-            linear_api_key=linear.get("api_key", ""),
+            version=str(raw.get("version", "")),
+            entry_point=raw.get("entry_point", ""),
+            chat=raw.get("chat", ""),
+            services=services,
+            event_server_url=raw.get("event_server_url", event_server_url),
             registries=raw.get("registries", []),
+            slack_bot_token=slack.get("bot_token", "") if isinstance(slack, dict) else "",
+            linear_api_key=linear.get("api_key", "") if isinstance(linear, dict) else "",
+            venn_api_key=raw.get("venn_api_key", ""),
+            mcp_servers=raw.get("mcp_servers", {}),
+            monitors=raw.get("monitors", []),
         )
 
     @classmethod
     def from_file(cls, project_path: Path) -> "Config":
         return cls.load(project_path)
 
+    @property
+    def native_services(self) -> list[str]:
+        return ["github", "slack", "linear"]
+
+    @property
+    def venn_services(self) -> list[ServiceConfig]:
+        """Services that require Venn (not natively supported)."""
+        return [s for s in self.services if s.name not in self.native_services]
+
+    @property
+    def event_services(self) -> list[ServiceConfig]:
+        """Services with events enabled."""
+        return [s for s in self.services if s.events]
+
+
+def _find_agent_yaml(project_path: Path, agent_name: str | None = None) -> Path | None:
+    """Find agent.yaml in .modastack/ — the only runtime location."""
+    path = project_path / ".modastack" / "agent.yaml"
+    return path if path.exists() else None
+
 
 ProjectConfig = Config
-
-
-def _credentials_path() -> Path:
-    """XDG-standard credentials path (~/.config/modastack/credentials.yaml)."""
-    return Path.home() / ".config" / "modastack" / "credentials.yaml"
-
-
-@dataclass
-class Credentials:
-    """API keys per workspace (Linear, etc.). GitHub Issues needs no key."""
-
-    entries: dict[str, dict[str, str]] = field(default_factory=dict)
-
-    @classmethod
-    def load(cls) -> "Credentials":
-        path = _credentials_path()
-        if not path.exists():
-            return cls()
-        raw = yaml.safe_load(path.read_text()) or {}
-        return cls(entries=raw)
-
-    def save(self) -> None:
-        path = _credentials_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.dump(self.entries, default_flow_style=False))
-
-    def get(self, name: str) -> dict[str, str]:
-        if name in self.entries:
-            return self.entries[name]
-        return self.entries.get("default", {})
-
-    def add(self, name: str, **kwargs: str) -> None:
-        self.entries.setdefault(name, {})
-        for key, value in kwargs.items():
-            if value:
-                self.entries[name][key] = value
-        self.save()
-
-    def list_names(self) -> list[str]:
-        return list(self.entries.keys())
 
 
 # --- Event server deployment state (ephemeral, auto-registered) ---

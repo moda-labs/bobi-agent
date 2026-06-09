@@ -77,7 +77,7 @@ class MonitorRegistry:
             project_key = str(project_path)
             project_sources = [
                 project_path / ".modastack" / "monitors.yaml",
-                project_path / ".modastack" / "config.yaml",
+                project_path / ".modastack" / "agent.yaml",
             ]
             for config_path in project_sources:
                 for raw in _read_records(config_path):

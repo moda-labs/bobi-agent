@@ -55,10 +55,9 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     # Monitors from agent pack
     try:
         from modastack.monitors.registry import MonitorRegistry
-        from modastack.prompts import AGENTS_CACHE_DIR
         if not agent_name:
-            for search_dir in [project_path / "agents", AGENTS_CACHE_DIR]:
-                if search_dir and search_dir.is_dir():
+            for search_dir in [project_path / "agents", project_path / ".modastack" / "agents"]:
+                if search_dir.is_dir():
                     for pack in search_dir.iterdir():
                         if pack.is_dir() and (pack / "monitors").is_dir():
                             agent_name = pack.name
@@ -75,6 +74,38 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     lines.append(f"  {'logs':<{W}}{log_file}")
 
     click.echo("\n".join(lines))
+
+def _migrate_global_config(project_path: Path) -> None:
+    """One-time migration: copy ~/.modastack/ config and agents into the project.
+
+    Runs silently on start/restart. Only copies files that don't already
+    exist in the project — never overwrites.
+    """
+    import shutil
+
+    global_dir = Path.home() / ".modastack"
+    if not global_dir.is_dir():
+        return
+
+    config_dir = project_path / ".modastack"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    global_config = global_dir / "config.yaml"
+    local_config = config_dir / "agent.yaml"
+    if global_config.exists() and not local_config.exists():
+        shutil.copy2(global_config, local_config)
+        click.echo(f"Migrated config from {global_config} → {local_config}")
+
+    global_agents = global_dir / "agents"
+    local_agents = config_dir / "agents"
+    if global_agents.is_dir():
+        for pack in global_agents.iterdir():
+            if pack.is_dir() and (pack / "agent.yaml").exists():
+                dest = local_agents / pack.name
+                if not dest.exists():
+                    shutil.copytree(pack, dest)
+                    click.echo(f"Migrated agent pack '{pack.name}' → {dest}")
+
 
 def _detect_project_root(cwd: Path | None = None) -> Path:
     """Return the project root — the given directory or cwd."""
@@ -104,7 +135,7 @@ def main():
     if project:
         dot_moda = project / ".modastack"
         if dot_moda.is_dir():
-            click.echo(f"Using .modastack at {dot_moda}")
+            click.echo(f"Running from {project}")
         else:
             click.echo(
                 click.style("Warning: ", fg="yellow")
@@ -151,7 +182,6 @@ def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
     Resolution:
       1. <project>/agents/{name}
       2. <project>/.modastack/agents/{name}
-      3. ~/.modastack/agents/{name}  (user cache)
     """
     visible = project_path / "agents" / name
     if visible.is_dir():
@@ -159,24 +189,15 @@ def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
     hidden = project_path / ".modastack" / "agents" / name
     if hidden.is_dir():
         return hidden
-    from modastack.prompts import AGENTS_CACHE_DIR
-    cached = AGENTS_CACHE_DIR / name
-    if cached.is_dir():
-        return cached
     return None
 
 
 def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
     """List available agent packs with their source."""
     packs: dict[str, str] = {}
-    from modastack.prompts import AGENTS_CACHE_DIR
-    if AGENTS_CACHE_DIR.is_dir():
-        for d in sorted(AGENTS_CACHE_DIR.iterdir()):
-            if d.is_dir() and (d / "defaults.yaml").exists():
-                packs[d.name] = "cached"
     for agents_dir, label in [
+        (project_path / ".modastack" / "agents", "cached"),
         (project_path / "agents", "local"),
-        (project_path / ".modastack" / "agents", "local"),
     ]:
         if agents_dir.is_dir():
             for d in sorted(agents_dir.iterdir()):
@@ -207,19 +228,24 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
     set_project_root(project_path)
 
     agent_name = config.get("agent")
-    role = config.get("role")
-    if not role and agent_name:
-        from modastack.prompts.resolver import _resolve_agent_dir
-        agent_dir = _resolve_agent_dir(agent_name, project_path)
-        if agent_dir:
-            defaults_path = agent_dir / "defaults.yaml"
-            if defaults_path.exists():
-                import yaml as _yaml
-                defaults = _yaml.safe_load(defaults_path.read_text()) or {}
-                role = defaults.get("role", "manager")
-    role = role or "manager"
+
+    from modastack.config import Config as UnifiedConfig
+    unified_cfg = UnifiedConfig.load(project_path, agent_name=agent_name)
+
+    role = config.get("role") or unified_cfg.entry_point or "manager"
+
     from modastack.events.subscriptions import discover_subscriptions
     subscribe = config.get("subscribe") or discover_subscriptions(project_path, agent_name)
+
+    # Add monitor event topics for non-native services with events enabled
+    monitor_topics = []
+    for svc in unified_cfg.event_services:
+        if svc.name not in unified_cfg.native_services:
+            for mon in unified_cfg.monitors:
+                if mon.get("event"):
+                    monitor_topics.append(mon["event"])
+    if monitor_topics:
+        subscribe = list(subscribe) + monitor_topics
 
     state_dir = project_path / ".modastack" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -272,6 +298,7 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
         name=f"moda-{role}-{project_path.name}",
         persistent=True,
         role=role,
+        mcp_servers=unified_cfg.mcp_servers or None,
     )
 
 
@@ -294,6 +321,8 @@ def start(agent_pack, foreground, fresh, subscribe):
     """
     project_path = _detect_project_root()
 
+    _migrate_global_config(project_path)
+
     agent_config = _load_agent_config(project_path) or {}
     if not agent_pack:
         agent_pack = agent_config.get("agent")
@@ -312,7 +341,7 @@ def start(agent_pack, foreground, fresh, subscribe):
         from modastack.registry import fetch
         try:
             click.echo(f"Agent '{agent_pack}' not found locally, fetching from remote...")
-            fetch(agent_pack)
+            fetch(project_path, agent_pack)
             resolved = _resolve_agent_pack(agent_pack, project_path)
         except Exception as e:
             click.echo(f"Failed to fetch '{agent_pack}': {e}", err=True)
@@ -324,25 +353,23 @@ def start(agent_pack, foreground, fresh, subscribe):
                 for name, source in available:
                     click.echo(f"  {name:20s} [{source}]", err=True)
             raise SystemExit(1)
-    else:
-        # Found locally — background version check
-        import threading
-        def _check_update():
-            try:
-                from modastack.registry import check_update
-                local_v, remote_v = check_update(agent_pack)
-                if local_v and remote_v and remote_v != local_v:
-                    click.echo(
-                        f"  update        {agent_pack} v{local_v} installed, "
-                        f"v{remote_v} available — run: modastack agents update {agent_pack}"
-                    )
-            except Exception:
-                pass
-        threading.Thread(target=_check_update, daemon=True).start()
+
+    # Install pack into .modastack/ if not already there
+    _install_pack(resolved, project_path)
 
     agent_config["agent"] = agent_pack
     if subscribe:
         agent_config.setdefault("subscribe", []).extend(subscribe)
+
+    # Run preflight checks in foreground before forking
+    from modastack.validate import validate_config
+    validation = validate_config(project_path)
+    if validation.checks:
+        click.echo("Preflight:")
+        click.echo(validation.format())
+        if not validation.ok:
+            click.echo("\nStartup blocked — fix the issues above.", err=True)
+            raise SystemExit(1)
 
     state_dir = project_path / ".modastack" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -357,9 +384,7 @@ def start(agent_pack, foreground, fresh, subscribe):
         except (ProcessLookupError, ValueError):
             pid_path.unlink(missing_ok=True)
 
-    # Prevent nested runtimes: if an ancestor directory already has a
-    # running manager, starting a second one here would create an
-    # isolated registry that can't see its parent's agents.
+    # Prevent nested runtimes
     from modastack.sdk import find_runtime_root, _pid_file_alive
     ancestor = find_runtime_root(project_path.parent)
     if ancestor and ancestor != project_path:
@@ -375,8 +400,6 @@ def start(agent_pack, foreground, fresh, subscribe):
             err=True,
         )
         raise SystemExit(1)
-
-    _ensure_config()
 
     if fresh:
         _clear_manager_session(project_path)
@@ -407,9 +430,42 @@ def start(agent_pack, foreground, fresh, subscribe):
         _print_startup_info(project_path, proc.pid, log_file)
 
 
-def _ensure_config() -> None:
-    """Placeholder — registration happens at agent startup via _start_event_subscription."""
-    pass
+def _install_pack(pack_dir: Path, project_path: Path) -> None:
+    """Copy pack contents into .modastack/ for runtime use.
+
+    Copies roles, tools, workflows, monitors from the pack source into
+    .modastack/. Merges the pack's agent.yaml into .modastack/agent.yaml
+    (pack provides defaults, project override wins per-field).
+    """
+    import shutil
+    import yaml as _yaml
+
+    dest = project_path / ".modastack"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    for subdir in ["roles", "tools", "workflows", "monitors"]:
+        src = pack_dir / subdir
+        if src.is_dir():
+            dst = dest / subdir
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+
+    # Copy agent.md if present
+    agent_md = pack_dir / "agent.md"
+    if agent_md.exists():
+        shutil.copy2(agent_md, dest / "agent.md")
+
+    # Merge pack agent.yaml under project agent.yaml
+    pack_yaml = pack_dir / "agent.yaml"
+    project_yaml = dest / "agent.yaml"
+
+    pack_cfg = _yaml.safe_load(pack_yaml.read_text()) if pack_yaml.exists() else {}
+    project_cfg = _yaml.safe_load(project_yaml.read_text()) if project_yaml.exists() else {}
+
+    # Pack provides defaults, project overrides per-field
+    merged = {**pack_cfg, **project_cfg}
+    project_yaml.write_text(_yaml.dump(merged, default_flow_style=False, sort_keys=False))
 
 
 def _register_event_server(url: str, project_path: Path, rc: "ProjectConfig") -> tuple[str, str]:
@@ -655,7 +711,7 @@ def slack_reply(text, workspace, channel, thread):
         cfg = Config.load(project_path)
         token = cfg.slack_bot_token
     if not token:
-        click.echo(f"No bot token configured (set slack.bot_token in ~/.modastack/config.yaml)", err=True)
+        click.echo("No bot token configured (set slack.bot_token in .modastack/agent.yaml)", err=True)
         sys.exit(1)
 
     # The manager invokes this command through a shell, where newlines in the
@@ -872,25 +928,20 @@ def status():
         click.echo("Not in a modastack-configured project. Run `modastack start` to set one up.")
         raise SystemExit(1)
 
-    mgr_name = f"moda-mgr-{project_path.name}"
-    session_id = load_session_id(mgr_name) or ""
-    session_short = session_id[:8] if session_id else ""
-
     if running:
-        mgr_label = f"running (session {session_short})" if session_short else "running"
+        click.echo(f"  Agent: running (pid {pid})")
     else:
-        mgr_label = "stopped"
-    click.echo(f"  Manager: {mgr_label}")
+        click.echo("  Agent: stopped")
 
     registry = get_registry()
-    active = [e for e in registry.list_active() if e.role == "engineer"]
+    active = registry.list_active()
     if not active:
-        click.echo("  Engineers: none active")
+        click.echo("  Sub-agents: none active")
         return
 
-    click.echo(f"  Engineers: {len(active)} active")
+    click.echo(f"  Sub-agents: {len(active)} active")
     for e in active:
-        click.echo(f"    {e.issue_id}/{e.phase} — {e.status}")
+        click.echo(f"    {e.name} ({e.role}) — {e.status}")
 
 
 @main.command()
@@ -1428,13 +1479,15 @@ def monitor_list():
     project_path = _detect_project_root()
     agent_config = _load_agent_config(project_path)
     agent_name = (agent_config or {}).get("agent")
-    if not agent_name:
-        from modastack.prompts import AGENTS_CACHE_DIR
-        if AGENTS_CACHE_DIR.is_dir():
-            for pack in AGENTS_CACHE_DIR.iterdir():
-                if pack.is_dir() and (pack / "monitors").is_dir():
-                    agent_name = pack.name
-                    break
+    if not agent_name and project_path:
+        for search_dir in [project_path / "agents", project_path / ".modastack" / "agents"]:
+            if search_dir.is_dir():
+                for pack in search_dir.iterdir():
+                    if pack.is_dir() and (pack / "monitors").is_dir():
+                        agent_name = pack.name
+                        break
+            if agent_name:
+                break
     registry = MonitorRegistry.load(agent_name=agent_name)
     monitors = sorted(registry.all_monitors(), key=lambda m: (m.name, m.project))
     if not monitors:
@@ -1815,15 +1868,20 @@ def agents_update(name):
     """
     from modastack.registry import fetch, list_cached, check_update
 
+    project_path = _detect_project_root()
+    if not project_path:
+        click.echo("No project detected. Run from a project directory.", err=True)
+        raise SystemExit(1)
+
     if name:
         try:
-            local_v, remote_v = check_update(name)
+            local_v, remote_v = check_update(project_path, name)
             if local_v and remote_v and remote_v == local_v:
                 click.echo(f"{name} v{local_v} is already up to date.")
                 return
-            path = fetch(name)
+            path = fetch(project_path, name)
             from modastack.registry import _read_local_version
-            new_v = _read_local_version(name) or "unknown"
+            new_v = _read_local_version(project_path, name) or "unknown"
             if local_v:
                 click.echo(f"Updated {name}: v{local_v} → v{new_v}")
             else:
@@ -1832,17 +1890,17 @@ def agents_update(name):
             click.echo(f"Failed: {e}", err=True)
             raise SystemExit(1)
     else:
-        cached = list_cached()
+        cached = list_cached(project_path)
         if not cached:
             click.echo("No cached agent packs to update.")
             return
         for pack in cached:
             try:
-                local_v, remote_v = check_update(pack["name"])
+                local_v, remote_v = check_update(project_path, pack["name"])
                 if local_v and remote_v and remote_v == local_v:
                     click.echo(f"  {pack['name']} v{local_v} — up to date")
                 elif remote_v:
-                    fetch(pack["name"])
+                    fetch(project_path, pack["name"])
                     click.echo(f"  {pack['name']} v{local_v} → v{remote_v}")
                 else:
                     click.echo(f"  {pack['name']} v{local_v} — could not check remote")
@@ -1861,10 +1919,15 @@ def agents_add_registry(repo):
     Usage:
         modastack agents add-registry myorg/my-agents
     """
-    from modastack.config import _machine_config_path, _load_yaml
+    from modastack.config import _project_config_path, _load_yaml
     import yaml as _yaml
 
-    config_path = _machine_config_path()
+    project_path = _detect_project_root()
+    if not project_path:
+        click.echo("No project detected. Run from a project directory.", err=True)
+        raise SystemExit(1)
+
+    config_path = _project_config_path(project_path)
     raw = _load_yaml(config_path) if config_path.exists() else {}
     registries = raw.get("registries", [])
 
@@ -1887,10 +1950,15 @@ def agents_remove_registry(repo):
     Usage:
         modastack agents remove-registry myorg/my-agents
     """
-    from modastack.config import _machine_config_path, _load_yaml
+    from modastack.config import _project_config_path, _load_yaml
     import yaml as _yaml
 
-    config_path = _machine_config_path()
+    project_path = _detect_project_root()
+    if not project_path:
+        click.echo("No project detected. Run from a project directory.", err=True)
+        raise SystemExit(1)
+
+    config_path = _project_config_path(project_path)
     raw = _load_yaml(config_path) if config_path.exists() else {}
     registries = raw.get("registries", [])
 
@@ -1916,12 +1984,14 @@ def agents_browse():
     """
     from modastack.registry import list_remote, list_cached, DEFAULT_REPO
 
-    remote = list_remote()
+    project_path = _detect_project_root()
+    remote = list_remote(project_path)
     if not remote:
         click.echo("Could not fetch remote registry.", err=True)
         raise SystemExit(1)
 
-    cached = {p["name"]: p["version"] for p in list_cached()}
+    cached_packs = list_cached(project_path) if project_path else []
+    cached = {p["name"]: p["version"] for p in cached_packs}
 
     click.echo("Available agent packs:\n")
     for pack in remote:

@@ -147,6 +147,9 @@ export function subscriptionKeysForEvent(event: NormalizedEvent): string[] {
 	if (event.workspace) {
 		keys.push(`slack:${event.workspace}`);
 	}
+	// Generic topic routing — fallback for events without source-specific keys
+	// (e.g. monitor-generated events posted to /events/{topic}).
+	if (keys.length === 0 && event.type) keys.push(event.type);
 	return keys;
 }
 

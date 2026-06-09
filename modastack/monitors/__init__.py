@@ -9,8 +9,8 @@ like a webhook would.
 Two storage tiers, merged most-general to most-specific (later tiers
 override earlier ones by `name`):
 
-  1. Built-in defaults  — monitors/defaults.yaml (shipped, read-only)
-  2. Repo-specific      — <repo>/.modastack/monitors.yaml
+  1. Built-in defaults  — agent pack monitors/defaults.yaml (shipped, read-only)
+  2. Project-specific   — <project>/.modastack/monitors.yaml
 """
 
 from .schema import Monitor, parse_interval

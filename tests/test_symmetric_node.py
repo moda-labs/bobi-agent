@@ -179,14 +179,15 @@ class TestPromptResolver:
     def test_discover_roles_finds_director_and_engineer(self, modastack_install):
         from modastack.prompts.resolver import discover_roles
         mi = modastack_install
-        roles = discover_roles(agent_name=mi.agent_name)
+        roles = discover_roles(project_path=mi.repo_path, agent_name=mi.agent_name)
         names = [r["name"] for r in roles]
         assert "director" in names
         assert "engineer" in names
 
     def test_discover_roles_scans_all_packs_without_agent_name(self, modastack_install):
         from modastack.prompts.resolver import discover_roles
-        roles = discover_roles()
+        mi = modastack_install
+        roles = discover_roles(project_path=mi.repo_path)
         names = [r["name"] for r in roles]
         assert "director" in names
         assert "engineer" in names

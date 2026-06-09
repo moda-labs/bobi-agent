@@ -250,3 +250,95 @@ class TestSchedulerRun:
         sched, injected = _scheduler(tmp_path, [m], spawned=spawned)
         sched.tick()
         assert len(spawned) == 1
+
+
+class TestCommandMonitor:
+    def test_command_runs_and_fires_events(self, tmp_path):
+        m = Monitor(
+            name="new-emails",
+            command='echo \'[{"id": "msg1", "subject": "Hello"}, {"id": "msg2", "subject": "World"}]\'',
+            event="email/received",
+        )
+        sched, injected = _scheduler(tmp_path, [m])
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        assert len(injected) == 2
+        assert injected[0]["data"]["subject"] == "Hello"
+        assert injected[1]["data"]["subject"] == "World"
+
+    def test_command_deduplicates_by_id(self, tmp_path):
+        m = Monitor(
+            name="check",
+            command='echo \'[{"id": "same", "v": 1}]\'',
+            event="monitor/check",
+        )
+        sched, injected = _scheduler(tmp_path, [m])
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        sched.run_monitor(m, reg, _fixed_now())
+        assert len(injected) == 1
+
+    def test_command_deduplicates_by_hash(self, tmp_path):
+        m = Monitor(
+            name="check",
+            command='echo \'[{"a": 1}]\'',
+            event="monitor/check",
+        )
+        sched, injected = _scheduler(tmp_path, [m])
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        sched.run_monitor(m, reg, _fixed_now())
+        assert len(injected) == 1
+
+    def test_command_empty_output_clears_active(self, tmp_path):
+        m = Monitor(
+            name="check",
+            command='echo \'[{"id": "x"}]\'',
+            event="monitor/check",
+        )
+        sched, injected = _scheduler(tmp_path, [m])
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        assert len(injected) == 1
+
+        m.command = "echo ''"
+        sched.run_monitor(m, reg, _fixed_now())
+        assert sched.state["check"]["active"] == []
+
+    def test_command_failure_does_not_crash(self, tmp_path):
+        m = Monitor(
+            name="fail",
+            command="exit 1",
+            event="monitor/fail",
+        )
+        sched, injected = _scheduler(tmp_path, [m])
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        assert injected == []
+        assert "fail" in sched.state
+
+    def test_command_single_object_output(self, tmp_path):
+        m = Monitor(
+            name="single",
+            command='echo \'{"id": "one", "status": "ok"}\'',
+            event="monitor/single",
+        )
+        sched, injected = _scheduler(tmp_path, [m])
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        assert len(injected) == 1
+        assert injected[0]["data"]["status"] == "ok"
+
+    def test_command_takes_priority_over_check(self, tmp_path):
+        """When both command and check are set, command wins."""
+        m = Monitor(
+            name="both",
+            command='echo \'[{"id": "cmd"}]\'',
+            check="pr_conflicts",
+            event="monitor/both",
+        )
+        sched, injected = _scheduler(tmp_path, [m])
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        assert len(injected) == 1
+        assert injected[0]["data"]["id"] == "cmd"

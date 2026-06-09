@@ -16,7 +16,7 @@ class Condition:
 # Reserved keys parsed into named fields; everything else is free-form and
 # kept in `extra` (e.g. `url:` for a deploy-health check) so new check types
 # need no schema change.
-_RESERVED = {"name", "description", "interval", "event", "check", "enabled"}
+_RESERVED = {"name", "description", "interval", "event", "check", "command", "enabled"}
 
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -55,6 +55,7 @@ class Monitor:
     interval: str = "15m"
     event: str = ""
     check: str = ""
+    command: str = ""
     enabled: bool = True
     extra: dict = field(default_factory=dict)
     source: str = "user"
@@ -71,6 +72,7 @@ class Monitor:
             interval=str(raw.get("interval", "15m")),
             event=raw.get("event", f"monitor/{raw['name']}"),
             check=raw.get("check", ""),
+            command=raw.get("command", ""),
             enabled=raw.get("enabled", True),
             extra=extra,
             source=source,
@@ -87,6 +89,8 @@ class Monitor:
             record["event"] = self.event
         if self.check:
             record["check"] = self.check
+        if self.command:
+            record["command"] = self.command
         if not self.enabled:
             record["enabled"] = False
         record.update(self.extra)

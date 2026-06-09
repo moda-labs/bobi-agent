@@ -23,10 +23,12 @@ def _create_test_agent(agents_dir: Path) -> Path:
     (pack / "workflows").mkdir()
     (pack / "monitors").mkdir()
 
-    (pack / "defaults.yaml").write_text(yaml.dump({
+    (pack / "agent.yaml").write_text(yaml.dump({
         "version": "0.0.1",
-        "role": "director",
-        "event_sources": ["slack"],
+        "entry_point": "director",
+        "services": [
+            {"name": "slack", "events": True},
+        ],
     }))
 
     (pack / "agent.md").write_text("# Test Agent\nMinimal agent for testing.")
@@ -133,29 +135,19 @@ def modastack_install(tmp_path, monkeypatch):
     config_dir = repo_path / ".modastack"
     state_dir = config_dir / "state"
     sessions_dir = config_dir / "sessions"
-    agents_dir = tmp_path / "agents_cache"
+    agents_dir = config_dir / "agents"
 
-    for d in [config_dir, state_dir, sessions_dir, config_dir / "workflows"]:
+    for d in [config_dir, state_dir, sessions_dir, config_dir / "workflows", agents_dir]:
         d.mkdir(parents=True)
 
     _create_test_agent(agents_dir)
 
     (config_dir / "agent.yaml").write_text(yaml.dump({
         "agent": TEST_AGENT_NAME,
-        "role": "director",
+        "entry_point": "director",
     }))
 
-    machine_config = tmp_path / "machine_config.yaml"
-    machine_config.write_text("{}")
-
-    creds_path = tmp_path / "credentials.yaml"
-    creds_path.write_text("{}")
-
     monkeypatch.setattr("modastack.sdk._project_root", repo_path)
-    monkeypatch.setattr("modastack.config._machine_config_path", lambda: machine_config)
-    monkeypatch.setattr("modastack.config._credentials_path", lambda: creds_path)
-    monkeypatch.setattr("modastack.prompts.AGENTS_CACHE_DIR", agents_dir)
-    monkeypatch.setattr("modastack.prompts.resolver.AGENTS_CACHE_DIR", agents_dir)
 
     return ModastackInstall(
         repo_path=repo_path,

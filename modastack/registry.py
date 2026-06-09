@@ -1,13 +1,12 @@
 """Agent pack registry — fetch, cache, and version-check agent packs.
 
 Packs are fetched from a GitHub repo (default: moda-labs/moda-agents) and
-cached at ~/.modastack/agents/<name>/. A .meta.json file tracks the
+cached at <project>/.modastack/agents/<name>/. A .meta.json file tracks the
 installed version and fetch timestamp.
 
 Resolution order (handled by callers in cli.py / resolver.py):
-  1. <project>/agents/<name>            — project-level
-  2. <project>/.modastack/agents/<name> — project override
-  3. ~/.modastack/agents/<name>          — user cache (this module)
+  1. <project>/agents/<name>            — project-level (checked in)
+  2. <project>/.modastack/agents/<name> — local agents (overrides + cached)
 """
 
 from __future__ import annotations
@@ -30,15 +29,18 @@ import yaml
 log = logging.getLogger(__name__)
 
 DEFAULT_REPO = "moda-labs/modastack"
-CACHE_DIR = Path.home() / ".modastack" / "agents"
 GITHUB_RAW = "https://raw.githubusercontent.com"
 
 
-def _all_registries() -> list[str]:
+def _cache_dir(project_path: Path) -> Path:
+    return project_path / ".modastack" / "agents"
+
+
+def _all_registries(project_path: Path) -> list[str]:
     """Get all configured registries (default + user-added)."""
     try:
         from modastack.config import Config
-        cfg = Config.load()
+        cfg = Config.load(project_path)
         user_registries = cfg.registries or []
     except Exception:
         user_registries = []
@@ -81,12 +83,12 @@ def _urlopen(url: str, timeout: int = 10):
     return urllib.request.urlopen(req, timeout=timeout, context=_ssl_context())
 
 
-def _meta_path(name: str) -> Path:
-    return CACHE_DIR / name / ".meta.json"
+def _meta_path(project_path: Path, name: str) -> Path:
+    return _cache_dir(project_path) / name / ".meta.json"
 
 
-def _read_meta(name: str) -> dict:
-    p = _meta_path(name)
+def _read_meta(project_path: Path, name: str) -> dict:
+    p = _meta_path(project_path, name)
     if not p.exists():
         return {}
     try:
@@ -95,18 +97,18 @@ def _read_meta(name: str) -> dict:
         return {}
 
 
-def _write_meta(name: str, version: str, repo: str) -> None:
+def _write_meta(project_path: Path, name: str, version: str, repo: str) -> None:
     meta = {
         "version": version,
         "source": f"github:{repo}",
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
-    _meta_path(name).write_text(json.dumps(meta, indent=2))
+    _meta_path(project_path, name).write_text(json.dumps(meta, indent=2))
 
 
 def _read_remote_version(name: str, repo: str = DEFAULT_REPO) -> str | None:
-    """Fetch just defaults.yaml from GitHub to read the remote version."""
-    url = f"{GITHUB_RAW}/{repo}/main/agents/{name}/defaults.yaml"
+    """Fetch just agent.yaml from GitHub to read the remote version."""
+    url = f"{GITHUB_RAW}/{repo}/main/agents/{name}/agent.yaml"
     try:
         with _urlopen(url, timeout=5) as resp:
             data = yaml.safe_load(resp.read())
@@ -115,9 +117,9 @@ def _read_remote_version(name: str, repo: str = DEFAULT_REPO) -> str | None:
         return None
 
 
-def _read_local_version(name: str) -> str | None:
-    """Read version from cached pack's defaults.yaml."""
-    defaults = CACHE_DIR / name / "defaults.yaml"
+def _read_local_version(project_path: Path, name: str) -> str | None:
+    """Read version from cached pack's agent.yaml."""
+    defaults = _cache_dir(project_path) / name / "agent.yaml"
     if not defaults.exists():
         return None
     try:
@@ -127,19 +129,15 @@ def _read_local_version(name: str) -> str | None:
         return None
 
 
-def is_cached(name: str) -> bool:
-    """Check if a pack exists in the user cache."""
-    return (CACHE_DIR / name / "defaults.yaml").exists()
+def is_cached(project_path: Path, name: str) -> bool:
+    """Check if a pack exists in the project cache."""
+    return (_cache_dir(project_path) / name / "agent.yaml").exists()
 
 
-def check_update(name: str, repo: str | None = None) -> tuple[str | None, str | None]:
-    """Compare local vs remote version. Returns (local_version, remote_version).
-
-    Searches all registries if repo is not specified.
-    If remote is None, the check failed (network error, pack not found).
-    """
-    local = _read_local_version(name)
-    registries = [repo] if repo else _all_registries()
+def check_update(project_path: Path, name: str, repo: str | None = None) -> tuple[str | None, str | None]:
+    """Compare local vs remote version. Returns (local_version, remote_version)."""
+    local = _read_local_version(project_path, name)
+    registries = [repo] if repo else _all_registries(project_path)
     for r in registries:
         remote = _read_remote_version(name, r)
         if remote:
@@ -147,14 +145,10 @@ def check_update(name: str, repo: str | None = None) -> tuple[str | None, str | 
     return local, None
 
 
-def fetch(name: str, repo: str | None = None) -> Path:
-    """Download an agent pack from GitHub and install to cache.
-
-    Searches all registries if repo is not specified.
-    Downloads the repo tarball and extracts just the named pack directory.
-    """
+def fetch(project_path: Path, name: str, repo: str | None = None) -> Path:
+    """Download an agent pack from GitHub and install to project cache."""
     if not repo:
-        registries = _all_registries()
+        registries = _all_registries(project_path)
         for r in registries:
             if _read_remote_version(name, r):
                 repo = r
@@ -178,6 +172,7 @@ def fetch(name: str, repo: str | None = None) -> Path:
     except Exception as e:
         raise RuntimeError(f"Failed to fetch from GitHub: {e}") from e
 
+    cache = _cache_dir(project_path)
     with tarfile.open(fileobj=tarball, mode="r:gz") as tar:
         prefix = None
         pack_prefix = None
@@ -186,12 +181,10 @@ def fetch(name: str, repo: str | None = None) -> Path:
             parts = member.name.split("/")
             if prefix is None:
                 prefix = parts[0]
-            # Match agents/<name>/... in the tarball
             if len(parts) >= 3 and parts[1] == "agents" and parts[2] == name:
                 pack_members.append(member)
                 if pack_prefix is None:
                     pack_prefix = f"{parts[0]}/agents/{name}"
-            # Also match <name>/... at root (flat layout)
             elif len(parts) >= 2 and parts[1] == name and not pack_members:
                 pack_members.append(member)
                 if pack_prefix is None:
@@ -203,7 +196,7 @@ def fetch(name: str, repo: str | None = None) -> Path:
                 f"Available packs can be listed with: modastack agents list --remote"
             )
 
-        dest = CACHE_DIR / name
+        dest = cache / name
         if dest.exists():
             shutil.rmtree(dest)
         dest.mkdir(parents=True, exist_ok=True)
@@ -215,8 +208,8 @@ def fetch(name: str, repo: str | None = None) -> Path:
                 raise RuntimeError(f"Extraction failed for '{name}'")
             shutil.copytree(extracted, dest, dirs_exist_ok=True)
 
-    version = _read_local_version(name) or "unknown"
-    _write_meta(name, version, repo)
+    version = _read_local_version(project_path, name) or "unknown"
+    _write_meta(project_path, name, version, repo)
     log.info(f"Installed {name} v{version} to {dest}")
     return dest
 
@@ -237,13 +230,14 @@ def _list_remote_single(repo: str) -> list[dict]:
     ]
 
 
-def list_remote(repo: str | None = None) -> list[dict]:
+def list_remote(project_path: Path | None = None, repo: str | None = None) -> list[dict]:
     """List agent packs available across all registries."""
     if repo:
         return _list_remote_single(repo)
     seen: set[str] = set()
     results: list[dict] = []
-    for r in _all_registries():
+    registries = _all_registries(project_path) if project_path else [DEFAULT_REPO]
+    for r in registries:
         for pack in _list_remote_single(r):
             if pack["name"] not in seen:
                 seen.add(pack["name"])
@@ -251,15 +245,16 @@ def list_remote(repo: str | None = None) -> list[dict]:
     return results
 
 
-def list_cached() -> list[dict]:
-    """List agent packs in the local cache with version info."""
-    if not CACHE_DIR.is_dir():
+def list_cached(project_path: Path) -> list[dict]:
+    """List agent packs in the project cache with version info."""
+    cache = _cache_dir(project_path)
+    if not cache.is_dir():
         return []
     packs = []
-    for d in sorted(CACHE_DIR.iterdir()):
-        if d.is_dir() and (d / "defaults.yaml").exists():
-            meta = _read_meta(d.name)
-            version = _read_local_version(d.name) or "unknown"
+    for d in sorted(cache.iterdir()):
+        if d.is_dir() and (d / "agent.yaml").exists():
+            meta = _read_meta(project_path, d.name)
+            version = _read_local_version(project_path, d.name) or "unknown"
             packs.append({
                 "name": d.name,
                 "version": version,

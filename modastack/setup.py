@@ -1,4 +1,4 @@
-"""Auto-generate .modastack/config.yaml by inspecting a project."""
+"""Auto-generate .modastack/agent.yaml by inspecting a project."""
 
 import json
 import re
@@ -132,10 +132,10 @@ def generate_dispatch_yaml(project_path: Path, task_tracking: str = "github-issu
 
 
 def setup_project(project_path: Path) -> Path:
-    """Generate .modastack/config.yaml and return the path."""
+    """Generate .modastack/agent.yaml and return the path."""
     config = generate_dispatch_yaml(project_path)
     output_dir = project_path / ".modastack"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "config.yaml"
+    output_path = output_dir / "agent.yaml"
     output_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
     return output_path

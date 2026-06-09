@@ -57,21 +57,21 @@ class TestCheckProject:
         assert not r.ok
 
 
-# --- Machine config ---
+# --- Project config ---
 
-class TestCheckMachineConfig:
+class TestCheckProjectConfig:
 
     def test_passes_when_exists(self, tmp_path):
-        machine_config = tmp_path / "config.yaml"
-        machine_config.write_text("event_server:\n  url: https://events.test\n")
-        with patch("modastack.config._machine_config_path", return_value=machine_config):
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir()
+        (config_dir / "agent.yaml").write_text("entry_point: manager\nevent_server_url: https://events.test\n")
+        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
             from modastack.doctor import _check_local_config
             r = _check_local_config()
         assert r.ok
 
     def test_fails_when_missing(self, tmp_path):
-        missing = tmp_path / "nonexistent.yaml"
-        with patch("modastack.config._machine_config_path", return_value=missing):
+        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
             from modastack.doctor import _check_local_config
             r = _check_local_config()
         assert not r.ok
