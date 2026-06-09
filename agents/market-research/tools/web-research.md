@@ -8,23 +8,42 @@ and drags in SEO listicle spam — avoid it.
 
 ## Sources and access
 
-Two layers:
+Your tools are `WebSearch` (discover) and `WebFetch` (read full text),
+plus `Bash` (curl). There are no browser/scraper MCPs wired into worker
+sessions today, so the reachability below is the real, tested picture.
+Anchor searches to the allowed source domains in `research/moda-context.md`
+to bias toward real voices (a strong bias, not a hard filter), and use
+general web search for broader discovery (the "Adjacent / emerging" area
+especially).
 
-1. **Allowed source domains** (from `research/moda-context.md`) — anchor
-   searches to these to bias toward real voices:
-   `linkedin.com`, `substack.com`, `medium.com`, `reddit.com`,
-   `news.ycombinator.com`. This is a strong bias, not a hard filter; a few
-   off-domain results are fine and sometimes useful.
-2. **General web search** — allowed for broader discovery outside the
-   anchored set (the "Adjacent / emerging" coverage area especially).
+### Reachability (tested)
 
-### Browser MCPs (optional, recommended)
+| Source | Discover (WebSearch) | Read full text | Notes |
+|---|---|---|---|
+| Substack | yes | yes (WebFetch) | full article text |
+| Medium | yes | yes (WebFetch) | public posts; member-only posts may be partial |
+| Hacker News | yes | yes | **best entry point: the Algolia API** (below) |
+| LinkedIn | yes (titles + snippets) | no | post bodies are login-walled; use the search snippet, do not try to fetch the full post |
+| Reddit | **no** | **no** | blocked for both WebSearch and WebFetch at the crawler level, and plain curl returns 403. Treat as unreachable. |
 
-For pages that need JS rendering or are behind soft walls, this pack can
-use Playwright, Firecrawl, and BrowserMCP. **Restrict each MCP's allowed
-domains to the source list above** so the agent can't wander. These are a
-prerequisite you configure once in `~/.modastack/config.yaml`; if they're
-not present, fall back to plain search + fetch.
+**Hacker News via Algolia.** Fetch the JSON API directly, it returns
+titles, points, comments, and URLs:
+
+```
+https://hn.algolia.com/api/v1/search_by_date?query=<terms>&tags=story
+https://hn.algolia.com/api/v1/search?query=<terms>&tags=story   (by relevance)
+```
+
+**Reddit.** Do not spend searches on `reddit.com`, they fail. Pick up
+Reddit discourse indirectly: HN threads, cross-posts, and articles that
+quote Reddit. If first-hand Reddit voices become essential, that needs
+added infrastructure (the official Reddit API or a managed scraper such
+as Firecrawl) wired into the worker, which is not configured yet.
+
+**LinkedIn.** WebSearch surfaces post titles and a snippet, lean on those.
+Full post bodies require an authenticated session and are out of reach
+here. The named-voices hit list mostly lives on Substack and personal
+sites, so this is a minor gap.
 
 ## The scan, step by step
 
@@ -65,5 +84,7 @@ for each finding as you go — reconstructing sources later is lossy.
 ## Known blind spots (accept, don't chase)
 
 - Substack Notes and most X/Twitter activity aren't reliably searchable.
-- X and Reddit carry real discourse but are noisy; they're de-emphasized
-  deliberately.
+- Reddit is unreachable here (see the reachability table) and X is poorly
+  searchable, so first-hand forum voices are thin. Lean on practitioner
+  write-ups, HN threads, and benchmark posts instead, and name the gap when
+  it matters rather than papering over it.

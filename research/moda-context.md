@@ -136,3 +136,17 @@ Keeps us from re-researching dead ends. (Empty to start.)
 - Report, don't editorialize. Map the discourse; don't decide strategy.
 - Never close on a summary. End on the shift that matters or the
   whitespace worth taking.
+
+## Delivery targets
+
+Where proactive output goes (the weekly digest, and any result with no
+originating thread). Replies to a chat or Linear request always go back to
+that request's own surface; these are only the defaults.
+
+- Slack workspace: `T0952RZRZ0X` (Moda Labs)
+- Weekly digest channel: `D0B9074JUG4`
+  (currently the modastack bot DM, used for testing. Replace with a real
+  public channel ID, e.g. #market-research, and invite the `modastack`
+  bot to it. The bot token lacks `channels:read`, so set the ID directly.)
+
+Post with: `modastack slack-reply -w <workspace> -c <channel> "..."`.

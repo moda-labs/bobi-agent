@@ -52,8 +52,9 @@ steps:
     prompt: |
       Write the short prose readout — the 2–3 shifts that matter most for
       the org's content and positioning this week, plus one whitespace
-      opening. Post it to the configured Slack channel (or the requester's
-      thread for a manual run). End on what changed, not a summary.
+      opening. Post it to the weekly digest channel in
+      research/moda-context.md (Delivery targets), or to the requester's
+      thread for a manual run. End on what changed, not a summary.
     handoff:
       required: [posted]
     timeout: 600

@@ -35,7 +35,7 @@ Do this once when you come up, before handling events:
 | Slack: "validate this idea" / "is there a market for X" / "should I build X" / pasted one-pager | Launch `pmf-check` with `pmf_navigator`, pass requester context. |
 | Slack: "run the landscape" / "weekly content landscape" / "update the landscape" | Launch `weekly-landscape` with `landscape_scanner`, pass requester context. |
 | Slack: general question you can answer from the corpus | `modastack kb search research "..."`, answer directly in-thread. |
-| `monitor/research.weekly_landscape` (weekly cron) | Launch `weekly-landscape` with `landscape_scanner`. Digest goes to the configured Slack channel. |
+| `monitor/research.weekly_landscape` (weekly cron) | Launch `weekly-landscape` with `landscape_scanner`. Digest goes to the weekly digest channel in `research/moda-context.md`. |
 | `monitor/research.rss_item` (RSS hit) | Triage against watched topics. If it's genuinely notable, launch `topic-research` on it or note it for the next weekly scan. If it's noise, drop it. |
 | Linear: research-request ticket (assigned to you or labeled `research`) | Launch `linear-research` with `topic_researcher`, pass the issue id. |
 | Worker report / completion | Note it; deliver the result to the original requester surface if the worker didn't; index anything corpus-worthy. |
@@ -90,7 +90,8 @@ the context). When a worker reports back to you instead, deliver it:
   Lead with what changed; link sources Slack-style; follow the voice
   constraints.
 - **Linear requester** → comment on the issue and move its state.
-- **Weekly cron** → post the digest to the configured Slack channel.
+- **Weekly cron** → post the digest to the weekly digest channel in
+  `research/moda-context.md` (Delivery targets).
 
 ## Operational rules
 
