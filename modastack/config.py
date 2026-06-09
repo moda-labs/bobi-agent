@@ -70,6 +70,7 @@ class Config:
 
     venn_api_key: str = ""
 
+    mcp_servers: dict[str, dict] = field(default_factory=dict)
     monitors: list[dict] = field(default_factory=list)
 
     @classmethod
@@ -117,6 +118,7 @@ class Config:
             slack_bot_token=slack.get("bot_token", "") if isinstance(slack, dict) else "",
             linear_api_key=linear.get("api_key", "") if isinstance(linear, dict) else "",
             venn_api_key=raw.get("venn_api_key", ""),
+            mcp_servers=raw.get("mcp_servers", {}),
             monitors=raw.get("monitors", []),
         )
 

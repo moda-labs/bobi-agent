@@ -316,6 +316,7 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
         name=f"moda-{role}-{project_path.name}",
         persistent=True,
         role=role,
+        mcp_servers=unified_cfg.mcp_servers or None,
     )
 
 

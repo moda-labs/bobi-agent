@@ -149,6 +149,53 @@ def test_agent_yaml_monitors(tmp_path):
     assert cfg.monitors[0]["command"].startswith("venn exec")
 
 
+def test_agent_yaml_mcp_servers(tmp_path):
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        entry_point: manager
+        services:
+          - name: email
+        mcp_servers:
+          internal-crm:
+            type: http
+            url: https://crm.internal/mcp
+            headers:
+              Authorization: Bearer test-token
+          local-tools:
+            type: stdio
+            command: node
+            args:
+              - tools/server.js
+    """))
+
+    cfg = Config.load(tmp_path)
+    assert len(cfg.mcp_servers) == 2
+    assert cfg.mcp_servers["internal-crm"]["type"] == "http"
+    assert cfg.mcp_servers["internal-crm"]["url"] == "https://crm.internal/mcp"
+    assert cfg.mcp_servers["local-tools"]["type"] == "stdio"
+    assert cfg.mcp_servers["local-tools"]["command"] == "node"
+
+
+def test_mcp_servers_env_var_interpolation(tmp_path, monkeypatch):
+    monkeypatch.setenv("CRM_TOKEN", "secret-123")
+
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        entry_point: manager
+        mcp_servers:
+          crm:
+            type: http
+            url: https://crm.internal/mcp
+            headers:
+              Authorization: Bearer ${CRM_TOKEN}
+    """))
+
+    cfg = Config.load(tmp_path)
+    assert cfg.mcp_servers["crm"]["headers"]["Authorization"] == "Bearer secret-123"
+
+
 def test_venn_services_property(tmp_path):
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir()
