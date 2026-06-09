@@ -14,6 +14,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_claude_auth())
     results.append(_check_project_config())
     results.append(_check_local_config())
+    results.extend(_check_services())
     results.append(_check_workflows())
     results.append(_check_event_server())
     results.append(_check_recent_events())
@@ -83,6 +84,23 @@ def _check_local_config() -> CheckResult:
     return CheckResult("Project config", ok=False,
                        detail=f"missing {config_path}",
                        hint="Create .modastack/agent.yaml with entry_point, services, and credentials")
+
+
+def _check_services() -> list[CheckResult]:
+    """Run service validation — native credentials, Venn, MCP servers."""
+    from modastack.sdk import get_project_root
+    root = get_project_root()
+    if not root:
+        return []
+    try:
+        from modastack.validate import validate_config
+        result = validate_config(root)
+        return [
+            CheckResult(c.name, ok=c.ok, detail=c.detail, hint=c.hint)
+            for c in result.checks
+        ]
+    except Exception as e:
+        return [CheckResult("Services", ok=False, detail=f"validation error: {e}")]
 
 
 def _check_workflows() -> CheckResult:
