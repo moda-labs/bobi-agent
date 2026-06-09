@@ -224,7 +224,7 @@ describe("normalizeSlackPayload", () => {
 });
 
 describe("subscriptionKeysForEvent", () => {
-	it("returns repo key for github events", () => {
+	it("returns repo key and type for github events", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "github",
@@ -233,10 +233,11 @@ describe("subscriptionKeysForEvent", () => {
 			timestamp: "",
 			payload: {},
 		});
-		expect(keys).toEqual(["github:org/repo"]);
+		expect(keys).toContain("github:org/repo");
+		expect(keys).toContain("github.issues");
 	});
 
-	it("returns linear key for linear events", () => {
+	it("returns linear key and type for linear events", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "linear",
@@ -245,10 +246,11 @@ describe("subscriptionKeysForEvent", () => {
 			timestamp: "",
 			payload: {},
 		});
-		expect(keys).toEqual(["linear:PROJ"]);
+		expect(keys).toContain("linear:PROJ");
+		expect(keys).toContain("linear.Issue.update");
 	});
 
-	it("returns workspace key for slack events", () => {
+	it("returns workspace key and type for slack events", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "slack",
@@ -258,10 +260,11 @@ describe("subscriptionKeysForEvent", () => {
 			timestamp: "",
 			payload: {},
 		});
-		expect(keys).toEqual(["slack:T123"]);
+		expect(keys).toContain("slack:T123");
+		expect(keys).toContain("slack.mention");
 	});
 
-	it("returns empty array when no routing fields", () => {
+	it("returns type as fallback key when no source-specific routing fields", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "unknown",
@@ -269,7 +272,16 @@ describe("subscriptionKeysForEvent", () => {
 			timestamp: "",
 			payload: {},
 		});
-		expect(keys).toEqual([]);
+		expect(keys).toEqual(["test"]);
+	});
+
+	it("routes generic topic events like email/received", () => {
+		const event = createTopicEvent("email/received", {
+			source: "monitor",
+			payload: { subject: "Hello" },
+		});
+		const keys = subscriptionKeysForEvent(event);
+		expect(keys).toContain("email/received");
 	});
 });
 

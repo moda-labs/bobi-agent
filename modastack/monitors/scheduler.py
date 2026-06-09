@@ -180,7 +180,9 @@ class MonitorScheduler:
             return False
 
     def run_monitor(self, monitor, registry: MonitorRegistry, now: datetime) -> None:
-        if monitor.check:
+        if monitor.command:
+            self._run_command_check(monitor)
+        elif monitor.check:
             check = self._checks.get(monitor.check)
             if check is None:
                 log.warning(f"Monitor {monitor.name} names unknown check "
@@ -219,6 +221,50 @@ class MonitorScheduler:
         }
         log.info(f"Monitor {monitor.name} fired {monitor.event} ({condition.key})")
         self.inject_event(event)
+
+    def _run_command_check(self, monitor) -> None:
+        """Run a shell command, parse JSON output, diff against last run."""
+        import hashlib
+        from .schema import Condition
+
+        try:
+            result = subprocess.run(
+                monitor.command, shell=True, capture_output=True, text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            log.error(f"Command monitor {monitor.name} timed out")
+            return
+        except OSError as e:
+            log.error(f"Command monitor {monitor.name} failed to run: {e}")
+            return
+
+        if result.returncode != 0:
+            stderr = result.stderr.strip()[:200] if result.stderr else ""
+            log.warning(f"Command monitor {monitor.name} exited {result.returncode}: {stderr}")
+            return
+
+        stdout = result.stdout.strip()
+        if not stdout:
+            self._reconcile(monitor, [])
+            return
+
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError:
+            log.warning(f"Command monitor {monitor.name} returned non-JSON output")
+            return
+
+        items = data if isinstance(data, list) else [data]
+        conditions = []
+        for item in items:
+            if isinstance(item, dict):
+                key = item.get("id") or hashlib.sha256(
+                    json.dumps(item, sort_keys=True).encode()
+                ).hexdigest()[:12]
+                conditions.append(Condition(key=str(key), data=item))
+
+        self._reconcile(monitor, conditions)
 
     def _spawn_check(self, monitor, projects: list[Path]) -> None:
         """No native check — run the description as a non-interactive check.

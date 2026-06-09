@@ -147,6 +147,9 @@ export function subscriptionKeysForEvent(event: NormalizedEvent): string[] {
 	if (event.workspace) {
 		keys.push(`slack:${event.workspace}`);
 	}
+	// Generic topic routing — allows monitors and external services to post
+	// events to /events/{topic} and have them route to subscribers.
+	if (event.type) keys.push(event.type);
 	return keys;
 }
 
