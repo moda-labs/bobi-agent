@@ -6,31 +6,86 @@ How a pack author creates a new agent and how a user sets it up.
 
 Five questions define an agent:
 
-1. **What is this agent going to do?** Describe the domain. "Manage the engineering SDLC", "Run sales outreach", "Monitor customer support tickets." This frames everything that follows.
+1. **What is this agent going to do?** Describe the domain in a sentence. "Manage the engineering SDLC", "Run sales outreach", "Monitor customer support tickets." This frames everything that follows.
 
-2. **How many specialists do you need?** An agent pack is a team. A simple pack might be a single role. A complex one has a hierarchy — a director that triages, project leads that coordinate, and engineers that execute. Each role gets its own prompt, responsibilities, and scope. Define the roles and who the entry point is.
+2. **What are the distinct jobs involved?** Break the purpose down into roles. Think about the different hats a human team would wear. A sales pipeline might need a researcher, a copywriter, and a CRM updater. An engineering org might need a director who triages, project leads who coordinate, and engineers who execute. A simple agent might just be one role. Each role gets its own prompt and responsibilities — this is how the agent pack scales from a solo operator to a full team.
 
-3. **What services does the team need?** Pick from: email, github, salesforce, calendar, linear, slack, telegram, notion, jira, etc. These are the tools the agents will read from and write to.
+3. **How do you want to interact with it?** Choose:
+   - **Slack** — chat with the agent in a channel, get updates, give instructions
+   - **Telegram** — same, but via Telegram bot
+   - **Autonomous** — no chat interface, the agent operates entirely on its own based on events and schedules
 
-4. **How do users talk to the agent?** Choose: slack, telegram, or cli (none). This is the interactive channel — where humans give instructions and get updates.
+4. **What services does the team need?** Pick from: email, github, salesforce, calendar, linear, notion, jira, etc. These are the tools the agents will read from and write to.
 
-5. **Which services should push events to the agent?** For each service from question 3, opt in to inbound events. This determines whether the agent reacts to changes in that service (new email, PR opened, deal updated) or only reads/writes on demand.
+5. **Which sources should the agent proactively respond to?** For each service from question 4, decide: should the agent watch for changes and react on its own (new email arrives, PR opens, deal updates), or only interact with it when asked? This is the difference between an agent that monitors your inbox vs one that only sends email when told to.
 
 ### Example: engineering SDLC agent
 
-> 1. **What does it do?** Manages the software development lifecycle — triages issues, coordinates project work, reviews PRs, monitors deploys.
-> 2. **Specialists?** Three roles: a director (triages incoming work, assigns to projects), project leads (coordinate within a project), and engineers (execute tasks). Director is the entry point.
-> 3. **Services?** GitHub (code + PRs), Linear (issue tracking), Slack (team comms).
-> 4. **Chat?** Slack — the team talks to the agent in a channel.
+> 1. **Purpose?** Manages the software development lifecycle — triages issues, coordinates project work, reviews PRs, monitors deploys.
+> 2. **Jobs?** Three roles: a director (triages incoming work, assigns to projects), project leads (coordinate within a project), and engineers (execute tasks). Director is the entry point.
+> 3. **Interaction?** Slack — the team talks to the agent in a channel.
+> 4. **Services?** GitHub (code + PRs), Linear (issue tracking).
 > 5. **Events?** GitHub (react to PR opens, issue assignments), Linear (react to status changes), Slack (react to mentions and DMs).
 
 ### Example: sales outreach agent
 
-> 1. **What does it do?** Monitors inbound leads, drafts personalized outreach, updates CRM.
-> 2. **Specialists?** Single role — an outreach agent. No hierarchy needed.
-> 3. **Services?** Salesforce (CRM), email (outreach), calendar (meetings).
-> 4. **Chat?** Slack — sales team reviews drafts in a channel.
+> 1. **Purpose?** Monitors inbound leads, drafts personalized outreach, updates CRM.
+> 2. **Jobs?** Three roles: a researcher (enriches lead data), a copywriter (drafts outreach), and a CRM updater (logs activity). Or just one role if you want it simple.
+> 3. **Interaction?** Slack — sales team reviews drafts in a channel before they go out.
+> 4. **Services?** Salesforce (CRM), email (outreach), calendar (meetings).
 > 5. **Events?** Salesforce (new lead created), email (reply received).
+
+### Example: deploy monitor
+
+> 1. **Purpose?** Watches production deploys, runs smoke tests, alerts on failures.
+> 2. **Jobs?** Single role — one agent handles it all.
+> 3. **Interaction?** Autonomous — no human chat, just monitors and alerts to a Slack channel.
+> 4. **Services?** GitHub (deploy events), Slack (alert channel).
+> 5. **Events?** GitHub (deploy status changes).
+
+### Monitor discovery: building the `command:` lines
+
+For any non-native service the user wants to proactively respond to (question 5), the pack builder needs to construct the actual `venn exec` command. This requires exploring the user's Venn account to discover server IDs, tool names, and argument schemas.
+
+The discovery flow:
+
+```bash
+# 1. What servers are connected?
+venn help list_servers
+# → work-gmail (gmail), salesforce (salesforce), personal-google-calendar (googlecalendar), ...
+
+# 2. What tools does this server have for listing/polling?
+venn tools search "list recent emails"
+# → work-gmail / list_messages (rank 1)
+# → work-gmail / search_messages (rank 2)
+
+# 3. What arguments does it take?
+venn tools describe -s work-gmail -t list_messages
+# → maxResults (int), q (string), labelIds (array), ...
+
+# 4. Test the command
+venn tools execute -s work-gmail -t list_messages -a '{"maxResults": 5, "q": "is:unread"}'
+# → [{"id": "msg1", "subject": "...", ...}, ...]
+```
+
+The pack builder iterates through each service that needs monitoring, discovers the right tool, tests it, and writes the `command:` line for the monitor. The key is finding a tool that returns a list of items with stable IDs — the monitor scheduler diffs by ID across runs, so the tool output needs to be diffable.
+
+This discovery step is why pack creation should be an interactive, agent-guided process rather than a static template. The available tools, server IDs, and argument schemas vary per user's Venn account.
+
+**Fallback: agent-based monitors.** Not every Venn tool returns clean, diffable JSON with stable IDs. Some return nested structures, paginated results, or data that needs interpretation to decide if it's actionable. In those cases, use a description-only monitor instead — the scheduler spawns a short-lived agent that calls the Venn CLI, interprets the results, and decides whether to fire an event. More expensive (uses an LLM call per interval), but handles any complexity:
+
+```yaml
+monitors:
+  - name: important-emails
+    description: >
+      Check for emails from VIP customers (domain: @bigcorp.com)
+      in the last 30 minutes. Only fire if the email looks urgent
+      or mentions a production issue.
+    interval: 10m
+    event: email/vip_urgent
+```
+
+### Output
 
 These answers produce a single `agent.yaml`:
 
