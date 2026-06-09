@@ -122,54 +122,121 @@ linear:
 venn_api_key: ${VENN_API_KEY}
 ```
 
-## Service resolution
+## Service connection: three mechanisms
 
-Services fall into two categories at startup:
+Every service the agent uses connects through one of three mechanisms:
 
-**Native services** (github, slack, linear) — modastack has built-in webhook integrations for real-time events. These connect directly using their own credentials. Each has a different auth story:
+### API key services (native)
 
-- **Slack**: bot token handles everything (auto-detect workspace, verify webhooks, send replies)
-- **Linear**: API key handles everything (auto-detect team, receive events, write back)
-- **GitHub**: webhook setup is external (GitHub App install or manual), reads/writes via `gh` CLI with its own auth, no credential in agent.yaml needed
+GitHub, Slack, Linear — modastack has built-in webhook integrations. Each has its own auth:
 
-**Non-native services** (email, salesforce, calendar, etc.) — handled by Venn. Venn holds OAuth tokens for 50+ services behind a single API key. Agents interact via the `venn` CLI (like they use `gh` for GitHub). For inbound events, monitors poll via `venn exec` on a schedule.
+- **GitHub**: auto-detected from git remote. Reads/writes via `gh` CLI (user runs `gh auth login`). Webhooks via GitHub App install or manual setup.
+- **Slack**: bot token in agent.yaml. Handles workspace detection, webhooks, and replies.
+- **Linear**: API key in agent.yaml. Handles team detection, webhooks, and writes.
 
-The framework doesn't maintain a hardcoded list of every service. The logic is: "Do I know this natively? If not, it's a Venn service."
+Setup: paste the API key or token. Done.
 
-## User onboarding flow
+### OAuth services (via Venn)
 
-When a user runs `modastack start <agent>`, the framework validates everything is connected:
+Gmail, Salesforce, Google Calendar, Notion, Jira, HubSpot, Dropbox, etc. — anything that requires OAuth.
+
+OAuth is hard in headless environments. The token acquisition flow requires a browser redirect, but on EC2 there's no browser. Worse, each provider requires a registered OAuth application with approved scopes — Google's security review alone takes weeks. The MCP ecosystem hasn't solved this: users are creating their own Google Cloud projects just to read email.
+
+Venn solves both problems: it holds pre-registered OAuth apps for 50+ services and manages all tokens behind a single API key. The user connects services on venn.ai (browser-based, one-time), then the agent uses the `venn` CLI for reads/writes and `venn exec` in monitors for polling.
+
+Setup: create a Venn account, connect services, paste the API key. One key covers everything.
+
+### Custom MCP servers
+
+For internal services, custom tools, or anything not covered by native integrations or Venn. Declared in agent.yaml:
+
+```yaml
+mcp_servers:
+  internal-crm:
+    type: http
+    url: https://crm.internal/mcp
+    headers:
+      Authorization: Bearer ${CRM_TOKEN}
+  local-tools:
+    type: stdio
+    command: node
+    args: ["tools/server.js"]
+```
+
+MCP servers are wired directly into the Claude Code session via the SDK. The agent gets their tools automatically. Supports HTTP, SSE, and stdio transports.
+
+Setup: provide the URL/command and credentials. Preflight validation probes each MCP server to verify it connects and lists tools.
+
+## Interactive onboarding: `modastack setup`
+
+The `modastack setup` command walks through the five questions, then handles service connection interactively:
 
 ```
-$ modastack start sales-team
+$ modastack setup
 
-Services:
-  ✓ github       (native, detected from git remote)
-  ✓ linear       (native, API key configured)
-  ✓ email        (venn, work-gmail connected)
-  ✓ calendar     (venn, personal-google-calendar connected)
-  ✗ salesforce   (venn — not connected)
+What is this agent going to do?
+> Manage sales outreach — monitor leads, draft emails, update CRM
+
+What are the distinct jobs?
+> A researcher that enriches leads, a copywriter that drafts outreach
+
+How do you want to interact with it?
+> Slack
+
+What services does the team need?
+> salesforce, email, calendar, slack
+
+Which should it proactively respond to?
+> salesforce (new leads), email (replies)
+
+Connecting services...
+
+  slack — needs a bot token.
+  Paste your Slack bot token: xoxb-...
+  ✓ slack                          native
+
+  github — auto-detected from git remote.
+  ✓ github                         native
+
+  salesforce, email, calendar — these require OAuth.
+  Go to venn.ai, connect: Salesforce, Gmail, Google Calendar
+  Paste your Venn API key: venn_...
+  ✓ email                          venn
+  ✓ calendar                       venn
+  ✓ salesforce                     venn
+
+Building monitors for event sources...
+  Exploring Venn tools for salesforce polling...
+  ✓ salesforce/updated — venn exec salesforce query_records '{"object": "Lead", "limit": 20}'
+  Exploring Venn tools for email polling...
+  ✓ email/received — venn exec work-gmail list_messages '{"maxResults": 10, "q": "is:unread"}'
+
+Writing agent.yaml...
+Done. Run `modastack start sales-outreach` to launch.
+```
+
+### Preflight validation
+
+On every `modastack start`, the framework runs preflight checks before launching:
+
+```
+Preflight checks:
+  ✓ github                         native
+  ✓ slack                          native
+  ✓ email                          venn
+  ✓ calendar                       venn
+  ✗ salesforce                     venn — not connected
     → Connect at venn.ai, then restart
-
-Missing 1 required service.
+  ✓ internal-crm                   mcp, 12 tools
 ```
 
-### Setup steps for the user
-
-1. **Native services**: provide credentials in agent.yaml (or env vars)
-   - Slack: create a bot, paste bot token
-   - Linear: generate API key, paste it
-   - GitHub: install the modastack GitHub App on the repo (or manually configure webhooks pointing at the event server)
-
-2. **Non-native services**: go to venn.ai, create an account, connect the services the agent needs (Gmail, Salesforce, Google Calendar, etc.), then paste the Venn API key into agent.yaml
-
-That's it. One API key covers all non-native services.
+Checks: entry point role exists, native credentials present, Venn services connected (REST API call), MCP servers connect and list tools (Claude SDK probe).
 
 ## Config file design
 
-`agent.yaml` is the single source of truth. It replaces the previous split between `defaults.yaml` (pack manifest) and `.modastack/config.yaml` (project credentials).
+`agent.yaml` is the single source of truth for an agent pack.
 
-**Pack ships** `agents/<name>/agent.yaml` with defaults — services, entry point, monitors. No secrets.
+**Pack ships** `agents/<name>/agent.yaml` with defaults — entry point, services, monitors. No secrets.
 
 **User overrides** in `.modastack/agent.yaml` — merged on top, secrets via `${ENV_VAR}` references.
 
@@ -181,7 +248,7 @@ Two paths for getting events into the agent:
 
 **Real-time webhooks** (native services only): GitHub, Slack, and Linear push webhooks to the event server. The event server normalizes payloads and routes them to subscribed agents via WebSocket. Sub-second latency.
 
-**Polling monitors** (any service, including Venn): the monitor scheduler runs a shell command on an interval, parses JSON output, diffs against the previous run, and fires events for new items. Uses the existing monitor infrastructure with the `command:` field:
+**Polling monitors** (any service): the monitor scheduler runs a shell command on an interval, parses JSON output, diffs against the previous run, and fires events for new items:
 
 ```yaml
 monitors:
@@ -191,18 +258,17 @@ monitors:
     event: email/received
 ```
 
-The `command:` monitor is generic — it works with `venn exec`, `gh pr list`, `curl`, or any command that returns JSON. No LLM or agent is spawned; it's pure subprocess + JSON diff.
+The `command:` monitor is generic — works with `venn exec`, `gh pr list`, `curl`, or any command that returns JSON. No LLM or agent spawned; pure subprocess + JSON diff.
 
-Monitor events route through the event server's generic topic endpoint (`POST /events/{topic}`), which routes based on `event.type` as a subscription key.
-
-Venn does not provide webhooks, so polling via monitors is the only inbound event path for non-native services.
+Monitor events route through the event server's generic topic endpoint (`POST /events/{topic}`), which uses `event.type` as a fallback subscription key when no source-specific routing fields exist.
 
 ## Agent operations architecture
 
-Agents interact with services through CLI tools:
+Agents interact with services through CLI tools and MCP:
 
 - **Native**: `gh` for GitHub, Slack API via `modastack slack-reply`, Linear API via tool guides
-- **Non-native**: `venn` CLI wraps the Venn REST API
+- **Venn services**: `venn` CLI wraps the Venn REST API
+- **Custom MCP**: tools appear in the Claude session automatically
 
 The `venn` CLI mirrors how `gh` works:
 
@@ -213,6 +279,4 @@ venn tools describe -s gmail -t send_email  # get the schema
 venn tools execute -s gmail -t send_email -a '{"to": "...", "body": "..."}'
 ```
 
-A tool guide (`tools/venn.md`) in the agent pack teaches the agent how to use the CLI — same pattern as `tools/github.md`.
-
-No MCP wiring is needed. Venn is just another CLI tool in the agent's environment.
+Tool guides (`tools/venn.md`, `tools/github.md`) in the agent pack teach the agent how to use CLI tools. MCP server tools are discovered automatically by the Claude SDK — no guide needed.
