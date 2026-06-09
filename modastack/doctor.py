@@ -15,7 +15,6 @@ def run_doctor() -> list[CheckResult]:
 
     results.append(_check_claude_cli())
     results.append(_check_claude_auth())
-    results.append(_check_project_config())
     results.append(_check_local_config())
     results.extend(_check_services())
     results.append(_check_workflows())

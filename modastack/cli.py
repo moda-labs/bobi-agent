@@ -135,7 +135,7 @@ def main():
     if project:
         dot_moda = project / ".modastack"
         if dot_moda.is_dir():
-            click.echo(f"Using .modastack at {dot_moda}")
+            click.echo(f"Running from {project}")
         else:
             click.echo(
                 click.style("Warning: ", fg="yellow")
