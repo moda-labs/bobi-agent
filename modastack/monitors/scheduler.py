@@ -32,27 +32,26 @@ from pathlib import Path
 import importlib.util
 import sys
 
-def _load_checks(agent_name: str | None = None) -> dict:
-    """Load check runners from agent pack monitors/*_checks.py files."""
+def _load_checks(agent_name: str | None = None, project_path: Path | None = None) -> dict:
+    """Load check runners from installed monitors/*_checks.py files."""
     all_checks: dict = {}
-    search_dirs: list[Path] = []
-    if agent_name:
-        from modastack.prompts.resolver import _resolve_agent_dir
-        agent_dir = _resolve_agent_dir(agent_name)
-        if agent_dir:
-            search_dirs.append(agent_dir / "monitors")
-    for checks_dir in search_dirs:
-        if not checks_dir.exists():
-            continue
-        for py_file in checks_dir.glob("*_checks.py"):
-            module_name = f"modastack_checks.{py_file.stem}"
-            spec = importlib.util.spec_from_file_location(module_name, py_file)
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = mod
-                spec.loader.exec_module(mod)
-                if hasattr(mod, "CHECKS"):
-                    all_checks.update(mod.CHECKS)
+    if not project_path:
+        from modastack.sdk import get_project_root
+        project_path = get_project_root()
+    if not project_path:
+        return all_checks
+    checks_dir = project_path / ".modastack" / "monitors"
+    if not checks_dir.exists():
+        return all_checks
+    for py_file in checks_dir.glob("*_checks.py"):
+        module_name = f"modastack_checks.{py_file.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, py_file)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = mod
+            spec.loader.exec_module(mod)
+            if hasattr(mod, "CHECKS"):
+                all_checks.update(mod.CHECKS)
     return all_checks
 
 def _parse_iso(value: str):
@@ -121,15 +120,16 @@ def _default_spawn_check(monitor, cwd: str | None) -> None:
 class MonitorScheduler:
     def __init__(self, inject_event=None, state_path: Path | None = None,
                  now=None, registry_loader=None, spawn_check=None,
-                 agent_name: str | None = None):
+                 agent_name: str | None = None, project_path: Path | None = None):
         self.inject_event = inject_event or _default_inject
         self.spawn_check = spawn_check or _default_spawn_check
         self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._agent_name = agent_name
-        self._checks = _load_checks(agent_name)
+        self._project_path = project_path
+        self._checks = _load_checks(agent_name, project_path)
         self._registry_loader = registry_loader or (
-            lambda **kw: MonitorRegistry.load(agent_name=agent_name, **kw)
+            lambda **kw: MonitorRegistry.load(agent_name=agent_name, project_path=project_path, **kw)
         )
         self.state: dict = self._load_state()
         self._stop = threading.Event()

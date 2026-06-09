@@ -459,9 +459,8 @@ def spawn_adhoc(
     _emit_session_started(issue_id, project, task, issue_id, phase="adhoc",
                           requested_by=requested_by)
 
-    from modastack.prompts.resolver import _resolve_role_prompt, _resolve_agent_dir
-    agent_dir = _resolve_agent_dir(None, Path(cwd))
-    role_prompt = _resolve_role_prompt(role, agent_dir, Path(cwd))
+    from modastack.prompts.resolver import _resolve_role_prompt
+    role_prompt = _resolve_role_prompt(role, None, Path(cwd))
     append_parts = [
         f"You are a {role} agent working on an adhoc task. "
         f"Complete the task described in your initial prompt."

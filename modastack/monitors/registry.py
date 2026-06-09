@@ -20,13 +20,17 @@ from .schema import Monitor
 
 log = logging.getLogger(__name__)
 
-def _defaults_path(agent_name: str | None = None) -> Path:
-    """Find the monitors defaults.yaml — from agent pack or fallback."""
-    if agent_name:
-        from modastack.prompts.resolver import _resolve_agent_dir
-        agent_dir = _resolve_agent_dir(agent_name)
-        if agent_dir:
-            p = agent_dir / "monitors" / "defaults.yaml"
+def _defaults_path(agent_name: str | None = None, project_path: Path | None = None) -> Path:
+    """Find the monitors defaults.yaml — from installed .modastack/ or framework fallback."""
+    if project_path:
+        p = project_path / ".modastack" / "monitors" / "defaults.yaml"
+        if p.exists():
+            return p
+    if not project_path:
+        from modastack.sdk import get_project_root
+        root = get_project_root()
+        if root:
+            p = root / ".modastack" / "monitors" / "defaults.yaml"
             if p.exists():
                 return p
     return Path(__file__).resolve().parent / "defaults.yaml"
@@ -64,7 +68,7 @@ class MonitorRegistry:
 
     def _load(self) -> None:
         agent_name = getattr(self, "_agent_name", None)
-        for raw in _read_records(_defaults_path(agent_name)):
+        for raw in _read_records(_defaults_path(agent_name, self.project_path)):
             try:
                 m = Monitor.from_dict(raw, source="default")
                 self.globals[m.name] = m

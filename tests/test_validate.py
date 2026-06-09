@@ -18,15 +18,13 @@ from modastack.config import Config, ServiceConfig
 class TestCheckEntryPoint:
 
     def test_valid_role(self, tmp_path):
-        pack = tmp_path / ".modastack" / "agents" / "test" / "roles" / "director"
-        pack.mkdir(parents=True)
+        (tmp_path / ".modastack" / "roles" / "director").mkdir(parents=True)
         cfg = Config(entry_point="director")
         result = _check_entry_point(cfg, tmp_path, "test")
         assert result.ok
 
     def test_missing_role(self, tmp_path):
-        pack = tmp_path / ".modastack" / "agents" / "test" / "roles" / "engineer"
-        pack.mkdir(parents=True)
+        (tmp_path / ".modastack" / "roles" / "engineer").mkdir(parents=True)
         cfg = Config(entry_point="director")
         result = _check_entry_point(cfg, tmp_path, "test")
         assert not result.ok

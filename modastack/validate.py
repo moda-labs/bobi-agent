@@ -67,20 +67,17 @@ def _check_entry_point(cfg, project_path: Path, agent_name: str | None) -> Check
     if not cfg.entry_point:
         return CheckResult("entry_point", ok=True, detail="not set, defaulting to manager")
 
-    try:
-        from modastack.prompts.resolver import _resolve_agent_dir
-        agent_dir = _resolve_agent_dir(agent_name, project_path) if agent_name else None
-        if agent_dir:
-            role_dir = agent_dir / "roles" / cfg.entry_point
-            if role_dir.is_dir():
-                return CheckResult("entry_point", ok=True, detail=cfg.entry_point)
-            return CheckResult(
-                "entry_point", ok=False,
-                detail=f"role '{cfg.entry_point}' not found",
-                hint=f"Available roles in {agent_dir / 'roles'}",
-            )
-    except Exception:
-        pass
+    installed_roles = project_path / ".modastack" / "roles"
+    role_dir = installed_roles / cfg.entry_point
+    if role_dir.is_dir():
+        return CheckResult("entry_point", ok=True, detail=cfg.entry_point)
+
+    if installed_roles.is_dir():
+        return CheckResult(
+            "entry_point", ok=False,
+            detail=f"role '{cfg.entry_point}' not found",
+            hint=f"Available roles in {installed_roles}",
+        )
 
     return CheckResult("entry_point", ok=True, detail=cfg.entry_point)
 

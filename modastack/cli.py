@@ -240,15 +240,15 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
         from modastack.subagent import _start_event_subscription
         _start_event_subscription(f"moda-{role}-{project_path.name}", subscribe, project_path)
 
-    if agent_name:
-        from modastack.prompts.resolver import _resolve_agent_dir as _rad
-        agent_dir = _rad(agent_name, project_path)
-        monitors_dir = agent_dir / "monitors" if agent_dir else None
-        if monitors_dir and monitors_dir.is_dir():
-            from modastack.monitors.scheduler import MonitorScheduler
-            monitor_scheduler = MonitorScheduler(agent_name=agent_name)
-            monitor_scheduler.start()
-            log.info("Monitor scheduler started")
+    has_monitors = (
+        (project_path / ".modastack" / "monitors").is_dir()
+        or unified_cfg.monitors
+    )
+    if has_monitors:
+        from modastack.monitors.scheduler import MonitorScheduler
+        monitor_scheduler = MonitorScheduler(agent_name=agent_name, project_path=project_path)
+        monitor_scheduler.start()
+        log.info("Monitor scheduler started")
 
     from modastack.prompts.resolver import build_startup_prompt
     from modastack.subagent import spawn_adhoc
