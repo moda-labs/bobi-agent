@@ -7,11 +7,18 @@ Venn account before starting the agent.
 from __future__ import annotations
 
 import logging
+import ssl
 from dataclasses import dataclass, field
+
+import certifi
 
 log = logging.getLogger(__name__)
 
 VENN_API_BASE = "https://app.venn.ai/api/tooliq"
+
+
+def _ssl_context() -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=certifi.where())
 
 SERVICE_ALIASES: dict[str, list[str]] = {
     "email": ["gmail", "outlook"],
@@ -50,12 +57,13 @@ def list_servers(api_key: str) -> list[VennServer]:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "User-Agent": "modastack/1.0",
         },
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=_ssl_context()) as resp:
             body = json.loads(resp.read())
     except Exception as e:
         log.error(f"Failed to query Venn API: {e}")
