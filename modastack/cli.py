@@ -234,23 +234,13 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
 
     role = config.get("role") or unified_cfg.entry_point or "manager"
 
-    # Validate Venn services at startup
-    venn_services = unified_cfg.venn_services
-    if venn_services:
-        if not unified_cfg.venn_api_key:
-            click.echo(
-                f"Services {[s.name for s in venn_services]} require Venn. "
-                f"Set venn_api_key in agent.yaml or VENN_API_KEY in environment.",
-                err=True,
-            )
-            raise SystemExit(1)
-        from modastack.venn import check_services, format_service_report
-        required = [s.name for s in venn_services]
-        check = check_services(unified_cfg.venn_api_key, required)
-        native_in_config = [s.name for s in unified_cfg.services if s.name in unified_cfg.native_services]
-        click.echo(format_service_report(check, native_services=native_in_config))
-        if check.missing:
-            raise SystemExit(1)
+    from modastack.validate import validate_config
+    validation = validate_config(project_path, agent_name=agent_name)
+    click.echo("Preflight checks:")
+    click.echo(validation.format())
+    if not validation.ok:
+        click.echo("\nStartup blocked — fix the issues above.", err=True)
+        raise SystemExit(1)
 
     from modastack.events.subscriptions import discover_subscriptions
     subscribe = config.get("subscribe") or discover_subscriptions(project_path, agent_name)
