@@ -23,10 +23,12 @@ def _create_test_agent(agents_dir: Path) -> Path:
     (pack / "workflows").mkdir()
     (pack / "monitors").mkdir()
 
-    (pack / "defaults.yaml").write_text(yaml.dump({
+    (pack / "agent.yaml").write_text(yaml.dump({
         "version": "0.0.1",
-        "role": "director",
-        "event_sources": ["slack"],
+        "entry_point": "director",
+        "services": [
+            {"name": "slack", "events": True},
+        ],
     }))
 
     (pack / "agent.md").write_text("# Test Agent\nMinimal agent for testing.")
@@ -142,10 +144,8 @@ def modastack_install(tmp_path, monkeypatch):
 
     (config_dir / "agent.yaml").write_text(yaml.dump({
         "agent": TEST_AGENT_NAME,
-        "role": "director",
+        "entry_point": "director",
     }))
-
-    (config_dir / "config.yaml").write_text("{}")
 
     monkeypatch.setattr("modastack.sdk._project_root", repo_path)
 

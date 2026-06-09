@@ -49,17 +49,18 @@ def modastack_env(tmp_path_factory):
 
     (config_dir / "agent.yaml").write_text(yaml.dump({
         "agent": "software_team",
-        "role": "manager",
+        "entry_point": "manager",
+        "services": [
+            {"name": "github", "events": True},
+        ],
     }))
-
-    (config_dir / "config.yaml").write_text("{}")
 
     # Create a minimal software_team agent pack in the project
     pack_dir = config_dir / "agents" / "software_team"
     for role_name in ["manager", "engineer", "project_lead"]:
         (pack_dir / "roles" / role_name).mkdir(parents=True)
-    (pack_dir / "defaults.yaml").write_text(
-        "version: \"1.0.0\"\nrole: manager\nevent_sources:\n  - github\n"
+    (pack_dir / "agent.yaml").write_text(
+        "version: \"1.0.0\"\nentry_point: manager\nservices:\n  - name: github\n    events: true\n"
     )
     (pack_dir / "roles" / "manager" / "ROLE.md").write_text(
         "# Manager\n\nYou are a test manager agent.\n"

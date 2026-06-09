@@ -15,10 +15,9 @@ def discover_subscriptions(project_path: Path, agent_name: str | None = None) ->
     """Build subscription keys by auto-detecting event sources.
 
     Resolution order:
-    1. .modastack/agent.yaml subscribe list (explicit override)
-    2. Unified agent.yaml services with events: true (native services auto-detected)
-    3. Agent pack defaults.yaml event_sources (legacy, auto-detected)
-    4. Fallback to project directory name
+    1. agent.yaml subscribe list (explicit override)
+    2. agent.yaml services with events: true (native services auto-detected)
+    3. Fallback to project directory name
     """
     agent_yaml = project_path / ".modastack" / "agent.yaml"
     if agent_yaml.exists():
@@ -30,7 +29,6 @@ def discover_subscriptions(project_path: Path, agent_name: str | None = None) ->
         except Exception:
             pass
 
-    # Unified agent.yaml: resolve native services with events: true
     from modastack.config import Config
     cfg = Config.load(project_path, agent_name=agent_name)
     if cfg.event_services:
@@ -42,34 +40,7 @@ def discover_subscriptions(project_path: Path, agent_name: str | None = None) ->
         if subs:
             return subs
 
-    event_sources = _load_event_sources(agent_name, project_path)
-    if event_sources:
-        subs = []
-        for source in event_sources:
-            keys = _resolve_source(source, project_path)
-            subs.extend(keys)
-        if subs:
-            return subs
-
     return [project_path.name]
-
-
-def _load_event_sources(agent_name: str | None, project_path: Path | None = None) -> list[str]:
-    """Load the event_sources list from an agent pack's defaults.yaml."""
-    if not agent_name:
-        return []
-    from modastack.prompts.resolver import _resolve_agent_dir
-    agent_dir = _resolve_agent_dir(agent_name, project_path)
-    if not agent_dir:
-        return []
-    defaults = agent_dir / "defaults.yaml"
-    if not defaults.exists():
-        return []
-    try:
-        raw = yaml.safe_load(defaults.read_text()) or {}
-        return raw.get("event_sources", [])
-    except Exception:
-        return []
 
 
 def _resolve_source(source: str, project_path: Path) -> list[str]:

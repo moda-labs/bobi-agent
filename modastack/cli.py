@@ -91,7 +91,7 @@ def _migrate_global_config(project_path: Path) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
 
     global_config = global_dir / "config.yaml"
-    local_config = config_dir / "config.yaml"
+    local_config = config_dir / "agent.yaml"
     if global_config.exists() and not local_config.exists():
         shutil.copy2(global_config, local_config)
         click.echo(f"Migrated config from {global_config} → {local_config}")
@@ -100,7 +100,7 @@ def _migrate_global_config(project_path: Path) -> None:
     local_agents = config_dir / "agents"
     if global_agents.is_dir():
         for pack in global_agents.iterdir():
-            if pack.is_dir() and (pack / "defaults.yaml").exists():
+            if pack.is_dir() and (pack / "agent.yaml").exists():
                 dest = local_agents / pack.name
                 if not dest.exists():
                     shutil.copytree(pack, dest)
@@ -232,17 +232,7 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
     from modastack.config import Config as UnifiedConfig
     unified_cfg = UnifiedConfig.load(project_path, agent_name=agent_name)
 
-    role = config.get("role") or unified_cfg.entry_point
-    if not role and agent_name:
-        from modastack.prompts.resolver import _resolve_agent_dir
-        agent_dir = _resolve_agent_dir(agent_name, project_path)
-        if agent_dir:
-            defaults_path = agent_dir / "defaults.yaml"
-            if defaults_path.exists():
-                import yaml as _yaml
-                defaults = _yaml.safe_load(defaults_path.read_text()) or {}
-                role = defaults.get("role", "manager")
-    role = role or "manager"
+    role = config.get("role") or unified_cfg.entry_point or "manager"
 
     # Validate Venn services at startup
     venn_services = unified_cfg.venn_services
@@ -711,7 +701,7 @@ def slack_reply(text, workspace, channel, thread):
         cfg = Config.load(project_path)
         token = cfg.slack_bot_token
     if not token:
-        click.echo("No bot token configured (set slack.bot_token in .modastack/config.yaml)", err=True)
+        click.echo("No bot token configured (set slack.bot_token in .modastack/agent.yaml)", err=True)
         sys.exit(1)
 
     # The manager invokes this command through a shell, where newlines in the

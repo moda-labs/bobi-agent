@@ -82,7 +82,7 @@ def _check_local_config() -> CheckResult:
         return CheckResult("Project config", ok=True, detail=str(config_path))
     return CheckResult("Project config", ok=False,
                        detail=f"missing {config_path}",
-                       hint="Create .modastack/config.yaml with event_server, slack, and linear credentials")
+                       hint="Create .modastack/agent.yaml with entry_point, services, and credentials")
 
 
 def _check_workflows() -> CheckResult:

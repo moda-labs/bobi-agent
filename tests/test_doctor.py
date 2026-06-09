@@ -64,7 +64,7 @@ class TestCheckProjectConfig:
     def test_passes_when_exists(self, tmp_path):
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("event_server:\n  url: https://events.test\n")
+        (config_dir / "agent.yaml").write_text("entry_point: manager\nevent_server_url: https://events.test\n")
         with patch("modastack.sdk.get_project_root", return_value=tmp_path):
             from modastack.doctor import _check_local_config
             r = _check_local_config()

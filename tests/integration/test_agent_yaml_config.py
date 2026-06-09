@@ -1,8 +1,7 @@
 """Integration tests for unified agent.yaml config format.
 
 Verifies that the config system correctly loads agent.yaml with env var
-interpolation, service declarations, and backward compatibility with
-the legacy defaults.yaml + config.yaml split.
+interpolation, service declarations, and command monitors.
 """
 
 import os
@@ -71,25 +70,14 @@ class TestAgentYamlConfig:
         assert cfg.slack_bot_token == "xoxb-from-env-123"
         assert cfg.venn_api_key == "venn_env_456"
 
-    def test_legacy_format_still_works(self, tmp_path):
-        """Legacy defaults.yaml + config.yaml continues to load correctly."""
-        config_dir = tmp_path / ".modastack"
-        config_dir.mkdir()
-
-        # Legacy agent.yaml (just role, no entry_point or services)
-        (config_dir / "agent.yaml").write_text("role: manager\n")
-        (config_dir / "config.yaml").write_text(textwrap.dedent("""\
-            slack:
-              bot_token: xoxb-legacy-token
-            event_server:
-              url: https://events.example.com
-        """))
-
+    def test_no_agent_yaml_returns_empty_config(self, tmp_path):
+        """Missing agent.yaml returns a default empty Config."""
         from modastack.config import Config
         cfg = Config.load(tmp_path)
 
-        assert cfg.slack_bot_token == "xoxb-legacy-token"
-        assert cfg.event_server_url == "https://events.example.com"
+        assert cfg.entry_point == ""
+        assert cfg.services == []
+        assert cfg.slack_bot_token == ""
 
     def test_venn_services_vs_native(self, tmp_path):
         """Services property correctly separates native from Venn-backed."""

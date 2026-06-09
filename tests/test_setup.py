@@ -91,7 +91,7 @@ def test_setup_project_writes_file(tmp_path):
     output = setup_project(tmp_path)
 
     assert output.exists()
-    assert output.name == "config.yaml"
+    assert output.name == "agent.yaml"
     assert output.parent.name == ".modastack"
     content = output.read_text()
     assert "npm test" in content

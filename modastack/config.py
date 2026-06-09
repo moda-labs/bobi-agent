@@ -1,12 +1,12 @@
-"""Per-project configuration from agent.yaml / .modastack/config.yaml.
+"""Per-project configuration from agent.yaml.
 
 All config is scoped to a project directory — no global ~/.modastack/.
 Service credentials, event server URLs, and registry lists live alongside
 the project they belong to.
 
-agent.yaml is the unified config format — it replaces both the agent pack's
-defaults.yaml and .modastack/config.yaml. Secrets use ${ENV_VAR} references.
-The legacy formats are supported as fallbacks during migration.
+agent.yaml is the single config file for an agent pack. It defines the
+agent's roles, services, monitors, and credentials. Secrets use ${ENV_VAR}
+references resolved from the environment at load time.
 """
 
 import logging
@@ -42,7 +42,7 @@ def _load_yaml(path: Path) -> dict:
 
 
 def _project_config_path(project_path: Path) -> Path:
-    return project_path / ".modastack" / "config.yaml"
+    return project_path / ".modastack" / "agent.yaml"
 
 
 @dataclass
@@ -55,38 +55,33 @@ class ServiceConfig:
 
 @dataclass
 class Config:
-    """Per-project config, loaded from agent.yaml or legacy config files."""
+    """Per-project config from agent.yaml."""
 
-    # --- pack metadata (was in defaults.yaml) ---
     version: str = ""
     entry_point: str = ""
     chat: str = ""
     services: list[ServiceConfig] = field(default_factory=list)
 
-    # --- infrastructure ---
     event_server_url: str = ""
     registries: list[str] = field(default_factory=list)
 
-    # --- native integration credentials ---
     slack_bot_token: str = ""
     linear_api_key: str = ""
 
-    # --- venn ---
     venn_api_key: str = ""
 
-    # --- monitors ---
     monitors: list[dict] = field(default_factory=list)
 
     @classmethod
     def load(cls, project_path: Path, agent_name: str | None = None) -> "Config":
-        """Load config with fallback: agent.yaml → legacy defaults.yaml + config.yaml."""
+        """Load config from agent.yaml."""
         agent_yaml = _find_agent_yaml(project_path, agent_name)
-        if agent_yaml:
-            return cls._from_agent_yaml(agent_yaml)
-        return cls._from_legacy(project_path, agent_name)
+        if not agent_yaml:
+            return cls()
+        return cls._parse(agent_yaml)
 
     @classmethod
-    def _from_agent_yaml(cls, path: Path) -> "Config":
+    def _parse(cls, path: Path) -> "Config":
         raw = _interpolate_env(_load_yaml(path))
 
         services = []
@@ -121,27 +116,6 @@ class Config:
         )
 
     @classmethod
-    def _from_legacy(cls, project_path: Path, agent_name: str | None = None) -> "Config":
-        """Load from legacy .modastack/config.yaml + defaults.yaml."""
-        raw = _load_yaml(_project_config_path(project_path))
-        slack = raw.get("slack", {})
-        linear = raw.get("linear", {})
-        event_server = raw.get("event_server", {})
-
-        entry_point = ""
-        if agent_name:
-            defaults = _load_agent_defaults(project_path, agent_name)
-            entry_point = defaults.get("role", "")
-
-        return cls(
-            event_server_url=event_server.get("url", ""),
-            slack_bot_token=slack.get("bot_token", ""),
-            linear_api_key=linear.get("api_key", ""),
-            registries=raw.get("registries", []),
-            entry_point=entry_point,
-        )
-
-    @classmethod
     def from_file(cls, project_path: Path) -> "Config":
         return cls.load(project_path)
 
@@ -160,41 +134,19 @@ class Config:
         return [s for s in self.services if s.events]
 
 
-def _is_unified_agent_yaml(path: Path) -> bool:
-    """Check if an agent.yaml uses the new unified format (has services or version)."""
-    raw = _load_yaml(path)
-    return bool(raw.get("services") or raw.get("entry_point"))
-
-
 def _find_agent_yaml(project_path: Path, agent_name: str | None = None) -> Path | None:
-    """Find a unified-format agent.yaml: project override first, then agent pack.
-
-    Legacy .modastack/agent.yaml files (with just role/subscribe) are ignored —
-    those are handled by the legacy config path.
-    """
+    """Find agent.yaml: project override first, then agent pack."""
     project_override = project_path / ".modastack" / "agent.yaml"
-    if project_override.exists() and _is_unified_agent_yaml(project_override):
+    if project_override.exists():
         return project_override
 
     if agent_name:
         for base in [project_path / "agents", project_path / ".modastack" / "agents"]:
             candidate = base / agent_name / "agent.yaml"
-            if candidate.exists() and _is_unified_agent_yaml(candidate):
+            if candidate.exists():
                 return candidate
 
     return None
-
-
-def _load_agent_defaults(project_path: Path, agent_name: str) -> dict:
-    """Load legacy defaults.yaml from an agent pack."""
-    from modastack.prompts.resolver import _resolve_agent_dir
-    agent_dir = _resolve_agent_dir(agent_name, project_path)
-    if not agent_dir:
-        return {}
-    defaults = agent_dir / "defaults.yaml"
-    if not defaults.exists():
-        return {}
-    return yaml.safe_load(defaults.read_text()) or {}
 
 
 ProjectConfig = Config

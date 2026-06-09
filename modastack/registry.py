@@ -107,8 +107,8 @@ def _write_meta(project_path: Path, name: str, version: str, repo: str) -> None:
 
 
 def _read_remote_version(name: str, repo: str = DEFAULT_REPO) -> str | None:
-    """Fetch just defaults.yaml from GitHub to read the remote version."""
-    url = f"{GITHUB_RAW}/{repo}/main/agents/{name}/defaults.yaml"
+    """Fetch just agent.yaml from GitHub to read the remote version."""
+    url = f"{GITHUB_RAW}/{repo}/main/agents/{name}/agent.yaml"
     try:
         with _urlopen(url, timeout=5) as resp:
             data = yaml.safe_load(resp.read())
@@ -118,8 +118,8 @@ def _read_remote_version(name: str, repo: str = DEFAULT_REPO) -> str | None:
 
 
 def _read_local_version(project_path: Path, name: str) -> str | None:
-    """Read version from cached pack's defaults.yaml."""
-    defaults = _cache_dir(project_path) / name / "defaults.yaml"
+    """Read version from cached pack's agent.yaml."""
+    defaults = _cache_dir(project_path) / name / "agent.yaml"
     if not defaults.exists():
         return None
     try:
@@ -131,7 +131,7 @@ def _read_local_version(project_path: Path, name: str) -> str | None:
 
 def is_cached(project_path: Path, name: str) -> bool:
     """Check if a pack exists in the project cache."""
-    return (_cache_dir(project_path) / name / "defaults.yaml").exists()
+    return (_cache_dir(project_path) / name / "agent.yaml").exists()
 
 
 def check_update(project_path: Path, name: str, repo: str | None = None) -> tuple[str | None, str | None]:
@@ -252,7 +252,7 @@ def list_cached(project_path: Path) -> list[dict]:
         return []
     packs = []
     for d in sorted(cache.iterdir()):
-        if d.is_dir() and (d / "defaults.yaml").exists():
+        if d.is_dir() and (d / "agent.yaml").exists():
             meta = _read_meta(project_path, d.name)
             version = _read_local_version(project_path, d.name) or "unknown"
             packs.append({

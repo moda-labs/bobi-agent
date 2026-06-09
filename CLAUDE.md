@@ -76,7 +76,7 @@ webhook ingestion for GitHub, Linear, Slack, and any custom source.
 ```
 modastack/                        # Framework (Python package)
 ├── cli.py                        # Click CLI entrypoint
-├── config.py                     # Per-project config (.modastack/config.yaml)
+├── config.py                     # Per-project config (.modastack/agent.yaml)
 ├── session.py                    # Claude Code SDK session wrapper
 ├── subagent.py                   # Agent executor (blocking + detached)
 ├── sdk.py                        # Session registry, activity logging
@@ -116,7 +116,7 @@ skills/                           # Claude Code skill files
 agents/                           # Agent packs (portable agent definitions)
 ├── registry.yaml                 # Local pack index
 └── eng-org/                      # Engineering org agent pack (reference impl)
-    ├── defaults.yaml             # Pack metadata (entry role, event sources)
+    ├── agent.yaml                # Pack config (entry point, services, credentials)
     ├── agent.md                  # Shared base prompt for all roles
     ├── roles/                    # Role-specific prompts (folder format)
     │   ├── director/ROLE.md
@@ -131,7 +131,7 @@ agents/                           # Agent packs (portable agent definitions)
     │   ├── pr-feedback.yaml
     │   └── ...
     └── monitors/                 # Background checks
-        └── defaults.yaml
+        └── agent.yaml
 
 .modastack/                       # Per-project runtime state
 ├── sessions/                     # Agent session state
@@ -182,7 +182,7 @@ the variable context for downstream steps.
 
 ### Config
 
-All config is per-project in `.modastack/config.yaml` (not checked in).
+All config is per-project in `.modastack/agent.yaml` (not checked in).
 No global `~/.modastack/` directory — each project is fully self-contained.
 Credentials, event server URLs, and registries live alongside the project
 they belong to. Per-project overrides in `.modastack/` for roles, workflows,

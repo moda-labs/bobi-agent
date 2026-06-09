@@ -1,29 +1,10 @@
-"""Tests for per-project config loading from agent.yaml / .modastack/config.yaml."""
+"""Tests for per-project config loading from agent.yaml."""
 
 import os
 from pathlib import Path
 from textwrap import dedent
 
 from modastack.config import Config, ServiceConfig, load_deployment_state, save_deployment_state
-
-
-def test_loads_project_config(tmp_path):
-    config_dir = tmp_path / ".modastack"
-    config_dir.mkdir()
-    (config_dir / "config.yaml").write_text(dedent("""
-        event_server:
-          url: https://events.example.com
-        slack:
-          bot_token: xoxb-test
-        linear:
-          api_key: lin_api_test
-    """))
-
-    cfg = Config.load(tmp_path)
-
-    assert cfg.event_server_url == "https://events.example.com"
-    assert cfg.slack_bot_token == "xoxb-test"
-    assert cfg.linear_api_key == "lin_api_test"
 
 
 def test_defaults_when_no_config(tmp_path):
@@ -58,7 +39,7 @@ def test_deployment_state_missing_returns_empty(tmp_path):
     assert state == {}
 
 
-# --- Unified agent.yaml format ---
+# --- agent.yaml ---
 
 
 def test_loads_agent_yaml(tmp_path):
@@ -184,18 +165,3 @@ def test_venn_services_property(tmp_path):
     venn = cfg.venn_services
     assert len(venn) == 2
     assert {s.name for s in venn} == {"email", "salesforce"}
-
-
-def test_legacy_agent_yaml_falls_back_to_legacy_config(tmp_path):
-    """Legacy .modastack/agent.yaml (with just role:) should not be treated
-    as the new unified format — config.yaml should still provide credentials."""
-    config_dir = tmp_path / ".modastack"
-    config_dir.mkdir()
-    (config_dir / "agent.yaml").write_text("role: manager\n")
-    (config_dir / "config.yaml").write_text(dedent("""
-        slack:
-          bot_token: xoxb-legacy
-    """))
-
-    cfg = Config.load(tmp_path)
-    assert cfg.slack_bot_token == "xoxb-legacy"
