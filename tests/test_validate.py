@@ -49,12 +49,14 @@ class TestCheckNativeCredentials:
         checks = _check_native_credentials(cfg)
         assert len(checks) == 1
         assert checks[0].ok
+        assert checks[0].detail == "native"
 
     def test_slack_missing_token(self):
         cfg = Config(services=[ServiceConfig(name="slack")])
         checks = _check_native_credentials(cfg)
         assert len(checks) == 1
         assert not checks[0].ok
+        assert "native" in checks[0].detail
         assert "missing" in checks[0].detail
 
     def test_linear_with_key(self):
@@ -65,6 +67,7 @@ class TestCheckNativeCredentials:
         checks = _check_native_credentials(cfg)
         assert len(checks) == 1
         assert checks[0].ok
+        assert checks[0].detail == "native"
 
     def test_linear_missing_key(self):
         cfg = Config(services=[ServiceConfig(name="linear")])
@@ -75,7 +78,7 @@ class TestCheckNativeCredentials:
         cfg = Config(services=[ServiceConfig(name="github")])
         checks = _check_native_credentials(cfg)
         assert checks[0].ok
-        assert "native" in checks[0].detail
+        assert checks[0].detail == "native"
 
     def test_no_native_services(self):
         cfg = Config(services=[ServiceConfig(name="email")])
@@ -111,8 +114,8 @@ class TestCheckVennServices:
         assert len(checks) == 2
         ok_names = {c.name for c in checks if c.ok}
         fail_names = {c.name for c in checks if not c.ok}
-        assert "venn (email)" in ok_names
-        assert "venn (salesforce)" in fail_names
+        assert "email" in ok_names
+        assert "salesforce" in fail_names
 
     def test_no_venn_key(self):
         cfg = Config(
@@ -122,7 +125,7 @@ class TestCheckVennServices:
         checks = _check_venn_services(cfg)
         assert len(checks) == 1
         assert not checks[0].ok
-        assert "no venn_api_key" in checks[0].detail
+        assert "no API key" in checks[0].detail
 
     def test_no_venn_services(self):
         cfg = Config(services=[ServiceConfig(name="github")])
@@ -137,12 +140,14 @@ class TestCheckMcpServers:
         checks = _check_mcp_servers(cfg, tmp_path)
         assert len(checks) == 1
         assert not checks[0].ok
+        assert checks[0].name == "bad"
         assert "missing url" in checks[0].detail
 
     def test_stdio_missing_command(self, tmp_path):
         cfg = Config(mcp_servers={"bad": {"type": "stdio"}})
         checks = _check_mcp_servers(cfg, tmp_path)
         assert not checks[0].ok
+        assert checks[0].name == "bad"
         assert "missing command" in checks[0].detail
 
     def test_no_mcp_servers(self, tmp_path):

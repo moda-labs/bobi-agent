@@ -92,18 +92,18 @@ def _check_native_credentials(cfg) -> list[CheckResult]:
             ok = bool(cfg.slack_bot_token)
             checks.append(CheckResult(
                 "slack", ok=ok,
-                detail="bot token configured" if ok else "missing bot token",
+                detail="native" if ok else "native — missing bot token",
                 hint="Set slack.bot_token in agent.yaml" if not ok else "",
             ))
         elif svc.name == "linear":
             ok = bool(cfg.linear_api_key)
             checks.append(CheckResult(
                 "linear", ok=ok,
-                detail="API key configured" if ok else "missing API key",
+                detail="native" if ok else "native — missing API key",
                 hint="Set linear.api_key in agent.yaml" if not ok else "",
             ))
         elif svc.name == "github":
-            checks.append(CheckResult("github", ok=True, detail="native (auto-detected)"))
+            checks.append(CheckResult("github", ok=True, detail="native"))
     return checks
 
 
@@ -115,8 +115,8 @@ def _check_venn_services(cfg) -> list[CheckResult]:
     if not cfg.venn_api_key:
         return [
             CheckResult(
-                f"venn ({s.name})", ok=False,
-                detail="no venn_api_key",
+                s.name, ok=False,
+                detail="venn — no API key",
                 hint="Set venn_api_key in agent.yaml or VENN_API_KEY in environment",
             )
             for s in venn_services
@@ -127,11 +127,11 @@ def _check_venn_services(cfg) -> list[CheckResult]:
 
     checks = []
     for name in result.connected:
-        checks.append(CheckResult(f"venn ({name})", ok=True, detail="connected"))
+        checks.append(CheckResult(name, ok=True, detail="venn"))
     for name in result.missing:
         checks.append(CheckResult(
-            f"venn ({name})", ok=False,
-            detail="not connected in Venn",
+            name, ok=False,
+            detail="venn — not connected",
             hint="Connect at venn.ai, then restart",
         ))
     return checks
@@ -148,16 +148,16 @@ def _check_mcp_servers(cfg, project_path: Path) -> list[CheckResult]:
         if server_type in ("http", "sse"):
             if not server_cfg.get("url"):
                 checks.append(CheckResult(
-                    f"mcp ({name})", ok=False,
-                    detail="missing url",
+                    name, ok=False,
+                    detail="mcp — missing url",
                     hint=f"Set mcp_servers.{name}.url in agent.yaml",
                 ))
                 continue
         elif server_type == "stdio":
             if not server_cfg.get("command"):
                 checks.append(CheckResult(
-                    f"mcp ({name})", ok=False,
-                    detail="missing command",
+                    name, ok=False,
+                    detail="mcp — missing command",
                     hint=f"Set mcp_servers.{name}.command in agent.yaml",
                 ))
                 continue
@@ -179,8 +179,8 @@ def _probe_mcp_server(
         return result
     except Exception as e:
         return CheckResult(
-            f"mcp ({name})", ok=False,
-            detail=f"probe failed: {e}",
+            name, ok=False,
+            detail=f"mcp — probe failed: {e}",
             hint="Check server URL/command and credentials",
         )
 
@@ -214,33 +214,32 @@ async def _async_probe_mcp(
             srv_status = server.get("status", "unknown")
             if srv_status == "connected":
                 tools = server.get("tools", [])
-                tool_count = len(tools)
                 return CheckResult(
-                    f"mcp ({name})", ok=True,
-                    detail=f"connected, {tool_count} tools",
+                    name, ok=True,
+                    detail=f"mcp, {len(tools)} tools",
                 )
             elif srv_status == "needs-auth":
                 return CheckResult(
-                    f"mcp ({name})", ok=False,
-                    detail="authentication required",
+                    name, ok=False,
+                    detail="mcp — authentication required",
                     hint="Check credentials in agent.yaml",
                 )
             elif srv_status == "failed":
                 error = server.get("error", "unknown error")
                 return CheckResult(
-                    f"mcp ({name})", ok=False,
-                    detail=f"connection failed: {error}",
+                    name, ok=False,
+                    detail=f"mcp — {error}",
                     hint="Check server URL/command and credentials",
                 )
             else:
                 return CheckResult(
-                    f"mcp ({name})", ok=False,
-                    detail=f"status: {srv_status}",
+                    name, ok=False,
+                    detail=f"mcp — {srv_status}",
                 )
 
         return CheckResult(
-            f"mcp ({name})", ok=False,
-            detail="server not found in MCP status",
+            name, ok=False,
+            detail="mcp — server not found",
         )
     finally:
         try:
