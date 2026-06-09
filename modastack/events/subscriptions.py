@@ -12,12 +12,13 @@ log = logging.getLogger(__name__)
 
 
 def discover_subscriptions(project_path: Path, agent_name: str | None = None) -> list[str]:
-    """Build subscription keys by auto-detecting event event_sources.
+    """Build subscription keys by auto-detecting event sources.
 
     Resolution order:
     1. .modastack/agent.yaml subscribe list (explicit override)
-    2. Agent pack defaults.yaml event_sources (auto-detected)
-    3. Fallback to project directory name
+    2. Unified agent.yaml services with events: true (native services auto-detected)
+    3. Agent pack defaults.yaml event_sources (legacy, auto-detected)
+    4. Fallback to project directory name
     """
     agent_yaml = project_path / ".modastack" / "agent.yaml"
     if agent_yaml.exists():
@@ -28,6 +29,18 @@ def discover_subscriptions(project_path: Path, agent_name: str | None = None) ->
                 return list(explicit)
         except Exception:
             pass
+
+    # Unified agent.yaml: resolve native services with events: true
+    from modastack.config import Config
+    cfg = Config.load(project_path, agent_name=agent_name)
+    if cfg.event_services:
+        subs = []
+        for svc in cfg.event_services:
+            if svc.name in cfg.native_services:
+                keys = _resolve_source(svc.name, project_path)
+                subs.extend(keys)
+        if subs:
+            return subs
 
     event_sources = _load_event_sources(agent_name, project_path)
     if event_sources:

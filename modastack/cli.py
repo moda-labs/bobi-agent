@@ -228,7 +228,11 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
     set_project_root(project_path)
 
     agent_name = config.get("agent")
-    role = config.get("role")
+
+    from modastack.config import Config as UnifiedConfig
+    unified_cfg = UnifiedConfig.load(project_path, agent_name=agent_name)
+
+    role = config.get("role") or unified_cfg.entry_point
     if not role and agent_name:
         from modastack.prompts.resolver import _resolve_agent_dir
         agent_dir = _resolve_agent_dir(agent_name, project_path)
@@ -239,8 +243,37 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
                 defaults = _yaml.safe_load(defaults_path.read_text()) or {}
                 role = defaults.get("role", "manager")
     role = role or "manager"
+
+    # Validate Venn services at startup
+    venn_services = unified_cfg.venn_services
+    if venn_services:
+        if not unified_cfg.venn_api_key:
+            click.echo(
+                f"Services {[s.name for s in venn_services]} require Venn. "
+                f"Set venn_api_key in agent.yaml or VENN_API_KEY in environment.",
+                err=True,
+            )
+            raise SystemExit(1)
+        from modastack.venn import check_services, format_service_report
+        required = [s.name for s in venn_services]
+        check = check_services(unified_cfg.venn_api_key, required)
+        native_in_config = [s.name for s in unified_cfg.services if s.name in unified_cfg.native_services]
+        click.echo(format_service_report(check, native_services=native_in_config))
+        if check.missing:
+            raise SystemExit(1)
+
     from modastack.events.subscriptions import discover_subscriptions
     subscribe = config.get("subscribe") or discover_subscriptions(project_path, agent_name)
+
+    # Add monitor event topics for non-native services with events enabled
+    monitor_topics = []
+    for svc in unified_cfg.event_services:
+        if svc.name not in unified_cfg.native_services:
+            for mon in unified_cfg.monitors:
+                if mon.get("event"):
+                    monitor_topics.append(mon["event"])
+    if monitor_topics:
+        subscribe = list(subscribe) + monitor_topics
 
     state_dir = project_path / ".modastack" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
