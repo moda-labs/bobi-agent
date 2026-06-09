@@ -74,9 +74,9 @@ class Config:
     monitors: list[dict] = field(default_factory=list)
 
     @classmethod
-    def load(cls, project_path: Path, agent_name: str | None = None) -> "Config":
-        """Load config from agent.yaml."""
-        agent_yaml = _find_agent_yaml(project_path, agent_name)
+    def load(cls, project_path: Path, **_kwargs) -> "Config":
+        """Load config from .modastack/agent.yaml."""
+        agent_yaml = _find_agent_yaml(project_path)
         if not agent_yaml:
             return cls()
         return cls._parse(agent_yaml)
@@ -142,18 +142,9 @@ class Config:
 
 
 def _find_agent_yaml(project_path: Path, agent_name: str | None = None) -> Path | None:
-    """Find agent.yaml: project override first, then agent pack."""
-    project_override = project_path / ".modastack" / "agent.yaml"
-    if project_override.exists():
-        return project_override
-
-    if agent_name:
-        for base in [project_path / "agents", project_path / ".modastack" / "agents"]:
-            candidate = base / agent_name / "agent.yaml"
-            if candidate.exists():
-                return candidate
-
-    return None
+    """Find agent.yaml in .modastack/ — the only runtime location."""
+    path = project_path / ".modastack" / "agent.yaml"
+    return path if path.exists() else None
 
 
 ProjectConfig = Config
