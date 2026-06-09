@@ -4,13 +4,33 @@ How a pack author creates a new agent and how a user sets it up.
 
 ## Pack author experience
 
-Three questions define an agent:
+Five questions define an agent:
 
-1. **What services does your agent need?** Pick from: email, github, salesforce, calendar, linear, slack, telegram, notion, jira, etc.
+1. **What is this agent going to do?** Describe the domain. "Manage the engineering SDLC", "Run sales outreach", "Monitor customer support tickets." This frames everything that follows.
 
-2. **How do users talk to the agent?** Choose: slack, telegram, or cli (none).
+2. **How many specialists do you need?** An agent pack is a team. A simple pack might be a single role. A complex one has a hierarchy — a director that triages, project leads that coordinate, and engineers that execute. Each role gets its own prompt, responsibilities, and scope. Define the roles and who the entry point is.
 
-3. **Which services should push events?** For each service from question 1, opt in to inbound events. This determines whether the agent reacts to changes in that service or only reads/writes on demand.
+3. **What services does the team need?** Pick from: email, github, salesforce, calendar, linear, slack, telegram, notion, jira, etc. These are the tools the agents will read from and write to.
+
+4. **How do users talk to the agent?** Choose: slack, telegram, or cli (none). This is the interactive channel — where humans give instructions and get updates.
+
+5. **Which services should push events to the agent?** For each service from question 3, opt in to inbound events. This determines whether the agent reacts to changes in that service (new email, PR opened, deal updated) or only reads/writes on demand.
+
+### Example: engineering SDLC agent
+
+> 1. **What does it do?** Manages the software development lifecycle — triages issues, coordinates project work, reviews PRs, monitors deploys.
+> 2. **Specialists?** Three roles: a director (triages incoming work, assigns to projects), project leads (coordinate within a project), and engineers (execute tasks). Director is the entry point.
+> 3. **Services?** GitHub (code + PRs), Linear (issue tracking), Slack (team comms).
+> 4. **Chat?** Slack — the team talks to the agent in a channel.
+> 5. **Events?** GitHub (react to PR opens, issue assignments), Linear (react to status changes), Slack (react to mentions and DMs).
+
+### Example: sales outreach agent
+
+> 1. **What does it do?** Monitors inbound leads, drafts personalized outreach, updates CRM.
+> 2. **Specialists?** Single role — an outreach agent. No hierarchy needed.
+> 3. **Services?** Salesforce (CRM), email (outreach), calendar (meetings).
+> 4. **Chat?** Slack — sales team reviews drafts in a channel.
+> 5. **Events?** Salesforce (new lead created), email (reply received).
 
 These answers produce a single `agent.yaml`:
 
@@ -18,6 +38,11 @@ These answers produce a single `agent.yaml`:
 version: "1.0.0"
 entry_point: director
 chat: slack
+
+roles:
+  - director
+  - project_lead
+  - engineer
 
 services:
   - name: github
