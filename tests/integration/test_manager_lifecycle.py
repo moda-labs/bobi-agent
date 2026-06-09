@@ -19,7 +19,7 @@ from .conftest import requires_claude
 class TestManagerStartStop:
 
     def test_start_creates_pid_file(self, modastack_env, cli_run):
-        result = cli_run("start", "software_team", timeout=15)
+        result = cli_run("start", timeout=15)
         assert result.returncode == 0, f"start failed: {result.stderr}"
 
         pid_file = modastack_env.state_dir / "manager.pid"
@@ -40,7 +40,7 @@ class TestManagerStartStop:
         pid_file.unlink(missing_ok=True)
 
     def test_start_writes_log(self, modastack_env, cli_run):
-        result = cli_run("start", "software_team", timeout=15)
+        result = cli_run("start", timeout=15)
         assert result.returncode == 0
 
         log_file = modastack_env.state_dir / "manager.log"
@@ -68,7 +68,7 @@ class TestManagerStartStop:
             pid_file.unlink(missing_ok=True)
 
     def test_stop_removes_pid_file(self, modastack_env, cli_run):
-        cli_run("start", "software_team", timeout=15)
+        cli_run("start", timeout=15)
 
         pid_file = modastack_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
@@ -99,7 +99,7 @@ class TestManagerStartStop:
         assert "not running" in result.stdout.lower()
 
     def test_start_rejects_double_start(self, modastack_env, cli_run):
-        cli_run("start", "software_team", timeout=15)
+        cli_run("start", timeout=15)
 
         pid_file = modastack_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
@@ -108,7 +108,7 @@ class TestManagerStartStop:
                 break
             time.sleep(0.5)
 
-        result = cli_run("start", "software_team", timeout=5)
+        result = cli_run("start", timeout=5)
         assert "already running" in result.stdout.lower()
 
         # Clean up
@@ -116,7 +116,7 @@ class TestManagerStartStop:
         _wait_for_exit_file(pid_file)
 
     def test_status_shows_running_after_start(self, modastack_env, cli_run):
-        cli_run("start", "software_team", timeout=15)
+        cli_run("start", timeout=15)
 
         pid_file = modastack_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
@@ -132,7 +132,7 @@ class TestManagerStartStop:
         _wait_for_exit_file(pid_file)
 
     def test_restart_swaps_pid(self, modastack_env, cli_run):
-        cli_run("start", "software_team", timeout=15)
+        cli_run("start", timeout=15)
 
         pid_file = modastack_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
@@ -176,7 +176,7 @@ class TestManagerMessaging:
         # Record log position before start so we only check new output
         log_pos = log_file.stat().st_size if log_file.exists() else 0
 
-        cli_run("start", "software_team", timeout=15)
+        cli_run("start", timeout=15)
 
         deadline = time.monotonic() + 60
         ready = False

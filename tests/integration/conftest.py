@@ -47,30 +47,30 @@ def modastack_env(tmp_path_factory):
               state_dir / "workflow" / "runs", state_dir / "logs"]:
         d.mkdir(parents=True)
 
-    (config_dir / "agent.yaml").write_text(yaml.dump({
+    # Build a local agent pack, then install it via modastack install
+    pack_dir = base / "software_team"
+    (pack_dir / "agent.yaml").write_text(yaml.dump({
+        "version": "1.0.0",
         "agent": "software_team",
         "entry_point": "manager",
         "services": [
             {"name": "github", "events": True},
         ],
     }))
-
-    # Create a minimal software_team agent pack in the project
-    pack_dir = config_dir / "agents" / "software_team"
-    for role_name in ["manager", "engineer", "project_lead"]:
+    for role_name, content in [
+        ("manager", "# Manager\n\nYou are a test manager agent.\n"),
+        ("engineer", "# Engineer\n\nYou are a test engineer agent. Complete tasks quickly.\n"),
+        ("project_lead", "# Project Lead\n\nYou are a test project lead agent.\n"),
+    ]:
         (pack_dir / "roles" / role_name).mkdir(parents=True)
-    (pack_dir / "agent.yaml").write_text(
-        "version: \"1.0.0\"\nentry_point: manager\nservices:\n  - name: github\n    events: true\n"
+        (pack_dir / "roles" / role_name / "ROLE.md").write_text(content)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "modastack.cli", "install", str(pack_dir)],
+        capture_output=True, text=True, timeout=30,
+        cwd=str(project_path),
     )
-    (pack_dir / "roles" / "manager" / "ROLE.md").write_text(
-        "# Manager\n\nYou are a test manager agent.\n"
-    )
-    (pack_dir / "roles" / "engineer" / "ROLE.md").write_text(
-        "# Engineer\n\nYou are a test engineer agent. Complete tasks quickly.\n"
-    )
-    (pack_dir / "roles" / "project_lead" / "ROLE.md").write_text(
-        "# Project Lead\n\nYou are a test project lead agent.\n"
-    )
+    assert result.returncode == 0, f"install failed: {result.stderr}"
 
     subprocess.run(
         ["git", "init"], cwd=str(project_path),

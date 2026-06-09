@@ -22,6 +22,33 @@ log = logging.getLogger(__name__)
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 
+def load_dotenv(project_path: Path) -> None:
+    """Load .modastack/.env into os.environ (existing vars take precedence)."""
+    env_file = project_path / ".modastack" / ".env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def find_required_env_vars(project_path: Path) -> list[str]:
+    """Scan .modastack/agent.yaml for ${VAR} references and return var names."""
+    agent_yaml = project_path / ".modastack" / "agent.yaml"
+    if not agent_yaml.exists():
+        return []
+    content = agent_yaml.read_text()
+    return _ENV_VAR_RE.findall(content)
+
+
 def _interpolate_env(value):
     """Recursively resolve ${ENV_VAR} references in strings, dicts, and lists."""
     if isinstance(value, str):

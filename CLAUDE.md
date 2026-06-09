@@ -21,10 +21,11 @@ pip install -e ".[dev]"
 ## Commands
 
 ```bash
-modastack start <agent>           # start an agent pack
+modastack install <path>          # install an agent pack from a local path or registry
+modastack start                   # start the installed agent
 modastack stop                    # stop the running instance
 modastack restart                 # stop and restart
-modastack start <agent> --fresh   # wipe session and start clean
+modastack start --fresh           # wipe session and start clean
 
 modastack agents launch -w W --role R --task T  # launch an agent
 modastack agents list             # list active agents
@@ -133,7 +134,14 @@ agents/                           # Agent packs (portable agent definitions)
     └── monitors/                 # Background checks
         └── agent.yaml
 
-.modastack/                       # Per-project runtime state
+.modastack/                       # Per-project installed agent + runtime state
+├── agent.yaml                    # Installed config (check-in-able, ${VAR} refs for secrets)
+├── .env                          # Secrets (gitignored, created by `modastack install`)
+├── .gitignore                    # Ignores .env
+├── roles/                        # Installed role prompts
+├── tools/                        # Installed tool guides
+├── workflows/                    # Installed + project workflows
+├── monitors/                     # Installed + project monitors
 ├── sessions/                     # Agent session state
 └── state/                        # PID files, logs, event server state
 ```
@@ -182,11 +190,18 @@ the variable context for downstream steps.
 
 ### Config
 
-All config is per-project in `.modastack/agent.yaml` (not checked in).
-No global `~/.modastack/` directory — each project is fully self-contained.
-Credentials, event server URLs, and registries live alongside the project
-they belong to. Per-project overrides in `.modastack/` for roles, workflows,
-monitors, and tools.
+All config is per-project. No global `~/.modastack/` directory — each
+project is fully self-contained.
+
+- `.modastack/agent.yaml` — check-in-able. Declares agent, roles,
+  services, entry point, monitors. Secrets use `${ENV_VAR}` references.
+- `.modastack/.env` — gitignored. Holds `SLACK_BOT_TOKEN`,
+  `LINEAR_API_KEY`, `VENN_API_KEY`, etc. Created by `modastack install`.
+- `.modastack/roles/`, `tools/`, `workflows/`, `monitors/` — installed
+  from the agent pack by `modastack install`.
+
+Per-project overrides in `.modastack/` for roles, workflows, monitors,
+and tools.
 
 ## Tests
 

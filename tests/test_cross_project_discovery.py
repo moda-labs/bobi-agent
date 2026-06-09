@@ -393,10 +393,8 @@ class TestNestedRuntimePrevention:
         from modastack.cli import main
 
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=child), \
-             patch("modastack.cli._resolve_agent_pack", return_value=child / ".modastack" / "agents" / "software_team"), \
-             patch("modastack.cli._list_agent_packs", return_value=[("software_team", "local")]):
-            result = runner.invoke(main, ["start", "software_team"])
+        with patch("modastack.cli._detect_project_root", return_value=child):
+            result = runner.invoke(main, ["start"])
 
         assert result.exit_code == 1
         assert "already running" in result.output.lower() or "already running" in (result.output + (result.stderr_bytes or b'').decode()).lower()

@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from textwrap import dedent
 
-from modastack.config import Config, ServiceConfig, load_deployment_state, save_deployment_state
+from modastack.config import Config, ServiceConfig, load_deployment_state, save_deployment_state, load_dotenv, find_required_env_vars
 
 
 def test_defaults_when_no_config(tmp_path):
@@ -194,6 +194,102 @@ def test_mcp_servers_env_var_interpolation(tmp_path, monkeypatch):
 
     cfg = Config.load(tmp_path)
     assert cfg.mcp_servers["crm"]["headers"]["Authorization"] == "Bearer secret-123"
+
+
+# --- .env loading ---
+
+
+def test_load_dotenv(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text("MY_TOKEN=secret123\nOTHER_KEY=abc\n")
+
+    monkeypatch.delenv("MY_TOKEN", raising=False)
+    monkeypatch.delenv("OTHER_KEY", raising=False)
+
+    load_dotenv(tmp_path)
+
+    assert os.environ["MY_TOKEN"] == "secret123"
+    assert os.environ["OTHER_KEY"] == "abc"
+
+    monkeypatch.delenv("MY_TOKEN")
+    monkeypatch.delenv("OTHER_KEY")
+
+
+def test_load_dotenv_does_not_override_existing(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text("MY_TOKEN=from-dotenv\n")
+
+    monkeypatch.setenv("MY_TOKEN", "from-env")
+    load_dotenv(tmp_path)
+
+    assert os.environ["MY_TOKEN"] == "from-env"
+
+
+def test_load_dotenv_skips_comments_and_blanks(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text("# comment\n\nVALID=yes\n")
+
+    monkeypatch.delenv("VALID", raising=False)
+    load_dotenv(tmp_path)
+    assert os.environ["VALID"] == "yes"
+    monkeypatch.delenv("VALID")
+
+
+def test_load_dotenv_strips_quotes(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text("SINGLE='quoted'\nDOUBLE=\"quoted\"\n")
+
+    monkeypatch.delenv("SINGLE", raising=False)
+    monkeypatch.delenv("DOUBLE", raising=False)
+    load_dotenv(tmp_path)
+    assert os.environ["SINGLE"] == "quoted"
+    assert os.environ["DOUBLE"] == "quoted"
+    monkeypatch.delenv("SINGLE")
+    monkeypatch.delenv("DOUBLE")
+
+
+def test_load_dotenv_missing_file(tmp_path):
+    load_dotenv(tmp_path)
+
+
+def test_find_required_env_vars(tmp_path):
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        slack:
+          bot_token: ${SLACK_BOT_TOKEN}
+        venn_api_key: ${VENN_API_KEY}
+    """))
+
+    vars = find_required_env_vars(tmp_path)
+    assert "SLACK_BOT_TOKEN" in vars
+    assert "VENN_API_KEY" in vars
+
+
+def test_find_required_env_vars_no_config(tmp_path):
+    assert find_required_env_vars(tmp_path) == []
+
+
+def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
+    """Full integration: .env values resolve through ${VAR} in agent.yaml."""
+    config_dir = tmp_path / ".modastack"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        entry_point: manager
+        slack:
+          bot_token: ${TEST_DOTENV_TOKEN}
+    """))
+    (config_dir / ".env").write_text("TEST_DOTENV_TOKEN=xoxb-from-dotenv\n")
+
+    monkeypatch.delenv("TEST_DOTENV_TOKEN", raising=False)
+    load_dotenv(tmp_path)
+    cfg = Config.load(tmp_path)
+    assert cfg.slack_bot_token == "xoxb-from-dotenv"
+    monkeypatch.delenv("TEST_DOTENV_TOKEN")
 
 
 def test_venn_services_property(tmp_path):
