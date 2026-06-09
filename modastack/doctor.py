@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 
 from modastack.browser import CheckResult
 
 
 def run_doctor() -> list[CheckResult]:
+    logging.getLogger("modastack").setLevel(logging.WARNING)
+
     results = []
 
     results.append(_check_claude_cli())
@@ -140,16 +143,15 @@ def _check_event_server() -> CheckResult:
 
     port = 8080
     try:
-        req = urllib.request.Request(f"http://localhost:{port}/health")
+        url = f"http://localhost:{port}"
+        req = urllib.request.Request(f"{url}/health")
         with urllib.request.urlopen(req, timeout=2) as resp:
             data = json.loads(resp.read())
-            mode = data.get("mode", "unknown")
-            deployments = data.get("deployments", 0)
             return CheckResult("Event server", ok=True,
-                               detail=f"running on port {port} (mode={mode}, deployments={deployments})")
+                               detail=f"{url}")
     except Exception:
         return CheckResult("Event server", ok=False,
-                           detail=f"not running on port {port}",
+                           detail="not running",
                            hint="`modastack event-server start` or `modastack start` will auto-launch")
 
 
