@@ -234,14 +234,6 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
 
     role = config.get("role") or unified_cfg.entry_point or "manager"
 
-    from modastack.validate import validate_config
-    validation = validate_config(project_path, agent_name=agent_name)
-    click.echo("Preflight checks:")
-    click.echo(validation.format())
-    if not validation.ok:
-        click.echo("\nStartup blocked — fix the issues above.", err=True)
-        raise SystemExit(1)
-
     from modastack.events.subscriptions import discover_subscriptions
     subscribe = config.get("subscribe") or discover_subscriptions(project_path, agent_name)
 
@@ -361,25 +353,23 @@ def start(agent_pack, foreground, fresh, subscribe):
                 for name, source in available:
                     click.echo(f"  {name:20s} [{source}]", err=True)
             raise SystemExit(1)
-    else:
-        # Found locally — background version check
-        import threading
-        def _check_update():
-            try:
-                from modastack.registry import check_update
-                local_v, remote_v = check_update(project_path, agent_pack)
-                if local_v and remote_v and remote_v != local_v:
-                    click.echo(
-                        f"  update        {agent_pack} v{local_v} installed, "
-                        f"v{remote_v} available — run: modastack agents update {agent_pack}"
-                    )
-            except Exception:
-                pass
-        threading.Thread(target=_check_update, daemon=True).start()
+
+    # Install pack into .modastack/ if not already there
+    _install_pack(resolved, project_path)
 
     agent_config["agent"] = agent_pack
     if subscribe:
         agent_config.setdefault("subscribe", []).extend(subscribe)
+
+    # Run preflight checks in foreground before forking
+    from modastack.validate import validate_config
+    validation = validate_config(project_path)
+    if validation.checks:
+        click.echo("Preflight:")
+        click.echo(validation.format())
+        if not validation.ok:
+            click.echo("\nStartup blocked — fix the issues above.", err=True)
+            raise SystemExit(1)
 
     state_dir = project_path / ".modastack" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -394,9 +384,7 @@ def start(agent_pack, foreground, fresh, subscribe):
         except (ProcessLookupError, ValueError):
             pid_path.unlink(missing_ok=True)
 
-    # Prevent nested runtimes: if an ancestor directory already has a
-    # running manager, starting a second one here would create an
-    # isolated registry that can't see its parent's agents.
+    # Prevent nested runtimes
     from modastack.sdk import find_runtime_root, _pid_file_alive
     ancestor = find_runtime_root(project_path.parent)
     if ancestor and ancestor != project_path:
@@ -412,8 +400,6 @@ def start(agent_pack, foreground, fresh, subscribe):
             err=True,
         )
         raise SystemExit(1)
-
-    _ensure_config()
 
     if fresh:
         _clear_manager_session(project_path)
@@ -444,9 +430,42 @@ def start(agent_pack, foreground, fresh, subscribe):
         _print_startup_info(project_path, proc.pid, log_file)
 
 
-def _ensure_config() -> None:
-    """Placeholder — registration happens at agent startup via _start_event_subscription."""
-    pass
+def _install_pack(pack_dir: Path, project_path: Path) -> None:
+    """Copy pack contents into .modastack/ for runtime use.
+
+    Copies roles, tools, workflows, monitors from the pack source into
+    .modastack/. Merges the pack's agent.yaml into .modastack/agent.yaml
+    (pack provides defaults, project override wins per-field).
+    """
+    import shutil
+    import yaml as _yaml
+
+    dest = project_path / ".modastack"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    for subdir in ["roles", "tools", "workflows", "monitors"]:
+        src = pack_dir / subdir
+        if src.is_dir():
+            dst = dest / subdir
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+
+    # Copy agent.md if present
+    agent_md = pack_dir / "agent.md"
+    if agent_md.exists():
+        shutil.copy2(agent_md, dest / "agent.md")
+
+    # Merge pack agent.yaml under project agent.yaml
+    pack_yaml = pack_dir / "agent.yaml"
+    project_yaml = dest / "agent.yaml"
+
+    pack_cfg = _yaml.safe_load(pack_yaml.read_text()) if pack_yaml.exists() else {}
+    project_cfg = _yaml.safe_load(project_yaml.read_text()) if project_yaml.exists() else {}
+
+    # Pack provides defaults, project overrides per-field
+    merged = {**pack_cfg, **project_cfg}
+    project_yaml.write_text(_yaml.dump(merged, default_flow_style=False, sort_keys=False))
 
 
 def _register_event_server(url: str, project_path: Path, rc: "ProjectConfig") -> tuple[str, str]:
