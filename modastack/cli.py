@@ -909,25 +909,20 @@ def status():
         click.echo("Not in a modastack-configured project. Run `modastack start` to set one up.")
         raise SystemExit(1)
 
-    mgr_name = f"moda-mgr-{project_path.name}"
-    session_id = load_session_id(mgr_name) or ""
-    session_short = session_id[:8] if session_id else ""
-
     if running:
-        mgr_label = f"running (session {session_short})" if session_short else "running"
+        click.echo(f"  Agent: running (pid {pid})")
     else:
-        mgr_label = "stopped"
-    click.echo(f"  Manager: {mgr_label}")
+        click.echo("  Agent: stopped")
 
     registry = get_registry()
-    active = [e for e in registry.list_active() if e.role == "engineer"]
+    active = registry.list_active()
     if not active:
-        click.echo("  Engineers: none active")
+        click.echo("  Sub-agents: none active")
         return
 
-    click.echo(f"  Engineers: {len(active)} active")
+    click.echo(f"  Sub-agents: {len(active)} active")
     for e in active:
-        click.echo(f"    {e.issue_id}/{e.phase} — {e.status}")
+        click.echo(f"    {e.name} ({e.role}) — {e.status}")
 
 
 @main.command()
