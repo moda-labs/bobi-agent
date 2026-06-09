@@ -224,7 +224,7 @@ describe("normalizeSlackPayload", () => {
 });
 
 describe("subscriptionKeysForEvent", () => {
-	it("returns repo key and type for github events", () => {
+	it("returns only repo key for github events (no type fallback)", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "github",
@@ -233,11 +233,10 @@ describe("subscriptionKeysForEvent", () => {
 			timestamp: "",
 			payload: {},
 		});
-		expect(keys).toContain("github:org/repo");
-		expect(keys).toContain("github.issues");
+		expect(keys).toEqual(["github:org/repo"]);
 	});
 
-	it("returns linear key and type for linear events", () => {
+	it("returns only linear key for linear events (no type fallback)", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "linear",
@@ -246,11 +245,10 @@ describe("subscriptionKeysForEvent", () => {
 			timestamp: "",
 			payload: {},
 		});
-		expect(keys).toContain("linear:PROJ");
-		expect(keys).toContain("linear.Issue.update");
+		expect(keys).toEqual(["linear:PROJ"]);
 	});
 
-	it("returns workspace key and type for slack events", () => {
+	it("returns only workspace key for slack events (no type fallback)", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "slack",
@@ -260,8 +258,7 @@ describe("subscriptionKeysForEvent", () => {
 			timestamp: "",
 			payload: {},
 		});
-		expect(keys).toContain("slack:T123");
-		expect(keys).toContain("slack.mention");
+		expect(keys).toEqual(["slack:T123"]);
 	});
 
 	it("returns type as fallback key when no source-specific routing fields", () => {

@@ -259,7 +259,8 @@ class MonitorScheduler:
         conditions = []
         for item in items:
             if isinstance(item, dict):
-                key = item.get("id") or hashlib.sha256(
+                raw_id = item.get("id")
+                key = str(raw_id) if raw_id is not None else hashlib.sha256(
                     json.dumps(item, sort_keys=True).encode()
                 ).hexdigest()[:12]
                 conditions.append(Condition(key=str(key), data=item))

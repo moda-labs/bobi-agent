@@ -82,7 +82,12 @@ class Config:
 
     @classmethod
     def _parse(cls, path: Path) -> "Config":
-        raw = _interpolate_env(_load_yaml(path))
+        raw_uninterpolated = _load_yaml(path)
+        # Preserve monitor commands verbatim — they may contain ${VAR}
+        # intended for shell expansion, not config interpolation.
+        monitors_raw = raw_uninterpolated.get("monitors", [])
+        raw = _interpolate_env(raw_uninterpolated)
+        raw["monitors"] = monitors_raw
 
         services = []
         for s in raw.get("services", []):

@@ -35,7 +35,7 @@ def discover_subscriptions(project_path: Path, agent_name: str | None = None) ->
         subs = []
         for svc in cfg.event_services:
             if svc.name in cfg.native_services:
-                keys = _resolve_source(svc.name, project_path)
+                keys = _resolve_source(svc.name, project_path, cfg)
                 subs.extend(keys)
         if subs:
             return subs
@@ -43,14 +43,14 @@ def discover_subscriptions(project_path: Path, agent_name: str | None = None) ->
     return [project_path.name]
 
 
-def _resolve_source(source: str, project_path: Path) -> list[str]:
+def _resolve_source(source: str, project_path: Path, cfg=None) -> list[str]:
     """Resolve a source name to concrete subscription keys."""
     if source == "github":
         return _detect_github(project_path)
     elif source == "slack":
-        return _detect_slack(project_path)
+        return _detect_slack(project_path, cfg)
     elif source == "linear":
-        return _detect_linear(project_path)
+        return _detect_linear(project_path, cfg)
     else:
         return [source]
 
@@ -87,10 +87,11 @@ def _parse_github_url(url: str) -> str:
     return ""
 
 
-def _detect_slack(project_path: Path) -> list[str]:
+def _detect_slack(project_path: Path, cfg=None) -> list[str]:
     """Detect slack:WORKSPACE_ID from the bot token via auth.test."""
-    from modastack.config import Config
-    cfg = Config.load(project_path)
+    if cfg is None:
+        from modastack.config import Config
+        cfg = Config.load(project_path)
     if not cfg.slack_bot_token:
         return []
     try:
@@ -108,10 +109,11 @@ def _detect_slack(project_path: Path) -> list[str]:
     return []
 
 
-def _detect_linear(project_path: Path) -> list[str]:
+def _detect_linear(project_path: Path, cfg=None) -> list[str]:
     """Detect linear:TEAM from the Linear API."""
-    from modastack.config import Config
-    cfg = Config.load(project_path)
+    if cfg is None:
+        from modastack.config import Config
+        cfg = Config.load(project_path)
     if not cfg.linear_api_key:
         return []
     try:
