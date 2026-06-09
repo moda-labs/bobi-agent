@@ -91,6 +91,16 @@ Date: {YYYY-MM-DD} · Requested by: {who}
 ## Actionable read
 {2–3 implications for positioning/content. Map, not plan.}
 
+## Source coverage
+{One or two lines that make the evidence base explicit, so the reader
+knows what backs this opinion. Give the source count broken down by
+platform (e.g. "Based on 9 sources: 4 Substack, 3 Medium, 2 HN
+threads"), then name what you could NOT reach for this topic and what
+that leaves thin (e.g. "Reddit unreachable, so first-hand r/dataengineering
+voices are absent; LinkedIn snippets only"). Per the web-research tool
+guide's reachability table. Be honest: a confident read built on a narrow
+base should say so here.}
+
 ## Sources
 {a link for every non-trivial claim above.}
 ```
@@ -102,8 +112,10 @@ Date: {YYYY-MM-DD} · Requested by: {who}
    `company::` findings separately so future searches surface them.
 2. **Deliver to the requester** using the context you were given:
    - Slack requester → post a tight readout in their thread
-     (`modastack slack-reply ...`): the TL;DR plus the single most useful
-     finding, with a link/path to the full brief.
+     (`modastack slack-reply ...`): the TL;DR, the single most useful
+     finding, and the **Source coverage line** (so the reader sees what
+     the opinion is built on and what was unreachable), with a link/path
+     to the full brief.
    - No requester surface → `modastack message` the manager once with the
      brief path and TL;DR.
    - No requester surface and no manager reachable → record the brief path

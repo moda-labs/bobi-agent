@@ -147,7 +147,10 @@ Whitespace: [an angle nobody is taking on this theme.]
 [strongest unclaimed angles, pulled together across themes.]
 
 ## Coverage check
-[which coverage areas were thin; any hit-list source that returned nothing.]
+[which coverage areas were thin; any hit-list source that returned nothing;
+and which sources backed the scan versus which were unreachable (per the
+web-research reachability table, e.g. Reddit unreachable, LinkedIn snippets
+only), so the reader knows the evidence base.]
 
 ## Changelog
 - YYYY-MM-DD — Map created; initial themes established.
