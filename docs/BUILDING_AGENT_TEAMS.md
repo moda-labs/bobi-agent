@@ -101,6 +101,30 @@ Two kinds:
   short-lived agent to decide whether to fire. Costs an LLM call per
   interval; use when diffable JSON isn't available.
 
+## Tool guides: function vs. policy
+
+`tools/*.md` loads fully into every role's prompt, so it should carry
+**policy** — how this team uses a service: thread discipline, voice,
+attribution, escalation, what counts as actionable. The rules a human
+lead would put in an onboarding doc.
+
+**Function** (command syntax, flags) belongs to surfaces that can't
+drift from the installed version:
+
+- `modastack <cmd> --help` — generated from code, always correct
+- `modastack skill modastack` — the full CLI reference
+- `venn tools describe` — live schemas from the gateway
+
+Never re-document modastack or venn CLI syntax in a tool guide — name
+the command and let agents pull syntax from those surfaces.
+`tests/test_tool_guides.py` fails the build if a pack prompt references
+a modastack command that doesn't exist (this drift reached main twice).
+
+The exception: services the framework doesn't wrap (a raw REST/GraphQL
+API the team calls with a `${VAR}` credential). The pack is the only
+owner of those mechanics, so document them in the tool guide — minimal
+and tested by hand. See `agents/eng-team/tools/linear.md`.
+
 ## Context files
 
 `context/*.md` is team-shipped reference content — rubrics, methodology,

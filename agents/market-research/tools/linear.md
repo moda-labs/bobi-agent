@@ -1,41 +1,57 @@
 # Linear
 
-Receive research requests from Linear and report results back, via the
-`modastack` CLI.
+Receive research requests from Linear and report results back, via
+Linear's GraphQL API. `$LINEAR_API_KEY` is in your environment (declared
+in agent.yaml, loaded from `.modastack/.env`).
+
+All calls are POSTs to one endpoint:
+
+```bash
+curl -s https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "<graphql>"}'
+```
 
 ## Get issue details
 
-```bash
-modastack linear issue <issue-id>
+`issue(id:)` accepts the human identifier (e.g. `MOD-166`) or UUID. This
+is how you read a research-request ticket into a brief:
+
+```graphql
+query { issue(id: "MOD-166") {
+  id identifier title description
+  state { name } assignee { name } labels { nodes { name } }
+} }
 ```
 
-Returns title, description, state, assignee, labels, and linked items.
-This is how you read a research-request ticket into a brief.
+Capture the returned `id` (UUID) — mutations below need it.
 
 ## Comment results back on an issue
 
-```bash
-modastack linear comment <issue-id> "message"
-```
+Post the research summary and a link/path to the full brief when a
+`linear-research` run completes:
 
-Post the research summary and a link to the full brief (or paste it) when
-a `linear-research` run completes.
+```graphql
+mutation { commentCreate(input: {
+  issueId: "<issue-uuid>", body: "<TL;DR + brief path>"
+}) { success } }
+```
 
 ## Update issue state
 
-```bash
-modastack linear move <issue-id> <state>
+Move a ticket to `In Progress` when you pick it up and `Done` (or
+`In Review`) once results are commented. States are per-team — look up
+the target state's UUID first:
+
+```graphql
+query { issue(id: "MOD-166") { team { states { nodes { id name } } } } }
 ```
 
-States: `Todo`, `In Progress`, `In Review`, `Done`, `Blocked`.
-Move a research ticket to `In Progress` when you pick it up and to `Done`
-(or `In Review`) when you've commented the results.
-
-## List issues
-
-```bash
-modastack linear issues --state "In Progress"
-modastack linear issues --assignee "@me"
+```graphql
+mutation { issueUpdate(id: "<issue-uuid>", input: {
+  stateId: "<state-uuid>"
+}) { success } }
 ```
 
 ## What counts as a research request

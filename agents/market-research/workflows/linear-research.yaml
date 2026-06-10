@@ -11,10 +11,10 @@ steps:
   - name: parse
     agent: topic_researcher
     prompt: |
-      Read the Linear issue referenced in your task
-      (`modastack linear issue <id>`). Extract the research question into a
-      clear brief, and move the issue to In Progress. Search the research
-      KB for prior work on it.
+      Read the Linear issue referenced in your task via the Linear API
+      (see tools/linear.md). Extract the research question into a clear
+      brief, and move the issue to In Progress. Search the research KB
+      for prior work on it.
     handoff:
       required: [research_brief]
       optional: [prior_brief]
@@ -43,8 +43,9 @@ steps:
     agent: topic_researcher
     prompt: |
       Comment the TL;DR and key findings on the Linear issue with a link
-      or path to the full brief (`modastack linear comment <id> ...`), and
-      move the issue to In Review (or Done if the ask is fully answered).
+      or path to the full brief via the Linear API (see tools/linear.md),
+      and move the issue to In Review (or Done if the ask is fully
+      answered).
     handoff:
       required: [commented]
     timeout: 600
