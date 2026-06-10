@@ -408,7 +408,12 @@ export async function handleSlackSend(
 		return { status: 400, body: { error: "no bot token for workspace" } };
 	}
 
-	const result = await sendSlackMessage(ws.bot_token, channel, text, body.thread_ts as string | undefined);
+	let result;
+	try {
+		result = await sendSlackMessage(ws.bot_token, channel, text, body.thread_ts as string | undefined);
+	} catch (err) {
+		return { status: 502, body: { ok: false, error: String(err) } };
+	}
 	if (!result.ok) {
 		return { status: 502, body: { ok: false, error: result.error } };
 	}
