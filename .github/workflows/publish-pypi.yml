@@ -177,7 +177,9 @@ jobs:
           cd "$PROD_DIR"
           modastack stop 2>/dev/null || true
           sleep 2
-          modastack start
+          # Strip RUNNER_TRACKING_ID or the Actions runner kills the
+          # daemonized director during post-job process cleanup.
+          env -u RUNNER_TRACKING_ID modastack start
           sleep 5
           test -f .modastack/state/manager.pid
           kill -0 "$(cat .modastack/state/manager.pid)"
