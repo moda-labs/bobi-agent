@@ -631,6 +631,27 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     es_key = state.get("api_key", "")
     es_deployment = state.get("deployment_id", "")
 
+    def _register_with_retry(url: str, attempts: int = 3) -> tuple[str, str]:
+        last_err: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                dep, key = register(url, session_name, subscribe)
+                save_deployment_state(project_path, dep, key)
+                return dep, key
+            except Exception as e:
+                last_err = e
+                if attempt < attempts - 1:
+                    delay = 2 ** (attempt + 1)
+                    log.warning(
+                        "Event server registration failed (attempt %d/%d): %s — retrying in %ds",
+                        attempt + 1, attempts, e, delay,
+                    )
+                    time.sleep(delay)
+        raise RuntimeError(
+            f"Could not register with event server at {url} "
+            f"after {attempts} attempts: {last_err}"
+        ) from last_err
+
     if not es_url:
         es_port = 8080
         es_url = f"http://localhost:{es_port}"
@@ -639,7 +660,11 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             log.info("No event server configured — started local server on port %d", es_port)
         elif result == "connected":
             log.info("Connected to existing local event server on port %d", es_port)
-        es_deployment, es_key = register(es_url, session_name, subscribe)
+        es_deployment, es_key = _register_with_retry(es_url)
+    elif not (es_deployment and es_key):
+        # No saved deployment — register fresh rather than PUT to a
+        # guaranteed-400 empty deployment URL.
+        es_deployment, es_key = _register_with_retry(es_url)
     else:
         import json as _json, urllib.request
         try:
@@ -653,9 +678,10 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                 },
                 method="PUT",
             )
-            urllib.request.urlopen(req, timeout=5)
-        except Exception:
-            es_deployment, es_key = register(es_url, session_name, subscribe)
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as e:
+            log.info("Subscription update failed (%s) — re-registering", e)
+            es_deployment, es_key = _register_with_retry(es_url)
 
     client = EventServerClient(
         server_url=es_url,

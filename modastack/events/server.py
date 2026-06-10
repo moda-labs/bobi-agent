@@ -131,6 +131,6 @@ def register(base_url: str, name: str,
         data=data,
         headers={"Content-Type": "application/json", "User-Agent": "modastack"},
     )
-    with urllib.request.urlopen(req, timeout=5) as resp:
+    with urllib.request.urlopen(req, timeout=15) as resp:
         result = json.loads(resp.read())
     return result["deployment_id"], result["api_key"]
