@@ -42,6 +42,60 @@ def _resolve_tools(project: Path | None) -> str:
     return "\n\n".join(parts)
 
 
+def _first_line(path: Path) -> str:
+    """First non-empty line of a file, stripped of markdown heading marks."""
+    try:
+        for line in path.read_text().splitlines():
+            stripped = line.strip().lstrip("#").strip()
+            if stripped:
+                return stripped
+    except (OSError, UnicodeDecodeError):
+        pass
+    return ""
+
+
+def _resolve_context_index(project: Path | None) -> str:
+    """Index the installed .modastack/context/ files.
+
+    Context files are pack-shipped reference content agents read on
+    demand. Only the index goes into the prompt — never the contents.
+    """
+    if not project:
+        return ""
+    context_dir = project / ".modastack" / "context"
+    if not context_dir.is_dir():
+        return ""
+    lines = []
+    for f in sorted(context_dir.rglob("*")):
+        if f.is_file():
+            rel = f.relative_to(project).as_posix()
+            desc = _first_line(f)
+            lines.append(f"- `{rel}`" + (f" — {desc}" if desc else ""))
+    if not lines:
+        return ""
+    return (
+        "## Context files\n\n"
+        "Reference files shipped with this agent team. Read them when "
+        "relevant — they are not loaded automatically.\n\n"
+        + "\n".join(lines)
+    )
+
+
+def _resolve_workspace_note(project: Path | None) -> str:
+    """Point agents at the project workspace/ directory if it exists.
+
+    workspace/ holds user-owned domain files and agent work products.
+    What belongs there is defined by role prompts, not the framework.
+    """
+    if not project or not (project / "workspace").is_dir():
+        return ""
+    return (
+        "## Workspace\n\n"
+        "`workspace/` at the project root holds domain files and your "
+        "work products. Your role prompt defines what lives there."
+    )
+
+
 def resolve_agent_prompt(
     role: str,
     project_path: Path | str,
@@ -54,7 +108,8 @@ def resolve_agent_prompt(
       1. Base framework prompt
       2. Role prompt (folder or flat, project override or pack)
       3. Tools (service interaction guides from pack + project)
-      4. Interactive/non-interactive notice
+      4. Context file index + workspace note
+      5. Interactive/non-interactive notice
     """
     parts = [BASE_PATH.read_text()]
 
@@ -67,6 +122,11 @@ def resolve_agent_prompt(
     tools_section = _resolve_tools(project)
     if tools_section:
         parts.append(tools_section)
+
+    for section in (_resolve_context_index(project),
+                    _resolve_workspace_note(project)):
+        if section:
+            parts.append(section)
 
     if interactive:
         parts.append(

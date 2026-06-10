@@ -357,13 +357,15 @@ def _install_pack(pack_dir: Path, project_path: Path,
     dest = project_path / ".modastack"
     dest.mkdir(parents=True, exist_ok=True)
 
-    for subdir in ["roles", "tools", "workflows", "monitors"]:
+    for subdir in ["roles", "tools", "workflows", "monitors", "context"]:
         src = pack_dir / subdir
         if src.is_dir():
             dst = dest / subdir
             if dst.exists():
                 shutil.rmtree(dst)
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
+
+    _seed_workspace(pack_dir, project_path)
 
     # Copy agent.md if present
     agent_md = pack_dir / "agent.md"
@@ -381,6 +383,29 @@ def _install_pack(pack_dir: Path, project_path: Path,
     _write_install_manifest(dest, pack_dir, local_source)
 
 
+def _seed_workspace(pack_dir: Path, project_path: Path) -> None:
+    """Seed <project>/workspace/ from the pack's workspace/ templates.
+
+    Workspace files are user-owned domain content (context the user fills
+    in, directories agents write into). Unlike the frozen image, each file
+    is copied only if absent — reinstall never overwrites user edits.
+    """
+    import shutil
+
+    src = pack_dir / "workspace"
+    if not src.is_dir():
+        return
+    dest = project_path / "workspace"
+    for f in sorted(src.rglob("*")):
+        rel = f.relative_to(src)
+        target = dest / rel
+        if f.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, target)
+
+
 def _write_install_manifest(dest: Path, pack_dir: Path,
                             local_source: bool) -> None:
     """Record a hash of every installed file so doctor can flag drift.
@@ -392,7 +417,7 @@ def _write_install_manifest(dest: Path, pack_dir: Path,
     import json as _json
 
     files = {}
-    for subdir in ["roles", "tools", "workflows", "monitors"]:
+    for subdir in ["roles", "tools", "workflows", "monitors", "context"]:
         d = dest / subdir
         if d.is_dir():
             for f in sorted(d.rglob("*")):
@@ -424,8 +449,8 @@ def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
     entries = [".env", ".gitignore", "sessions/", "state/", "agents/",
                "install-manifest.json"]
     if local_source:
-        entries += ["roles/", "tools/", "workflows/", "monitors/", "agent.md",
-                    "agent.yaml"]
+        entries += ["roles/", "tools/", "workflows/", "monitors/", "context/",
+                    "agent.md", "agent.yaml"]
     gitignore = project_path / ".modastack" / ".gitignore"
     gitignore.write_text("\n".join(entries) + "\n")
 
@@ -486,12 +511,14 @@ def install(pack):
 
     installed = project_path / ".modastack"
     parts = []
-    for subdir in ["roles", "tools", "workflows", "monitors"]:
+    for subdir in ["roles", "tools", "workflows", "monitors", "context"]:
         d = installed / subdir
         if d.is_dir():
             items = [p.name for p in d.iterdir()]
             if items:
                 parts.append(f"  {subdir}: {', '.join(sorted(items))}")
+    if (pack_dir / "workspace").is_dir():
+        parts.append("  workspace: seeded to workspace/ (existing files kept)")
     if parts:
         click.echo("\n".join(parts))
 
