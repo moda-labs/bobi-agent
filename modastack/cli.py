@@ -345,12 +345,15 @@ def start(foreground, fresh, subscribe):
         _print_startup_info(project_path, proc.pid, log_file)
 
 
-def _install_pack(pack_dir: Path, project_path: Path) -> None:
+def _install_pack(pack_dir: Path, project_path: Path,
+                  local_source: bool = True) -> None:
     """Copy pack contents into .modastack/ for runtime use.
 
-    Copies roles, tools, workflows, monitors from the pack source into
-    .modastack/. Merges the pack's agent.yaml into .modastack/agent.yaml
-    (pack provides defaults, project override wins per-field).
+    The installed copy is a frozen runtime image: install regenerates it
+    verbatim from the pack source every time, including agent.yaml.
+    Machine- and project-specific variance enters through ${VAR}
+    references resolved from .modastack/.env, never by editing the
+    installed copy.
     """
     import shutil
     import yaml as _yaml
@@ -371,18 +374,46 @@ def _install_pack(pack_dir: Path, project_path: Path) -> None:
     if agent_md.exists():
         shutil.copy2(agent_md, dest / "agent.md")
 
-    # Merge pack agent.yaml under project agent.yaml
+    # agent.yaml is written verbatim from the pack — no merge with any
+    # existing installed copy, so reinstall is idempotent and clean.
     pack_yaml = pack_dir / "agent.yaml"
-    project_yaml = dest / "agent.yaml"
+    cfg = _yaml.safe_load(pack_yaml.read_text()) if pack_yaml.exists() else {}
+    cfg.setdefault("agent", pack_dir.name)
+    (dest / "agent.yaml").write_text(
+        _yaml.dump(cfg, default_flow_style=False, sort_keys=False))
 
-    pack_cfg = _yaml.safe_load(pack_yaml.read_text()) if pack_yaml.exists() else {}
-    project_cfg = _yaml.safe_load(project_yaml.read_text()) if project_yaml.exists() else {}
+    _write_install_manifest(dest, pack_dir, local_source)
 
-    # Pack provides defaults, project overrides per-field
-    merged = {**pack_cfg, **project_cfg}
-    if "agent" not in merged:
-        merged["agent"] = pack_dir.name
-    project_yaml.write_text(_yaml.dump(merged, default_flow_style=False, sort_keys=False))
+
+def _write_install_manifest(dest: Path, pack_dir: Path,
+                            local_source: bool) -> None:
+    """Record a hash of every installed file so doctor can flag drift.
+
+    Edits to a frozen image are lost on the next install; the manifest
+    lets `modastack doctor` warn before that happens.
+    """
+    import hashlib
+    import json as _json
+
+    files = {}
+    for subdir in ["roles", "tools", "workflows", "monitors"]:
+        d = dest / subdir
+        if d.is_dir():
+            for f in sorted(d.rglob("*")):
+                if f.is_file() and "__pycache__" not in f.parts:
+                    files[f.relative_to(dest).as_posix()] = \
+                        hashlib.sha256(f.read_bytes()).hexdigest()
+    for name in ["agent.yaml", "agent.md"]:
+        f = dest / name
+        if f.exists():
+            files[name] = hashlib.sha256(f.read_bytes()).hexdigest()
+
+    (dest / "install-manifest.json").write_text(_json.dumps({
+        "agent": pack_dir.name,
+        "source": str(pack_dir),
+        "frozen": local_source,
+        "files": files,
+    }, indent=1))
 
 
 def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
@@ -394,9 +425,11 @@ def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
     of truth, so it stays check-in-able. Install owns this file and
     rewrites it each run so switching paths doesn't leave stale entries.
     """
-    entries = [".env", "sessions/", "state/", "agents/"]
+    entries = [".env", ".gitignore", "sessions/", "state/", "agents/",
+               "install-manifest.json"]
     if local_source:
-        entries += ["roles/", "tools/", "workflows/", "monitors/", "agent.md"]
+        entries += ["roles/", "tools/", "workflows/", "monitors/", "agent.md",
+                    "agent.yaml"]
     gitignore = project_path / ".modastack" / ".gitignore"
     gitignore.write_text("\n".join(entries) + "\n")
 
@@ -449,7 +482,7 @@ def install(pack):
         and not pack_dir.is_relative_to(dot_moda)
     )
 
-    _install_pack(pack_dir, project_path)
+    _install_pack(pack_dir, project_path, local_source)
     _write_install_gitignore(project_path, local_source)
 
     agent_name = pack_dir.name
