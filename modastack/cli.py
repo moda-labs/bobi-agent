@@ -21,33 +21,29 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     """Print a startup summary with environment info."""
     from .config import Config
 
+    cfg = Config.load(project_path)
+
     W = 16  # column width for labels
     lines = []
     lines.append(f"modastack v{__version__}")
     lines.append(f"  {'project':<{W}}{project_path.name} ({project_path})")
     lines.append(f"  {'pid':<{W}}{pid}")
 
-    agent_config = _load_agent_config(project_path)
-    agent_name = (agent_config or {}).get("agent")
-    if agent_name:
-        lines.append(f"  {'agent':<{W}}{agent_name}")
+    if cfg.agent:
+        lines.append(f"  {'agent':<{W}}{cfg.agent}")
 
-    try:
-        cfg = Config.load(project_path)
-        if cfg.event_server_url:
-            label = "remote" if not cfg.event_server_url.startswith("http://localhost") else "local"
-            lines.append(f"  {'event server':<{W}}{cfg.event_server_url} ({label})")
-        else:
-            lines.append(f"  {'event server':<{W}}not configured")
-    except Exception:
-        pass
+    if cfg.event_server_url:
+        label = "remote" if not cfg.event_server_url.startswith("http://localhost") else "local"
+        lines.append(f"  {'event server':<{W}}{cfg.event_server_url} ({label})")
+    else:
+        lines.append(f"  {'event server':<{W}}not configured")
 
     try:
         import logging as _lg
         _lg.getLogger("modastack.workflow").setLevel(_lg.WARNING)
         from modastack.workflow.triggers import WorkflowDispatcher
         dispatcher = WorkflowDispatcher()
-        dispatcher.load_all_workflows(project_path, agent_name=agent_name)
+        dispatcher.load_all_workflows(project_path, agent_name=cfg.agent)
         wf_names = sorted(set(wf.name for wf, _ in dispatcher.workflows))
         if wf_names:
             lines.append(f"  {'workflows':<{W}}{', '.join(wf_names)}")
@@ -56,7 +52,7 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
 
     try:
         from modastack.monitors.registry import MonitorRegistry
-        registry = MonitorRegistry.load(agent_name=agent_name, project_path=project_path)
+        registry = MonitorRegistry.load(agent_name=cfg.agent, project_path=project_path)
         mon_names = sorted(m.name for m in registry.all_monitors())
         if mon_names:
             lines.append(f"  {'monitors':<{W}}{', '.join(mon_names)}")
@@ -167,20 +163,9 @@ def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
     return [(name, source) for name, source in sorted(packs.items())]
 
 
-def _load_agent_config(project_path: Path, config_path: str | None = None) -> dict | None:
-    """Load agent config from .modastack/agent.yaml or explicit path."""
-    import yaml
-    if config_path:
-        p = Path(config_path)
-    else:
-        p = project_path / ".modastack" / "agent.yaml"
-    if not p.exists():
-        return None
-    return yaml.safe_load(p.read_text()) or {}
 
-
-def _run_from_agent_config(project_path: Path, config: dict) -> None:
-    """Start an agent from a config dict — the new modastack start path."""
+def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[str] | None = None) -> None:
+    """Start an agent from a Config object."""
     import atexit
     import signal
     import threading
@@ -188,21 +173,17 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
     from modastack.sdk import set_project_root
     set_project_root(project_path)
 
-    agent_name = config.get("agent")
-
-    from modastack.config import Config as UnifiedConfig
-    unified_cfg = UnifiedConfig.load(project_path, agent_name=agent_name)
-
-    role = config.get("role") or unified_cfg.entry_point or "manager"
+    agent_name = cfg.agent
+    role = cfg.entry_point or "manager"
 
     from modastack.events.subscriptions import discover_subscriptions
-    subscribe = config.get("subscribe") or discover_subscriptions(project_path, agent_name)
+    subscribe = list(extra_subscribe or []) or discover_subscriptions(project_path, agent_name)
 
     # Add monitor event topics for non-native services with events enabled
     monitor_topics = []
-    for svc in unified_cfg.event_services:
-        if svc.name not in unified_cfg.native_services:
-            for mon in unified_cfg.monitors:
+    for svc in cfg.event_services:
+        if svc.name not in cfg.native_services:
+            for mon in cfg.monitors:
                 if mon.get("event"):
                     monitor_topics.append(mon["event"])
     if monitor_topics:
@@ -239,7 +220,7 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
 
     has_monitors = (
         (project_path / ".modastack" / "monitors").is_dir()
-        or unified_cfg.monitors
+        or cfg.monitors
     )
     if has_monitors:
         from modastack.monitors.scheduler import MonitorScheduler
@@ -250,7 +231,7 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
     from modastack.prompts.resolver import build_startup_prompt
     from modastack.subagent import spawn_adhoc
 
-    task = config.get("task") or build_startup_prompt(role, project_path, agent_name=agent_name)
+    task = build_startup_prompt(role, project_path, agent_name=agent_name)
 
     log.info(f"Modastack running for {project_path.name}")
     spawn_adhoc(
@@ -259,7 +240,7 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
         name=f"moda-{role}-{project_path.name}",
         persistent=True,
         role=role,
-        mcp_servers=unified_cfg.mcp_servers or None,
+        mcp_servers=cfg.mcp_servers or None,
     )
 
 
@@ -278,10 +259,11 @@ def start(foreground, fresh, subscribe):
         modastack start --foreground
         modastack start --subscribe linear:MOD
     """
+    from modastack.config import Config
     project_path = _detect_project_root()
 
-    agent_config = _load_agent_config(project_path)
-    if not agent_config or not agent_config.get("agent"):
+    cfg = Config.load(project_path)
+    if not cfg.agent:
         click.echo("No agent installed. Run `modastack install <path>` first.", err=True)
         available = _list_agent_packs(project_path)
         if available:
@@ -290,8 +272,7 @@ def start(foreground, fresh, subscribe):
                 click.echo(f"  {name:20s} [{source}]", err=True)
         raise SystemExit(1)
 
-    if subscribe:
-        agent_config.setdefault("subscribe", []).extend(subscribe)
+    extra_subscribe = list(subscribe)
 
     # Run preflight checks in foreground before forking
     from modastack.validate import validate_config
@@ -340,7 +321,7 @@ def start(foreground, fresh, subscribe):
         root = logging.getLogger()
         root.handlers = [h for h in root.handlers
                          if isinstance(h, logging.FileHandler)]
-        _run_from_agent_config(project_path, agent_config)
+        _run_from_config(project_path, cfg, extra_subscribe=extra_subscribe)
     else:
         log_file = state_dir / "manager.log"
         env = os.environ.copy()
@@ -1505,21 +1486,12 @@ def monitor_list():
     Usage:
         modastack monitors list
     """
+    from .config import Config
     from .monitors.registry import MonitorRegistry
 
     project_path = _detect_project_root()
-    agent_config = _load_agent_config(project_path)
-    agent_name = (agent_config or {}).get("agent")
-    if not agent_name and project_path:
-        for search_dir in [project_path / "agents", project_path / ".modastack" / "agents"]:
-            if search_dir.is_dir():
-                for pack in search_dir.iterdir():
-                    if pack.is_dir() and (pack / "monitors").is_dir():
-                        agent_name = pack.name
-                        break
-            if agent_name:
-                break
-    registry = MonitorRegistry.load(agent_name=agent_name)
+    cfg = Config.load(project_path)
+    registry = MonitorRegistry.load(agent_name=cfg.agent, project_path=project_path)
     monitors = sorted(registry.all_monitors(), key=lambda m: (m.name, m.project))
     if not monitors:
         click.echo("No monitors found.")

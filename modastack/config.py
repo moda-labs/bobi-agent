@@ -84,6 +84,7 @@ class ServiceConfig:
 class Config:
     """Per-project config from agent.yaml."""
 
+    agent: str = ""
     version: str = ""
     entry_point: str = ""
     chat: str = ""
@@ -137,6 +138,7 @@ class Config:
             event_server_url = event_server.get("url", "")
 
         return cls(
+            agent=raw.get("agent", ""),
             version=str(raw.get("version", "")),
             entry_point=raw.get("entry_point", ""),
             chat=raw.get("chat", ""),
