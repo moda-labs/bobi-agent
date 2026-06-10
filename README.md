@@ -57,12 +57,12 @@ modastack ask "What's the status of issue #42?"
 modastack message "Skip the integration tests, just ship it"
 ```
 
-## Agent Packages
+## Agent Teams
 
-An agent package is everything an agent needs to operate in a domain: role prompts, workflows, monitors, tools, and extra context/content.
+An agent team is everything an agent needs to operate in a domain: role prompts, workflows, monitors, tools, and extra context/content.
 
 ```
-agents/eng-team/                   # ← browse the reference pack at agents/eng-team/
+agents/eng-team/                   # ← browse the reference team at agents/eng-team/
 ├── defaults.yaml           # entry role, event sources
 ├── roles/
 │   ├── director/ROLE.md    # engineering director
@@ -82,18 +82,18 @@ agents/eng-team/                   # ← browse the reference pack at agents/eng
 
 ### Creating Your Own Agents
 
-Run the following prompt in your chat assistant of choice (ChatGPT, Claude, etc) to launch a guided process that will help you generate your own agent package:
+Run the following prompt in your chat assistant of choice (ChatGPT, Claude, etc) to launch a guided process that will help you generate your own agent team:
 
 ```plaintext
 Read https://raw.githubusercontent.com/moda-labs/modastack/main/skills/create-agent.md and help me build a modastack agent
 ```
 
-### Agent Package Registry
+### Agent Team Registry
 
-Modastack maintains an agent package registry at [`agents/`](agents/). Install packages from our registry, or maintain your own private registry and add it to your local installation of Modastack:
+Modastack maintains an agent team registry at [`agents/`](agents/). Install teams from our registry, or maintain your own private registry and add it to your local installation of Modastack:
 
 ```bash
-modastack agents browse                     # see available packs from all registries
+modastack agents browse                     # see available teams from all registries
 modastack agents update eng-team             # install or update
 modastack agents add-registry myorg/agents  # add a private registry
 ```
@@ -102,9 +102,9 @@ If you think you have a general-purpose agent you'd like to share with the world
 
 ## Architecture
 
-The topology below is just one example — the [`eng-team`](agents/eng-team/) agent package for software teams. The event server and monitor scheduler, and agent messaging system are infrastructure that every deployment gets.
+The topology below is just one example — the [`eng-team`](agents/eng-team/) agent team for software teams. The event server and monitor scheduler, and agent messaging system are infrastructure that every deployment gets.
 
-The topology of agents, including their roles, relationships to each other, and events they are subscribed to is completely defined by the agent package.
+The topology of agents, including their roles, relationships to each other, and events they are subscribed to is completely defined by the agent team.
 ```
 ─ GitHub · Slack · Linear · any webhooks
                  │ 
@@ -117,7 +117,7 @@ The topology of agents, including their roles, relationships to each other, and 
     └─────────────┬─────────────┘
                   │ WebSocket
 ┌─────────────────┼──────────────────────────────────────┐
-│ Agent Package   │                                      │
+│ Agent Teamage   │                                      │
 │                 │          ┌──────────────────────┐    │
 │                 │          │      Monitors        │    │
 │                 │          │    (runs locally)    │    │
@@ -258,7 +258,7 @@ linear:
   api_key: lin_api_...
 ```
 
-Per-project overrides in `.modastack/` — custom roles, workflows, monitors, and tools that take priority over the agent pack defaults.
+Per-project overrides in `.modastack/` — custom roles, workflows, monitors, and tools that take priority over the agent team defaults.
 
 ## Development
 

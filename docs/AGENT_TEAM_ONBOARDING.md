@@ -1,14 +1,14 @@
-# Agent Pack Onboarding Design
+# Agent Team Onboarding Design
 
-How a pack author creates a new agent and how a user sets it up.
+How a team author creates a new agent and how a user sets it up.
 
-## Pack author experience
+## Team author experience
 
 Five questions define an agent:
 
 1. **What is this agent going to do?** Describe the domain in a sentence. "Manage the engineering SDLC", "Run sales outreach", "Monitor customer support tickets." This frames everything that follows.
 
-2. **What are the distinct jobs involved?** Break the purpose down into roles. Think about the different hats a human team would wear. A sales pipeline might need a researcher, a copywriter, and a CRM updater. An engineering org might need a director who triages, project leads who coordinate, and engineers who execute. A simple agent might just be one role. Each role gets its own prompt and responsibilities — this is how the agent pack scales from a solo operator to a full team.
+2. **What are the distinct jobs involved?** Break the purpose down into roles. Think about the different hats a human team would wear. A sales pipeline might need a researcher, a copywriter, and a CRM updater. An engineering org might need a director who triages, project leads who coordinate, and engineers who execute. A simple agent might just be one role. Each role gets its own prompt and responsibilities — this is how an agent team scales from a solo operator to a full organization.
 
 3. **How do you want to interact with it?** Choose:
    - **Slack** — chat with the agent in a channel, get updates, give instructions
@@ -45,7 +45,7 @@ Five questions define an agent:
 
 ### Monitor discovery: building the `command:` lines
 
-For any non-native service the user wants to proactively respond to (question 5), the pack builder needs to construct the actual `venn exec` command. This requires exploring the user's Venn account to discover server IDs, tool names, and argument schemas.
+For any non-native service the user wants to proactively respond to (question 5), the team builder needs to construct the actual `venn exec` command. This requires exploring the user's Venn account to discover server IDs, tool names, and argument schemas.
 
 The discovery flow:
 
@@ -68,9 +68,9 @@ venn tools execute -s work-gmail -t list_messages -a '{"maxResults": 5, "q": "is
 # → [{"id": "msg1", "subject": "...", ...}, ...]
 ```
 
-The pack builder iterates through each service that needs monitoring, discovers the right tool, tests it, and writes the `command:` line for the monitor. The key is finding a tool that returns a list of items with stable IDs — the monitor scheduler diffs by ID across runs, so the tool output needs to be diffable.
+The team builder iterates through each service that needs monitoring, discovers the right tool, tests it, and writes the `command:` line for the monitor. The key is finding a tool that returns a list of items with stable IDs — the monitor scheduler diffs by ID across runs, so the tool output needs to be diffable.
 
-This discovery step is why pack creation should be an interactive, agent-guided process rather than a static template. The available tools, server IDs, and argument schemas vary per user's Venn account.
+This discovery step is why team creation should be an interactive, agent-guided process rather than a static template. The available tools, server IDs, and argument schemas vary per user's Venn account.
 
 **Fallback: agent-based monitors.** Not every Venn tool returns clean, diffable JSON with stable IDs. Some return nested structures, paginated results, or data that needs interpretation to decide if it's actionable. In those cases, use a description-only monitor instead — the scheduler spawns a short-lived agent that calls the Venn CLI, interprets the results, and decides whether to fire an event. More expensive (uses an LLM call per interval), but handles any complexity:
 
@@ -131,10 +131,10 @@ Every service the agent uses connects through one of three mechanisms:
 GitHub, Slack, Linear — modastack has built-in webhook integrations. Each has its own auth:
 
 - **GitHub**: auto-detected from git remote. Reads/writes via `gh` CLI (user runs `gh auth login`). Webhooks via GitHub App install or manual setup.
-- **Slack**: bot token in agent.yaml. Handles workspace detection, webhooks, and replies.
-- **Linear**: API key in agent.yaml. Handles team detection, webhooks, and writes.
+- **Slack**: bot token referenced as `${SLACK_BOT_TOKEN}` in agent.yaml, value in `.modastack/.env`. Handles workspace detection, webhooks, and replies.
+- **Linear**: API key referenced as `${LINEAR_API_KEY}` in agent.yaml, value in `.modastack/.env`. Handles team detection, webhooks, and writes.
 
-Setup: paste the API key or token. Done.
+Setup: paste the API key or token when `modastack install` prompts. Done.
 
 ### OAuth services (via Venn)
 
@@ -166,6 +166,40 @@ mcp_servers:
 MCP servers are wired directly into the Claude Code session via the SDK. The agent gets their tools automatically. Supports HTTP, SSE, and stdio transports.
 
 Setup: provide the URL/command and credentials. Preflight validation probes each MCP server to verify it connects and lists tools.
+
+## Installing a team: `modastack install`
+
+Installing is distinct from authoring. A user with an existing team — from
+the repo, a teammate, or a registry — runs:
+
+```
+$ modastack install agents/eng-team
+
+Installed 'eng-team' into .modastack/
+  roles: director, engineer, project_lead
+  tools: github.md, linear.md, slack.md, venn.md
+  workflows: adhoc.yaml, issue-lifecycle.yaml, pr-feedback.yaml, ...
+
+This agent needs credentials:
+  SLACK_BOT_TOKEN: xoxb-...
+Credentials saved to .modastack/.env
+
+Run `modastack start` to launch.
+```
+
+Resolution order: local path first, then remote registries. Install:
+
+1. Copies the team's `roles/`, `tools/`, `workflows/`, `monitors/`, and
+   `agent.md` into `.modastack/` — the only runtime location.
+2. Merges the team's `agent.yaml` into `.modastack/agent.yaml` (team
+   provides defaults, existing project values win per-field).
+3. Scans the merged config for `${VAR}` references, prompts for any
+   missing values, and writes them to `.modastack/.env` (gitignored
+   automatically).
+
+`modastack start` takes no arguments — it reads `.modastack/agent.yaml`,
+loads `.env`, runs preflight, and launches. If no agent is installed it
+says so and lists available teams.
 
 ## Interactive onboarding: `modastack setup`
 
@@ -205,15 +239,21 @@ Connecting services...
   ✓ calendar                       venn
   ✓ salesforce                     venn
 
+  Credentials saved to .modastack/.env
+
 Building monitors for event sources...
   Exploring Venn tools for salesforce polling...
   ✓ salesforce/updated — venn exec salesforce query_records '{"object": "Lead", "limit": 20}'
   Exploring Venn tools for email polling...
   ✓ email/received — venn exec work-gmail list_messages '{"maxResults": 10, "q": "is:unread"}'
 
-Writing agent.yaml...
-Done. Run `modastack start sales-outreach` to launch.
+Writing .modastack/agent.yaml...
+Done. Run `modastack start` to launch.
 ```
+
+Setup ends with the agent installed — the answers produce the team and
+write the installed state in one pass, so no separate `install` step is
+needed.
 
 ### Preflight validation
 
@@ -234,13 +274,15 @@ Checks: entry point role exists, native credentials present, Venn services conne
 
 ## Config file design
 
-`agent.yaml` is the single source of truth for an agent pack.
+`agent.yaml` is the single source of truth for an agent team.
 
-**Pack ships** `agents/<name>/agent.yaml` with defaults — entry point, services, monitors. No secrets.
+**Team ships** `agents/<name>/agent.yaml` with defaults — entry point, services, monitors, and `${VAR}` references for any credentials it needs. No secrets.
 
-**User overrides** in `.modastack/agent.yaml` — merged on top, secrets via `${ENV_VAR}` references.
+**Install merges** it into `.modastack/agent.yaml` — team provides defaults, existing project values win per-field. This file is check-in-able: it declares the agent's full shape, including which secrets it needs, without containing any.
 
-Secrets are never hardcoded. The `${VAR}` references serve as documentation — glance at the config and know exactly what accounts and tokens are needed.
+**Secrets live in `.modastack/.env`** — gitignored, created by `modastack install`, which scans the merged config for `${VAR}` references and prompts for each missing value. `Config.load()` reads `.env` into the environment before resolving the config, so every command (start, doctor, monitors) sees resolved values through a single path.
+
+The `${VAR}` references serve as documentation — glance at the config and know exactly what accounts and tokens are needed. Preflight validation resolves them and fails with a pointed hint if any are missing.
 
 ## Inbound events architecture
 
@@ -279,4 +321,4 @@ venn tools describe -s gmail -t send_email  # get the schema
 venn tools execute -s gmail -t send_email -a '{"to": "...", "body": "..."}'
 ```
 
-Tool guides (`tools/venn.md`, `tools/github.md`) in the agent pack teach the agent how to use CLI tools. MCP server tools are discovered automatically by the Claude SDK — no guide needed.
+Tool guides (`tools/venn.md`, `tools/github.md`) in the agent team teach the agent how to use CLI tools. MCP server tools are discovered automatically by the Claude SDK — no guide needed.

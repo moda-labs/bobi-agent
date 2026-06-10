@@ -4,7 +4,7 @@
 
 ## What Modastack Is
 
-A thin, event-driven multi-agent orchestrator. Events come in (GitHub, Linear, Slack), a persistent coordinator agent reasons about them, and sub-agents get dispatched via declarative YAML workflows. Domain-agnostic — SDLC is the reference implementation, but the same framework runs content review, research, ops runbooks, or anything else. All domain logic lives in agent packs (`agents/<pack>/`).
+A thin, event-driven multi-agent orchestrator. Events come in (GitHub, Linear, Slack), a persistent coordinator agent reasons about them, and sub-agents get dispatched via declarative YAML workflows. Domain-agnostic — SDLC is the reference implementation, but the same framework runs content review, research, ops runbooks, or anything else. All domain logic lives in agent teams (`agents/<pack>/`).
 
 **Core design principle:** Do one thing well. Modastack is not a memory system, a tool registry, an integration platform, or an agent runtime. It's the coordination layer that sits on top of whatever agents and tools you already have.
 
@@ -42,7 +42,7 @@ Elixir-based orchestrator that polls Linear, maps issues to agent workspaces, re
 |---|---|---|
 | Runtime | Elixir/OTP (crash isolation) | Python + Claude SDK |
 | Events | Polls Linear (30s) | Webhooks + WebSocket, cursor-based replay |
-| Domain scope | SDLC only (hardcoded) | Any (agent packs) |
+| Domain scope | SDLC only (hardcoded) | Any (agent teams) |
 | Coordinator | None | Persistent, composable (base + domain overlay) |
 | Workflows | Fixed pipeline | Declarative YAML with branching + approval gates |
 | Communication | None | Slack (DMs, threads, multi-workspace) |
@@ -56,7 +56,7 @@ Multi-droid coordinator with specialized agents (Code, Review, Docs, Test, Knowl
 | | Factory.ai | Modastack |
 |---|---|---|
 | Knowledge | Persistent codebase index (Knowledge Droid) | Agents re-explore per task |
-| Domain scope | SDLC only | Any (agent packs) |
+| Domain scope | SDLC only | Any (agent teams) |
 | Model routing | Multi-model (best per task) | Claude-only |
 | Workflows | Opaque black box | Transparent YAML |
 | Deployment | SaaS | Self-hosted |
@@ -88,11 +88,11 @@ Multi-droid coordinator with specialized agents (Code, Review, Docs, Test, Knowl
 
 1. **Thin coordinator architecture** — Event bus + persistent coordinator + workflow dispatch. Nothing else. Doesn't try to be a memory system, tool registry, or agent runtime.
 
-2. **Persistent coordinator intelligence** — A composable LLM coordinator (domain-agnostic base + agent pack role overlay) that receives ALL events and makes routing decisions. No other self-hosted tool has this.
+2. **Persistent coordinator intelligence** — A composable LLM coordinator (domain-agnostic base + agent team role overlay) that receives ALL events and makes routing decisions. No other self-hosted tool has this.
 
 3. **Declarative YAML workflows** — Branching, approval gates, natural-language triggers. Readable by non-engineers, customizable without code. Symphony has fixed pipelines; Factory's are opaque; CrewAI/LangGraph require code.
 
-4. **Domain-agnostic framework, domain-specific agent packs** — Zero domain opinions in the framework. All domain logic in agent packs (roles, workflows, monitors). SDLC is a reference implementation, not hardcoded.
+4. **Domain-agnostic framework, domain-specific agent teams** — Zero domain opinions in the framework. All domain logic in agent teams (roles, workflows, monitors). SDLC is a reference implementation, not hardcoded.
 
 5. **Three-tier resolution** — Workflows, monitors, agent roles, and coordinator prompts: repo-specific → user-level → built-in defaults. No other system offers this.
 

@@ -1,4 +1,4 @@
-"""Agent pack registry — fetch, cache, and version-check agent packs.
+"""Agent team registry — fetch, cache, and version-check agent teams.
 
 Packs are fetched from a GitHub repo (default: moda-labs/moda-agents) and
 cached at <project>/.modastack/agents/<name>/. A .meta.json file tracks the
@@ -146,7 +146,7 @@ def check_update(project_path: Path, name: str, repo: str | None = None) -> tupl
 
 
 def fetch(project_path: Path, name: str, repo: str | None = None) -> Path:
-    """Download an agent pack from GitHub and install to project cache."""
+    """Download an agent team from GitHub and install to project cache."""
     if not repo:
         registries = _all_registries(project_path)
         for r in registries:
@@ -155,12 +155,12 @@ def fetch(project_path: Path, name: str, repo: str | None = None) -> Path:
                 break
         if not repo:
             raise RuntimeError(
-                f"Agent pack '{name}' not found in any registry. "
+                f"Agent team '{name}' not found in any registry. "
                 f"Searched: {', '.join(registries)}"
             )
 
     url = f"https://api.github.com/repos/{repo}/tarball/main"
-    log.info(f"Fetching agent pack '{name}' from {repo}")
+    log.info(f"Fetching agent team '{name}' from {repo}")
 
     try:
         with _urlopen(url, timeout=30) as resp:
@@ -192,7 +192,7 @@ def fetch(project_path: Path, name: str, repo: str | None = None) -> Path:
 
         if not pack_members:
             raise RuntimeError(
-                f"Agent pack '{name}' not found in {repo}. "
+                f"Agent team '{name}' not found in {repo}. "
                 f"Available packs can be listed with: modastack agents list --remote"
             )
 
@@ -215,7 +215,7 @@ def fetch(project_path: Path, name: str, repo: str | None = None) -> Path:
 
 
 def _list_remote_single(repo: str) -> list[dict]:
-    """List agent packs from a single registry."""
+    """List agent teams from a single registry."""
     url = f"{GITHUB_RAW}/{repo}/main/agents/registry.yaml"
     try:
         with _urlopen(url, timeout=5) as resp:
@@ -231,7 +231,7 @@ def _list_remote_single(repo: str) -> list[dict]:
 
 
 def list_remote(project_path: Path | None = None, repo: str | None = None) -> list[dict]:
-    """List agent packs available across all registries."""
+    """List agent teams available across all registries."""
     if repo:
         return _list_remote_single(repo)
     seen: set[str] = set()
@@ -246,7 +246,7 @@ def list_remote(project_path: Path | None = None, repo: str | None = None) -> li
 
 
 def list_cached(project_path: Path) -> list[dict]:
-    """List agent packs in the project cache with version info."""
+    """List agent teams in the project cache with version info."""
     cache = _cache_dir(project_path)
     if not cache.is_dir():
         return []

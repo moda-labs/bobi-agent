@@ -4,7 +4,7 @@ All config is scoped to a project directory — no global ~/.modastack/.
 Service credentials, event server URLs, and registry lists live alongside
 the project they belong to.
 
-agent.yaml is the single config file for an agent pack. It defines the
+agent.yaml is the single config file for an agent team. It defines the
 agent's roles, services, monitors, and credentials. Secrets use ${ENV_VAR}
 references resolved from the environment at load time.
 """

@@ -47,7 +47,7 @@ def modastack_env(tmp_path_factory):
               state_dir / "workflow" / "runs", state_dir / "logs"]:
         d.mkdir(parents=True)
 
-    # Build a local agent pack, then install it via modastack install
+    # Build a local agent team, then install it via modastack install
     pack_dir = base / "software_team"
     pack_dir.mkdir()
     (pack_dir / "agent.yaml").write_text(yaml.dump({

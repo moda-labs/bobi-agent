@@ -17,7 +17,7 @@ topology opinions.
 # Install
 uv tool install modastack
 
-# Start an agent pack
+# Start an agent team
 modastack start <pack-name>
 
 # Stop
@@ -107,7 +107,7 @@ FTS5 for keyword search and sqlite-vec for semantic search. An embedding
 sidecar (sentence-transformers) auto-starts on first use and stays alive
 between commands. `modastack stop` tears it down.
 
-Agent packs use KBs for domain-specific retrieval — index Google Docs,
+Agent teams use KBs for domain-specific retrieval — index Google Docs,
 Slack history, emails, or any text source into a named KB, then search
 it from agent tools.
 
@@ -134,7 +134,7 @@ Outputs (PRs, messages, reports, deployments)
 ```
 
 Key concepts:
-- **Agent pack**: portable bundle of roles, workflows, monitors, tools
+- **Agent team**: portable bundle of roles, workflows, monitors, tools
 - **Symmetric node**: any agent can subscribe to any topic — no hierarchy in framework
 - **Event server**: centralized pub/sub (topic-based)
 - **Workflow**: YAML DAG defining multi-step processes
@@ -170,7 +170,7 @@ registries:
 
 Resolution order (most specific wins):
 1. `.modastack/` in project
-2. Agent pack directory
+2. Agent team directory
 3. User cache (`~/.modastack/agents/`)
 
 ## Common tasks
@@ -178,7 +178,7 @@ Resolution order (most specific wins):
 ### Start a new project with modastack
 
 1. Install: `uv tool install modastack`
-2. Create or fetch an agent pack into `agents/<name>/`
+2. Create or fetch an agent team into `agents/<name>/`
 3. Configure `~/.modastack/config.yaml` with credentials
 4. Run: `modastack start <name>`
 

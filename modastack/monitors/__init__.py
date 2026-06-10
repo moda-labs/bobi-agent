@@ -9,7 +9,7 @@ like a webhook would.
 Two storage tiers, merged most-general to most-specific (later tiers
 override earlier ones by `name`):
 
-  1. Built-in defaults  — agent pack monitors/defaults.yaml (shipped, read-only)
+  1. Built-in defaults  — agent team monitors/defaults.yaml (shipped, read-only)
   2. Project-specific   — <project>/.modastack/monitors.yaml
 """
 

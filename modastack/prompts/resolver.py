@@ -1,4 +1,4 @@
-"""Resolve agent prompts: base + agent pack role + tools + project override."""
+"""Resolve agent prompts: base + agent team role + tools + project override."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _resolve_tools(agent_dir: Path | None, project: Path | None) -> str:
 
 
 def _resolve_agent_dir(agent_name: str | None, project_path: Path | None = None) -> Path | None:
-    """Find the agent pack directory.
+    """Find the agent team directory.
 
     Resolution order:
       1. <project>/agents/{name}             — project-level (checked in)

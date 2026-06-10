@@ -1,16 +1,16 @@
 """Framework prompt files — loaded at runtime for all agent sessions.
 
-Resolution order for agent packs:
+Resolution order for agent teams:
   1. <project>/agents/{name}           — project-level (checked in)
   2. <project>/.modastack/agents/{name} — local agents (overrides + cached)
 
 Resolution order for role prompts:
   1. <project>/.modastack/roles/{role}/ROLE.md — project override
-  2. Agent pack roles/{role}/ROLE.md           — from resolved agent pack
+  2. Agent team roles/{role}/ROLE.md           — from resolved agent team
   3. Built-in: modastack/prompts/agents/{role}/ROLE.md — framework-shipped
 
 Tools (loaded into all agent contexts from the pack):
-  - Agent pack tools/*.md — service interaction guides
+  - Agent team tools/*.md — service interaction guides
   - <project>/.modastack/tools/*.md — project-level tool overrides
 """
 

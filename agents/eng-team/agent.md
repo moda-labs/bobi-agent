@@ -1,6 +1,6 @@
 # eng-team
 
-Multi-repo agent pack where a director manages multiple software teams,
+Multi-repo agent team where a director manages multiple software teams,
 each running independently in their own repo. Also works for a single repo.
 
 ## Roles

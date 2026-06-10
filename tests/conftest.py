@@ -114,7 +114,7 @@ def modastack_install(tmp_path, monkeypatch):
     Sets sdk._project_root so all per-project path resolution points at tmp_path.
     No global ~/.modastack directory is created or referenced.
 
-    Creates a self-contained test agent pack so tests never depend on
+    Creates a self-contained test agent team so tests never depend on
     remote-fetched packs or the user's cache.
     """
     repo_path = tmp_path / "repo"

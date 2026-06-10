@@ -92,7 +92,7 @@ TEST 1.3: Config loads machine-wide settings
   "
   EXPECT: Config loads without error, fields are present
 
-TEST 1.4: Agent pack defaults.yaml loads correctly
+TEST 1.4: Agent team defaults.yaml loads correctly
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
@@ -102,7 +102,7 @@ TEST 1.4: Agent pack defaults.yaml loads correctly
   "
   EXPECT: Output contains "github-issues" and "PLAYBOOK"
 
-TEST 1.5: Agent pack registry.yaml lists packs
+TEST 1.5: Agent team registry.yaml lists packs
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
@@ -113,7 +113,7 @@ TEST 1.5: Agent pack registry.yaml lists packs
   "
   EXPECT: Output contains "content-team"
 
-TEST 1.6: Agent pack resolution finds local pack
+TEST 1.6: Agent team resolution finds local pack
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
@@ -123,7 +123,7 @@ TEST 1.6: Agent pack resolution finds local pack
   "
   EXPECT: Output contains "modastack-dogfood/agents/content-team"
 
-TEST 1.7: Agent pack resolution returns None for missing pack
+TEST 1.7: Agent team resolution returns None for missing pack
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
@@ -133,7 +133,7 @@ TEST 1.7: Agent pack resolution returns None for missing pack
   "
   EXPECT: Output is "None"
 
-TEST 1.8: List agent packs discovers local packs
+TEST 1.8: List agent teams discovers local packs
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
@@ -186,7 +186,7 @@ TEST 2.9: Restart while running
   WAIT: 3 seconds
   EXPECT: Output contains "Stopped" or "Stopping" AND "started"
 
-TEST 2.10: Start without agent pack shows usage
+TEST 2.10: Start without agent team shows usage
   ACTION: cd /tmp && modastack start 2>&1
   EXPECT: Exit code non-zero, output contains "Usage: modastack start <agent>"
 
@@ -301,7 +301,7 @@ TEST 3.19: Restart event server
 ### Section 4: Workflow System
 
 ```
-TEST 4.1: Workflow list shows agent pack workflows
+TEST 4.1: Workflow list shows agent team workflows
   ACTION: cd ~/dev/modastack-dogfood && modastack workflows list 2>&1
   EXPECT: Output contains "content-lifecycle" AND "research-task" AND "content-review"
 
@@ -309,8 +309,8 @@ TEST 4.2: Built-in workflows also loaded
   ACTION: cd ~/dev/modastack-dogfood && modastack workflows list 2>&1
   EXPECT: Output contains "adhoc"
 
-TEST 4.3: Agent pack workflows override built-in by name
-  ACTION: If dogfood agent pack has a workflow with same name as built-in, pack version wins
+TEST 4.3: Agent team workflows override built-in by name
+  ACTION: If dogfood agent team has a workflow with same name as built-in, pack version wins
   EXPECT: Verify via WorkflowDispatcher.format_workflow_menu() dedup logic
 
 TEST 4.4: Workflow YAML parsing
@@ -336,15 +336,15 @@ TEST 4.6: Workflow state directory exists
 ### Section 5: Role System
 
 ```
-TEST 5.1: Role list shows custom roles from agent pack
+TEST 5.1: Role list shows custom roles from agent team
   ACTION: cd ~/dev/modastack-dogfood && modastack roles list 2>&1
   EXPECT: Output contains "researcher" AND "editor" AND "fact-checker"
 
-TEST 5.2: Manager role from agent pack also available
+TEST 5.2: Manager role from agent team also available
   ACTION: cd ~/dev/modastack-dogfood && modastack roles list 2>&1
   EXPECT: Output contains "manager"
 
-TEST 5.3: Role files exist in agent pack
+TEST 5.3: Role files exist in agent team
   ACTION: ls ~/dev/modastack-dogfood/agents/content-team/roles/
   EXPECT: Contains researcher.md, editor.md, fact-checker.md, manager.md
 ```
@@ -512,7 +512,7 @@ TEST 10.3: Clean up
   EXPECT: Both stopped
 ```
 
-### Section 11: Agent Pack Registry and Resolution
+### Section 11: Agent Team Registry and Resolution
 
 ```
 TEST 11.1: Registry module loads without error
@@ -527,7 +527,7 @@ TEST 11.1: Registry module loads without error
   "
   EXPECT: Command runs without error, prints cache dir and any cached packs
 
-TEST 11.2: Agent pack resolution order (project > .modastack > cache)
+TEST 11.2: Agent team resolution order (project > .modastack > cache)
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
@@ -540,7 +540,7 @@ TEST 11.2: Agent pack resolution order (project > .modastack > cache)
 
 TEST 11.3: Agent browse command (remote registry)
   ACTION: cd ~/dev/modastack-dogfood && modastack agents browse 2>&1
-  EXPECT: Output contains "Available agent packs" or exits with registry info
+  EXPECT: Output contains "Available agent teams" or exits with registry info
 
 TEST 11.4: Multi-registry config in Config.registries
   ACTION: python3 -c "
@@ -552,7 +552,7 @@ TEST 11.4: Multi-registry config in Config.registries
   "
   EXPECT: registries is a list (may be empty)
 
-TEST 11.5: Prompt resolver builds startup prompt with agent pack
+TEST 11.5: Prompt resolver builds startup prompt with agent team
   ACTION: python3 -c "
     import sys; sys.path.insert(0, '$HOME/dev/modastack')
     from pathlib import Path
