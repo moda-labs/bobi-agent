@@ -32,10 +32,10 @@ jobs:
     name: Dogfood end-to-end
     needs: publish
     runs-on: self-hosted
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       DOGFOOD_REPO: moda-labs/modastack-dogfood
-      DOGFOOD_DIR: /home/ubuntu/dev/modastack-dogfood
+      PROD_DIR: /home/ubuntu/dev
     steps:
       - name: Extract version
         id: version
@@ -55,52 +55,57 @@ jobs:
           done
           exit 1
 
-      - name: Install release via uv
+      - name: Set up isolated smoke environment
+        # Validation runs in a throwaway dir with its own venv and a fresh
+        # dogfood clone. The production deployment in ~/dev (director +
+        # repos + uv tool install) is not touched until promotion below.
         run: |
-          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+          export PATH="$HOME/.local/bin:$PATH"
           VERSION="${{ steps.version.outputs.version }}"
-          uv tool install "modastack==$VERSION" --force --refresh
-          modastack --version
+          SMOKE="$RUNNER_TEMP/smoke"
+          rm -rf "$SMOKE" && mkdir -p "$SMOKE"
+          echo "SMOKE=$SMOKE" >> "$GITHUB_ENV"
+          uv venv "$SMOKE/venv"
+          uv pip install -p "$SMOKE/venv/bin/python" "modastack==$VERSION"
+          "$SMOKE/venv/bin/modastack" --version
+          git clone "https://github.com/$DOGFOOD_REPO" "$SMOKE/modastack-dogfood"
 
-      - name: Clone or update dogfood repo
-        run: |
-          if [ -d "$DOGFOOD_DIR" ]; then
-            cd "$DOGFOOD_DIR" && git checkout main && git pull --ff-only
-          else
-            mkdir -p ~/dev
-            git clone "https://github.com/$DOGFOOD_REPO" "$DOGFOOD_DIR"
-          fi
-
-      - name: Start modastack
+      - name: Install agent pack and start smoke instance
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
-          # Stop any ancestor manager (the parent ~/dev has a running instance)
-          cd "$(dirname "$DOGFOOD_DIR")" && modastack stop 2>/dev/null || true
-          cd "$DOGFOOD_DIR"
-          modastack stop 2>/dev/null || true
-          modastack start content-review
+          cd "$SMOKE/modastack-dogfood"
+          mkdir -p .modastack
+          # Only the Venn key carries over from prod. MODASTACK_EVENT_SERVER
+          # stays unset so the smoke instance runs an isolated local event
+          # server instead of the production Cloudflare Worker.
+          grep '^VENN_API_KEY=' "$PROD_DIR/modastack-dogfood/.modastack/.env" > .modastack/.env || true
+          "$SMOKE/venv/bin/modastack" install agents/content-review < /dev/null
+          "$SMOKE/venv/bin/modastack" start
 
           LOG=".modastack/state/manager.log"
-          POS=$(wc -c < "$LOG" 2>/dev/null || echo 0)
-          for i in $(seq 1 60); do
-            tail -c +$POS "$LOG" 2>/dev/null | grep -q "drain loop active\|Modastack running" && break
-            sleep 1
+          for i in $(seq 1 90); do
+            grep -q "Drain loop active\|Modastack running" "$LOG" 2>/dev/null && break
+            sleep 2
           done
           test -f .modastack/state/manager.pid
-          echo "Modastack ready"
+          echo "Smoke instance ready"
 
       - name: Create issue and assign to modastack
         id: issue
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
-          cd "$DOGFOOD_DIR"
+          cd "$SMOKE/modastack-dogfood"
           VERSION="${{ steps.version.outputs.version }}"
 
+          # Label is smoke-test ONLY (no trigger labels like 'agent') so the
+          # production director, which also subscribes to this repo via the
+          # cloud event server, ignores it. The smoke instance is driven by
+          # the direct webhook injection below, not by labels.
           ISSUE_URL=$(gh issue create \
             --repo "$DOGFOOD_REPO" \
             --title "[CI] Release smoke test v${VERSION}" \
             --body "Automated smoke test for modastack v${VERSION}. Write a one-line file, commit, and close this issue." \
-            --label "smoke-test,agent" \
+            --label "smoke-test" \
             --assignee "modastack")
           ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
           echo "issue_num=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
@@ -115,7 +120,7 @@ jobs:
               \"number\": $ISSUE_NUM,
               \"title\": \"[CI] Release smoke test v${VERSION}\",
               \"state\": \"open\",
-              \"labels\": [{\"name\": \"smoke-test\"}, {\"name\": \"agent\"}],
+              \"labels\": [{\"name\": \"smoke-test\"}],
               \"assignees\": [{\"login\": \"modastack\"}],
               \"user\": {\"login\": \"github-actions\"},
               \"body\": \"Automated smoke test. Write a one-line file, commit, and close this issue.\",
@@ -133,7 +138,7 @@ jobs:
             echo "Event delivered via webhook"
           else
             echo "Event server not reachable — delivering via CLI inbox"
-            modastack message "GitHub issue assigned: issue #${ISSUE_NUM} '[CI] Release smoke test v${VERSION}' in ${DOGFOOD_REPO} was assigned to modastack. Action: assigned. Labels: smoke-test, agent. Body: Automated smoke test. Write a one-line file, commit, and close this issue. URL: ${ISSUE_URL}"
+            "$SMOKE/venv/bin/modastack" message "GitHub issue assigned: issue #${ISSUE_NUM} '[CI] Release smoke test v${VERSION}' in ${DOGFOOD_REPO} was assigned to modastack. Action: assigned. Labels: smoke-test. Body: Automated smoke test. Write a one-line file, commit, and close this issue. URL: ${ISSUE_URL}"
           fi
 
       - name: Wait for modastack to close the issue
@@ -158,41 +163,35 @@ jobs:
           echo "=== SMOKE TEST FAILED ==="
           exit 1
 
-      - name: Restart modastack in all configured repos
+      - name: Promote release to production
+        # Runs only if the smoke test passed. This is the ONLY step that
+        # touches the production deployment: upgrade the uv tool and
+        # restart the director at ~/dev (it relaunches project leads).
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
           VERSION="${{ steps.version.outputs.version }}"
 
-          for config in $(find ~/dev -maxdepth 3 -path '*/.modastack/config.yaml' 2>/dev/null); do
-            REPO_DIR=$(dirname $(dirname "$config"))
-            REPO_NAME=$(basename "$REPO_DIR")
+          uv tool install "modastack==$VERSION" --force --refresh
+          modastack --version
 
-            # Skip repos without local.yaml (not bootstrapped)
-            if [ ! -f "$REPO_DIR/.modastack/local.yaml" ]; then
-              echo "[$REPO_NAME] skipped — no local.yaml"
-              continue
-            fi
-
-            echo "[$REPO_NAME] restarting with v$VERSION..."
-            cd "$REPO_DIR"
-
-            # Read agent name from the repo's agent.yaml (required since CLI refactor)
-            AGENT=$(python3 -c "import yaml; print(yaml.safe_load(open('$REPO_DIR/.modastack/agent.yaml')).get('agent',''))" 2>/dev/null)
-            if [ -z "$AGENT" ]; then
-              echo "[$REPO_NAME] skipped — no agent configured in agent.yaml"
-              continue
-            fi
-
-            modastack stop 2>/dev/null || true
-            sleep 1
-            modastack start "$AGENT"
-            echo "[$REPO_NAME] started with agent $AGENT"
-          done
+          cd "$PROD_DIR"
+          modastack stop 2>/dev/null || true
+          sleep 2
+          modastack start
+          sleep 5
+          test -f .modastack/state/manager.pid
+          kill -0 "$(cat .modastack/state/manager.pid)"
+          echo "Production director restarted on v$VERSION"
 
       - name: Cleanup smoke test
         if: always()
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+          if [ -d "$SMOKE/modastack-dogfood" ]; then
+            cd "$SMOKE/modastack-dogfood"
+            "$SMOKE/venv/bin/modastack" stop --force 2>/dev/null || true
+            "$SMOKE/venv/bin/modastack" event-server stop 2>/dev/null || true
+          fi
           ISSUE_NUM="${{ steps.issue.outputs.issue_num }}"
           if [ -n "$ISSUE_NUM" ]; then
             STATE=$(gh issue view "$ISSUE_NUM" --repo "$DOGFOOD_REPO" --json state --jq '.state' 2>/dev/null)
@@ -201,6 +200,7 @@ jobs:
                 --comment "Smoke test did not complete. Closing (cleanup)." 2>/dev/null || true
             fi
           fi
+          rm -rf "$SMOKE"
 
   deploy-event-server:
     name: Deploy event server
