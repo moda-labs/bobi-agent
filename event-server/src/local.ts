@@ -30,7 +30,7 @@ const subscriptionIndex = new Map<string, Set<string>>();
 
 const webhookSecret = process.env.MODASTACK_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.MODASTACK_ES_SLACK_SIGNING_SECRET || "";
-const slackWorkspaces = new Map<string, string>(); // workspace_id -> bot_token
+const slackWorkspaces = new Map<string, { bot_token: string; bot_id?: string }>(); // workspace_id -> token + bot_id
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -171,7 +171,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			if (!valid) return json(res, { error: "invalid signature" }, 401);
 		}
 
-		const result = normalizeSlackPayload(payload);
+		const teamId = (payload.team_id as string) || "";
+		const selfBotId = teamId ? slackWorkspaces.get(teamId)?.bot_id : undefined;
+
+		const result = normalizeSlackPayload(payload, selfBotId);
 
 		if (result.challenge !== undefined) {
 			return json(res, { challenge: result.challenge });
@@ -264,8 +267,22 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		if (!workspaceId || !botToken) {
 			return json(res, { error: "workspace_id and bot_token required" }, 400);
 		}
-		slackWorkspaces.set(workspaceId, botToken);
-		return json(res, { ok: true, workspace_id: workspaceId });
+
+		let botId: string | undefined;
+		try {
+			const resp = await fetch("https://slack.com/api/auth.test", {
+				headers: { Authorization: `Bearer ${botToken}` },
+			});
+			const authData = (await resp.json()) as Record<string, unknown>;
+			if (authData.ok) {
+				botId = authData.bot_id as string;
+			}
+		} catch {
+			// best-effort — self-loop filtering degrades gracefully without bot_id
+		}
+
+		slackWorkspaces.set(workspaceId, { bot_token: botToken, bot_id: botId });
+		return json(res, { ok: true, workspace_id: workspaceId, bot_id: botId });
 	}
 
 	// Slack send-through: POST /slack/send
@@ -280,7 +297,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			return json(res, { error: "channel and text required" }, 400);
 		}
 
-		const botToken = slackWorkspaces.get((data.workspace as string) || "");
+		const botToken = slackWorkspaces.get((data.workspace as string) || "")?.bot_token;
 		if (!botToken) {
 			return json(res, { error: "no bot token for workspace" }, 400);
 		}

@@ -1,5 +1,6 @@
-import { SELF } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
+import worker from "../src/index";
 
 describe("event-server", () => {
 	it("health check returns ok", async () => {
@@ -108,5 +109,75 @@ describe("event-server", () => {
 			body: JSON.stringify({ text: "hello" }),
 		});
 		expect(response.status).toBe(400);
+	});
+});
+
+describe("github webhook signature verification", () => {
+	const secret = "test-webhook-secret";
+
+	async function sign(body: string): Promise<string> {
+		const key = await crypto.subtle.importKey(
+			"raw",
+			new TextEncoder().encode(secret),
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+		const hex = Array.from(new Uint8Array(sig))
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join("");
+		return `sha256=${hex}`;
+	}
+
+	it("rejects github webhook with invalid signature when WEBHOOK_SECRET is set", async () => {
+		const payload = JSON.stringify({ action: "opened", repository: { full_name: "org/repo" } });
+		const envWithSecret = { ...env, WEBHOOK_SECRET: secret };
+		const response = await worker.fetch(
+			new Request("https://example.com/webhooks/github", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"x-github-event": "issues",
+					"x-hub-signature-256": "sha256=invalid",
+				},
+				body: payload,
+			}),
+			envWithSecret,
+			{} as ExecutionContext,
+		);
+		expect(response.status).toBe(401);
+	});
+
+	it("accepts github webhook with valid signature when WEBHOOK_SECRET is set", async () => {
+		const payload = JSON.stringify({ action: "opened", repository: { full_name: "org/repo" } });
+		const signature = await sign(payload);
+		const envWithSecret = { ...env, WEBHOOK_SECRET: secret };
+		const response = await worker.fetch(
+			new Request("https://example.com/webhooks/github", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"x-github-event": "issues",
+					"x-hub-signature-256": signature,
+				},
+				body: payload,
+			}),
+			envWithSecret,
+			{} as ExecutionContext,
+		);
+		expect(response.status).toBe(200);
+	});
+
+	it("accepts github webhook without signature when WEBHOOK_SECRET is not set", async () => {
+		const response = await SELF.fetch("https://example.com/webhooks/github", {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"x-github-event": "issues",
+			},
+			body: JSON.stringify({ action: "opened", repository: { full_name: "org/repo" } }),
+		});
+		expect(response.status).toBe(200);
 	});
 });
