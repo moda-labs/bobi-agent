@@ -18,6 +18,8 @@ my-team/
   tools/*.md        # how-to docs injected for the agents (CLI recipes)
   workflows/*.yaml  # step-based workflows (validate with `modastack workflows validate`)
   monitors/         # optional: defaults.yaml + custom check scripts
+  context/          # optional: reference files agents read on demand
+  workspace/        # optional: seed templates for user-owned domain files
 ```
 
 Ship it inside a project at `agents/<name>/`, or in a registry repo with
@@ -99,6 +101,31 @@ Two kinds:
   short-lived agent to decide whether to fire. Costs an LLM call per
   interval; use when diffable JSON isn't available.
 
+## Context files
+
+`context/*.md` is team-shipped reference content — rubrics, methodology,
+output format specs, worked examples. It installs frozen to
+`.modastack/context/` and agents see an index (path + first line) in
+their prompt, reading files on demand. Make the first line of each file
+a one-line description.
+
+Use `context/` instead of `tools/` when the content is reference
+material rather than a service guide: tools load fully into every
+role's prompt; context files cost nothing until an agent reads one.
+
+## Workspace seeds
+
+`workspace/` holds templates for user-owned domain content — the things
+only the user can fill in (positioning, source lists, watchlists) and
+the directories agents write work products into. Install copies it to
+`<project>/workspace/`, each file only if absent: reinstall never
+overwrites what users or agents wrote there.
+
+Reference these files from role prompts by installed path
+(`workspace/<file>`), and tell users in `agent.md` which files to fill
+in before starting the team. Filling in workspace files is not
+customization — the team source stays untouched and updatable.
+
 ## The frozen-image contract
 
 `modastack install` regenerates `.modastack/` verbatim from the team
@@ -108,8 +135,9 @@ source — every time, no merging. Authoring rules that follow from this:
   destroyed by the next install, and `modastack doctor` flags them
   against the install manifest.
 - All variance a deployment needs must be expressible as `${VAR}` in
-  agent.yaml + a value in `.modastack/.env`. If your team needs a knob,
-  make it an env reference.
+  agent.yaml + a value in `.modastack/.env`, or as a user-owned file
+  seeded from `workspace/`. If your team needs a knob, make it an env
+  reference; if it needs domain content, make it a workspace file.
 - Customization means editing the team source and reinstalling. For
   teams the user doesn't own, that means materializing a copy into their
   repo first (setup's customize branch / eject).
@@ -134,3 +162,6 @@ handle, and watch `.modastack/state/manager.log`.
 - `agents/content-review` (modastack-dogfood repo) — single-repo content
   pipeline: manager entry point, researcher/editor/fact-checker roles,
   github + email via Venn, command monitor for inbound email.
+- `agents/market-research` (modastack repo) — research manager entry
+  point with three workers; slack + linear, workspace seeds for domain
+  context and feed lists, agent monitors for weekly cadence + RSS.

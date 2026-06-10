@@ -189,17 +189,22 @@ Run `modastack start` to launch.
 
 Resolution order: local path first, then remote registries. Install:
 
-1. Copies the team's `roles/`, `tools/`, `workflows/`, `monitors/`, and
-   `agent.md` into `.modastack/` — the only runtime location.
+1. Copies the team's `roles/`, `tools/`, `workflows/`, `monitors/`,
+   `context/`, and `agent.md` into `.modastack/` — the only runtime
+   location.
 2. Writes the team's `agent.yaml` verbatim into `.modastack/agent.yaml`
    (plus the team name). The installed copy is a frozen image —
    regenerated wholesale on every install, never merged with prior
    state, never hand-edited. Per-machine variance enters only through
    `${VAR}` references resolved from `.env`.
-3. Scans the installed config for `${VAR}` references, prompts for any
+3. Seeds `<project>/workspace/` from the team's `workspace/` templates —
+   user-owned domain files, copied only if absent. Unlike the frozen
+   image, reinstall never overwrites them and they are not
+   manifest-tracked.
+4. Scans the installed config for `${VAR}` references, prompts for any
    missing values, and writes them to `.modastack/.env` (gitignored
    automatically).
-4. Records a hash of every installed file in `install-manifest.json` —
+5. Records a hash of every installed file in `install-manifest.json` —
    `modastack doctor` flags hand-edits to the frozen image before a
    reinstall would silently destroy them.
 
