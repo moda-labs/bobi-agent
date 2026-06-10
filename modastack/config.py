@@ -102,7 +102,8 @@ class Config:
 
     @classmethod
     def load(cls, project_path: Path, **_kwargs) -> "Config":
-        """Load config from .modastack/agent.yaml."""
+        """Load config from .modastack/agent.yaml, resolving .env first."""
+        load_dotenv(project_path)
         agent_yaml = _find_agent_yaml(project_path)
         if not agent_yaml:
             return cls()

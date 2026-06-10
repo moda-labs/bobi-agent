@@ -185,9 +185,6 @@ def _run_from_agent_config(project_path: Path, config: dict) -> None:
     import signal
     import threading
 
-    from modastack.config import load_dotenv
-    load_dotenv(project_path)
-
     from modastack.sdk import set_project_root
     set_project_root(project_path)
 
@@ -282,10 +279,6 @@ def start(foreground, fresh, subscribe):
         modastack start --subscribe linear:MOD
     """
     project_path = _detect_project_root()
-
-    # Load .env before reading config so ${VAR} references resolve
-    from modastack.config import load_dotenv
-    load_dotenv(project_path)
 
     agent_config = _load_agent_config(project_path)
     if not agent_config or not agent_config.get("agent"):
