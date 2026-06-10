@@ -8,7 +8,6 @@ from modastack.events.client import (
     EventServerClient,
     event_queue,
     format_event_for_manager,
-    start_event_client,
 )
 from modastack.events.drain import drain_loop
 from modastack.events.server import ensure_running, register
@@ -18,7 +17,6 @@ __all__ = [
     "EventServerClient",
     "event_queue",
     "format_event_for_manager",
-    "start_event_client",
     "drain_loop",
     "ensure_running",
     "register",

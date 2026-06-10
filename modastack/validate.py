@@ -42,17 +42,14 @@ class CheckResult:
     hint: str = ""
 
 
-def validate_config(
-    project_path: Path,
-    agent_name: str | None = None,
-) -> ValidationResult:
+def validate_config(project_path: Path) -> ValidationResult:
     """Run all startup validation checks."""
     from modastack.config import Config
 
-    cfg = Config.load(project_path, agent_name=agent_name)
+    cfg = Config.load(project_path)
     checks: list[CheckResult] = []
 
-    checks.append(_check_entry_point(cfg, project_path, agent_name))
+    checks.append(_check_entry_point(cfg, project_path))
     checks.extend(_check_native_credentials(cfg))
     checks.extend(_check_venn_services(cfg))
     checks.extend(_check_mcp_servers(cfg, project_path))
@@ -63,7 +60,7 @@ def validate_config(
     )
 
 
-def _check_entry_point(cfg, project_path: Path, agent_name: str | None) -> CheckResult:
+def _check_entry_point(cfg, project_path: Path) -> CheckResult:
     if not cfg.entry_point:
         return CheckResult("entry_point", ok=True, detail="not set, defaulting to manager")
 

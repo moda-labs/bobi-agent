@@ -42,6 +42,24 @@ def _needs_build(es_dir: Path) -> bool:
     return dist.stat().st_mtime < src_mtime
 
 
+def health(base_url: str, timeout: float = 2) -> dict | None:
+    """Probe an event server's /health endpoint.
+
+    Returns the parsed health payload when the server reports ok, else None.
+    The single definition of "what counts as healthy" — used by ensure_running,
+    `modastack stop`, `modastack event-server status`, and doctor.
+    """
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(f"{base_url}/health")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+        return data if data.get("status") == "ok" else None
+    except Exception:
+        return None
+
+
 def ensure_running(port: int, webhook_secret: str = "",
                    slack_signing_secret: str = "",
                    project_path: Path | None = None) -> str:
@@ -50,17 +68,9 @@ def ensure_running(port: int, webhook_secret: str = "",
     Returns "connected" if an existing server was found, "started" if
     a new one was launched.
     """
-    import urllib.request
-
-    try:
-        req = urllib.request.Request(f"http://localhost:{port}/health")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = json.loads(resp.read())
-            if data.get("status") == "ok":
-                log.info(f"Event server already running on port {port}")
-                return "connected"
-    except Exception:
-        pass
+    if health(f"http://localhost:{port}"):
+        log.info(f"Event server already running on port {port}")
+        return "connected"
 
     es_dir = _find_event_server_dir()
 
@@ -82,12 +92,11 @@ def ensure_running(port: int, webhook_secret: str = "",
             capture_output=True,
         )
 
-    from modastack.sdk import get_project_root
+    from modastack.sdk import get_project_root, state_dir
     rp = project_path or get_project_root()
     if rp is None:
         raise RuntimeError("project_path required for event server")
-    state = rp / ".modastack" / "state"
-    state.mkdir(parents=True, exist_ok=True)
+    state = state_dir(rp)
     log_file = state / "event-server.log"
     pid_file = state / "event-server.pid"
 
@@ -109,13 +118,9 @@ def ensure_running(port: int, webhook_secret: str = "",
 
     for _ in range(30):
         time.sleep(0.5)
-        try:
-            req = urllib.request.Request(f"http://localhost:{port}/health")
-            with urllib.request.urlopen(req, timeout=2):
-                log.info(f"Event server started on port {port} (pid {proc.pid})")
-                return "started"
-        except Exception:
-            continue
+        if health(f"http://localhost:{port}"):
+            log.info(f"Event server started on port {port} (pid {proc.pid})")
+            return "started"
     log.error("Event server failed to start within 15 seconds")
     return "failed"
 

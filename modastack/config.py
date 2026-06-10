@@ -22,21 +22,26 @@ log = logging.getLogger(__name__)
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 
-def load_dotenv(project_path: Path) -> None:
-    """Load .modastack/.env into os.environ (existing vars take precedence)."""
-    env_file = project_path / ".modastack" / ".env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text().splitlines():
+def parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a .env file into a dict (quotes stripped, comments skipped)."""
+    result: dict[str, str] = {}
+    if not path.exists():
+        return result
+    for line in path.read_text().splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
+        if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.strip().strip("'\"")
-        if key and key not in os.environ:
+        if key:
+            result[key] = value.strip().strip("'\"")
+    return result
+
+
+def load_dotenv(project_path: Path) -> None:
+    """Load .modastack/.env into os.environ (existing vars take precedence)."""
+    for key, value in parse_env_file(project_path / ".modastack" / ".env").items():
+        if key not in os.environ:
             os.environ[key] = value
 
 
@@ -102,11 +107,11 @@ class Config:
     monitors: list[dict] = field(default_factory=list)
 
     @classmethod
-    def load(cls, project_path: Path, **_kwargs) -> "Config":
+    def load(cls, project_path: Path) -> "Config":
         """Load config from .modastack/agent.yaml, resolving .env first."""
         load_dotenv(project_path)
-        agent_yaml = _find_agent_yaml(project_path)
-        if not agent_yaml:
+        agent_yaml = _project_config_path(project_path)
+        if not agent_yaml.exists():
             return cls()
         return cls._parse(agent_yaml)
 
@@ -152,10 +157,6 @@ class Config:
             monitors=raw.get("monitors", []),
         )
 
-    @classmethod
-    def from_file(cls, project_path: Path) -> "Config":
-        return cls.load(project_path)
-
     @property
     def native_services(self) -> list[str]:
         return ["github", "slack", "linear"]
@@ -169,15 +170,6 @@ class Config:
     def event_services(self) -> list[ServiceConfig]:
         """Services with events enabled."""
         return [s for s in self.services if s.events]
-
-
-def _find_agent_yaml(project_path: Path, agent_name: str | None = None) -> Path | None:
-    """Find agent.yaml in .modastack/ — the only runtime location."""
-    path = project_path / ".modastack" / "agent.yaml"
-    return path if path.exists() else None
-
-
-ProjectConfig = Config
 
 
 # --- Event server deployment state (ephemeral, auto-registered) ---

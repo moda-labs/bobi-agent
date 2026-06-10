@@ -71,20 +71,20 @@ class TestIsRunning:
     def test_stale_pid(self, state_dir):
         (state_dir / "embedding-sidecar.pid").write_text("999999")
         (state_dir / "embedding-sidecar.port").write_text("8000")
-        with patch.object(embedder, "_is_process_alive", return_value=False):
+        with patch("modastack.sdk.pid_alive", return_value=False):
             assert embedder.is_running() is False
 
     def test_alive_and_healthy(self, state_dir):
         (state_dir / "embedding-sidecar.pid").write_text("12345")
         (state_dir / "embedding-sidecar.port").write_text("8000")
-        with patch.object(embedder, "_is_process_alive", return_value=True), \
+        with patch("modastack.sdk.pid_alive", return_value=True), \
              patch.object(embedder, "_check_health", return_value=True):
             assert embedder.is_running() is True
 
     def test_alive_but_unhealthy(self, state_dir):
         (state_dir / "embedding-sidecar.pid").write_text("12345")
         (state_dir / "embedding-sidecar.port").write_text("8000")
-        with patch.object(embedder, "_is_process_alive", return_value=True), \
+        with patch("modastack.sdk.pid_alive", return_value=True), \
              patch.object(embedder, "_check_health", return_value=False):
             assert embedder.is_running() is False
 

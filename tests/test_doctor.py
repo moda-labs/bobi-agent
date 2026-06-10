@@ -35,29 +35,6 @@ class TestCheckCLI:
 
 # --- Project ---
 
-class TestCheckProject:
-
-    def test_passes_with_modastack_dir(self, tmp_path):
-        (tmp_path / ".modastack").mkdir()
-        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
-            from modastack.doctor import _check_project_config
-            r = _check_project_config()
-        assert r.ok
-
-    def test_passes_without_modastack_dir(self, tmp_path):
-        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
-            from modastack.doctor import _check_project_config
-            r = _check_project_config()
-        assert r.ok
-
-    def test_fails_when_no_root(self):
-        with patch("modastack.sdk.get_project_root", return_value=None):
-            from modastack.doctor import _check_project_config
-            r = _check_project_config()
-        assert not r.ok
-
-
-# --- Project config ---
 
 class TestCheckProjectConfig:
 

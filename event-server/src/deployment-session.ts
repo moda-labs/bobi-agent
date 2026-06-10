@@ -13,6 +13,19 @@ export class DeploymentSession extends DurableObject<Env> {
 	private deploymentId: string = "";
 	private nextSeq: number = 1;
 
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		// Load persisted identity/sequence once; the DO is single-threaded,
+		// so in-memory values are authoritative after this.
+		ctx.blockConcurrencyWhile(async () => {
+			this.deploymentId = ((await ctx.storage.get("deployment_id")) as string) || "";
+			const savedSeq = (await ctx.storage.get("next_seq")) as number | undefined;
+			if (savedSeq && savedSeq > this.nextSeq) {
+				this.nextSeq = savedSeq;
+			}
+		});
+	}
+
 	override async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
 
@@ -43,23 +56,15 @@ export class DeploymentSession extends DurableObject<Env> {
 	private async handleIncomingEvent(request: Request): Promise<Response> {
 		const event = (await request.json()) as NormalizedEvent;
 
-		if (!this.deploymentId) {
-			this.deploymentId = ((await this.ctx.storage.get("deployment_id")) as string) || "";
-		}
-
-		const savedSeq = (await this.ctx.storage.get("next_seq")) as number | undefined;
-		if (savedSeq && savedSeq > this.nextSeq) {
-			this.nextSeq = savedSeq;
-		}
-
 		const seq = this.nextSeq++;
-		await this.ctx.storage.put("next_seq", this.nextSeq);
-
 		const storedEvent: StoredEvent = { ...event, seq };
 
-		await this.env.EVENTS.put(`events:${this.deploymentId}:${seq}`, JSON.stringify(storedEvent), {
-			expirationTtl: EVENT_BUFFER_TTL,
-		});
+		await Promise.all([
+			this.ctx.storage.put("next_seq", this.nextSeq),
+			this.env.EVENTS.put(`events:${this.deploymentId}:${seq}`, JSON.stringify(storedEvent), {
+				expirationTtl: EVENT_BUFFER_TTL,
+			}),
+		]);
 
 		const message = JSON.stringify({ type: "event", data: storedEvent });
 		for (const ws of this.ctx.getWebSockets()) {
@@ -74,15 +79,6 @@ export class DeploymentSession extends DurableObject<Env> {
 	}
 
 	private async handleWebSocketUpgrade(request: Request): Promise<Response> {
-		if (!this.deploymentId) {
-			this.deploymentId = ((await this.ctx.storage.get("deployment_id")) as string) || "";
-		}
-
-		const savedSeq = (await this.ctx.storage.get("next_seq")) as number | undefined;
-		if (savedSeq) {
-			this.nextSeq = savedSeq;
-		}
-
 		const pair = new WebSocketPair();
 		const [client, server] = [pair[0], pair[1]];
 

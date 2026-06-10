@@ -23,7 +23,6 @@ import pytest
 from modastack.sdk import (
     SessionEntry,
     SessionRegistry,
-    _pid_alive,
     _pid_file_alive,
     _sessions_dir,
     find_runtime_root,
@@ -262,10 +261,10 @@ class TestRegistryCrossProject:
 
 
 # ---------------------------------------------------------------------------
-# Tests: list_agents merging in-memory + registry
+# Tests: list_agents registry discovery
 # ---------------------------------------------------------------------------
 
-class TestListAgentsMerge:
+class TestListAgentsRegistry:
     def test_includes_registry_agents(self, tree):
         parent, child = tree
         (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
@@ -289,64 +288,11 @@ class TestListAgentsMerge:
         from dataclasses import asdict
         (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
 
-        from modastack.subagent import list_agents, _running
-        _running.clear()
-        try:
-            agents = list_agents()
-            assert len(agents) >= 1
-            names = [a.get("name") for a in agents]
-            assert "eng-42-implement" in names
-            # Should be from registry source
-            registry_agent = next(a for a in agents if a["name"] == "eng-42-implement")
-            assert registry_agent["source"] == "registry"
-        finally:
-            _running.clear()
-
-    def test_deduplicates_in_memory_and_registry(self, tree):
-        """If an agent appears in both _running and registry, list it once."""
-        import asyncio
-        parent, _ = tree
-        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
-
-        set_project_root(parent)
-
-        # Create on-disk entry
-        session_dir = parent / ".modastack" / "sessions" / "eng-dup-1-implement"
-        session_dir.mkdir(parents=True)
-        entry = SessionEntry(
-            name="eng-dup-1-implement",
-            session_id="sess-dup",
-            role="engineer",
-            issue_id="DUP-1",
-            phase="implement",
-            status="running",
-            pid=os.getpid(),
-        )
-        from dataclasses import asdict
-        (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
-
-        # Also add to in-memory _running
-        from modastack.subagent import _running, RunningAgent, list_agents
-        loop = asyncio.new_event_loop()
-        future = loop.create_future()
-        task = asyncio.ensure_future(future, loop=loop)
-        _running["dup-1"] = RunningAgent(
-            issue_id="DUP-1",
-            phase="implement",
-            session_id="sess-dup",
-            task=task,
-            cwd="/tmp",
-        )
-
-        try:
-            agents = list_agents()
-            matching = [a for a in agents if a["issue_id"] == "DUP-1"]
-            assert len(matching) == 1
-            assert matching[0]["source"] == "in-process"
-        finally:
-            task.cancel()
-            loop.close()
-            _running.clear()
+        from modastack.subagent import list_agents
+        agents = list_agents()
+        assert len(agents) >= 1
+        names = [a.get("name") for a in agents]
+        assert "eng-42-implement" in names
 
     def test_excludes_managers_from_registry(self, tree):
         parent, _ = tree
@@ -366,14 +312,10 @@ class TestListAgentsMerge:
         from dataclasses import asdict
         (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
 
-        from modastack.subagent import list_agents, _running
-        _running.clear()
-        try:
-            agents = list_agents()
-            names = [a.get("name") for a in agents]
-            assert "moda-manager-dev" not in names
-        finally:
-            _running.clear()
+        from modastack.subagent import list_agents
+        agents = list_agents()
+        names = [a.get("name") for a in agents]
+        assert "moda-manager-dev" not in names
 
 
 # ---------------------------------------------------------------------------

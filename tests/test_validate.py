@@ -20,19 +20,19 @@ class TestCheckEntryPoint:
     def test_valid_role(self, tmp_path):
         (tmp_path / ".modastack" / "roles" / "director").mkdir(parents=True)
         cfg = Config(entry_point="director")
-        result = _check_entry_point(cfg, tmp_path, "test")
+        result = _check_entry_point(cfg, tmp_path)
         assert result.ok
 
     def test_missing_role(self, tmp_path):
         (tmp_path / ".modastack" / "roles" / "engineer").mkdir(parents=True)
         cfg = Config(entry_point="director")
-        result = _check_entry_point(cfg, tmp_path, "test")
+        result = _check_entry_point(cfg, tmp_path)
         assert not result.ok
         assert "not found" in result.detail
 
     def test_empty_entry_point_defaults(self, tmp_path):
         cfg = Config(entry_point="")
-        result = _check_entry_point(cfg, tmp_path, None)
+        result = _check_entry_point(cfg, tmp_path)
         assert result.ok
         assert "defaulting" in result.detail
 

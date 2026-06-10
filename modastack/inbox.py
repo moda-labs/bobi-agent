@@ -188,7 +188,7 @@ def deliver(
 
     Returns (success, response_text).
     """
-    from modastack.sdk import get_registry, _pid_alive
+    from modastack.sdk import get_registry, pid_alive
 
     entry = get_registry().get(to)
     if not entry:
@@ -197,7 +197,7 @@ def deliver(
     if not entry.inbox_port:
         return False, f"session '{to}' has no inbox"
 
-    if entry.pid and not _pid_alive(entry.pid):
+    if entry.pid and not pid_alive(entry.pid):
         return False, f"session '{to}' process is dead"
 
     payload = json.dumps({

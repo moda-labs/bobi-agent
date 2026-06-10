@@ -3,7 +3,6 @@
 For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 """
 
-import asyncio
 import tempfile
 import shutil
 from pathlib import Path
@@ -11,24 +10,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from modastack.sdk import SessionEntry
 from modastack.subagent import (
     AgentResult,
     _build_prompt,
     _parse_issue_number,
     _resolve_project_name,
     cancel_agent,
-    get_result,
-    is_running,
+    find_agent,
     list_agents,
-    _running,
 )
-
-
-@pytest.fixture(autouse=True)
-def clear_running():
-    _running.clear()
-    yield
-    _running.clear()
 
 
 @pytest.fixture
@@ -98,112 +89,83 @@ class TestResolveProjectName:
         assert _resolve_project_name(str(tmp_path)) == tmp_path.name
 
 
+def _mock_registry(entries):
+    registry = MagicMock()
+    by_name = {e.name: e for e in entries}
+    registry.get = MagicMock(side_effect=lambda name: by_name.get(name))
+    registry.list_all = MagicMock(return_value=entries)
+    registry.list_active = MagicMock(
+        return_value=[e for e in entries
+                      if e.status in ("starting", "running", "idle")])
+    return registry
+
+
 class TestAgentLifecycle:
-    def test_is_running_no_agent(self):
-        assert not is_running("AGD-99")
-
-    def test_get_result_no_agent(self):
-        assert get_result("AGD-99") is None
-
     def test_cancel_no_agent(self):
-        assert not cancel_agent("AGD-99")
+        with patch("modastack.subagent.get_registry",
+                   return_value=_mock_registry([])):
+            assert not cancel_agent("AGD-99")
+
+    def test_find_agent_none(self):
+        with patch("modastack.subagent.get_registry",
+                   return_value=_mock_registry([])):
+            assert find_agent("AGD-99") is None
 
     def test_list_agents_empty(self):
-        assert list_agents() == []
+        with patch("modastack.subagent.get_registry",
+                   return_value=_mock_registry([])):
+            assert list_agents() == []
 
-    def test_is_running_with_pending_task(self):
-        loop = asyncio.new_event_loop()
-        future = loop.create_future()
-        task = asyncio.ensure_future(future, loop=loop)
+    def test_find_agent_by_issue_id(self):
+        entry = SessionEntry(name="eng-agd-12-implement", issue_id="AGD-12",
+                             phase="implement", status="running", pid=0)
+        with patch("modastack.subagent.get_registry",
+                   return_value=_mock_registry([entry])):
+            found = find_agent("AGD-12")
+            assert found is not None
+            assert found.name == "eng-agd-12-implement"
 
-        from modastack.subagent import RunningAgent
-        _running["agd-12"] = RunningAgent(
-            issue_id="AGD-12",
-            phase="implement",
-            session_id="test-session",
-            task=task,
-            cwd="/tmp/test",
-        )
+    def test_find_agent_by_session_name(self):
+        entry = SessionEntry(name="eng-agd-12-implement", issue_id="AGD-12",
+                             phase="implement", status="running", pid=0)
+        with patch("modastack.subagent.get_registry",
+                   return_value=_mock_registry([entry])):
+            assert find_agent("eng-agd-12-implement") is entry
 
-        assert is_running("AGD-12")
-        assert list_agents()[0]["running"]
+    def test_find_agent_prefers_active(self):
+        done = SessionEntry(name="eng-agd-12-spec", issue_id="AGD-12",
+                            phase="spec", status="done", pid=0)
+        active = SessionEntry(name="eng-agd-12-implement", issue_id="AGD-12",
+                              phase="implement", status="running", pid=0)
+        with patch("modastack.subagent.get_registry",
+                   return_value=_mock_registry([done, active])):
+            assert find_agent("AGD-12") is active
 
-        task.cancel()
-        loop.close()
+    def test_list_agents_excludes_managers(self):
+        mgr = SessionEntry(name="moda-director-x", role="manager",
+                           status="running", pid=0)
+        eng = SessionEntry(name="eng-1-implement", issue_id="1",
+                           phase="implement", status="running", pid=0)
+        with patch("modastack.subagent.get_registry",
+                   return_value=_mock_registry([mgr, eng])):
+            names = [a["name"] for a in list_agents()]
+            assert names == ["eng-1-implement"]
 
-    def test_get_result_completed_task(self):
-        loop = asyncio.new_event_loop()
-        future = loop.create_future()
-        expected = AgentResult(
-            session_id="sess-1",
-            issue_id="AGD-12",
-            phase="spec",
-            success=True,
-            duration_ms=5000,
-            total_cost_usd=0.42,
-            num_turns=15,
-        )
-        future.set_result(expected)
-        task = asyncio.ensure_future(future, loop=loop)
+    def test_cancel_running_agent_updates_registry(self):
+        entry = SessionEntry(name="eng-agd-12-implement", issue_id="AGD-12",
+                             phase="implement", status="running", pid=0)
+        registry = _mock_registry([entry])
+        with patch("modastack.subagent.get_registry", return_value=registry):
+            assert cancel_agent("AGD-12")
+        registry.update.assert_called_once_with(
+            "eng-agd-12-implement", status="cancelled", pid=0)
 
-        from modastack.subagent import RunningAgent
-        _running["agd-12"] = RunningAgent(
-            issue_id="AGD-12",
-            phase="spec",
-            session_id="sess-1",
-            task=task,
-            cwd="/tmp/test",
-        )
-
-        result = get_result("AGD-12")
-        assert result is not None
-        assert result.success
-        assert result.total_cost_usd == 0.42
-        assert "agd-12" not in _running
-
-        loop.close()
-
-    def test_cancel_running_agent(self):
-        loop = asyncio.new_event_loop()
-        future = loop.create_future()
-        task = asyncio.ensure_future(future, loop=loop)
-
-        from modastack.subagent import RunningAgent
-        _running["agd-12"] = RunningAgent(
-            issue_id="AGD-12",
-            phase="implement",
-            session_id="test-session",
-            task=task,
-            cwd="/tmp/test",
-        )
-
-        assert cancel_agent("AGD-12")
-        assert "agd-12" not in _running
-        assert task.cancelled()
-
-        loop.close()
-
-    def test_get_result_failed_task(self):
-        loop = asyncio.new_event_loop()
-        future = loop.create_future()
-        future.set_exception(RuntimeError("SDK connection lost"))
-        task = asyncio.ensure_future(future, loop=loop)
-
-        from modastack.subagent import RunningAgent
-        _running["agd-12"] = RunningAgent(
-            issue_id="AGD-12",
-            phase="implement",
-            session_id="",
-            task=task,
-            cwd="/tmp/test",
-        )
-
-        result = get_result("AGD-12")
-        assert result is not None
-        assert not result.success
-        assert "SDK connection lost" in result.error
-
-        loop.close()
+    def test_cancel_done_agent_returns_false(self):
+        entry = SessionEntry(name="eng-agd-12-implement", issue_id="AGD-12",
+                             phase="implement", status="done", pid=0)
+        with patch("modastack.subagent.get_registry",
+                   return_value=_mock_registry([entry])):
+            assert not cancel_agent("AGD-12")
 
 
 class TestLaunchDetached:

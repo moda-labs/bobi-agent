@@ -19,13 +19,8 @@ import websocket
 log = logging.getLogger(__name__)
 
 def _state_path(name: str) -> Path:
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        raise RuntimeError("project root not set — call set_project_root() first")
-    d = root / ".modastack" / "state"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / name
+    from modastack.sdk import state_dir
+    return state_dir() / name
 
 # Normalized events land here for the consumer to drain.
 event_queue: SimpleQueue = SimpleQueue()
@@ -115,13 +110,6 @@ def _format_requester(requester: dict) -> str:
     return " ".join(parts)
 
 
-def _should_filter(event: dict) -> bool:
-    """Framework-level event filter. Currently passes everything through."""
-    return False
-
-
-
-
 class EventServerClient:
     """WebSocket client that connects to the centralized event server.
 
@@ -194,13 +182,12 @@ class EventServerClient:
                 data = msg.get("data", {})
                 seq = data.get("seq", 0)
 
-                if not _should_filter(data):
-                    _log_event(data)
-                    event_queue.put(data)
-                    log.info(f"Event queued: {data.get('source', '?')}/{data.get('type', '?')}")
+                _log_event(data)
+                event_queue.put(data)
+                log.info(f"Event queued: {data.get('source', '?')}/{data.get('type', '?')}")
 
-                    if self.on_event:
-                        self.on_event(data)
+                if self.on_event:
+                    self.on_event(data)
 
                 if seq > 0:
                     _save_cursor(seq)
@@ -221,9 +208,3 @@ class EventServerClient:
         )
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         self._ws.run_forever(ping_interval=30, ping_timeout=10, sslopt={"context": ssl_context})
-
-
-def start_event_client(server_url: str, deployment_id: str, api_key: str,
-                       on_event: callable = None) -> threading.Thread:
-    client = EventServerClient(server_url, deployment_id, api_key, on_event=on_event)
-    return client.start()

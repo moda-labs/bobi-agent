@@ -11,7 +11,7 @@ import yaml
 log = logging.getLogger(__name__)
 
 
-def discover_subscriptions(project_path: Path, agent_name: str | None = None) -> list[str]:
+def discover_subscriptions(project_path: Path) -> list[str]:
     """Build subscription keys by auto-detecting event sources.
 
     Resolution order:
@@ -30,7 +30,7 @@ def discover_subscriptions(project_path: Path, agent_name: str | None = None) ->
             pass
 
     from modastack.config import Config
-    cfg = Config.load(project_path, agent_name=agent_name)
+    cfg = Config.load(project_path)
     if cfg.event_services:
         subs = []
         for svc in cfg.event_services:

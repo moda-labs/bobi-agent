@@ -29,6 +29,7 @@ Monitors come in three flavors:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import subprocess
@@ -37,10 +38,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-import importlib.util
-import sys
 
-def _load_checks(agent_name: str | None = None, project_path: Path | None = None) -> dict:
+def _load_checks(project_path: Path | None = None) -> dict:
     """Load check runners from installed monitors/*_checks.py files."""
     all_checks: dict = {}
     if not project_path:
@@ -78,13 +77,10 @@ from .registry import MonitorRegistry
 log = logging.getLogger(__name__)
 
 def _monitor_state_path() -> Path:
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        raise RuntimeError("project root not set — call set_project_root() first")
-    d = root / ".modastack" / "state"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "monitor_state.json"
+    from modastack.sdk import state_dir
+    return state_dir() / "monitor_state.json"
+
+
 TICK_INTERVAL = 30  # seconds between scheduler ticks
 
 
@@ -128,16 +124,15 @@ def _default_spawn_check(monitor, cwd: str | None) -> None:
 class MonitorScheduler:
     def __init__(self, inject_event=None, state_path: Path | None = None,
                  now=None, registry_loader=None, spawn_check=None,
-                 agent_name: str | None = None, project_path: Path | None = None):
+                 project_path: Path | None = None):
         self.inject_event = inject_event or _default_inject
         self.spawn_check = spawn_check or _default_spawn_check
         self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
-        self._agent_name = agent_name
         self._project_path = project_path
-        self._checks = _load_checks(agent_name, project_path)
+        self._checks = _load_checks(project_path)
         self._registry_loader = registry_loader or (
-            lambda **kw: MonitorRegistry.load(agent_name=agent_name, project_path=project_path, **kw)
+            lambda **kw: MonitorRegistry.load(project_path=project_path, **kw)
         )
         self.state: dict = self._load_state()
         self._stop = threading.Event()

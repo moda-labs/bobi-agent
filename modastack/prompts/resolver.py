@@ -5,31 +5,21 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from . import BASE_PATH, BUILTIN_AGENTS_DIR, PROMPTS_DIR
+from . import BASE_PATH, PROMPTS_DIR
 
 log = logging.getLogger(__name__)
 
 
-def _resolve_role_prompt(role: str, agent_dir: Path | None, project: Path | None) -> str | None:
-    """Find the role prompt.
-
-    Resolution order:
-      1. <project>/.modastack/roles/{role}/ROLE.md — installed (from pack or override)
-      2. Built-in: modastack/prompts/agents/{role}/ROLE.md — framework-shipped
-    """
+def _resolve_role_prompt(role: str, project: Path | None) -> str | None:
+    """Find the role prompt at <project>/.modastack/roles/{role}/ROLE.md."""
     if project:
         installed = project / ".modastack" / "roles" / role / "ROLE.md"
         if installed.exists():
             return installed.read_text()
-
-    builtin = BUILTIN_AGENTS_DIR / role / "ROLE.md"
-    if builtin.exists():
-        return builtin.read_text()
-
     return None
 
 
-def _resolve_tools(agent_dir: Path | None, project: Path | None) -> str:
+def _resolve_tools(project: Path | None) -> str:
     """Load all tool markdown files from the installed .modastack/tools/.
 
     Tools are service interaction guides (e.g. gmail.md, jira.md) that
@@ -52,26 +42,6 @@ def _resolve_tools(agent_dir: Path | None, project: Path | None) -> str:
     return "\n\n".join(parts)
 
 
-def _resolve_agent_dir(agent_name: str | None, project_path: Path | None = None) -> Path | None:
-    """Find the agent team directory.
-
-    Resolution order:
-      1. <project>/agents/{name}             — project-level (checked in)
-      2. <project>/.modastack/agents/{name}  — local agents (overrides + cached)
-    """
-    if not agent_name:
-        return None
-    if project_path:
-        project = Path(project_path)
-        visible = project / "agents" / agent_name
-        if visible.is_dir():
-            return visible
-        hidden = project / ".modastack" / "agents" / agent_name
-        if hidden.is_dir():
-            return hidden
-    return None
-
-
 def resolve_agent_prompt(
     role: str,
     project_path: Path | str,
@@ -89,13 +59,12 @@ def resolve_agent_prompt(
     parts = [BASE_PATH.read_text()]
 
     project = Path(project_path)
-    agent_dir = _resolve_agent_dir(agent_name, project)
 
-    role_prompt = _resolve_role_prompt(role, agent_dir, project)
+    role_prompt = _resolve_role_prompt(role, project)
     if role_prompt:
         parts.append(role_prompt)
 
-    tools_section = _resolve_tools(agent_dir, project)
+    tools_section = _resolve_tools(project)
     if tools_section:
         parts.append(tools_section)
 
@@ -131,24 +100,17 @@ def build_startup_prompt(
 
 
 def list_workflows(project_path: Path | str, agent_name: str | None = None) -> str:
-    """List available workflows as a formatted string for agent prompts."""
+    """List available workflows as a formatted string for agent prompts.
+
+    Delegates to WorkflowDispatcher so agents see the same menu (same
+    tiers, dedup, and priority) as `modastack workflows list`.
+    """
     try:
-        from modastack.workflow.schema import load_workflow
+        from modastack.workflow.triggers import WorkflowDispatcher
 
-        project = Path(project_path)
-        wf_dir = project / ".modastack" / "workflows"
-        if not wf_dir.exists():
-            return "(no workflows)"
-
-        lines: list[str] = []
-        for f in sorted(wf_dir.glob("*.yaml")):
-            try:
-                wf = load_workflow(f)
-                trigger = getattr(wf.trigger, 'event', None) or str(wf.trigger)[:60]
-                lines.append(f"- {wf.name}: {trigger}")
-            except Exception:
-                continue
-        return "\n".join(lines) if lines else "No workflows found."
+        dispatcher = WorkflowDispatcher()
+        dispatcher.load_all_workflows(Path(project_path), agent_name=agent_name)
+        return dispatcher.format_workflow_menu()
     except Exception:
         return ""
 
@@ -244,12 +206,10 @@ def validate_role(
     project_path: Path | str | None = None,
     agent_name: str | None = None,
 ) -> bool:
-    """Check whether a role exists in the installed .modastack/roles/ or built-ins."""
+    """Check whether a role exists in the installed .modastack/roles/."""
     if project_path:
         project = Path(project_path)
         installed_roles = project / ".modastack" / "roles"
         if _resolve_role_path(role_name, installed_roles):
             return True
-    if _resolve_role_path(role_name, BUILTIN_AGENTS_DIR):
-        return True
     return False

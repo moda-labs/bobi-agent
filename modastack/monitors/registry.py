@@ -20,7 +20,7 @@ from .schema import Monitor
 
 log = logging.getLogger(__name__)
 
-def _defaults_path(agent_name: str | None = None, project_path: Path | None = None) -> Path:
+def _defaults_path(project_path: Path | None = None) -> Path:
     """Find the monitors defaults.yaml — from installed .modastack/ or framework fallback."""
     if project_path:
         p = project_path / ".modastack" / "monitors" / "defaults.yaml"
@@ -59,16 +59,13 @@ class MonitorRegistry:
         self.opt_outs: dict[str, set[str]] = {}
 
     @classmethod
-    def load(cls, project_path: Path | None = None,
-             agent_name: str | None = None) -> "MonitorRegistry":
+    def load(cls, project_path: Path | None = None) -> "MonitorRegistry":
         registry = cls(project_path=project_path)
-        registry._agent_name = agent_name
         registry._load()
         return registry
 
     def _load(self) -> None:
-        agent_name = getattr(self, "_agent_name", None)
-        for raw in _read_records(_defaults_path(agent_name, self.project_path)):
+        for raw in _read_records(_defaults_path(self.project_path)):
             try:
                 m = Monitor.from_dict(raw, source="default")
                 self.globals[m.name] = m
@@ -125,13 +122,6 @@ class MonitorRegistry:
     # --- Writes to user-writable tiers ---------------------------------
 
     @staticmethod
-    def add_global(monitor: Monitor) -> None:
-        """Deprecated — use add_project instead. Global monitors are not supported."""
-        raise NotImplementedError(
-            "Global monitors removed. Use `modastack monitors add --project .` instead."
-        )
-
-    @staticmethod
     def add_project(monitor: Monitor, project_path: Path) -> None:
         """Append or replace a monitor in .modastack/monitors.yaml."""
         monitors_path = project_path / ".modastack" / "monitors.yaml"
@@ -186,7 +176,7 @@ class MonitorRegistry:
             return "removed"
 
         # Present only as a built-in default — can't delete, must pause.
-        for raw in _read_records(_defaults_path(getattr(self, "_agent_name", None))):
+        for raw in _read_records(_defaults_path()):
             if raw.get("name") == name:
                 return "default-only"
         return "not-found"

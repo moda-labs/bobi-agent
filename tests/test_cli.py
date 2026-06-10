@@ -19,8 +19,15 @@ def test_version_flag():
     assert __version__ in result.output
 
 
+def _fresh_publish():
+    """Clear the memoized event-server URL between tests."""
+    from modastack.events import publish
+    publish._es_url_cache.clear()
+    return publish
+
+
 def test_post_event_posts_to_event_server():
-    from modastack.cli import _post_event
+    publish = _fresh_publish()
 
     captured = {}
 
@@ -40,10 +47,10 @@ def test_post_event_posts_to_event_server():
         return FakeResp()
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
-         patch("modastack.cli._detect_project_root", return_value=Path("/tmp/repo")), \
-         patch("modastack.config.ProjectConfig.from_file") as mock_pc:
+         patch("modastack.config.Config.load") as mock_pc:
         mock_pc.return_value = type("PC", (), {"event_server_url": "https://events.test"})()
-        ok = _post_event("monitor/deploy.down", {"summary": "down"})
+        ok = publish.post_event("monitor/deploy.down", {"summary": "down"},
+                                project_path=Path("/tmp/repo"))
 
     assert ok is True
     assert captured["url"] == "https://events.test/events/deploy.down"
@@ -52,7 +59,7 @@ def test_post_event_posts_to_event_server():
 
 
 def test_post_event_defaults_source_when_no_slash():
-    from modastack.cli import _post_event
+    publish = _fresh_publish()
 
     captured = {}
 
@@ -72,24 +79,22 @@ def test_post_event_defaults_source_when_no_slash():
         return FakeResp()
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
-         patch("modastack.cli._detect_project_root", return_value=Path("/tmp/repo")), \
-         patch("modastack.config.ProjectConfig.from_file") as mock_pc:
+         patch("modastack.config.Config.load") as mock_pc:
         mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
-        _post_event("deploy_down", {})
+        publish.post_event("deploy_down", {}, project_path=Path("/tmp/repo"))
 
     assert captured["body"]["source"] == "monitor"
     assert "deploy_down" in captured["url"]
 
 
 def test_post_event_returns_false_on_connection_error():
-    from modastack.cli import _post_event
+    publish = _fresh_publish()
     import urllib.error
 
     with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("nope")), \
-         patch("modastack.cli._detect_project_root", return_value=Path("/tmp/repo")), \
-         patch("modastack.config.ProjectConfig.from_file") as mock_pc:
+         patch("modastack.config.Config.load") as mock_pc:
         mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
-        assert _post_event("monitor/x", {}) is False
+        assert publish.post_event("monitor/x", {}, project_path=Path("/tmp/repo")) is False
 
 
 # --- modastack workflows list ------------------------------------------------

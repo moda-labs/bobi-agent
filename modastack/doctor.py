@@ -4,8 +4,20 @@ from __future__ import annotations
 
 import logging
 import shutil
+from dataclasses import dataclass
 
-from modastack.browser import CheckResult
+
+@dataclass
+class CheckResult:
+    """Outcome of a single health check."""
+
+    name: str
+    ok: bool
+    detail: str = ""
+    hint: str = ""
+    # Set when the failure is specifically the AppArmor userns sandbox block,
+    # so callers can offer the targeted fix.
+    sandbox_error: bool = False
 
 
 def run_doctor() -> list[CheckResult]:
@@ -57,20 +69,6 @@ def _check_claude_auth() -> CheckResult:
         return CheckResult("Claude auth", ok=False,
                            detail="timed out",
                            hint="Check network connectivity")
-
-
-def _check_project_config() -> CheckResult:
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        return CheckResult("Project", ok=False,
-                           detail="project root not set",
-                           hint="Run `modastack start <agent>` from a project directory")
-    modastack_dir = root / ".modastack"
-    if modastack_dir.is_dir():
-        return CheckResult("Project", ok=True, detail=str(root))
-    return CheckResult("Project", ok=True,
-                       detail=f"{root} (no .modastack/ yet — created on first start)")
 
 
 def _check_install_integrity() -> CheckResult:
@@ -170,10 +168,8 @@ def _check_workflows() -> CheckResult:
 
 def _check_event_server() -> CheckResult:
     """Probe the event server /health endpoint."""
-    import json
-    import urllib.request
-
     from modastack.config import Config, load_deployment_state
+    from modastack.events.server import health
     from modastack.sdk import get_project_root
 
     root = get_project_root()
@@ -187,18 +183,12 @@ def _check_event_server() -> CheckResult:
         except FileNotFoundError:
             pass
 
-    port = 8080
-    try:
-        url = f"http://localhost:{port}"
-        req = urllib.request.Request(f"{url}/health")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = json.loads(resp.read())
-            return CheckResult("Event server", ok=True,
-                               detail=f"{url}")
-    except Exception:
-        return CheckResult("Event server", ok=False,
-                           detail="not running",
-                           hint="`modastack event-server start` or `modastack start` will auto-launch")
+    url = "http://localhost:8080"
+    if health(url):
+        return CheckResult("Event server", ok=True, detail=url)
+    return CheckResult("Event server", ok=False,
+                       detail="not running",
+                       hint="`modastack event-server start` or `modastack start` will auto-launch")
 
 
 def _check_recent_events() -> CheckResult:

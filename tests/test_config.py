@@ -15,14 +15,6 @@ def test_defaults_when_no_config(tmp_path):
     assert cfg.linear_api_key == ""
 
 
-def test_from_file_alias(tmp_path):
-    cfg = Config.from_file(tmp_path)
-    assert cfg.event_server_url == ""
-
-
-# --- Deployment state (ephemeral) ---
-
-
 def test_deployment_state_roundtrip(tmp_path):
     state_dir = tmp_path / ".modastack" / "state"
     state_dir.mkdir(parents=True)

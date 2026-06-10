@@ -52,7 +52,7 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
 
     try:
         from modastack.monitors.registry import MonitorRegistry
-        registry = MonitorRegistry.load(agent_name=cfg.agent, project_path=project_path)
+        registry = MonitorRegistry.load(project_path=project_path)
         mon_names = sorted(m.name for m in registry.all_monitors())
         if mon_names:
             lines.append(f"  {'monitors':<{W}}{', '.join(mon_names)}")
@@ -71,9 +71,8 @@ def _detect_project_root(cwd: Path | None = None) -> Path:
 
 def _project_state_dir(project_path: Path) -> Path:
     """Runtime state directory for a project's manager."""
-    d = project_path / ".modastack" / "state"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    from modastack.sdk import state_dir
+    return state_dir(project_path)
 
 
 
@@ -177,18 +176,14 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
     role = cfg.entry_point or "manager"
 
     from modastack.events.subscriptions import discover_subscriptions
-    subscribe = discover_subscriptions(project_path, agent_name)
+    subscribe = discover_subscriptions(project_path)
     subscribe += [s for s in (extra_subscribe or []) if s not in subscribe]
 
-    # Add monitor event topics for non-native services with events enabled
-    monitor_topics = []
-    for svc in cfg.event_services:
-        if svc.name not in cfg.native_services:
-            for mon in cfg.monitors:
-                if mon.get("event"):
-                    monitor_topics.append(mon["event"])
-    if monitor_topics:
-        subscribe = list(subscribe) + monitor_topics
+    # Monitor event topics need a subscription when any non-native service
+    # delivers events (native services already route through webhooks).
+    if any(s.name not in cfg.native_services for s in cfg.event_services):
+        subscribe += [m["event"] for m in cfg.monitors
+                      if m.get("event") and m["event"] not in subscribe]
 
     state_dir = project_path / ".modastack" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -217,7 +212,8 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
 
     if subscribe:
         from modastack.subagent import _start_event_subscription
-        _start_event_subscription(f"moda-{role}-{project_path.name}", subscribe, project_path)
+        _start_event_subscription(_manager_session_name(project_path, role),
+                                  subscribe, project_path)
 
     has_monitors = (
         (project_path / ".modastack" / "monitors").is_dir()
@@ -225,7 +221,7 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
     )
     if has_monitors:
         from modastack.monitors.scheduler import MonitorScheduler
-        monitor_scheduler = MonitorScheduler(agent_name=agent_name, project_path=project_path)
+        monitor_scheduler = MonitorScheduler(project_path=project_path)
         monitor_scheduler.start()
         log.info("Monitor scheduler started")
 
@@ -238,7 +234,7 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
     spawn_adhoc(
         cwd=str(project_path),
         task=task,
-        name=f"moda-{role}-{project_path.name}",
+        name=_manager_session_name(project_path, role),
         persistent=True,
         role=role,
         mcp_servers=cfg.mcp_servers or None,
@@ -300,7 +296,7 @@ def start(foreground, fresh, subscribe):
             pid_path.unlink(missing_ok=True)
 
     # Prevent nested runtimes
-    from modastack.sdk import find_runtime_root, _pid_file_alive
+    from modastack.sdk import find_runtime_root
     ancestor = find_runtime_root(project_path.parent)
     if ancestor and ancestor != project_path:
         ancestor_pid_path = ancestor / ".modastack" / "state" / "manager.pid"
@@ -500,17 +496,11 @@ def install(pack):
         click.echo("\n".join(parts))
 
     # Prompt for any required env vars and write .modastack/.env
-    from modastack.config import find_required_env_vars
+    from modastack.config import find_required_env_vars, parse_env_file
     env_vars = find_required_env_vars(project_path)
     if env_vars:
         env_file = installed / ".env"
-        existing = {}
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, _, v = line.partition("=")
-                    existing[k.strip()] = v.strip()
+        existing = parse_env_file(env_file)
 
         click.echo()
         missing = [v for v in env_vars if v not in existing and v not in os.environ]
@@ -541,36 +531,25 @@ def install(pack):
     click.echo(f"Run `modastack start` to launch.")
 
 
-def _register_event_server(url: str, project_path: Path, rc: "ProjectConfig") -> tuple[str, str]:
-    """Register with the event server and return (deployment_id, api_key)."""
-    import urllib.request
-    import urllib.error
-    from modastack.events.subscriptions import discover_subscriptions
-    try:
-        subs = discover_subscriptions(project_path)
-        payload = json.dumps({
-            "name": project_path.name,
-            "subscriptions": subs,
-        }).encode()
-        req = urllib.request.Request(
-            f"{url}/deployments",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        return data.get("deployment_id", ""), data.get("api_key", "")
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
-        logging.getLogger(__name__).warning(f"Event server registration failed: {e}")
-        return "", ""
+def _manager_session_name(project_path: Path, role: str | None = None) -> str:
+    """Session name of the project's entry-point agent.
+
+    The single definition of the manager naming convention — start, --fresh,
+    and transcript lookup all resolve the same name through here.
+    """
+    if role is None:
+        from modastack.config import Config
+        try:
+            role = Config.load(project_path).entry_point or "manager"
+        except Exception:
+            role = "manager"
+    return f"moda-{role}-{project_path.name}"
 
 
 def _clear_manager_session(project_path: Path) -> None:
     """Wipe saved session ID so the manager starts a fresh conversation."""
     from modastack.sdk import save_session_id
-    session_name = f"moda-mgr-{project_path.name}"
-    save_session_id(session_name, "")
+    save_session_id(_manager_session_name(project_path), "")
     click.echo("Cleared manager session — starting fresh.")
 
 
@@ -653,16 +632,9 @@ def stop(force):
     stop_embedder()
 
     # Check if the local event server is still running
-    try:
-        import urllib.request
-        req = urllib.request.Request("http://localhost:8080/health")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            import json as _json
-            data = _json.loads(resp.read())
-            if data.get("status") == "ok":
-                click.echo("Event server is still running. Use `modastack event-server stop` to stop it.")
-    except Exception:
-        pass
+    from modastack.events.server import health
+    if health("http://localhost:8080"):
+        click.echo("Event server is still running. Use `modastack event-server stop` to stop it.")
 
 
 @main.command()
@@ -887,7 +859,7 @@ def _find_transcript(session: str) -> Path | None:
 
     if session == "manager":
         project = _detect_project_root()
-        session = f"moda-mgr-{project.name}" if project else "moda-manager"
+        session = _manager_session_name(project) if project else "moda-manager"
 
     # Primary: session dir log
     session_log = SessionRegistry.log_path(session)
@@ -1074,19 +1046,18 @@ def doctor(browser, fix):
     if sandbox_failure and fix:
         from . import browser as browser_mod
         click.echo()
-        _offer_sandbox_fix(browser_mod, non_interactive=False)
+        _offer_sandbox_fix(browser_mod)
     elif sandbox_failure:
         click.echo("\nRe-run with `modastack doctor --browser --fix` to apply the sandbox fix.")
 
     raise SystemExit(1)
 
 
-def _offer_sandbox_fix(browser_mod, non_interactive: bool) -> None:
-    """Explain the Chromium sandbox issue and (interactively) apply the fix.
+def _offer_sandbox_fix(browser_mod) -> None:
+    """Explain the Chromium sandbox issue and interactively apply the fix.
 
-    Shared by `modastack setup` and `modastack doctor --fix`. In
-    non-interactive mode it only prints instructions; otherwise it asks for
-    confirmation before running the sudo sysctl change.
+    Used by `modastack doctor --fix`. Asks for confirmation before running
+    the sudo sysctl change.
     """
     click.echo("Chromium's sandbox is blocked by the AppArmor restriction on")
     click.echo("unprivileged user namespaces — this prevents /browse from running.")
@@ -1099,10 +1070,6 @@ def _offer_sandbox_fix(browser_mod, non_interactive: bool) -> None:
     click.echo("  Acceptable on dedicated dev machines. See scripts/install.sh for")
     click.echo("  a narrower per-binary AppArmor alternative and the --no-sandbox fallback.")
     click.echo()
-
-    if non_interactive:
-        click.echo("  Non-interactive — apply it manually with the command above.")
-        return
 
     try:
         if not click.confirm("  Apply the fix now (requires sudo)?", default=False):
@@ -1132,7 +1099,7 @@ def agents():
 
 @agents.command("list")
 def agents_list():
-    """List active agents from both in-process and on-disk registry.
+    """List active agents from the on-disk registry.
 
     Detached agents launched into child repos are discovered via the
     SessionRegistry's walk-up resolution — they register in the runtime
@@ -1150,11 +1117,8 @@ def agents_list():
 
     for a in active:
         state = "running" if a["running"] else "done"
-        name = a.get("name", "")
-        source = a.get("source", "")
-        suffix = f"  [{source}]" if source == "registry" else ""
-        label = name or f"{a['issue_id']}/{a['phase']}"
-        click.echo(f"  {label} — {state} ({a['elapsed_s']}s){suffix}")
+        label = a.get("name") or f"{a['issue_id']}/{a['phase']}"
+        click.echo(f"  {label} — {state} ({a['elapsed_s']}s)")
 
 
 @agents.command("show")
@@ -1165,28 +1129,27 @@ def agents_show(issue_id):
     Usage:
         modastack agents show AGD-12
     """
-    from modastack.subagent import list_agents as _list_agents, is_running, get_result
+    import time as _time
+    from modastack.subagent import find_agent
 
-    if is_running(issue_id):
-        for a in _list_agents():
-            if a["issue_id"].lower() == issue_id.lower():
-                click.echo(f"  Issue:   {a['issue_id']}")
-                click.echo(f"  Phase:   {a['phase']}")
-                click.echo(f"  Status:  running ({a['elapsed_s']}s)")
-                click.echo(f"  CWD:     {a['cwd']}")
-                return
-
-    result = get_result(issue_id)
-    if result:
-        click.echo(f"  Issue:   {result.issue_id}")
-        click.echo(f"  Phase:   {result.phase}")
-        click.echo(f"  Status:  {'success' if result.success else 'failed'}")
-        click.echo(f"  Turns:   {result.num_turns}")
-        click.echo(f"  Time:    {result.duration_ms / 1000:.1f}s")
-        if result.error:
-            click.echo(f"  Error:   {result.error}")
-    else:
+    entry = find_agent(issue_id)
+    if not entry:
         click.echo(f"No agent found for {issue_id}")
+        return
+
+    click.echo(f"  Session: {entry.name}")
+    if entry.issue_id:
+        click.echo(f"  Issue:   {entry.issue_id}")
+    click.echo(f"  Phase:   {entry.phase}")
+    if entry.status in ("starting", "running", "idle"):
+        elapsed = int(_time.time() - entry.started_at)
+        click.echo(f"  Status:  {entry.status} ({elapsed}s)")
+    else:
+        click.echo(f"  Status:  {entry.status}")
+    if entry.cwd:
+        click.echo(f"  CWD:     {entry.cwd}")
+    if entry.title:
+        click.echo(f"  Task:    {entry.title}")
 
 
 @agents.command("cancel")
@@ -1412,7 +1375,7 @@ def workflow_status():
     """Show active and recent workflow runs.
 
     Displays up to 20 recent runs with their status, trigger issue,
-    node completion progress, and start time.
+    current step, and start time.
 
     Usage:
         modastack workflows status
@@ -1425,13 +1388,13 @@ def workflow_status():
     for run in runs[:20]:
         event_data = run.trigger_event.get("data", {})
         issue = event_data.get("issue_id", run.issue_id or "?")
-        completed = sum(1 for ns in run.nodes.values() if ns.status == "completed")
-        total = len(run.nodes)
         suffix = ""
+        if run.suspended_at_step >= 0:
+            suffix = f"  step={run.suspended_at_step}"
         if run.status == "waiting" and run.await_event:
-            suffix = f"  awaiting={run.await_event}"
+            suffix += f"  awaiting={run.await_event}"
         click.echo(f"  {run.run_id}  {run.workflow_name:20s} {run.status:10s} "
-                  f"issue={issue}  {completed}/{total} nodes  {run.started_at[:19]}{suffix}")
+                  f"issue={issue}  {run.started_at[:19]}{suffix}")
 
 
 @workflows.command("resume")
@@ -1559,12 +1522,10 @@ def monitor_list():
     Usage:
         modastack monitors list
     """
-    from .config import Config
     from .monitors.registry import MonitorRegistry
 
     project_path = _detect_project_root()
-    cfg = Config.load(project_path)
-    registry = MonitorRegistry.load(agent_name=cfg.agent, project_path=project_path)
+    registry = MonitorRegistry.load(project_path=project_path)
     monitors = sorted(registry.all_monitors(), key=lambda m: (m.name, m.project))
     if not monitors:
         click.echo("No monitors found.")
@@ -1698,9 +1659,10 @@ def event_server_start(foreground, port):
     """Start the local event server."""
     es_port = port or 8080
 
+    from modastack.events.server import ensure_running
+    ensure_running(es_port, project_path=_detect_project_root())
+
     if foreground:
-        from modastack.events.server import ensure_running
-        ensure_running(es_port, project_path=_detect_project_root())
         click.echo(f"Event server running on port {es_port} (foreground)")
         try:
             import time
@@ -1709,13 +1671,11 @@ def event_server_start(foreground, port):
         except KeyboardInterrupt:
             pass
         return
-    else:
-        from modastack.events.server import ensure_running
-        ensure_running(es_port, project_path=_detect_project_root())
-        click.echo(f"Event server running on port {es_port}")
-        click.echo(f"  GitHub:  http://localhost:{es_port}/webhooks/github")
-        click.echo(f"  Linear:  http://localhost:{es_port}/webhooks/linear")
-        click.echo(f"  Slack:   http://localhost:{es_port}/webhooks/slack")
+
+    click.echo(f"Event server running on port {es_port}")
+    click.echo(f"  GitHub:  http://localhost:{es_port}/webhooks/github")
+    click.echo(f"  Linear:  http://localhost:{es_port}/webhooks/linear")
+    click.echo(f"  Slack:   http://localhost:{es_port}/webhooks/slack")
 
 
 @event_server_cmd.command("stop")
@@ -1753,16 +1713,14 @@ def event_server_restart(ctx, port):
 @event_server_cmd.command("status")
 def event_server_status():
     """Show event server status."""
-    import urllib.request
+    from modastack.events.server import health
     es_port = 8080
-    try:
-        req = urllib.request.Request(f"http://localhost:{es_port}/health")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = json.loads(resp.read())
+    data = health(f"http://localhost:{es_port}")
+    if data:
         click.echo(f"Event server: running on port {es_port}")
         click.echo(f"  Mode: {data.get('mode', 'unknown')}")
         click.echo(f"  Deployments: {data.get('deployments', 0)}")
-    except Exception:
+    else:
         click.echo(f"Event server: not running (port {es_port})")
 
 
@@ -1898,39 +1856,9 @@ def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> Non
 
 
 def _post_event(event_type: str, data: dict) -> bool:
-    """Post a synthetic event to the event server's generic topic endpoint."""
-    import urllib.error
-    import urllib.request
-
-    if "/" in event_type:
-        source, etype = event_type.split("/", 1)
-    else:
-        source, etype = "monitor", event_type
-
-    project_path = _detect_project_root()
-    if not project_path:
-        return False
-
-    try:
-        from modastack.config import ProjectConfig
-        pc = ProjectConfig.from_file(project_path)
-        es_url = pc.event_server_url or "http://localhost:8080"
-    except Exception:
-        es_url = "http://localhost:8080"
-
-    payload = json.dumps({"source": source, "payload": data}).encode()
-    try:
-        req = urllib.request.Request(
-            f"{es_url}/events/{etype}",
-            data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": "modastack"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read())
-        return True
-    except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError) as e:
-        logging.getLogger(__name__).warning(f"Failed to post event {event_type}: {e}")
-        return False
+    """Post a synthetic event to the event server (see events/publish.py)."""
+    from modastack.events.publish import post_event
+    return post_event(event_type, data, project_path=_detect_project_root())
 
 
 @agents.command("update")

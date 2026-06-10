@@ -1,4 +1,4 @@
-"""Tests for event client — formatting, filtering, queue ingestion."""
+"""Tests for event client — formatting and queue ingestion."""
 
 import json
 from pathlib import Path
@@ -7,7 +7,6 @@ from unittest.mock import patch, MagicMock
 from modastack.events.client import (
     format_event_for_manager,
     event_queue,
-    _should_filter,
 )
 
 
@@ -96,17 +95,6 @@ class TestFormatEventForManager:
         text = format_event_for_manager(event)
         assert "requested_by: Alice" in text
         assert "channel C0SHARED" in text
-
-
-class TestShouldFilter:
-
-    def test_passes_everything_through(self):
-        event = {"source": "linear", "type": "linear.Issue.update", "payload": {}}
-        assert _should_filter(event) is False
-
-    def test_passes_non_linear_events(self):
-        event = {"source": "github", "type": "github.issues", "payload": {}}
-        assert _should_filter(event) is False
 
 
 class TestEventQueue:
