@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.13.0 — 2026-06-10
+
+Full-codebase simplify pass: net −1,300 lines with no behavior changes
+beyond the fixes below. Verified by the unit, integration, event-server,
+and dogfood batteries.
+
+### Fixed
+- `modastack start --fresh` and `transcript show manager` now resolve the
+  real manager session name (`moda-<entry_point>-<project>`) — previously
+  they targeted a nonexistent `moda-mgr-*` name, so `--fresh` cleared nothing
+- `modastack agents show` / `agents cancel` now work from the CLI — they
+  read the on-disk session registry instead of an in-process dict that was
+  always empty (cancel terminates the agent's detached process)
+
+### Removed
+- Legacy fire-and-forget executor (`run_phase`, `run_phase_sync`,
+  `inject_message`) and its private event loop — the supervised session
+  path is the single executor
+- Orphaned modules: `relay`, `scanner`, `board_setup`, `setup`
+- `WorkflowRun` node-DAG API (`find_active`, `find_completed`,
+  `retry_failed`, `NodeState`) — the orchestrator is a linear step
+  executor; `workflows status` shows step/awaiting instead of node counts
+- Phantom `agent_name` parameter across config/validate/subscriptions/
+  monitors; `ProjectConfig`/`Config.from_file` aliases; the unused
+  built-in roles tier
+
+### Changed
+- Event publishing moved to `modastack.events.publish.post_event` with a
+  memoized server URL — library code no longer imports the CLI module
+- Shared helpers consolidated into `sdk` (`pid_alive`, `read_pid`,
+  `state_dir`, cached runtime-root resolution), `events.server.health()`,
+  and `config.parse_env_file`
+- Agent prompts list workflows via the same dispatcher as
+  `modastack workflows list` (same tiers and dedup)
+- Performance: workflow run files parsed once per read, KB store reuses
+  one SQLite connection, embedder caches the sidecar port, Cloudflare
+  worker fans out to KV/Durable Objects in parallel, local event-server
+  buffer eviction is O(1)
+
 ## 0.7.1 — 2026-06-05
 
 ### Added
