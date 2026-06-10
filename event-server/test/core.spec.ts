@@ -5,6 +5,7 @@ import {
 	normalizeLinearPayload,
 	normalizeSlackPayload,
 	subscriptionKeysForEvent,
+	verifyGitHubSignature,
 } from "../src/core";
 
 describe("normalizeGitHubPayload", () => {
@@ -220,6 +221,44 @@ describe("normalizeSlackPayload", () => {
 			},
 		});
 		expect((result.event!.payload as Record<string, string>).text.length).toBe(4000);
+	});
+});
+
+describe("verifyGitHubSignature", () => {
+	const secret = "test-webhook-secret";
+
+	async function sign(body: string): Promise<string> {
+		const key = await crypto.subtle.importKey(
+			"raw",
+			new TextEncoder().encode(secret),
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+		const hex = Array.from(new Uint8Array(sig))
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join("");
+		return `sha256=${hex}`;
+	}
+
+	it("accepts a valid signature", async () => {
+		const body = '{"action":"opened"}';
+		const signature = await sign(body);
+		const valid = await verifyGitHubSignature(secret, new TextEncoder().encode(body), signature);
+		expect(valid).toBe(true);
+	});
+
+	it("rejects an invalid signature", async () => {
+		const body = '{"action":"opened"}';
+		const valid = await verifyGitHubSignature(secret, new TextEncoder().encode(body), "sha256=bad");
+		expect(valid).toBe(false);
+	});
+
+	it("rejects an empty signature header", async () => {
+		const body = '{"action":"opened"}';
+		const valid = await verifyGitHubSignature(secret, new TextEncoder().encode(body), "");
+		expect(valid).toBe(false);
 	});
 });
 

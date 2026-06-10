@@ -7,6 +7,7 @@ import {
 	normalizeSlackPayload,
 	sendSlackMessage,
 	subscriptionKeysForEvent,
+	verifyGitHubSignature,
 	verifySlackSignature,
 } from "./core";
 
@@ -139,6 +140,15 @@ async function addSubscriptionIndex(env: Env, sub: string, deploymentId: string)
 
 async function handleGitHubWebhook(request: Request, env: Env): Promise<Response> {
 	const body = await request.text();
+
+	if (env.WEBHOOK_SECRET) {
+		const sigHeader = request.headers.get("x-hub-signature-256") || "";
+		const valid = await verifyGitHubSignature(env.WEBHOOK_SECRET, new TextEncoder().encode(body), sigHeader);
+		if (!valid) {
+			return new Response("Invalid signature", { status: 401 });
+		}
+	}
+
 	let payload: Record<string, unknown>;
 	try {
 		payload = JSON.parse(body);
