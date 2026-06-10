@@ -47,7 +47,7 @@ See [scripts/install.sh](scripts/install.sh) for what the installer does.
 
 ```bash
 # Start a pre-built agent
-modastack start eng-org 
+modastack start eng-team 
 
 # Or launch a single ad-hoc agent
 modastack agents launch --role engineer --task "Fix the login bug"
@@ -62,7 +62,7 @@ modastack message "Skip the integration tests, just ship it"
 An agent package is everything an agent needs to operate in a domain: role prompts, workflows, monitors, tools, and extra context/content.
 
 ```
-agents/eng-org/                   # ← browse the reference pack at agents/eng-org/
+agents/eng-team/                   # ← browse the reference pack at agents/eng-team/
 ├── defaults.yaml           # entry role, event sources
 ├── roles/
 │   ├── director/ROLE.md    # engineering director
@@ -94,7 +94,7 @@ Modastack maintains an agent package registry at [`agents/`](agents/). Install p
 
 ```bash
 modastack agents browse                     # see available packs from all registries
-modastack agents update eng-org             # install or update
+modastack agents update eng-team             # install or update
 modastack agents add-registry myorg/agents  # add a private registry
 ```
 
@@ -102,7 +102,7 @@ If you think you have a general-purpose agent you'd like to share with the world
 
 ## Architecture
 
-The topology below is just one example — the [`eng-org`](agents/eng-org/) agent package for software teams. The event server and monitor scheduler, and agent messaging system are infrastructure that every deployment gets.
+The topology below is just one example — the [`eng-team`](agents/eng-team/) agent package for software teams. The event server and monitor scheduler, and agent messaging system are infrastructure that every deployment gets.
 
 The topology of agents, including their roles, relationships to each other, and events they are subscribed to is completely defined by the agent package.
 ```

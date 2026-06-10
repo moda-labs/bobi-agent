@@ -116,7 +116,7 @@ skills/                           # Claude Code skill files
 
 agents/                           # Agent packs (portable agent definitions)
 ├── registry.yaml                 # Local pack index
-└── eng-org/                      # Engineering org agent pack (reference impl)
+└── eng-team/                      # Engineering org agent pack (reference impl)
     ├── agent.yaml                # Pack config (entry point, services, credentials)
     ├── agent.md                  # Shared base prompt for all roles
     ├── roles/                    # Role-specific prompts (folder format)

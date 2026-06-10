@@ -1,4 +1,4 @@
-# eng-org
+# eng-team
 
 Multi-repo agent pack where a director manages multiple software teams,
 each running independently in their own repo. Also works for a single repo.
@@ -20,7 +20,7 @@ each running independently in their own repo. Also works for a single repo.
 
 ```bash
 cd ~/dev                          # parent of all repos
-modastack start eng-org
+modastack start eng-team
 ```
 
 Then onboard repos via Slack:

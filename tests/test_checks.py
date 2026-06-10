@@ -40,7 +40,7 @@ def _find_checks_module() -> Path:
 _checks_path = _find_checks_module()
 if _checks_path is None:
     pytest.skip(
-        "github_checks.py not found — run: modastack agents update eng-org",
+        "github_checks.py not found — run: modastack agents update eng-team",
         allow_module_level=True,
     )
 

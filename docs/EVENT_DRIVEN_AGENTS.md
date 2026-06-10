@@ -615,7 +615,7 @@ event_sources:
   - linear
 
 # Or subscribe via CLI:
-# modastack start eng-org --subscribe github:moda-labs/modastack
+# modastack start eng-team --subscribe github:moda-labs/modastack
 ```
 
 The event server maintains a subscription index in KV. When an event
@@ -633,11 +633,11 @@ uv tool install modastack
 
 # Browse and install an agent pack
 modastack agents browse
-modastack agents update eng-org
+modastack agents update eng-team
 
 # Start the agent
 cd my-project
-modastack start eng-org
+modastack start eng-team
 
 # The agent is now:
 # - Subscribed to GitHub, Slack, and Linear events

@@ -397,9 +397,9 @@ def install(pack):
       2. Remote registry lookup
 
     Usage:
-        modastack install agents/eng-org
+        modastack install agents/eng-team
         modastack install /path/to/my-agent
-        modastack install eng-org              # fetches from registry
+        modastack install eng-team              # fetches from registry
     """
     project_path = _detect_project_root()
 
@@ -1879,7 +1879,7 @@ def agents_update(name):
     """Update agent packs from the remote registry.
 
     Usage:
-        modastack agents update eng-org    # update one pack
+        modastack agents update eng-team    # update one pack
         modastack agents update            # update all cached packs
     """
     from modastack.registry import fetch, list_cached, check_update
