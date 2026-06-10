@@ -112,6 +112,38 @@ describe("event-server", () => {
 	});
 });
 
+describe("slack send error handling", () => {
+	it("returns 502 when slack API fetch fails", async () => {
+		// Register a workspace with a token so the handler reaches sendSlackMessage
+		const regResponse = await SELF.fetch("https://example.com/slack/workspaces", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				workspace_id: "T_FAIL",
+				bot_token: "xoxb-fake-token",
+			}),
+		});
+		expect(regResponse.status).toBe(200);
+
+		// Now send — the fetch to slack.com will fail in the test sandbox
+		const response = await SELF.fetch("https://example.com/slack/send", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				workspace: "T_FAIL",
+				channel: "C123",
+				text: "hello",
+			}),
+		});
+
+		// Should get 502, not 500 — the try/catch maps fetch failures to 502
+		expect(response.status).toBe(502);
+		const body = await response.json() as { ok: boolean; error: string };
+		expect(body.ok).toBe(false);
+		expect(body.error).toBeTruthy();
+	});
+});
+
 describe("github webhook signature verification", () => {
 	const secret = "test-webhook-secret";
 
