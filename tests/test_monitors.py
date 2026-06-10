@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from modastack.monitors.schema import Monitor, parse_interval
+from modastack.monitors.schema import Monitor, parse_at, parse_interval
 from modastack.monitors import registry as registry_mod
 from modastack.monitors.registry import MonitorRegistry
 from modastack.monitors.schema import Condition
@@ -30,6 +30,22 @@ class TestParseInterval:
         for bad in ["", "abc", "5x", "-3m", "0"]:
             with pytest.raises(ValueError):
                 parse_interval(bad)
+
+
+# === At-time parsing ===
+
+class TestParseAt:
+    def test_single_and_list(self):
+        assert parse_at("06:00") == [(6, 0)]
+        assert parse_at(["06:00", "18:30"]) == [(6, 0), (18, 30)]
+
+    def test_none_is_empty(self):
+        assert parse_at(None) == []
+
+    def test_invalid(self):
+        for bad in ["6am", "25:00", "12:60", "noon", ""]:
+            with pytest.raises(ValueError):
+                parse_at(bad)
 
 
 # === Monitor schema ===
@@ -62,6 +78,21 @@ class TestMonitor:
         d = m.to_dict()
         assert d["enabled"] is False
         assert d["url"] == "u"
+
+    def test_at_tz_notify_fields(self):
+        m = Monitor.from_dict({"name": "roundup", "at": ["06:00", "18:00"],
+                               "tz": "America/Los_Angeles", "notify": True})
+        assert m.at_times == [(6, 0), (18, 0)]
+        assert m.notify is True
+        d = m.to_dict()
+        assert d["at"] == ["06:00", "18:00"]
+        assert d["tz"] == "America/Los_Angeles"
+        assert d["notify"] is True
+        assert "interval" not in d  # at-monitors don't serialize an interval
+
+    def test_single_at_string_becomes_list(self):
+        m = Monitor.from_dict({"name": "x", "at": "06:00"})
+        assert m.at == ["06:00"]
 
 
 # === Registry merge ===
@@ -169,6 +200,59 @@ class TestSchedulerDue:
         sched, _ = _scheduler(tmp_path, [m])
         sched.state["x"] = {"last_run": (_fixed_now() - timedelta(minutes=6)).isoformat()}
         assert sched._due(m, _fixed_now()) is True
+
+
+class TestSchedulerDueAt:
+    # _fixed_now() is 2026-06-01 12:00 UTC. Monitors below use tz UTC so the
+    # tests don't depend on the host timezone.
+    def _monitor(self):
+        return Monitor(name="roundup", at=["06:00", "18:00"], tz="UTC",
+                       notify=True, event="monitor/status.roundup_due")
+
+    def test_first_sight_records_baseline_without_firing(self, tmp_path):
+        m = self._monitor()
+        sched, _ = _scheduler(tmp_path, [m])
+        # Noon: the 06:00 slot has passed, but starting mid-day must not fire it.
+        assert sched._due(m, _fixed_now()) is False
+        assert sched.state["roundup"]["last_run"] == _fixed_now().isoformat()
+
+    def test_due_after_scheduled_time_crossed(self, tmp_path):
+        m = self._monitor()
+        sched, _ = _scheduler(tmp_path, [m])
+        sched.state["roundup"] = {"last_run": _fixed_now().replace(hour=17).isoformat()}
+        assert sched._due(m, _fixed_now().replace(hour=18, minute=5)) is True
+
+    def test_not_due_between_slots(self, tmp_path):
+        m = self._monitor()
+        sched, _ = _scheduler(tmp_path, [m])
+        sched.state["roundup"] = {"last_run": _fixed_now().replace(hour=6, minute=1).isoformat()}
+        assert sched._due(m, _fixed_now()) is False
+
+    def test_at_times_respect_timezone(self, tmp_path):
+        # 06:00 Pacific is 13:00 UTC in June (PDT). Baseline at 10:00 UTC.
+        m = Monitor(name="r2", at=["06:00"], tz="America/Los_Angeles", notify=True)
+        sched, _ = _scheduler(tmp_path, [m])
+        sched.state["r2"] = {"last_run": (_fixed_now() - timedelta(hours=2)).isoformat()}
+        assert sched._due(m, _fixed_now()) is False  # 12:00 UTC = 5am PDT
+        assert sched._due(m, _fixed_now() + timedelta(hours=1, minutes=5)) is True  # 6:05am PDT
+
+
+class TestNotifyMonitor:
+    def test_notify_fires_event_directly_every_run(self, tmp_path):
+        m = Monitor(name="roundup", notify=True, event="monitor/status.roundup_due",
+                    description="ping the leads")
+        spawned = []
+        sched, injected = _scheduler(tmp_path, [m], spawned=spawned)
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        sched.run_monitor(m, reg, _fixed_now() + timedelta(hours=12))
+        assert spawned == []      # no out-of-band check agent
+        assert len(injected) == 2  # no dedup — fires every time it's due
+        ev = injected[0]
+        assert ev["source"] == "monitor"
+        assert ev["type"] == "status.roundup_due"
+        assert ev["data"]["monitor"] == "roundup"
+        assert ev["data"]["description"] == "ping the leads"
 
 
 class TestSchedulerReconcile:

@@ -91,6 +91,7 @@ When asked what repos you're managing:
 | Slack: general question | Answer directly |
 | Project lead status update | Note it, relay to human if significant |
 | Agent lifecycle event | Track it, no action unless error |
+| `monitor/status.roundup_due` | Run the scheduled status roundup (below) |
 
 ## Routing work to project leads
 
@@ -117,7 +118,30 @@ When asked for org-wide status:
    ```
 3. Compile and report to the human.
 
-## Operational rules
+## Scheduled status roundup
+
+The `team-status-roundup` monitor fires `monitor/status.roundup_due`
+twice a day (6am and 6pm Pacific). When it does:
+
+1. `modastack agents list` to find every project lead session.
+2. Ping each lead for a full report on its repo:
+   ```bash
+   modastack message --to <project-lead-session> \
+     "Scheduled status roundup. Report on your repo: in-progress tickets, open PRs (and their review/CI state), open issues, CI failures, and anything blocked or stuck." --wait
+   ```
+3. Aggregate the responses into one org-wide update, grouped by repo.
+   Lead with anything that needs human attention (CI failures, blocked
+   work, stale PRs), then the routine status.
+4. Post the update to Slack in the channel where you normally talk to
+   the human (the most recent channel a human messaged you in). Post it
+   as a new message, not a thread reply — this is a broadcast, not a
+   conversation. Use Slack-formatted links for issues and PRs.
+
+Always post the roundup, even if every repo is quiet — "All quiet:
+no open PRs, no CI failures, nothing blocked" is a valid report. If a
+project lead doesn't respond, say so in the update rather than
+silently omitting that repo. If no repos are being managed yet, skip
+the Slack post entirely.
 
 - **Stay responsive.** You are the control plane. Never do work that
   takes more than a few seconds — delegate everything.

@@ -9,7 +9,15 @@ into the manager's event stream for each newly-appeared condition.
 Synthetic events are pushed onto the same `event_queue` webhooks use, so the
 manager receives and routes them exactly like a real webhook event.
 
-Monitors come in two flavors:
+Monitors run on an `interval` (e.g. '15m') or at wall-clock times
+(`at: ["06:00", "18:00"]`, optionally pinned to a timezone with
+`tz: America/Los_Angeles`). At-monitors don't fire on first sight — the
+first tick records a baseline, then each scheduled time fires once.
+
+Monitors come in three flavors:
+  - Notification (`notify: true`) — fires its event straight to the manager
+    every time it's due. No condition detection, no dedup. For scheduled
+    nudges like a twice-daily status roundup.
   - Native check (`check:` field) — a deterministic Python runner in
     checks.py that the scheduler calls directly and deduplicates.
   - Description-only — the scheduler launches a short-lived, non-interactive
@@ -168,6 +176,8 @@ class MonitorScheduler:
     def _due(self, monitor, now: datetime) -> bool:
         entry = self.state.get(monitor.state_key)
         last_run = entry.get("last_run") if entry else None
+        if monitor.at:
+            return self._due_at(monitor, now, last_run)
         if not last_run:
             return True  # never run -> run on startup
         last = _parse_iso(last_run)
@@ -179,8 +189,49 @@ class MonitorScheduler:
             log.warning(f"Monitor {monitor.name} has bad interval: {e}")
             return False
 
+    def _due_at(self, monitor, now: datetime, last_run: str | None) -> bool:
+        """Due when a scheduled wall-clock time has passed since the last run.
+
+        Unlike interval monitors, an at-monitor does NOT fire on first sight —
+        starting the manager at 2pm shouldn't trigger the 6am slot. The first
+        tick just records a baseline; subsequent ticks fire once per scheduled
+        time crossed.
+        """
+        try:
+            scheduled = self._last_scheduled(monitor, now)
+        except ValueError as e:
+            log.warning(f"Monitor {monitor.name} has bad at-times: {e}")
+            return False
+        last = _parse_iso(last_run) if last_run else None
+        if last is None:
+            self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
+            self._save_state()
+            return False
+        return scheduled > last
+
+    @staticmethod
+    def _last_scheduled(monitor, now: datetime) -> datetime:
+        """The most recent scheduled fire time at or before `now`, computed in
+        the monitor's timezone (so '06:00' means 6am in `tz`, not UTC)."""
+        from datetime import timedelta
+
+        local = now.astimezone(monitor.tzinfo)
+        candidates = []
+        for hour, minute in monitor.at_times:
+            t = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if t > local:
+                t -= timedelta(days=1)
+            candidates.append(t)
+        return max(candidates)
+
     def run_monitor(self, monitor, registry: MonitorRegistry, now: datetime) -> None:
-        if monitor.command:
+        if monitor.notify:
+            # Scheduled notification — no condition to detect, no dedup.
+            # The event goes straight to the manager every time it's due.
+            from .schema import Condition
+            self._fire(monitor, Condition(key=now.isoformat(),
+                                          data={"description": monitor.description}))
+        elif monitor.command:
             self._run_command_check(monitor)
         elif monitor.check:
             check = self._checks.get(monitor.check)
