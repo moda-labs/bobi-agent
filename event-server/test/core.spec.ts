@@ -147,7 +147,7 @@ describe("normalizeSlackPayload", () => {
 		expect(result.event!.type).toBe("slack.thread_reply");
 	});
 
-	it("skips bot messages", () => {
+	it("skips own bot messages when selfBotId matches", () => {
 		const result = normalizeSlackPayload({
 			type: "event_callback",
 			team_id: "T123",
@@ -160,9 +160,28 @@ describe("normalizeSlackPayload", () => {
 				text: "bot",
 				ts: "123",
 			},
-		});
+		}, "B123");
 		expect(result.skip).toBe(true);
 		expect(result.event).toBeNull();
+	});
+
+	it("passes through other bot messages", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "app_mention",
+				user: "U123",
+				bot_id: "B_OTHER",
+				channel: "C456",
+				channel_type: "channel",
+				text: "from another bot",
+				ts: "123",
+			},
+		}, "B_SELF");
+		expect(result.skip).toBe(false);
+		expect(result.event).not.toBeNull();
+		expect(result.event!.type).toBe("slack.mention");
 	});
 
 	it("skips non-threaded channel messages", () => {
@@ -205,7 +224,7 @@ describe("normalizeSlackPayload", () => {
 });
 
 describe("subscriptionKeysForEvent", () => {
-	it("returns repo key for github events", () => {
+	it("returns only repo key for github events (no type fallback)", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "github",
@@ -217,7 +236,7 @@ describe("subscriptionKeysForEvent", () => {
 		expect(keys).toEqual(["github:org/repo"]);
 	});
 
-	it("returns linear key for linear events", () => {
+	it("returns only linear key for linear events (no type fallback)", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "linear",
@@ -229,7 +248,7 @@ describe("subscriptionKeysForEvent", () => {
 		expect(keys).toEqual(["linear:PROJ"]);
 	});
 
-	it("returns workspace key for slack events", () => {
+	it("returns only workspace key for slack events (no type fallback)", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "slack",
@@ -242,7 +261,7 @@ describe("subscriptionKeysForEvent", () => {
 		expect(keys).toEqual(["slack:T123"]);
 	});
 
-	it("returns empty array when no routing fields", () => {
+	it("returns type as fallback key when no source-specific routing fields", () => {
 		const keys = subscriptionKeysForEvent({
 			id: "1",
 			source: "unknown",
@@ -250,7 +269,16 @@ describe("subscriptionKeysForEvent", () => {
 			timestamp: "",
 			payload: {},
 		});
-		expect(keys).toEqual([]);
+		expect(keys).toEqual(["test"]);
+	});
+
+	it("routes generic topic events like email/received", () => {
+		const event = createTopicEvent("email/received", {
+			source: "monitor",
+			payload: { subject: "Hello" },
+		});
+		const keys = subscriptionKeysForEvent(event);
+		expect(keys).toContain("email/received");
 	});
 });
 

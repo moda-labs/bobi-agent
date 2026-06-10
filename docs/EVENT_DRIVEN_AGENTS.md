@@ -434,7 +434,7 @@ Workflows are loaded from three tiers — built-in defaults, user-level
 overrides, and per-project definitions — so teams customize behavior
 without forking the framework.
 
-### Agent packs: creating your own agents
+### Agent teams: creating your own agents
 
 Creating a purpose-built agent is a single command:
 
@@ -446,7 +446,7 @@ This launches an interactive session with a builder agent that walks
 you through designing your agent — what role it plays, what events it
 subscribes to, what workflows it runs, what monitors it needs, when
 it should notify you, and when it should ask for your input versus
-acting autonomously. The builder generates a complete agent pack
+acting autonomously. The builder generates a complete agent team
 written to disk, ready to launch.
 
 You can also skip the interactive flow if you already know what you
@@ -458,7 +458,7 @@ modastack agents create incident-responder \
           investigates using Datadog, and posts findings to Slack"
 ```
 
-The result is an agent pack — a portable bundle of everything an
+The result is an agent team — a portable bundle of everything an
 agent needs to operate in a domain: role prompts, workflows, monitors,
 and check functions. Packs are the distribution unit for agents. You
 can install a pack someone else built, point it at your project, and
@@ -615,7 +615,7 @@ event_sources:
   - linear
 
 # Or subscribe via CLI:
-# modastack start eng-org --subscribe github:moda-labs/modastack
+# modastack start eng-team --subscribe github:moda-labs/modastack
 ```
 
 The event server maintains a subscription index in KV. When an event
@@ -631,13 +631,13 @@ missed events on reconnect via cursor-based replay.
 # Install
 uv tool install modastack
 
-# Browse and install an agent pack
+# Browse and install an agent team
 modastack agents browse
-modastack agents update eng-org
+modastack agents update eng-team
 
 # Start the agent
 cd my-project
-modastack start eng-org
+modastack start eng-team
 
 # The agent is now:
 # - Subscribed to GitHub, Slack, and Linear events
@@ -693,7 +693,7 @@ auditable. Teams need to read the code that decides whether to roll
 back a deploy or merge a PR. Open source isn't just a distribution
 model here — it's a trust requirement.
 
-**Extensibility.** Agent packs, workflow definitions, monitor checks,
+**Extensibility.** Agent teams, workflow definitions, monitor checks,
 and connector configs are all user-authored. The framework provides
 the event bus and orchestration; the community provides the domain
 expertise. This only works if the framework is open.
@@ -711,7 +711,7 @@ managed service to depend on — you own the entire stack.
 - Generic webhook endpoint (`POST /webhooks/{source}`) with pluggable
   connector configs for routing key extraction
 - MCP gateway integration in the monitor scheduler
-- Agent pack registry for community-contributed domain packs
+- Agent team registry for community-contributed domain packs
 
 ### Next
 - CloudEvents envelope format for interop with non-agent infrastructure

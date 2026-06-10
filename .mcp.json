@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "Venn": {
+      "url": "https://mcp.venn.ai/mcp",
+      "type": "http"
+    }
+  }
+}

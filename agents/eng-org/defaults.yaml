@@ -1,8 +1,0 @@
-version: "1.1.0"
-
-# Entry point role for `modastack start eng-org`
-role: director
-
-# The director only needs Slack — project leads handle GitHub per-repo
-event_sources:
-  - slack

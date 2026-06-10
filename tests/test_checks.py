@@ -21,22 +21,26 @@ from modastack.monitors.schema import Condition
 
 
 def _find_checks_module() -> Path:
-    """Find github_checks.py from cache or project-local agents."""
-    from modastack.prompts import AGENTS_CACHE_DIR
-    candidates = [
-        AGENTS_CACHE_DIR / "eng-org" / "monitors" / "github_checks.py",
-        AGENTS_CACHE_DIR / "test-agent" / "monitors" / "github_checks.py",
+    """Find github_checks.py from project-local agents."""
+    repo_root = Path(__file__).parent.parent
+    search_dirs = [
+        repo_root / "agents",
+        repo_root / ".modastack" / "agents",
     ]
-    for search in candidates:
-        if search.exists():
-            return search
+    for search_dir in search_dirs:
+        if not search_dir.is_dir():
+            continue
+        for pack in search_dir.iterdir():
+            candidate = pack / "monitors" / "github_checks.py"
+            if candidate.exists():
+                return candidate
     return None
 
 
 _checks_path = _find_checks_module()
 if _checks_path is None:
     pytest.skip(
-        "github_checks.py not found — run: modastack agents update eng-org",
+        "github_checks.py not found — run: modastack agents update eng-team",
         allow_module_level=True,
     )
 

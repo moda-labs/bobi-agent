@@ -1,7 +1,7 @@
-# Create Agent Packages
+# Create Agent Teamages
 
-Guide the user through designing and generating a modastack agent package.
-An agent package is a portable bundle — role prompts, workflows, monitors,
+Guide the user through designing and generating a modastack agent teamage.
+An agent teamage is a portable bundle — role prompts, workflows, monitors,
 and tool guides — that defines a multi-agent system. The output is a
 runnable `agents/<pack-name>/` directory.
 

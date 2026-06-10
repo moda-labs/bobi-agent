@@ -14,44 +14,35 @@ import yaml
 TEST_AGENT_NAME = "test-agent"
 
 
-def _create_test_agent(agents_dir: Path) -> Path:
-    """Create a minimal self-contained agent pack for testing."""
-    pack = agents_dir / TEST_AGENT_NAME
-    (pack / "roles" / "director").mkdir(parents=True)
-    (pack / "roles" / "project_lead").mkdir(parents=True)
-    (pack / "roles" / "engineer").mkdir(parents=True)
-    (pack / "workflows").mkdir()
-    (pack / "monitors").mkdir()
+def _install_test_agent(config_dir: Path) -> None:
+    """Create installed agent state in .modastack/ (simulates `modastack install`)."""
+    for subdir in ["roles/director", "roles/project_lead", "roles/engineer",
+                    "workflows", "monitors"]:
+        (config_dir / subdir).mkdir(parents=True, exist_ok=True)
 
-    (pack / "defaults.yaml").write_text(yaml.dump({
-        "version": "0.0.1",
-        "role": "director",
-        "event_sources": ["slack"],
-    }))
+    (config_dir / "agent.md").write_text("# Test Agent\nMinimal agent for testing.")
 
-    (pack / "agent.md").write_text("# Test Agent\nMinimal agent for testing.")
-
-    (pack / "roles" / "director" / "ROLE.md").write_text(
+    (config_dir / "roles" / "director" / "ROLE.md").write_text(
         "# Engineering Director\n\n"
         "You are a director of engineering managing multiple software projects."
     )
-    (pack / "roles" / "project_lead" / "ROLE.md").write_text(
+    (config_dir / "roles" / "project_lead" / "ROLE.md").write_text(
         "# Project Lead\n\n"
         "You are a project lead managing a single software project."
     )
-    (pack / "roles" / "engineer" / "ROLE.md").write_text(
+    (config_dir / "roles" / "engineer" / "ROLE.md").write_text(
         "# Engineer Agent\n\n"
         "You are a staff engineer who ships production-quality code."
     )
 
-    (pack / "workflows" / "adhoc.yaml").write_text(yaml.dump({
+    (config_dir / "workflows" / "adhoc.yaml").write_text(yaml.dump({
         "name": "adhoc",
         "trigger": "For any ad-hoc task.",
         "description": "Open-ended task.",
         "steps": [{"name": "task", "prompt": "${{input.task}}"}],
     }))
 
-    (pack / "monitors" / "defaults.yaml").write_text(yaml.dump({
+    (config_dir / "monitors" / "defaults.yaml").write_text(yaml.dump({
         "monitors": [{
             "name": "test-check",
             "description": "Test monitor",
@@ -61,13 +52,11 @@ def _create_test_agent(agents_dir: Path) -> Path:
         }],
     }))
 
-    (pack / "monitors" / "github_checks.py").write_text(
+    (config_dir / "monitors" / "github_checks.py").write_text(
         (Path(__file__).parent.parent / "tests" / "_test_checks_stub.py").read_text()
         if (Path(__file__).parent.parent / "tests" / "_test_checks_stub.py").exists()
         else _CHECKS_STUB
     )
-
-    return pack
 
 
 _CHECKS_STUB = '''"""Stub monitor checks for testing."""
@@ -125,7 +114,7 @@ def modastack_install(tmp_path, monkeypatch):
     Sets sdk._project_root so all per-project path resolution points at tmp_path.
     No global ~/.modastack directory is created or referenced.
 
-    Creates a self-contained test agent pack so tests never depend on
+    Creates a self-contained test agent team so tests never depend on
     remote-fetched packs or the user's cache.
     """
     repo_path = tmp_path / "repo"
@@ -133,29 +122,23 @@ def modastack_install(tmp_path, monkeypatch):
     config_dir = repo_path / ".modastack"
     state_dir = config_dir / "state"
     sessions_dir = config_dir / "sessions"
-    agents_dir = tmp_path / "agents_cache"
+    agents_dir = config_dir / "agents"
 
-    for d in [config_dir, state_dir, sessions_dir, config_dir / "workflows"]:
+    for d in [config_dir, state_dir, sessions_dir, agents_dir]:
         d.mkdir(parents=True)
 
-    _create_test_agent(agents_dir)
+    _install_test_agent(config_dir)
 
     (config_dir / "agent.yaml").write_text(yaml.dump({
+        "version": "0.0.1",
         "agent": TEST_AGENT_NAME,
-        "role": "director",
+        "entry_point": "director",
+        "services": [
+            {"name": "slack", "events": True},
+        ],
     }))
 
-    machine_config = tmp_path / "machine_config.yaml"
-    machine_config.write_text("{}")
-
-    creds_path = tmp_path / "credentials.yaml"
-    creds_path.write_text("{}")
-
     monkeypatch.setattr("modastack.sdk._project_root", repo_path)
-    monkeypatch.setattr("modastack.config._machine_config_path", lambda: machine_config)
-    monkeypatch.setattr("modastack.config._credentials_path", lambda: creds_path)
-    monkeypatch.setattr("modastack.prompts.AGENTS_CACHE_DIR", agents_dir)
-    monkeypatch.setattr("modastack.prompts.resolver.AGENTS_CACHE_DIR", agents_dir)
 
     return ModastackInstall(
         repo_path=repo_path,

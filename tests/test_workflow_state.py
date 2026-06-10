@@ -1,4 +1,4 @@
-"""Unit tests for WorkflowRun and NodeState — persistence, querying, retry."""
+"""Unit tests for WorkflowRun — persistence and querying."""
 
 import json
 import time
@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from modastack.workflow.state import WorkflowRun, NodeState
+from modastack.workflow.state import WorkflowRun
 
 
 @pytest.fixture
@@ -36,25 +36,6 @@ def _make_run(runs_dir, run_id="abc123", workflow_name="test-wf",
     )
     run.save()
     return run
-
-
-# ---------------------------------------------------------------------------
-# NodeState
-# ---------------------------------------------------------------------------
-
-class TestNodeState:
-    def test_defaults(self):
-        ns = NodeState()
-        assert ns.status == "pending"
-        assert ns.started_at == ""
-        assert ns.completed_at == ""
-        assert ns.outputs == {}
-        assert ns.error == ""
-
-    def test_custom_values(self):
-        ns = NodeState(status="completed", error="oops")
-        assert ns.status == "completed"
-        assert ns.error == "oops"
 
 
 # ---------------------------------------------------------------------------
@@ -89,16 +70,6 @@ class TestSaveLoad:
         assert loaded.run_id == "rt1"
         assert loaded.workflow_name == "lifecycle"
         assert loaded.status == "running"
-
-    def test_round_trip_with_nodes(self, runs_dir):
-        run = _make_run(runs_dir, run_id="rt2")
-        run.nodes["step1"] = NodeState(status="completed", outputs={"key": "val"})
-        run.nodes["step2"] = NodeState(status="failed", error="timeout")
-        run.save()
-        loaded = WorkflowRun.load("rt2")
-        assert loaded.nodes["step1"].status == "completed"
-        assert loaded.nodes["step1"].outputs == {"key": "val"}
-        assert loaded.nodes["step2"].error == "timeout"
 
     def test_save_is_atomic(self, runs_dir):
         run = _make_run(runs_dir, run_id="atomic")
@@ -143,71 +114,6 @@ class TestSaveLoad:
 
 
 # ---------------------------------------------------------------------------
-# WorkflowRun.node_state
-# ---------------------------------------------------------------------------
-
-class TestNodeStateAccess:
-    def test_creates_new_node_on_access(self):
-        run = WorkflowRun.create("wf", {})
-        ns = run.node_state("step1")
-        assert ns.status == "pending"
-        assert "step1" in run.nodes
-
-    def test_returns_existing_node(self):
-        run = WorkflowRun.create("wf", {})
-        run.nodes["step1"] = NodeState(status="completed")
-        ns = run.node_state("step1")
-        assert ns.status == "completed"
-
-
-# ---------------------------------------------------------------------------
-# WorkflowRun.find_active
-# ---------------------------------------------------------------------------
-
-class TestFindActive:
-    def test_finds_running_run(self, runs_dir):
-        _make_run(runs_dir, run_id="active1", status="running",
-                  issue_id="42")
-        found = WorkflowRun.find_active("test-wf", "42")
-        assert found is not None
-        assert found.run_id == "active1"
-
-    def test_finds_waiting_run(self, runs_dir):
-        _make_run(runs_dir, run_id="waiting1", status="waiting",
-                  issue_id="42")
-        found = WorkflowRun.find_active("test-wf", "42")
-        assert found is not None
-        assert found.run_id == "waiting1"
-
-    def test_skips_completed(self, runs_dir):
-        _make_run(runs_dir, run_id="done1", status="completed",
-                  issue_id="42")
-        assert WorkflowRun.find_active("test-wf", "42") is None
-
-    def test_skips_wrong_workflow(self, runs_dir):
-        _make_run(runs_dir, run_id="wrong1", status="running",
-                  issue_id="42", workflow_name="other-wf")
-        assert WorkflowRun.find_active("test-wf", "42") is None
-
-    def test_skips_wrong_issue(self, runs_dir):
-        _make_run(runs_dir, run_id="wrong2", status="running",
-                  issue_id="99")
-        assert WorkflowRun.find_active("test-wf", "42") is None
-
-    def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state._runs_dir",
-                            lambda: tmp_path / "nonexistent")
-        assert WorkflowRun.find_active("wf", "42") is None
-
-    def test_tolerates_corrupt_json(self, runs_dir):
-        (runs_dir / "corrupt.json").write_text("{bad json")
-        _make_run(runs_dir, run_id="good", status="running", issue_id="42")
-        found = WorkflowRun.find_active("test-wf", "42")
-        assert found is not None
-        assert found.run_id == "good"
-
-
-# ---------------------------------------------------------------------------
 # WorkflowRun.find_waiting
 # ---------------------------------------------------------------------------
 
@@ -245,29 +151,6 @@ class TestFindWaiting:
 
 
 # ---------------------------------------------------------------------------
-# WorkflowRun.find_completed
-# ---------------------------------------------------------------------------
-
-class TestFindCompleted:
-    def test_finds_completed_run(self, runs_dir):
-        _make_run(runs_dir, run_id="done", status="completed",
-                  issue_id="42")
-        found = WorkflowRun.find_completed("test-wf", "42")
-        assert found is not None
-        assert found.run_id == "done"
-
-    def test_skips_running(self, runs_dir):
-        _make_run(runs_dir, run_id="running", status="running",
-                  issue_id="42")
-        assert WorkflowRun.find_completed("test-wf", "42") is None
-
-    def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state._runs_dir",
-                            lambda: tmp_path / "nonexistent")
-        assert WorkflowRun.find_completed("wf", "42") is None
-
-
-# ---------------------------------------------------------------------------
 # WorkflowRun.list_runs
 # ---------------------------------------------------------------------------
 
@@ -302,42 +185,3 @@ class TestListRuns:
         assert runs[0].run_id == "good"
 
 
-# ---------------------------------------------------------------------------
-# WorkflowRun.retry_failed
-# ---------------------------------------------------------------------------
-
-class TestRetryFailed:
-    def test_resets_failed_nodes(self, runs_dir):
-        run = _make_run(runs_dir, run_id="retry1")
-        run.nodes["s1"] = NodeState(status="completed")
-        run.nodes["s2"] = NodeState(status="failed", error="timeout")
-        run.nodes["s3"] = NodeState(status="failed", error="crash")
-        run.status = "failed"
-        run.save()
-
-        reset = run.retry_failed()
-        assert set(reset) == {"s2", "s3"}
-        assert run.nodes["s1"].status == "completed"
-        assert run.nodes["s2"].status == "pending"
-        assert run.nodes["s2"].error == ""
-        assert run.nodes["s3"].status == "pending"
-        assert run.status == "running"
-        assert run.completed_at == ""
-
-    def test_no_failed_nodes_returns_empty(self, runs_dir):
-        run = _make_run(runs_dir, run_id="retry2")
-        run.nodes["s1"] = NodeState(status="completed")
-        run.save()
-        reset = run.retry_failed()
-        assert reset == []
-
-    def test_retry_persists_to_disk(self, runs_dir):
-        run = _make_run(runs_dir, run_id="retry3")
-        run.nodes["s1"] = NodeState(status="failed", error="err")
-        run.status = "failed"
-        run.save()
-
-        run.retry_failed()
-        loaded = WorkflowRun.load("retry3")
-        assert loaded.nodes["s1"].status == "pending"
-        assert loaded.status == "running"

@@ -1,60 +1,36 @@
-"""Resolve agent prompts: base + agent pack role + tools + project override."""
+"""Resolve agent prompts: base + agent team role + tools + project override."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
-from . import BASE_PATH, AGENTS_CACHE_DIR, BUILTIN_AGENTS_DIR, PROMPTS_DIR
+from . import BASE_PATH, PROMPTS_DIR
 
 log = logging.getLogger(__name__)
 
 
-def _resolve_role_prompt(role: str, agent_dir: Path | None, project: Path | None) -> str | None:
-    """Find the role prompt.
-
-    Resolution order:
-      1. <project>/.modastack/roles/{role}/ROLE.md — project override
-      2. Agent pack roles/{role}/ROLE.md           — from resolved agent pack
-      3. Built-in: modastack/prompts/agents/{role}/ROLE.md — framework-shipped
-    """
+def _resolve_role_prompt(role: str, project: Path | None) -> str | None:
+    """Find the role prompt at <project>/.modastack/roles/{role}/ROLE.md."""
     if project:
-        folder = project / ".modastack" / "roles" / role / "ROLE.md"
-        if folder.exists():
-            return folder.read_text()
-
-    if agent_dir:
-        folder = agent_dir / "roles" / role / "ROLE.md"
-        if folder.exists():
-            return folder.read_text()
-
-    builtin = BUILTIN_AGENTS_DIR / role / "ROLE.md"
-    if builtin.exists():
-        return builtin.read_text()
-
+        installed = project / ".modastack" / "roles" / role / "ROLE.md"
+        if installed.exists():
+            return installed.read_text()
     return None
 
 
-def _resolve_tools(agent_dir: Path | None, project: Path | None) -> str:
-    """Load all tool markdown files from the pack and project overrides.
+def _resolve_tools(project: Path | None) -> str:
+    """Load all tool markdown files from the installed .modastack/tools/.
 
     Tools are service interaction guides (e.g. gmail.md, jira.md) that
     describe how to interact with external services.
-
-    Project-level tools override pack tools with the same filename.
     """
     tools: dict[str, str] = {}
 
-    if agent_dir:
-        tools_dir = agent_dir / "tools"
+    if project:
+        tools_dir = project / ".modastack" / "tools"
         if tools_dir.is_dir():
             for md in sorted(tools_dir.glob("*.md")):
-                tools[md.stem] = md.read_text()
-
-    if project:
-        project_tools = project / ".modastack" / "tools"
-        if project_tools.is_dir():
-            for md in sorted(project_tools.glob("*.md")):
                 tools[md.stem] = md.read_text()
 
     if not tools:
@@ -64,28 +40,6 @@ def _resolve_tools(agent_dir: Path | None, project: Path | None) -> str:
     for name, content in sorted(tools.items()):
         parts.append(f"### {name}\n\n{content.strip()}")
     return "\n\n".join(parts)
-
-
-def _resolve_agent_dir(agent_name: str | None, project_path: Path | None = None) -> Path | None:
-    """Find the agent pack directory.
-
-    Resolution order:
-      1. <project>/agents/{name}             — project-level (visible)
-      2. <project>/.modastack/agents/{name}  — project override (hidden)
-      3. ~/.modastack/agents/{name}          — user cache (fetched from remote)
-    """
-    if not agent_name:
-        return None
-    if project_path:
-        project = Path(project_path)
-        visible = project / "agents" / agent_name
-        if visible.is_dir():
-            return visible
-        hidden = project / ".modastack" / "agents" / agent_name
-        if hidden.is_dir():
-            return hidden
-    d = AGENTS_CACHE_DIR / agent_name
-    return d if d.is_dir() else None
 
 
 def resolve_agent_prompt(
@@ -105,13 +59,12 @@ def resolve_agent_prompt(
     parts = [BASE_PATH.read_text()]
 
     project = Path(project_path)
-    agent_dir = _resolve_agent_dir(agent_name, project)
 
-    role_prompt = _resolve_role_prompt(role, agent_dir, project)
+    role_prompt = _resolve_role_prompt(role, project)
     if role_prompt:
         parts.append(role_prompt)
 
-    tools_section = _resolve_tools(agent_dir, project)
+    tools_section = _resolve_tools(project)
     if tools_section:
         parts.append(tools_section)
 
@@ -147,37 +100,17 @@ def build_startup_prompt(
 
 
 def list_workflows(project_path: Path | str, agent_name: str | None = None) -> str:
-    """List available workflows as a formatted string for agent prompts."""
+    """List available workflows as a formatted string for agent prompts.
+
+    Delegates to WorkflowDispatcher so agents see the same menu (same
+    tiers, dedup, and priority) as `modastack workflows list`.
+    """
     try:
-        from modastack.workflow.schema import load_workflow
+        from modastack.workflow.triggers import WorkflowDispatcher
 
-        project = Path(project_path)
-        sources: list[Path] = []
-
-        agent_dir = _resolve_agent_dir(agent_name, project)
-        if agent_dir:
-            wf_dir = agent_dir / "workflows"
-            if wf_dir.exists():
-                sources.append(wf_dir)
-
-        repo_wf = project / ".modastack" / "workflows"
-        if repo_wf.exists():
-            sources.append(repo_wf)
-
-        seen: set[str] = set()
-        lines: list[str] = []
-        for d in reversed(sources):
-            for f in sorted(d.glob("*.yaml")):
-                if f.stem in seen:
-                    continue
-                seen.add(f.stem)
-                try:
-                    wf = load_workflow(f)
-                    trigger = getattr(wf.trigger, 'event', None) or str(wf.trigger)[:60]
-                    lines.append(f"- {wf.name}: {trigger}")
-                except Exception:
-                    continue
-        return "\n".join(lines) if lines else "No workflows found."
+        dispatcher = WorkflowDispatcher()
+        dispatcher.load_all_workflows(Path(project_path), agent_name=agent_name)
+        return dispatcher.format_workflow_menu()
     except Exception:
         return ""
 
@@ -240,53 +173,16 @@ def discover_roles(
     project_path: Path | str | None = None,
     agent_name: str | None = None,
 ) -> list[dict]:
-    """List available agent roles from agent pack and project tiers."""
+    """List available agent roles from installed .modastack/roles/."""
     roles: dict[str, dict] = {}
-
-    if agent_name:
-        agent_dir = _resolve_agent_dir(agent_name, Path(project_path) if project_path else None)
-        if agent_dir:
-            for name, path in _discover_roles_in_dir(agent_dir / "roles"):
-                roles[name] = {
-                    "name": name,
-                    "source": agent_name,
-                    "description": _extract_description(path),
-                    "path": str(path),
-                }
-    elif AGENTS_CACHE_DIR.is_dir():
-        for pack in sorted(AGENTS_CACHE_DIR.iterdir()):
-            if not pack.is_dir():
-                continue
-            for name, path in _discover_roles_in_dir(pack / "roles"):
-                if name not in roles:
-                    roles[name] = {
-                        "name": name,
-                        "source": pack.name,
-                        "description": _extract_description(path),
-                        "path": str(path),
-                    }
 
     if project_path:
         project = Path(project_path)
-        for agents_dir in [project / "agents", project / ".modastack" / "agents"]:
-            if agents_dir.is_dir():
-                for pack in sorted(agents_dir.iterdir()):
-                    if not pack.is_dir():
-                        continue
-                    for name, path in _discover_roles_in_dir(pack / "roles"):
-                        if name not in roles:
-                            roles[name] = {
-                                "name": name,
-                                "source": pack.name,
-                                "description": _extract_description(path),
-                                "path": str(path),
-                            }
-
-        project_roles = project / ".modastack" / "roles"
-        for name, path in _discover_roles_in_dir(project_roles):
+        installed_roles = project / ".modastack" / "roles"
+        for name, path in _discover_roles_in_dir(installed_roles):
             roles[name] = {
                 "name": name,
-                "source": "project",
+                "source": agent_name or "installed",
                 "description": _extract_description(path),
                 "path": str(path),
             }
@@ -310,24 +206,10 @@ def validate_role(
     project_path: Path | str | None = None,
     agent_name: str | None = None,
 ) -> bool:
-    """Check whether a role exists in any tier."""
-    agent_dir = _resolve_agent_dir(agent_name, Path(project_path) if project_path else None)
-    if agent_dir and _resolve_role_path(role_name, agent_dir / "roles"):
-        return True
+    """Check whether a role exists in the installed .modastack/roles/."""
     if project_path:
         project = Path(project_path)
-        project_roles = project / ".modastack" / "roles"
-        if _resolve_role_path(role_name, project_roles):
+        installed_roles = project / ".modastack" / "roles"
+        if _resolve_role_path(role_name, installed_roles):
             return True
-        for agents_dir in [project / "agents", project / ".modastack" / "agents"]:
-            if agents_dir.is_dir():
-                for pack in agents_dir.iterdir():
-                    if pack.is_dir() and _resolve_role_path(role_name, pack / "roles"):
-                        return True
-    if not agent_name and AGENTS_CACHE_DIR.is_dir():
-        for pack in AGENTS_CACHE_DIR.iterdir():
-            if pack.is_dir() and _resolve_role_path(role_name, pack / "roles"):
-                return True
-    if _resolve_role_path(role_name, BUILTIN_AGENTS_DIR):
-        return True
     return False

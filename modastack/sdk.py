@@ -30,26 +30,46 @@ CLAUDE_CLI = shutil.which("claude") or "/opt/homebrew/bin/claude"
 
 _project_root: Path | None = None
 
+# Resolved sessions dir per project root. Runtime-root resolution walks the
+# filesystem and probes pids; it runs on every registry op without this cache.
+_sessions_dir_cache: dict[str, Path] = {}
+
 
 def set_project_root(path: Path) -> None:
     """Set the project root for all session state paths."""
     global _project_root
     _project_root = path
+    _sessions_dir_cache.clear()
 
 
 def get_project_root() -> Path | None:
     return _project_root
 
 
-def _pid_file_alive(pid_path: Path) -> bool:
-    """Check whether a manager.pid file points to a running process."""
-    if not pid_path.exists():
+def pid_alive(pid: int) -> bool:
+    """Whether a pid refers to a live process (signal-0 probe)."""
+    if pid <= 0:
         return False
     try:
-        pid = int(pid_path.read_text().strip())
-    except (ValueError, OSError):
+        os.kill(pid, 0)
+    except ProcessLookupError:
         return False
-    return _pid_alive(pid)
+    except PermissionError:
+        return True
+    return True
+
+
+def read_pid(pid_path: Path) -> int:
+    """Read a pid file, returning 0 when missing or malformed."""
+    try:
+        return int(pid_path.read_text().strip())
+    except (ValueError, OSError):
+        return 0
+
+
+def _pid_file_alive(pid_path: Path) -> bool:
+    """Check whether a manager.pid file points to a running process."""
+    return pid_alive(read_pid(pid_path))
 
 
 def find_runtime_root(start: Path | None = None) -> Path | None:
@@ -80,13 +100,34 @@ def _sessions_dir() -> Path:
     If a live manager is running in an ancestor directory, sessions are
     stored under that ancestor's .modastack/sessions/ so all agents in the
     runtime are visible to each other. Falls back to the local project
-    root when no ancestor manager is found.
+    root when no ancestor manager is found. The resolution is cached per
+    project root (cleared by set_project_root).
     """
     if not _project_root:
         raise RuntimeError("project root not set — call set_project_root() first")
+    key = str(_project_root)
+    cached = _sessions_dir_cache.get(key)
+    if cached is not None:
+        return cached
     runtime = find_runtime_root(_project_root) or _project_root
     d = runtime / ".modastack" / "sessions"
     d.mkdir(parents=True, exist_ok=True)
+    _sessions_dir_cache[key] = d
+    return d
+
+
+_created_state_dirs: set[str] = set()
+
+
+def state_dir(project_path: Path | None = None) -> Path:
+    """Runtime state directory: <project>/.modastack/state (created on demand)."""
+    root = project_path or _project_root
+    if not root:
+        raise RuntimeError("project root not set — call set_project_root() first")
+    d = root / ".modastack" / "state"
+    if str(d) not in _created_state_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+        _created_state_dirs.add(str(d))
     return d
 
 
@@ -110,18 +151,6 @@ class SessionEntry:
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     requested_by: dict = field(default_factory=dict)
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 class SessionRegistry:
@@ -191,7 +220,7 @@ class SessionRegistry:
                 continue
             if entry.status not in ("starting", "running", "idle"):
                 continue
-            if entry.pid and not _pid_alive(entry.pid):
+            if entry.pid and not pid_alive(entry.pid):
                 self.mark_done(entry.name)
                 continue
             result.append(entry)

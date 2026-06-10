@@ -20,13 +20,17 @@ from .schema import Monitor
 
 log = logging.getLogger(__name__)
 
-def _defaults_path(agent_name: str | None = None) -> Path:
-    """Find the monitors defaults.yaml — from agent pack or fallback."""
-    if agent_name:
-        from modastack.prompts.resolver import _resolve_agent_dir
-        agent_dir = _resolve_agent_dir(agent_name)
-        if agent_dir:
-            p = agent_dir / "monitors" / "defaults.yaml"
+def _defaults_path(project_path: Path | None = None) -> Path:
+    """Find the monitors defaults.yaml — from installed .modastack/ or framework fallback."""
+    if project_path:
+        p = project_path / ".modastack" / "monitors" / "defaults.yaml"
+        if p.exists():
+            return p
+    if not project_path:
+        from modastack.sdk import get_project_root
+        root = get_project_root()
+        if root:
+            p = root / ".modastack" / "monitors" / "defaults.yaml"
             if p.exists():
                 return p
     return Path(__file__).resolve().parent / "defaults.yaml"
@@ -55,16 +59,13 @@ class MonitorRegistry:
         self.opt_outs: dict[str, set[str]] = {}
 
     @classmethod
-    def load(cls, project_path: Path | None = None,
-             agent_name: str | None = None) -> "MonitorRegistry":
+    def load(cls, project_path: Path | None = None) -> "MonitorRegistry":
         registry = cls(project_path=project_path)
-        registry._agent_name = agent_name
         registry._load()
         return registry
 
     def _load(self) -> None:
-        agent_name = getattr(self, "_agent_name", None)
-        for raw in _read_records(_defaults_path(agent_name)):
+        for raw in _read_records(_defaults_path(self.project_path)):
             try:
                 m = Monitor.from_dict(raw, source="default")
                 self.globals[m.name] = m
@@ -77,7 +78,7 @@ class MonitorRegistry:
             project_key = str(project_path)
             project_sources = [
                 project_path / ".modastack" / "monitors.yaml",
-                project_path / ".modastack" / "config.yaml",
+                project_path / ".modastack" / "agent.yaml",
             ]
             for config_path in project_sources:
                 for raw in _read_records(config_path):
@@ -119,13 +120,6 @@ class MonitorRegistry:
         return [self.project_path]
 
     # --- Writes to user-writable tiers ---------------------------------
-
-    @staticmethod
-    def add_global(monitor: Monitor) -> None:
-        """Deprecated — use add_project instead. Global monitors are not supported."""
-        raise NotImplementedError(
-            "Global monitors removed. Use `modastack monitors add --project .` instead."
-        )
 
     @staticmethod
     def add_project(monitor: Monitor, project_path: Path) -> None:
@@ -182,7 +176,7 @@ class MonitorRegistry:
             return "removed"
 
         # Present only as a built-in default — can't delete, must pause.
-        for raw in _read_records(_defaults_path(getattr(self, "_agent_name", None))):
+        for raw in _read_records(_defaults_path()):
             if raw.get("name") == name:
                 return "default-only"
         return "not-found"

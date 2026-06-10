@@ -744,8 +744,8 @@ class TestSummarizeOutput:
 
 class TestEmitLifecycleEvent:
     def test_posts_via_cli_post_event(self):
-        """_emit_lifecycle_event posts (issue_id, repo, ...) via cli._post_event."""
-        with patch("modastack.cli._post_event") as post:
+        """_emit_lifecycle_event posts (issue_id, repo, ...) via events.publish.post_event."""
+        with patch("modastack.events.publish.post_event") as post:
             _emit_lifecycle_event("engineer/session.started",
                                   {"issue_id": "X-1", "repo": "r", "task": ""})
             # Runs on a daemon thread — wait for it to drain.
@@ -761,7 +761,7 @@ class TestEmitLifecycleEvent:
         assert "task" not in data
 
     def test_never_raises_on_post_failure(self):
-        with patch("modastack.cli._post_event", side_effect=RuntimeError("boom")):
+        with patch("modastack.events.publish.post_event", side_effect=RuntimeError("boom")):
             _emit_lifecycle_event("engineer/session.failed", {"issue_id": "X-2"})
             for t in threading.enumerate():
                 if t.name == "lifecycle-event":
@@ -780,7 +780,7 @@ class TestEmitLifecycleEvent:
             time.sleep(0.1)
             landed.set()
 
-        with patch("modastack.cli._post_event", side_effect=_slow_post):
+        with patch("modastack.events.publish.post_event", side_effect=_slow_post):
             _emit_lifecycle_event(
                 "engineer/session.completed", {"issue_id": "X-3"}, blocking=True,
             )
@@ -794,7 +794,7 @@ class TestEmitLifecycleEvent:
         def _hang(event_type, payload):
             release.wait(5)
 
-        with patch("modastack.cli._post_event", side_effect=_hang):
+        with patch("modastack.events.publish.post_event", side_effect=_hang):
             start = time.time()
             _emit_lifecycle_event(
                 "engineer/session.completed", {"issue_id": "X-4"},

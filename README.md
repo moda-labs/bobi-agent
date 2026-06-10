@@ -4,17 +4,9 @@
 [![PyPI](https://img.shields.io/pypi/v/modastack)](https://pypi.org/project/modastack/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Modastack is a general-purpose CLI tool that allows you to build teams of interactive event-driven agents that can respond to both outside world events like updates to tickets or inbound emails, while remaining interactive to human questions. Agents can leave messages for each other or ask blocking questions, and can recursively spin up their own interactive or task-based agents.
+Modastack is a CLI toolkit that provides the building blocks for creating proactive agent teams: agents that are both human-responsive, and can act autonomously in response to real-world events like GitHub PRs, Slack messages, ticket updates, or incoming emails. You define the roles and functionality of your agent team, and Modastack builds and runs it for you.
 
-Under the hood, every agent is a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) session — which means the entire system runs on a flat-rate Claude Pro or Max plan with no per-token API costs. API key usage is also supported if you prefer.
-
-Unlike other agent harnesses that either only let you run a single siloed agent, or come with pre-defined agent layouts, Modastack lets you define any agent topology that best matches the problem you are solving. Here's some examples:
-
-- Want to build a multi-repo agentic engineering team with a director, project leads, and engineers?
-- How about a sales organization with a lead-router that watches your CRM, qualifies inbound leads, and dispatches research agents to prep briefs before your reps even see the notification?
-- Or a support team where a triage agent monitors Zendesk, routes tickets by domain, and spins up specialists that pull context from your docs and codebase?
-
-If you can describe the specialist roles and the events you want to monitor for, Modastack can build it and run it for you!
+Under the hood, every agent is a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) session — which means the entire system runs on a flat-rate Claude Pro or Max plan with no per-token API costs. API key usage is also supported.
 
 ## Installation
 
@@ -55,7 +47,7 @@ See [scripts/install.sh](scripts/install.sh) for what the installer does.
 
 ```bash
 # Start a pre-built agent
-modastack start eng-org 
+modastack start eng-team 
 
 # Or launch a single ad-hoc agent
 modastack agents launch --role engineer --task "Fix the login bug"
@@ -65,12 +57,12 @@ modastack ask "What's the status of issue #42?"
 modastack message "Skip the integration tests, just ship it"
 ```
 
-## Agent Packages
+## Agent Teams
 
-An agent package is everything an agent needs to operate in a domain: role prompts, workflows, monitors, tools, and extra context/content.
+An agent team is everything an agent needs to operate in a domain: role prompts, workflows, monitors, tools, and extra context/content.
 
 ```
-agents/eng-org/                   # ← browse the reference pack at agents/eng-org/
+agents/eng-team/                   # ← browse the reference team at agents/eng-team/
 ├── defaults.yaml           # entry role, event sources
 ├── roles/
 │   ├── director/ROLE.md    # engineering director
@@ -90,19 +82,19 @@ agents/eng-org/                   # ← browse the reference pack at agents/eng-
 
 ### Creating Your Own Agents
 
-Run the following prompt in your chat assistant of choice (ChatGPT, Claude, etc) to launch a guided process that will help you generate your own agent package:
+Run the following prompt in your chat assistant of choice (ChatGPT, Claude, etc) to launch a guided process that will help you generate your own agent team:
 
 ```plaintext
 Read https://raw.githubusercontent.com/moda-labs/modastack/main/skills/create-agent.md and help me build a modastack agent
 ```
 
-### Agent Package Registry
+### Agent Team Registry
 
-Modastack maintains an agent package registry at [`agents/`](agents/). Install packages from our registry, or maintain your own private registry and add it to your local installation of Modastack:
+Modastack maintains an agent team registry at [`agents/`](agents/). Install teams from our registry, or maintain your own private registry and add it to your local installation of Modastack:
 
 ```bash
-modastack agents browse                     # see available packs from all registries
-modastack agents update eng-org             # install or update
+modastack agents browse                     # see available teams from all registries
+modastack agents update eng-team             # install or update
 modastack agents add-registry myorg/agents  # add a private registry
 ```
 
@@ -110,9 +102,9 @@ If you think you have a general-purpose agent you'd like to share with the world
 
 ## Architecture
 
-The topology below is just one example — the [`eng-org`](agents/eng-org/) agent package for software teams. The event server and monitor scheduler, and agent messaging system are infrastructure that every deployment gets.
+The topology below is just one example — the [`eng-team`](agents/eng-team/) agent team for software teams. The event server and monitor scheduler, and agent messaging system are infrastructure that every deployment gets.
 
-The topology of agents, including their roles, relationships to each other, and events they are subscribed to is completely defined by the agent package.
+The topology of agents, including their roles, relationships to each other, and events they are subscribed to is completely defined by the agent team.
 ```
 ─ GitHub · Slack · Linear · any webhooks
                  │ 
@@ -125,7 +117,7 @@ The topology of agents, including their roles, relationships to each other, and 
     └─────────────┬─────────────┘
                   │ WebSocket
 ┌─────────────────┼──────────────────────────────────────┐
-│ Agent Package   │                                      │
+│ Agent Teamage   │                                      │
 │                 │          ┌──────────────────────┐    │
 │                 │          │      Monitors        │    │
 │                 │          │    (runs locally)    │    │
@@ -266,7 +258,7 @@ linear:
   api_key: lin_api_...
 ```
 
-Per-project overrides in `.modastack/` — custom roles, workflows, monitors, and tools that take priority over the agent pack defaults.
+Per-project overrides in `.modastack/` — custom roles, workflows, monitors, and tools that take priority over the agent team defaults.
 
 ## Development
 

@@ -1,6 +1,6 @@
 [project]
 name = "modastack"
-version = "0.10.0"
+version = "0.13.0"
 description = "Build teams of event-driven AI agents"
 requires-python = ">=3.11"
 license = "MIT"
@@ -52,6 +52,18 @@ modastack = "modastack.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["modastack"]
+
+# Bundle the event server source so standalone (PyPI) installs can run a
+# local event server — it is npm-installed and built on first use.
+[tool.hatch.build.targets.wheel.force-include]
+"event-server/src" = "modastack/event-server/src"
+"event-server/package.json" = "modastack/event-server/package.json"
+"event-server/package-lock.json" = "modastack/event-server/package-lock.json"
+"event-server/tsconfig.json" = "modastack/event-server/tsconfig.json"
+
+[tool.hatch.build.targets.sdist]
+include = ["modastack", "event-server", "README.md", "CHANGELOG.md"]
+exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
 
 [build-system]
 requires = ["hatchling"]

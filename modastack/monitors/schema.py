@@ -16,7 +16,8 @@ class Condition:
 # Reserved keys parsed into named fields; everything else is free-form and
 # kept in `extra` (e.g. `url:` for a deploy-health check) so new check types
 # need no schema change.
-_RESERVED = {"name", "description", "interval", "event", "check", "enabled"}
+_RESERVED = {"name", "description", "interval", "event", "check", "command",
+             "enabled", "at", "tz", "notify"}
 
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -41,6 +42,26 @@ def parse_interval(value: str | int) -> int:
     return seconds
 
 
+def parse_at(value) -> list[tuple[int, int]]:
+    """Parse `at:` times — '06:00' or ['06:00', '18:00'] — into (hour, minute)
+    tuples. Interpreted in the monitor's `tz` (IANA name), falling back to
+    the host's local timezone. Raises ValueError on garbage.
+    """
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    times = []
+    for item in items:
+        match = re.fullmatch(r"(\d{1,2}):(\d{2})", str(item).strip())
+        if not match:
+            raise ValueError(f"Invalid at-time: {item!r} (expected 'HH:MM')")
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if hour > 23 or minute > 59:
+            raise ValueError(f"Invalid at-time: {item!r} (expected 'HH:MM')")
+        times.append((hour, minute))
+    return times
+
+
 @dataclass
 class Monitor:
     """One monitoring task, resolved from a single YAML record.
@@ -53,8 +74,12 @@ class Monitor:
     name: str
     description: str = ""
     interval: str = "15m"
+    at: list = field(default_factory=list)
+    tz: str = ""
     event: str = ""
     check: str = ""
+    command: str = ""
+    notify: bool = False
     enabled: bool = True
     extra: dict = field(default_factory=dict)
     source: str = "user"
@@ -65,12 +90,17 @@ class Monitor:
         if not raw.get("name"):
             raise ValueError("Monitor record requires a 'name'")
         extra = {k: v for k, v in raw.items() if k not in _RESERVED}
+        at = raw.get("at")
         return cls(
             name=raw["name"],
             description=raw.get("description", ""),
             interval=str(raw.get("interval", "15m")),
+            at=(at if isinstance(at, list) else [at]) if at else [],
+            tz=raw.get("tz", ""),
             event=raw.get("event", f"monitor/{raw['name']}"),
             check=raw.get("check", ""),
+            command=raw.get("command", ""),
+            notify=bool(raw.get("notify", False)),
             enabled=raw.get("enabled", True),
             extra=extra,
             source=source,
@@ -82,11 +112,20 @@ class Monitor:
         record: dict = {"name": self.name}
         if self.description:
             record["description"] = self.description
-        record["interval"] = self.interval
+        if self.at:
+            record["at"] = list(self.at)
+            if self.tz:
+                record["tz"] = self.tz
+        else:
+            record["interval"] = self.interval
         if self.event:
             record["event"] = self.event
         if self.check:
             record["check"] = self.check
+        if self.command:
+            record["command"] = self.command
+        if self.notify:
+            record["notify"] = True
         if not self.enabled:
             record["enabled"] = False
         record.update(self.extra)
@@ -95,6 +134,26 @@ class Monitor:
     @property
     def interval_seconds(self) -> int:
         return parse_interval(self.interval)
+
+    @property
+    def at_times(self) -> list[tuple[int, int]]:
+        """Parsed (hour, minute) tuples from `at`, in the monitor's timezone."""
+        return parse_at(self.at)
+
+    @property
+    def tzinfo(self):
+        """The tzinfo for `at` times — the monitor's `tz` (IANA name) if set
+        and resolvable, else the host's local timezone (None means local to
+        datetime.astimezone)."""
+        if self.tz:
+            try:
+                from zoneinfo import ZoneInfo
+                return ZoneInfo(self.tz)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"Monitor {self.name}: unknown tz {self.tz!r} — using host local time")
+        return None
 
     @property
     def state_key(self) -> str:

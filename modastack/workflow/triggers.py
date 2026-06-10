@@ -24,23 +24,15 @@ class WorkflowDispatcher:
 
     def load_all_workflows(self, project_path: Path | None = None,
                            agent_name: str | None = None):
-        """Load workflows: project overrides → agent pack → built-in fallback."""
+        """Load workflows: installed .modastack/workflows/ → built-in fallback."""
         if project_path is None:
             from modastack.sdk import get_project_root
             project_path = get_project_root()
 
         if project_path:
-            project_wf_dir = project_path / ".modastack" / "workflows"
-            if project_wf_dir.exists():
-                self._load_from(project_wf_dir, source=str(project_path))
-
-        if agent_name:
-            from modastack.prompts.resolver import _resolve_agent_dir
-            agent_dir = _resolve_agent_dir(agent_name, project_path)
-            if agent_dir:
-                agent_wf = agent_dir / "workflows"
-                if agent_wf.exists():
-                    self._load_from(agent_wf, source=agent_name)
+            installed_wf_dir = project_path / ".modastack" / "workflows"
+            if installed_wf_dir.exists():
+                self._load_from(installed_wf_dir, source=agent_name or str(project_path))
 
         self._load_from(WORKFLOWS_DIR, source="default")
 

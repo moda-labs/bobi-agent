@@ -28,13 +28,13 @@ class TestStatus:
 class TestDoctor:
 
     def test_doctor_runs(self, cli_run):
-        result = cli_run("doctor")
+        result = cli_run("doctor", timeout=30)
         # Exit code 1 is expected when event server isn't running
         assert result.returncode in (0, 1)
         assert "config" in result.stdout.lower() or "claude" in result.stdout.lower()
 
     def test_doctor_checks_config(self, cli_run):
-        result = cli_run("doctor")
+        result = cli_run("doctor", timeout=30)
         assert "config" in result.stdout.lower() or "ok" in result.stdout.lower()
 
 

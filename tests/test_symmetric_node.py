@@ -179,14 +179,15 @@ class TestPromptResolver:
     def test_discover_roles_finds_director_and_engineer(self, modastack_install):
         from modastack.prompts.resolver import discover_roles
         mi = modastack_install
-        roles = discover_roles(agent_name=mi.agent_name)
+        roles = discover_roles(project_path=mi.repo_path, agent_name=mi.agent_name)
         names = [r["name"] for r in roles]
         assert "director" in names
         assert "engineer" in names
 
     def test_discover_roles_scans_all_packs_without_agent_name(self, modastack_install):
         from modastack.prompts.resolver import discover_roles
-        roles = discover_roles()
+        mi = modastack_install
+        roles = discover_roles(project_path=mi.repo_path)
         names = [r["name"] for r in roles]
         assert "director" in names
         assert "engineer" in names
@@ -194,45 +195,35 @@ class TestPromptResolver:
 
 class TestAgentConfig:
 
-    def test_load_agent_config_from_default_path(self, tmp_path):
-        from modastack.cli import _load_agent_config
+    def test_config_load_from_default_path(self, tmp_path):
+        from modastack.config import Config
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""
-            role: manager
-            persistent: true
-            subscribe:
-              - moda-labs/modastack
-              - slack:T123
-            monitors: true
+            agent: test-agent
+            entry_point: manager
+            services:
+              - name: github
+                events: true
         """))
-        config = _load_agent_config(tmp_path)
-        assert config["role"] == "manager"
-        assert config["persistent"] is True
-        assert "moda-labs/modastack" in config["subscribe"]
-        assert "slack:T123" in config["subscribe"]
-        assert config["monitors"] is True
+        cfg = Config.load(tmp_path)
+        assert cfg.agent == "test-agent"
+        assert cfg.entry_point == "manager"
+        assert cfg.services[0].name == "github"
 
-    def test_load_agent_config_explicit_path(self, tmp_path):
-        from modastack.cli import _load_agent_config
-        custom = tmp_path / "custom-agent.yaml"
-        custom.write_text("role: assistant\npersistent: false\n")
-        config = _load_agent_config(tmp_path, str(custom))
-        assert config["role"] == "assistant"
-        assert config["persistent"] is False
+    def test_config_load_missing_returns_defaults(self, tmp_path):
+        from modastack.config import Config
+        cfg = Config.load(tmp_path)
+        assert cfg.agent == ""
+        assert cfg.entry_point == ""
 
-    def test_load_agent_config_missing_returns_none(self, tmp_path):
-        from modastack.cli import _load_agent_config
-        config = _load_agent_config(tmp_path)
-        assert config is None
-
-    def test_load_agent_config_empty_file(self, tmp_path):
-        from modastack.cli import _load_agent_config
+    def test_config_load_empty_file(self, tmp_path):
+        from modastack.config import Config
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text("")
-        config = _load_agent_config(tmp_path)
-        assert config == {}
+        cfg = Config.load(tmp_path)
+        assert cfg.agent == ""
 
 
 # ---------------------------------------------------------------------------

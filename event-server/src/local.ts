@@ -6,6 +6,7 @@ import {
 	normalizeGitHubPayload,
 	normalizeLinearPayload,
 	normalizeSlackPayload,
+	sendSlackMessage,
 	subscriptionKeysForEvent,
 	verifySlackSignature,
 	verifyGitHubSignature,
@@ -49,6 +50,15 @@ function json(res: http.ServerResponse, data: unknown, status = 200) {
 	res.end(JSON.stringify(data));
 }
 
+/** Parse a JSON string, or null when malformed (callers respond 400). */
+function parseJson(body: string): Record<string, unknown> | null {
+	try {
+		return JSON.parse(body);
+	} catch {
+		return null;
+	}
+}
+
 function authDeployment(deploymentId: string, req: http.IncomingMessage): Deployment | null {
 	const auth = req.headers.authorization || "";
 	if (!auth.startsWith("Bearer ")) return null;
@@ -79,8 +89,10 @@ function routeEvent(event: NormalizedEvent): number {
 		const seq = dep.nextSeq++;
 		const seqEvent = { ...event, seq };
 		dep.eventBuffer.push(seqEvent);
-		if (dep.eventBuffer.length > MAX_BUFFER) {
-			dep.eventBuffer.shift();
+		// Amortized O(1) eviction — shift() on a full 10k buffer copies the
+		// whole array on every event.
+		if (dep.eventBuffer.length >= 2 * MAX_BUFFER) {
+			dep.eventBuffer = dep.eventBuffer.slice(-MAX_BUFFER);
 		}
 		delivered++;
 
@@ -119,12 +131,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			if (!valid) return json(res, { error: "invalid signature" }, 401);
 		}
 
-		let payload: Record<string, unknown>;
-		try {
-			payload = JSON.parse(body);
-		} catch {
-			return json(res, { error: "invalid JSON" }, 400);
-		}
+		const payload = parseJson(body);
+		if (!payload) return json(res, { error: "invalid JSON" }, 400);
 
 		const eventHeader = (req.headers["x-github-event"] as string) || "unknown";
 		const deliveryId = (req.headers["x-github-delivery"] as string) || crypto.randomUUID();
@@ -137,12 +145,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
 	if (method === "POST" && path === "/webhooks/linear") {
 		const body = await readBody(req);
-		let payload: Record<string, unknown>;
-		try {
-			payload = JSON.parse(body);
-		} catch {
-			return json(res, { error: "invalid JSON" }, 400);
-		}
+		const payload = parseJson(body);
+		if (!payload) return json(res, { error: "invalid JSON" }, 400);
 
 		return json(res, { delivered_to: routeEvent(normalizeLinearPayload(payload)) });
 	}
@@ -153,12 +157,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		}
 
 		const body = await readBody(req);
-		let payload: Record<string, unknown>;
-		try {
-			payload = JSON.parse(body);
-		} catch {
-			return json(res, { error: "invalid JSON" }, 400);
-		}
+		const payload = parseJson(body);
+		if (!payload) return json(res, { error: "invalid JSON" }, 400);
 
 		if ((payload as Record<string, unknown>).type === "url_verification") {
 			return json(res, { challenge: (payload as Record<string, unknown>).challenge });
@@ -185,12 +185,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
 	if (method === "POST" && path === "/deployments") {
 		const body = await readBody(req);
-		let data: Record<string, unknown>;
-		try {
-			data = JSON.parse(body);
-		} catch {
-			return json(res, { error: "invalid JSON" }, 400);
-		}
+		const data = parseJson(body);
+		if (!data) return json(res, { error: "invalid JSON" }, 400);
 
 		const name = data.name as string;
 		const subs = data.subscriptions as string[];
@@ -227,12 +223,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		if (!dep) return json(res, { error: "unauthorized" }, 403);
 
 		const body = await readBody(req);
-		let data: Record<string, unknown>;
-		try {
-			data = JSON.parse(body);
-		} catch {
-			return json(res, { error: "invalid JSON" }, 400);
-		}
+		const data = parseJson(body);
+		if (!data) return json(res, { error: "invalid JSON" }, 400);
 
 		const newSubs = data.add as string[];
 		if (!newSubs?.length) return json(res, { error: "add[] required" }, 400);
@@ -254,12 +246,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	const topicMatch = method === "POST" && path.match(/^\/events\/(.+)$/);
 	if (topicMatch) {
 		const body = await readBody(req);
-		let data: Record<string, unknown>;
-		try {
-			data = JSON.parse(body);
-		} catch {
-			return json(res, { error: "invalid JSON" }, 400);
-		}
+		const data = parseJson(body);
+		if (!data) return json(res, { error: "invalid JSON" }, 400);
 
 		const event = createTopicEvent(topicMatch[1], data);
 		return json(res, { delivered_to: routeEvent(event) });
@@ -268,12 +256,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	// Slack workspace registry: POST /slack/workspaces
 	if (method === "POST" && path === "/slack/workspaces") {
 		const body = await readBody(req);
-		let data: Record<string, unknown>;
-		try {
-			data = JSON.parse(body);
-		} catch {
-			return json(res, { error: "invalid JSON" }, 400);
-		}
+		const data = parseJson(body);
+		if (!data) return json(res, { error: "invalid JSON" }, 400);
 
 		const workspaceId = data.workspace_id as string;
 		const botToken = data.bot_token as string;
@@ -287,12 +271,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	// Slack send-through: POST /slack/send
 	if (method === "POST" && path === "/slack/send") {
 		const body = await readBody(req);
-		let data: Record<string, unknown>;
-		try {
-			data = JSON.parse(body);
-		} catch {
-			return json(res, { error: "invalid JSON" }, 400);
-		}
+		const data = parseJson(body);
+		if (!data) return json(res, { error: "invalid JSON" }, 400);
 
 		const channel = data.channel as string;
 		const text = data.text as string;
@@ -305,19 +285,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			return json(res, { error: "no bot token for workspace" }, 400);
 		}
 
-		const slackPayload: Record<string, unknown> = { channel, text };
-		if (data.thread_ts) slackPayload.thread_ts = data.thread_ts;
-
 		try {
-			const resp = await fetch("https://slack.com/api/chat.postMessage", {
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${botToken}`,
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify(slackPayload),
-			});
-			const result = (await resp.json()) as Record<string, unknown>;
+			const result = await sendSlackMessage(botToken, channel, text, data.thread_ts as string | undefined);
 			if (!result.ok) {
 				return json(res, { ok: false, error: result.error }, 502);
 			}

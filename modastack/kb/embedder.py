@@ -20,13 +20,8 @@ log = logging.getLogger(__name__)
 
 
 def _state_dir() -> Path:
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        raise RuntimeError("project root not set")
-    d = root / ".modastack" / "state"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    from modastack.sdk import state_dir
+    return state_dir()
 
 
 def _pid_path() -> Path:
@@ -61,23 +56,10 @@ def _check_health(port: int) -> bool:
         return False
 
 
-def _is_process_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
-        return False
-
-
 def is_running() -> bool:
-    pid_p = _pid_path()
-    if not pid_p.exists():
-        return False
-    try:
-        pid = int(pid_p.read_text().strip())
-    except (ValueError, OSError):
-        return False
-    if not _is_process_alive(pid):
+    from modastack.sdk import pid_alive, read_pid
+
+    if not pid_alive(read_pid(_pid_path())):
         return False
     port = _read_port()
     if port is None:
@@ -119,9 +101,12 @@ def ensure_running() -> int:
     raise RuntimeError("Embedding sidecar failed to start within 30 seconds")
 
 
-def embed(texts: list[str]) -> list[list[float]]:
-    """Embed a list of texts via the sidecar. Auto-starts if needed."""
-    port = ensure_running()
+# Port of the last sidecar that answered an embed, so repeated embed()
+# calls skip the health-check roundtrip. Invalidated on request failure.
+_verified_port: int | None = None
+
+
+def _post_embed(port: int, texts: list[str]) -> list[list[float]]:
     data = json.dumps({"texts": texts}).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/embed",
@@ -133,8 +118,25 @@ def embed(texts: list[str]) -> list[list[float]]:
     return result["embeddings"]
 
 
+def embed(texts: list[str]) -> list[list[float]]:
+    """Embed a list of texts via the sidecar. Auto-starts if needed."""
+    global _verified_port
+    port = _verified_port or ensure_running()
+    try:
+        embeddings = _post_embed(port, texts)
+    except OSError:
+        # Sidecar died since the last call — restart once and retry.
+        _verified_port = None
+        port = ensure_running()
+        embeddings = _post_embed(port, texts)
+    _verified_port = port
+    return embeddings
+
+
 def stop() -> None:
     """Stop the sidecar if running."""
+    global _verified_port
+    _verified_port = None
     pid_p = _pid_path()
     if not pid_p.exists():
         return

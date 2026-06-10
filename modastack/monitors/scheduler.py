@@ -9,7 +9,15 @@ into the manager's event stream for each newly-appeared condition.
 Synthetic events are pushed onto the same `event_queue` webhooks use, so the
 manager receives and routes them exactly like a real webhook event.
 
-Monitors come in two flavors:
+Monitors run on an `interval` (e.g. '15m') or at wall-clock times
+(`at: ["06:00", "18:00"]`, optionally pinned to a timezone with
+`tz: America/Los_Angeles`). At-monitors don't fire on first sight — the
+first tick records a baseline, then each scheduled time fires once.
+
+Monitors come in three flavors:
+  - Notification (`notify: true`) — fires its event straight to the manager
+    every time it's due. No condition detection, no dedup. For scheduled
+    nudges like a twice-daily status roundup.
   - Native check (`check:` field) — a deterministic Python runner in
     checks.py that the scheduler calls directly and deduplicates.
   - Description-only — the scheduler launches a short-lived, non-interactive
@@ -21,6 +29,7 @@ Monitors come in two flavors:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import subprocess
@@ -29,30 +38,27 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-import importlib.util
-import sys
 
-def _load_checks(agent_name: str | None = None) -> dict:
-    """Load check runners from agent pack monitors/*_checks.py files."""
+def _load_checks(project_path: Path | None = None) -> dict:
+    """Load check runners from installed monitors/*_checks.py files."""
     all_checks: dict = {}
-    search_dirs: list[Path] = []
-    if agent_name:
-        from modastack.prompts.resolver import _resolve_agent_dir
-        agent_dir = _resolve_agent_dir(agent_name)
-        if agent_dir:
-            search_dirs.append(agent_dir / "monitors")
-    for checks_dir in search_dirs:
-        if not checks_dir.exists():
-            continue
-        for py_file in checks_dir.glob("*_checks.py"):
-            module_name = f"modastack_checks.{py_file.stem}"
-            spec = importlib.util.spec_from_file_location(module_name, py_file)
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = mod
-                spec.loader.exec_module(mod)
-                if hasattr(mod, "CHECKS"):
-                    all_checks.update(mod.CHECKS)
+    if not project_path:
+        from modastack.sdk import get_project_root
+        project_path = get_project_root()
+    if not project_path:
+        return all_checks
+    checks_dir = project_path / ".modastack" / "monitors"
+    if not checks_dir.exists():
+        return all_checks
+    for py_file in checks_dir.glob("*_checks.py"):
+        module_name = f"modastack_checks.{py_file.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, py_file)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = mod
+            spec.loader.exec_module(mod)
+            if hasattr(mod, "CHECKS"):
+                all_checks.update(mod.CHECKS)
     return all_checks
 
 def _parse_iso(value: str):
@@ -71,13 +77,10 @@ from .registry import MonitorRegistry
 log = logging.getLogger(__name__)
 
 def _monitor_state_path() -> Path:
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        raise RuntimeError("project root not set — call set_project_root() first")
-    d = root / ".modastack" / "state"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "monitor_state.json"
+    from modastack.sdk import state_dir
+    return state_dir() / "monitor_state.json"
+
+
 TICK_INTERVAL = 30  # seconds between scheduler ticks
 
 
@@ -121,15 +124,15 @@ def _default_spawn_check(monitor, cwd: str | None) -> None:
 class MonitorScheduler:
     def __init__(self, inject_event=None, state_path: Path | None = None,
                  now=None, registry_loader=None, spawn_check=None,
-                 agent_name: str | None = None):
+                 project_path: Path | None = None):
         self.inject_event = inject_event or _default_inject
         self.spawn_check = spawn_check or _default_spawn_check
         self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
-        self._agent_name = agent_name
-        self._checks = _load_checks(agent_name)
+        self._project_path = project_path
+        self._checks = _load_checks(project_path)
         self._registry_loader = registry_loader or (
-            lambda **kw: MonitorRegistry.load(agent_name=agent_name, **kw)
+            lambda **kw: MonitorRegistry.load(project_path=project_path, **kw)
         )
         self.state: dict = self._load_state()
         self._stop = threading.Event()
@@ -168,6 +171,8 @@ class MonitorScheduler:
     def _due(self, monitor, now: datetime) -> bool:
         entry = self.state.get(monitor.state_key)
         last_run = entry.get("last_run") if entry else None
+        if monitor.at:
+            return self._due_at(monitor, now, last_run)
         if not last_run:
             return True  # never run -> run on startup
         last = _parse_iso(last_run)
@@ -179,8 +184,51 @@ class MonitorScheduler:
             log.warning(f"Monitor {monitor.name} has bad interval: {e}")
             return False
 
+    def _due_at(self, monitor, now: datetime, last_run: str | None) -> bool:
+        """Due when a scheduled wall-clock time has passed since the last run.
+
+        Unlike interval monitors, an at-monitor does NOT fire on first sight —
+        starting the manager at 2pm shouldn't trigger the 6am slot. The first
+        tick just records a baseline; subsequent ticks fire once per scheduled
+        time crossed.
+        """
+        try:
+            scheduled = self._last_scheduled(monitor, now)
+        except ValueError as e:
+            log.warning(f"Monitor {monitor.name} has bad at-times: {e}")
+            return False
+        last = _parse_iso(last_run) if last_run else None
+        if last is None:
+            self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
+            self._save_state()
+            return False
+        return scheduled > last
+
+    @staticmethod
+    def _last_scheduled(monitor, now: datetime) -> datetime:
+        """The most recent scheduled fire time at or before `now`, computed in
+        the monitor's timezone (so '06:00' means 6am in `tz`, not UTC)."""
+        from datetime import timedelta
+
+        local = now.astimezone(monitor.tzinfo)
+        candidates = []
+        for hour, minute in monitor.at_times:
+            t = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if t > local:
+                t -= timedelta(days=1)
+            candidates.append(t)
+        return max(candidates)
+
     def run_monitor(self, monitor, registry: MonitorRegistry, now: datetime) -> None:
-        if monitor.check:
+        if monitor.notify:
+            # Scheduled notification — no condition to detect, no dedup.
+            # The event goes straight to the manager every time it's due.
+            from .schema import Condition
+            self._fire(monitor, Condition(key=now.isoformat(),
+                                          data={"description": monitor.description}))
+        elif monitor.command:
+            self._run_command_check(monitor)
+        elif monitor.check:
             check = self._checks.get(monitor.check)
             if check is None:
                 log.warning(f"Monitor {monitor.name} names unknown check "
@@ -219,6 +267,51 @@ class MonitorScheduler:
         }
         log.info(f"Monitor {monitor.name} fired {monitor.event} ({condition.key})")
         self.inject_event(event)
+
+    def _run_command_check(self, monitor) -> None:
+        """Run a shell command, parse JSON output, diff against last run."""
+        import hashlib
+        from .schema import Condition
+
+        try:
+            result = subprocess.run(
+                monitor.command, shell=True, capture_output=True, text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            log.error(f"Command monitor {monitor.name} timed out")
+            return
+        except OSError as e:
+            log.error(f"Command monitor {monitor.name} failed to run: {e}")
+            return
+
+        if result.returncode != 0:
+            stderr = result.stderr.strip()[:200] if result.stderr else ""
+            log.warning(f"Command monitor {monitor.name} exited {result.returncode}: {stderr}")
+            return
+
+        stdout = result.stdout.strip()
+        if not stdout:
+            self._reconcile(monitor, [])
+            return
+
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError:
+            log.warning(f"Command monitor {monitor.name} returned non-JSON output")
+            return
+
+        items = data if isinstance(data, list) else [data]
+        conditions = []
+        for item in items:
+            if isinstance(item, dict):
+                raw_id = item.get("id")
+                key = str(raw_id) if raw_id is not None else hashlib.sha256(
+                    json.dumps(item, sort_keys=True).encode()
+                ).hexdigest()[:12]
+                conditions.append(Condition(key=str(key), data=item))
+
+        self._reconcile(monitor, conditions)
 
     def _spawn_check(self, monitor, projects: list[Path]) -> None:
         """No native check — run the description as a non-interactive check.

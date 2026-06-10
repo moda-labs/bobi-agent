@@ -169,6 +169,7 @@ class KBStore:
         self._db_path = db_path or (_kb_dir() / f"{name}.db")
         if not self._db_path.exists():
             raise FileNotFoundError(f"KB '{name}' does not exist at {self._db_path}")
+        self._conn: apsw.Connection | None = None
 
     @staticmethod
     def kb_dir() -> Path:
@@ -179,9 +180,23 @@ class KBStore:
         return _kb_dir() / f"{name}.db"
 
     def _connect(self) -> apsw.Connection:
-        conn = apsw.Connection(str(self._db_path))
-        self._load_vec(conn)
-        return conn
+        """Open the connection lazily and reuse it for the store's lifetime."""
+        if self._conn is None:
+            conn = apsw.Connection(str(self._db_path))
+            self._load_vec(conn)
+            self._conn = conn
+        return self._conn
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def __enter__(self) -> "KBStore":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     @staticmethod
     def _load_vec(conn: apsw.Connection) -> None:
@@ -248,25 +263,22 @@ class KBStore:
         source_hash = hashlib.sha256(text.encode()).hexdigest()
 
         conn = self._connect()
-        try:
-            ids = []
-            with conn:
-                for i, chunk in enumerate(chunks):
-                    conn.execute(
-                        """INSERT INTO entries
-                           (content, source, source_hash, chunk_index, metadata, created_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (chunk, source, source_hash, i, meta_json, now, now),
-                    )
-                    ids.append(conn.last_insert_rowid())
+        ids = []
+        with conn:
+            for i, chunk in enumerate(chunks):
+                conn.execute(
+                    """INSERT INTO entries
+                       (content, source, source_hash, chunk_index, metadata, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (chunk, source, source_hash, i, meta_json, now, now),
+                )
+                ids.append(conn.last_insert_rowid())
 
-                if embed_fn and ids:
-                    embeddings = embed_fn(chunks)
-                    self._store_embeddings(conn, ids, embeddings)
+            if embed_fn and ids:
+                embeddings = embed_fn(chunks)
+                self._store_embeddings(conn, ids, embeddings)
 
-            return ids
-        finally:
-            conn.close()
+        return ids
 
     def add_file(self, path: Path,
                  embed_fn: Callable[[list[str]], list[list[float]]] | None = None,
@@ -277,21 +289,18 @@ class KBStore:
         source = str(path)
 
         conn = self._connect()
-        try:
-            existing = _fetchone(
-                conn,
-                "SELECT source_hash FROM entries WHERE source = ? LIMIT 1",
-                (source,),
-            )
+        existing = _fetchone(
+            conn,
+            "SELECT source_hash FROM entries WHERE source = ? LIMIT 1",
+            (source,),
+        )
 
-            if existing and existing["source_hash"] == file_hash:
-                return []
+        if existing and existing["source_hash"] == file_hash:
+            return []
 
-            if existing:
-                with conn:
-                    self._remove_source_entries(conn, source)
-        finally:
-            conn.close()
+        if existing:
+            with conn:
+                self._remove_source_entries(conn, source)
 
         return self.add_text(content, source=source, embed_fn=embed_fn)
 
@@ -300,56 +309,47 @@ class KBStore:
                ) -> list[dict]:
         """Hybrid search: FTS5 + vector, merged via RRF."""
         conn = self._connect()
-        try:
-            fts_results = self._fts_search(conn, query, limit)
+        fts_results = self._fts_search(conn, query, limit)
 
-            if embed_fn:
-                query_embedding = embed_fn([query])[0]
-                vec_results = self._vec_search(conn, query_embedding, limit)
-                return _rrf_merge(fts_results, vec_results, limit)
+        if embed_fn:
+            query_embedding = embed_fn([query])[0]
+            vec_results = self._vec_search(conn, query_embedding, limit)
+            return _rrf_merge(fts_results, vec_results, limit)
 
-            for i, r in enumerate(fts_results):
-                r["score"] = 1.0 / (60 + i + 1)
-            return fts_results[:limit]
-        finally:
-            conn.close()
+        for i, r in enumerate(fts_results):
+            r["score"] = 1.0 / (60 + i + 1)
+        return fts_results[:limit]
 
     def info(self) -> dict:
         conn = self._connect()
-        try:
-            entry_count = _fetchval(conn, "SELECT COUNT(*) FROM entries")
+        entry_count = _fetchval(conn, "SELECT COUNT(*) FROM entries")
 
-            sources = _fetchall(
-                conn,
-                """SELECT source, COUNT(*) as count
-                   FROM entries GROUP BY source ORDER BY count DESC""",
-            )
+        sources = _fetchall(
+            conn,
+            """SELECT source, COUNT(*) as count
+               FROM entries GROUP BY source ORDER BY count DESC""",
+        )
 
-            meta = {}
-            for row in _fetchall(conn, "SELECT key, value FROM kb_meta"):
-                meta[row["key"]] = row["value"]
+        meta = {}
+        for row in _fetchall(conn, "SELECT key, value FROM kb_meta"):
+            meta[row["key"]] = row["value"]
 
-            return {
-                "name": self.name,
-                "entry_count": entry_count,
-                "source_count": len(sources),
-                "sources": sources,
-                "embedding_model": meta.get("embedding_model", EMBEDDING_MODEL),
-                "created_at": meta.get("created_at", ""),
-            }
-        finally:
-            conn.close()
+        return {
+            "name": self.name,
+            "entry_count": entry_count,
+            "source_count": len(sources),
+            "sources": sources,
+            "embedding_model": meta.get("embedding_model", EMBEDDING_MODEL),
+            "created_at": meta.get("created_at", ""),
+        }
 
     def remove_source(self, source: str) -> int:
         conn = self._connect()
-        try:
-            with conn:
-                count = self._remove_source_entries(conn, source)
-            return count
-        finally:
-            conn.close()
+        with conn:
+            return self._remove_source_entries(conn, source)
 
     def delete(self) -> None:
+        self.close()
         if self._db_path.exists():
             self._db_path.unlink()
 

@@ -9,22 +9,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 def _runs_dir() -> Path:
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        raise RuntimeError("project root not set — call set_project_root() first")
-    d = root / ".modastack" / "state" / "workflow" / "runs"
+    from modastack.sdk import state_dir
+    d = state_dir() / "workflow" / "runs"
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-@dataclass
-class NodeState:
-    status: str = "pending"
-    started_at: str = ""
-    completed_at: str = ""
-    outputs: dict = field(default_factory=dict)
-    error: str = ""
 
 
 @dataclass
@@ -32,7 +20,6 @@ class WorkflowRun:
     run_id: str
     workflow_name: str
     trigger_event: dict
-    nodes: dict[str, NodeState] = field(default_factory=dict)
     started_at: str = ""
     completed_at: str = ""
     status: str = "running"
@@ -58,10 +45,8 @@ class WorkflowRun:
         tmp.replace(path)
 
     @classmethod
-    def load(cls, run_id: str) -> WorkflowRun:
-        path = _runs_dir() / f"{run_id}.json"
-        data = json.loads(path.read_text())
-        run = cls(
+    def from_dict(cls, data: dict) -> WorkflowRun:
+        return cls(
             run_id=data["run_id"],
             workflow_name=data["workflow_name"],
             trigger_event=data["trigger_event"],
@@ -77,27 +62,11 @@ class WorkflowRun:
             issue_id=data.get("issue_id", ""),
             resumed_at=data.get("resumed_at", ""),
         )
-        for nid, ns_data in data.get("nodes", {}).items():
-            run.nodes[nid] = NodeState(**ns_data)
-        return run
 
     @classmethod
-    def find_active(cls, workflow_name: str, event_key: str) -> WorkflowRun | None:
-        if not _runs_dir().exists():
-            return None
-        for path in _runs_dir().glob("*.json"):
-            try:
-                data = json.loads(path.read_text())
-                if data.get("status") not in ("running", "waiting"):
-                    continue
-                if data.get("workflow_name") != workflow_name:
-                    continue
-                trigger_data = data.get("trigger_event", {}).get("data", {})
-                if trigger_data.get("issue_id") == event_key:
-                    return cls.load(data["run_id"])
-            except (json.JSONDecodeError, KeyError):
-                continue
-        return None
+    def load(cls, run_id: str) -> WorkflowRun:
+        path = _runs_dir() / f"{run_id}.json"
+        return cls.from_dict(json.loads(path.read_text()))
 
     @classmethod
     def find_waiting(cls, await_event: str, issue_id: str = "") -> WorkflowRun | None:
@@ -115,25 +84,7 @@ class WorkflowRun:
                     trigger_data = data.get("trigger_event", {}).get("data", {})
                     if trigger_data.get("issue_id") != issue_id:
                         continue
-                return cls.load(data["run_id"])
-            except (json.JSONDecodeError, KeyError):
-                continue
-        return None
-
-    @classmethod
-    def find_completed(cls, workflow_name: str, event_key: str) -> WorkflowRun | None:
-        if not _runs_dir().exists():
-            return None
-        for path in _runs_dir().glob("*.json"):
-            try:
-                data = json.loads(path.read_text())
-                if data.get("status") != "completed":
-                    continue
-                if data.get("workflow_name") != workflow_name:
-                    continue
-                trigger_data = data.get("trigger_event", {}).get("data", {})
-                if trigger_data.get("issue_id") == event_key:
-                    return cls.load(data["run_id"])
+                return cls.from_dict(data)
             except (json.JSONDecodeError, KeyError):
                 continue
         return None
@@ -148,7 +99,7 @@ class WorkflowRun:
                 data = json.loads(path.read_text())
                 if status and data.get("status") != status:
                     continue
-                runs.append(cls.load(data["run_id"]))
+                runs.append(cls.from_dict(data))
             except (json.JSONDecodeError, KeyError):
                 continue
         return runs
@@ -161,28 +112,3 @@ class WorkflowRun:
             trigger_event=event,
             started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         )
-
-    def node_state(self, node_id: str) -> NodeState:
-        if node_id not in self.nodes:
-            self.nodes[node_id] = NodeState()
-        return self.nodes[node_id]
-
-    def retry_failed(self) -> list[str]:
-        """Reset all failed nodes to pending so execute() retries them.
-
-        Also resets the run status back to running. Returns the IDs of
-        nodes that were reset.
-        """
-        reset = []
-        for nid, ns in self.nodes.items():
-            if ns.status == "failed":
-                ns.status = "pending"
-                ns.error = ""
-                ns.started_at = ""
-                ns.completed_at = ""
-                reset.append(nid)
-        if reset:
-            self.status = "running"
-            self.completed_at = ""
-            self.save()
-        return reset

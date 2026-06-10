@@ -1,0 +1,22 @@
+version: "1.1.0"
+
+entry_point: director
+chat: slack
+
+# Cloud event server URL in production (.env), empty for an
+# auto-started local server.
+event_server: ${MODASTACK_EVENT_SERVER}
+
+services:
+  - name: github
+    events: true
+  - name: slack
+    events: true
+  - name: linear
+    events: true
+
+slack:
+  bot_token: ${SLACK_BOT_TOKEN}
+
+linear:
+  api_key: ${LINEAR_API_KEY}

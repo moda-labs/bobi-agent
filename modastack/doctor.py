@@ -2,18 +2,34 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
+from dataclasses import dataclass
 
-from modastack.browser import CheckResult
+
+@dataclass
+class CheckResult:
+    """Outcome of a single health check."""
+
+    name: str
+    ok: bool
+    detail: str = ""
+    hint: str = ""
+    # Set when the failure is specifically the AppArmor userns sandbox block,
+    # so callers can offer the targeted fix.
+    sandbox_error: bool = False
 
 
 def run_doctor() -> list[CheckResult]:
+    logging.getLogger("modastack").setLevel(logging.WARNING)
+
     results = []
 
     results.append(_check_claude_cli())
     results.append(_check_claude_auth())
-    results.append(_check_project_config())
     results.append(_check_local_config())
+    results.append(_check_install_integrity())
+    results.extend(_check_services())
     results.append(_check_workflows())
     results.append(_check_event_server())
     results.append(_check_recent_events())
@@ -55,28 +71,83 @@ def _check_claude_auth() -> CheckResult:
                            hint="Check network connectivity")
 
 
-def _check_project_config() -> CheckResult:
+def _check_install_integrity() -> CheckResult:
+    """Flag edits to the installed .modastack/ image.
+
+    The installed copy is frozen — regenerated verbatim by `modastack
+    install` — so hand-edits are silently lost on the next install.
+    Compare on-disk files against the hashes recorded at install time.
+    """
+    import hashlib
+    import json
+
     from modastack.sdk import get_project_root
     root = get_project_root()
     if not root:
-        return CheckResult("Project", ok=False,
-                           detail="project root not set",
-                           hint="Run `modastack start <agent>` from a project directory")
-    modastack_dir = root / ".modastack"
-    if modastack_dir.is_dir():
-        return CheckResult("Project", ok=True, detail=str(root))
-    return CheckResult("Project", ok=True,
-                       detail=f"{root} (no .modastack/ yet — created on first start)")
+        return CheckResult("Installed team", ok=True, detail="no project")
+    dest = root / ".modastack"
+    manifest_path = dest / "install-manifest.json"
+    if not manifest_path.exists():
+        return CheckResult("Installed team", ok=True,
+                           detail="no install manifest (pre-0.12 install)")
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return CheckResult("Installed team", ok=False,
+                           detail="unreadable install manifest",
+                           hint="Re-run `modastack install`")
+    if not manifest.get("frozen", True):
+        return CheckResult("Installed team", ok=True,
+                           detail=f"{manifest.get('agent', '?')} (downloaded — editable)")
+    drifted = []
+    for rel, digest in manifest.get("files", {}).items():
+        f = dest / rel
+        if not f.is_file():
+            drifted.append(f"{rel} (missing)")
+        elif hashlib.sha256(f.read_bytes()).hexdigest() != digest:
+            drifted.append(rel)
+    if drifted:
+        shown = ", ".join(drifted[:3]) + ("…" if len(drifted) > 3 else "")
+        return CheckResult(
+            "Installed team", ok=False,
+            detail=f"{len(drifted)} file(s) differ from installed pack: {shown}",
+            hint="Edits to .modastack/ are lost on reinstall — edit the "
+                 "pack source and re-run `modastack install`")
+    return CheckResult("Installed team", ok=True,
+                       detail=f"{manifest.get('agent', '?')} (frozen, clean)")
 
 
 def _check_local_config() -> CheckResult:
-    from modastack.config import _machine_config_path
-    machine = _machine_config_path()
-    if machine.exists():
-        return CheckResult("Machine config", ok=True, detail=str(machine))
-    return CheckResult("Machine config", ok=False,
-                       detail="missing ~/.modastack/config.yaml",
-                       hint="Create ~/.modastack/config.yaml with event_server, slack, and linear credentials")
+    from modastack.config import _project_config_path
+    from modastack.sdk import get_project_root
+    root = get_project_root()
+    if not root:
+        return CheckResult("Project config", ok=False,
+                           detail="no project detected",
+                           hint="Run from a project directory with .modastack/")
+    config_path = _project_config_path(root)
+    if config_path.exists():
+        return CheckResult("Project config", ok=True, detail=str(config_path))
+    return CheckResult("Project config", ok=False,
+                       detail=f"missing {config_path}",
+                       hint="Create .modastack/agent.yaml with entry_point, services, and credentials")
+
+
+def _check_services() -> list[CheckResult]:
+    """Run service validation — native credentials, Venn, MCP servers."""
+    from modastack.sdk import get_project_root
+    root = get_project_root()
+    if not root:
+        return []
+    try:
+        from modastack.validate import validate_config
+        result = validate_config(root)
+        return [
+            CheckResult(c.name, ok=c.ok, detail=c.detail, hint=c.hint)
+            for c in result.checks
+        ]
+    except Exception as e:
+        return [CheckResult("Services", ok=False, detail=f"validation error: {e}")]
 
 
 def _check_workflows() -> CheckResult:
@@ -97,10 +168,8 @@ def _check_workflows() -> CheckResult:
 
 def _check_event_server() -> CheckResult:
     """Probe the event server /health endpoint."""
-    import json
-    import urllib.request
-
     from modastack.config import Config, load_deployment_state
+    from modastack.events.server import health
     from modastack.sdk import get_project_root
 
     root = get_project_root()
@@ -114,19 +183,12 @@ def _check_event_server() -> CheckResult:
         except FileNotFoundError:
             pass
 
-    port = 8080
-    try:
-        req = urllib.request.Request(f"http://localhost:{port}/health")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = json.loads(resp.read())
-            mode = data.get("mode", "unknown")
-            deployments = data.get("deployments", 0)
-            return CheckResult("Event server", ok=True,
-                               detail=f"running on port {port} (mode={mode}, deployments={deployments})")
-    except Exception:
-        return CheckResult("Event server", ok=False,
-                           detail=f"not running on port {port}",
-                           hint="`modastack event-server start` or `modastack start` will auto-launch")
+    url = "http://localhost:8080"
+    if health(url):
+        return CheckResult("Event server", ok=True, detail=url)
+    return CheckResult("Event server", ok=False,
+                       detail="not running",
+                       hint="`modastack event-server start` or `modastack start` will auto-launch")
 
 
 def _check_recent_events() -> CheckResult:

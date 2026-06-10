@@ -1,8 +1,8 @@
 """Integration test fixtures — fully isolated modastack installation.
 
 Every integration test runs against a temporary modastack installation
-in tmp_path. Nothing touches the real repo's .modastack/ directory,
-the user's ~/.config/modastack, or any production state.
+in tmp_path. Nothing touches the real repo's .modastack/ directory
+or any production state.
 """
 
 import os
@@ -25,7 +25,6 @@ class ModastackEnv:
     state_dir: Path
     sessions_dir: Path
     workflows_dir: Path
-    machine_config: Path
 
 
 @pytest.fixture(scope="session")
@@ -48,34 +47,31 @@ def modastack_env(tmp_path_factory):
               state_dir / "workflow" / "runs", state_dir / "logs"]:
         d.mkdir(parents=True)
 
-    (config_dir / "agent.yaml").write_text(yaml.dump({
+    # Build a local agent team, then install it via modastack install
+    pack_dir = base / "software_team"
+    pack_dir.mkdir()
+    (pack_dir / "agent.yaml").write_text(yaml.dump({
+        "version": "1.0.0",
         "agent": "software_team",
-        "role": "manager",
+        "entry_point": "manager",
+        "services": [
+            {"name": "github", "events": True},
+        ],
     }))
-
-    # Create a minimal software_team agent pack in the project
-    pack_dir = config_dir / "agents" / "software_team"
-    for role_name in ["manager", "engineer", "project_lead"]:
+    for role_name, content in [
+        ("manager", "# Manager\n\nYou are a test manager agent.\n"),
+        ("engineer", "# Engineer\n\nYou are a test engineer agent. Complete tasks quickly.\n"),
+        ("project_lead", "# Project Lead\n\nYou are a test project lead agent.\n"),
+    ]:
         (pack_dir / "roles" / role_name).mkdir(parents=True)
-    (pack_dir / "defaults.yaml").write_text(
-        "version: \"1.0.0\"\nrole: manager\nevent_sources:\n  - github\n"
-    )
-    (pack_dir / "roles" / "manager" / "ROLE.md").write_text(
-        "# Manager\n\nYou are a test manager agent.\n"
-    )
-    (pack_dir / "roles" / "engineer" / "ROLE.md").write_text(
-        "# Engineer\n\nYou are a test engineer agent. Complete tasks quickly.\n"
-    )
-    (pack_dir / "roles" / "project_lead" / "ROLE.md").write_text(
-        "# Project Lead\n\nYou are a test project lead agent.\n"
-    )
+        (pack_dir / "roles" / role_name / "ROLE.md").write_text(content)
 
-    creds_dir = base / "config" / "modastack"
-    creds_dir.mkdir(parents=True)
-    (creds_dir / "credentials.yaml").write_text("{}")
-
-    machine_config = base / "machine_config.yaml"
-    machine_config.write_text("{}")
+    result = subprocess.run(
+        [sys.executable, "-m", "modastack.cli", "install", str(pack_dir)],
+        capture_output=True, text=True, timeout=30,
+        cwd=str(project_path),
+    )
+    assert result.returncode == 0, f"install failed: {result.stderr}"
 
     subprocess.run(
         ["git", "init"], cwd=str(project_path),
@@ -114,19 +110,13 @@ def modastack_env(tmp_path_factory):
     from modastack.sdk import set_project_root
     set_project_root(project_path)
 
-    from modastack import config as _cfg
-    _orig_creds = _cfg._credentials_path
-    _cfg._credentials_path = lambda: creds_dir / "credentials.yaml"
-
     yield ModastackEnv(
         project_path=project_path,
         state_dir=state_dir,
         sessions_dir=sessions_dir,
         workflows_dir=workflows_dir,
-        machine_config=machine_config,
     )
 
-    _cfg._credentials_path = _orig_creds
     set_project_root(None)
 
 
@@ -139,13 +129,11 @@ requires_claude = pytest.mark.skipif(
 @pytest.fixture
 def cli_run(modastack_env):
     """Run modastack CLI commands against the isolated install."""
-    env = {**os.environ, "MODASTACK_CONFIG": str(modastack_env.machine_config)}
     def _run(*args, timeout=10):
         return subprocess.run(
             [sys.executable, "-m", "modastack.cli", *args],
             capture_output=True, text=True, timeout=timeout,
             cwd=str(modastack_env.project_path),
-            env=env,
         )
     return _run
 

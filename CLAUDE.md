@@ -2,7 +2,7 @@
 
 Event-driven AI agent framework. Spawn persistent agents that subscribe
 to real-world events, react autonomously, and stay interactive. Domain
-behavior comes from agent packs — the framework has no topology opinions.
+behavior comes from agent teams — the framework has no topology opinions.
 
 ## Install
 
@@ -21,17 +21,18 @@ pip install -e ".[dev]"
 ## Commands
 
 ```bash
-modastack start <agent>           # start an agent pack
+modastack install <path>          # install an agent team from a local path or registry
+modastack start                   # start the installed agent
 modastack stop                    # stop the running instance
 modastack restart                 # stop and restart
-modastack start <agent> --fresh   # wipe session and start clean
+modastack start --fresh           # wipe session and start clean
 
 modastack agents launch -w W --role R --task T  # launch an agent
 modastack agents list             # list active agents
 modastack agents show <id>        # inspect a specific agent
 modastack agents cancel <id>      # cancel a running agent
 modastack agents browse           # browse remote agent registry
-modastack agents update <name>    # update agent packs from remote
+modastack agents update <name>    # update agent teams from remote
 modastack agents add-registry <repo>  # add a remote registry
 
 modastack ask "question"          # ask an agent, block until response
@@ -76,16 +77,16 @@ webhook ingestion for GitHub, Linear, Slack, and any custom source.
 ```
 modastack/                        # Framework (Python package)
 ├── cli.py                        # Click CLI entrypoint
-├── config.py                     # Machine-wide config (~/.modastack/config.yaml)
+├── config.py                     # Per-project config (.modastack/agent.yaml)
 ├── session.py                    # Claude Code SDK session wrapper
 ├── subagent.py                   # Agent executor (blocking + detached)
 ├── sdk.py                        # Session registry, activity logging
-├── registry.py                   # Agent pack registry (fetch, update, browse)
+├── registry.py                   # Agent team registry (fetch, update, browse)
 ├── inbox.py                      # Per-session message delivery
 ├── prompts/                      # Agent prompts (no domain logic in framework)
 │   ├── __init__.py               # Path exports
 │   ├── base.md                   # Generic capabilities shared by all agents
-│   └── resolver.py               # Prompt resolution: base + agent pack role + tools
+│   └── resolver.py               # Prompt resolution: base + agent team role + tools
 ├── events/                       # Generic event infrastructure
 │   ├── client.py                 # WebSocket client (connects to event server)
 │   ├── server.py                 # Local event server launcher (Node.js)
@@ -108,15 +109,15 @@ modastack/                        # Framework (Python package)
     └── scheduler.py              # Interval scheduler, dedup, event injection
 
 skills/                           # Claude Code skill files
-├── create-agent.md               # Guide for designing new agent packs
+├── create-agent.md               # Guide for designing new agent teams
 ├── modastack.md                  # Guide for using modastack
 ├── linear-setup.md               # Linear API key setup
 └── slack-setup.md                # Slack bot setup
 
-agents/                           # Agent packs (portable agent definitions)
-├── registry.yaml                 # Local pack index
-└── eng-org/                      # Engineering org agent pack (reference impl)
-    ├── defaults.yaml             # Pack metadata (entry role, event sources)
+agents/                           # Agent teams (portable agent definitions)
+├── registry.yaml                 # Local team index
+└── eng-team/                      # Engineering org agent team (reference impl)
+    ├── agent.yaml                # Team config (entry point, services, credentials)
     ├── agent.md                  # Shared base prompt for all roles
     ├── roles/                    # Role-specific prompts (folder format)
     │   ├── director/ROLE.md
@@ -131,38 +132,44 @@ agents/                           # Agent packs (portable agent definitions)
     │   ├── pr-feedback.yaml
     │   └── ...
     └── monitors/                 # Background checks
-        └── defaults.yaml
+        └── agent.yaml
 
-.modastack/                       # Per-project runtime state
+.modastack/                       # Per-project installed agent + runtime state
+├── agent.yaml                    # Installed config (check-in-able, ${VAR} refs for secrets)
+├── .env                          # Secrets (gitignored, created by `modastack install`)
+├── .gitignore                    # Ignores .env
+├── roles/                        # Installed role prompts
+├── tools/                        # Installed tool guides
+├── workflows/                    # Installed + project workflows
+├── monitors/                     # Installed + project monitors
 ├── sessions/                     # Agent session state
 └── state/                        # PID files, logs, event server state
 ```
 
-### Agent packs
+### Agent teams
 
 A portable bundle of role prompts, workflows, monitors, and tool guides.
-Packs are the distribution unit — install one and get a working agent
+Teams are the distribution unit — install one and get a working agent
 for a domain.
 
 **Resolution order:**
-1. `<project>/agents/<name>/` — project-level
-2. `<project>/.modastack/agents/<name>/` — project override
-3. `~/.modastack/agents/<name>/` — user cache (from remote registry)
+1. `<project>/agents/<name>/` — project-level (checked in)
+2. `<project>/.modastack/agents/<name>/` — local agents (overrides + cached)
 
 **Role prompts** resolve from:
 1. `<project>/.modastack/roles/<role>/ROLE.md` — project override
-2. Agent pack `roles/<role>/ROLE.md`
+2. Agent team `roles/<role>/ROLE.md`
 
 **Tools** are markdown service guides in `tools/`. All tools load into
 every role's context. Project tools in `.modastack/tools/` override
-pack tools with the same filename.
+team tools with the same filename.
 
 ### Workflows
 
 YAML DAGs with three step types: **prompt** (agent executes + writes
 handoff), **route** (deterministic branch on handoff value), **await**
 (suspend until external event). Loaded from three tiers (most specific
-wins): agent pack → project `.modastack/workflows/` → user
+wins): agent team → project `.modastack/workflows/` → user
 `~/.modastack/workflows/`.
 
 See `skills/create-agent.md` for the full YAML reference.
@@ -183,7 +190,16 @@ the variable context for downstream steps.
 
 ### Config
 
-Machine-wide credentials in `~/.modastack/config.yaml` (not checked in).
+All config is per-project. No global `~/.modastack/` directory — each
+project is fully self-contained.
+
+- `.modastack/agent.yaml` — check-in-able. Declares agent, roles,
+  services, entry point, monitors. Secrets use `${ENV_VAR}` references.
+- `.modastack/.env` — gitignored. Holds `SLACK_BOT_TOKEN`,
+  `LINEAR_API_KEY`, `VENN_API_KEY`, etc. Created by `modastack install`.
+- `.modastack/roles/`, `tools/`, `workflows/`, `monitors/` — installed
+  from the agent team by `modastack install`.
+
 Per-project overrides in `.modastack/` for roles, workflows, monitors,
 and tools.
 

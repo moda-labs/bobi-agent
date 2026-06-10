@@ -3,10 +3,6 @@
 Each engineer gets a persistent ClaudeSDKClient session tracked in the
 registry. Sessions survive restarts and can be resumed, interacted with
 from the dashboard, or cancelled.
-
-Two execution modes:
-  - run_phase(): fire-and-forget async
-  - run_phase_blocking(): synchronous, blocks until completion
 """
 
 from __future__ import annotations
@@ -55,28 +51,8 @@ class AgentResult:
     final_text: str = ""
 
 
-@dataclass
-class RunningAgent:
-    issue_id: str
-    phase: str
-    session_id: str
-    task: asyncio.Task[AgentResult]
-    started_at: float = field(default_factory=time.time)
-    cwd: str = ""
-    client: Any = None
-
-
-_running: dict[str, RunningAgent] = {}
-
-
-def _build_prompt(phase: str, issue_id: str, context: str = "", cwd: str = "") -> str:
+def _build_prompt(phase: str, issue_id: str, context: str = "") -> str:
     parts = [f"Phase: {phase}", f"Issue: #{issue_id}"]
-
-    if cwd:
-        modastack_root = Path(__file__).parent.parent
-        project_name = Path(cwd).name
-        worktree_base = modastack_root / "worktrees" / project_name
-        parts.append(f"Worktree base: {worktree_base}")
 
     if context:
         parts.append(context)
@@ -102,12 +78,12 @@ def _session_name(issue_id: str, phase: str = "") -> str:
 # Engineer processes run out-of-band — their own OS process for `modastack
 # spawn`, or a worker thread for workflow phases — so they can't reach the
 # manager's in-process event queue directly. They post lifecycle events to the
-# bus the same way monitor checks do: over HTTP to the local dashboard's
-# /api/event endpoint (modastack.cli._post_event). The started emit is
-# fire-and-forget on a daemon thread so a missing or unreachable dashboard
-# never blocks or breaks the engineer run. The terminal emit (completed/failed)
-# blocks briefly on that thread: it's the last action before the spawn process
-# exits, and a daemon thread would otherwise be killed mid-POST at shutdown.
+# bus the same way monitor checks do: over HTTP via events/publish.post_event.
+# The started emit is fire-and-forget on a daemon thread so a missing or
+# unreachable event server never blocks or breaks the engineer run. The
+# terminal emit (completed/failed) blocks briefly on that thread: it's the
+# last action before the spawn process exits, and a daemon thread would
+# otherwise be killed mid-POST at shutdown.
 
 
 def _summarize_output(text: str, max_lines: int = 6, max_chars: int = 600) -> str:
@@ -130,14 +106,14 @@ def _emit_lifecycle_event(
     (session.completed / session.failed): it fires as the last action before the
     spawn process exits, and a daemon thread is killed at interpreter shutdown
     without finishing its in-flight POST. The bounded join can't hang the
-    process — ``_post_event`` carries its own socket timeout.
+    process — ``post_event`` carries its own socket timeout.
     """
     payload = {k: v for k, v in data.items() if v not in (None, "")}
 
     def _send() -> None:
         try:
-            from modastack.cli import _post_event
-            _post_event(event_type, payload)
+            from modastack.events.publish import post_event
+            post_event(event_type, payload)
         except Exception as e:  # never let event posting surface
             log.debug(f"Lifecycle event {event_type} not posted: {e}")
 
@@ -221,7 +197,6 @@ async def _run_agent_supervised(
     phase: str,
     timeout: int,
     on_input_needed: InputHandler | None = None,
-    max_budget_usd: float | None = None,
 ) -> AgentResult:
     """Core agent loop. Blocks until the agent finishes or times out.
 
@@ -342,7 +317,6 @@ def run_phase_blocking(
     title: str = "",
     project: str = "",
     timeout: int | None = None,
-    on_input_needed: InputHandler | None = None,
 ) -> AgentResult:
     """Run a sub-agent phase, blocking until completion.
 
@@ -352,7 +326,7 @@ def run_phase_blocking(
     """
     from modastack.session import Session
 
-    prompt = _build_prompt(phase, issue_id, context, cwd=cwd)
+    prompt = _build_prompt(phase, issue_id, context)
     effective_timeout = timeout or PHASE_TIMEOUT.get(phase, 1800)
     name = _session_name(issue_id, phase)
 
@@ -436,6 +410,7 @@ def spawn_adhoc(
     requested_by: dict | None = None,
     persistent: bool = False,
     role: str = "engineer",
+    mcp_servers: dict | None = None,
 ) -> AgentResult:
     """Spawn an engineer agent with a freeform task prompt.
 
@@ -458,9 +433,8 @@ def spawn_adhoc(
     _emit_session_started(issue_id, project, task, issue_id, phase="adhoc",
                           requested_by=requested_by)
 
-    from modastack.prompts.resolver import _resolve_role_prompt, _resolve_agent_dir
-    agent_dir = _resolve_agent_dir(None, Path(cwd))
-    role_prompt = _resolve_role_prompt(role, agent_dir, Path(cwd))
+    from modastack.prompts.resolver import _resolve_role_prompt
+    role_prompt = _resolve_role_prompt(role, Path(cwd))
     append_parts = [
         f"You are a {role} agent working on an adhoc task. "
         f"Complete the task described in your initial prompt."
@@ -481,7 +455,11 @@ def spawn_adhoc(
             "preset": "claude_code",
             "append": "\n\n".join(append_parts),
         },
-        extra_options={"skills": "all", "max_turns": 200},
+        extra_options={
+            "skills": "all",
+            "max_turns": 200,
+            **({"mcp_servers": mcp_servers} if mcp_servers else {}),
+        },
         role=role,
     )
 
@@ -627,11 +605,40 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     es_key = state.get("api_key", "")
     es_deployment = state.get("deployment_id", "")
 
+    def _register_with_retry(url: str, attempts: int = 3) -> tuple[str, str]:
+        last_err: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                dep, key = register(url, session_name, subscribe)
+                save_deployment_state(project_path, dep, key)
+                return dep, key
+            except Exception as e:
+                last_err = e
+                if attempt < attempts - 1:
+                    delay = 2 ** (attempt + 1)
+                    log.warning(
+                        "Event server registration failed (attempt %d/%d): %s — retrying in %ds",
+                        attempt + 1, attempts, e, delay,
+                    )
+                    time.sleep(delay)
+        raise RuntimeError(
+            f"Could not register with event server at {url} "
+            f"after {attempts} attempts: {last_err}"
+        ) from last_err
+
     if not es_url:
         es_port = 8080
         es_url = f"http://localhost:{es_port}"
-        ensure_running(es_port, project_path=project_path)
-        es_deployment, es_key = register(es_url, session_name, subscribe)
+        result = ensure_running(es_port, project_path=project_path)
+        if result == "started":
+            log.info("No event server configured — started local server on port %d", es_port)
+        elif result == "connected":
+            log.info("Connected to existing local event server on port %d", es_port)
+        es_deployment, es_key = _register_with_retry(es_url)
+    elif not (es_deployment and es_key):
+        # No saved deployment — register fresh rather than PUT to a
+        # guaranteed-400 empty deployment URL.
+        es_deployment, es_key = _register_with_retry(es_url)
     else:
         import json as _json, urllib.request
         try:
@@ -645,9 +652,10 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                 },
                 method="PUT",
             )
-            urllib.request.urlopen(req, timeout=5)
-        except Exception:
-            es_deployment, es_key = register(es_url, session_name, subscribe)
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as e:
+            log.info("Subscription update failed (%s) — re-registering", e)
+            es_deployment, es_key = _register_with_retry(es_url)
 
     client = EventServerClient(
         server_url=es_url,
@@ -678,10 +686,8 @@ def _run_agent_entry(args: dict) -> None:
     subscribe = args.get("subscribe", [])
 
     from modastack.sdk import set_project_root
-    from modastack.cli import _detect_project_root
-    project_root = _detect_project_root(Path(cwd))
-    if project_root:
-        set_project_root(project_root)
+    project_root = Path(cwd).resolve()
+    set_project_root(project_root)
 
     if subscribe and project_root:
         _start_event_subscription(issue_id, subscribe, project_root)
@@ -889,316 +895,70 @@ def run_check_blocking(
 
 
 # ---------------------------------------------------------------------------
-# Fire-and-forget execution (legacy engine path)
+# Agent inspection — registry-backed
 # ---------------------------------------------------------------------------
 
 
-async def _run_agent(
-    prompt: str,
-    cwd: str,
-    issue_id: str,
-    phase: str,
-    timeout: int,
-    max_budget_usd: float | None = None,
-) -> AgentResult:
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ClaudeSDKClient,
-        ResultMessage,
-        TextBlock,
-    )
-
-    name = _session_name(issue_id, phase)
-    saved_id = load_session_id(name)
-    registry = get_registry()
-
-    options = ClaudeAgentOptions(
-        cwd=cwd,
-        permission_mode="bypassPermissions",
-        max_turns=200,
-        cli_path=get_cli_path(),
-        resume=saved_id or None,
-        skills="all",
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": (
-                f"You are an engineer agent working on issue #{issue_id}, "
-                f"phase: {phase}. Follow the skill file instructions exactly."
-            ),
-        },
-    )
-
-    client = ClaudeSDKClient(options)
-    key = issue_id.lower()
-    if key in _running:
-        _running[key].client = client
-
-    registry.update(name, status="running", phase=phase, session_id=saved_id or "")
-
-    result = AgentResult(
-        session_id="", issue_id=issue_id, phase=phase, success=False,
-    )
-
-    try:
-        connect_prompt = prompt if not saved_id else None
-        await client.connect(connect_prompt)
-
-        if saved_id:
-            await client.query(prompt)
-
-        async for msg in client.receive_messages():
-            if isinstance(msg, AssistantMessage):
-                text_parts = [b.text for b in msg.content if isinstance(b, TextBlock)]
-                if text_parts:
-                    log_activity("response", {
-                        "text": "\n".join(text_parts)[:500],
-                    }, session=name)
-
-            elif isinstance(msg, ResultMessage):
-                save_session_id(name, msg.session_id)
-                result.session_id = msg.session_id
-                result.success = not msg.is_error
-                result.duration_ms = msg.duration_ms
-                result.total_cost_usd = msg.total_cost_usd or 0.0
-                result.num_turns = msg.num_turns
-                if msg.is_error:
-                    result.error = msg.result or "unknown error"
-                registry.update(name, status="done", phase=phase, session_id=msg.session_id)
-                log_activity("Stop", {
-                    "session_id": msg.session_id,
-                }, session=name)
-    except asyncio.TimeoutError:
-        result.error = f"timeout after {timeout}s"
-        registry.update(name, status="error")
-    except Exception as e:
-        result.error = str(e)
-        registry.update(name, status="error")
-        log.error(f"Sub-agent error for {issue_id}/{phase}: {e}")
-    finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-
-    return result
-
-
-def run_phase(
-    issue_id: str,
-    phase: str,
-    cwd: str,
-    context: str = "",
-    max_budget_usd: float | None = None,
-    title: str = "",
-    project: str = "",
-) -> str:
-    key = issue_id.lower()
-    if key in _running:
-        if not _running[key].task.done():
-            log.warning(f"Agent already running for {key}, skipping")
-            return key
-        del _running[key]
-
-    prompt = _build_prompt(phase, issue_id, context)
-    timeout = PHASE_TIMEOUT.get(phase, 1800)
-
-    name = _session_name(issue_id, phase)
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=name, session_id="", role="engineer",
-        issue_id=issue_id, title=title, phase=phase, project=project,
-        cwd=cwd, status="starting",
-    ))
-
-    loop = _ensure_loop()
-
-    started_at = time.time()
-    _emit_session_started(issue_id, project, title or context, name, phase=phase)
-
-    async def _wrapped():
-        try:
-            result = await asyncio.wait_for(
-                _run_agent(prompt, cwd, issue_id, phase, timeout, max_budget_usd),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            registry.update(name, status="error")
-            result = AgentResult(
-                session_id="",
-                issue_id=issue_id,
-                phase=phase,
-                success=False,
-                error=f"timeout after {timeout}s",
-            )
-        _emit_session_finished(result, project, name, started_at)
-        return result
-
-    future = asyncio.run_coroutine_threadsafe(_wrapped(), loop)
-    _running[key] = RunningAgent(
-        issue_id=issue_id,
-        phase=phase,
-        session_id="",
-        task=future,
-        cwd=cwd,
-    )
-    log.info(f"Sub-agent started: {issue_id}/{phase} in {cwd}")
-    return key
-
-
-def run_phase_sync(
-    issue_id: str,
-    phase: str,
-    cwd: str,
-    context: str = "",
-    max_budget_usd: float | None = None,
-) -> AgentResult:
-    prompt = _build_prompt(phase, issue_id, context)
-    timeout = PHASE_TIMEOUT.get(phase, 1800)
-    loop = _ensure_loop()
-    future = asyncio.run_coroutine_threadsafe(
-        asyncio.wait_for(
-            _run_agent(prompt, cwd, issue_id, phase, timeout, max_budget_usd),
-            timeout=timeout,
-        ),
-        loop,
-    )
-    return future.result(timeout=timeout + 10)
-
-
-def inject_message(issue_id: str, text: str) -> bool:
-    key = issue_id.lower()
-    agent = _running.get(key)
-    if not agent or not agent.client:
-        log.warning(f"No running agent for {key}")
-        return False
-    try:
-        loop = _ensure_loop()
-        future = asyncio.run_coroutine_threadsafe(agent.client.query(text), loop)
-        future.result(timeout=10)
-        return True
-    except Exception as e:
-        log.error(f"Inject to {key} failed: {e}")
-        return False
-
-
-def is_running(issue_id: str) -> bool:
-    key = issue_id.lower()
-    agent = _running.get(key)
-    if not agent:
-        return False
-    return not agent.task.done()
-
-
-def get_result(issue_id: str) -> AgentResult | None:
-    key = issue_id.lower()
-    agent = _running.get(key)
-    if not agent:
-        return None
-    if not agent.task.done():
-        return None
-    try:
-        result = agent.task.result()
-        del _running[key]
-        return result
-    except Exception as e:
-        del _running[key]
-        return AgentResult(
-            session_id="",
-            issue_id=issue_id,
-            phase=agent.phase,
-            success=False,
-            error=str(e),
-        )
-
-
-def cancel_agent(issue_id: str) -> bool:
-    key = issue_id.lower()
-    agent = _running.get(key)
-    if not agent:
-        return False
-    agent.task.cancel()
-    del _running[key]
-    name = _session_name(issue_id, agent.phase)
-    get_registry().update(name, status="cancelled")
-    log.info(f"Sub-agent cancelled: {issue_id}/{agent.phase}")
-    return True
-
-
 def list_agents() -> list[dict[str, Any]]:
-    """List active agents from both the in-memory _running dict and the
-    on-disk SessionRegistry.
+    """List active agents from the on-disk SessionRegistry.
 
-    The in-memory dict only contains agents launched within this process.
     Detached agents (launched via launch_agent into child repos) register
-    in the SessionRegistry on disk. We merge both sources, deduplicating
-    by session name so an agent that appears in both is listed once.
+    in the runtime root's SessionRegistry, so they are visible from any
+    process resolving the same runtime root.
     """
-    seen: set[str] = set()
     result = []
-
-    # In-memory agents first (most detailed info).
-    for key, agent in list(_running.items()):
-        done = agent.task.done()
-        elapsed = time.time() - agent.started_at
-        name = _session_name(agent.issue_id, agent.phase)
-        seen.add(name)
-        result.append({
-            "issue_id": agent.issue_id,
-            "phase": agent.phase,
-            "cwd": agent.cwd,
-            "running": not done,
-            "elapsed_s": int(elapsed),
-            "name": name,
-            "source": "in-process",
-        })
-
-    # On-disk registry — picks up detached/cross-project agents.
     try:
         registry = get_registry()
-        for entry in registry.list_active():
-            if entry.name in seen:
-                continue
-            if entry.role == "manager":
-                continue  # managers are shown separately in `modastack status`
-            seen.add(entry.name)
-            elapsed = time.time() - entry.started_at
-            result.append({
-                "issue_id": entry.issue_id or entry.name,
-                "phase": entry.phase,
-                "cwd": entry.cwd,
-                "running": True,
-                "elapsed_s": int(elapsed),
-                "name": entry.name,
-                "source": "registry",
-            })
     except Exception:
-        pass  # registry may not be initialized yet
-
+        return result  # registry may not be initialized yet
+    for entry in registry.list_active():
+        if entry.role == "manager":
+            continue  # managers are shown separately in `modastack status`
+        result.append({
+            "issue_id": entry.issue_id or entry.name,
+            "phase": entry.phase,
+            "cwd": entry.cwd,
+            "running": True,
+            "elapsed_s": int(time.time() - entry.started_at),
+            "name": entry.name,
+            "source": "registry",
+        })
     return result
 
 
-_loop: asyncio.AbstractEventLoop | None = None
-_loop_thread: threading.Thread | None = None
+def find_agent(ref: str) -> SessionEntry | None:
+    """Look up a registry entry by session name or issue id (active first)."""
+    registry = get_registry()
+    entry = registry.get(ref)
+    if entry:
+        return entry
+    ref_lower = ref.lower()
+    candidates = [e for e in registry.list_all()
+                  if e.issue_id.lower() == ref_lower or e.name.lower() == ref_lower]
+    if not candidates:
+        return None
+    active = [e for e in candidates if e.status in ("starting", "running", "idle")]
+    pool = active or candidates
+    return max(pool, key=lambda e: e.last_activity)
 
 
-def _ensure_loop() -> asyncio.AbstractEventLoop:
-    global _loop, _loop_thread
-    if _loop is not None and _loop.is_running():
-        return _loop
+def cancel_agent(ref: str) -> bool:
+    """Cancel a running agent by session name or issue id.
 
-    _loop = asyncio.new_event_loop()
+    Terminates the detached process (if its pid is alive) and marks the
+    registry entry cancelled.
+    """
+    import os
+    import signal
 
-    def _run():
-        asyncio.set_event_loop(_loop)
-        _loop.run_forever()
-
-    _loop_thread = threading.Thread(target=_run, daemon=True, name="subagent-loop")
-    _loop_thread.start()
-
-    # Wait until the loop is actually running
-    while not _loop.is_running():
-        time.sleep(0.01)
-
-    return _loop
+    entry = find_agent(ref)
+    if not entry or entry.status not in ("starting", "running", "idle"):
+        return False
+    if entry.pid:
+        try:
+            os.kill(entry.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    get_registry().update(entry.name, status="cancelled", pid=0)
+    log.info(f"Sub-agent cancelled: {entry.name}")
+    return True

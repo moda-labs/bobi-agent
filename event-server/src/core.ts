@@ -78,6 +78,7 @@ export function normalizeLinearPayload(
 
 export function normalizeSlackPayload(
 	payload: Record<string, unknown>,
+	selfBotId?: string,
 ): SlackNormalizationResult {
 	if (payload.type === "url_verification") {
 		return { event: null, challenge: payload.challenge as string, skip: true };
@@ -90,7 +91,13 @@ export function normalizeSlackPayload(
 	const event = payload.event as Record<string, unknown> | undefined;
 	if (!event) return { event: null, skip: true };
 
-	if (event.bot_id || event.subtype) {
+	if (event.subtype) {
+		return { event: null, skip: true };
+	}
+
+	// Only filter our own bot's messages to prevent loops.
+	// Messages from other bots (e.g. user-level Slack apps) pass through.
+	if (event.bot_id && selfBotId && event.bot_id === selfBotId) {
 		return { event: null, skip: true };
 	}
 
@@ -140,7 +147,25 @@ export function subscriptionKeysForEvent(event: NormalizedEvent): string[] {
 	if (event.workspace) {
 		keys.push(`slack:${event.workspace}`);
 	}
+	// Generic topic routing — fallback for events without source-specific keys
+	// (e.g. monitor-generated events posted to /events/{topic}).
+	if (keys.length === 0 && event.type) keys.push(event.type);
 	return keys;
+}
+
+async function hmacSha256Hex(secret: string, data: Uint8Array | string): Promise<string> {
+	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+	const key = await crypto.subtle.importKey(
+		"raw",
+		new TextEncoder().encode(secret),
+		{ name: "HMAC", hash: "SHA-256" },
+		false,
+		["sign"],
+	);
+	const sig = await crypto.subtle.sign("HMAC", key, bytes);
+	return Array.from(new Uint8Array(sig))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
 }
 
 export async function verifySlackSignature(
@@ -154,21 +179,7 @@ export async function verifySlackSignature(
 	const age = Math.abs(Date.now() / 1000 - parseInt(timestamp, 10));
 	if (age > 300) return false;
 
-	const sigBase = `v0:${timestamp}:${body}`;
-	const key = await crypto.subtle.importKey(
-		"raw",
-		new TextEncoder().encode(secret),
-		{ name: "HMAC", hash: "SHA-256" },
-		false,
-		["sign"],
-	);
-	const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(sigBase));
-	const hexSig =
-		"v0=" +
-		Array.from(new Uint8Array(sig))
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
-
+	const hexSig = "v0=" + (await hmacSha256Hex(secret, `v0:${timestamp}:${body}`));
 	return hexSig === signature;
 }
 
@@ -179,19 +190,33 @@ export async function verifyGitHubSignature(
 ): Promise<boolean> {
 	if (!signatureHeader) return false;
 
-	const key = await crypto.subtle.importKey(
-		"raw",
-		new TextEncoder().encode(secret),
-		{ name: "HMAC", hash: "SHA-256" },
-		false,
-		["sign"],
-	);
-	const sig = await crypto.subtle.sign("HMAC", key, body);
-	const expected =
-		"sha256=" +
-		Array.from(new Uint8Array(sig))
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
-
+	const expected = "sha256=" + (await hmacSha256Hex(secret, body));
 	return expected === signatureHeader;
+}
+
+export interface SlackSendResult {
+	ok: boolean;
+	error?: string;
+	ts?: string;
+	[key: string]: unknown;
+}
+
+export async function sendSlackMessage(
+	botToken: string,
+	channel: string,
+	text: string,
+	threadTs?: string,
+): Promise<SlackSendResult> {
+	const body: Record<string, unknown> = { channel, text };
+	if (threadTs) body.thread_ts = threadTs;
+
+	const resp = await fetch("https://slack.com/api/chat.postMessage", {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${botToken}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(body),
+	});
+	return (await resp.json()) as SlackSendResult;
 }

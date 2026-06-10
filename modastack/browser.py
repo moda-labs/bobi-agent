@@ -13,7 +13,7 @@ This module centralizes:
   - applying (and persisting) the sysctl fix with sudo,
   - the individual health checks behind `modastack doctor`.
 
-The setup flow (`modastack setup`) and the `modastack doctor` command both
+The `modastack doctor` command and
 build on the functions here.
 """
 
@@ -22,8 +22,9 @@ from __future__ import annotations
 import platform
 import re
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
+
+from modastack.doctor import CheckResult
 
 # The AppArmor knob that gates unprivileged user namespaces. 1 = restricted
 # (Chromium's sandbox can't initialize), 0 = unrestricted (Chromium works).
@@ -52,21 +53,8 @@ SANDBOX_ERROR_MARKERS = (
 FIX_COMMAND = f"sudo sysctl -w {USERNS_SYSCTL}=0"
 FIX_HINT = (
     f"Run `{FIX_COMMAND}` (and persist it to {SYSCTL_CONF_PATH}), "
-    f"or re-run `modastack setup` to apply it interactively."
+    f"or re-run `modastack doctor --browser --fix` to apply it interactively."
 )
-
-
-@dataclass
-class CheckResult:
-    """Outcome of a single browser health check."""
-
-    name: str
-    ok: bool
-    detail: str = ""
-    hint: str = ""
-    # Set when the failure is specifically the AppArmor userns sandbox block,
-    # so callers (setup) can offer the targeted fix.
-    sandbox_error: bool = False
 
 
 def is_linux() -> bool:
