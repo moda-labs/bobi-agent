@@ -134,7 +134,7 @@ def _systemctl(action: str) -> bool:
 
 
 def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
-    """Find an agent pack.
+    """Find an agent team.
 
     Resolution:
       1. <project>/agents/{name}
@@ -150,7 +150,7 @@ def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
 
 
 def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
-    """List available agent packs with their source."""
+    """List available agent teams with their source."""
     packs: dict[str, str] = {}
     for agents_dir, label in [
         (project_path / ".modastack" / "agents", "cached"),
@@ -384,12 +384,28 @@ def _install_pack(pack_dir: Path, project_path: Path) -> None:
     project_yaml.write_text(_yaml.dump(merged, default_flow_style=False, sort_keys=False))
 
 
+def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
+    """Write .modastack/.gitignore based on which install path was taken.
+
+    Runtime state is always ignored. When the team source lives in the
+    repo (local source of truth), the installed copies are build artifacts
+    and get ignored too. A downloaded team's installed copy IS the source
+    of truth, so it stays check-in-able. Install owns this file and
+    rewrites it each run so switching paths doesn't leave stale entries.
+    """
+    entries = [".env", "sessions/", "state/", "agents/"]
+    if local_source:
+        entries += ["roles/", "tools/", "workflows/", "monitors/", "agent.md"]
+    gitignore = project_path / ".modastack" / ".gitignore"
+    gitignore.write_text("\n".join(entries) + "\n")
+
+
 @main.command()
 @click.argument("pack")
 def install(pack):
-    """Install an agent pack into the current project.
+    """Install an agent team into the current project.
 
-    PACK is a path to a local agent pack directory, or a name to fetch
+    PACK is a path to a local agent team directory, or a name to fetch
     from a remote registry.
 
     Resolution order:
@@ -410,7 +426,7 @@ def install(pack):
         # Try remote registry
         from modastack.registry import fetch
         try:
-            click.echo(f"'{pack}' is not a local pack directory, fetching from remote...")
+            click.echo(f"'{pack}' is not a local team directory, fetching from remote...")
             fetch(project_path, pack)
             resolved = _resolve_agent_pack(pack, project_path)
             if not resolved:
@@ -423,7 +439,17 @@ def install(pack):
             click.echo(f"Failed to fetch '{pack}': {e}", err=True)
             raise SystemExit(1)
 
+    # Local source of truth: the team source lives in the repo (outside
+    # .modastack/), so the installed copies are gitignored build artifacts.
+    # Downloaded/external: the installed copy is the source of truth.
+    dot_moda = project_path / ".modastack"
+    local_source = (
+        pack_dir.is_relative_to(project_path)
+        and not pack_dir.is_relative_to(dot_moda)
+    )
+
     _install_pack(pack_dir, project_path)
+    _write_install_gitignore(project_path, local_source)
 
     agent_name = pack_dir.name
     click.echo(f"Installed '{agent_name}' into .modastack/")
@@ -469,16 +495,16 @@ def install(pack):
             )
             click.echo(f"Credentials saved to .modastack/.env")
 
-        # Ensure .env is gitignored
-        gitignore = project_path / ".modastack" / ".gitignore"
-        gitignore_content = gitignore.read_text() if gitignore.exists() else ""
-        if ".env" not in gitignore_content:
-            with open(gitignore, "a") as f:
-                if gitignore_content and not gitignore_content.endswith("\n"):
-                    f.write("\n")
-                f.write(".env\n")
+    if local_source:
+        try:
+            src_display = pack_dir.relative_to(project_path)
+        except ValueError:
+            src_display = pack_dir
+        click.echo(f"\nSource of truth: {src_display}/ — edit there and reinstall to change the team.")
+    else:
+        click.echo("\nSource of truth: .modastack/ — edit in place and check in to customize.")
 
-    click.echo(f"\nRun `modastack start` to launch.")
+    click.echo(f"Run `modastack start` to launch.")
 
 
 def _register_event_server(url: str, project_path: Path, rc: "ProjectConfig") -> tuple[str, str]:
@@ -1876,7 +1902,7 @@ def _post_event(event_type: str, data: dict) -> bool:
 @agents.command("update")
 @click.argument("name", default=None, required=False)
 def agents_update(name):
-    """Update agent packs from the remote registry.
+    """Update agent teams from the remote registry.
 
     Usage:
         modastack agents update eng-team    # update one pack
@@ -1908,7 +1934,7 @@ def agents_update(name):
     else:
         cached = list_cached(project_path)
         if not cached:
-            click.echo("No cached agent packs to update.")
+            click.echo("No cached agent teams to update.")
             return
         for pack in cached:
             try:
@@ -1927,10 +1953,10 @@ def agents_update(name):
 @agents.command("add-registry")
 @click.argument("repo")
 def agents_add_registry(repo):
-    """Add a registry to fetch agent packs from.
+    """Add a registry to fetch agent teams from.
 
     A registry is a GitHub repo containing an agents/ directory
-    with agent packs and a registry.yaml index.
+    with agent teams and a registry.yaml index.
 
     Usage:
         modastack agents add-registry myorg/my-agents
@@ -1990,7 +2016,7 @@ def agents_remove_registry(repo):
 
 @agents.command("browse")
 def agents_browse():
-    """Browse available agent packs from the remote registry.
+    """Browse available agent teams from the remote registry.
 
     Shows all packs available for install, along with their versions
     and whether they're already cached locally.
@@ -2009,7 +2035,7 @@ def agents_browse():
     cached_packs = list_cached(project_path) if project_path else []
     cached = {p["name"]: p["version"] for p in cached_packs}
 
-    click.echo("Available agent packs:\n")
+    click.echo("Available agent teams:\n")
     for pack in remote:
         name = pack["name"]
         version = pack.get("version", "?")
