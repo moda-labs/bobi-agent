@@ -20,13 +20,17 @@ log = logging.getLogger(__name__)
 
 
 def _find_event_server_dir() -> Path:
-    pkg_dir = Path(__file__).resolve().parent.parent.parent
-    es_dir = pkg_dir / "event-server"
-    if es_dir.exists() and (es_dir / "package.json").exists():
-        return es_dir
+    pkg_dir = Path(__file__).resolve().parent.parent
+    candidates = [
+        pkg_dir / "event-server",         # bundled in the installed package
+        pkg_dir.parent / "event-server",  # repo checkout
+    ]
+    for es_dir in candidates:
+        if (es_dir / "package.json").exists():
+            return es_dir
     raise FileNotFoundError(
-        f"event-server directory not found at {es_dir}. "
-        "Run from the modastack repo checkout for local event server."
+        "event-server directory not found (checked "
+        + ", ".join(str(c) for c in candidates) + ")."
     )
 
 
