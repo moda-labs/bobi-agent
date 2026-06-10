@@ -95,6 +95,8 @@ def _check_services() -> list[CheckResult]:
     if not root:
         return []
     try:
+        from modastack.config import load_dotenv
+        load_dotenv(root)
         from modastack.validate import validate_config
         result = validate_config(root)
         return [
