@@ -30,7 +30,7 @@ organized. Always include a date (`YYYY-MM-DD`).
 
 | Prefix | Holds |
 |---|---|
-| `context::` | Org positioning, ICP, coverage map, voice list (seeded from `research/moda-context.md`) |
+| `context::` | Org positioning, ICP, coverage map, voice list (seeded from `workspace/moda-context.md`) |
 | `landscape::` | Current landscape map — standing themes, momentum, whitespace |
 | `snapshot::` | A dated, never-edited copy of the landscape map |
 | `topic::` | A topic brief (signal, voices, companies, use cases, forecast) |
@@ -51,6 +51,6 @@ Sources: https://... , https://..."
 ## First-run seeding
 
 On startup the manager ensures the `research` KB exists and, if it has no
-`context::` entries, indexes `research/moda-context.md` into it (split by
+`context::` entries, indexes `workspace/moda-context.md` into it (split by
 section, each as a `context::` entry). After that, `moda-context.md` is the
 human-editable source and the KB is the searchable copy.

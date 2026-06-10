@@ -11,7 +11,7 @@ and drags in SEO listicle spam — avoid it.
 Your tools are `WebSearch` (discover) and `WebFetch` (read full text),
 plus `Bash` (curl). There are no browser/scraper MCPs wired into worker
 sessions today, so the reachability below is the real, tested picture.
-Anchor searches to the allowed source domains in `research/moda-context.md`
+Anchor searches to the allowed source domains in `workspace/moda-context.md`
 to bias toward real voices (a strong bias, not a hard filter), and use
 general web search for broader discovery (the "Adjacent / emerging" area
 especially).

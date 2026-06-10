@@ -50,19 +50,23 @@ file and a knowledge base — the pack itself is generic and retargetable.
 Findings persist in a modastack knowledge base named `research`
 (hybrid FTS + semantic search). Domain context — positioning, ICP
 topics, the standing themes, and the named-voices hit list — lives in
-`research/moda-context.md` (project-relative) and is seeded into the KB
+`workspace/moda-context.md` (project-relative) and is seeded into the KB
 on first run. See `tools/research-corpus.md`.
 
 ## Setup
 
 ```bash
-# from the project root (the directory that holds research/)
-modastack start market-research
+# from the project root
+modastack install agents/market-research   # or: modastack install market-research
+modastack start
 ```
 
+Install seeds `workspace/` at the project root from the pack's
+templates (existing files are never overwritten).
+
 Prerequisites:
-- Fill in `research/moda-context.md` with who you research for, the
+- Fill in `workspace/moda-context.md` with who you research for, the
   topics to watch, and the source hit list.
-- Fill in `research/feeds.txt` with RSS/source URLs for `rss-watch`.
+- Fill in `workspace/feeds.txt` with RSS/source URLs for `rss-watch`.
 - (Optional) Configure Playwright / Firecrawl / BrowserMCP restricted to
   the allowed source domains — see `tools/web-research.md`.

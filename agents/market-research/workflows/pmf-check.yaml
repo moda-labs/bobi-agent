@@ -57,7 +57,7 @@ steps:
     prompt: |
       Issue exactly one verdict (HAS LEGS / VALIDATE-VIA-X / LIKELY
       NON-VIABLE) with a confidence level and reasoning. Write the full
-      report to research/pmf/<slug>-<date>.md, index it (pmf:: entry), and
+      report to workspace/pmf/<slug>-<date>.md, index it (pmf:: entry), and
       deliver to the requester: restated hypothesis, verdict, and the one
       decisive next experiment, with a path to the report.
     handoff:

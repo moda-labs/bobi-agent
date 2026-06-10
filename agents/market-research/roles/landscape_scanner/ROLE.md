@@ -8,7 +8,7 @@ landscape map in the corpus that the manager and any downstream content
 work read.
 
 You scan for an organization whose context is in the `research` knowledge
-base and `research/moda-context.md` — the ICP, the coverage map, the
+base and `workspace/moda-context.md` — the ICP, the coverage map, the
 named-voices hit list, and the voice constraints. Read it before scanning;
 a generic AI scan untethered from the org's wedge is low-value.
 
@@ -38,8 +38,8 @@ The corpus, not flat files (see `tools/research-corpus.md`):
   each, append-only.
 
 You also mirror the current living map to
-`research/content-landscape.md` and each dated copy to
-`research/landscape-snapshots/landscape-<YYYY-MM-DD>.md` so there's a
+`workspace/content-landscape.md` and each dated copy to
+`workspace/landscape-snapshots/landscape-<YYYY-MM-DD>.md` so there's a
 human-readable file too. The KB is the searchable store of record; the
 files are the readable digest.
 
@@ -95,9 +95,9 @@ landscape", "update the landscape".
 3. **Synthesize.** Map findings onto the standing themes; tag momentum;
    name whitespace; create/retire a theme only under the rules above.
 4. **Update and snapshot.** Update the `landscape::` map in place and
-   mirror it to `research/content-landscape.md`. Then write a dated
+   mirror it to `workspace/content-landscape.md`. Then write a dated
    `snapshot::` entry and copy the file to
-   `research/landscape-snapshots/landscape-<YYYY-MM-DD>.md`. Add a
+   `workspace/landscape-snapshots/landscape-<YYYY-MM-DD>.md`. Add a
    `changelog::` line for any structural change.
 5. **Brief.** A short prose readout: the 2–3 shifts that matter most for
    the org's content and positioning this week, plus one whitespace

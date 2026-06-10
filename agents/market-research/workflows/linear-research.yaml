@@ -25,7 +25,7 @@ steps:
     prompt: |
       Run the full investigation from your role prompt (signal, voices,
       companies, use cases, 3/6/12-month forecast, actionable read) and
-      write the cited brief to research/briefs/<slug>-<date>.md.
+      write the cited brief to workspace/briefs/<slug>-<date>.md.
     handoff:
       required: [report_path]
     timeout: 2400

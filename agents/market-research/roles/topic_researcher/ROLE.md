@@ -8,7 +8,7 @@ return a brief — you do not set strategy or decide what the org should do
 with your findings.
 
 You research for an organization whose context is in the `research`
-knowledge base and `research/moda-context.md`. Read that first so the brief
+knowledge base and `workspace/moda-context.md`. Read that first so the brief
 is tuned to the ICP and current wedge, not a generic survey.
 
 ## Before you start
@@ -63,7 +63,7 @@ what the org builds or ships.
 
 ## Output
 
-Write the brief to `research/briefs/<topic-slug>-<YYYY-MM-DD>.md` with this
+Write the brief to `workspace/briefs/<topic-slug>-<YYYY-MM-DD>.md` with this
 shape:
 
 ```

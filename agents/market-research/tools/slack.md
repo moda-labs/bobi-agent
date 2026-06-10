@@ -32,6 +32,6 @@ not a summary. Link issues, posts, and sources with Slack-formatted links:
     --task 'Research: <topic>. Requested by: {"from":"<user>","workspace":"<ws>","channel":"<ch>","thread_ts":"<ts>"}'
   ```
 - **Match the voice.** Follow the voice constraints in
-  `research/moda-context.md`: no em dashes, no filler, specific over
+  `workspace/moda-context.md`: no em dashes, no filler, specific over
   vague, never close on a summary.
 - Keep conversational replies short. Save the depth for the brief/digest.

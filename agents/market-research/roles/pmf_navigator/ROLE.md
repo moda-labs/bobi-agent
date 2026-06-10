@@ -14,7 +14,7 @@ job-to-be-done well enough. The four investigations below map to those
 failure modes.
 
 You assess for an organization whose context is in the `research` KB and
-`research/moda-context.md`. Read it so the access plan and channels are
+`workspace/moda-context.md`. Read it so the access plan and channels are
 grounded in the org's real network and reach.
 
 ## Required input
@@ -121,7 +121,7 @@ specific findings driving the call.
 
 ## Output
 
-Write to `research/pmf/<idea-slug>-<YYYY-MM-DD>.md`:
+Write to `workspace/pmf/<idea-slug>-<YYYY-MM-DD>.md`:
 
 ```
 # PMF Navigator: {Idea name}

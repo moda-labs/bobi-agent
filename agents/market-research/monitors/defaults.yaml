@@ -21,13 +21,13 @@ monitors:
     event: monitor/research.weekly_landscape
 
   # Polling approximation of an RSS trigger (no native RSS event source).
-  # Fetches the feeds listed in research/feeds.txt and surfaces genuinely
+  # Fetches the feeds listed in workspace/feeds.txt and surfaces genuinely
   # new items relevant to the watched topics.
   - name: rss-watch
     description: >
-      Read the feed URLs in research/feeds.txt, fetch each, and identify
+      Read the feed URLs in workspace/feeds.txt, fetch each, and identify
       items published since the last check that are relevant to the watched
-      topics in research/moda-context.md. Emit the event only for genuinely
+      topics in workspace/moda-context.md. Emit the event only for genuinely
       new, on-topic items (include the item title and URL). Ignore anything
       already seen or off-topic. If feeds.txt is empty or only comments,
       emit nothing.
