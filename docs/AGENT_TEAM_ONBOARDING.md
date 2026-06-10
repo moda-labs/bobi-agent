@@ -15,7 +15,7 @@ Five questions define an agent:
    - **Telegram** — same, but via Telegram bot
    - **Autonomous** — no chat interface, the agent operates entirely on its own based on events and schedules
 
-4. **What services does the team need?** Pick from: email, github, salesforce, calendar, linear, notion, jira, etc. These are the tools the agents will read from and write to.
+4. **What services does the team need?** Pick from: email, github, salesforce, calendar, linear, notion, jira, etc. These are the tools the agents will read from and write to. Internal services and custom tooling count too — anything with an MCP server can be declared in `mcp_servers` and its tools land in the agents' sessions automatically.
 
 5. **Which sources should the agent proactively respond to?** For each service from question 4, decide: should the agent watch for changes and react on its own (new email arrives, PR opens, deal updates), or only interact with it when asked? This is the difference between an agent that monitors your inbox vs one that only sends email when told to.
 
@@ -191,22 +191,106 @@ Resolution order: local path first, then remote registries. Install:
 
 1. Copies the team's `roles/`, `tools/`, `workflows/`, `monitors/`, and
    `agent.md` into `.modastack/` — the only runtime location.
-2. Merges the team's `agent.yaml` into `.modastack/agent.yaml` (team
-   provides defaults, existing project values win per-field).
-3. Scans the merged config for `${VAR}` references, prompts for any
+2. Writes the team's `agent.yaml` verbatim into `.modastack/agent.yaml`
+   (plus the team name). The installed copy is a frozen image —
+   regenerated wholesale on every install, never merged with prior
+   state, never hand-edited. Per-machine variance enters only through
+   `${VAR}` references resolved from `.env`.
+3. Scans the installed config for `${VAR}` references, prompts for any
    missing values, and writes them to `.modastack/.env` (gitignored
    automatically).
+4. Records a hash of every installed file in `install-manifest.json` —
+   `modastack doctor` flags hand-edits to the frozen image before a
+   reinstall would silently destroy them.
 
 `modastack start` takes no arguments — it reads `.modastack/agent.yaml`,
 loads `.env`, runs preflight, and launches. If no agent is installed it
 says so and lists available teams.
 
+### Two paths: downloaded vs. local source
+
+The source of truth is wherever the team came from, and install adjusts
+what gets checked in accordingly:
+
+**Downloaded team** — installed from a registry. The copy in `.modastack/`
+is the only copy, so it is the source of truth. Edit roles, workflows, and
+monitors in place; check the contents in to share customizations with the
+team. Only `.env`, `sessions/`, and `state/` are gitignored.
+
+**Local source of truth** — the team lives at `agents/<name>/` in the repo,
+checked in. Install materializes it into `.modastack/` as a build artifact:
+the installed copies are gitignored and never hand-edited. To customize,
+edit `agents/<name>/` and reinstall. This avoids two diverging copies of
+the same team in git.
+
+Install writes `.modastack/.gitignore` to match the path it took. Either
+way, `.modastack/agent.yaml` (the manifest — which team, its config,
+`${VAR}` refs) and the rest of the runtime contract stay identical.
+
 ## Interactive onboarding: `modastack setup`
 
-The `modastack setup` command walks through the five questions, then handles service connection interactively:
+The `modastack setup` command starts by offering existing teams from the
+registry — most users should start from a working team rather than a blank
+page. Three branches:
+
+- **Use as-is** — drops straight into the install flow: credentials, then
+  start.
+- **Customize** — loads the existing team's shape as the starting answers
+  to the five questions, walks through each one for review (roles to add or
+  drop, services to change, event sources to toggle), then continues to
+  service connection. Customizing materializes the team into
+  `agents/<name>/` in the project (the eject step) and installs from there
+  — the user now owns the source, and `.modastack/` stays a frozen build
+  artifact. This is the only sanctioned way to modify a team you didn't
+  author.
+- **Build your own** — walks through the five questions from scratch.
+
+Every branch starts the same way:
 
 ```
 $ modastack setup
+
+Use an existing agent team, customize one, or build your own?
+
+  Available teams:
+    eng-team          Engineering team — a director triages issues and
+                      coordinates project leads and engineers across repos.
+                      GitHub + Linear + Slack.
+    content-review    Content pipeline — researchers, editors, and fact
+                      checkers produce and maintain documentation from
+                      GitHub issues and email requests.
+```
+
+### Customizing an existing team
+
+Setup shows the team's current shape and walks through each of the five
+questions with the team's answers pre-filled — keep or change each one:
+
+```
+> customize content-review
+
+content-review currently:
+  Purpose:     Produce and maintain documentation from issues and email
+  Roles:       manager (entry), researcher, editor, fact_checker
+  Interaction: Slack
+  Services:    github (events), email (events)
+
+Roles — keep all four?
+> drop fact_checker, keep the rest
+
+Interaction — keep Slack?
+> yes
+
+Services — keep github and email?
+> add linear, with events
+
+...continues to service connection, same as below.
+```
+
+### Building from scratch
+
+```
+> build my own
 
 What is this agent going to do?
 > Manage sales outreach — monitor leads, draft emails, update CRM
@@ -247,13 +331,21 @@ Building monitors for event sources...
   Exploring Venn tools for email polling...
   ✓ email/received — venn exec work-gmail list_messages '{"maxResults": 10, "q": "is:unread"}'
 
-Writing .modastack/agent.yaml...
+Writing agents/sales-outreach/ (roles, monitors, agent.yaml)...
+Installing into .modastack/...
 Done. Run `modastack start` to launch.
 ```
 
-Setup ends with the agent installed — the answers produce the team and
-write the installed state in one pass, so no separate `install` step is
-needed.
+Setup ends with the agent installed. The answers produce a team source at
+`agents/<name>/` and setup runs install internally — so the result is a
+normal local-source team, and `.modastack/` stays a regenerable artifact.
+
+Because install is idempotent (frozen image, no merge), setup is safe to
+re-run at any time: to revisit the five questions, add a service, or reset
+a hand-edited image back to its source. If the user has edited
+`.modastack/` directly, `modastack doctor` flags the drift against the
+install manifest, and setup offers to migrate those edits into the team
+source before regenerating.
 
 ### Preflight validation
 
@@ -278,9 +370,9 @@ Checks: entry point role exists, native credentials present, Venn services conne
 
 **Team ships** `agents/<name>/agent.yaml` with defaults — entry point, services, monitors, and `${VAR}` references for any credentials it needs. No secrets.
 
-**Install merges** it into `.modastack/agent.yaml` — team provides defaults, existing project values win per-field. This file is check-in-able: it declares the agent's full shape, including which secrets it needs, without containing any.
+**Install copies** it verbatim into `.modastack/agent.yaml`. The installed copy mimics a runtime installation — frozen, regenerated on every install, never edited in place. Customizing the team means editing the source `agents/<name>/agent.yaml` and reinstalling. Whether `.modastack/` is checked in depends on which install path was taken (see "Two paths" above) — downloaded teams live there as the source of truth; local-source teams treat the whole image, `agent.yaml` included, as a gitignored build artifact.
 
-**Secrets live in `.modastack/.env`** — gitignored, created by `modastack install`, which scans the merged config for `${VAR}` references and prompts for each missing value. `Config.load()` reads `.env` into the environment before resolving the config, so every command (start, doctor, monitors) sees resolved values through a single path.
+**Secrets live in `.modastack/.env`** — gitignored, created by `modastack install`, which scans the installed config for `${VAR}` references and prompts for each missing value. `Config.load()` reads `.env` into the environment before resolving the config, so every command (start, doctor, monitors) sees resolved values through a single path. `.env` is also where per-machine, non-secret variance goes — e.g. `event_server: ${MODASTACK_EVENT_SERVER}` resolves to the cloud Worker in production and to nothing (auto-started local server) in CI and local dev.
 
 The `${VAR}` references serve as documentation — glance at the config and know exactly what accounts and tokens are needed. Preflight validation resolves them and fails with a pointed hint if any are missing.
 
