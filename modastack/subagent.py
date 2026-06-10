@@ -634,7 +634,11 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     if not es_url:
         es_port = 8080
         es_url = f"http://localhost:{es_port}"
-        ensure_running(es_port, project_path=project_path)
+        result = ensure_running(es_port, project_path=project_path)
+        if result == "started":
+            log.info("No event server configured — started local server on port %d", es_port)
+        elif result == "connected":
+            log.info("Connected to existing local event server on port %d", es_port)
         es_deployment, es_key = register(es_url, session_name, subscribe)
     else:
         import json as _json, urllib.request

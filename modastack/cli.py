@@ -36,7 +36,7 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
         label = "remote" if not cfg.event_server_url.startswith("http://localhost") else "local"
         lines.append(f"  {'event server':<{W}}{cfg.event_server_url} ({label})")
     else:
-        lines.append(f"  {'event server':<{W}}not configured")
+        lines.append(f"  {'event server':<{W}}localhost:8080 (auto)")
 
     try:
         import logging as _lg
@@ -274,6 +274,7 @@ def start(foreground, fresh, subscribe):
 
     extra_subscribe = list(subscribe)
 
+    click.echo("Running preflight checks...")
     # Run preflight checks in foreground before forking
     from modastack.validate import validate_config
     validation = validate_config(project_path)
@@ -590,6 +591,18 @@ def stop(force):
         set_project_root(_detect_project_root())
     from modastack.kb.embedder import stop as stop_embedder
     stop_embedder()
+
+    # Check if the local event server is still running
+    try:
+        import urllib.request
+        req = urllib.request.Request("http://localhost:8080/health")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            import json as _json
+            data = _json.loads(resp.read())
+            if data.get("status") == "ok":
+                click.echo("Event server is still running. Use `modastack event-server stop` to stop it.")
+    except Exception:
+        pass
 
 
 @main.command()

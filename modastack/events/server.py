@@ -40,8 +40,12 @@ def _needs_build(es_dir: Path) -> bool:
 
 def ensure_running(port: int, webhook_secret: str = "",
                    slack_signing_secret: str = "",
-                   project_path: Path | None = None) -> None:
-    """Start the local event server if not already running."""
+                   project_path: Path | None = None) -> str:
+    """Start the local event server if not already running.
+
+    Returns "connected" if an existing server was found, "started" if
+    a new one was launched.
+    """
     import urllib.request
 
     try:
@@ -50,7 +54,7 @@ def ensure_running(port: int, webhook_secret: str = "",
             data = json.loads(resp.read())
             if data.get("status") == "ok":
                 log.info(f"Event server already running on port {port}")
-                return
+                return "connected"
     except Exception:
         pass
 
@@ -105,10 +109,11 @@ def ensure_running(port: int, webhook_secret: str = "",
             req = urllib.request.Request(f"http://localhost:{port}/health")
             with urllib.request.urlopen(req, timeout=2):
                 log.info(f"Event server started on port {port} (pid {proc.pid})")
-                return
+                return "started"
         except Exception:
             continue
     log.error("Event server failed to start within 15 seconds")
+    return "failed"
 
 
 def register(base_url: str, name: str,
