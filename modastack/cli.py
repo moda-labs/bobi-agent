@@ -177,7 +177,8 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
     role = cfg.entry_point or "manager"
 
     from modastack.events.subscriptions import discover_subscriptions
-    subscribe = list(extra_subscribe or []) or discover_subscriptions(project_path, agent_name)
+    subscribe = discover_subscriptions(project_path, agent_name)
+    subscribe += [s for s in (extra_subscribe or []) if s not in subscribe]
 
     # Add monitor event topics for non-native services with events enabled
     monitor_topics = []

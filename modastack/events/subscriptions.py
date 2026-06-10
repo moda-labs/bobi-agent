@@ -56,12 +56,35 @@ def _resolve_source(source: str, project_path: Path, cfg=None) -> list[str]:
 
 
 def _detect_github(project_path: Path) -> list[str]:
-    """Detect github:org/repo from git remote."""
+    """Detect github:org/repo from git remote.
+
+    If the project root is not itself a git repo (director-style
+    deployments run from a parent directory of repos), detect the
+    remote of each immediate child repo instead.
+    """
+    keys = _github_remote_key(project_path)
+    if keys:
+        return keys
+    if (project_path / ".git").exists():
+        return []
+    subs = []
+    try:
+        children = sorted(p for p in project_path.iterdir() if p.is_dir())
+    except OSError:
+        return []
+    for child in children:
+        if (child / ".git").exists():
+            subs.extend(_github_remote_key(child))
+    return subs
+
+
+def _github_remote_key(repo_path: Path) -> list[str]:
+    """Subscription key for a single repo's GitHub origin remote."""
     try:
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
             capture_output=True, text=True, timeout=5,
-            cwd=str(project_path),
+            cwd=str(repo_path),
         )
         if result.returncode != 0:
             return []
