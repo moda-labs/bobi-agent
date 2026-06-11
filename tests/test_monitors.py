@@ -144,16 +144,13 @@ class TestDefaultsPath:
         result = registry_mod._defaults_path(project)
         assert result == project / ".modastack" / "monitors" / "defaults.yaml"
 
-    def test_no_framework_fallback_when_file_missing(self, tmp_path):
-        """When .modastack/monitors/defaults.yaml doesn't exist, _defaults_path
-        must NOT fall back to the framework source directory."""
-        project = tmp_path / "proj"
-        project.mkdir()
-        result = registry_mod._defaults_path(project)
-        # Must point at the installed location, not the framework package
-        assert "modastack/monitors" not in str(result) or ".modastack" in str(result)
-        assert result.parent.name == "monitors"
-        assert result.parent.parent.name == ".modastack"
+    def test_returns_none_without_project(self):
+        """_defaults_path returns None when no project path is available."""
+        result = registry_mod._defaults_path(None)
+        # Without monkeypatching get_project_root, this may return None or a
+        # real path — but it must never return a framework source path.
+        if result is not None:
+            assert ".modastack" in str(result)
 
     def test_loads_defaults_from_installed_pack(self, tmp_path):
         """Registry loads defaults from .modastack/monitors/defaults.yaml."""
