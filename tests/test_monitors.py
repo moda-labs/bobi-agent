@@ -165,13 +165,12 @@ class TestDefaultsPath:
 
 # === Install copies built-in defaults ===
 
-class TestInstallBuiltinDefaults:
-    def test_install_creates_monitor_defaults_when_pack_has_no_monitors(self, tmp_path):
-        """When a pack has no monitors/ directory, install must still create
-        .modastack/monitors/defaults.yaml with the built-in monitors."""
+class TestInstallNoFrameworkFallback:
+    def test_install_does_not_inject_framework_monitors(self, tmp_path):
+        """When a pack has no monitors/ directory, install must NOT inject
+        framework-bundled monitors — only the pack's own monitors resolve."""
         from modastack.cli import _install_pack
 
-        # Create a minimal pack with no monitors directory
         pack = tmp_path / "minimal-pack"
         pack.mkdir()
         (pack / "agent.yaml").write_text("agent: minimal\n")
@@ -182,15 +181,12 @@ class TestInstallBuiltinDefaults:
         _install_pack(pack, project)
 
         defaults = project / ".modastack" / "monitors" / "defaults.yaml"
-        assert defaults.exists(), "Built-in monitor defaults must always be installed"
-        raw = yaml.safe_load(defaults.read_text())
-        names = [m["name"] for m in raw["monitors"]]
-        assert "pr-conflict-check" in names
-        assert "stale-pr-check" in names
+        assert not defaults.exists(), (
+            "Install must not create monitor defaults when pack ships none"
+        )
 
-    def test_install_preserves_pack_monitors_alongside_builtins(self, tmp_path):
-        """When a pack has its own monitors/, the built-in defaults must still
-        be present (pack monitors/ is copied, which may include defaults.yaml)."""
+    def test_install_uses_only_pack_monitors(self, tmp_path):
+        """When a pack ships its own monitors/, only those are installed."""
         from modastack.cli import _install_pack
 
         pack = tmp_path / "full-pack"
@@ -199,8 +195,6 @@ class TestInstallBuiltinDefaults:
         monitors_dir = pack / "monitors"
         monitors_dir.mkdir()
         _write(monitors_dir / "defaults.yaml", [
-            {"name": "pr-conflict-check", "interval": "10m", "check": "pr_conflicts"},
-            {"name": "stale-pr-check", "interval": "2h", "check": "stale_prs"},
             {"name": "custom-check", "interval": "30m"},
         ])
 
@@ -213,8 +207,9 @@ class TestInstallBuiltinDefaults:
         assert defaults.exists()
         raw = yaml.safe_load(defaults.read_text())
         names = [m["name"] for m in raw["monitors"]]
-        assert "pr-conflict-check" in names
-        assert "custom-check" in names
+        assert names == ["custom-check"], (
+            f"Only pack monitors should be installed, got: {names}"
+        )
 
 
 # === Registry writes ===

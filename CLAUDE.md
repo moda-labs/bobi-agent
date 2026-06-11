@@ -94,7 +94,7 @@ modastack/                        # Framework (Python package)
 │   └── subscriptions.py          # Subscription key builder
 ├── workflow/
 │   ├── orchestrator.py           # DAG executor with deterministic routing
-│   ├── triggers.py               # Workflow discovery, three-tier resolution
+│   ├── triggers.py               # Workflow discovery from installed pack
 │   ├── schema.py                 # WorkflowDef, StepDef, YAML parsing
 │   ├── state.py                  # JSON persistence for workflow runs
 │   └── variables.py              # Variable resolution, safe condition evaluation
@@ -104,11 +104,11 @@ modastack/                        # Framework (Python package)
 │   └── sidecar.py                # HTTP server holding sentence-transformers model
 └── monitors/                     # Background polling to fill webhook gaps
     ├── schema.py                 # Monitor record + interval parsing
-    ├── registry.py               # Three-tier load/merge + writes
+    ├── registry.py               # Installed defaults + project overrides
     ├── checks.py                 # Native check runners (pr_conflicts, stale_prs)
     └── scheduler.py              # Interval scheduler, dedup, event injection
 
-skills/                           # Claude Code skill files
+skills/                           # Claude Code skill files (also in modastack/skills/ as package data)
 ├── create-agent.md               # Guide for designing new agent teams
 ├── modastack.md                  # Guide for using modastack
 ├── linear-setup.md               # Linear API key setup
@@ -183,9 +183,8 @@ prompts, not the framework.
 
 YAML DAGs with three step types: **prompt** (agent executes + writes
 handoff), **route** (deterministic branch on handoff value), **await**
-(suspend until external event). Loaded from three tiers (most specific
-wins): agent team → project `.modastack/workflows/` → user
-`~/.modastack/workflows/`.
+(suspend until external event). Loaded exclusively from the installed
+pack image at `.modastack/workflows/`.
 
 See `skills/create-agent.md` for the full YAML reference.
 

@@ -197,21 +197,34 @@ class TestLoadFrom:
         assert dispatcher.workflows[0][1] == "my-repo"
 
 
-class TestNaturalLanguageTriggers:
-    """Verify that workflow YAML files use natural language triggers
-    instead of event-type strings."""
+class TestNoFrameworkFallback:
+    """Verify workflows resolve only from .modastack/, not from the framework package."""
 
-    def test_builtin_workflows_have_natural_language_triggers(self):
-        from modastack.workflow.triggers import WORKFLOWS_DIR
-        event_type_pattern = [
-            "task.assigned", "review.changes_requested", "ci.failed",
-            "pr.merged", "worker.stalled",
-        ]
-        for yaml_file in WORKFLOWS_DIR.glob("*.yaml"):
-            wf = load_workflow(yaml_file)
-            if wf.name == "adhoc":
-                continue
-            assert wf.trigger not in event_type_pattern, \
-                f"{wf.name} still uses event-type trigger: {wf.trigger}"
-            assert len(wf.trigger) > 20, \
-                f"{wf.name} trigger too short to be natural language: {wf.trigger!r}"
+    def test_no_bundled_workflow_yamls_in_package(self):
+        """The modastack/workflow/ directory must not contain any YAML files.
+
+        Domain workflows belong in agent packs, not the framework package.
+        """
+        package_dir = Path(__file__).parent.parent / "modastack" / "workflow"
+        yamls = list(package_dir.glob("*.yaml"))
+        assert yamls == [], (
+            f"Framework package must not ship workflow YAMLs: {[f.name for f in yamls]}"
+        )
+
+    def test_load_all_without_project_loads_nothing(self):
+        """Without a project path, no workflows should load."""
+        dispatcher = WorkflowDispatcher()
+        dispatcher.load_all_workflows(project_path=None)
+        assert len(dispatcher.workflows) == 0
+
+    def test_load_all_uses_only_installed_pack(self, tmp_path):
+        """Workflows load exclusively from .modastack/workflows/."""
+        wf_dir = tmp_path / ".modastack" / "workflows"
+        wf_dir.mkdir(parents=True)
+        _make_workflow_yaml(wf_dir / "my-wf.yaml", "my-workflow",
+                           "When something custom happens.")
+
+        dispatcher = WorkflowDispatcher()
+        dispatcher.load_all_workflows(project_path=tmp_path)
+        names = [wf.name for wf, _src in dispatcher.workflows]
+        assert names == ["my-workflow"]

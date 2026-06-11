@@ -100,12 +100,24 @@ def test_post_event_returns_false_on_connection_error():
 # --- modastack workflows list ------------------------------------------------
 
 
-def test_workflow_list_shows_workflows():
+def test_workflow_list_shows_installed_workflows(modastack_install):
+    """Workflows resolve only from the installed pack, not from the framework."""
     runner = CliRunner()
-    result = runner.invoke(main, ["workflows", "list"])
+    with patch("modastack.cli._detect_project_root",
+               return_value=modastack_install.repo_path):
+        result = runner.invoke(main, ["workflows", "list"])
     assert result.exit_code == 0
-    assert "issue-lifecycle" in result.output
+    # The modastack_install fixture installs an adhoc workflow in .modastack/workflows/
     assert "adhoc" in result.output
+
+
+def test_workflow_list_empty_without_pack(tmp_path):
+    """Without an installed pack, no workflows should resolve."""
+    runner = CliRunner()
+    with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        result = runner.invoke(main, ["workflows", "list"])
+    assert result.exit_code == 0
+    assert "No workflows loaded" in result.output
 
 
 def test_workflow_list_no_errors():
