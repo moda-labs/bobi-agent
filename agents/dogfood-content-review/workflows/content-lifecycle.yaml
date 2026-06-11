@@ -1,0 +1,79 @@
+name: content-lifecycle
+trigger: When an issue is assigned that requires writing or updating documentation, guides, or runbooks.
+description: >
+  Full content lifecycle: research the topic, draft the content, verify
+  accuracy, and open a PR. Use for any content creation or update task.
+
+steps:
+  - name: setup
+    agent: editor
+    prompt: |
+      Create a git worktree for this issue and set up the workspace.
+      Read the issue to understand what content needs to be created or updated.
+      Check existing content in workspace/guides/, workspace/runbooks/, and workspace/research/ for related material.
+    handoff:
+      required: [worktree]
+    timeout: 300
+
+  - name: triage
+    agent: editor
+    prompt: |
+      Classify this content task:
+      - What type of content is needed? (guide, runbook, research summary, update)
+      - Does it need research first, or can we draft directly from the issue?
+      - How complex is it? (trivial: typo/link fix, small: single doc update,
+        medium: new doc or significant rewrite, large: multi-doc project)
+
+      Write the handoff with your classification.
+    handoff:
+      required: [content_type, needs_research, complexity]
+      optional: [notes, related_docs]
+    timeout: 600
+
+  - name: route_research
+    if: "needs_research == true"
+    goto: research
+    else: draft
+
+  - name: research
+    agent: researcher
+    prompt: |
+      Research the topic described in the issue. Follow your research process:
+      investigate, gather sources, and write a research summary to workspace/research/.
+      The editor will use your findings to draft the final content.
+    handoff:
+      required: [research_path]
+      optional: [key_findings, sources]
+    timeout: 1800
+
+  - name: draft
+    agent: editor
+    prompt: |
+      Write or update the content described in the issue.
+      If research was done, read the research summary first.
+      Follow your style guide and use the appropriate document template.
+      Place the content in the correct directory (workspace/guides/ or workspace/runbooks/).
+    handoff:
+      required: [content_path, status]
+    timeout: 1800
+
+  - name: verify
+    agent: fact_checker
+    prompt: |
+      Fact-check the content that was just drafted or updated.
+      Follow your verification process: check claims, test instructions,
+      verify links. Write your verification report as a comment on the issue.
+    handoff:
+      required: [verdict]
+      optional: [issues_found]
+    timeout: 1200
+
+  - name: pr
+    agent: editor
+    prompt: |
+      Create a pull request with the content changes.
+      Include the fact-check verdict in the PR description.
+      Link the PR to the issue.
+    handoff:
+      required: [pr_url]
+    timeout: 600

@@ -82,7 +82,7 @@ jobs:
           # stays unset so the smoke instance runs an isolated local event
           # server instead of the production Cloudflare Worker.
           grep '^VENN_API_KEY=' "$PROD_DIR/modastack-dogfood/.modastack/.env" > .modastack/.env || true
-          "$SMOKE/venv/bin/modastack" install agents/content-review < /dev/null
+          "$SMOKE/venv/bin/modastack" install agents/dogfood-content-review < /dev/null
           "$SMOKE/venv/bin/modastack" start
 
           LOG=".modastack/state/manager.log"

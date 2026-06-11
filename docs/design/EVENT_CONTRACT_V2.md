@@ -71,7 +71,7 @@ teams cannot declare a new service's credentials — the framework owns the list
   tracker-domain concept — is cemented into `AgentResult`, `SessionEntry`,
   and workflow state.
 
-**Cost:** a non-engineering team (e.g. the dogfood content-review team) gets
+**Cost:** a non-engineering team (e.g. the dogfood-content-review team) gets
 events on `engineer/*` topics that subscriptions can't distinguish by actual
 role, and any task mentioning two issue numbers — or a Slack message quoting
 "#42" — produces wrong/colliding session names and resume matching.
@@ -180,7 +180,7 @@ on its own judgment with rationale for veto.
    `.modastack/agent.yaml` (services, credentials, subscribe lists) and
    workflow YAML that reference the current contract. The reference team
    (`agents/eng-team` or `software_team`) and the dogfood team
-   (`content-review`) must both migrate as part of the change, and the dogfood
+   (`dogfood-content-review`) must both migrate as part of the change, and the dogfood
    battery must pass after. Decide: versioned envelope? back-compat shim for a
    release? hard cutover with a migration note?
 4. **Verification bar.** 620 unit + 86 integration + 37 event-server tests must
@@ -222,7 +222,7 @@ cleaner than the issues were written against.
 5. `modastack/subagent.py` — `_session_name`, `_parse_issue_number`,
    `_emit_session_*`, `PHASE_TIMEOUT`/role strings (Finding 2).
 6. `modastack/events/drain.py` — the Slack special case (Finding 3).
-7. A current installed `agent.yaml` (e.g. dogfood `content-review`) — to see
+7. A current installed `agent.yaml` (e.g. `dogfood-content-review`) — to see
    what teams actually declare today, which constrains the migration.
 
 Related memory: `project_simplify_deferred` indexes #163-#167; `agent.yaml`,
@@ -522,9 +522,9 @@ Reference migrations (in the same change):
 2. `agents/market-research` (this repo, about to merge) — same treatment;
    coordinate with that branch so it lands already on v2 or migrates
    immediately after.
-3. `content-review` — **decided 2026-06-10: the modastack-dogfood repo is
+3. `dogfood-content-review` — **decided 2026-06-10: the modastack-dogfood repo is
    retired.** Isolated per-project installs make a standing dogfood repo
-   unnecessary: the pack moves into `agents/content-review/` in this repo
+   unnecessary: the pack moves into `agents/dogfood-content-review/` in this repo
    and the battery installs it into throwaway temp projects instead
    (ticket D in §7, which also carries the v2 migration + email-service
    routing verification). Full dogfood battery (manager lifecycle, ask
@@ -575,9 +575,9 @@ The three coding tickets touch **disjoint file-sets**:
   monitor `role:`, session naming, in `subagent.py` / `orchestrator.py` /
   `state.py` / `monitors/` / `cli.py`.
   *Gate:* unit + integration.
-- **D (#180). chore: absorb content-review + retire modastack-dogfood** —
+- **D (#180). chore: absorb dogfood-content-review + retire modastack-dogfood** —
   (decided 2026-06-10: isolated per-project installs make a standing
-  dogfood repo unnecessary). Move `agents/content-review/` from
+  dogfood repo unnecessary). Move `agents/dogfood-content-review/` from
   modastack-dogfood into this repo's `agents/` (+ `registry.yaml`);
   migrate it to v2 in the same diff; re-point its `context.content_dirs`
   (guides/runbooks/research) at in-repo fixture content; rewrite the
@@ -593,7 +593,7 @@ The three coding tickets touch **disjoint file-sets**:
   topic events. Those are different exact-match keys; confirm how email
   events actually reach the manager (server routing vs direct monitor
   injection) and fix the declaration or the topic if they don't line up.
-  content-review is the only live exercise of the "4th service, zero
+  dogfood-content-review is the only live exercise of the "4th service, zero
   framework edits" promise — this ticket is where that promise gets
   proven.
   **Open question (settle at filing):** the webhook→manager pipeline test

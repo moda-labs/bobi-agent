@@ -1,0 +1,16 @@
+name: smoke-test
+trigger: When an issue labeled "smoke-test" is assigned.
+description: >
+  Quick smoke test for CI. Writes a one-line file, commits it,
+  comments on the issue, and closes the issue.
+
+steps:
+  - name: task
+    prompt: |
+      You have been assigned a smoke test issue. Do these steps:
+      1. Read the issue to get the issue number
+      2. Create a file called smoke-test-result.md with the text "Smoke test passed"
+      3. Commit it to a new branch and open a PR
+      4. Comment on the issue saying the smoke test passed
+      5. Close the issue
+    timeout: 120
