@@ -48,8 +48,6 @@ def compute_manifest_hash(project_path: Path | None = None) -> str:
     if not root:
         return ""
     manifest = root / ".modastack" / "install-manifest.json"
-    if not manifest.exists():
-        return ""
     try:
         data = json.loads(manifest.read_text())
         files = data.get("files", {})
@@ -57,9 +55,29 @@ def compute_manifest_hash(project_path: Path | None = None) -> str:
         return ""
     if not files:
         return ""
-    # Deterministic: sort by key and hash the concatenation
     content = "".join(f"{k}:{v}" for k, v in sorted(files.items()))
     return hashlib.sha256(content.encode()).hexdigest()
+
+
+def check_image_rotation(session_name: str, project_path: Path) -> bool:
+    """Clear a session if the installed image has changed since it was stamped.
+
+    Returns True if the session was rotated.  Safe no-ops: no manifest,
+    no prior session, no stored hash (first run after upgrade).
+    """
+    current_hash = compute_manifest_hash(project_path)
+    if not current_hash:
+        return False
+    saved_id = load_session_id(session_name)
+    if not saved_id:
+        return False
+    registry = get_registry()
+    entry = registry.get(session_name)
+    if not entry or not entry.image_hash or entry.image_hash == current_hash:
+        return False
+    log.info("Installed image changed — rotating session for %s", session_name)
+    save_session_id(session_name, "")
+    return True
 
 
 def set_project_root(path: Path) -> None:

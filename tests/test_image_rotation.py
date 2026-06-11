@@ -12,7 +12,7 @@ import pytest
 
 from modastack.sdk import (
     SessionEntry, SessionRegistry, compute_manifest_hash,
-    save_session_id, load_session_id,
+    check_image_rotation, save_session_id, load_session_id,
 )
 
 
@@ -103,10 +103,10 @@ class TestSessionEntryImageHash:
 
 
 # ---------------------------------------------------------------------------
-# Manager image rotation (cli.py start path)
+# check_image_rotation (shared helper)
 # ---------------------------------------------------------------------------
 
-class TestManagerImageRotation:
+class TestCheckImageRotation:
     def test_rotates_when_hash_changes(self, tmp_path, monkeypatch):
         """Session is cleared when manifest hash differs from stored stamp."""
         monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
@@ -115,7 +115,6 @@ class TestManagerImageRotation:
         registry = SessionRegistry()
         session_name = "moda-manager-proj"
 
-        # Simulate a prior session with old hash
         _write_manifest(tmp_path, {"a.md": "old_hash"})
         old_hash = compute_manifest_hash(tmp_path)
         save_session_id(session_name, "session-id-123")
@@ -126,17 +125,8 @@ class TestManagerImageRotation:
 
         # Install changes → new manifest
         _write_manifest(tmp_path, {"a.md": "new_hash"})
-        current_hash = compute_manifest_hash(tmp_path)
-        assert old_hash != current_hash
 
-        # Verify existing session has old hash
-        saved_id = load_session_id(session_name)
-        assert saved_id == "session-id-123"
-        entry = registry.get(session_name)
-        assert entry.image_hash != current_hash
-
-        # Rotation clears the session
-        save_session_id(session_name, "")
+        assert check_image_rotation(session_name, tmp_path) is True
         assert load_session_id(session_name) == ""
 
     def test_no_rotation_when_hash_matches(self, tmp_path, monkeypatch):
@@ -155,9 +145,7 @@ class TestManagerImageRotation:
             image_hash=h,
         ))
 
-        # Same manifest → session ID preserved
-        entry = registry.get(session_name)
-        assert entry.image_hash == h
+        assert check_image_rotation(session_name, tmp_path) is False
         assert load_session_id(session_name) == "session-id-456"
 
     def test_no_rotation_when_no_prior_hash(self, tmp_path, monkeypatch):
@@ -172,14 +160,19 @@ class TestManagerImageRotation:
         save_session_id(session_name, "session-id-789")
         registry.register(SessionEntry(
             name=session_name, session_id="session-id-789",
-            image_hash="",  # no prior stamp
+            image_hash="",
         ))
 
-        current_hash = compute_manifest_hash(tmp_path)
-        entry = registry.get(session_name)
-        # Empty stored hash → skip rotation
-        assert entry.image_hash == ""
+        assert check_image_rotation(session_name, tmp_path) is False
         assert load_session_id(session_name) == "session-id-789"
+
+    def test_no_rotation_when_no_saved_session(self, tmp_path, monkeypatch):
+        """No session ID → nothing to rotate."""
+        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
+
+        _write_manifest(tmp_path, {"a.md": "hash"})
+        assert check_image_rotation("nonexistent", tmp_path) is False
 
     def test_no_rotation_when_no_manifest(self, tmp_path, monkeypatch):
         """Without an install manifest, rotation never fires."""
@@ -188,7 +181,7 @@ class TestManagerImageRotation:
 
         session_name = "moda-manager-proj"
         save_session_id(session_name, "session-id-111")
-        assert compute_manifest_hash(tmp_path) == ""
+        assert check_image_rotation(session_name, tmp_path) is False
         assert load_session_id(session_name) == "session-id-111"
 
 

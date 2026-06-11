@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import threading
+from pathlib import Path
 
 from modastack.inbox import Inbox, Message
 from modastack.sdk import (
@@ -286,7 +287,7 @@ class Session:
                 status="starting",
                 inbox_port=self.inbox.port,
                 pid=os.getpid(),
-                image_hash=compute_manifest_hash(),
+                image_hash=compute_manifest_hash(Path(self.cwd)),
             )
         )
 
