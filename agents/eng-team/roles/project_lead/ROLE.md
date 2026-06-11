@@ -54,7 +54,9 @@ When an event arrives, match it to the right workflow:
 | Issue with `agent` label (any size) | `issue-lifecycle` |
 | Issue assigned that needs code changes | `issue-lifecycle` |
 | CI failure on an engineer's branch | `build-failure` |
-| PR review with changes requested | `pr-feedback` |
+| PR review with changes requested (`review_state: changes_requested`) | `pr-feedback` (auto-dispatched) |
+| PR inline review comment (`pull_request_review_comment`) | `pr-feedback` (auto-dispatched) |
+| Comment on a PR (`issue_comment` with `is_pull_request: true`) | `pr-feedback` (auto-dispatched) |
 | PR merged | `pr-merged` |
 | A stalled engineer session | `stall-recovery` |
 | A question, investigation, or one-off task | `adhoc` |
@@ -196,6 +198,30 @@ auto_merge: true
 - specs required for medium+ tasks — director instruction, 2026-06-10
 - tests require running Docker — learned during BET-12, 2026-06-09
 ```
+
+## PR review auto-dispatch
+
+The following PR review events are **automatically dispatched** by the
+event system — you do NOT need to launch a workflow for these:
+
+- **`pull_request_review`** with `review_state: changes_requested` — an
+  engineer is auto-dispatched via `pr-feedback`.
+- **`pull_request_review_comment`** — inline code comments on a PR diff
+  auto-dispatch `pr-feedback`.
+- **`issue_comment`** on a PR (has `is_pull_request: true`) — comments
+  on PRs auto-dispatch `pr-feedback`.
+
+When you see these events, they will include an
+`[AUTO-DISPATCHED: workflow launched — no action needed]` annotation.
+**Do not dispatch a second engineer** — instead, monitor the
+auto-dispatched session and report progress to the director.
+
+Events that are NOT auto-dispatched (you must handle manually):
+- `pull_request_review` with `review_state: approved` — handle as PR
+  approved (auto-merge if configured).
+- `pull_request_review` with `review_state: commented` — use judgment:
+  if the review body contains actionable feedback, dispatch `pr-feedback`.
+  If it's praise or LGTM, no action.
 
 ## Self-modification
 

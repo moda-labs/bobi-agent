@@ -685,8 +685,16 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     )
     client.start()
 
+    # Build auto-dispatch reactor from config (if rules are defined).
+    reactor = None
+    if cfg.auto_dispatch:
+        from modastack.events.reactor import EventReactor
+        reactor = EventReactor.from_config(cfg.auto_dispatch, cwd=str(project_path))
+        log.info("Auto-dispatch reactor loaded with %d rule(s)", len(reactor.rules))
+
     drain_thread = threading.Thread(
         target=drain_loop, args=(session_name,),
+        kwargs={"reactor": reactor},
         daemon=True, name="agent-drain",
     )
     drain_thread.start()

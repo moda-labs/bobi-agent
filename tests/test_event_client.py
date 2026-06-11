@@ -142,6 +142,48 @@ class TestFormatEventForManager:
         assert "requested_by: Alice" in text
         assert "channel C0SHARED" in text
 
+    def test_v2_pr_review_event_renders_review_state(self):
+        """pull_request_review events include review_state so the lead
+        can distinguish changes_requested from approved/commented."""
+        event = {
+            "v": 2, "source": "github", "type": "github.pull_request_review",
+            "topics": ["github:moda-labs/test"],
+            "delivery": "bulk",
+            "text": "[moda-labs/test] submitted PR #10 Fix bug (changes_requested)",
+            "fields": {
+                "action": "submitted", "number": 10, "title": "Fix bug",
+                "state": "open", "sender": "reviewer1",
+                "review_state": "changes_requested",
+                "review_body": "Please fix the null check on line 42.",
+            },
+            "payload": {},
+        }
+        text = format_event_for_manager(event)
+        assert "Event: github/github.pull_request_review" in text
+        assert "review_state: changes_requested" in text
+        assert "review_body: Please fix the null check" in text
+
+    def test_v2_pr_review_comment_event_renders_comment_fields(self):
+        """pull_request_review_comment events include comment body and path."""
+        event = {
+            "v": 2, "source": "github",
+            "type": "github.pull_request_review_comment",
+            "topics": ["github:moda-labs/test"],
+            "delivery": "bulk",
+            "text": "[moda-labs/test] created PR #10 Fix bug",
+            "fields": {
+                "action": "created", "number": 10, "title": "Fix bug",
+                "state": "open", "sender": "reviewer1",
+                "comment_body": "This should use a guard clause.",
+                "comment_path": "src/handler.ts",
+            },
+            "payload": {},
+        }
+        text = format_event_for_manager(event)
+        assert "Event: github/github.pull_request_review_comment" in text
+        assert "comment_body: This should use a guard clause." in text
+        assert "comment_path: src/handler.ts" in text
+
     def test_legacy_event_scalar_fallback(self):
         """v1 events without text/fields get scalar fallback from payload."""
         event = {

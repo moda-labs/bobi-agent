@@ -10,10 +10,13 @@ from modastack.events.client import (
     format_event_for_manager,
 )
 from modastack.events.drain import drain_loop
+from modastack.events.reactor import AutoDispatchRule, EventReactor
 from modastack.events.server import ensure_running, register
 from modastack.events.subscriptions import discover_subscriptions
 
 __all__ = [
+    "AutoDispatchRule",
+    "EventReactor",
     "EventServerClient",
     "event_queue",
     "format_event_for_manager",
