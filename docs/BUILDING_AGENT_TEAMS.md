@@ -248,7 +248,7 @@ handle, and watch `.modastack/state/manager.log`.
 
 - `agents/eng-team` (modastack repo) — multi-repo org: director entry
   point, project leads, engineers; github + linear + slack.
-- `agents/content-review` (modastack-dogfood repo) — single-repo content
+- `agents/dogfood-content-review` (modastack repo) — single-repo content
   pipeline: manager entry point, researcher/editor/fact-checker roles,
   github + email via Venn, command monitor for inbound email.
 - `agents/market-research` (modastack repo) — research manager entry

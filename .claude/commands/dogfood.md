@@ -1,14 +1,14 @@
 ---
-description: Run integration tests against the in-repo content-review pack. Installs into a throwaway temp project. Tests CLI, event server, workflows, config, and SDK. Writes failing tests before fixing bugs.
+description: Run integration tests against the in-repo dogfood-content-review pack. Installs into a throwaway temp project. Tests CLI, event server, workflows, config, and SDK. Writes failing tests before fixing bugs.
 ---
 
 # Modastack Dogfood Integration Tests
 
 You are running a comprehensive integration test battery against modastack
-using the in-repo `agents/content-review/` pack installed into a throwaway
+using the in-repo `agents/dogfood-content-review/` pack installed into a throwaway
 temp project. No external repo is needed — the pack lives in this repo.
 
-The test team is `content-review` (roles: researcher, editor, fact_checker,
+The test team is `dogfood-content-review` (roles: researcher, editor, fact_checker,
 manager). Discover the team name from `agents/registry.yaml` — don't assume it.
 
 ## Phase 1: Setup
@@ -26,7 +26,7 @@ manager). Discover the team name from `agents/registry.yaml` — don't assume it
    git init
    # Copy the pack source so `modastack install` can find it
    cp -r ~/dev/modastack/agents/ "$DOGFOOD_DIR/agents/"
-   modastack install agents/content-review
+   modastack install agents/dogfood-content-review
    ```
    Save `$DOGFOOD_DIR` — all subsequent commands run from there.
 

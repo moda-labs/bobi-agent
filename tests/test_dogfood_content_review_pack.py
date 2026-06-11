@@ -1,7 +1,7 @@
-"""Tests for the in-repo content-review agent pack.
+"""Tests for the in-repo dogfood-content-review agent pack.
 
 Verifies the pack structure, installability, and email event routing.
-The content-review pack is the canonical exercise of "4th service,
+The dogfood-content-review pack is the canonical exercise of "4th service,
 zero framework edits" — email has no adapter, so the monitor injects
 events directly into the manager's event queue.
 """
@@ -14,7 +14,7 @@ from modastack.cli import _install_pack
 from modastack.config import Config
 
 
-PACK_DIR = Path(__file__).parent.parent / "agents" / "content-review"
+PACK_DIR = Path(__file__).parent.parent / "agents" / "dogfood-content-review"
 
 
 class TestPackStructure:
@@ -40,7 +40,7 @@ class TestPackStructure:
         assert actual_roles == expected_roles
 
     def test_workflows_present(self):
-        expected = {"content-lifecycle.yaml", "content-review.yaml",
+        expected = {"content-lifecycle.yaml", "dogfood-content-review.yaml",
                     "research-task.yaml", "smoke-test.yaml"}
         actual = {f.name for f in (PACK_DIR / "workflows").iterdir() if f.is_file()}
         assert actual == expected
@@ -62,7 +62,7 @@ class TestInstall:
         installed = tmp_path / ".modastack" / "agent.yaml"
         assert installed.exists()
         cfg = yaml.safe_load(installed.read_text())
-        assert cfg["agent"] == "content-review"
+        assert cfg["agent"] == "dogfood-content-review"
         assert cfg["entry_point"] == "manager"
 
     def test_install_copies_all_roles(self, tmp_path):
@@ -85,7 +85,7 @@ class TestInstall:
     def test_config_loads_after_install(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
         cfg = Config.load(tmp_path)
-        assert cfg.agent == "content-review"
+        assert cfg.agent == "dogfood-content-review"
         assert cfg.entry_point == "manager"
 
 
@@ -172,12 +172,12 @@ class TestContentDirs:
 
 
 class TestRegistryEntry:
-    """The content-review pack has an entry in agents/registry.yaml."""
+    """The dogfood-content-review pack has an entry in agents/registry.yaml."""
 
     def test_registry_includes_content_review(self):
         registry_path = Path(__file__).parent.parent / "agents" / "registry.yaml"
         registry = yaml.safe_load(registry_path.read_text())
-        assert "content-review" in registry["agents"]
-        entry = registry["agents"]["content-review"]
+        assert "dogfood-content-review" in registry["agents"]
+        entry = registry["agents"]["dogfood-content-review"]
         assert entry["version"] == "1.1.0"
         assert "description" in entry

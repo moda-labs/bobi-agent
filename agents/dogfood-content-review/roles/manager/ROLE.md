@@ -12,7 +12,7 @@ When an event arrives, match it to the right workflow:
 |---|---|
 | Issue with `content` or `agent` label | `content-lifecycle` |
 | Issue with `research` label | `research-task` |
-| Issue requesting review of existing content | `content-review` |
+| Issue requesting review of existing content | `dogfood-content-review` |
 | PR review with changes requested | `pr-feedback` |
 | PR merged | `pr-merged` |
 | Slack DM requesting content work | pick the workflow that fits |

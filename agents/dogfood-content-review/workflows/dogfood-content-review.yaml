@@ -1,4 +1,4 @@
-name: content-review
+name: dogfood-content-review
 trigger: When an issue requests review or audit of existing content for accuracy and freshness.
 description: >
   Review existing content for accuracy, freshness, and quality.

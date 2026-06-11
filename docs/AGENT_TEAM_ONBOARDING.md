@@ -277,7 +277,8 @@ Use an existing agent team, customize one, or build your own?
     eng-team          Engineering team — a director triages issues and
                       coordinates project leads and engineers across repos.
                       GitHub + Linear + Slack.
-    content-review    Content pipeline — researchers, editors, and fact
+    dogfood-content-review
+                      Content pipeline — researchers, editors, and fact
                       checkers produce and maintain documentation from
                       GitHub issues and email requests.
 ```
@@ -288,9 +289,9 @@ Setup shows the team's current shape and walks through each of the five
 questions with the team's answers pre-filled — keep or change each one:
 
 ```
-> customize content-review
+> customize dogfood-content-review
 
-content-review currently:
+dogfood-content-review currently:
   Purpose:     Produce and maintain documentation from issues and email
   Roles:       manager (entry), researcher, editor, fact_checker
   Interaction: Slack
