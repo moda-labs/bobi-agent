@@ -11,17 +11,19 @@ log = logging.getLogger(__name__)
 
 DRAIN_INTERVAL = 2
 
+# Maps event source names to (service_name, credential_key) pairs for
+# looking up service tokens from project config.
+_SOURCE_TO_CREDENTIAL: dict[str, tuple[str, str]] = {
+    "slack": ("slack", "bot_token"),
+}
+
 
 def _get_service_token(source: str) -> str:
     """Retrieve the service credential for *source* from project config.
 
     Returns empty string if unavailable (no project root, no config, etc.).
     """
-    _source_to_credential = {
-        "slack": ("slack", "bot_token"),
-    }
-
-    entry = _source_to_credential.get(source)
+    entry = _SOURCE_TO_CREDENTIAL.get(source)
     if not entry:
         return ""
 

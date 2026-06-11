@@ -17,7 +17,6 @@ from unittest.mock import patch, MagicMock, call
 import pytest
 
 from modastack.slack import (
-    format_slack_message,
     post_slack_message,
     update_slack_message,
     set_thread_status,
@@ -404,6 +403,25 @@ class TestChannelRegistry:
         from modastack.events.channels import get_channel_handler
         assert get_channel_handler("github") is None
         assert get_channel_handler("unknown") is None
+
+
+class TestStopRefreshLoop:
+    def test_stops_and_removes_active_loop(self):
+        from modastack.events.channels import _active_loops, stop_refresh_loop
+
+        mock_loop = MagicMock()
+        _active_loops[("C123", "171.42")] = mock_loop
+
+        stop_refresh_loop("C123", "171.42")
+
+        mock_loop.stop.assert_called_once_with(clear=True)
+        assert ("C123", "171.42") not in _active_loops
+
+    def test_noop_when_no_loop_exists(self):
+        from modastack.events.channels import stop_refresh_loop
+
+        # Should not raise
+        stop_refresh_loop("C999", "999.99")
 
 
 # ---------------------------------------------------------------------------

@@ -820,6 +820,9 @@ def slack_reply(text, workspace, channel, thread, edit_ts):
             update_slack_message(token, channel, edit_ts, text)
             if thread:
                 set_thread_status(token, channel, thread, "")
+                # Stop the background refresh loop (if one is running).
+                from .events.channels import stop_refresh_loop
+                stop_refresh_loop(channel, thread)
             click.echo(f"Updated {edit_ts} in {channel}")
         else:
             post_slack_message(token, channel, text, thread_ts=thread)

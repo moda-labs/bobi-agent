@@ -102,3 +102,16 @@ _handlers: dict[str, InputChannelHandler] = {
 def get_channel_handler(source: str) -> InputChannelHandler | None:
     """Return the input channel handler for *source*, or ``None``."""
     return _handlers.get(source)
+
+
+def stop_refresh_loop(channel: str, thread_ts: str) -> None:
+    """Stop and remove the status refresh loop for a thread.
+
+    Called when the agent replies (``slack-reply --edit``) so the
+    background thread is cleaned up and the ``_active_loops`` dict
+    doesn't grow unbounded.  No-ops silently if no loop exists.
+    """
+    key = (channel, thread_ts)
+    loop = _active_loops.pop(key, None)
+    if loop is not None:
+        loop.stop(clear=True)  # type: ignore[union-attr]
