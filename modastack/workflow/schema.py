@@ -4,6 +4,7 @@ A workflow is a linear sequence of steps. Each step is either:
 - A prompt step: injects a prompt into the agent, waits for handoff
 - A route step: deterministic branch based on handoff outputs
 - An await step: suspends the workflow waiting for an external event
+- A notify step: deterministic notification (e.g. Slack message)
 """
 
 from __future__ import annotations
@@ -37,6 +38,10 @@ class StepDef:
 
     # Await step fields
     await_event: str = ""
+
+    # Notify step fields
+    notify: str = ""         # notification target (e.g. "slack")
+    message: str = ""        # message template (supports ${{scope.key}})
 
 
 @dataclass
@@ -82,6 +87,8 @@ def load_workflow(path: Path) -> Workflow:
             goto=s.get("goto", ""),
             else_goto=s.get("else", ""),
             await_event=s.get("await", ""),
+            notify=s.get("notify", ""),
+            message=s.get("message", ""),
         )
         steps.append(step)
 

@@ -27,6 +27,10 @@ steps:
       optional: [blocked_by, notes, has_frontend]
     timeout: 1800
 
+  - name: notify_start
+    notify: slack
+    message: "Working on #${{input.issue_id}}: ${{input.task}}"
+
   - name: route
     if: "needs_spec == true"
     goto: spec
@@ -74,3 +78,7 @@ steps:
       required: [qa_status]
       optional: [qa_findings]
     timeout: 1800
+
+  - name: notify_complete
+    notify: slack
+    message: "Completed #${{input.issue_id}}: ${{input.task}} — PR ${{pr.pr_url}} merged"
