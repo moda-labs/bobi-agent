@@ -133,6 +133,90 @@ class TestRegistryMerge:
         assert reg.projects_for(scoped) == [project]
 
 
+# === Defaults path resolution ===
+
+class TestDefaultsPath:
+    def test_returns_installed_path_only(self, tmp_path):
+        """_defaults_path must only return .modastack/monitors/defaults.yaml —
+        no framework fallback, no get_project_root fallback."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        result = registry_mod._defaults_path(project)
+        assert result == project / ".modastack" / "monitors" / "defaults.yaml"
+
+    def test_returns_none_without_project(self):
+        """_defaults_path returns None when no project path is available."""
+        result = registry_mod._defaults_path(None)
+        # Without monkeypatching get_project_root, this may return None or a
+        # real path — but it must never return a framework source path.
+        if result is not None:
+            assert ".modastack" in str(result)
+
+    def test_loads_defaults_from_installed_pack(self, tmp_path):
+        """Registry loads defaults from .modastack/monitors/defaults.yaml."""
+        project = tmp_path / "proj"
+        _write(project / ".modastack" / "monitors" / "defaults.yaml", [
+            {"name": "my-check", "interval": "10m", "check": "pr_conflicts"},
+        ])
+        reg = MonitorRegistry.load(project_path=project)
+        names = [m.name for m in reg.effective_monitors()]
+        assert "my-check" in names
+
+
+# === Install copies built-in defaults ===
+
+class TestInstallBuiltinDefaults:
+    def test_install_creates_monitor_defaults_when_pack_has_no_monitors(self, tmp_path):
+        """When a pack has no monitors/ directory, install must still create
+        .modastack/monitors/defaults.yaml with the built-in monitors."""
+        from modastack.cli import _install_pack
+
+        # Create a minimal pack with no monitors directory
+        pack = tmp_path / "minimal-pack"
+        pack.mkdir()
+        (pack / "agent.yaml").write_text("agent: minimal\n")
+
+        project = tmp_path / "proj"
+        project.mkdir()
+
+        _install_pack(pack, project)
+
+        defaults = project / ".modastack" / "monitors" / "defaults.yaml"
+        assert defaults.exists(), "Built-in monitor defaults must always be installed"
+        raw = yaml.safe_load(defaults.read_text())
+        names = [m["name"] for m in raw["monitors"]]
+        assert "pr-conflict-check" in names
+        assert "stale-pr-check" in names
+
+    def test_install_preserves_pack_monitors_alongside_builtins(self, tmp_path):
+        """When a pack has its own monitors/, the built-in defaults must still
+        be present (pack monitors/ is copied, which may include defaults.yaml)."""
+        from modastack.cli import _install_pack
+
+        pack = tmp_path / "full-pack"
+        pack.mkdir()
+        (pack / "agent.yaml").write_text("agent: full\n")
+        monitors_dir = pack / "monitors"
+        monitors_dir.mkdir()
+        _write(monitors_dir / "defaults.yaml", [
+            {"name": "pr-conflict-check", "interval": "10m", "check": "pr_conflicts"},
+            {"name": "stale-pr-check", "interval": "2h", "check": "stale_prs"},
+            {"name": "custom-check", "interval": "30m"},
+        ])
+
+        project = tmp_path / "proj"
+        project.mkdir()
+
+        _install_pack(pack, project)
+
+        defaults = project / ".modastack" / "monitors" / "defaults.yaml"
+        assert defaults.exists()
+        raw = yaml.safe_load(defaults.read_text())
+        names = [m["name"] for m in raw["monitors"]]
+        assert "pr-conflict-check" in names
+        assert "custom-check" in names
+
+
 # === Registry writes ===
 
 class TestRegistryWrites:

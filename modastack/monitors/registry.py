@@ -20,25 +20,23 @@ from .schema import Monitor
 
 log = logging.getLogger(__name__)
 
-def _defaults_path(project_path: Path | None = None) -> Path:
-    """Find the monitors defaults.yaml — from installed .modastack/ or framework fallback."""
-    if project_path:
-        p = project_path / ".modastack" / "monitors" / "defaults.yaml"
-        if p.exists():
-            return p
+def _defaults_path(project_path: Path | None = None) -> Path | None:
+    """Return the installed monitor defaults path.
+
+    Only reads from .modastack/monitors/defaults.yaml — no framework
+    fallback.  Returns None when no project is detected.
+    """
     if not project_path:
         from modastack.sdk import get_project_root
-        root = get_project_root()
-        if root:
-            p = root / ".modastack" / "monitors" / "defaults.yaml"
-            if p.exists():
-                return p
-    return Path(__file__).resolve().parent / "defaults.yaml"
+        project_path = get_project_root()
+    if not project_path:
+        return None
+    return project_path / ".modastack" / "monitors" / "defaults.yaml"
 
 
-def _read_records(path: Path) -> list[dict]:
+def _read_records(path: Path | None) -> list[dict]:
     """Read the `monitors:` list from a YAML file, tolerating absence."""
-    if not path.exists():
+    if path is None or not path.exists():
         return []
     try:
         raw = yaml.safe_load(path.read_text()) or {}
