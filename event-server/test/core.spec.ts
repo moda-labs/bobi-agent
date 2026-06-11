@@ -220,6 +220,8 @@ describe("normalizeSlackPayload", () => {
 		});
 		expect(result.event!.type).toBe("slack.dm");
 		expect(result.event!.delivery).toBe("chat");
+		// a DM is not a real channel — it stays workspace-level only
+		expect(result.event!.topics).toEqual(["slack:T123"]);
 	});
 
 	it("normalizes group DM (mpim)", () => {

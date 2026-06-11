@@ -46,13 +46,17 @@ export function normalizeSlackWebhook(
 	const rawText = ((event.text as string) || "").slice(0, 4000);
 	const ts = (event.ts as string) || "";
 
+	const isDm = channelType === "im" || channelType === "mpim";
+
 	const topics: string[] = [];
 	if (teamId) {
 		topics.push(`slack:${teamId}`);
 		// Channel-scoped topic so multiple teams can share one workspace/bot,
 		// each subscribing only to its own channel(s). The workspace-level
-		// topic above stays for teams that want every message.
-		if (channel) topics.push(`slack:${teamId}:${channel}`);
+		// topic above stays for teams that want every message. DMs are NOT
+		// real channels (the id is a DM conversation), so they stay
+		// workspace-level only.
+		if (channel && !isDm) topics.push(`slack:${teamId}:${channel}`);
 	}
 
 	const fields: Record<string, string | number | boolean> = {};
