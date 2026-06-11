@@ -123,3 +123,55 @@ def test_failed_put_falls_back_to_register(mock_register, mock_urlopen,
     mock_register.assert_called_once()
     saved = json.loads(_state_file(project).read_text())
     assert saved["deployment_id"] == "dep-new"
+
+
+# --- Slack workspace registration (self-reply loop prevention) ---------------
+
+def _slack_resp(payload):
+    return type("Resp", (), {
+        "read": lambda self: json.dumps(payload).encode(),
+        "__enter__": lambda self: self,
+        "__exit__": lambda self, *a: False,
+    })()
+
+
+def test_register_slack_workspaces_posts_bot_token(monkeypatch):
+    """Regression for the Slack self-reply loop: the agent must register its
+    workspace bot with the event server, else the event server can't identify
+    (and skip) the bot's own messages and the agent loops on its own replies.
+    """
+    from modastack.events.server import register_slack_workspaces
+    from modastack.config import Config, ServiceConfig
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url
+        if "auth.test" in url:
+            return _slack_resp({"ok": True, "team_id": "T0952", "bot_id": "BSELF"})
+        if url.endswith("/slack/workspaces"):
+            captured["url"] = url
+            captured["body"] = json.loads(req.data.decode())
+            return _slack_resp({"ok": True, "workspace_id": "T0952", "bot_id": "BSELF"})
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    cfg = Config(services=[
+        ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
+    ])
+    result = register_slack_workspaces("http://localhost:8080", cfg)
+
+    assert result == ["T0952"]
+    assert captured["url"] == "http://localhost:8080/slack/workspaces"
+    assert captured["body"] == {"workspace_id": "T0952", "bot_token": "xoxb-test"}
+
+
+def test_register_slack_workspaces_noop_without_token(monkeypatch):
+    from modastack.events.server import register_slack_workspaces
+    from modastack.config import Config
+
+    def fake_urlopen(*a, **k):
+        raise AssertionError("no network call without a slack bot token")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert register_slack_workspaces("http://localhost:8080", Config()) == []
