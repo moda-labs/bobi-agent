@@ -54,6 +54,7 @@ class Session:
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._keep_alive: asyncio.Event | None = None
+        self._input_ready: asyncio.Event | None = None
         self._state = "stopped"
         self._last_response = ""
         self._last_is_error = False
@@ -68,11 +69,19 @@ class Session:
     def detect_state(self) -> str:
         return self._state
 
+    def _set_state(self, state: str) -> None:
+        """Update state and wake any waiter when the session becomes idle or terminal."""
+        self._state = state
+        if state in ("waiting_input", "stopped", "error") and self._input_ready:
+            self._input_ready.set()
+
     async def _drain_turn(self) -> str:
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
         self._last_response = ""
-        self._state = "working"
+        if self._input_ready:
+            self._input_ready.clear()
+        self._set_state("working")
         registry = get_registry()
         registry.update(self.name, status="running")
 
@@ -101,30 +110,39 @@ class Session:
                     self._total_duration_ms += msg.duration_ms
                     self._total_turns += msg.num_turns
                     if msg.is_error:
-                        self._state = "error"
+                        self._set_state("error")
                         log.error(f"Session '{self.name}' error: {self._last_response[:200]}")
                         registry.update(self.name, status="error", session_id=msg.session_id)
                     else:
-                        self._state = "waiting_input"
+                        self._set_state("waiting_input")
                         registry.update(self.name, status="idle", session_id=msg.session_id)
         except Exception as e:
             log.error(f"Drain failed for '{self.name}': {e}")
-            self._state = "error"
+            self._set_state("error")
             registry.update(self.name, status="error")
 
         return self._last_response
 
     async def _process_message(self, msg: Message) -> None:
         """Wait for ready state, inject a message, and optionally respond."""
-        for _ in range(600):
-            if self._state == "waiting_input":
+        deadline = 300.0  # seconds
+        while self._state not in ("waiting_input", "stopped", "error"):
+            if self._input_ready:
+                try:
+                    await asyncio.wait_for(self._input_ready.wait(), timeout=deadline)
+                except asyncio.TimeoutError:
+                    pass
                 break
-            if self._state in ("stopped", "error"):
-                if msg.wait:
-                    self.inbox.respond(msg.id, f"session {self._state}")
-                return
-            await asyncio.sleep(0.5)
-        else:
+            else:
+                # Fallback: no event yet (shouldn't happen after _run)
+                await asyncio.sleep(0.5)
+
+        if self._state in ("stopped", "error"):
+            if msg.wait:
+                self.inbox.respond(msg.id, f"session {self._state}")
+            return
+
+        if self._state != "waiting_input":
             log.warning(f"Session '{self.name}' never became ready for inbox message")
             if msg.wait:
                 self.inbox.respond(msg.id, "session not ready")
@@ -144,7 +162,7 @@ class Session:
             log.error(f"Inbox processing failed for '{self.name}': {e}")
             if msg.wait:
                 self.inbox.respond(msg.id, f"error: {e}")
-            self._state = "error"
+            self._set_state("error")
 
     async def _inbox_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -196,7 +214,8 @@ class Session:
             else:
                 raise
 
-        self._state = "running"
+        self._input_ready = asyncio.Event()
+        self._set_state("running")
         registry = get_registry()
         registry.update(self.name, status="running")
 
@@ -206,7 +225,7 @@ class Session:
             await self._client.query(startup_prompt)
             await self._drain_turn()
         else:
-            self._state = "waiting_input"
+            self._set_state("waiting_input")
             registry.update(self.name, status="idle")
 
         self._ready.set()
@@ -226,7 +245,7 @@ class Session:
             if self._client:
                 await self._client.disconnect()
                 self._client = None
-            self._state = "stopped"
+            self._set_state("stopped")
             registry.update(self.name, status="stopped")
 
     def _thread_target(self, startup_prompt: str | None) -> None:
@@ -239,7 +258,7 @@ class Session:
             raise
         except Exception as e:
             log.error(f"Session '{self.name}' crashed: {e}", exc_info=True)
-            self._state = "error"
+            self._set_state("error")
         finally:
             self._loop.close()
             self._loop = None

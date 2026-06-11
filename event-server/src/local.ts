@@ -2,19 +2,30 @@ import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
 	type NormalizedEvent,
-	createTopicEvent,
-	normalizeGitHubPayload,
-	normalizeLinearPayload,
-	normalizeSlackPayload,
-	sendSlackMessage,
+	type StorageAdapter,
+	type DeploymentRecord,
+	type SlackWorkspaceRecord,
+	type HandlerResult,
 	subscriptionKeysForEvent,
-	verifySlackSignature,
 	verifyGitHubSignature,
+	verifySlackSignature,
+	handleGitHubWebhook,
+	handleLinearWebhook,
+	handleSlackWebhook,
+	handleRegisterDeployment,
+	handleUpdateSubscriptions,
+	handleTopicEvent,
+	handleSlackSend,
+	handleSlackWorkspaceRegister,
 } from "./core";
 
 const MAX_BUFFER = 10_000;
 
-interface Deployment {
+// ---------------------------------------------------------------------------
+// In-memory state — extends DeploymentRecord with runtime fields
+// ---------------------------------------------------------------------------
+
+interface LocalDeployment {
 	id: string;
 	name: string;
 	apiKey: string;
@@ -24,16 +35,108 @@ interface Deployment {
 	websockets: Set<WebSocket>;
 }
 
-const deployments = new Map<string, Deployment>();
+const deployments = new Map<string, LocalDeployment>();
 const apiKeyIndex = new Map<string, string>();
 const subscriptionIndex = new Map<string, Set<string>>();
+const slackWorkspaces = new Map<string, SlackWorkspaceRecord>();
 
 const webhookSecret = process.env.MODASTACK_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.MODASTACK_ES_SLACK_SIGNING_SECRET || "";
-const slackWorkspaces = new Map<string, string>(); // workspace_id -> bot_token
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Map-based storage adapter
+// ---------------------------------------------------------------------------
+
+const storage: StorageAdapter = {
+	async getDeploymentByApiKey(apiKey: string): Promise<DeploymentRecord | null> {
+		const id = apiKeyIndex.get(apiKey);
+		if (!id) return null;
+		const dep = deployments.get(id);
+		if (!dep) return null;
+		return {
+			id: dep.id,
+			name: dep.name,
+			api_key: dep.apiKey,
+			subscriptions: [...dep.subscriptions],
+		};
+	},
+
+	async putDeployment(record: DeploymentRecord): Promise<void> {
+		const existing = deployments.get(record.id);
+		if (existing) {
+			existing.name = record.name;
+			existing.subscriptions = [...record.subscriptions];
+		} else {
+			deployments.set(record.id, {
+				id: record.id,
+				name: record.name,
+				apiKey: record.api_key,
+				subscriptions: [...record.subscriptions],
+				nextSeq: 1,
+				eventBuffer: [],
+				websockets: new Set(),
+			});
+			apiKeyIndex.set(record.api_key, record.id);
+		}
+	},
+
+	async addSubscription(key: string, deploymentId: string): Promise<void> {
+		if (!subscriptionIndex.has(key)) subscriptionIndex.set(key, new Set());
+		subscriptionIndex.get(key)!.add(deploymentId);
+	},
+
+	async deliver(event: NormalizedEvent): Promise<number> {
+		const keys = subscriptionKeysForEvent(event);
+		const depIds = new Set<string>();
+		for (const key of keys) {
+			for (const id of subscriptionIndex.get(key) || []) {
+				depIds.add(id);
+			}
+		}
+
+		let delivered = 0;
+		for (const depId of depIds) {
+			const dep = deployments.get(depId);
+			if (!dep) continue;
+
+			const seq = dep.nextSeq++;
+			const seqEvent = { ...event, seq };
+			dep.eventBuffer.push(seqEvent);
+			// Amortized O(1) eviction — shift() on a full 10k buffer copies the
+			// whole array on every event.
+			if (dep.eventBuffer.length >= 2 * MAX_BUFFER) {
+				dep.eventBuffer = dep.eventBuffer.slice(-MAX_BUFFER);
+			}
+			delivered++;
+
+			const msg = JSON.stringify({ type: "event", data: seqEvent });
+			for (const ws of dep.websockets) {
+				try {
+					ws.send(msg);
+				} catch {
+					dep.websockets.delete(ws);
+				}
+			}
+		}
+
+		return delivered;
+	},
+
+	async getSlackWorkspace(workspaceId: string): Promise<SlackWorkspaceRecord | null> {
+		return slackWorkspaces.get(workspaceId) || null;
+	},
+
+	async putSlackWorkspace(workspaceId: string, record: SlackWorkspaceRecord): Promise<void> {
+		slackWorkspaces.set(workspaceId, record);
+	},
+
+	async initDeploymentSession(): Promise<void> {
+		// no-op for local — deployment is fully initialized in putDeployment
+	},
+};
+
+// ---------------------------------------------------------------------------
+// Node.js HTTP helpers
 // ---------------------------------------------------------------------------
 
 function readBody(req: http.IncomingMessage): Promise<string> {
@@ -50,7 +153,6 @@ function json(res: http.ServerResponse, data: unknown, status = 200) {
 	res.end(JSON.stringify(data));
 }
 
-/** Parse a JSON string, or null when malformed (callers respond 400). */
 function parseJson(body: string): Record<string, unknown> | null {
 	try {
 		return JSON.parse(body);
@@ -59,58 +161,12 @@ function parseJson(body: string): Record<string, unknown> | null {
 	}
 }
 
-function authDeployment(deploymentId: string, req: http.IncomingMessage): Deployment | null {
-	const auth = req.headers.authorization || "";
-	if (!auth.startsWith("Bearer ")) return null;
-	const apiKey = auth.slice(7);
-	const depId = apiKeyIndex.get(apiKey);
-	if (!depId || depId !== deploymentId) return null;
-	return deployments.get(depId) || null;
+function respond(res: http.ServerResponse, result: HandlerResult) {
+	json(res, result.body, result.status);
 }
 
 // ---------------------------------------------------------------------------
-// Event routing (in-memory equivalent of KV + Durable Objects)
-// ---------------------------------------------------------------------------
-
-function routeEvent(event: NormalizedEvent): number {
-	const keys = subscriptionKeysForEvent(event);
-	const depIds = new Set<string>();
-	for (const key of keys) {
-		for (const id of subscriptionIndex.get(key) || []) {
-			depIds.add(id);
-		}
-	}
-
-	let delivered = 0;
-	for (const depId of depIds) {
-		const dep = deployments.get(depId);
-		if (!dep) continue;
-
-		const seq = dep.nextSeq++;
-		const seqEvent = { ...event, seq };
-		dep.eventBuffer.push(seqEvent);
-		// Amortized O(1) eviction — shift() on a full 10k buffer copies the
-		// whole array on every event.
-		if (dep.eventBuffer.length >= 2 * MAX_BUFFER) {
-			dep.eventBuffer = dep.eventBuffer.slice(-MAX_BUFFER);
-		}
-		delivered++;
-
-		const msg = JSON.stringify({ type: "event", data: seqEvent });
-		for (const ws of dep.websockets) {
-			try {
-				ws.send(msg);
-			} catch {
-				dep.websockets.delete(ws);
-			}
-		}
-	}
-
-	return delivered;
-}
-
-// ---------------------------------------------------------------------------
-// HTTP handler
+// Routing table
 // ---------------------------------------------------------------------------
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -137,18 +193,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		const eventHeader = (req.headers["x-github-event"] as string) || "unknown";
 		const deliveryId = (req.headers["x-github-delivery"] as string) || crypto.randomUUID();
 
-		const event = normalizeGitHubPayload(eventHeader, deliveryId, payload);
-		if (!event) return json(res, { error: "no repository in payload" }, 400);
-
-		return json(res, { delivered_to: routeEvent(event) });
+		return respond(res, await handleGitHubWebhook(storage, eventHeader, deliveryId, payload));
 	}
 
 	if (method === "POST" && path === "/webhooks/linear") {
 		const body = await readBody(req);
 		const payload = parseJson(body);
 		if (!payload) return json(res, { error: "invalid JSON" }, 400);
-
-		return json(res, { delivered_to: routeEvent(normalizeLinearPayload(payload)) });
+		return respond(res, await handleLinearWebhook(storage, payload));
 	}
 
 	if (method === "POST" && path === "/webhooks/slack") {
@@ -160,6 +212,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		const payload = parseJson(body);
 		if (!payload) return json(res, { error: "invalid JSON" }, 400);
 
+		// url_verification must be handled before signature check —
+		// Slack's url_verification request does not include signing headers.
 		if ((payload as Record<string, unknown>).type === "url_verification") {
 			return json(res, { challenge: (payload as Record<string, unknown>).challenge });
 		}
@@ -171,75 +225,27 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			if (!valid) return json(res, { error: "invalid signature" }, 401);
 		}
 
-		const result = normalizeSlackPayload(payload);
-
-		if (result.challenge !== undefined) {
-			return json(res, { challenge: result.challenge });
-		}
-		if (result.skip || !result.event) {
-			return json(res, { ok: true });
-		}
-
-		return json(res, { delivered_to: routeEvent(result.event) });
+		return respond(res, await handleSlackWebhook(storage, payload));
 	}
 
 	if (method === "POST" && path === "/deployments") {
 		const body = await readBody(req);
 		const data = parseJson(body);
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
-
-		const name = data.name as string;
-		const subs = data.subscriptions as string[];
-		if (!name || !subs?.length) {
-			return json(res, { error: "name and subscriptions[] required" }, 400);
-		}
-
-		const id = crypto.randomUUID();
-		const apiKey = `moda_${crypto.randomUUID().replace(/-/g, "")}`;
-
-		const dep: Deployment = {
-			id,
-			name,
-			apiKey,
-			subscriptions: [...subs],
-			nextSeq: 1,
-			eventBuffer: [],
-			websockets: new Set(),
-		};
-
-		deployments.set(id, dep);
-		apiKeyIndex.set(apiKey, id);
-		for (const sub of subs) {
-			if (!subscriptionIndex.has(sub)) subscriptionIndex.set(sub, new Set());
-			subscriptionIndex.get(sub)!.add(id);
-		}
-
-		return json(res, { deployment_id: id, api_key: apiKey }, 201);
+		return respond(res, await handleRegisterDeployment(storage, data));
 	}
 
 	const subsMatch = path.match(/^\/deployments\/([^/]+)\/subscriptions$/);
 	if (method === "PUT" && subsMatch) {
-		const dep = authDeployment(subsMatch[1], req);
-		if (!dep) return json(res, { error: "unauthorized" }, 403);
+		const authHeader = req.headers.authorization || "";
+		if (!authHeader.startsWith("Bearer ")) return json(res, { error: "unauthorized" }, 403);
+		const apiKey = authHeader.slice(7);
 
 		const body = await readBody(req);
 		const data = parseJson(body);
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
 
-		const newSubs = data.add as string[];
-		if (!newSubs?.length) return json(res, { error: "add[] required" }, 400);
-
-		let added = 0;
-		for (const sub of newSubs) {
-			if (!dep.subscriptions.includes(sub)) {
-				dep.subscriptions.push(sub);
-				added++;
-			}
-			if (!subscriptionIndex.has(sub)) subscriptionIndex.set(sub, new Set());
-			subscriptionIndex.get(sub)!.add(dep.id);
-		}
-
-		return json(res, { subscriptions: dep.subscriptions, added });
+		return respond(res, await handleUpdateSubscriptions(storage, subsMatch[1], apiKey, data));
 	}
 
 	// Generic topic: POST /events/{topic}
@@ -248,52 +254,21 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		const body = await readBody(req);
 		const data = parseJson(body);
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
-
-		const event = createTopicEvent(topicMatch[1], data);
-		return json(res, { delivered_to: routeEvent(event) });
+		return respond(res, await handleTopicEvent(storage, topicMatch[1], data));
 	}
 
-	// Slack workspace registry: POST /slack/workspaces
 	if (method === "POST" && path === "/slack/workspaces") {
 		const body = await readBody(req);
 		const data = parseJson(body);
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
-
-		const workspaceId = data.workspace_id as string;
-		const botToken = data.bot_token as string;
-		if (!workspaceId || !botToken) {
-			return json(res, { error: "workspace_id and bot_token required" }, 400);
-		}
-		slackWorkspaces.set(workspaceId, botToken);
-		return json(res, { ok: true, workspace_id: workspaceId });
+		return respond(res, await handleSlackWorkspaceRegister(storage, data));
 	}
 
-	// Slack send-through: POST /slack/send
 	if (method === "POST" && path === "/slack/send") {
 		const body = await readBody(req);
 		const data = parseJson(body);
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
-
-		const channel = data.channel as string;
-		const text = data.text as string;
-		if (!channel || !text) {
-			return json(res, { error: "channel and text required" }, 400);
-		}
-
-		const botToken = slackWorkspaces.get((data.workspace as string) || "");
-		if (!botToken) {
-			return json(res, { error: "no bot token for workspace" }, 400);
-		}
-
-		try {
-			const result = await sendSlackMessage(botToken, channel, text, data.thread_ts as string | undefined);
-			if (!result.ok) {
-				return json(res, { ok: false, error: result.error }, 502);
-			}
-			return json(res, { ok: true, ts: result.ts });
-		} catch (err) {
-			return json(res, { ok: false, error: String(err) }, 502);
-		}
+		return respond(res, await handleSlackSend(storage, data));
 	}
 
 	res.writeHead(404);
@@ -301,7 +276,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket upgrade
+// WebSocket upgrade — transport-specific (node ws)
 // ---------------------------------------------------------------------------
 
 function handleUpgrade(req: http.IncomingMessage, socket: import("node:net").Socket, head: Buffer, wss: WebSocketServer) {
