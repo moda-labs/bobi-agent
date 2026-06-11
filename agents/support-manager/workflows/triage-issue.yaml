@@ -1,0 +1,98 @@
+name: triage-issue
+trigger: >
+  When a potential issue signal arrives — a PostHog error/watchlist hit, a
+  support email that reads like a bug, or a Slack "investigate this" ask.
+description: >
+  The core support pipeline: intake and dedup the signal, take a
+  high-level look at the codebase, classify real vs not-real, then either
+  file a labeled Linear ticket + Slack alert (real) or log the dismissal
+  (not real). Every signal ends up in the support log.
+
+steps:
+  - name: intake
+    agent: support_manager
+    prompt: |
+      Follow the Intake phase in your role prompt. Turn the signal in your
+      task into a clear problem statement with source, scope, and a link
+      back to the source. Dedup against the support log first
+      (`modastack kb search support`) — if this is a known signal, handle
+      the recurrence per your role prompt and set is_duplicate.
+    handoff:
+      required: [problem_statement, source, is_duplicate]
+      optional: [scope, source_link]
+    timeout: 600
+
+  - name: dedup_route
+    if: "is_duplicate == true"
+    goto: done
+    else: investigate
+
+  - name: investigate
+    agent: support_manager
+    prompt: |
+      Follow the Investigate-the-code phase. Take a high-level, read-only
+      look at the product codebase (path in workspace/support-context.md):
+      locate the suspect file/function, check recent commits, form a
+      hypothesis, and rough the effort. Time-box it — "cause unclear" is
+      an acceptable outcome.
+    handoff:
+      required: [investigation, severity]
+      optional: [effort_estimate]
+    timeout: 1800
+
+  - name: classify
+    agent: support_manager
+    prompt: |
+      Follow the Classify phase. Decide verdict (real | not_real) using the
+      evidence, the watchlist, and the known-noise list in
+      workspace/support-context.md. State the deciding factor as the reason.
+      For a real issue, set the Linear priority per the context mapping.
+    handoff:
+      required: [verdict, reason]
+      optional: [priority]
+    timeout: 600
+
+  - name: verdict_route
+    if: "verdict == 'real'"
+    goto: file_issue
+    else: log_dismissal
+
+  - name: file_issue
+    agent: support_manager
+    prompt: |
+      Follow Phase 4a. Create the Linear ticket in the configured team
+      with the `agent` trigger label in the configured initial state
+      per tools/linear.md / support-context.md so the engineering
+      agent picks it up; the description must be a startable
+      brief (problem, scope, investigation, source link, severity).
+      Then post the Slack alert to the support channel, and log the issue
+      to both the KB and workspace/log/<today>.md.
+    handoff:
+      required: [ticket_url, alerted, logged]
+    timeout: 900
+
+  - name: to_done
+    if: "verdict == 'real'"
+    goto: done
+
+  - name: log_dismissal
+    agent: support_manager
+    prompt: |
+      Follow Phase 4b. Do NOT file a ticket or post a per-issue alert.
+      Log an issue:: entry (verdict not_real) with the investigation
+      summary and the dismissal reason to the KB and to
+      workspace/log/<today>.md. If a human asked in Slack, reply once with
+      the short verdict + reason.
+    handoff:
+      required: [logged]
+    timeout: 600
+
+  - name: done
+    agent: support_manager
+    prompt: |
+      Triage complete. If this was a duplicate, confirm the recurrence was
+      logged (and commented on the existing ticket if one is open).
+      Otherwise no action needed.
+    handoff:
+      required: [closed]
+    timeout: 120
