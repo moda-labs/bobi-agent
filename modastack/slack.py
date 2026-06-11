@@ -12,7 +12,6 @@ import logging
 import re
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 
