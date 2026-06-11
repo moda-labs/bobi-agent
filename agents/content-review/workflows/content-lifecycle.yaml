@@ -10,7 +10,7 @@ steps:
     prompt: |
       Create a git worktree for this issue and set up the workspace.
       Read the issue to understand what content needs to be created or updated.
-      Check existing content in guides/, runbooks/, and research/ for related material.
+      Check existing content in workspace/guides/, workspace/runbooks/, and workspace/research/ for related material.
     handoff:
       required: [worktree]
     timeout: 300
@@ -39,7 +39,7 @@ steps:
     agent: researcher
     prompt: |
       Research the topic described in the issue. Follow your research process:
-      investigate, gather sources, and write a research summary to research/.
+      investigate, gather sources, and write a research summary to workspace/research/.
       The editor will use your findings to draft the final content.
     handoff:
       required: [research_path]
@@ -52,13 +52,13 @@ steps:
       Write or update the content described in the issue.
       If research was done, read the research summary first.
       Follow your style guide and use the appropriate document template.
-      Place the content in the correct directory (guides/ or runbooks/).
+      Place the content in the correct directory (workspace/guides/ or workspace/runbooks/).
     handoff:
       required: [content_path, status]
     timeout: 1800
 
   - name: verify
-    agent: fact-checker
+    agent: fact_checker
     prompt: |
       Fact-check the content that was just drafted or updated.
       Follow your verification process: check claims, test instructions,

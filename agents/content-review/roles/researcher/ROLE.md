@@ -16,7 +16,7 @@ information, and produce structured research summaries that other agents
 
 ## Output format
 
-Write research summaries to `research/` as markdown files:
+Write research summaries to `workspace/research/` as markdown files:
 
 ```markdown
 # Research: [Topic]

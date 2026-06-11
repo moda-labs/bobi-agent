@@ -7,7 +7,7 @@ description: >
 
 steps:
   - name: setup
-    agent: fact-checker
+    agent: fact_checker
     prompt: |
       Create a git worktree for this issue and set up the workspace.
       Read the issue to understand which content needs review.
@@ -16,7 +16,7 @@ steps:
     timeout: 300
 
   - name: audit
-    agent: fact-checker
+    agent: fact_checker
     prompt: |
       Audit the content specified in the issue. Check for:
       - Factual accuracy (test any technical instructions)
@@ -47,7 +47,7 @@ steps:
     timeout: 1200
 
   - name: done
-    agent: fact-checker
+    agent: fact_checker
     prompt: |
       The content passed review. Comment on the issue confirming the
       content is accurate and up-to-date, then close it.

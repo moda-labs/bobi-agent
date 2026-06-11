@@ -19,7 +19,7 @@ steps:
     prompt: |
       Research the topic described in the issue. Follow your research process:
       investigate thoroughly, gather sources, and write a structured research
-      summary to research/. When done, comment on the issue with your key findings.
+      summary to workspace/research/. When done, comment on the issue with your key findings.
     handoff:
       required: [research_path, key_findings]
       optional: [sources, recommendations]
