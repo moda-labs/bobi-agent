@@ -52,24 +52,24 @@ mappings, human preferences — lives here.
 The YAML frontmatter block holds current operational state. The prose
 section below it holds decisions with provenance (who said it, when).
 
-```markdown
+```yaml
 ---
 managed_repos:
-  - repo: moda-labs/jobtack
-    path: ~/dev/jobtack
-    linear_team: JOB
+  - repo: acme/webapp
+    path: ~/dev/webapp
+    linear_team: WEB
     onboarded: 2026-06-10
-  - repo: moda-labs/modastack
-    path: ~/dev/modastack
-    linear_team: MDS
+  - repo: acme/api-server
+    path: ~/dev/api-server
+    linear_team: API
     onboarded: 2026-06-08
 slack_channel: C0ENG
 slack_workspace: T0952RZRZ0X
 ---
 
-- jobtack onboarded, Linear team JOB — Zach (U0952RZRZ0X), 2026-06-10
+- webapp onboarded, Linear team WEB — Zach (U0952RZRZ0X), 2026-06-10
 - prefer squash merges for single-commit PRs — team decision, 2026-06-09
-- modastack tracks in MDS — Zach (U0952RZRZ0X), 2026-06-08
+- api-server onboarded, Linear team API — Zach (U0952RZRZ0X), 2026-06-08
 ```
 
 ### Rules
