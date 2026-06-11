@@ -14,6 +14,8 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+import modastack.subagent  # noqa: E402 — top-level so @patch can intercept
+
 log = logging.getLogger(__name__)
 
 DEFAULT_COOLDOWN = 1800  # 30 minutes
@@ -113,8 +115,7 @@ class EventReactor:
 
         log.info("Auto-dispatching %s for %s", rule.workflow, key)
         try:
-            import modastack.subagent as _subagent
-            _subagent.launch_agent(
+            modastack.subagent.launch_agent(
                 task=task,
                 cwd=self.cwd,
                 workflow_name=rule.workflow,
