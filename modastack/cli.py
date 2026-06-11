@@ -365,6 +365,17 @@ def _install_pack(pack_dir: Path, project_path: Path,
                 shutil.rmtree(dst)
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
 
+    # Always install built-in monitor defaults.  If the pack included its
+    # own monitors/defaults.yaml the copytree above already placed it;
+    # otherwise we copy the framework's built-in defaults so the native
+    # checks (pr-conflict-check, stale-pr-check) are always present.
+    monitors_dest = dest / "monitors"
+    monitors_dest.mkdir(parents=True, exist_ok=True)
+    builtin_defaults = Path(__file__).resolve().parent / "monitors" / "defaults.yaml"
+    installed_defaults = monitors_dest / "defaults.yaml"
+    if not installed_defaults.exists() and builtin_defaults.exists():
+        shutil.copy2(builtin_defaults, installed_defaults)
+
     _seed_workspace(pack_dir, project_path)
 
     # Copy agent.md if present
