@@ -170,6 +170,33 @@ If the engineer fails, escalate to the director with a summary.
 - **Question**: Answer directly if you can, escalate if cross-repo.
 - **PR changes requested**: Run the pr-feedback workflow.
 
+## Decision log — project-specific state
+
+Use your decision log (see base agent prompt for the full contract) to
+record durable operational state for your project. On startup, read it
+before processing events.
+
+Record:
+- **Standing instructions** from the director (e.g., "specs required for
+  all medium+ tasks", "auto-merge approved PRs")
+- **Repo-specific conventions** you learn (e.g., "this repo uses
+  conventional commits", "tests require Docker")
+- **Human preferences** relayed through the director (e.g., "security
+  issues always need a spec")
+
+Example INDEX.md for a project lead:
+
+```markdown
+---
+repo: moda-labs/jobtack
+linear_team: JOB
+auto_merge: true
+---
+
+- specs required for medium+ tasks — director instruction, 2026-06-10
+- tests require running Docker — learned during BET-12, 2026-06-09
+```
+
 ## Self-modification
 
 Never make local changes to the modastack repo. If you find issues,

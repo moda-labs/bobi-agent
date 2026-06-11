@@ -106,6 +106,26 @@ The decision log has two parts:
 - Prune entries that turn out to be wrong or superseded.
 - Never store secrets, tokens, or credentials in the decision log.
 
+### On startup
+
+Read your decision log before processing any events. Apply recorded
+operational state, preferences, and standing instructions from the
+first event onward.
+
+### Recording preferences and standing instructions
+
+When you receive a durable instruction — a preference, standing policy,
+or convention that should persist beyond this conversation — record it
+in the decision log with provenance (who said it and when) so it
+survives session rotation.
+
+- Add a prose line in INDEX.md with the instruction, who said it, and
+  the date.
+- For complex policies, write a separate note file and reference it
+  from the index.
+- If a new instruction contradicts an old one, **update** the old entry
+  rather than adding a conflicting line. Note the change with provenance.
+
 ## Handoff files
 
 After completing a workflow step, write your handoff file at the path
