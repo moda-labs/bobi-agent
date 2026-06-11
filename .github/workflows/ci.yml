@@ -63,8 +63,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
+        # CPU-only torch: tests need embeddings, not CUDA — the GPU wheel
+        # stack is ~7GB and overflows the self-hosted runner disk (#161).
         run: |
           python3 -m venv .venv
+          .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
           .venv/bin/pip install -e ".[dev]"
 
       - name: Agent launch

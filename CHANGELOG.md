@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.1 — 2026-06-11
+
+Same code as 0.14.0; re-released to get a working release pipeline.
+
+### Fixed
+- Release smoke test and Claude CI jobs install CPU-only torch — the
+  CUDA wheel stack (~7GB) repeatedly filled the self-hosted runner disk
+  (#161), failing the dogfood gate before promotion
+
 ## 0.14.0 — 2026-06-11
 
 Agent teams can now ship runtime files, and the first non-engineering

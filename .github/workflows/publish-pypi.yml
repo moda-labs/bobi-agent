@@ -66,6 +66,9 @@ jobs:
           rm -rf "$SMOKE" && mkdir -p "$SMOKE"
           echo "SMOKE=$SMOKE" >> "$GITHUB_ENV"
           uv venv "$SMOKE/venv"
+          # CPU-only torch first: the smoke env needs embeddings, not CUDA —
+          # the GPU wheel stack is ~7GB and overflows the runner disk (#161).
+          uv pip install -p "$SMOKE/venv/bin/python" torch --index-url https://download.pytorch.org/whl/cpu
           uv pip install -p "$SMOKE/venv/bin/python" "modastack==$VERSION"
           "$SMOKE/venv/bin/modastack" --version
           git clone "https://github.com/$DOGFOOD_REPO" "$SMOKE/modastack-dogfood"
