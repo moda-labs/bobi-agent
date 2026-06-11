@@ -111,11 +111,30 @@ def _parse_github_url(url: str) -> str:
     return ""
 
 
+def _slack_keys(team_id: str, channels: list[str]) -> list[str]:
+    """Build Slack subscription keys for a workspace.
+
+    With channels configured, subscribe per-channel (`slack:TEAM:CHANNEL`)
+    so multiple teams can share one bot/workspace, split by channel. Without,
+    subscribe to the whole workspace (`slack:TEAM`).
+    """
+    if not team_id:
+        return []
+    if channels:
+        return [f"slack:{team_id}:{ch}" for ch in channels]
+    return [f"slack:{team_id}"]
+
+
 def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
-    """Detect slack:WORKSPACE_ID from the bot token via auth.test."""
+    """Detect Slack subscription keys from the bot token via auth.test.
+
+    Scopes to the slack service's configured `channels` if any are set.
+    """
     token = cfg.credential("slack", "bot_token")
     if not token:
         return []
+    svc = next((s for s in cfg.services if s.name == "slack"), None)
+    channels = svc.channels if svc else []
     try:
         req = urllib.request.Request(
             "https://slack.com/api/auth.test",
@@ -124,8 +143,12 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
         if data.get("ok") and data.get("team_id"):
-            log.info(f"Auto-detected Slack workspace: {data['team_id']}")
-            return [f"slack:{data['team_id']}"]
+            keys = _slack_keys(data["team_id"], channels)
+            log.info(
+                f"Auto-detected Slack workspace {data['team_id']}; "
+                f"subscribing: {keys}"
+            )
+            return keys
     except Exception as e:
         log.debug(f"Slack auto-detection failed: {e}")
     return []

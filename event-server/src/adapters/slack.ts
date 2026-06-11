@@ -47,7 +47,13 @@ export function normalizeSlackWebhook(
 	const ts = (event.ts as string) || "";
 
 	const topics: string[] = [];
-	if (teamId) topics.push(`slack:${teamId}`);
+	if (teamId) {
+		topics.push(`slack:${teamId}`);
+		// Channel-scoped topic so multiple teams can share one workspace/bot,
+		// each subscribing only to its own channel(s). The workspace-level
+		// topic above stays for teams that want every message.
+		if (channel) topics.push(`slack:${teamId}:${channel}`);
+	}
 
 	const fields: Record<string, string | number | boolean> = {};
 	if (userId) fields.user_id = userId;

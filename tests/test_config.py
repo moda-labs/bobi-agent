@@ -15,6 +15,55 @@ def test_defaults_when_no_config(tmp_path):
     assert cfg.credential("linear", "api_key") == ""
 
 
+def _write_agent_yaml(tmp_path, body):
+    d = tmp_path / ".modastack"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "agent.yaml").write_text(dedent(body))
+
+
+def test_parse_channels_helper():
+    from modastack.config import _parse_channels
+    assert _parse_channels(None) == []
+    assert _parse_channels("") == []
+    assert _parse_channels(["C1", "C2"]) == ["C1", "C2"]
+    assert _parse_channels("C1,C2") == ["C1", "C2"]
+    assert _parse_channels(" C1 , C2 ,") == ["C1", "C2"]  # trims + drops empties
+
+
+def test_service_channels_from_list(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        entry_point: x
+        services:
+          - name: slack
+            events: true
+            channels: [C0AAA, C0BBB]
+            credentials:
+              bot_token: xoxb-1
+    """)
+    cfg = Config.load(tmp_path)
+    slack = next(s for s in cfg.services if s.name == "slack")
+    assert slack.channels == ["C0AAA", "C0BBB"]
+
+
+def test_service_channels_from_env_csv(tmp_path):
+    os.environ["SLACK_CHANNELS"] = "C0AAA,C0BBB"
+    try:
+        _write_agent_yaml(tmp_path, """
+            entry_point: x
+            services:
+              - name: slack
+                events: true
+                channels: ${SLACK_CHANNELS}
+                credentials:
+                  bot_token: xoxb-1
+        """)
+        cfg = Config.load(tmp_path)
+        slack = next(s for s in cfg.services if s.name == "slack")
+        assert slack.channels == ["C0AAA", "C0BBB"]
+    finally:
+        del os.environ["SLACK_CHANNELS"]
+
+
 def test_deployment_state_roundtrip(tmp_path):
     state_dir = tmp_path / ".modastack" / "state"
     state_dir.mkdir(parents=True)
