@@ -23,6 +23,25 @@ Event: slack/slack.mention
 
 `user_id` is the stable Slack identity (survives display name changes).
 
+### Slack placeholder messages
+
+When a Slack event arrives, the framework automatically posts an
+"Evaluating…" placeholder and sets a "is thinking…" typing indicator.
+The event includes a `placeholder_ts` field with the placeholder's
+message timestamp.
+
+**Use `--edit` to replace the placeholder with your actual response:**
+
+```bash
+modastack slack-reply -w <workspace> -c <channel> -t <thread_ts> --edit <placeholder_ts> "message"
+```
+
+This edits the placeholder in-place (no orphaned "Evaluating…") and
+clears the typing indicator. Always use `--edit` when `placeholder_ts`
+is present in the event. If no `placeholder_ts` exists, reply normally
+without `--edit`. Subsequent replies in the same thread should also be
+posted normally (no `--edit`).
+
 ## CLI tools
 
 ### Launch agents

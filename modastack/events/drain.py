@@ -12,6 +12,52 @@ log = logging.getLogger(__name__)
 DRAIN_INTERVAL = 2
 
 
+def _get_project_config():
+    """Load the project Config, or return None if unavailable."""
+    try:
+        from modastack.sdk import get_project_root
+        from modastack.config import Config
+
+        root = get_project_root()
+        if not root:
+            return None
+        return Config.load(root)
+    except Exception:
+        return None
+
+
+def _prepare_chat_events(events: list[dict]) -> list[dict]:
+    """Run input channel handlers on chat events, returning augmented copies.
+
+    Each handler may post placeholders, set typing status, or inject
+    fields (e.g. ``placeholder_ts``) into the event before delivery.
+
+    Credential resolution is generic: the handler declares its
+    ``credential_key`` and the drain loop resolves it via
+    ``cfg.credential(source, key)`` from the project's service config.
+    """
+    from modastack.events.channels import get_channel_handler
+
+    cfg = _get_project_config()
+
+    result: list[dict] = []
+    for event in events:
+        source = event.get("source", "")
+        handler = get_channel_handler(source)
+        if handler is None:
+            result.append(event)
+            continue
+
+        token = cfg.credential(source, handler.credential_key) if cfg else ""
+        if not token:
+            result.append(event)
+            continue
+
+        result.append(handler.prepare(event, token))
+
+    return result
+
+
 def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                formatter: Callable | None = None) -> None:
     """Drain events from a queue and deliver to a session's inbox.
@@ -45,6 +91,10 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
         # interactive messages that may need an immediate reply.
         bulk_events = [e for e in batch if e.get("delivery") != "chat"]
         chat_events = [e for e in batch if e.get("delivery") == "chat"]
+
+        # Run input channel handlers on chat events (placeholder, typing, etc.).
+        if chat_events:
+            chat_events = _prepare_chat_events(chat_events)
 
         for group in [bulk_events, chat_events]:
             if not group:

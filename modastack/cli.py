@@ -792,16 +792,18 @@ def ask(question, timeout, source):
 @click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
 @click.option("--channel", "-c", required=True, help="Slack channel ID (e.g. D0B51JP1N4C)")
 @click.option("--thread", "-t", default="", help="Thread timestamp to reply in")
-def slack_reply(text, workspace, channel, thread):
+@click.option("--edit", "edit_ts", default="", help="Placeholder message ts to edit instead of posting new")
+def slack_reply(text, workspace, channel, thread, edit_ts):
     """Post a message to Slack. Used by the manager to reply to Slack events.
 
     Usage:
         modastack slack-reply -w T0952RZRZ0X -c D0B51JP1N4C "Hello"
         modastack slack-reply -w T0952RZRZ0X -c C123 -t 1780165787.159589 "Thread reply"
+        modastack slack-reply -w T0952RZRZ0X -c C123 -t 171.42 --edit 171.99 "Real response"
     """
     import urllib.error
 
-    from .slack import post_slack_message
+    from .slack import post_slack_message, update_slack_message, set_thread_status
 
     token = ""
     project_path = _detect_project_root()
@@ -814,8 +816,17 @@ def slack_reply(text, workspace, channel, thread):
         sys.exit(1)
 
     try:
-        post_slack_message(token, channel, text, thread_ts=thread)
-        click.echo(f"Sent to {channel}")
+        if edit_ts:
+            update_slack_message(token, channel, edit_ts, text)
+            if thread:
+                set_thread_status(token, channel, thread, "")
+                # Stop the background refresh loop (if one is running).
+                from .events.channels import stop_refresh_loop
+                stop_refresh_loop(channel, thread)
+            click.echo(f"Updated {edit_ts} in {channel}")
+        else:
+            post_slack_message(token, channel, text, thread_ts=thread)
+            click.echo(f"Sent to {channel}")
     except RuntimeError as e:
         click.echo(str(e), err=True)
         sys.exit(1)
