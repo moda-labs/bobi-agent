@@ -162,4 +162,4 @@ class TestSlackReplyCommand:
         result = runner.invoke(main, [
             "slack-reply", "-w", "T123", "-c", "D456", "Hello",
         ])
-        assert "Slack error" in result.output or result.exit_code == 0
+        assert "Slack" in result.output and "error" in result.output.lower()

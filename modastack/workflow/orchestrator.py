@@ -160,6 +160,8 @@ def run_workflow(
 
     ctx = VariableContext()
     ctx.set_scope("input", {"task": task, "repo": repo, "issue_id": issue_id})
+    if requested_by:
+        ctx.set_scope("requested_by", requested_by)
 
     if needs_worktree:
         ctx.set_scope("worktree", {"path": work_cwd})
@@ -388,6 +390,12 @@ async def _run_workflow_async(
                 step_idx += 1
                 continue
 
+            # Notify step — deterministic, no LLM
+            if step.notify:
+                _execute_notify_step(step, ctx, cwd, issue_id, workflow.name)
+                step_idx += 1
+                continue
+
             # Await step — suspend and persist state for resume
             if step.await_event:
                 log.info(f"Await step {step.name}: suspending, waiting for '{step.await_event}'")
@@ -540,6 +548,66 @@ def _emit_step_failed(issue_id, workflow_name, step_name, error):
         "error": error,
         "text": f"Step {step_name} failed: {error}",
     }, blocking=True)
+
+
+def _execute_notify_step(
+    step: StepDef,
+    ctx: VariableContext,
+    cwd: str,
+    issue_id: str,
+    workflow_name: str,
+) -> None:
+    """Execute a notify step — deterministic Slack message, no LLM.
+
+    Resolves the message template, finds Slack credentials from the project
+    config, and posts to the appropriate channel.  Channel resolution:
+    1. requested_by.channel (reply in the requester's thread)
+    2. Falls back silently if no channel is available.
+    """
+    message = ctx.resolve(step.message)
+
+    if step.notify != "slack":
+        log.warning(f"Notify step {step.name}: unknown target '{step.notify}', skipping")
+        return
+
+    from modastack.config import Config
+    project_root = _find_project_root(cwd)
+    cfg = Config.load(project_root)
+    token = cfg.credential("slack", "bot_token")
+    if not token:
+        log.warning(f"Notify step {step.name}: no Slack bot_token configured, skipping")
+        return
+
+    # Determine channel and thread from the requester context
+    requester = ctx.scopes.get("requested_by", {})
+    channel = requester.get("channel", "")
+    thread_ts = requester.get("thread_ts", "")
+
+    if not channel:
+        log.warning(f"Notify step {step.name}: no Slack channel available, skipping")
+        return
+
+    from modastack.slack import post_slack_message
+    try:
+        post_slack_message(token, channel, message, thread_ts=thread_ts)
+        log.info(f"Notify step {step.name}: posted to {channel}")
+        _emit_lifecycle_event("engineer/notify.sent", {
+            "issue_id": issue_id,
+            "workflow": workflow_name,
+            "step": step.name,
+            "channel": channel,
+            "text": f"Notify {step.name}: {message[:200]}",
+        })
+    except Exception as e:
+        # Notification failures are non-fatal — log and continue
+        log.warning(f"Notify step {step.name}: Slack post failed: {e}")
+        _emit_lifecycle_event("engineer/notify.failed", {
+            "issue_id": issue_id,
+            "workflow": workflow_name,
+            "step": step.name,
+            "error": str(e),
+            "text": f"Notify {step.name} failed: {e}",
+        })
 
 
 def _build_step_prompt(step: StepDef, ctx: VariableContext, session_name: str = "", step_name: str = "") -> str:

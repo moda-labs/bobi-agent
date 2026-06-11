@@ -803,9 +803,9 @@ def slack_reply(text, workspace, channel, thread):
         modastack slack-reply -w T0952RZRZ0X -c D0B51JP1N4C "Hello"
         modastack slack-reply -w T0952RZRZ0X -c C123 -t 1780165787.159589 "Thread reply"
     """
-    import re
     import urllib.error
-    import urllib.request
+
+    from .slack import post_slack_message
 
     token = ""
     project_path = _detect_project_root()
@@ -817,35 +817,12 @@ def slack_reply(text, workspace, channel, thread):
         click.echo("No bot token configured (set credentials.bot_token under the slack service in agent.yaml)", err=True)
         sys.exit(1)
 
-    # The manager invokes this command through a shell, where newlines in the
-    # message arrive as literal "\n" escape sequences rather than real
-    # newlines. Convert them back so Slack renders proper line breaks instead
-    # of showing the literal characters.
-    text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
-
-    text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
-    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
-    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
-    if len(text) > 3000:
-        text = text[:3000] + '\n_(truncated)_'
-
-    payload: dict = {"channel": channel, "text": text}
-    if thread:
-        payload["thread_ts"] = thread
-
     try:
-        req = urllib.request.Request(
-            "https://slack.com/api/chat.postMessage",
-            data=json.dumps(payload).encode(),
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read())
-        if result.get("ok"):
-            click.echo(f"Sent to {channel}")
-        else:
-            click.echo(f"Slack error: {result.get('error', 'unknown')}", err=True)
-            sys.exit(1)
+        post_slack_message(token, channel, text, thread_ts=thread)
+        click.echo(f"Sent to {channel}")
+    except RuntimeError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         click.echo(f"Failed: {e}", err=True)
         sys.exit(1)
