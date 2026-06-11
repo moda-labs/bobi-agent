@@ -1,17 +1,60 @@
-"""Director and project lead prompts must operate from the decision log.
+"""Decision log prompts: framework base contract + role-specific usage.
 
 Issue #175: the director derived 'what I manage' from session records,
-which resurrected stale launch records on restart. The prompts must now
-use the persistent decision log as the source of truth for managed repos,
-reconcile on startup, record onboarding with provenance, and persist
-human preferences across session rotation.
+which resurrected stale launch records on restart. The decision log is
+now a framework-level concept (base.md) with role-specific extensions
+in eng-team director and project lead prompts.
 """
 
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+BASE_PROMPT = REPO_ROOT / "modastack" / "prompts" / "base.md"
 DIRECTOR_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "director" / "ROLE.md"
 LEAD_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "project_lead" / "ROLE.md"
+
+
+class TestBaseDecisionLogContract:
+    """The framework base prompt must define the decision log contract for all agents."""
+
+    def setup_method(self):
+        self.text = BASE_PROMPT.read_text()
+        self.lower = self.text.lower()
+
+    def test_has_decision_log_section(self):
+        assert "decision log" in self.lower, (
+            "Base prompt must have a decision log section"
+        )
+
+    def test_documents_index_md_structure(self):
+        assert "INDEX.md" in self.text, (
+            "Base prompt must document INDEX.md structure"
+        )
+
+    def test_has_startup_section(self):
+        assert "on startup" in self.lower, (
+            "Base prompt must instruct agents to read decision log on startup"
+        )
+
+    def test_reads_before_processing_events(self):
+        assert "before processing" in self.lower, (
+            "Base prompt must tell agents to read the log before processing events"
+        )
+
+    def test_has_preference_recording_section(self):
+        assert "recording preferences" in self.lower, (
+            "Base prompt must have a section on recording preferences"
+        )
+
+    def test_requires_provenance(self):
+        assert "provenance" in self.lower, (
+            "Base prompt must require provenance on recorded entries"
+        )
+
+    def test_survives_session_rotation(self):
+        assert "survive" in self.lower and "rotation" in self.lower, (
+            "Base prompt must state the decision log survives session rotation"
+        )
 
 
 class TestDirectorDecisionLog:
