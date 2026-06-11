@@ -11,33 +11,19 @@ log = logging.getLogger(__name__)
 
 DRAIN_INTERVAL = 2
 
-# Maps event source names to (service_name, credential_key) pairs for
-# looking up service tokens from project config.
-_SOURCE_TO_CREDENTIAL: dict[str, tuple[str, str]] = {
-    "slack": ("slack", "bot_token"),
-}
 
-
-def _get_service_token(source: str) -> str:
-    """Retrieve the service credential for *source* from project config.
-
-    Returns empty string if unavailable (no project root, no config, etc.).
-    """
-    entry = _SOURCE_TO_CREDENTIAL.get(source)
-    if not entry:
-        return ""
-
+def _get_project_config():
+    """Load the project Config, or return None if unavailable."""
     try:
         from modastack.sdk import get_project_root
         from modastack.config import Config
 
         root = get_project_root()
         if not root:
-            return ""
-        cfg = Config.load(root)
-        return cfg.credential(*entry)
+            return None
+        return Config.load(root)
     except Exception:
-        return ""
+        return None
 
 
 def _prepare_chat_events(events: list[dict]) -> list[dict]:
@@ -45,8 +31,14 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
 
     Each handler may post placeholders, set typing status, or inject
     fields (e.g. ``placeholder_ts``) into the event before delivery.
+
+    Credential resolution is generic: the handler declares its
+    ``credential_key`` and the drain loop resolves it via
+    ``cfg.credential(source, key)`` from the project's service config.
     """
     from modastack.events.channels import get_channel_handler
+
+    cfg = _get_project_config()
 
     result: list[dict] = []
     for event in events:
@@ -56,7 +48,7 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
             result.append(event)
             continue
 
-        token = _get_service_token(source)
+        token = cfg.credential(source, handler.credential_key) if cfg else ""
         if not token:
             result.append(event)
             continue

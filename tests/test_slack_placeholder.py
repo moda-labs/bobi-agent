@@ -399,6 +399,11 @@ class TestChannelRegistry:
         handler = get_channel_handler("slack")
         assert handler is not None
 
+    def test_slack_handler_credential_key(self):
+        from modastack.events.channels import get_channel_handler
+        handler = get_channel_handler("slack")
+        assert handler.credential_key == "bot_token"
+
     def test_unknown_source_returns_none(self):
         from modastack.events.channels import get_channel_handler
         assert get_channel_handler("github") is None
@@ -525,10 +530,20 @@ class TestSlackReplyEdit:
 # Drain loop integration (channel handler wiring)
 # ---------------------------------------------------------------------------
 
+class _FakeConfig:
+    """Minimal Config stand-in for drain loop tests."""
+
+    def __init__(self, credentials=None):
+        self._creds = credentials or {}
+
+    def credential(self, service, key):
+        return self._creds.get((service, key), "")
+
+
 class TestDrainChannelIntegration:
     @patch("modastack.events.channels.SlackInputChannel.prepare")
     def test_drain_calls_channel_handler_for_slack(self, mock_prepare,
-                                                    tmp_path, monkeypatch):
+                                                    monkeypatch):
         """Drain loop invokes the Slack channel handler for chat events."""
         from queue import SimpleQueue
         from modastack.events.drain import drain_loop
@@ -552,10 +567,8 @@ class TestDrainChannelIntegration:
                 lines.append(f"  {k}: {v}")
             return "\n".join(lines)
 
-        def fake_get_token(source):
-            return "xoxb-test" if source == "slack" else ""
-
-        monkeypatch.setattr("modastack.events.drain._get_service_token", fake_get_token)
+        cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
+        monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
 
         with patch("modastack.inbox.deliver", fake_deliver):
             with pytest.raises(SystemExit):
@@ -566,7 +579,7 @@ class TestDrainChannelIntegration:
         assert "placeholder_ts" in delivered[0]
         assert "171.99" in delivered[0]
 
-    def test_drain_skips_handler_for_non_slack(self, tmp_path, monkeypatch):
+    def test_drain_skips_handler_for_non_slack(self, monkeypatch):
         """Non-Slack events are delivered without channel handler processing."""
         from queue import SimpleQueue
         from modastack.events.drain import drain_loop
@@ -598,7 +611,7 @@ class TestDrainChannelIntegration:
 
     @patch("modastack.events.channels.SlackInputChannel.prepare")
     def test_drain_skips_handler_without_token(self, mock_prepare,
-                                                tmp_path, monkeypatch):
+                                                monkeypatch):
         """No channel handler called when service token is unavailable."""
         from queue import SimpleQueue
         from modastack.events.drain import drain_loop
@@ -615,10 +628,36 @@ class TestDrainChannelIntegration:
         def fake_formatter(event):
             return f"Event: {event['source']}/{event['type']}"
 
-        def fake_get_token(source):
-            return ""
+        cfg = _FakeConfig()  # No credentials configured
+        monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
 
-        monkeypatch.setattr("modastack.events.drain._get_service_token", fake_get_token)
+        with patch("modastack.inbox.deliver", fake_deliver):
+            with pytest.raises(SystemExit):
+                drain_loop("test-session", queue=q, formatter=fake_formatter)
+
+        mock_prepare.assert_not_called()
+        assert len(delivered) == 1
+
+    @patch("modastack.events.channels.SlackInputChannel.prepare")
+    def test_drain_skips_handler_without_config(self, mock_prepare,
+                                                 monkeypatch):
+        """No channel handler called when project config is unavailable."""
+        from queue import SimpleQueue
+        from modastack.events.drain import drain_loop
+
+        q = SimpleQueue()
+        q.put(_make_slack_event())
+
+        delivered = []
+
+        def fake_deliver(session, text, sender=""):
+            delivered.append(text)
+            raise SystemExit
+
+        def fake_formatter(event):
+            return f"Event: {event['source']}/{event['type']}"
+
+        monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: None)
 
         with patch("modastack.inbox.deliver", fake_deliver):
             with pytest.raises(SystemExit):

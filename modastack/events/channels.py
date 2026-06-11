@@ -21,6 +21,17 @@ log = logging.getLogger(__name__)
 class InputChannelHandler(Protocol):
     """Pre-delivery hook for a chat event source."""
 
+    @property
+    def credential_key(self) -> str:
+        """The credential key to look up in the service's config.
+
+        The drain loop calls ``cfg.credential(source, handler.credential_key)``
+        to resolve the token for this handler.  For example, Slack's handler
+        returns ``"bot_token"`` so the drain loop looks up
+        ``cfg.credential("slack", "bot_token")``.
+        """
+        ...
+
     def prepare(self, event: dict, token: str) -> dict:
         """Process *event* before inbox delivery.
 
@@ -44,7 +55,7 @@ _active_loops: dict[tuple[str, str], object] = {}
 
 
 class SlackInputChannel:
-    """Post an "Evaluating…" placeholder and set typing status on arrival.
+    """Post an "Evaluating..." placeholder and set typing status on arrival.
 
     When a Slack chat event reaches the drain loop, this handler:
 
@@ -54,6 +65,10 @@ class SlackInputChannel:
     4. Injects ``placeholder_ts`` into the event fields so the agent
        can edit the placeholder with its real response via ``--edit``
     """
+
+    @property
+    def credential_key(self) -> str:
+        return "bot_token"
 
     def prepare(self, event: dict, token: str) -> dict:
         from modastack.slack import post_placeholder, StatusRefreshLoop
