@@ -10,11 +10,13 @@ from modastack.events.client import format_event_for_manager
 
 class TestDrainLoop:
 
-    def _make_event(self, source="github", etype="task.opened", text="", **kwargs):
+    def _make_event(self, source="github", etype="task.opened", text="",
+                    delivery="bulk", **kwargs):
         data = {"issue_id": "1", "title": "Test", **kwargs}
         if text:
             data["text"] = text
-        return {"type": etype, "source": source, "data": data}
+        return {"type": etype, "source": source, "delivery": delivery,
+                "data": data}
 
     @patch("modastack.inbox.deliver", return_value=(True, ""))
     def test_single_event_delivered(self, mock_deliver):
@@ -54,6 +56,7 @@ class TestDrainLoop:
         event_queue.put(self._make_event(etype="task.opened"))
         event_queue.put(self._make_event(etype="task.assigned"))
         event_queue.put(self._make_event(source="slack", etype="slack.dm",
+                                          delivery="chat",
                                           text="hello", channel="D123", workspace="T123"))
 
         call_count = 0

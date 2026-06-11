@@ -63,37 +63,50 @@ def _log_event(event: dict) -> None:
 def format_event_for_manager(event: dict) -> str:
     """Format an event as a concise message for the consuming agent.
 
-    Works with raw server events (type/source/payload at top level)
-    and internal events (type/source/data at top level).
+    v2 events carry ``text`` (human summary) and ``fields`` (flat scalar map).
+    When ``fields`` is absent (e.g. unknown-source events posted via
+    ``/events/{topic}``), the formatter falls back to rendering scalar values
+    from ``payload`` directly (~200 chars per value, ~20 entries max).
+
+    The ``requested_by`` pretty-printer is preserved for lifecycle events.
     """
     etype = event.get("type", "unknown")
     source = event.get("source", "")
-    data = event.get("data", event.get("payload", {}))
 
     lines = [f"Event: {source}/{etype}"]
 
-    for key in ("repo", "team_key", "workspace", "channel",
-                "installation_id"):
-        val = event.get(key)
-        if val:
-            lines.append(f"  {key}: {val}")
+    # v2 text — the adapter's human-readable summary
+    text = event.get("text", "")
+    if text:
+        lines.append(f"  {text}")
 
-    if isinstance(data, dict):
-        for key in ("issue_id", "pr_number", "title", "from", "user_id",
-                     "state", "branch", "conclusion", "text", "ref",
-                     "thread_ts", "phase", "duration", "summary", "error",
-                     "action"):
-            val = data.get(key)
-            if val:
+    # v2 fields — flat scalar map from the adapter
+    fields = event.get("fields")
+    if isinstance(fields, dict) and fields:
+        for key, val in fields.items():
+            if val is not None and val != "":
                 lines.append(f"  {key}: {val}")
-        if data.get("labels"):
-            labels = data["labels"]
-            if isinstance(labels, list):
-                lines.append(f"  labels: {', '.join(str(l) for l in labels)}")
-        if data.get("url") or data.get("pr_url") or data.get("html_url"):
-            lines.append(f"  url: {data.get('url') or data.get('pr_url') or data.get('html_url')}")
-        if data.get("requested_by"):
-            lines.append(f"  requested_by: {_format_requester(data['requested_by'])}")
+    elif not fields:
+        # Scalar fallback — render payload scalars when fields is absent.
+        # Caps: ~200 chars per value, ~20 entries.
+        data = event.get("data", event.get("payload", {}))
+        if isinstance(data, dict):
+            count = 0
+            for key, val in data.items():
+                if count >= 20:
+                    break
+                if isinstance(val, (str, int, float, bool)):
+                    s = str(val)
+                    if len(s) > 200:
+                        s = s[:200] + "..."
+                    if s:
+                        lines.append(f"  {key}: {s}")
+                        count += 1
+
+    # Lifecycle events carry requested_by in data/payload
+    data = event.get("data", event.get("payload", {}))
+    if isinstance(data, dict) and data.get("requested_by"):
+        lines.append(f"  requested_by: {_format_requester(data['requested_by'])}")
 
     return "\n".join(lines)
 

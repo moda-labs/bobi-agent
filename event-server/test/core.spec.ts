@@ -22,18 +22,60 @@ import {
 } from "../src/core";
 
 describe("normalizeGitHubPayload", () => {
-	it("normalizes an issue event", () => {
+	it("normalizes an issue event with v2 envelope", () => {
 		const event = normalizeGitHubPayload("issues", "delivery-1", {
 			action: "opened",
 			repository: { full_name: "org/repo" },
 			installation: { id: 42 },
+			sender: { login: "testuser" },
+			issue: { number: 10, title: "Bug fix", state: "open",
+				html_url: "https://github.com/org/repo/issues/10" },
 		});
 		expect(event).not.toBeNull();
+		expect(event!.v).toBe(2);
 		expect(event!.source).toBe("github");
 		expect(event!.type).toBe("github.issues");
-		expect(event!.repo).toBe("org/repo");
-		expect(event!.installation_id).toBe(42);
+		expect(event!.topics).toEqual(["github:org/repo"]);
+		expect(event!.delivery).toBe("bulk");
+		expect(event!.text).toContain("org/repo");
+		expect(event!.text).toContain("opened");
 		expect(event!.id).toBe("delivery-1");
+
+		// Fields structurally guarantee key data
+		expect(event!.fields).toBeDefined();
+		expect(event!.fields!.action).toBe("opened");
+		expect(event!.fields!.sender).toBe("testuser");
+		expect(event!.fields!.number).toBe(10);
+		expect(event!.fields!.title).toBe("Bug fix");
+		expect(event!.fields!.state).toBe("open");
+		expect(event!.fields!.url).toBe("https://github.com/org/repo/issues/10");
+	});
+
+	it("extracts assignees from issue payload", () => {
+		const event = normalizeGitHubPayload("issues", "d-2", {
+			action: "assigned",
+			repository: { full_name: "org/repo" },
+			sender: { login: "admin" },
+			issue: {
+				number: 42, title: "Add feature", state: "open",
+				assignee: { login: "dev1" },
+				assignees: [{ login: "dev1" }, { login: "dev2" }],
+			},
+		});
+		expect(event!.fields!.assignees).toBe("dev1, dev2");
+	});
+
+	it("extracts single assignee when assignees array is empty", () => {
+		const event = normalizeGitHubPayload("issues", "d-3", {
+			action: "assigned",
+			repository: { full_name: "org/repo" },
+			issue: {
+				number: 42, title: "Task", state: "open",
+				assignee: { login: "dev1" },
+				assignees: [],
+			},
+		});
+		expect(event!.fields!.assignee).toBe("dev1");
 	});
 
 	it("returns null when no repository", () => {
@@ -47,22 +89,44 @@ describe("normalizeGitHubPayload", () => {
 		});
 		expect(event!.id).toBeTruthy();
 	});
+
+	it("drops legacy top-level routing fields (v2 hard cutover)", () => {
+		const event = normalizeGitHubPayload("issues", "d-1", {
+			action: "opened",
+			repository: { full_name: "org/repo" },
+			installation: { id: 42 },
+		});
+		expect(event).not.toBeNull();
+		// v2: no top-level repo, installation_id — those live in payload
+		expect((event as any).repo).toBeUndefined();
+		expect((event as any).installation_id).toBeUndefined();
+	});
 });
 
 describe("normalizeLinearPayload", () => {
-	it("normalizes an issue update", () => {
+	it("normalizes an issue update with v2 envelope", () => {
 		const event = normalizeLinearPayload({
 			action: "update",
 			type: "Issue",
 			data: {
 				id: "abc",
 				identifier: "PROJ-1",
+				title: "Add caching layer",
 				team: { key: "PROJ" },
+				state: { name: "In Progress" },
 			},
 		});
+		expect(event.v).toBe(2);
 		expect(event.source).toBe("linear");
 		expect(event.type).toBe("linear.Issue.update");
-		expect(event.team_key).toBe("PROJ");
+		expect(event.topics).toEqual(["linear:PROJ"]);
+		expect(event.delivery).toBe("bulk");
+		expect(event.text).toContain("update");
+		expect(event.text).toContain("PROJ-1");
+		expect(event.fields!.action).toBe("update");
+		expect(event.fields!.identifier).toBe("PROJ-1");
+		expect(event.fields!.title).toBe("Add caching layer");
+		expect(event.fields!.state).toBe("In Progress");
 	});
 
 	it("handles missing team", () => {
@@ -72,7 +136,16 @@ describe("normalizeLinearPayload", () => {
 			data: {},
 		});
 		expect(event.type).toBe("linear.Comment.create");
-		expect(event.team_key).toBeUndefined();
+		expect(event.topics).toEqual([]);
+	});
+
+	it("drops legacy top-level team_key (v2 hard cutover)", () => {
+		const event = normalizeLinearPayload({
+			action: "update",
+			type: "Issue",
+			data: { team: { key: "PROJ" } },
+		});
+		expect((event as any).team_key).toBeUndefined();
 	});
 });
 
@@ -87,7 +160,7 @@ describe("normalizeSlackPayload", () => {
 		expect(result.event).toBeNull();
 	});
 
-	it("normalizes app_mention", () => {
+	it("normalizes app_mention with v2 envelope", () => {
 		const result = normalizeSlackPayload({
 			type: "event_callback",
 			team_id: "T123",
@@ -102,9 +175,14 @@ describe("normalizeSlackPayload", () => {
 			},
 		});
 		expect(result.skip).toBe(false);
+		expect(result.event!.v).toBe(2);
 		expect(result.event!.type).toBe("slack.mention");
-		expect(result.event!.workspace).toBe("T123");
-		expect(result.event!.channel).toBe("C456");
+		expect(result.event!.topics).toEqual(["slack:T123"]);
+		expect(result.event!.delivery).toBe("chat");
+		expect(result.event!.text).toBe("<@U99> hello");
+		expect(result.event!.fields!.user_id).toBe("U123");
+		expect(result.event!.fields!.channel).toBe("C456");
+		// payload preserved for backward compat
 		expect(result.event!.payload).toMatchObject({
 			user_id: "U123",
 			channel: "C456",
@@ -112,7 +190,7 @@ describe("normalizeSlackPayload", () => {
 		});
 	});
 
-	it("normalizes DM", () => {
+	it("normalizes DM with chat delivery", () => {
 		const result = normalizeSlackPayload({
 			type: "event_callback",
 			team_id: "T123",
@@ -126,6 +204,7 @@ describe("normalizeSlackPayload", () => {
 			},
 		});
 		expect(result.event!.type).toBe("slack.dm");
+		expect(result.event!.delivery).toBe("chat");
 	});
 
 	it("normalizes group DM (mpim)", () => {
@@ -159,6 +238,7 @@ describe("normalizeSlackPayload", () => {
 			},
 		});
 		expect(result.event!.type).toBe("slack.thread_reply");
+		expect(result.event!.fields!.thread_ts).toBe("123.000");
 	});
 
 	it("skips own bot messages when selfBotId matches", () => {
@@ -233,7 +313,24 @@ describe("normalizeSlackPayload", () => {
 				ts: "123",
 			},
 		});
-		expect((result.event!.payload as Record<string, string>).text.length).toBe(4000);
+		expect(result.event!.text.length).toBe(4000);
+	});
+
+	it("drops legacy top-level workspace/channel (v2 hard cutover)", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "app_mention",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "hi",
+				ts: "123",
+			},
+		});
+		expect((result.event as any).workspace).toBeUndefined();
+		expect((result.event as any).channel).toBeUndefined();
 	});
 });
 
@@ -276,50 +373,20 @@ describe("verifyGitHubSignature", () => {
 });
 
 describe("subscriptionKeysForEvent", () => {
-	it("returns only repo key for github events (no type fallback)", () => {
+	it("returns topics when present", () => {
 		const keys = subscriptionKeysForEvent({
-			id: "1",
-			source: "github",
-			type: "github.issues",
-			repo: "org/repo",
-			timestamp: "",
-			payload: {},
+			v: 2, id: "1", source: "github", type: "github.issues",
+			topics: ["github:org/repo"], delivery: "bulk", text: "test",
+			timestamp: "", payload: {},
 		});
 		expect(keys).toEqual(["github:org/repo"]);
 	});
 
-	it("returns only linear key for linear events (no type fallback)", () => {
+	it("falls back to type when topics is empty", () => {
 		const keys = subscriptionKeysForEvent({
-			id: "1",
-			source: "linear",
-			type: "linear.Issue.update",
-			team_key: "PROJ",
-			timestamp: "",
-			payload: {},
-		});
-		expect(keys).toEqual(["linear:PROJ"]);
-	});
-
-	it("returns only workspace key for slack events (no type fallback)", () => {
-		const keys = subscriptionKeysForEvent({
-			id: "1",
-			source: "slack",
-			type: "slack.mention",
-			workspace: "T123",
-			channel: "C456",
-			timestamp: "",
-			payload: {},
-		});
-		expect(keys).toEqual(["slack:T123"]);
-	});
-
-	it("returns type as fallback key when no source-specific routing fields", () => {
-		const keys = subscriptionKeysForEvent({
-			id: "1",
-			source: "unknown",
-			type: "test",
-			timestamp: "",
-			payload: {},
+			v: 2, id: "1", source: "unknown", type: "test",
+			topics: [], delivery: "bulk", text: "",
+			timestamp: "", payload: {},
 		});
 		expect(keys).toEqual(["test"]);
 	});
@@ -332,19 +399,54 @@ describe("subscriptionKeysForEvent", () => {
 		const keys = subscriptionKeysForEvent(event);
 		expect(keys).toContain("email/received");
 	});
+
+	it("subscription keys match existing shapes for github", () => {
+		const event = normalizeGitHubPayload("issues", "d-1", {
+			action: "opened",
+			repository: { full_name: "org/repo" },
+		});
+		const keys = subscriptionKeysForEvent(event!);
+		expect(keys).toEqual(["github:org/repo"]);
+	});
+
+	it("subscription keys match existing shapes for slack", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "app_mention", user: "U123",
+				channel: "C456", channel_type: "channel",
+				text: "hi", ts: "123",
+			},
+		});
+		const keys = subscriptionKeysForEvent(result.event!);
+		expect(keys).toEqual(["slack:T123"]);
+	});
+
+	it("subscription keys match existing shapes for linear", () => {
+		const event = normalizeLinearPayload({
+			action: "update", type: "Issue",
+			data: { team: { key: "PROJ" } },
+		});
+		const keys = subscriptionKeysForEvent(event);
+		expect(keys).toEqual(["linear:PROJ"]);
+	});
 });
 
 describe("createTopicEvent", () => {
-	it("creates event with topic as type", () => {
+	it("creates v2 event with topic as type", () => {
 		const event = createTopicEvent("my-topic", {
 			source: "my-app",
 			payload: { key: "value" },
 		});
+		expect(event.v).toBe(2);
 		expect(event.type).toBe("my-topic");
 		expect(event.source).toBe("my-app");
+		expect(event.delivery).toBe("bulk");
 		expect(event.payload).toEqual({ key: "value" });
 		expect(event.id).toBeTruthy();
 		expect(event.timestamp).toBeTruthy();
+		expect(event.topics).toEqual(["my-topic"]);
 	});
 
 	it("uses body as payload when no payload field", () => {
@@ -352,16 +454,14 @@ describe("createTopicEvent", () => {
 		expect(event.payload).toEqual({ foo: "bar" });
 	});
 
-	it("preserves routing fields from body", () => {
+	it("generates topics from routing fields in body", () => {
 		const event = createTopicEvent("deploy.complete", {
 			repo: "org/repo",
 			workspace: "T123",
-			channel: "C456",
 			payload: { status: "success" },
 		});
-		expect(event.repo).toBe("org/repo");
-		expect(event.workspace).toBe("T123");
-		expect(event.channel).toBe("C456");
+		expect(event.topics).toContain("github:org/repo");
+		expect(event.topics).toContain("slack:T123");
 	});
 
 	it("uses provided id when present", () => {
@@ -372,6 +472,19 @@ describe("createTopicEvent", () => {
 	it("defaults source to custom", () => {
 		const event = createTopicEvent("test", {});
 		expect(event.source).toBe("custom");
+	});
+
+	it("passes through text, fields, delivery, run_key", () => {
+		const event = createTopicEvent("test", {
+			text: "Something happened",
+			fields: { key: "val" },
+			delivery: "chat",
+			run_key: "run-123",
+		});
+		expect(event.text).toBe("Something happened");
+		expect(event.fields).toEqual({ key: "val" });
+		expect(event.delivery).toBe("chat");
+		expect(event.run_key).toBe("run-123");
 	});
 });
 
@@ -463,7 +576,7 @@ describe("authenticateDeployment", () => {
 });
 
 describe("handleGitHubWebhook", () => {
-	it("normalizes and delivers a github event", async () => {
+	it("normalizes and delivers a v2 github event", async () => {
 		const store = createMockStorage();
 		const result = await handleGitHubWebhook(store, "issues", "del-1", {
 			action: "opened",
@@ -473,6 +586,8 @@ describe("handleGitHubWebhook", () => {
 		expect((result.body as Record<string, number>).delivered_to).toBe(1);
 		expect(store.delivered).toHaveLength(1);
 		expect(store.delivered[0].type).toBe("github.issues");
+		expect(store.delivered[0].v).toBe(2);
+		expect(store.delivered[0].topics).toEqual(["github:org/repo"]);
 	});
 
 	it("returns 400 for payload without repository", async () => {
@@ -483,7 +598,7 @@ describe("handleGitHubWebhook", () => {
 });
 
 describe("handleLinearWebhook", () => {
-	it("normalizes and delivers a linear event", async () => {
+	it("normalizes and delivers a v2 linear event", async () => {
 		const store = createMockStorage();
 		const result = await handleLinearWebhook(store, {
 			action: "update",
@@ -493,11 +608,13 @@ describe("handleLinearWebhook", () => {
 		expect(result.status).toBe(200);
 		expect(store.delivered).toHaveLength(1);
 		expect(store.delivered[0].type).toBe("linear.Issue.update");
+		expect(store.delivered[0].v).toBe(2);
+		expect(store.delivered[0].topics).toEqual(["linear:PROJ"]);
 	});
 });
 
 describe("handleSlackWebhook", () => {
-	it("delivers a slack mention event", async () => {
+	it("delivers a v2 slack mention event with chat delivery", async () => {
 		const store = createMockStorage();
 		const result = await handleSlackWebhook(store, {
 			type: "event_callback",
@@ -514,6 +631,7 @@ describe("handleSlackWebhook", () => {
 		expect(result.status).toBe(200);
 		expect((result.body as Record<string, number>).delivered_to).toBe(1);
 		expect(store.delivered).toHaveLength(1);
+		expect(store.delivered[0].delivery).toBe("chat");
 	});
 
 	it("returns ok for non-event_callback types without delivering", async () => {
@@ -662,7 +780,7 @@ describe("handleUpdateSubscriptions", () => {
 });
 
 describe("handleTopicEvent", () => {
-	it("creates and delivers a topic event", async () => {
+	it("creates and delivers a v2 topic event", async () => {
 		const store = createMockStorage();
 		const result = await handleTopicEvent(store, "deploy.complete", {
 			source: "ci",
@@ -671,6 +789,7 @@ describe("handleTopicEvent", () => {
 		expect(result.status).toBe(200);
 		expect(store.delivered).toHaveLength(1);
 		expect(store.delivered[0].type).toBe("deploy.complete");
+		expect(store.delivered[0].v).toBe(2);
 	});
 });
 
