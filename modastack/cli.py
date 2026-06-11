@@ -317,6 +317,18 @@ def start(foreground, fresh, subscribe):
 
     if fresh:
         _clear_manager_session(project_path)
+    else:
+        # Auto-rotate session when the installed image has changed.
+        from modastack.sdk import compute_manifest_hash, get_registry, load_session_id
+        current_hash = compute_manifest_hash(project_path)
+        if current_hash:
+            session_name = _manager_session_name(project_path)
+            saved_id = load_session_id(session_name)
+            if saved_id:
+                entry = get_registry().get(session_name)
+                if entry and entry.image_hash and entry.image_hash != current_hash:
+                    click.echo("Installed image changed — rotating session.")
+                    _clear_manager_session(project_path)
 
     if foreground:
         root = logging.getLogger()
