@@ -103,10 +103,11 @@ def format_event_for_manager(event: dict) -> str:
                         lines.append(f"  {key}: {s}")
                         count += 1
 
-    # Lifecycle events carry requested_by in data/payload
-    data = event.get("data", event.get("payload", {}))
-    if isinstance(data, dict) and data.get("requested_by"):
-        lines.append(f"  requested_by: {_format_requester(data['requested_by'])}")
+    # Lifecycle events carry requested_by in data/payload.
+    # Check both data (internal events) and payload (server events).
+    lifecycle_data = event.get("data", event.get("payload", {}))
+    if isinstance(lifecycle_data, dict) and lifecycle_data.get("requested_by"):
+        lines.append(f"  requested_by: {_format_requester(lifecycle_data['requested_by'])}")
 
     return "\n".join(lines)
 
