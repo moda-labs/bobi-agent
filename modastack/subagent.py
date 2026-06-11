@@ -468,10 +468,13 @@ def spawn_adhoc(
     if role_prompt:
         append_parts.append(role_prompt)
 
-    # Inject decision log (memory) so the session has continuity
-    memory_prompt = _load_memory_for_session(cwd, issue_id)
-    if memory_prompt:
-        append_parts.append(memory_prompt)
+    # Inject decision log (memory) so the session has continuity.
+    # Skip if the task prompt already contains it (e.g. entry-point agent
+    # where build_startup_prompt() already injected memory).
+    if "## Decision Log" not in task:
+        memory_prompt = _load_memory_for_session(cwd, issue_id)
+        if memory_prompt:
+            append_parts.append(memory_prompt)
 
     session = Session(
         name=issue_id,

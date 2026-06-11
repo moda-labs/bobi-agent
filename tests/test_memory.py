@@ -175,7 +175,7 @@ class TestDoctorMemoryCheck:
         assert r.ok
         assert "1 agent" in r.detail
 
-    def test_flags_empty_current_state(self, tmp_path):
+    def test_flags_all_empty_as_failure(self, tmp_path):
         state_dir = tmp_path / ".modastack" / "state"
         mem_dir = state_dir / "memory" / "moda-director-proj"
         mem_dir.mkdir(parents=True)
@@ -184,7 +184,20 @@ class TestDoctorMemoryCheck:
         with patch("modastack.sdk.get_project_root", return_value=tmp_path):
             from modastack.doctor import _check_memory
             r = _check_memory()
-        assert not r.ok  # empty decision log is flagged as drift
+        assert not r.ok  # all logs empty = likely drift
+        assert "empty" in r.detail
+
+    def test_partial_empty_still_ok(self, tmp_path):
+        state_dir = tmp_path / ".modastack" / "state"
+        # One populated, one empty
+        populated = state_dir / "memory" / "moda-director-proj"
+        _write_index(populated, {"managed_repos": ["org/app"]})
+        empty_dir = state_dir / "memory" / "moda-lead-proj"
+        empty_dir.mkdir(parents=True)
+        with patch("modastack.sdk.get_project_root", return_value=tmp_path):
+            from modastack.doctor import _check_memory
+            r = _check_memory()
+        assert r.ok  # some populated = ok, just note the empty one
         assert "empty" in r.detail
 
 

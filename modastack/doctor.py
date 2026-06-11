@@ -234,8 +234,10 @@ def _check_memory() -> CheckResult:
 
     if empty:
         shown = ", ".join(empty[:3]) + ("..." if len(empty) > 3 else "")
+        has_populated = len(agents) > len(empty)
         return CheckResult(
-            "Decision log", ok=False,
+            "Decision log",
+            ok=has_populated,  # only fail if ALL logs are empty (likely drift)
             detail=f"{len(empty)} agent(s) with empty decision logs: {shown}",
             hint="Agents should record decisions in .modastack/state/memory/<session>/INDEX.md")
 
