@@ -1,8 +1,12 @@
-"""Slack message posting — shared by the CLI and the workflow orchestrator.
+"""Slack message helpers — posting, editing, and typing status.
 
-Handles message formatting (markdown → Slack mrkdwn), truncation, and
-the HTTP POST to chat.postMessage.  All errors are raised, never swallowed
-— callers decide how to handle failures.
+Shared by the CLI (``slack-reply``) and the event drain loop.
+Handles markdown → Slack mrkdwn formatting, truncation, and the
+HTTP calls to chat.postMessage, chat.update, and
+assistant.threads.setStatus.
+
+All errors are raised unless documented otherwise — callers decide
+how to handle failures.
 """
 
 from __future__ import annotations
@@ -10,11 +14,16 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import urllib.error
 import urllib.request
 
 log = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
 
 def format_slack_message(text: str) -> str:
     """Convert markdown to Slack mrkdwn and truncate if needed."""
@@ -29,6 +38,38 @@ def format_slack_message(text: str) -> str:
     if len(text) > 3000:
         text = text[:3000] + '\n_(truncated)_'
     return text
+
+
+# ---------------------------------------------------------------------------
+# Post / Update
+# ---------------------------------------------------------------------------
+
+def _slack_api(
+    endpoint: str,
+    token: str,
+    payload: dict,
+    *,
+    timeout: float = 10,
+) -> dict:
+    """POST to a Slack Web API endpoint and return the parsed response.
+
+    Raises ``RuntimeError`` for non-ok responses.
+    """
+    req = urllib.request.Request(
+        f"https://slack.com/api/{endpoint}",
+        data=json.dumps(payload).encode(),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        result = json.loads(resp.read())
+
+    if not result.get("ok"):
+        raise RuntimeError(f"Slack API error: {result.get('error', 'unknown')}")
+
+    return result
 
 
 def post_slack_message(
@@ -49,18 +90,140 @@ def post_slack_message(
     if thread_ts:
         payload["thread_ts"] = thread_ts
 
+    return _slack_api("chat.postMessage", token, payload, timeout=timeout)
+
+
+def update_slack_message(
+    token: str,
+    channel: str,
+    ts: str,
+    text: str,
+    *,
+    timeout: float = 10,
+) -> dict:
+    """Edit an existing Slack message (chat.update) and return the response.
+
+    Raises on network errors or non-ok Slack responses.
+    """
+    text = format_slack_message(text)
+
+    payload: dict = {"channel": channel, "ts": ts, "text": text}
+
+    return _slack_api("chat.update", token, payload, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Typing status
+# ---------------------------------------------------------------------------
+
+def set_thread_status(
+    token: str,
+    channel: str,
+    thread_ts: str,
+    status: str,
+    *,
+    timeout: float = 10,
+) -> None:
+    """Set or clear the assistant typing status in a Slack thread.
+
+    Calls ``assistant.threads.setStatus``.  Only works in thread context —
+    silently no-ops if *thread_ts* is empty.  Failures are logged at debug
+    level and swallowed (non-fatal), matching the Hermes pattern.
+    """
+    if not thread_ts:
+        return
+
+    payload: dict = {
+        "channel_id": channel,
+        "thread_ts": thread_ts,
+        "status": status,
+    }
+
     req = urllib.request.Request(
-        "https://slack.com/api/chat.postMessage",
+        "https://slack.com/api/assistant.threads.setStatus",
         data=json.dumps(payload).encode(),
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        result = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            result = json.loads(resp.read())
+        if not result.get("ok"):
+            log.debug("setStatus failed: %s", result.get("error", "unknown"))
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        log.debug("setStatus request failed: %s", exc)
 
-    if not result.get("ok"):
-        raise RuntimeError(f"Slack API error: {result.get('error', 'unknown')}")
 
-    return result
+# ---------------------------------------------------------------------------
+# Placeholder + refresh loop
+# ---------------------------------------------------------------------------
+
+def post_placeholder(
+    token: str,
+    channel: str,
+    *,
+    thread_ts: str = "",
+    placeholder_text: str = "Evaluating\u2026",
+) -> str:
+    """Post a placeholder message and set typing status.
+
+    Returns the placeholder message ``ts`` (empty string on failure).
+    """
+    try:
+        result = post_slack_message(
+            token, channel, placeholder_text, thread_ts=thread_ts,
+        )
+    except (RuntimeError, urllib.error.URLError, OSError, TimeoutError) as exc:
+        log.warning("Placeholder post failed: %s", exc)
+        return ""
+
+    placeholder_ts = result.get("ts", "")
+
+    if thread_ts:
+        set_thread_status(token, channel, thread_ts, "is thinking\u2026")
+
+    return placeholder_ts
+
+
+class StatusRefreshLoop(threading.Thread):
+    """Background thread that re-sets typing status every *interval* seconds.
+
+    Slack enforces a 2-minute timeout on assistant status — this loop
+    keeps it alive for long-running agent work.  Call ``stop()`` to
+    terminate; pass ``clear=True`` to also clear the status on exit.
+    """
+
+    def __init__(
+        self,
+        token: str,
+        channel: str,
+        thread_ts: str,
+        *,
+        interval: float = 90,
+        status_text: str = "is thinking\u2026",
+    ):
+        super().__init__(daemon=True, name="slack-status-refresh")
+        self._token = token
+        self._channel = channel
+        self._thread_ts = thread_ts
+        self._interval = interval
+        self._status_text = status_text
+        self._stop_event = threading.Event()
+        self._clear_on_stop = False
+
+    def run(self) -> None:
+        while not self._stop_event.wait(self._interval):
+            set_thread_status(
+                self._token, self._channel, self._thread_ts, self._status_text,
+            )
+        if self._clear_on_stop:
+            set_thread_status(
+                self._token, self._channel, self._thread_ts, "",
+            )
+
+    def stop(self, *, clear: bool = False) -> None:
+        """Signal the loop to stop.  If *clear*, sends an empty status on exit."""
+        self._clear_on_stop = clear
+        self._stop_event.set()
