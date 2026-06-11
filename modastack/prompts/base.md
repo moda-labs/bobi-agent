@@ -86,10 +86,10 @@ The decision log has two parts:
 
    ```markdown
    ---
+   linear_team: MDS
+   slack_channel: "#eng-alerts"
    managed_repos:
      - moda-labs/modastack
-   slack_channel: "#eng-alerts"
-   linear_team: MDS
    ---
 
    - dogfood tracks in MDS — Zach, 2026-06-10
