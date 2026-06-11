@@ -88,9 +88,16 @@ def modastack_env(tmp_path_factory):
         cwd=str(project_path), capture_output=True, check=True,
     )
 
-    adhoc_src = PACKAGE_ROOT / "modastack" / "workflow" / "adhoc.yaml"
-    if adhoc_src.exists():
-        shutil.copy2(adhoc_src, workflows_dir / "adhoc.yaml")
+    (workflows_dir / "adhoc.yaml").write_text(
+        "name: adhoc\n"
+        "trigger: >\n"
+        "  For any ad-hoc task.\n"
+        "description: >\n"
+        "  Open-ended task.\n"
+        "steps:\n"
+        "  - name: task\n"
+        '    prompt: "${{input.task}}"\n'
+    )
 
     (workflows_dir / "two-step.yaml").write_text(
         "name: two-step\n"

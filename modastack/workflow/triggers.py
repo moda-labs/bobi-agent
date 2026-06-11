@@ -1,8 +1,7 @@
 """Workflow dispatcher — surfaces workflows to the manager for semantic matching.
 
-Workflow resolution order (most specific wins):
-  1. <project>/.modastack/workflows/   — project-specific overrides
-  2. <modastack>/workflows/            — built-in defaults
+Workflows resolve exclusively from the installed pack image:
+  <project>/.modastack/workflows/
 """
 
 from __future__ import annotations
@@ -14,8 +13,6 @@ from .schema import Workflow, load_workflow
 
 log = logging.getLogger(__name__)
 
-WORKFLOWS_DIR = Path(__file__).parent
-
 
 class WorkflowDispatcher:
 
@@ -24,7 +21,7 @@ class WorkflowDispatcher:
 
     def load_all_workflows(self, project_path: Path | None = None,
                            agent_name: str | None = None):
-        """Load workflows: installed .modastack/workflows/ → built-in fallback."""
+        """Load workflows from the installed pack at .modastack/workflows/."""
         if project_path is None:
             from modastack.sdk import get_project_root
             project_path = get_project_root()
@@ -33,8 +30,6 @@ class WorkflowDispatcher:
             installed_wf_dir = project_path / ".modastack" / "workflows"
             if installed_wf_dir.exists():
                 self._load_from(installed_wf_dir, source=agent_name or str(project_path))
-
-        self._load_from(WORKFLOWS_DIR, source="default")
 
     def _load_from(self, directory: Path, source: str):
         if not directory.exists():

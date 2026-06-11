@@ -14,7 +14,7 @@ import click
 
 from .__version__ import __version__
 
-REPO_ROOT = Path(__file__).parent.parent
+_PACKAGE_DIR = Path(__file__).parent
 
 
 def _print_startup_info(project_path: Path, pid: int, log_file: Path):
@@ -367,14 +367,6 @@ def _install_pack(pack_dir: Path, project_path: Path,
             if dst.exists():
                 shutil.rmtree(dst)
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
-
-    # Ensure built-in monitor defaults are always present after install.
-    installed_defaults = dest / "monitors" / "defaults.yaml"
-    if not installed_defaults.exists():
-        builtin_defaults = Path(__file__).resolve().parent / "monitors" / "defaults.yaml"
-        if builtin_defaults.exists():
-            installed_defaults.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(builtin_defaults, installed_defaults)
 
     _seed_workspace(pack_dir, project_path)
 
@@ -1227,7 +1219,7 @@ def skill(name):
         modastack skill create-agent   # print the agent creation guide
         modastack skill linear-setup   # print the Linear setup guide
     """
-    skills_dir = REPO_ROOT / "skills"
+    skills_dir = _PACKAGE_DIR / "skills"
     path = skills_dir / f"{name}.md"
     if not path.exists():
         available = [f.stem for f in skills_dir.glob("*.md")] if skills_dir.exists() else []
@@ -1408,11 +1400,7 @@ def workflows():
 
 @workflows.command("list")
 def workflow_list():
-    """List available workflow definitions.
-
-    Scans two tiers (most specific wins):
-      1. Project-local: <project>/.modastack/workflows/
-      2. Built-in: <modastack>/workflows/
+    """List available workflow definitions from the installed pack.
 
     Usage:
         modastack workflows list

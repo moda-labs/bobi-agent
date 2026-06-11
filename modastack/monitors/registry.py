@@ -1,12 +1,11 @@
-"""Monitor registry — merge the three storage tiers into one view.
+"""Monitor registry — merge installed defaults with project overrides.
 
-Load order (most general to most specific), later tiers override by `name`:
+Monitors resolve exclusively from the installed pack image:
 
-    built-in defaults  ->  user globals  ->  project-specific
+    .modastack/monitors/defaults.yaml  →  .modastack/monitors.yaml / agent.yaml
 
-A project-specific entry with `enabled: false` opts that project out of an
-inherited monitor. A project-specific entry that shares a name with a global
-monitor overrides it for that project (the global one skips that project).
+A project-specific entry with `enabled: false` disables a default monitor.
+A project-specific entry that shares a name with a default monitor overrides it.
 """
 
 from __future__ import annotations
