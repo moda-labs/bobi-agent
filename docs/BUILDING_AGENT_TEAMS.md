@@ -150,6 +150,71 @@ Reference these files from role prompts by installed path
 in before starting the team. Filling in workspace files is not
 customization — the team source stays untouched and updatable.
 
+## Decision log (memory)
+
+Every agent has a persistent decision log at
+`.modastack/state/memory/<session-name>/`. The framework injects it into
+context at every session start — this is what makes `--fresh` and session
+rotation safe. The agent curates the content; the framework owns the
+lifecycle.
+
+### Storage
+
+```
+.modastack/state/memory/<session-name>/
+  INDEX.md           # YAML current-state block + prose notes
+  2026-06-10-deploy-policy.md   # optional per-topic notes
+```
+
+The `INDEX.md` opens with a YAML frontmatter block for machine-readable
+current operational state, followed by timestamped prose notes:
+
+```markdown
+---
+managed_repos:
+  - moda-labs/modastack
+  - moda-labs/jobtack
+slack_channel: "#eng-alerts"
+linear_team: MDS
+---
+
+- dogfood tracks in MDS — Zach, 2026-06-10
+- prefer squash merges for single-commit PRs — team decision, 2026-06-09
+```
+
+### Prompt contract
+
+The base prompt (`prompts/base.md`) instructs every agent to:
+
+- **Write a note** when making a durable decision or learning something
+  that future sessions need.
+- **Keep the YAML current-state block accurate** — update it when facts
+  change.
+- **Prune** entries that turn out to be wrong or superseded.
+- **One fact per note line**, with provenance (who said it, when).
+- **Never store secrets** in the decision log.
+
+### Lifecycle
+
+- Memory survives `--fresh` (which only wipes the session ID, not state).
+- Memory survives reinstall and version upgrades (lives in `state/`,
+  which is gitignored and not part of the frozen install image).
+- `modastack doctor` checks for agents with empty decision logs and
+  flags them as potential drift.
+
+### Team authoring notes
+
+When designing roles for your team, consider what each role should record:
+
+- **Directors/managers**: topology decisions (which repos, routing
+  preferences, team mappings), operational intent.
+- **Project leads**: per-repo context, preferred workflows, known quirks.
+- **Engineers**: generally don't need persistent memory — they work on
+  bounded tasks via workflows.
+
+You don't need to add memory-related instructions to your role prompts —
+the contract in `prompts/base.md` is inherited by every role automatically.
+
 ## The frozen-image contract
 
 `modastack install` regenerates `.modastack/` verbatim from the team

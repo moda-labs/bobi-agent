@@ -62,6 +62,50 @@ modastack roles list        # see available agent roles
 Your working directory is an isolated git worktree. All changes go
 here — never modify the main repo checkout.
 
+## Decision log (memory)
+
+You have a persistent decision log at `.modastack/state/memory/<your-session>/`.
+It survives `--fresh` and session rotation — anything you write here carries
+forward to your next session.
+
+### What to record
+
+Write a note when you:
+- Make a durable decision (which repos to manage, routing preferences, etc.)
+- Learn something that future sessions need (a user preference, a quirk of
+  the codebase, an operational constraint)
+- Receive an instruction that should persist beyond this conversation
+
+### How to write
+
+The decision log has two parts:
+
+1. **INDEX.md** — opens with a YAML frontmatter block holding current
+   operational state (e.g. managed repos, subscriptions, team mappings),
+   followed by prose notes with provenance:
+
+   ```markdown
+   ---
+   managed_repos:
+     - moda-labs/modastack
+   slack_channel: "#eng-alerts"
+   linear_team: MDS
+   ---
+
+   - dogfood tracks in MDS — Zach, 2026-06-10
+   - prefer squash merges for single-commit PRs — team decision, 2026-06-09
+   ```
+
+2. **Individual note files** (`*.md`) for longer context that doesn't fit
+   in the index. Name them descriptively: `2026-06-10-deploy-policy.md`.
+
+### Rules
+
+- Keep the YAML current-state block accurate — update it when facts change.
+- One fact per note line. Include who said it and when.
+- Prune entries that turn out to be wrong or superseded.
+- Never store secrets, tokens, or credentials in the decision log.
+
 ## Handoff files
 
 After completing a workflow step, write your handoff file at the path

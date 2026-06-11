@@ -33,6 +33,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_workflows())
     results.append(_check_event_server())
     results.append(_check_recent_events())
+    results.append(_check_memory())
 
     return results
 
@@ -201,3 +202,43 @@ def _check_recent_events() -> CheckResult:
         return CheckResult("Recent events", ok=True, detail="no events yet")
     lines = events_file.read_text().strip().splitlines()
     return CheckResult("Recent events", ok=True, detail=f"{len(lines)} events logged")
+
+
+def _check_memory() -> CheckResult:
+    """Check agent decision logs — flag agents with empty current-state blocks."""
+    from modastack.sdk import get_project_root
+    root = get_project_root()
+    if not root:
+        return CheckResult("Decision log", ok=True, detail="no project detected")
+    memory_root = root / ".modastack" / "state" / "memory"
+    if not memory_root.is_dir():
+        return CheckResult("Decision log", ok=True, detail="no decision logs yet")
+
+    agents = []
+    empty = []
+    for agent_dir in sorted(memory_root.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        agents.append(agent_dir.name)
+        index = agent_dir / "INDEX.md"
+        if not index.is_file():
+            empty.append(agent_dir.name)
+            continue
+        content = index.read_text().strip()
+        # Check if the YAML frontmatter block has any content
+        if content in ("", "---\n---", "---\n---\n"):
+            empty.append(agent_dir.name)
+
+    if not agents:
+        return CheckResult("Decision log", ok=True, detail="no decision logs yet")
+
+    if empty:
+        shown = ", ".join(empty[:3]) + ("..." if len(empty) > 3 else "")
+        return CheckResult(
+            "Decision log", ok=False,
+            detail=f"{len(empty)} agent(s) with empty decision logs: {shown}",
+            hint="Agents should record decisions in .modastack/state/memory/<session>/INDEX.md")
+
+    return CheckResult(
+        "Decision log", ok=True,
+        detail=f"{len(agents)} agent(s) with decision logs")

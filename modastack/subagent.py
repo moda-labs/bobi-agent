@@ -333,16 +333,21 @@ def run_phase_blocking(
     started_at = time.time()
     _emit_session_started(issue_id, project, title or context, name, phase=phase)
 
+    append_text = (
+        f"You are an engineer agent working on issue #{issue_id}, "
+        f"phase: {phase}. Follow the skill file instructions exactly."
+    )
+    memory_prompt = _load_memory_for_session(cwd, name)
+    if memory_prompt:
+        append_text += "\n\n" + memory_prompt
+
     session = Session(
         name=name,
         cwd=cwd,
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
-            "append": (
-                f"You are an engineer agent working on issue #{issue_id}, "
-                f"phase: {phase}. Follow the skill file instructions exactly."
-            ),
+            "append": append_text,
         },
         extra_options={"skills": "all", "max_turns": 200},
     )
@@ -402,6 +407,22 @@ def _resolve_project_name(cwd: str) -> str:
     return Path(cwd).name or cwd
 
 
+def _load_memory_for_session(cwd: str, session_name: str) -> str:
+    """Load the decision log for a session, returning formatted prompt text.
+
+    Returns empty string if no memory exists. Never raises — memory loading
+    is best-effort and must not block session startup.
+    """
+    try:
+        from modastack.memory import load_memory, format_memory_prompt
+        state_dir = Path(cwd) / ".modastack" / "state"
+        content = load_memory(state_dir, session_name)
+        return format_memory_prompt(content)
+    except Exception:
+        log.debug("Failed to load memory for %s", session_name, exc_info=True)
+        return ""
+
+
 def spawn_adhoc(
     cwd: str,
     task: str,
@@ -446,6 +467,11 @@ def spawn_adhoc(
         )
     if role_prompt:
         append_parts.append(role_prompt)
+
+    # Inject decision log (memory) so the session has continuity
+    memory_prompt = _load_memory_for_session(cwd, issue_id)
+    if memory_prompt:
+        append_parts.append(memory_prompt)
 
     session = Session(
         name=issue_id,

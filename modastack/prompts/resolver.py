@@ -146,17 +146,38 @@ def build_startup_prompt(
     role: str,
     project_path: Path | str,
     agent_name: str | None = None,
+    session_name: str | None = None,
 ) -> str:
     """Build the startup prompt for a persistent agent."""
     prompt = resolve_agent_prompt(role, project_path, agent_name=agent_name, interactive=True)
     workflows = list_workflows(project_path, agent_name=agent_name)
 
     project = Path(project_path)
-    return (
+
+    memory_section = ""
+    if session_name:
+        memory_section = _load_memory_section(project, session_name)
+
+    parts = [
         f"You are a modastack {role} for {project.name}. "
-        f"Act directly using your tools.\n\n{prompt}\n\n"
-        f"## Available workflows\n\n{workflows}"
-    )
+        f"Act directly using your tools.\n\n{prompt}",
+    ]
+    if memory_section:
+        parts.append(memory_section)
+    parts.append(f"## Available workflows\n\n{workflows}")
+    return "\n\n".join(parts)
+
+
+def _load_memory_section(project: Path, session_name: str) -> str:
+    """Load the decision log for a session and format it for prompt injection."""
+    try:
+        from modastack.memory import load_memory, format_memory_prompt
+        state_dir = project / ".modastack" / "state"
+        content = load_memory(state_dir, session_name)
+        return format_memory_prompt(content)
+    except Exception:
+        log.debug("Failed to load memory for %s", session_name, exc_info=True)
+        return ""
 
 
 def list_workflows(project_path: Path | str, agent_name: str | None = None) -> str:
