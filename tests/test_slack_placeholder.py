@@ -5,8 +5,9 @@ Covers:
 - set_thread_status (assistant.threads.setStatus)
 - post_placeholder (post + setStatus in one call)
 - StatusRefreshLoop (periodic status refresh)
+- SlackInputChannel (framework-level channel handler)
 - CLI --edit flag on slack-reply
-- Drain loop placeholder integration
+- Drain loop integration via channel handlers
 """
 
 import json
@@ -54,6 +55,23 @@ def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
         yaml = "entry_point: manager\n"
     (config_dir / "agent.yaml").write_text(yaml)
     monkeypatch.chdir(tmp_path)
+
+
+def _make_slack_event(channel="C123", thread_ts="171.42",
+                      ts="171.50", text="hello bot"):
+    return {
+        "source": "slack",
+        "type": "slack.mention",
+        "delivery": "chat",
+        "text": text,
+        "fields": {
+            "user_id": "U123",
+            "channel": channel,
+            "channel_type": "channel",
+            "ts": ts,
+            "thread_ts": thread_ts,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +273,140 @@ class TestStatusRefreshLoop:
 
 
 # ---------------------------------------------------------------------------
+# SlackInputChannel (framework-level channel handler)
+# ---------------------------------------------------------------------------
+
+class TestSlackInputChannel:
+    @patch("modastack.slack.StatusRefreshLoop")
+    @patch("modastack.slack.post_placeholder")
+    def test_prepare_posts_placeholder_and_injects_ts(self, mock_placeholder,
+                                                       mock_loop_cls):
+        """Channel handler posts placeholder and injects placeholder_ts into fields."""
+        from modastack.events.channels import SlackInputChannel
+
+        mock_placeholder.return_value = "171.99"
+        mock_loop = MagicMock()
+        mock_loop_cls.return_value = mock_loop
+
+        handler = SlackInputChannel()
+        event = _make_slack_event()
+        result = handler.prepare(event, "xoxb-test")
+
+        mock_placeholder.assert_called_once_with(
+            "xoxb-test", "C123", thread_ts="171.42",
+        )
+        mock_loop_cls.assert_called_once_with("xoxb-test", "C123", "171.42")
+        mock_loop.start.assert_called_once()
+
+        # placeholder_ts injected into fields
+        assert result["fields"]["placeholder_ts"] == "171.99"
+        # Original fields preserved
+        assert result["fields"]["channel"] == "C123"
+        assert result["fields"]["user_id"] == "U123"
+
+    @patch("modastack.slack.StatusRefreshLoop")
+    @patch("modastack.slack.post_placeholder")
+    def test_prepare_uses_ts_when_no_thread_ts(self, mock_placeholder,
+                                                mock_loop_cls):
+        """When thread_ts is empty, uses ts as the thread anchor."""
+        from modastack.events.channels import SlackInputChannel
+
+        mock_placeholder.return_value = "171.99"
+        mock_loop_cls.return_value = MagicMock()
+
+        handler = SlackInputChannel()
+        event = _make_slack_event(thread_ts="", ts="171.50")
+        handler.prepare(event, "xoxb-test")
+
+        mock_placeholder.assert_called_once_with(
+            "xoxb-test", "C123", thread_ts="171.50",
+        )
+
+    @patch("modastack.slack.post_placeholder")
+    def test_prepare_no_refresh_without_thread(self, mock_placeholder):
+        """No refresh loop started when there's no thread context."""
+        from modastack.events.channels import SlackInputChannel
+
+        mock_placeholder.return_value = "171.99"
+
+        handler = SlackInputChannel()
+        event = _make_slack_event(thread_ts="", ts="171.50")
+        result = handler.prepare(event, "xoxb-test")
+
+        assert result["fields"]["placeholder_ts"] == "171.99"
+
+    @patch("modastack.slack.post_placeholder")
+    def test_prepare_failure_returns_original_event(self, mock_placeholder):
+        """If placeholder posting fails, returns the original event unchanged."""
+        from modastack.events.channels import SlackInputChannel
+
+        mock_placeholder.side_effect = RuntimeError("network")
+
+        handler = SlackInputChannel()
+        event = _make_slack_event()
+        result = handler.prepare(event, "xoxb-test")
+
+        assert "placeholder_ts" not in result["fields"]
+
+    @patch("modastack.slack.post_placeholder")
+    def test_prepare_empty_placeholder_returns_original(self, mock_placeholder):
+        """If placeholder returns empty ts, original event is returned."""
+        from modastack.events.channels import SlackInputChannel
+
+        mock_placeholder.return_value = ""
+
+        handler = SlackInputChannel()
+        event = _make_slack_event()
+        result = handler.prepare(event, "xoxb-test")
+
+        assert "placeholder_ts" not in result["fields"]
+
+    def test_prepare_no_channel_returns_original(self):
+        """Events without a channel field are returned unchanged."""
+        from modastack.events.channels import SlackInputChannel
+
+        handler = SlackInputChannel()
+        event = {"source": "slack", "type": "slack.mention",
+                 "delivery": "chat", "fields": {}}
+        result = handler.prepare(event, "xoxb-test")
+
+        assert result is event
+
+    @patch("modastack.slack.post_placeholder")
+    def test_prepare_does_not_mutate_original(self, mock_placeholder):
+        """Channel handler returns a new event dict, doesn't mutate the original."""
+        from modastack.events.channels import SlackInputChannel
+
+        mock_placeholder.return_value = "171.99"
+
+        handler = SlackInputChannel()
+        event = _make_slack_event()
+        original_fields = dict(event["fields"])
+
+        handler.prepare(event, "xoxb-test")
+
+        # Original event's fields should be untouched
+        assert "placeholder_ts" not in event["fields"]
+        assert event["fields"] == original_fields
+
+
+# ---------------------------------------------------------------------------
+# Channel handler registry
+# ---------------------------------------------------------------------------
+
+class TestChannelRegistry:
+    def test_slack_handler_registered(self):
+        from modastack.events.channels import get_channel_handler
+        handler = get_channel_handler("slack")
+        assert handler is not None
+
+    def test_unknown_source_returns_none(self):
+        from modastack.events.channels import get_channel_handler
+        assert get_channel_handler("github") is None
+        assert get_channel_handler("unknown") is None
+
+
+# ---------------------------------------------------------------------------
 # CLI --edit flag
 # ---------------------------------------------------------------------------
 
@@ -352,40 +504,23 @@ class TestSlackReplyEdit:
 
 
 # ---------------------------------------------------------------------------
-# Drain loop placeholder integration
+# Drain loop integration (channel handler wiring)
 # ---------------------------------------------------------------------------
 
-class TestDrainPlaceholder:
-    def _make_slack_event(self, channel="C123", thread_ts="171.42",
-                          ts="171.50", text="hello bot"):
-        return {
-            "source": "slack",
-            "type": "slack.mention",
-            "delivery": "chat",
-            "text": text,
-            "fields": {
-                "user_id": "U123",
-                "channel": channel,
-                "channel_type": "channel",
-                "ts": ts,
-                "thread_ts": thread_ts,
-            },
-        }
-
-    @patch("modastack.slack.StatusRefreshLoop")
-    @patch("modastack.slack.post_placeholder")
-    def test_placeholder_posted_on_slack_event(self, mock_placeholder, mock_loop_cls,
-                                                tmp_path, monkeypatch):
-        """Drain loop posts placeholder for Slack chat events."""
+class TestDrainChannelIntegration:
+    @patch("modastack.events.channels.SlackInputChannel.prepare")
+    def test_drain_calls_channel_handler_for_slack(self, mock_prepare,
+                                                    tmp_path, monkeypatch):
+        """Drain loop invokes the Slack channel handler for chat events."""
         from queue import SimpleQueue
         from modastack.events.drain import drain_loop
 
-        mock_placeholder.return_value = "171.99"
-        mock_loop = MagicMock()
-        mock_loop_cls.return_value = mock_loop
+        event = _make_slack_event()
+        augmented = dict(event, fields=dict(event["fields"], placeholder_ts="171.99"))
+        mock_prepare.return_value = augmented
 
         q = SimpleQueue()
-        q.put(self._make_slack_event())
+        q.put(event)
 
         delivered = []
 
@@ -393,30 +528,28 @@ class TestDrainPlaceholder:
             delivered.append(text)
             raise SystemExit
 
-        def fake_formatter(event):
-            return f"Event: {event['source']}/{event['type']}"
+        def fake_formatter(ev):
+            lines = [f"Event: {ev['source']}/{ev['type']}"]
+            for k, v in ev.get("fields", {}).items():
+                lines.append(f"  {k}: {v}")
+            return "\n".join(lines)
 
-        def fake_get_token():
-            return "xoxb-test"
+        def fake_get_token(source):
+            return "xoxb-test" if source == "slack" else ""
 
-        monkeypatch.setattr("modastack.events.drain._get_slack_token", fake_get_token)
+        monkeypatch.setattr("modastack.events.drain._get_service_token", fake_get_token)
 
         with patch("modastack.inbox.deliver", fake_deliver):
             with pytest.raises(SystemExit):
                 drain_loop("test-session", queue=q, formatter=fake_formatter)
 
-        mock_placeholder.assert_called_once_with(
-            "xoxb-test", "C123", thread_ts="171.42",
-        )
-        mock_loop.start.assert_called_once()
-
-        # placeholder_ts should appear in the delivered text
+        mock_prepare.assert_called_once_with(event, "xoxb-test")
+        # placeholder_ts should appear in the delivered text via formatter
+        assert "placeholder_ts" in delivered[0]
         assert "171.99" in delivered[0]
 
-    @patch("modastack.slack.post_placeholder")
-    def test_no_placeholder_for_non_slack(self, mock_placeholder,
-                                           tmp_path, monkeypatch):
-        """Non-Slack events don't get a placeholder."""
+    def test_drain_skips_handler_for_non_slack(self, tmp_path, monkeypatch):
+        """Non-Slack events are delivered without channel handler processing."""
         from queue import SimpleQueue
         from modastack.events.drain import drain_loop
 
@@ -426,33 +559,9 @@ class TestDrainPlaceholder:
             "type": "github.push",
             "delivery": "chat",
             "text": "push event",
-            "fields": {},
+            "fields": {"repo": "org/repo"},
         })
 
-        def fake_deliver(session, text, sender=""):
-            raise SystemExit
-
-        def fake_formatter(event):
-            return f"Event: {event['source']}/{event['type']}"
-
-        with patch("modastack.inbox.deliver", fake_deliver):
-            with pytest.raises(SystemExit):
-                drain_loop("test-session", queue=q, formatter=fake_formatter)
-
-        mock_placeholder.assert_not_called()
-
-    @patch("modastack.slack.post_placeholder")
-    def test_placeholder_failure_still_delivers(self, mock_placeholder,
-                                                 tmp_path, monkeypatch):
-        """If placeholder posting fails, event is still delivered normally."""
-        from queue import SimpleQueue
-        from modastack.events.drain import drain_loop
-
-        mock_placeholder.side_effect = RuntimeError("network")
-
-        q = SimpleQueue()
-        q.put(self._make_slack_event())
-
         delivered = []
 
         def fake_deliver(session, text, sender=""):
@@ -462,28 +571,22 @@ class TestDrainPlaceholder:
         def fake_formatter(event):
             return f"Event: {event['source']}/{event['type']}"
 
-        def fake_get_token():
-            return "xoxb-test"
-
-        monkeypatch.setattr("modastack.events.drain._get_slack_token", fake_get_token)
-
         with patch("modastack.inbox.deliver", fake_deliver):
             with pytest.raises(SystemExit):
                 drain_loop("test-session", queue=q, formatter=fake_formatter)
 
-        # Event still delivered despite placeholder failure
         assert len(delivered) == 1
-        assert "placeholder_ts" not in delivered[0]
+        assert "github.push" in delivered[0]
 
-    @patch("modastack.slack.post_placeholder")
-    def test_no_placeholder_without_token(self, mock_placeholder,
-                                           tmp_path, monkeypatch):
-        """No placeholder if Slack token is unavailable."""
+    @patch("modastack.events.channels.SlackInputChannel.prepare")
+    def test_drain_skips_handler_without_token(self, mock_prepare,
+                                                tmp_path, monkeypatch):
+        """No channel handler called when service token is unavailable."""
         from queue import SimpleQueue
         from modastack.events.drain import drain_loop
 
         q = SimpleQueue()
-        q.put(self._make_slack_event())
+        q.put(_make_slack_event())
 
         delivered = []
 
@@ -494,48 +597,14 @@ class TestDrainPlaceholder:
         def fake_formatter(event):
             return f"Event: {event['source']}/{event['type']}"
 
-        def fake_get_token():
+        def fake_get_token(source):
             return ""
 
-        monkeypatch.setattr("modastack.events.drain._get_slack_token", fake_get_token)
+        monkeypatch.setattr("modastack.events.drain._get_service_token", fake_get_token)
 
         with patch("modastack.inbox.deliver", fake_deliver):
             with pytest.raises(SystemExit):
                 drain_loop("test-session", queue=q, formatter=fake_formatter)
 
-        mock_placeholder.assert_not_called()
+        mock_prepare.assert_not_called()
         assert len(delivered) == 1
-
-    @patch("modastack.slack.StatusRefreshLoop")
-    @patch("modastack.slack.post_placeholder")
-    def test_placeholder_uses_ts_when_no_thread_ts(self, mock_placeholder,
-                                                     mock_loop_cls,
-                                                     tmp_path, monkeypatch):
-        """When thread_ts is empty, uses ts as the thread anchor."""
-        from queue import SimpleQueue
-        from modastack.events.drain import drain_loop
-
-        mock_placeholder.return_value = "171.99"
-        mock_loop_cls.return_value = MagicMock()
-
-        q = SimpleQueue()
-        q.put(self._make_slack_event(thread_ts="", ts="171.50"))
-
-        def fake_deliver(session, text, sender=""):
-            raise SystemExit
-
-        def fake_formatter(event):
-            return f"Event: {event['source']}/{event['type']}"
-
-        def fake_get_token():
-            return "xoxb-test"
-
-        monkeypatch.setattr("modastack.events.drain._get_slack_token", fake_get_token)
-
-        with patch("modastack.inbox.deliver", fake_deliver):
-            with pytest.raises(SystemExit):
-                drain_loop("test-session", queue=q, formatter=fake_formatter)
-
-        mock_placeholder.assert_called_once_with(
-            "xoxb-test", "C123", thread_ts="171.50",
-        )
