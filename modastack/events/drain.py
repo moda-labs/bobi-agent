@@ -106,7 +106,12 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
 
         # Run input channel handlers on chat events (placeholder, typing, etc.).
         if chat_events:
-            chat_events = _prepare_chat_events(chat_events)
+            raw = [ev for _, ev in chat_events]
+            prepared = _prepare_chat_events(raw)
+            chat_events = [
+                (dispatched, prepared_ev)
+                for (dispatched, _), prepared_ev in zip(chat_events, prepared)
+            ]
 
         for group in [bulk_events, chat_events]:
             if not group:
