@@ -114,8 +114,8 @@ class EventReactor:
 
         log.info("Auto-dispatching %s for %s", rule.workflow, key)
         try:
-            from modastack.subagent import launch_agent
-            launch_agent(
+            import modastack.subagent as _subagent
+            _subagent.launch_agent(
                 task=task,
                 cwd=self.cwd,
                 workflow_name=rule.workflow,
