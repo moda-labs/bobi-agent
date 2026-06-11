@@ -698,7 +698,8 @@ def restart(fresh):
 def _resolve_address(to: str | None) -> str | None:
     """Resolve a friendly address to a session name.
 
-    'manager' or None → finds the manager session by role.
+    'manager' or None → finds the coordinator session by the installed
+    pack's entry_point role (falling back to the literal role "manager").
     Anything else → used as-is (exact session name).
     """
     from modastack.sdk import get_registry, set_project_root
@@ -709,12 +710,19 @@ def _resolve_address(to: str | None) -> str | None:
 
     registry = get_registry()
     if to is None or to == "manager":
-        managers = registry.get_by_role("manager")
-        active = [m for m in managers if m.status in ("idle", "running", "starting")]
-        if active:
-            return active[0].name
-        if managers:
-            return managers[0].name
+        from modastack.config import Config
+        entry_point = ""
+        if project_path:
+            entry_point = Config.load(project_path).entry_point
+        roles = [r for r in dict.fromkeys([entry_point, "manager"]) if r]
+        for role in roles:
+            managers = registry.get_by_role(role)
+            active = [m for m in managers
+                      if m.status in ("idle", "running", "starting")]
+            if active:
+                return active[0].name
+            if managers:
+                return managers[0].name
         return None
     return to
 
