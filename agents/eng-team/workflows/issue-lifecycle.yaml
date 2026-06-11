@@ -29,7 +29,7 @@ steps:
 
   - name: notify_start
     notify: slack
-    message: "Working on #${{input.issue_id}}: ${{input.task}}"
+    message: "Working on #${{input.run_key}}: ${{input.task}}"
 
   - name: route
     if: "needs_spec == true"
@@ -81,4 +81,4 @@ steps:
 
   - name: notify_complete
     notify: slack
-    message: "Completed #${{input.issue_id}}: ${{input.task}} — PR ${{pr.pr_url}} merged"
+    message: "Completed #${{input.run_key}}: ${{input.task}} — PR ${{pr.pr_url}} merged"

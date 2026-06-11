@@ -396,7 +396,7 @@ async def _run_workflow_async(
 
             # Notify step — deterministic, no LLM
             if step.notify:
-                _execute_notify_step(step, ctx, cwd, issue_id, workflow.name)
+                _execute_notify_step(step, ctx, cwd, run_key, workflow.name)
                 step_idx += 1
                 continue
 
@@ -558,7 +558,7 @@ def _execute_notify_step(
     step: StepDef,
     ctx: VariableContext,
     cwd: str,
-    issue_id: str,
+    run_key: str,
     workflow_name: str,
 ) -> None:
     """Execute a notify step — deterministic Slack message, no LLM.
@@ -596,7 +596,7 @@ def _execute_notify_step(
         post_slack_message(token, channel, message, thread_ts=thread_ts)
         log.info(f"Notify step {step.name}: posted to {channel}")
         _emit_lifecycle_event("engineer/notify.sent", {
-            "issue_id": issue_id,
+            "run_key": run_key,
             "workflow": workflow_name,
             "step": step.name,
             "channel": channel,
@@ -606,7 +606,7 @@ def _execute_notify_step(
         # Notification failures are non-fatal — log and continue
         log.warning(f"Notify step {step.name}: Slack post failed: {e}")
         _emit_lifecycle_event("engineer/notify.failed", {
-            "issue_id": issue_id,
+            "run_key": run_key,
             "workflow": workflow_name,
             "step": step.name,
             "error": str(e),

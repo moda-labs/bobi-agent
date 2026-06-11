@@ -50,11 +50,11 @@ class TestNotifyStepSchema:
             steps:
               - name: greet
                 notify: slack
-                message: "Working on #${{input.issue_id}}: ${{input.task}}"
+                message: "Working on #${{input.run_key}}: ${{input.task}}"
         """))
         wf = load_workflow(f)
         step = wf.steps[0]
-        assert "${{input.issue_id}}" in step.message
+        assert "${{input.run_key}}" in step.message
         assert "${{input.task}}" in step.message
 
     def test_notify_step_coexists_with_other_types(self, tmp_path):
@@ -160,10 +160,10 @@ class TestPostSlackMessage:
 # ---------------------------------------------------------------------------
 
 class TestExecuteNotifyStep:
-    def _make_ctx(self, issue_id="42", task="fix the bug",
+    def _make_ctx(self, run_key="42", task="fix the bug",
                   channel="C123", thread_ts="171.42", workspace="T999"):
         ctx = VariableContext()
-        ctx.set_scope("input", {"task": task, "repo": "test/repo", "issue_id": issue_id})
+        ctx.set_scope("input", {"task": task, "repo": "test/repo", "run_key": run_key})
         if channel:
             ctx.set_scope("requested_by", {
                 "channel": channel,
@@ -178,7 +178,7 @@ class TestExecuteNotifyStep:
         self._setup_config(tmp_path, monkeypatch)
 
         step = StepDef(name="notify_start", notify="slack",
-                       message="Working on #${{input.issue_id}}: ${{input.task}}")
+                       message="Working on #${{input.run_key}}: ${{input.task}}")
         ctx = self._make_ctx()
 
         _execute_notify_step(step, ctx, str(tmp_path), "42", "issue-lifecycle")
@@ -199,7 +199,7 @@ class TestExecuteNotifyStep:
 
         step = StepDef(name="notify_start", notify="slack", message="Hello")
         ctx = VariableContext()
-        ctx.set_scope("input", {"task": "t", "repo": "r", "issue_id": "1"})
+        ctx.set_scope("input", {"task": "t", "repo": "r", "run_key": "1"})
         # No requested_by scope → no channel
 
         _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
@@ -346,7 +346,7 @@ class TestNotifyStepInWorkflow:
             StepDef(name="work", prompt="Do the thing"),
         ])
         result, mock_notify = self._mock_asyncio_run(
-            wf, tmp_path=tmp_path, task="t", repo="r", cwd="/tmp", issue_id="1",
+            wf, tmp_path=tmp_path, task="t", repo="r", cwd="/tmp", run_key="1",
         )
         assert result is True
         mock_notify.assert_called_once()
@@ -378,7 +378,7 @@ class TestNotifyStepInWorkflow:
                     message="Done"),
         ])
         result, mock_notify = self._mock_asyncio_run(
-            wf, tmp_path=tmp_path, task="t", repo="r", cwd="/tmp", issue_id="1",
+            wf, tmp_path=tmp_path, task="t", repo="r", cwd="/tmp", run_key="1",
         )
         assert result is True
         assert mock_notify.call_count == 2
@@ -400,7 +400,7 @@ class TestIssueLifecycleNotifySteps:
         step = wf.step_by_name("notify_start")
         assert step is not None, "notify_start step must exist"
         assert step.notify == "slack"
-        assert "input.issue_id" in step.message
+        assert "input.run_key" in step.message
         assert "input.task" in step.message
 
     def test_has_notify_complete_step(self):
@@ -412,7 +412,7 @@ class TestIssueLifecycleNotifySteps:
         step = wf.step_by_name("notify_complete")
         assert step is not None, "notify_complete step must exist"
         assert step.notify == "slack"
-        assert "input.issue_id" in step.message
+        assert "input.run_key" in step.message
 
     def test_notify_start_after_pickup_before_route(self):
         wf_path = Path(__file__).parent.parent / "agents" / "eng-team" / "workflows" / "issue-lifecycle.yaml"
