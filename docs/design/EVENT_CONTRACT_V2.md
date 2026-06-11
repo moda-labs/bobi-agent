@@ -1,9 +1,10 @@
 # Event Contract v2 — Design Handoff
 
-Status: **design reviewed with the user (2026-06-10).** Envelope shape
+Status: **design reviewed and tickets filed (2026-06-10).** Envelope shape
 approved; migration revised to hard cutover at the user's direction. The
-brief sections below are preserved as-is; the design follows under
-"Draft design." Next step: file the §7 tickets.
+§7 tickets are filed as #177 (A), #178 (B), #179 (C), #180 (D), #181 (E);
+#164/#165 are closed as superseded. The brief sections below are preserved
+as-is; the design follows under "Draft design."
 Owner: design pass for GitHub issues **#164** (service genericization) and
 **#165** (engineer hardcoding), to be done together as one envelope revision.
 
@@ -559,22 +560,22 @@ doc as the plan; the ticket body carries the file-set and the gate.
 
 The three coding tickets touch **disjoint file-sets**:
 
-- **A. v2 envelope, both runtimes** — `core.ts` → `adapters/*.ts`
+- **A (#177). v2 envelope, both runtimes** — `core.ts` → `adapters/*.ts`
   extraction; add `v/topics/delivery/text/fields`, drop legacy top-level
   fields, collapse `subscriptionKeysForEvent`; `client.py` v2 rendering;
   `drain.py` delivery grouping.
   *Gate:* event-server tests + unit + the new Finding-4 integration test.
-- **B. service descriptors + detector registry** — `config.py` credentials
+- **B (#178). service descriptors + detector registry** — `config.py` credentials
   + `cfg.credential()`, generic `validate.py`, `subscriptions.py` detector
   registry, delete `native_services`; migrate eng-team `agent.yaml` in the
   same diff so tests exercise the new format.
   *Gate:* unit tests.
-- **C. run_key + role-parameterized lifecycle** — renames (`issue_id` →
+- **C (#179). run_key + role-parameterized lifecycle** — renames (`issue_id` →
   `run_key`), `agents launch --id`, regex deletion, `agent/*` topics,
   monitor `role:`, session naming, in `subagent.py` / `orchestrator.py` /
   `state.py` / `monitors/` / `cli.py`.
   *Gate:* unit + integration.
-- **D. chore: absorb content-review + retire modastack-dogfood** —
+- **D (#180). chore: absorb content-review + retire modastack-dogfood** —
   (decided 2026-06-10: isolated per-project installs make a standing
   dogfood repo unnecessary). Move `agents/content-review/` from
   modastack-dogfood into this repo's `agents/` (+ `registry.yaml`);
@@ -603,7 +604,7 @@ The three coding tickets touch **disjoint file-sets**:
   sink.
   *Gate:* dogfood battery green against a v2 framework build, running
   from the in-repo pack.
-- **E. cutover (ops checklist, not a dispatch)** — market-research branch
+- **E (#181). cutover (ops checklist, not a dispatch)** — market-research branch
   coordination, prod runbook per §6, archive modastack-dogfood once D's
   battery is green.
   *Gate:* dogfood battery green on the upgraded prod install.
