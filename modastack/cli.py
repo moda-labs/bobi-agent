@@ -1243,12 +1243,17 @@ def events(tail, decisions_only):
     project_path = _detect_project_root()
 
     entries = []
+    malformed = 0
 
     if not decisions_only:
         events_path = (project_path / ".modastack" / "state" / "events.jsonl") if project_path else None
         if events_path and events_path.exists():
             for line in events_path.read_text().strip().splitlines():
-                entry = json.loads(line)
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    malformed += 1
+                    continue
                 data = entry.get("data", {})
                 detail = data.get("text", "") or data.get("title", "") or data.get("issue_id", "")
                 if len(detail) > 80:
@@ -1262,7 +1267,11 @@ def events(tail, decisions_only):
     decisions_path = (project_path / ".modastack" / "state" / "decisions.jsonl") if project_path else None
     if decisions_path and decisions_path.exists():
         for line in decisions_path.read_text().strip().splitlines():
-            entry = json.loads(line)
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                malformed += 1
+                continue
             actions = entry.get("actions", [])
             types = ", ".join(a.get("type", "?") for a in actions)
             reason = ""
@@ -1281,9 +1290,8 @@ def events(tail, decisions_only):
     for _, text in entries[-tail:]:
         click.echo(text)
 
-
-
-
+    if malformed:
+        click.echo(f"\n  ⚠ {malformed} malformed line(s) skipped", err=True)
 
 
 
