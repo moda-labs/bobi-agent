@@ -15,7 +15,7 @@ the lookup below. Use the lookup only if the UUIDs are missing or stale.
 
 A Linear personal API key (`lin_api_...`) is in your environment as
 `$LINEAR_API_KEY` (declared in `agent.yaml`, loaded from `.modastack/.env`).
-There is no `modastack linear create` command, so create and update issues
+There is no dedicated CLI command for Linear, so create and update issues
 against the Linear GraphQL API at `https://api.linear.app/graphql` with
 `Authorization: $LINEAR_API_KEY`.
 
