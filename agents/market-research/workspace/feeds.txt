@@ -1,0 +1,15 @@
+# RSS / source feed URLs for the rss-watch monitor.
+# One URL per line. Lines starting with # are ignored.
+#
+# The rss-watch monitor polls these on its interval, fetches new items,
+# and surfaces ones relevant to the watched topics in moda-context.md to
+# the research manager. There is no native RSS event source in modastack,
+# so this is an interval-poll approximation.
+#
+# Examples (uncomment / replace with your own):
+# https://simonwillison.net/atom/everything/
+# https://www.oneusefulthing.org/feed
+# https://www.latent.space/feed
+# https://newsletter.pragmaticengineer.com/feed
+# https://thebootstrappedfounder.com/feed/
+# https://magazine.sebastianraschka.com/feed

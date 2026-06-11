@@ -1,7 +1,7 @@
-# Create Agent Teamages
+# Create Agent Teams
 
-Guide the user through designing and generating a modastack agent teamage.
-An agent teamage is a portable bundle — role prompts, workflows, monitors,
+Guide the user through designing and generating a modastack agent team.
+An agent team is a portable bundle — role prompts, workflows, monitors,
 and tool guides — that defines a multi-agent system. The output is a
 runnable `agents/<pack-name>/` directory.
 
@@ -9,8 +9,8 @@ runnable `agents/<pack-name>/` directory.
 
 ```
 agents/<pack-name>/
-├── agent.md              # Human-readable packagedescription
-├── defaults.yaml         # Entry point config (starting role, event sources)
+├── agent.md              # Human-readable team description
+├── agent.yaml            # Team config (entry point, services, credentials)
 ├── roles/                # System prompts for each agent role
 │   └── <role>/
 │       └── ROLE.md
@@ -19,8 +19,12 @@ agents/<pack-name>/
 ├── workflows/            # DAG definitions for multi-step processes
 │   ├── adhoc.yaml        # Always include — open-ended task handler
 │   └── <workflow>.yaml
-└── monitors/             # Optional: background polling checks
-    └── defaults.yaml
+├── monitors/             # Optional: background polling checks
+│   └── defaults.yaml
+├── context/              # Optional: reference files agents read on demand
+│   └── <topic>.md
+└── workspace/            # Optional: seed templates for user-owned domain files
+    └── <template>.md
 ```
 
 ## How to guide the conversation
@@ -47,35 +51,50 @@ Explain in plain language. Get agreement before writing files.
 
 Write files in this order, explaining each as you go:
 
-1. `defaults.yaml`
+1. `agent.yaml`
 2. `agent.md`
 3. Role prompts (`roles/<name>/ROLE.md`)
-4. Tools (`tools/<service>.md`) — if the packageuses external services
+4. Tools (`tools/<service>.md`) — if the team uses external services
 5. Workflows (`workflows/*.yaml`)
 6. Monitors (`monitors/defaults.yaml`) — if applicable
+7. Context files (`context/*.md`) — if roles share reference material
+8. Workspace templates (`workspace/`) — if users must supply domain content
 
 ### 4. Finalize
 
-Show the directory tree, explain how to run (`modastack start <pack-name>`),
-and mention `.modastack/` overrides for per-project customization.
+Show the directory tree, explain how to run (`modastack install
+agents/<pack-name>` then `modastack start`), and mention `.modastack/`
+overrides for per-project customization.
 
 ## File format reference
 
-### defaults.yaml
+### agent.yaml
 
 ```yaml
-role: <entry-point-role>
-event_sources:
-  - github
-  - slack
+version: "1.0.0"
+entry_point: <starting-role>
+chat: slack                       # optional: where humans talk to the team
+
+services:
+  - name: slack
+    events: true
+  - name: linear
+    events: true
+
+slack:
+  bot_token: ${SLACK_BOT_TOKEN}   # secrets are ${VAR} refs, filled from .env
+
+linear:
+  api_key: ${LINEAR_API_KEY}
 ```
 
-Only include event sources the packageactually needs.
+Only include services the team actually needs. `modastack install`
+prompts for any `${VAR}` references and writes them to `.modastack/.env`.
 
 ### agent.md
 
 ```markdown
-# packageName
+# Team Name
 
 One-paragraph description of what this agent system does.
 
@@ -90,7 +109,8 @@ One-paragraph description of what this agent system does.
 
 ## Setup
 
-modastack start pack-name
+modastack install agents/pack-name
+modastack start
 ```
 
 ### Role prompts (roles/<name>/ROLE.md)
@@ -224,6 +244,30 @@ monitors:
 Monitors without `check:` are executed by a short-lived agent that
 evaluates the description and posts an event only if something is found.
 
+### Context files (context/*.md)
+
+Team-shipped reference content — rubrics, methodology, output format
+specs, examples — that agents read on demand. Installed frozen to
+`.modastack/context/`; reinstall restores them and `modastack doctor`
+flags hand-edits. Agents see an index (path + first line) in their
+prompt, so make the first line of each file a one-line description.
+
+Use context/ instead of tools/ when the content is reference material
+rather than a service guide — tools load fully into every role's
+prompt; context files cost nothing until an agent reads one.
+
+### Workspace templates (workspace/)
+
+Seed files for user-owned domain content: the things only the user can
+fill in (positioning, source lists, configuration the team researches
+against) and the directories agents write work products into. Install
+copies `workspace/` to `<project>/workspace/` — each file only if
+absent, so reinstall never overwrites what the user or agents wrote.
+
+Reference these from role prompts by their installed path
+(`workspace/<file>`), and tell the user in `agent.md` which files to
+fill in before starting the team.
+
 ## Built-in CLI tools
 
 Every agent has access to the full `modastack` CLI — messaging
@@ -254,7 +298,7 @@ command reference.
 
 ## Important
 
-- Generate a complete, working package— no placeholders or TODOs.
+- Generate a complete, working team — no placeholders or TODOs.
 - Role prompts should reference `modastack` CLI commands the agent will use.
 - Don't copy engineering-specific content into non-engineering packs.
 - Write files to `agents/<pack-name>/` in the current working directory.

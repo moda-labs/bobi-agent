@@ -13,8 +13,10 @@ Always reply in the thread — use the event's `ts` as `thread_ts` if no
 
 ## Send a new message
 
+Omit `-t` to post a new top-level message instead of a threaded reply:
+
 ```bash
-modastack slack-send -w <workspace> -c <channel> "message"
+modastack slack-reply -w <workspace> -c <channel> "message"
 ```
 
 ## Key rules

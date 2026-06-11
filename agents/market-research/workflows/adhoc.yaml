@@ -1,0 +1,12 @@
+name: adhoc
+trigger: >
+  For any ad-hoc research task, question, or one-off ask that doesn't
+  match a more specific workflow.
+description: >
+  Open-ended task with no structured lifecycle. Use for quick lookups,
+  questions, or anything that doesn't fit topic-research, weekly-landscape,
+  pmf-check, or linear-research.
+
+steps:
+  - name: task
+    prompt: "${{input.task}}"

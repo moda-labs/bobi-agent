@@ -142,8 +142,12 @@ agents/                           # Agent teams (portable agent definitions)
 ├── tools/                        # Installed tool guides
 ├── workflows/                    # Installed + project workflows
 ├── monitors/                     # Installed + project monitors
+├── context/                      # Installed reference files (read on demand)
 ├── sessions/                     # Agent session state
 └── state/                        # PID files, logs, event server state
+
+workspace/                        # User-owned domain files + agent work products
+                                  # (seeded once from the team's workspace/)
 ```
 
 ### Agent teams
@@ -163,6 +167,17 @@ for a domain.
 **Tools** are markdown service guides in `tools/`. All tools load into
 every role's context. Project tools in `.modastack/tools/` override
 team tools with the same filename.
+
+**Context** files in `context/` are team-shipped reference content
+(rubrics, methodology, examples). Installed frozen to
+`.modastack/context/`; agents get an index (path + first line) in their
+prompt and read files on demand — contents are never inlined.
+
+**Workspace** files in `workspace/` are user-owned domain content and
+agent work products. Install seeds `<project>/workspace/` from the
+team's `workspace/` — each file is copied only if absent, so reinstall
+never overwrites user edits. What lives there is defined by role
+prompts, not the framework.
 
 ### Workflows
 
