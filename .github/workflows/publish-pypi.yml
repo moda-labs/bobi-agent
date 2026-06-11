@@ -174,7 +174,12 @@ jobs:
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
           VERSION="${{ steps.version.outputs.version }}"
 
-          uv tool install "modastack==$VERSION" --force --refresh
+          # CPU-only torch (#161): the prod box (t3.medium) has no GPU, so
+          # the CUDA wheel stack is ~7GB of disk for zero runtime benefit.
+          # unsafe-best-match lets the +cpu local version win resolution.
+          uv tool install "modastack==$VERSION" --force --refresh \
+            --index https://download.pytorch.org/whl/cpu \
+            --index-strategy unsafe-best-match
           modastack --version
 
           cd "$PROD_DIR"

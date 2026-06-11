@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.2 — 2026-06-11
+
+Same code as 0.14.0 plus pipeline and diagnosability fixes.
+
+### Fixed
+- Production promotion installs CPU-only torch (#161) — the prod box
+  has no GPU; CUDA wheels were ~7GB of disk for zero runtime benefit
+  and overflowed the runner during `uv tool install`
+- Local event-server launch surfaces npm output on failure — npm errors
+  (e.g. disk full) were captured but never logged, leaving a bare
+  CalledProcessError in manager.log
+
 ## 0.14.1 — 2026-06-11
 
 Same code as 0.14.0; re-released to get a working release pipeline.

@@ -60,6 +60,25 @@ def health(base_url: str, timeout: float = 2) -> dict | None:
         return None
 
 
+def _run_npm(args: list[str], es_dir: Path) -> None:
+    """Run an npm command, surfacing its output on failure.
+
+    npm failures here used to raise a bare CalledProcessError with the
+    output captured but never shown — the real cause (e.g. ENOSPC)
+    was invisible in manager.log.
+    """
+    result = subprocess.run(
+        args, cwd=str(es_dir), capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        log.error(f"{' '.join(args)} failed (exit {result.returncode}):\n{detail}")
+        raise RuntimeError(
+            f"{' '.join(args)} failed (exit {result.returncode}): "
+            f"{detail or 'no output'}"
+        )
+
+
 def ensure_running(port: int, webhook_secret: str = "",
                    slack_signing_secret: str = "",
                    project_path: Path | None = None) -> str:
@@ -76,21 +95,11 @@ def ensure_running(port: int, webhook_secret: str = "",
 
     if not (es_dir / "node_modules").exists():
         log.info("Installing event server dependencies...")
-        subprocess.run(
-            ["npm", "install", "--no-audit", "--no-fund"],
-            cwd=str(es_dir),
-            check=True,
-            capture_output=True,
-        )
+        _run_npm(["npm", "install", "--no-audit", "--no-fund"], es_dir)
 
     if _needs_build(es_dir):
         log.info("Building local event server...")
-        subprocess.run(
-            ["npm", "run", "build:local"],
-            cwd=str(es_dir),
-            check=True,
-            capture_output=True,
-        )
+        _run_npm(["npm", "run", "build:local"], es_dir)
 
     from modastack.sdk import get_project_root, state_dir
     rp = project_path or get_project_root()
