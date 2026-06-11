@@ -104,7 +104,10 @@ def format_service_report(
     check: ServiceCheck,
     native_services: list[str] | None = None,
 ) -> str:
-    """Format a human-readable service status report for startup."""
+    """Format a human-readable service status report for startup.
+
+    native_services: names of services with a registered ingestion adapter.
+    """
     lines = ["Services:"]
     for name in native_services or []:
         lines.append(f"  ✓ {name:20} (native)")

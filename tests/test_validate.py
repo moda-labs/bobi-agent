@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 from modastack.validate import (
     validate_config,
     _check_entry_point,
-    _check_native_credentials,
+    _check_service_credentials,
     _check_venn_services,
     _check_mcp_servers,
     CheckResult,
@@ -37,21 +37,22 @@ class TestCheckEntryPoint:
         assert "defaulting" in result.detail
 
 
-class TestCheckNativeCredentials:
+class TestCheckServiceCredentials:
 
     def test_slack_with_token(self):
         cfg = Config(
-            services=[ServiceConfig(name="slack")],
-            slack_bot_token="xoxb-test",
+            services=[ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"})],
         )
-        checks = _check_native_credentials(cfg)
+        checks = _check_service_credentials(cfg)
         assert len(checks) == 1
         assert checks[0].ok
         assert checks[0].detail == "native"
 
     def test_slack_missing_token(self):
-        cfg = Config(services=[ServiceConfig(name="slack")])
-        checks = _check_native_credentials(cfg)
+        cfg = Config(
+            services=[ServiceConfig(name="slack", credentials={"bot_token": ""})],
+        )
+        checks = _check_service_credentials(cfg)
         assert len(checks) == 1
         assert not checks[0].ok
         assert "native" in checks[0].detail
@@ -59,28 +60,29 @@ class TestCheckNativeCredentials:
 
     def test_linear_with_key(self):
         cfg = Config(
-            services=[ServiceConfig(name="linear")],
-            linear_api_key="lin_test",
+            services=[ServiceConfig(name="linear", credentials={"api_key": "lin_test"})],
         )
-        checks = _check_native_credentials(cfg)
+        checks = _check_service_credentials(cfg)
         assert len(checks) == 1
         assert checks[0].ok
         assert checks[0].detail == "native"
 
     def test_linear_missing_key(self):
-        cfg = Config(services=[ServiceConfig(name="linear")])
-        checks = _check_native_credentials(cfg)
+        cfg = Config(
+            services=[ServiceConfig(name="linear", credentials={"api_key": ""})],
+        )
+        checks = _check_service_credentials(cfg)
         assert not checks[0].ok
 
     def test_github_always_ok(self):
         cfg = Config(services=[ServiceConfig(name="github")])
-        checks = _check_native_credentials(cfg)
+        checks = _check_service_credentials(cfg)
         assert checks[0].ok
         assert checks[0].detail == "native"
 
-    def test_no_native_services(self):
+    def test_no_registered_services(self):
         cfg = Config(services=[ServiceConfig(name="email")])
-        checks = _check_native_credentials(cfg)
+        checks = _check_service_credentials(cfg)
         assert checks == []
 
 

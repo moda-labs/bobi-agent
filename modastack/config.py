@@ -83,6 +83,7 @@ class ServiceConfig:
 
     name: str
     events: bool = False
+    credentials: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -98,13 +99,17 @@ class Config:
     event_server_url: str = ""
     registries: list[str] = field(default_factory=list)
 
-    slack_bot_token: str = ""
-    linear_api_key: str = ""
-
     venn_api_key: str = ""
 
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     monitors: list[dict] = field(default_factory=list)
+
+    def credential(self, service: str, key: str) -> str:
+        """Look up a credential value for a named service."""
+        for svc in self.services:
+            if svc.name == service:
+                return svc.credentials.get(key, "")
+        return ""
 
     @classmethod
     def load(cls, project_path: Path) -> "Config":
@@ -129,13 +134,15 @@ class Config:
             if isinstance(s, str):
                 services.append(ServiceConfig(name=s))
             elif isinstance(s, dict):
+                creds = s.get("credentials", {})
+                if not isinstance(creds, dict):
+                    creds = {}
                 services.append(ServiceConfig(
                     name=s.get("name", ""),
                     events=s.get("events", False),
+                    credentials={k: str(v) for k, v in creds.items()},
                 ))
 
-        slack = raw.get("slack", {})
-        linear = raw.get("linear", {})
         event_server = raw.get("event_server", {})
         if isinstance(event_server, str):
             event_server_url = event_server
@@ -150,21 +157,16 @@ class Config:
             services=services,
             event_server_url=raw.get("event_server_url", event_server_url),
             registries=raw.get("registries", []),
-            slack_bot_token=slack.get("bot_token", "") if isinstance(slack, dict) else "",
-            linear_api_key=linear.get("api_key", "") if isinstance(linear, dict) else "",
             venn_api_key=raw.get("venn_api_key", ""),
             mcp_servers=raw.get("mcp_servers", {}),
             monitors=raw.get("monitors", []),
         )
 
     @property
-    def native_services(self) -> list[str]:
-        return ["github", "slack", "linear"]
-
-    @property
     def venn_services(self) -> list[ServiceConfig]:
-        """Services that require Venn (not natively supported)."""
-        return [s for s in self.services if s.name not in self.native_services]
+        """Services without a registered ingestion adapter (require Venn)."""
+        from modastack.events.adapters import is_registered
+        return [s for s in self.services if not is_registered(s.name)]
 
     @property
     def event_services(self) -> list[ServiceConfig]:

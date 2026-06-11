@@ -14,10 +14,17 @@ def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
     """Set up project config with a Slack bot token."""
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir(parents=True)
-    (config_dir / "agent.yaml").write_text(
-        f"entry_point: manager\nslack:\n  bot_token: '{slack_bot_token}'\n"
-        if slack_bot_token else "entry_point: manager\n"
-    )
+    if slack_bot_token:
+        yaml = (
+            "entry_point: manager\n"
+            "services:\n"
+            "  - name: slack\n"
+            "    credentials:\n"
+            f"      bot_token: '{slack_bot_token}'\n"
+        )
+    else:
+        yaml = "entry_point: manager\n"
+    (config_dir / "agent.yaml").write_text(yaml)
     monkeypatch.chdir(tmp_path)
 
 
