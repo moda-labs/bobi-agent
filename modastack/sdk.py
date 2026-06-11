@@ -35,6 +35,51 @@ _project_root: Path | None = None
 _sessions_dir_cache: dict[str, Path] = {}
 
 
+def compute_manifest_hash(project_path: Path | None = None) -> str:
+    """Compute a stable hash of the install-manifest.json file list.
+
+    Returns the hex digest of the sorted file-hash entries, or "" if
+    no manifest exists.  Used to detect when the installed agent image
+    has changed so sessions can be rotated.
+    """
+    import hashlib
+
+    root = project_path or _project_root
+    if not root:
+        return ""
+    manifest = root / ".modastack" / "install-manifest.json"
+    try:
+        data = json.loads(manifest.read_text())
+        files = data.get("files", {})
+    except (json.JSONDecodeError, OSError):
+        return ""
+    if not files:
+        return ""
+    content = "".join(f"{k}:{v}" for k, v in sorted(files.items()))
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def check_image_rotation(session_name: str, project_path: Path) -> bool:
+    """Clear a session if the installed image has changed since it was stamped.
+
+    Returns True if the session was rotated.  Safe no-ops: no manifest,
+    no prior session, no stored hash (first run after upgrade).
+    """
+    current_hash = compute_manifest_hash(project_path)
+    if not current_hash:
+        return False
+    saved_id = load_session_id(session_name)
+    if not saved_id:
+        return False
+    registry = get_registry()
+    entry = registry.get(session_name)
+    if not entry or not entry.image_hash or entry.image_hash == current_hash:
+        return False
+    log.info("Installed image changed — rotating session for %s", session_name)
+    save_session_id(session_name, "")
+    return True
+
+
 def set_project_root(path: Path) -> None:
     """Set the project root for all session state paths."""
     global _project_root
@@ -148,6 +193,7 @@ class SessionEntry:
     status: str = "starting"
     pid: int = 0
     inbox_port: int = 0
+    image_hash: str = ""
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     requested_by: dict = field(default_factory=dict)

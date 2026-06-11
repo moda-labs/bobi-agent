@@ -317,6 +317,10 @@ def start(foreground, fresh, subscribe):
 
     if fresh:
         _clear_manager_session(project_path)
+    else:
+        from modastack.sdk import check_image_rotation
+        if check_image_rotation(_manager_session_name(project_path), project_path):
+            click.echo("Installed image changed — rotating session.")
 
     if foreground:
         root = logging.getLogger()

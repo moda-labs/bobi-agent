@@ -606,12 +606,17 @@ def launch_agent(
         "_run_agent_entry(json.loads(sys.argv[1]))"
     )
 
+    # Auto-rotate when the installed image has changed since the last run.
+    from modastack.sdk import check_image_rotation, compute_manifest_hash
+    check_image_rotation(session_name, Path(cwd))
+
     # Register first so the session dir exists for the log file
     registry.register(SessionEntry(
         name=session_name, session_id="", role=role,
         issue_id=issue_id, title=task[:80], phase=workflow_name,
         project=project, cwd=cwd, status="starting",
         requested_by=requested_by or {},
+        image_hash=compute_manifest_hash(Path(cwd)),
     ))
 
     log_file = SessionRegistry.log_path(session_name)

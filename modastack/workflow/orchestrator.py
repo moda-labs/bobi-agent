@@ -142,12 +142,14 @@ def run_workflow(
     session_name = make_session_name(workflow.name, repo, issue_id)
     needs_worktree = any(s.worktree for s in workflow.steps)
     work_cwd = _setup_worktree(cwd, session_name) if needs_worktree else cwd
+    from modastack.sdk import compute_manifest_hash
     registry = get_registry()
     registry.register(SessionEntry(
         name=session_name, session_id="", role=role,
         issue_id=issue_id, title=task[:80], phase=workflow.name,
         project=repo, cwd=work_cwd, status="running", pid=os.getpid(),
         requested_by=requested_by,
+        image_hash=compute_manifest_hash(Path(cwd)),
     ))
 
     _emit_lifecycle_event("engineer/workflow.started", {
