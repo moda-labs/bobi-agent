@@ -17,7 +17,7 @@ class TestAgentYamlConfig:
     """Config loading from agent.yaml in a real project directory."""
 
     def test_loads_unified_agent_yaml(self, tmp_path):
-        """agent.yaml with entry_point + services is recognized as unified format."""
+        """agent.yaml with entry_point + services + credentials is loaded correctly."""
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
@@ -27,11 +27,12 @@ class TestAgentYamlConfig:
             services:
               - name: github
                 events: true
+              - name: slack
+                credentials:
+                  bot_token: xoxb-test-token
               - name: email
                 events: true
               - name: salesforce
-            slack:
-              bot_token: xoxb-test-token
             venn_api_key: venn_test
         """))
 
@@ -41,15 +42,15 @@ class TestAgentYamlConfig:
         assert cfg.entry_point == "director"
         assert cfg.chat == "slack"
         assert cfg.venn_api_key == "venn_test"
-        assert cfg.slack_bot_token == "xoxb-test-token"
-        assert len(cfg.services) == 3
+        assert cfg.credential("slack", "bot_token") == "xoxb-test-token"
+        assert len(cfg.services) == 4
         assert cfg.services[0].name == "github"
         assert cfg.services[0].events is True
-        assert cfg.services[2].name == "salesforce"
-        assert cfg.services[2].events is False
+        assert cfg.services[3].name == "salesforce"
+        assert cfg.services[3].events is False
 
     def test_env_var_interpolation_end_to_end(self, tmp_path, monkeypatch):
-        """${ENV_VAR} in agent.yaml is resolved from the environment."""
+        """${ENV_VAR} in agent.yaml credentials is resolved from the environment."""
         monkeypatch.setenv("INTEG_SLACK_TOKEN", "xoxb-from-env-123")
         monkeypatch.setenv("INTEG_VENN_KEY", "venn_env_456")
 
@@ -59,15 +60,16 @@ class TestAgentYamlConfig:
             entry_point: manager
             services:
               - name: email
-            slack:
-              bot_token: ${INTEG_SLACK_TOKEN}
+              - name: slack
+                credentials:
+                  bot_token: ${INTEG_SLACK_TOKEN}
             venn_api_key: ${INTEG_VENN_KEY}
         """))
 
         from modastack.config import Config
         cfg = Config.load(tmp_path)
 
-        assert cfg.slack_bot_token == "xoxb-from-env-123"
+        assert cfg.credential("slack", "bot_token") == "xoxb-from-env-123"
         assert cfg.venn_api_key == "venn_env_456"
 
     def test_no_agent_yaml_returns_empty_config(self, tmp_path):
@@ -77,10 +79,10 @@ class TestAgentYamlConfig:
 
         assert cfg.entry_point == ""
         assert cfg.services == []
-        assert cfg.slack_bot_token == ""
+        assert cfg.credential("slack", "bot_token") == ""
 
     def test_venn_services_vs_native(self, tmp_path):
-        """Services property correctly separates native from Venn-backed."""
+        """Services with registered adapters are native; the rest need Venn."""
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
@@ -95,9 +97,10 @@ class TestAgentYamlConfig:
         """))
 
         from modastack.config import Config
+        from modastack.events.adapters import is_registered
         cfg = Config.load(tmp_path)
 
-        native_names = {s.name for s in cfg.services if s.name in cfg.native_services}
+        native_names = {s.name for s in cfg.services if is_registered(s.name)}
         venn_names = {s.name for s in cfg.venn_services}
 
         assert native_names == {"github", "slack", "linear"}

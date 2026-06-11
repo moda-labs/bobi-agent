@@ -179,9 +179,10 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
     subscribe = discover_subscriptions(project_path)
     subscribe += [s for s in (extra_subscribe or []) if s not in subscribe]
 
-    # Monitor event topics need a subscription when any non-native service
-    # delivers events (native services already route through webhooks).
-    if any(s.name not in cfg.native_services for s in cfg.event_services):
+    # Monitor event topics need a subscription when a service without a
+    # registered adapter delivers events (adapted services route via webhooks).
+    from modastack.events.adapters import is_registered
+    if any(not is_registered(s.name) for s in cfg.event_services):
         subscribe += [m["event"] for m in cfg.monitors
                       if m.get("event") and m["event"] not in subscribe]
 
@@ -766,9 +767,9 @@ def slack_reply(text, workspace, channel, thread):
     if project_path:
         from .config import Config
         cfg = Config.load(project_path)
-        token = cfg.slack_bot_token
+        token = cfg.credential("slack", "bot_token")
     if not token:
-        click.echo("No bot token configured (set slack.bot_token in .modastack/agent.yaml)", err=True)
+        click.echo("No bot token configured (set credentials.bot_token under the slack service in agent.yaml)", err=True)
         sys.exit(1)
 
     # The manager invokes this command through a shell, where newlines in the

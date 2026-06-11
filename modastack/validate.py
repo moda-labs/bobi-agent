@@ -50,7 +50,7 @@ def validate_config(project_path: Path) -> ValidationResult:
     checks: list[CheckResult] = []
 
     checks.append(_check_entry_point(cfg, project_path))
-    checks.extend(_check_native_credentials(cfg))
+    checks.extend(_check_service_credentials(cfg))
     checks.extend(_check_venn_services(cfg))
     checks.extend(_check_mcp_servers(cfg, project_path))
 
@@ -79,25 +79,32 @@ def _check_entry_point(cfg, project_path: Path) -> CheckResult:
     return CheckResult("entry_point", ok=True, detail=cfg.entry_point)
 
 
-def _check_native_credentials(cfg) -> list[CheckResult]:
+def _check_service_credentials(cfg) -> list[CheckResult]:
+    """Validate declared credentials for all services with registered adapters.
+
+    Every declared credential key must interpolate to a non-empty value.
+    Services with no declared credentials (e.g. github — auth rides on `gh`)
+    pass automatically.
+    """
+    from modastack.events.adapters import is_registered
+
     checks = []
     for svc in cfg.services:
-        if svc.name == "slack":
-            ok = bool(cfg.slack_bot_token)
+        if not is_registered(svc.name):
+            continue
+        if not svc.credentials:
+            checks.append(CheckResult(svc.name, ok=True, detail="native"))
+            continue
+        missing = [k for k, v in svc.credentials.items() if not v]
+        if missing:
+            keys_str = ", ".join(missing)
             checks.append(CheckResult(
-                "slack", ok=ok,
-                detail="native" if ok else "native — missing bot token",
-                hint="Set slack.bot_token in agent.yaml" if not ok else "",
+                svc.name, ok=False,
+                detail=f"native — missing {keys_str}",
+                hint=f"Set credentials for {svc.name} in agent.yaml",
             ))
-        elif svc.name == "linear":
-            ok = bool(cfg.linear_api_key)
-            checks.append(CheckResult(
-                "linear", ok=ok,
-                detail="native" if ok else "native — missing API key",
-                hint="Set linear.api_key in agent.yaml" if not ok else "",
-            ))
-        elif svc.name == "github":
-            checks.append(CheckResult("github", ok=True, detail="native"))
+        else:
+            checks.append(CheckResult(svc.name, ok=True, detail="native"))
     return checks
 
 

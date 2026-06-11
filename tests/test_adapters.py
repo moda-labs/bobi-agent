@@ -1,0 +1,108 @@
+"""Tests for the ingestion adapter registry."""
+
+from pathlib import Path
+from unittest.mock import patch
+
+from modastack.config import Config, ServiceConfig
+from modastack.events.adapters import (
+    is_registered,
+    detect,
+    _parse_github_url,
+)
+
+
+class TestAdapterRegistry:
+
+    def test_builtin_adapters_registered(self):
+        assert is_registered("github")
+        assert is_registered("slack")
+        assert is_registered("linear")
+
+    def test_unknown_service_not_registered(self):
+        assert not is_registered("email")
+        assert not is_registered("discord")
+
+    def test_detect_unregistered_falls_back_to_name(self):
+        cfg = Config()
+        keys = detect("email", Path("/fake"), cfg)
+        assert keys == ["email"]
+
+    def test_detect_unregistered_custom_service(self):
+        cfg = Config()
+        keys = detect("my-custom-source", Path("/fake"), cfg)
+        assert keys == ["my-custom-source"]
+
+
+class TestGithubDetector:
+
+    def test_parse_https_url(self):
+        assert _parse_github_url("https://github.com/moda-labs/modastack.git") == "moda-labs/modastack"
+
+    def test_parse_ssh_url(self):
+        assert _parse_github_url("git@github.com:moda-labs/modastack.git") == "moda-labs/modastack"
+
+    def test_parse_non_github_url(self):
+        assert _parse_github_url("https://gitlab.com/foo/bar") == ""
+
+    def test_detect_from_git_remote(self, tmp_path):
+        """Auto-detect github:org/repo when project is a git repo."""
+        import subprocess
+        subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/test-org/test-repo.git"],
+            capture_output=True, cwd=str(tmp_path),
+        )
+
+        cfg = Config()
+        keys = detect("github", tmp_path, cfg)
+        assert keys == ["github:test-org/test-repo"]
+
+
+class TestSlackDetector:
+
+    @patch("urllib.request.urlopen")
+    def test_detect_with_token(self, mock_urlopen, tmp_path):
+        import json
+        mock_resp = type("Resp", (), {
+            "read": lambda self: json.dumps({"ok": True, "team_id": "T123ABC"}).encode(),
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        mock_urlopen.return_value = mock_resp
+
+        cfg = Config(services=[
+            ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
+        ])
+        keys = detect("slack", tmp_path, cfg)
+        assert keys == ["slack:T123ABC"]
+
+    def test_detect_without_token(self, tmp_path):
+        cfg = Config(services=[ServiceConfig(name="slack")])
+        keys = detect("slack", tmp_path, cfg)
+        assert keys == []
+
+
+class TestLinearDetector:
+
+    @patch("urllib.request.urlopen")
+    def test_detect_with_key(self, mock_urlopen, tmp_path):
+        import json
+        mock_resp = type("Resp", (), {
+            "read": lambda self: json.dumps({
+                "data": {"teams": {"nodes": [{"key": "ENG"}, {"key": "OPS"}]}}
+            }).encode(),
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        mock_urlopen.return_value = mock_resp
+
+        cfg = Config(services=[
+            ServiceConfig(name="linear", credentials={"api_key": "lin_test"}),
+        ])
+        keys = detect("linear", tmp_path, cfg)
+        assert keys == ["linear:ENG", "linear:OPS"]
+
+    def test_detect_without_key(self, tmp_path):
+        cfg = Config(services=[ServiceConfig(name="linear")])
+        keys = detect("linear", tmp_path, cfg)
+        assert keys == []
