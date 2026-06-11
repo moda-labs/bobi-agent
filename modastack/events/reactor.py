@@ -75,8 +75,7 @@ class EventReactor:
 
             key = rule.dedup_key(event)
             now = time.monotonic()
-            last = self._dispatched.get(key, 0)
-            if now - last < rule.cooldown:
+            if key in self._dispatched and now - self._dispatched[key] < rule.cooldown:
                 log.info("Auto-dispatch skipped (cooldown): %s", key)
                 return False
 
