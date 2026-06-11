@@ -1,25 +1,36 @@
 """Unit tests for the embedding sidecar HTTP handler.
 
-Tests the handler in-process — no subprocess launched. Skipped if
-sentence-transformers is not installed.
+Tests the handler in-process — no subprocess launched.  The real
+sentence-transformers model is replaced with a lightweight stub so
+tests don't depend on HuggingFace Hub downloads (which are rate-limited
+and can exceed the CI timeout).
 """
 
-import io
 import json
 from http.server import HTTPServer
 from threading import Thread
-from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from modastack.kb.sidecar import _make_handler, MODEL_NAME, EMBEDDING_DIM
 
 
+class _StubModel:
+    """Drop-in replacement for SentenceTransformer that returns deterministic
+    embeddings without downloading anything."""
+
+    def encode(self, texts, *, show_progress_bar=False):
+        # Return a (len(texts), EMBEDDING_DIM) float32 ndarray — same shape
+        # as the real model — seeded for reproducibility.
+        rng = np.random.default_rng(42)
+        return rng.standard_normal((len(texts), EMBEDDING_DIM)).astype(np.float32)
+
+
 @pytest.fixture(scope="module")
 def model():
-    """Load the actual model once for all tests in this module."""
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(MODEL_NAME)
+    """Provide a lightweight stub model — no HuggingFace download needed."""
+    return _StubModel()
 
 
 @pytest.fixture(scope="module")
