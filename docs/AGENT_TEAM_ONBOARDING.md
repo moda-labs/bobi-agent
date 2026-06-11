@@ -4,48 +4,64 @@ How a team author creates a new agent and how a user sets it up.
 
 ## Team author experience
 
-Five questions define an agent:
+Seven questions define an agent:
 
 1. **What is this agent going to do?** Describe the domain in a sentence. "Manage the engineering SDLC", "Run sales outreach", "Monitor customer support tickets." This frames everything that follows.
 
-2. **What are the distinct jobs involved?** Break the purpose down into roles. Think about the different hats a human team would wear. A sales pipeline might need a researcher, a copywriter, and a CRM updater. An engineering org might need a director who triages, project leads who coordinate, and engineers who execute. A simple agent might just be one role. Each role gets its own prompt and responsibilities — this is how an agent team scales from a solo operator to a full organization.
+2. **What are the distinct roles involved, and what job does each perform?** A team is multiple roles, each responsible for a specific job — the different hats a human team would wear. Name each role and the concrete job it does:
+   - *Engineering team:* a **coder** (writes high-quality code), a **reviewer** (identifies anti-patterns and checks for specific things), a **QA** (runs automated test scripts).
+   - *Research team:* a **company researcher** (deep-dives a specific company and its positioning), a **voice tracker** (tracks what the important voices in the industry are saying), a **PMF analyzer** (collects info and reasons about product-market fit for an idea).
+   - *Marketing team:* a **social tracker** (monitors IG, TikTok, and more, and flags when there's something relevant to react to), an **organic analyst** (comes up with post ideas, copy, and images to publish), a **strategist** (builds multi-week posting plans and synthesizes the tracker's feedback).
 
-3. **How do you want to interact with it?** Choose:
+   Each role gets its own prompt and responsibilities — this is how an agent team scales from a solo operator to a full organization. A simple agent might just be one role.
+
+3. **What services does the team need to do its job?** Pick the services the agents read from and write to: email, github, salesforce, calendar, linear, notion, jira, etc. This is effectively the list of MCP servers. Internal services and custom tooling count too — anything with an MCP server can be declared in `mcp_servers` and its tools land in the agents' sessions automatically.
+
+4. **How do you want to interact with it?** Choose a chat app:
    - **Slack** — chat with the agent in a channel, get updates, give instructions
    - **Telegram** — same, but via Telegram bot
-   - **Autonomous** — no chat interface, the agent operates entirely on its own based on events and schedules
 
-4. **What services does the team need?** Pick from: email, github, salesforce, calendar, linear, notion, jira, etc. These are the tools the agents will read from and write to. Internal services and custom tooling count too — anything with an MCP server can be declared in `mcp_servers` and its tools land in the agents' sessions automatically.
+   Interaction is the human channel. Autonomy doesn't live here — it comes from scheduled jobs (question 5) and event triggers (question 6).
 
-5. **Which sources should the agent proactively respond to?** For each service from question 4, decide: should the agent watch for changes and react on its own (new email arrives, PR opens, deal updates), or only interact with it when asked? This is the difference between an agent that monitors your inbox vs one that only sends email when told to.
+5. **Are there jobs or workflows the team should run on a schedule?** Recurring work the agent should do proactively without being asked — a Monday-morning pipeline digest, a nightly deploy health check, a weekly content plan. These become scheduled workflows or monitors.
+
+6. **Should the agent trigger workflows off specific events?** For each service from question 3, decide what the agent watches for and reacts to on its own. Be specific about the trigger condition: a certain type of email (a VIP domain, a matching subject), a Linear ticket assigned to it and moved to "To Do", a specific phrase or content type in an RSS feed, a PR opening, a deal updating. This is the difference between an agent that monitors your inbox vs one that only sends email when told to.
+
+7. **(Optional) Are there workflows that must be followed, with human-in-the-loop gates?** For regulated or high-stakes processes, describe the required step order and where a human must sign off before the workflow continues. These approval gates become `await` steps — the workflow suspends until a person approves, then resumes. Example: outreach copy must be reviewed in Slack before it sends; a deploy must be approved before it promotes to production.
 
 ### Example: engineering SDLC agent
 
 > 1. **Purpose?** Manages the software development lifecycle — triages issues, coordinates project work, reviews PRs, monitors deploys.
-> 2. **Jobs?** Three roles: a director (triages incoming work, assigns to projects), project leads (coordinate within a project), and engineers (execute tasks). Director is the entry point.
-> 3. **Interaction?** Slack — the team talks to the agent in a channel.
-> 4. **Services?** GitHub (code + PRs), Linear (issue tracking).
-> 5. **Events?** GitHub (react to PR opens, issue assignments), Linear (react to status changes), Slack (react to mentions and DMs).
+> 2. **Roles?** A **director** (triages incoming work, assigns to projects), **project leads** (coordinate within a project), and **engineers** (execute tasks). Director is the entry point.
+> 3. **Services?** GitHub (code + PRs), Linear (issue tracking).
+> 4. **Interaction?** Slack — the team talks to the agent in a channel.
+> 5. **Scheduled jobs?** A daily stale-PR sweep; a deploy health check every 15 minutes.
+> 6. **Event triggers?** GitHub (PR opens, issue assignments), Linear (status changes), Slack (mentions and DMs).
+> 7. **Gated workflows?** None required — engineers land within policy.
 
 ### Example: sales outreach agent
 
 > 1. **Purpose?** Monitors inbound leads, drafts personalized outreach, updates CRM.
-> 2. **Jobs?** Three roles: a researcher (enriches lead data), a copywriter (drafts outreach), and a CRM updater (logs activity). Or just one role if you want it simple.
-> 3. **Interaction?** Slack — sales team reviews drafts in a channel before they go out.
-> 4. **Services?** Salesforce (CRM), email (outreach), calendar (meetings).
-> 5. **Events?** Salesforce (new lead created), email (reply received).
+> 2. **Roles?** A **researcher** (enriches lead data), a **copywriter** (drafts outreach), and a **CRM updater** (logs activity). Or just one role if you want it simple.
+> 3. **Services?** Salesforce (CRM), email (outreach), calendar (meetings).
+> 4. **Interaction?** Slack — sales team reviews drafts in a channel before they go out.
+> 5. **Scheduled jobs?** A morning digest of new leads needing outreach.
+> 6. **Event triggers?** Salesforce (new lead created), email (reply received).
+> 7. **Gated workflows?** Outreach copy must be approved in Slack before it sends.
 
 ### Example: deploy monitor
 
 > 1. **Purpose?** Watches production deploys, runs smoke tests, alerts on failures.
-> 2. **Jobs?** Single role — one agent handles it all.
-> 3. **Interaction?** Autonomous — no human chat, just monitors and alerts to a Slack channel.
-> 4. **Services?** GitHub (deploy events), Slack (alert channel).
-> 5. **Events?** GitHub (deploy status changes).
+> 2. **Roles?** Single role — one agent handles it all.
+> 3. **Services?** GitHub (deploy events), Slack (alert channel).
+> 4. **Interaction?** Slack — posts alerts to a channel (no back-and-forth chat needed).
+> 5. **Scheduled jobs?** Smoke tests on a fixed interval after each deploy.
+> 6. **Event triggers?** GitHub (deploy status changes).
+> 7. **Gated workflows?** None — alerting is fully autonomous.
 
 ### Monitor discovery: building the `command:` lines
 
-For any non-native service the user wants to proactively respond to (question 5), the team builder needs to construct the actual `venn exec` command. This requires exploring the user's Venn account to discover server IDs, tool names, and argument schemas.
+For any non-native service the user wants to proactively respond to (question 6), the team builder needs to construct the actual `venn exec` command. This requires exploring the user's Venn account to discover server IDs, tool names, and argument schemas.
 
 The discovery flow:
 
