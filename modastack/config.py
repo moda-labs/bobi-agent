@@ -105,6 +105,7 @@ class Config:
 
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     monitors: list[dict] = field(default_factory=list)
+    auto_dispatch: list[dict] = field(default_factory=list)
 
     def credential(self, service: str, key: str) -> str:
         """Look up a credential value for a named service."""
@@ -163,6 +164,7 @@ class Config:
             venn_api_key=raw.get("venn_api_key", ""),
             mcp_servers=raw.get("mcp_servers", {}),
             monitors=raw.get("monitors", []),
+            auto_dispatch=raw.get("auto_dispatch", []),
         )
 
     @property

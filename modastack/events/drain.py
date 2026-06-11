@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 import time
 from queue import SimpleQueue
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from modastack.events.reactor import EventReactor
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +62,8 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
 
 
 def drain_loop(session_name: str, queue: SimpleQueue | None = None,
-               formatter: Callable | None = None) -> None:
+               formatter: Callable | None = None,
+               reactor: "EventReactor | None" = None) -> None:
     """Drain events from a queue and deliver to a session's inbox.
 
     Args:
@@ -67,6 +71,10 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
         queue: Event queue to drain. Defaults to the global event_queue.
         formatter: Callable to format events for the session. Defaults to
             format_event_for_manager from the client module.
+        reactor: Optional EventReactor for deterministic auto-dispatch.
+            When set, each event is checked against auto-dispatch rules
+            before delivery. Matched events are still delivered but
+            annotated so the LLM knows a workflow was already launched.
     """
     if queue is None:
         from modastack.events.client import event_queue
@@ -86,21 +94,35 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
         while not queue.empty():
             batch.append(queue.get_nowait())
 
-        # Group by delivery class (v2). Chat events (e.g. Slack) are
-        # delivered last so the agent sees bulk context first, then
-        # interactive messages that may need an immediate reply.
-        bulk_events = [e for e in batch if e.get("delivery") != "chat"]
-        chat_events = [e for e in batch if e.get("delivery") == "chat"]
+        # Single pass: auto-dispatch + group by delivery class.
+        # Bulk events are delivered first so the agent sees context
+        # before interactive messages that may need an immediate reply.
+        bulk_events: list[tuple[bool, dict]] = []
+        chat_events: list[tuple[bool, dict]] = []
+        for e in batch:
+            was_dispatched = reactor.process(e) if reactor else False
+            target = chat_events if e.get("delivery") == "chat" else bulk_events
+            target.append((was_dispatched, e))
 
         # Run input channel handlers on chat events (placeholder, typing, etc.).
         if chat_events:
-            chat_events = _prepare_chat_events(chat_events)
+            raw = [ev for _, ev in chat_events]
+            prepared = _prepare_chat_events(raw)
+            chat_events = [
+                (dispatched, prepared_ev)
+                for (dispatched, _), prepared_ev in zip(chat_events, prepared)
+            ]
 
         for group in [bulk_events, chat_events]:
             if not group:
                 continue
 
-            lines = [formatter(e) for e in group]
+            lines = []
+            for was_dispatched, e in group:
+                formatted = formatter(e)
+                if was_dispatched:
+                    formatted += "\n  [AUTO-DISPATCHED: workflow launched — no action needed]"
+                lines.append(formatted)
             text = "\n\n".join(lines)
 
             log.info(f"Delivering {len(group)} event(s) to {session_name}")

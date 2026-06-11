@@ -45,11 +45,37 @@ export function normalizeGitHubWebhook(
 		}
 	}
 
+	// Review-specific fields — pull_request_review and pull_request_review_comment
+	// carry a review/comment object with state, body, and file context that the
+	// consuming agent needs to decide whether to dispatch pr-feedback.
+	const review = payload.review as Record<string, unknown> | undefined;
+	if (review) {
+		if (review.state) fields.review_state = review.state as string;
+		if (review.body) fields.review_body = (review.body as string).slice(0, 500);
+		if (review.html_url) fields.review_url = review.html_url as string;
+	}
+	const comment = payload.comment as Record<string, unknown> | undefined;
+	if (comment && eventHeader === "pull_request_review_comment") {
+		if (comment.body) fields.comment_body = (comment.body as string).slice(0, 500);
+		if (comment.path) fields.comment_path = comment.path as string;
+		if (comment.html_url) fields.comment_url = comment.html_url as string;
+	}
+
+	// issue_comment on a PR — GitHub sends issue_comment for both issues and
+	// PRs, but includes a pull_request key on the issue when it's a PR.
+	if (eventHeader === "issue_comment" && issue) {
+		const prRef = issue.pull_request as Record<string, unknown> | undefined;
+		if (prRef) {
+			fields.is_pull_request = true;
+		}
+	}
+
 	// Human-readable text summary
 	const objLabel = pr ? "PR" : issue ? "issue" : eventHeader;
 	const objNum = obj?.number ? `#${obj.number}` : "";
 	const objTitle = obj?.title ? ` ${obj.title}` : "";
-	const text = `[${repoFullName}] ${action || eventHeader} ${objLabel} ${objNum}${objTitle}`.trim();
+	const reviewSuffix = review?.state ? ` (${review.state})` : "";
+	const text = `[${repoFullName}] ${action || eventHeader} ${objLabel} ${objNum}${objTitle}${reviewSuffix}`.trim();
 
 	return {
 		v: 2,

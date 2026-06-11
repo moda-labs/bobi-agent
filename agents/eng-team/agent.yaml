@@ -18,3 +18,23 @@ services:
     events: true
     credentials:
       api_key: ${LINEAR_API_KEY}
+
+# Deterministic event→workflow routing. These rules fire BEFORE the
+# manager LLM sees the event, guaranteeing the workflow is launched
+# regardless of prompt compliance.
+auto_dispatch:
+  - event: github.pull_request_review
+    match:
+      review_state: changes_requested
+    workflow: pr-feedback
+    cooldown: 1800
+
+  - event: github.pull_request_review_comment
+    workflow: pr-feedback
+    cooldown: 1800
+
+  - event: github.issue_comment
+    match:
+      is_pull_request: true
+    workflow: pr-feedback
+    cooldown: 1800
