@@ -1,0 +1,38 @@
+version: "1.0.0"
+
+# Entry point role for `modastack start`
+entry_point: support_manager
+chat: slack
+
+# Cloud event server URL in production (.env), empty for an
+# auto-started local server.
+event_server: ${MODASTACK_EVENT_SERVER}
+
+# The manager talks to humans on Slack (alerts + the daily report) and
+# files tickets into Linear. PostHog error tracking and the support inbox
+# (Gmail via Venn) are polled by monitors, not native event sources.
+#
+# Credentials go INLINE under each service (`credentials:`) — that is where
+# the framework reads them (Slack workspace auto-detection calls `auth.test`
+# with the service's bot_token). A top-level `slack:`/`linear:` block is NOT
+# read for auto-detection.
+services:
+  - name: slack
+    events: true            # receive @mentions / DMs for "investigate this" asks
+    credentials:
+      bot_token: ${SLACK_BOT_TOKEN}
+  - name: linear
+    events: false           # outbound only — file tickets; do not react to Linear events
+    credentials:
+      api_key: ${LINEAR_API_KEY}
+
+# Email triage reads the support inbox through the Venn Gmail MCP.
+venn_api_key: ${VENN_API_KEY}
+
+# PostHog: a read-only, project-scoped personal key
+# (error_tracking:read + query:read). The posthog-watch monitor reads the
+# API with these, loaded from .modastack/.env. See tools/posthog.md.
+posthog:
+  api_key: ${POSTHOG_API_KEY}
+  host: ${POSTHOG_HOST}
+  project_id: ${POSTHOG_PROJECT_ID}

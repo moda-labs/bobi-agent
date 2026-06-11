@@ -1,0 +1,12 @@
+name: adhoc
+trigger: >
+  For any ad-hoc support task, question, or one-off ask that doesn't match
+  triage-issue or daily-report.
+description: >
+  Open-ended task with no structured lifecycle. Use for quick lookups
+  ("what did you find on the checkout error?"), status questions, or
+  anything that doesn't fit the triage or report pipelines.
+
+steps:
+  - name: task
+    prompt: "${{input.task}}"

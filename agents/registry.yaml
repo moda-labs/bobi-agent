@@ -5,3 +5,6 @@ agents:
   market-research:
     version: "1.0.0"
     description: "Market intelligence — research manager, topic researcher, landscape scanner, PMF navigator"
+  support-manager:
+    version: "1.0.0"
+    description: "Support triage — one agent watches PostHog + email, investigates, files Linear tickets for real issues, and reports daily"

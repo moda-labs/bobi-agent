@@ -1,0 +1,63 @@
+# Background monitors for the support-manager pack.
+#
+# None has a native `check:` runner, so each is evaluated by a short-lived
+# check agent that reads the description and posts its event. Override or
+# disable in your repo's .modastack/monitors.yaml.
+#
+# Intervals support s/m/h/d only — there is no week or time-of-day unit,
+# so the daily report is expressed as 24h from agent start.
+monitors:
+  # Poll PostHog for new error / watchlist signals. If you wire a PostHog
+  # webhook into the event server instead, pause this monitor — webhook
+  # signals arrive on the `posthog` topic. See tools/posthog.md.
+  - name: posthog-watch
+    description: >
+      Query the PostHog API directly with curl (see tools/posthog.md, "Path
+      B") using the project-scoped env vars $POSTHOG_API_KEY / $POSTHOG_HOST
+      / $POSTHOG_PROJECT_ID (from .modastack/.env).
+      Surface genuinely new error-tracking issues (exceptions) and any
+      watchlist event that crosses its threshold. Emit the event only for
+      new, in-scope, material signals — include the error name/type,
+      occurrence count, first/last seen, affected URL or user segment, and
+      the PostHog issue URL. Respect the known-noise / ignore list in
+      support-context.md (benign errors, test/staging/bot traffic). Ignore
+      anything already in the support log or below threshold. On a 401/403
+      or transport error, emit nothing and note the gap.
+    interval: 10m
+    event: monitor/support.posthog
+
+  # Poll the support inbox via the Venn MCP (Gmail) for new bug-like mail.
+  - name: email-watch
+    description: >
+      Read the support inbox through the Venn Gmail MCP — use the Gmail
+      instance and query configured in support-context.md (e.g.
+      `to:<support-address> newer_than:1d`; see tools/gmail.md). Apply the
+      two-step email filter
+      in support-context.md. STEP 1 (gate): emit nothing for mail that is
+      not from a real customer — drop vendor/sales/marketing outreach (cold
+      growth/partnership pitches from company domains) and automated
+      no-reply platform notifications (e.g. *-noreply@google.com, receipts,
+      product announcements). A real support email is first-person from an
+      individual about their own experience with the product. STEP 2: for mail that
+      passes, emit the event for each new candidate thread — include the
+      sender, subject, a body summary, whether more than one person
+      reported it, and the Gmail message link. Pass through real-customer
+      borderline cases (how-to/billing-question/feature-request) too so they
+      are accounted for; the verdict happens in triage. One thread is one
+      signal; do not emit per reply. If Venn is unreachable, emit nothing
+      and note the gap.
+    interval: 10m
+    event: monitor/support.email
+
+  # Unconditional daily tick. The check agent just fires the event every
+  # cycle so the manager runs the daily-report workflow; this is a cron,
+  # not a conditional check.
+  - name: daily-report
+    description: >
+      It is the daily support-report cadence. Always emit the daily-report
+      event to trigger the report. This is an unconditional daily tick — do
+      not evaluate whether anything changed; just fire so the support
+      manager launches the daily-report workflow and posts the report to
+      the support channel.
+    interval: 24h
+    event: monitor/support.daily_report
