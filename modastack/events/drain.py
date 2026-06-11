@@ -40,10 +40,13 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
         while not queue.empty():
             batch.append(queue.get_nowait())
 
-        slack_events = [e for e in batch if e.get("source") == "slack"]
-        other_events = [e for e in batch if e.get("source") != "slack"]
+        # Group by delivery class (v2). Chat events (e.g. Slack) are
+        # delivered last so the agent sees bulk context first, then
+        # interactive messages that may need an immediate reply.
+        bulk_events = [e for e in batch if e.get("delivery") != "chat"]
+        chat_events = [e for e in batch if e.get("delivery") == "chat"]
 
-        for group in [other_events, slack_events]:
+        for group in [bulk_events, chat_events]:
             if not group:
                 continue
 

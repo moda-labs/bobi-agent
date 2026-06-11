@@ -73,7 +73,8 @@ class TestDrainLoop:
             assert call_args[0][0] == "test-session"
             assert "formatted:task.opened" in call_args[0][1]
 
-    def test_slack_events_delivered_separately(self):
+    def test_chat_events_delivered_separately(self):
+        """Chat-delivery events (e.g. Slack) are batched separately from bulk."""
         queue = SimpleQueue()
 
         with patch("modastack.inbox.deliver") as mock_deliver:
@@ -87,8 +88,10 @@ class TestDrainLoop:
             thread.start()
 
             queue.put({"type": "task.opened", "source": "github",
+                       "delivery": "bulk",
                        "data": {"issue_id": "1"}})
             queue.put({"type": "slack.dm", "source": "slack",
+                       "delivery": "chat",
                        "data": {"text": "hi"}})
 
             time.sleep(DRAIN_INTERVAL + 1)

@@ -139,7 +139,10 @@ class TestGitHubWebhook:
         github_events = [e for e in events if e.get("source") == "github"]
         assert len(github_events) >= 1
         assert github_events[0]["type"] == "github.issues"
-        assert github_events[0]["repo"] == "test-org/test-repo"
+        assert github_events[0]["v"] == 2
+        assert github_events[0]["topics"] == ["github:test-org/test-repo"]
+        assert github_events[0]["delivery"] == "bulk"
+        assert "test-org/test-repo" in github_events[0]["text"]
 
     def test_github_pr_event_delivered(self, deployment):
         base_url, dep_id, api_key = deployment
@@ -169,7 +172,8 @@ class TestLinearWebhook:
         linear_events = [e for e in events if e.get("source") == "linear"]
         assert len(linear_events) >= 1
         assert linear_events[0]["type"] == "linear.Issue.update"
-        assert linear_events[0]["team_key"] == "TEST"
+        assert linear_events[0]["v"] == 2
+        assert linear_events[0]["topics"] == ["linear:TEST"]
 
 
 class TestSlackWebhook:
@@ -202,7 +206,9 @@ class TestSlackWebhook:
         slack_events = [e for e in events if e.get("source") == "slack"]
         assert len(slack_events) >= 1
         assert slack_events[0]["type"] == "slack.dm"
-        assert slack_events[0]["workspace"] == "T_TEST"
+        assert slack_events[0]["v"] == 2
+        assert slack_events[0]["topics"] == ["slack:T_TEST"]
+        assert slack_events[0]["delivery"] == "chat"
 
     def test_slack_mention_event_delivered(self, deployment):
         base_url, dep_id, api_key = deployment
