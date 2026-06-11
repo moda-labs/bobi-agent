@@ -201,3 +201,43 @@ class TestAgentCommand:
             ])
         assert result.exit_code == 0
         assert mock.call_args[1]["requested_by"] == {"from": "Alice", "channel": "C1"}
+
+
+# --- modastack events (malformed line handling) --------------------------------
+
+
+class TestEventsCommand:
+    """The events command must not crash on malformed JSONL lines."""
+
+    def test_skips_malformed_lines_in_events_jsonl(self, tmp_path):
+        state = tmp_path / ".modastack" / "state"
+        state.mkdir(parents=True)
+        good = {"timestamp": "2026-01-01T00:00:00", "source": "github", "type": "push", "data": {}}
+        # Write a good line, a corrupted line, and another good line
+        (state / "events.jsonl").write_text(
+            json.dumps(good) + "\n"
+            + "NOT VALID JSON\n"
+            + json.dumps({**good, "type": "pr"}) + "\n"
+        )
+        runner = CliRunner()
+        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+            result = runner.invoke(main, ["events"])
+        assert result.exit_code == 0, result.output
+        assert "push" in result.output
+        assert "pr" in result.output
+        assert "1 malformed" in result.output
+
+    def test_skips_malformed_lines_in_decisions_jsonl(self, tmp_path):
+        state = tmp_path / ".modastack" / "state"
+        state.mkdir(parents=True)
+        good = {"timestamp": "2026-01-01T00:00:00", "actions": [{"type": "deploy"}], "reasoning": "ship it"}
+        (state / "decisions.jsonl").write_text(
+            json.dumps(good) + "\n"
+            + "CORRUPTED\n"
+        )
+        runner = CliRunner()
+        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+            result = runner.invoke(main, ["events"])
+        assert result.exit_code == 0, result.output
+        assert "deploy" in result.output
+        assert "1 malformed" in result.output

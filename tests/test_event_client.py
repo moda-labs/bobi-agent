@@ -1,4 +1,4 @@
-"""Tests for event client — formatting and queue ingestion."""
+"""Tests for event client — formatting, queue ingestion, and event logging."""
 
 import json
 from pathlib import Path
@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 from modastack.events.client import (
     format_event_for_manager,
     event_queue,
+    _log_event,
 )
 
 
@@ -95,6 +96,41 @@ class TestFormatEventForManager:
         text = format_event_for_manager(event)
         assert "requested_by: Alice" in text
         assert "channel C0SHARED" in text
+
+
+class TestLogEvent:
+    """_log_event appends to events.jsonl without corrupting existing lines."""
+
+    def test_appends_on_fresh_line_when_file_missing_trailing_newline(self, tmp_path):
+        """If events.jsonl doesn't end with a newline (e.g. truncated write),
+        _log_event must start a new line so it doesn't merge with the last entry."""
+        jsonl = tmp_path / "events.jsonl"
+        # Simulate a prior write that lost its trailing newline
+        first = {"timestamp": "2026-01-01T00:00:00", "type": "a", "source": "x", "payload": {}}
+        jsonl.write_text(json.dumps(first))  # no trailing \n
+
+        with patch("modastack.events.client._state_path", return_value=jsonl):
+            _log_event({"type": "b", "source": "y"})
+
+        lines = jsonl.read_text().splitlines()
+        assert len(lines) == 2, f"Expected 2 lines, got {len(lines)}: {lines}"
+        # Both lines must be valid JSON
+        json.loads(lines[0])
+        json.loads(lines[1])
+
+    def test_normal_append_no_blank_line(self, tmp_path):
+        """When file ends with newline (normal case), no extra blank line inserted."""
+        jsonl = tmp_path / "events.jsonl"
+        first = {"timestamp": "2026-01-01T00:00:00", "type": "a", "source": "x", "payload": {}}
+        jsonl.write_text(json.dumps(first) + "\n")
+
+        with patch("modastack.events.client._state_path", return_value=jsonl):
+            _log_event({"type": "b", "source": "y"})
+
+        content = jsonl.read_text()
+        lines = content.splitlines()
+        assert len(lines) == 2
+        assert content.endswith("\n")
 
 
 class TestEventQueue:

@@ -47,8 +47,15 @@ def _log_event(event: dict) -> None:
         "source": event.get("source", ""),
         "payload": event.get("payload", event.get("data", {})),
     }
-    with open(_state_path("events.jsonl"), "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    path = _state_path("events.jsonl")
+    prefix = ""
+    if path.exists() and path.stat().st_size > 0:
+        with open(path, "rb") as f:
+            f.seek(-1, 2)
+            if f.read(1) != b"\n":
+                prefix = "\n"
+    with open(path, "a") as f:
+        f.write(prefix + json.dumps(entry) + "\n")
 
 
 
