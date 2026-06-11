@@ -14,11 +14,10 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from modastack.subagent import launch_agent
-
 log = logging.getLogger(__name__)
 
 DEFAULT_COOLDOWN = 1800  # 30 minutes
+_MAX_DEDUP_ENTRIES = 500
 
 
 @dataclass
@@ -82,10 +81,20 @@ class EventReactor:
                 return False
 
             self._dispatched[key] = now
+            self._prune_dispatched(now)
             self._dispatch(rule, event, key)
             return True
 
         return False
+
+    def _prune_dispatched(self, now: float) -> None:
+        """Remove expired entries so the dedup dict doesn't grow unbounded."""
+        if len(self._dispatched) <= _MAX_DEDUP_ENTRIES:
+            return
+        max_cooldown = max((r.cooldown for r in self.rules), default=DEFAULT_COOLDOWN)
+        expired = [k for k, ts in self._dispatched.items() if now - ts > max_cooldown]
+        for k in expired:
+            del self._dispatched[k]
 
     def _dispatch(self, rule: AutoDispatchRule, event: dict, key: str) -> None:
         """Launch the workflow for a matched event."""
@@ -96,7 +105,6 @@ class EventReactor:
         review_state = fields.get("review_state", "")
         event_type = event.get("type", "")
 
-        # Build a descriptive task for the engineer
         parts = [f"PR #{number} in {repo} received review feedback"]
         if review_state:
             parts.append(f"(review: {review_state})")
@@ -106,6 +114,7 @@ class EventReactor:
 
         log.info("Auto-dispatching %s for %s", rule.workflow, key)
         try:
+            from modastack.subagent import launch_agent
             launch_agent(
                 task=task,
                 cwd=self.cwd,

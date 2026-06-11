@@ -175,7 +175,7 @@ class TestEventReactor:
             },
         }
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_dispatches_on_matching_event(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -189,7 +189,7 @@ class TestEventReactor:
         assert call_kwargs[1]["workflow_name"] == "pr-feedback"
         assert "PR #42" in call_kwargs[1]["task"]
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_no_dispatch_on_non_matching_event(self, mock_launch):
         reactor = self._make_reactor()
         event = {"type": "github.issues", "fields": {"action": "opened"}}
@@ -199,7 +199,7 @@ class TestEventReactor:
         assert dispatched is False
         mock_launch.assert_not_called()
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_no_dispatch_when_review_state_is_approved(self, mock_launch):
         reactor = self._make_reactor()
         event = self._make_review_event(review_state="approved")
@@ -209,7 +209,7 @@ class TestEventReactor:
         assert dispatched is False
         mock_launch.assert_not_called()
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_dispatches_on_review_comment(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -220,7 +220,7 @@ class TestEventReactor:
         assert dispatched is True
         mock_launch.assert_called_once()
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_dedup_prevents_rapid_double_dispatch(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -230,7 +230,7 @@ class TestEventReactor:
         assert reactor.process(event) is False
         assert mock_launch.call_count == 1
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_dedup_allows_dispatch_after_cooldown(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor(cooldown=0)  # zero cooldown
@@ -240,7 +240,7 @@ class TestEventReactor:
         assert reactor.process(event) is True
         assert mock_launch.call_count == 2
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_different_prs_dispatch_independently(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -251,7 +251,7 @@ class TestEventReactor:
         assert reactor.process(event2) is True
         assert mock_launch.call_count == 2
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_graceful_on_launch_failure_active_session(self, mock_launch):
         """If launch_agent raises because session is already active, handle gracefully."""
         mock_launch.side_effect = RuntimeError("A run is already active")
@@ -262,7 +262,7 @@ class TestEventReactor:
         dispatched = reactor.process(event)
         assert dispatched is True
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_task_includes_pr_context(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -274,7 +274,7 @@ class TestEventReactor:
         assert "#42" in task
         assert "moda-labs/test" in task
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_empty_rules_never_dispatches(self, mock_launch):
         reactor = EventReactor(rules=[], cwd="/tmp")
         event = self._make_review_event()

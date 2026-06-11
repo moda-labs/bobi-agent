@@ -68,7 +68,7 @@ class TestDrainAutoDispatch:
 
         return delivered
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_matching_event_gets_annotation(self, mock_launch):
         """Auto-dispatched events get annotation appended to text."""
         mock_launch.return_value = "wf-pr-feedback-test-1"
@@ -89,7 +89,7 @@ class TestDrainAutoDispatch:
         assert "[org/repo] submitted PR #1" in delivered[0]
         mock_launch.assert_called_once()
 
-    @patch("modastack.events.reactor.launch_agent")
+    @patch("modastack.subagent.launch_agent")
     def test_non_matching_event_passes_through(self, mock_launch):
         """Non-matching events are delivered without annotation."""
         reactor = self._make_reactor()

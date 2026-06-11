@@ -94,20 +94,15 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
         while not queue.empty():
             batch.append(queue.get_nowait())
 
-        # Auto-dispatch: check each event before formatting. Matching
-        # events still get delivered but are annotated so the manager
-        # knows the workflow was already launched.
-        dispatched: set[int] = set()
-        if reactor:
-            for i, e in enumerate(batch):
-                if reactor.process(e):
-                    dispatched.add(i)
-
-        # Group by delivery class (v2). Chat events (e.g. Slack) are
-        # delivered last so the agent sees bulk context first, then
-        # interactive messages that may need an immediate reply.
-        bulk_events = [(i, e) for i, e in enumerate(batch) if e.get("delivery") != "chat"]
-        chat_events = [(i, e) for i, e in enumerate(batch) if e.get("delivery") == "chat"]
+        # Single pass: auto-dispatch + group by delivery class.
+        # Bulk events are delivered first so the agent sees context
+        # before interactive messages that may need an immediate reply.
+        bulk_events: list[tuple[bool, dict]] = []
+        chat_events: list[tuple[bool, dict]] = []
+        for e in batch:
+            was_dispatched = reactor.process(e) if reactor else False
+            target = chat_events if e.get("delivery") == "chat" else bulk_events
+            target.append((was_dispatched, e))
 
         # Run input channel handlers on chat events (placeholder, typing, etc.).
         if chat_events:
@@ -118,9 +113,9 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 continue
 
             lines = []
-            for i, e in group:
+            for was_dispatched, e in group:
                 formatted = formatter(e)
-                if i in dispatched:
+                if was_dispatched:
                     formatted += "\n  [AUTO-DISPATCHED: workflow launched — no action needed]"
                 lines.append(formatted)
             text = "\n\n".join(lines)
