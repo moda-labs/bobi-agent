@@ -214,10 +214,10 @@ class TestRegistryCrossProject:
         registry = SessionRegistry()
 
         entry = SessionEntry(
-            name="eng-42-implement",
+            name="agent-42-implement",
             session_id="sess-abc",
-            role="engineer",
-            issue_id="42",
+            role="",
+            run_key="42",
             phase="implement",
             project="jobtack",
             cwd=str(child),
@@ -227,9 +227,9 @@ class TestRegistryCrossProject:
         registry.register(entry)
 
         # Verify it was written to parent's sessions dir
-        assert (parent / ".modastack" / "sessions" / "eng-42-implement" / "state.json").exists()
+        assert (parent / ".modastack" / "sessions" / "agent-42-implement" / "state.json").exists()
         # NOT in child's sessions dir
-        assert not (child / ".modastack" / "sessions" / "eng-42-implement" / "state.json").exists()
+        assert not (child / ".modastack" / "sessions" / "agent-42-implement" / "state.json").exists()
 
         # Now switch perspective: director sets project root to parent
         set_project_root(parent)
@@ -238,7 +238,7 @@ class TestRegistryCrossProject:
         director_registry = SessionRegistry()
         active = director_registry.list_active()
         names = [e.name for e in active]
-        assert "eng-42-implement" in names
+        assert "agent-42-implement" in names
 
     def test_agent_registered_locally_without_manager(self, tree):
         _, child = tree
@@ -248,16 +248,16 @@ class TestRegistryCrossProject:
         registry = SessionRegistry()
 
         entry = SessionEntry(
-            name="eng-99-spec",
+            name="agent-99-spec",
             session_id="",
-            role="engineer",
+            role="",
             status="running",
             pid=os.getpid(),
         )
         registry.register(entry)
 
         # Should be in child's own sessions dir
-        assert (child / ".modastack" / "sessions" / "eng-99-spec" / "state.json").exists()
+        assert (child / ".modastack" / "sessions" / "agent-99-spec" / "state.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -272,13 +272,13 @@ class TestListAgentsRegistry:
         set_project_root(parent)
 
         # Manually create a session entry on disk (simulating a detached agent)
-        session_dir = parent / ".modastack" / "sessions" / "eng-42-implement"
+        session_dir = parent / ".modastack" / "sessions" / "agent-42-implement"
         session_dir.mkdir(parents=True)
         entry = SessionEntry(
-            name="eng-42-implement",
+            name="agent-42-implement",
             session_id="sess-x",
-            role="engineer",
-            issue_id="42",
+            role="",
+            run_key="42",
             phase="implement",
             project="jobtack",
             cwd=str(child),
@@ -292,7 +292,7 @@ class TestListAgentsRegistry:
         agents = list_agents()
         assert len(agents) >= 1
         names = [a.get("name") for a in agents]
-        assert "eng-42-implement" in names
+        assert "agent-42-implement" in names
 
     def test_excludes_managers_from_registry(self, tree):
         parent, _ = tree
@@ -362,13 +362,13 @@ class TestMessageRoutingCrossProject:
         (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
 
         # Register an agent in parent's sessions dir
-        session_dir = parent / ".modastack" / "sessions" / "eng-42-implement"
+        session_dir = parent / ".modastack" / "sessions" / "agent-42-implement"
         session_dir.mkdir(parents=True)
         entry = SessionEntry(
-            name="eng-42-implement",
+            name="agent-42-implement",
             session_id="sess-abc",
-            role="engineer",
-            issue_id="42",
+            role="",
+            run_key="42",
             phase="implement",
             status="running",
             pid=os.getpid(),
@@ -383,6 +383,6 @@ class TestMessageRoutingCrossProject:
         sdk._registry = None
 
         registry = get_registry()
-        found = registry.get("eng-42-implement")
+        found = registry.get("agent-42-implement")
         assert found is not None
         assert found.inbox_port == 12345

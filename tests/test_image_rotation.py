@@ -252,7 +252,7 @@ class TestSubagentImageStamp:
             "name": "old-session",
             "session_id": "legacy-id",
             "role": "engineer",
-            "issue_id": "",
+            "run_key": "",
             "title": "",
             "phase": "",
             "project": "",

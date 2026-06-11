@@ -129,8 +129,8 @@ class TestFormatEventForManager:
 
     def test_renders_requested_by_from_data(self):
         event = {
-            "v": 2, "type": "engineer/session.completed", "source": "engineer",
-            "topics": ["engineer/session.completed"], "delivery": "bulk",
+            "v": 2, "type": "agent/session.completed", "source": "engineer",
+            "topics": ["agent/session.completed"], "delivery": "bulk",
             "text": "engineer completed session",
             "data": {
                 "issue_id": "adhoc-x", "summary": "PR up",

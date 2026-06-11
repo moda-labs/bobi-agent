@@ -129,7 +129,7 @@ class TestMultiStepWorkflowLaunch:
 
         result = run_workflow(
             wf, task="Run two-step test #202", repo="test-repo",
-            cwd=str(modastack_env.project_path), issue_id="202",
+            cwd=str(modastack_env.project_path), run_key="202",
             timeout=120, interactive=False,
         )
 

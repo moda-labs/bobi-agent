@@ -29,7 +29,7 @@ class WorkflowRun:
     variable_scopes: dict = field(default_factory=dict)
     repo: str = ""
     cwd: str = ""
-    issue_id: str = ""
+    run_key: str = ""
     resumed_at: str = ""
 
     def save(self):
@@ -59,7 +59,7 @@ class WorkflowRun:
             variable_scopes=data.get("variable_scopes", {}),
             repo=data.get("repo", ""),
             cwd=data.get("cwd", ""),
-            issue_id=data.get("issue_id", ""),
+            run_key=data.get("run_key", ""),
             resumed_at=data.get("resumed_at", ""),
         )
 
@@ -69,7 +69,7 @@ class WorkflowRun:
         return cls.from_dict(json.loads(path.read_text()))
 
     @classmethod
-    def find_waiting(cls, await_event: str, issue_id: str = "") -> WorkflowRun | None:
+    def find_waiting(cls, await_event: str, run_key: str = "") -> WorkflowRun | None:
         """Find a run suspended and waiting for a specific event type."""
         if not _runs_dir().exists():
             return None
@@ -80,9 +80,9 @@ class WorkflowRun:
                     continue
                 if data.get("await_event") != await_event:
                     continue
-                if issue_id:
+                if run_key:
                     trigger_data = data.get("trigger_event", {}).get("data", {})
-                    if trigger_data.get("issue_id") != issue_id:
+                    if trigger_data.get("run_key") != run_key:
                         continue
                 return cls.from_dict(data)
             except (json.JSONDecodeError, KeyError):

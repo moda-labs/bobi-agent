@@ -1,6 +1,6 @@
-"""Sub-agent executor — runs engineer phases as Claude Code sessions.
+"""Sub-agent executor — runs agent phases as Claude Code sessions.
 
-Each engineer gets a persistent ClaudeSDKClient session tracked in the
+Each agent gets a persistent ClaudeSDKClient session tracked in the
 registry. Sessions survive restarts and can be resumed, interacted with
 from the dashboard, or cancelled.
 """
@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import subprocess as sp
 import sys
 import threading
@@ -41,7 +40,7 @@ PHASE_TIMEOUT = {
 @dataclass
 class AgentResult:
     session_id: str
-    issue_id: str
+    run_key: str
     phase: str
     success: bool
     duration_ms: int = 0
@@ -51,12 +50,12 @@ class AgentResult:
     final_text: str = ""
 
 
-def _build_prompt(phase: str, issue_id: str, context: str = "") -> str:
-    parts = [f"Phase: {phase}", f"Issue: #{issue_id}"]
+def _build_prompt(phase: str, run_key: str, role: str = "", context: str = "") -> str:
+    parts = [f"Phase: {phase}", f"Issue: #{run_key}"]
 
     if context:
         parts.append(context)
-    session_name = _session_name(issue_id, phase)
+    session_name = _session_name(run_key, role=role, phase=phase)
     handoff_path = SessionRegistry.handoff_path(session_name, phase)
     parts.append(
         f"After completing this phase, write your handoff file at "
@@ -65,24 +64,25 @@ def _build_prompt(phase: str, issue_id: str, context: str = "") -> str:
     return "\n\n".join(parts)
 
 
-def _session_name(issue_id: str, phase: str = "") -> str:
+def _session_name(run_key: str, role: str = "", phase: str = "") -> str:
+    prefix = role.lower() if role else "agent"
     if phase:
-        return f"eng-{issue_id.lower()}-{phase}"
-    return f"eng-{issue_id.lower()}"
+        return f"{prefix}-{run_key.lower()}-{phase}"
+    return f"{prefix}-{run_key.lower()}"
 
 
 # ---------------------------------------------------------------------------
 # Lifecycle events
 # ---------------------------------------------------------------------------
 #
-# Engineer processes run out-of-band — their own OS process for `modastack
+# Agent processes run out-of-band — their own OS process for `modastack
 # spawn`, or a worker thread for workflow phases — so they can't reach the
 # manager's in-process event queue directly. They post lifecycle events to the
 # bus the same way monitor checks do: over HTTP via events/publish.post_event.
 # The started emit is fire-and-forget on a daemon thread so a missing or
-# unreachable event server never blocks or breaks the engineer run. The
+# unreachable event server never blocks or breaks the agent run. The
 # terminal emit (completed/failed) blocks briefly on that thread: it's the
-# last action before the spawn process exits, and a daemon thread would
+# last action before the agent process exits, and a daemon thread would
 # otherwise be killed mid-POST at shutdown.
 
 
@@ -96,10 +96,10 @@ def _emit_lifecycle_event(
     event_type: str, data: dict[str, Any], *, blocking: bool = False,
     timeout: float = 5,
 ) -> None:
-    """POST an engineer lifecycle event to the event bus.
+    """POST an agent lifecycle event to the event bus.
 
     Runs on a daemon thread and swallows all errors — event delivery is
-    best-effort and must never fail the engineer run.
+    best-effort and must never fail the agent run.
 
     With ``blocking=True`` the caller waits (up to ``timeout`` seconds) for the
     POST to land before returning. This is required for the *terminal* emit
@@ -124,49 +124,54 @@ def _emit_lifecycle_event(
 
 
 def _emit_session_started(
-    issue_id: str, project: str, task: str, session_id: str, phase: str = "",
-    requested_by: dict | None = None,
+    run_key: str, project: str, task: str, session_id: str, phase: str = "",
+    requested_by: dict | None = None, role: str = "",
 ) -> None:
-    _emit_lifecycle_event("engineer/session.started", {
-        "issue_id": issue_id,
-        "repo": project,
+    label = role or "Agent"
+    _emit_lifecycle_event("agent/session.started", {
+        "run_key": run_key,
+        "role": role,
+        "project": project,
         "task": (task or "")[:500],
         "session_id": session_id,
         "phase": phase,
         "requested_by": requested_by or None,
-        "text": f"Engineer started working on {issue_id}",
+        "text": f"{label} started working on {run_key}",
     })
 
 
 def _emit_session_finished(
     result: "AgentResult", project: str, session_id: str, started_at: float,
-    requested_by: dict | None = None,
+    requested_by: dict | None = None, role: str = "",
 ) -> None:
     duration = round(time.time() - started_at, 1)
-    # Terminal emit: block so the POST lands before the spawn process exits.
+    label = role or "Agent"
+    # Terminal emit: block so the POST lands before the agent process exits.
     if result.success:
         summary = _summarize_output(result.final_text)
-        _emit_lifecycle_event("engineer/session.completed", {
-            "issue_id": result.issue_id,
-            "repo": project,
+        _emit_lifecycle_event("agent/session.completed", {
+            "run_key": result.run_key,
+            "role": role,
+            "project": project,
             "session_id": session_id,
             "phase": result.phase,
             "duration": duration,
             "summary": summary,
             "requested_by": requested_by or None,
-            "text": f"Engineer finished {result.issue_id} in {duration:.0f}s",
+            "text": f"{label} finished {result.run_key} in {duration:.0f}s",
         }, blocking=True)
     else:
         error = result.error or "unknown error"
-        _emit_lifecycle_event("engineer/session.failed", {
-            "issue_id": result.issue_id,
-            "repo": project,
+        _emit_lifecycle_event("agent/session.failed", {
+            "run_key": result.run_key,
+            "role": role,
+            "project": project,
             "session_id": session_id,
             "phase": result.phase,
             "duration": duration,
             "error": error,
             "requested_by": requested_by or None,
-            "text": f"Engineer failed on {result.issue_id}: {error}",
+            "text": f"{label} failed on {result.run_key}: {error}",
         }, blocking=True)
 
 
@@ -193,10 +198,11 @@ def _make_defer_hook() -> dict:
 async def _run_agent_supervised(
     prompt: str,
     cwd: str,
-    issue_id: str,
+    run_key: str,
     phase: str,
     timeout: int,
     on_input_needed: InputHandler | None = None,
+    role: str = "",
 ) -> AgentResult:
     """Core agent loop. Blocks until the agent finishes or times out.
 
@@ -212,12 +218,13 @@ async def _run_agent_supervised(
         TextBlock,
     )
 
-    name = _session_name(issue_id, phase)
+    name = _session_name(run_key, role=role, phase=phase)
     saved_id = load_session_id(name)
     registry = get_registry()
 
     hooks = _make_defer_hook() if on_input_needed else None
 
+    label = role or "agent"
     options = ClaudeAgentOptions(
         cwd=cwd,
         permission_mode="bypassPermissions",
@@ -230,7 +237,7 @@ async def _run_agent_supervised(
             "type": "preset",
             "preset": "claude_code",
             "append": (
-                f"You are an engineer agent working on issue #{issue_id}, "
+                f"You are a {label} agent working on issue #{run_key}, "
                 f"phase: {phase}. Follow the skill file instructions exactly."
             ),
         },
@@ -240,7 +247,7 @@ async def _run_agent_supervised(
     registry.update(name, status="running", phase=phase, session_id=saved_id or "")
 
     result = AgentResult(
-        session_id="", issue_id=issue_id, phase=phase, success=False,
+        session_id="", run_key=run_key, phase=phase, success=False,
     )
 
     try:
@@ -276,7 +283,7 @@ async def _run_agent_supervised(
 
             if result_msg.deferred_tool_use and on_input_needed:
                 deferred = result_msg.deferred_tool_use
-                log.info(f"Agent {issue_id}/{phase} deferred {deferred.name}")
+                log.info(f"Agent {run_key}/{phase} deferred {deferred.name}")
                 loop = asyncio.get_running_loop()
                 answer = await loop.run_in_executor(
                     None, on_input_needed, deferred.name, deferred.input,
@@ -299,7 +306,7 @@ async def _run_agent_supervised(
     except Exception as e:
         result.error = str(e)
         registry.update(name, status="error")
-        log.error(f"Sub-agent error for {issue_id}/{phase}: {e}")
+        log.error(f"Sub-agent error for {run_key}/{phase}: {e}")
     finally:
         try:
             await client.disconnect()
@@ -310,13 +317,14 @@ async def _run_agent_supervised(
 
 
 def run_phase_blocking(
-    issue_id: str,
+    run_key: str,
     phase: str,
     cwd: str,
     context: str = "",
     title: str = "",
     project: str = "",
     timeout: int | None = None,
+    role: str = "",
 ) -> AgentResult:
     """Run a sub-agent phase, blocking until completion.
 
@@ -326,15 +334,16 @@ def run_phase_blocking(
     """
     from modastack.session import Session
 
-    prompt = _build_prompt(phase, issue_id, context)
+    prompt = _build_prompt(phase, run_key, role=role, context=context)
     effective_timeout = timeout or PHASE_TIMEOUT.get(phase, 1800)
-    name = _session_name(issue_id, phase)
+    name = _session_name(run_key, role=role, phase=phase)
 
     started_at = time.time()
-    _emit_session_started(issue_id, project, title or context, name, phase=phase)
+    _emit_session_started(run_key, project, title or context, name, phase=phase, role=role)
 
+    label = role or "agent"
     append_text = (
-        f"You are an engineer agent working on issue #{issue_id}, "
+        f"You are a {label} agent working on issue #{run_key}, "
         f"phase: {phase}. Follow the skill file instructions exactly."
     )
     memory_prompt = _load_memory_for_session(cwd, name)
@@ -357,7 +366,7 @@ def run_phase_blocking(
     if ok:
         result = AgentResult(
             session_id=session.get_session_id(),
-            issue_id=issue_id,
+            run_key=run_key,
             phase=phase,
             success=not session._last_is_error,
             duration_ms=session._total_duration_ms,
@@ -368,38 +377,14 @@ def run_phase_blocking(
         )
     else:
         result = AgentResult(
-            session_id="", issue_id=issue_id, phase=phase,
+            session_id="", run_key=run_key, phase=phase,
             success=False, error=f"session failed to start within {effective_timeout}s",
         )
 
     session.stop()
-    _emit_session_finished(result, project, name, started_at)
+    _emit_session_finished(result, project, name, started_at, role=role)
     return result
 
-
-# Issue references in a freeform task, most specific first. We prefer an
-# explicit "issue" keyword over a bare "#5" so an incidental "#3" elsewhere in
-# the prompt doesn't win over the real reference.
-_ISSUE_REF_PATTERNS = (
-    re.compile(r"\bissues?\s*#\s*(\d+)\b", re.IGNORECASE),  # "issue #5", "issue#5"
-    re.compile(r"\bissues?\s+(\d+)\b", re.IGNORECASE),       # "Issue 5"
-    re.compile(r"#(\d+)\b"),                                  # bare "#5"
-)
-
-
-def _parse_issue_number(task: str) -> str | None:
-    """Extract an issue number referenced in a freeform task description.
-
-    Recognizes patterns like "issue #5", "Issue 5", or a bare "#5". Returns the
-    number as a string (e.g. "5"), or None when no reference is present.
-    """
-    if not task:
-        return None
-    for pattern in _ISSUE_REF_PATTERNS:
-        match = pattern.search(task)
-        if match:
-            return match.group(1)
-    return None
 
 
 def _resolve_project_name(cwd: str) -> str:
@@ -430,10 +415,10 @@ def spawn_adhoc(
     name: str | None = None,
     requested_by: dict | None = None,
     persistent: bool = False,
-    role: str = "engineer",
+    role: str = "",
     mcp_servers: dict | None = None,
 ) -> AgentResult:
-    """Spawn an engineer agent with a freeform task prompt.
+    """Spawn an agent with a freeform task prompt.
 
     Creates a Session with the task as the startup prompt. The session
     has an inbox so other sessions can message it during execution.
@@ -446,18 +431,19 @@ def spawn_adhoc(
     from modastack.session import Session
 
     short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
-    issue_id = name or _parse_issue_number(task) or f"adhoc-{short_hash}"
+    run_key = name or f"adhoc-{short_hash}"
     project = _resolve_project_name(cwd)
     requested_by = requested_by or {}
 
     started_at = time.time()
-    _emit_session_started(issue_id, project, task, issue_id, phase="adhoc",
-                          requested_by=requested_by)
+    _emit_session_started(run_key, project, task, run_key, phase="adhoc",
+                          requested_by=requested_by, role=role)
 
     from modastack.prompts.resolver import _resolve_role_prompt
     role_prompt = _resolve_role_prompt(role, Path(cwd))
+    label = role or "agent"
     append_parts = [
-        f"You are a {role} agent working on an adhoc task. "
+        f"You are a {label} agent working on an adhoc task. "
         f"Complete the task described in your initial prompt."
     ]
     if persistent:
@@ -472,12 +458,12 @@ def spawn_adhoc(
     # Skip if the task prompt already contains it (e.g. entry-point agent
     # where build_startup_prompt() already injected memory).
     if "## Decision Log" not in task:
-        memory_prompt = _load_memory_for_session(cwd, issue_id)
+        memory_prompt = _load_memory_for_session(cwd, run_key)
         if memory_prompt:
             append_parts.append(memory_prompt)
 
     session = Session(
-        name=issue_id,
+        name=run_key,
         cwd=cwd,
         system_prompt={
             "type": "preset",
@@ -504,7 +490,7 @@ def spawn_adhoc(
 
         result = AgentResult(
             session_id=session.get_session_id(),
-            issue_id=issue_id,
+            run_key=run_key,
             phase="adhoc",
             success=True,
             duration_ms=session._total_duration_ms,
@@ -512,14 +498,14 @@ def spawn_adhoc(
             num_turns=session._total_turns,
             final_text=session._last_response,
         )
-        _emit_session_finished(result, project, issue_id, started_at,
-                               requested_by=requested_by)
+        _emit_session_finished(result, project, run_key, started_at,
+                               requested_by=requested_by, role=role)
         return result
 
     if ok:
         result = AgentResult(
             session_id=session.get_session_id(),
-            issue_id=issue_id,
+            run_key=run_key,
             phase="adhoc",
             success=not session._last_is_error,
             duration_ms=session._total_duration_ms,
@@ -529,13 +515,13 @@ def spawn_adhoc(
         )
     else:
         result = AgentResult(
-            session_id="", issue_id=issue_id, phase="adhoc",
+            session_id="", run_key=run_key, phase="adhoc",
             success=False, error=f"session failed to start within {timeout}s",
         )
 
     session.stop()
-    _emit_session_finished(result, project, issue_id, started_at,
-                           requested_by=requested_by)
+    _emit_session_finished(result, project, run_key, started_at,
+                           requested_by=requested_by, role=role)
     return result
 
 
@@ -555,13 +541,14 @@ def launch_agent(
     timeout: int = 3600,
     requested_by: dict | None = None,
     interactive: bool = True,
-    role: str = "engineer",
+    role: str = "",
     persistent: bool = False,
     subscribe: list[str] | None = None,
+    run_key: str | None = None,
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
-    Session name is deterministic: wf-{workflow}-{project}-{issue}.
+    Session name is deterministic: wf-{workflow}-{project}-{run_key}.
     - If an active run exists for the same session → reject
     - If a failed/stale run exists → resume (same session ID)
     - If completed or new → fresh start
@@ -571,14 +558,14 @@ def launch_agent(
     instead of the workflow orchestrator.
     """
     import uuid
-    issue_id = _parse_issue_number(task) or f"adhoc-{uuid.uuid4().hex[:8]}"
+    run_key = run_key or f"adhoc-{uuid.uuid4().hex[:8]}"
     project = _resolve_project_name(cwd)
 
     if persistent:
-        session_name = issue_id
+        session_name = run_key
     else:
         from modastack.workflow.orchestrator import make_session_name
-        session_name = make_session_name(workflow_name, project, issue_id)
+        session_name = make_session_name(workflow_name, project, run_key)
 
     registry = get_registry()
     existing = registry.get(session_name)
@@ -594,7 +581,7 @@ def launch_agent(
         "workflow_name": workflow_name,
         "timeout": timeout,
         "requested_by": requested_by or {},
-        "issue_id": issue_id,
+        "run_key": run_key,
         "interactive": interactive,
         "role": role,
         "persistent": persistent,
@@ -613,7 +600,7 @@ def launch_agent(
     # Register first so the session dir exists for the log file
     registry.register(SessionEntry(
         name=session_name, session_id="", role=role,
-        issue_id=issue_id, title=task[:80], phase=workflow_name,
+        run_key=run_key, title=task[:80], phase=workflow_name,
         project=project, cwd=cwd, status="starting",
         requested_by=requested_by or {},
         image_hash=compute_manifest_hash(Path(cwd)),
@@ -713,9 +700,9 @@ def _run_agent_entry(args: dict) -> None:
     workflow_name = args["workflow_name"]
     timeout = args.get("timeout", 3600)
     requested_by = args.get("requested_by", {})
-    issue_id = args.get("issue_id", "adhoc")
+    run_key = args.get("run_key", "adhoc")
     interactive = args.get("interactive", True)
-    role = args.get("role", "engineer")
+    role = args.get("role", "")
     persistent = args.get("persistent", False)
     subscribe = args.get("subscribe", [])
 
@@ -724,16 +711,17 @@ def _run_agent_entry(args: dict) -> None:
     set_project_root(project_root)
 
     if subscribe and project_root:
-        _start_event_subscription(issue_id, subscribe, project_root)
+        _start_event_subscription(run_key, subscribe, project_root)
 
     if persistent:
         spawn_adhoc(
             cwd=cwd,
             task=task,
             timeout=timeout,
-            name=issue_id,
+            name=run_key,
             requested_by=requested_by,
             persistent=True,
+            role=role,
         )
         return
 
@@ -753,7 +741,7 @@ def _run_agent_entry(args: dict) -> None:
         task=task,
         repo=project,
         cwd=cwd,
-        issue_id=issue_id,
+        run_key=run_key,
         requested_by=requested_by,
         timeout=timeout,
         interactive=interactive,
@@ -881,7 +869,7 @@ def run_check_blocking(
 ) -> CheckResult:
     """Run a one-shot, non-interactive check agent and parse its verdict.
 
-    Reuses the same supervised agent loop as engineer phases, but with a
+    Reuses the same supervised agent loop as agent phases, but with a
     constrained read-only prompt and no input handler. Blocks until the
     agent finishes or times out.
     """
@@ -889,23 +877,23 @@ def run_check_blocking(
 
     short_hash = hashlib.sha256(description.encode()).hexdigest()[:8]
     slug = name or f"check-{short_hash}"
-    issue_id = slug
+    run_key = slug
     phase = "check"
-    session = _session_name(issue_id, phase)
+    session = _session_name(run_key, role="monitor", phase=phase)
 
     prompt = _build_check_prompt(description, extra)
 
     registry = get_registry()
     registry.register(SessionEntry(
         name=session, session_id="", role="monitor",
-        issue_id=issue_id, title=description[:80], phase=phase,
+        run_key=run_key, title=description[:80], phase=phase,
         cwd=cwd, status="starting",
     ))
 
     try:
         result = asyncio.run(
             asyncio.wait_for(
-                _run_agent_supervised(prompt, cwd, issue_id, phase, timeout),
+                _run_agent_supervised(prompt, cwd, run_key, phase, timeout, role="monitor"),
                 timeout=timeout,
             )
         )
@@ -949,7 +937,7 @@ def list_agents() -> list[dict[str, Any]]:
         if entry.role == "manager":
             continue  # managers are shown separately in `modastack status`
         result.append({
-            "issue_id": entry.issue_id or entry.name,
+            "run_key": entry.run_key or entry.name,
             "phase": entry.phase,
             "cwd": entry.cwd,
             "running": True,
@@ -961,14 +949,14 @@ def list_agents() -> list[dict[str, Any]]:
 
 
 def find_agent(ref: str) -> SessionEntry | None:
-    """Look up a registry entry by session name or issue id (active first)."""
+    """Look up a registry entry by session name or run key (active first)."""
     registry = get_registry()
     entry = registry.get(ref)
     if entry:
         return entry
     ref_lower = ref.lower()
     candidates = [e for e in registry.list_all()
-                  if e.issue_id.lower() == ref_lower or e.name.lower() == ref_lower]
+                  if e.run_key.lower() == ref_lower or e.name.lower() == ref_lower]
     if not candidates:
         return None
     active = [e for e in candidates if e.status in ("starting", "running", "idle")]
@@ -977,7 +965,7 @@ def find_agent(ref: str) -> SessionEntry | None:
 
 
 def cancel_agent(ref: str) -> bool:
-    """Cancel a running agent by session name or issue id.
+    """Cancel a running agent by session name or run key.
 
     Terminates the detached process (if its pid is alive) and marks the
     registry entry cancelled.

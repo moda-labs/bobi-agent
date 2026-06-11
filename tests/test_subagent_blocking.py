@@ -223,7 +223,7 @@ class TestRunAgentSupervisedNormal:
             result = await _run_agent_supervised(
                 prompt="Do the thing",
                 cwd="/tmp/test",
-                issue_id="TEST-1",
+                run_key="TEST-1",
                 phase="implement",
                 timeout=60,
             )
@@ -264,7 +264,7 @@ class TestRunAgentSupervisedNormal:
             result = await _run_agent_supervised(
                 prompt="Do the thing",
                 cwd="/tmp/test",
-                issue_id="TEST-2",
+                run_key="TEST-2",
                 phase="spec",
                 timeout=60,
             )
@@ -295,7 +295,7 @@ class TestRunAgentSupervisedNormal:
             result = await _run_agent_supervised(
                 prompt="Do the thing",
                 cwd="/tmp/test",
-                issue_id="TEST-3",
+                run_key="TEST-3",
                 phase="implement",
                 timeout=60,
             )
@@ -354,7 +354,7 @@ class TestRunAgentSupervisedDeferral:
             result = await _run_agent_supervised(
                 prompt="Build the feature",
                 cwd="/tmp/test",
-                issue_id="TEST-D1",
+                run_key="TEST-D1",
                 phase="implement",
                 timeout=120,
                 on_input_needed=handler,
@@ -420,7 +420,7 @@ class TestRunAgentSupervisedDeferral:
             result = await _run_agent_supervised(
                 prompt="Build it",
                 cwd="/tmp/test",
-                issue_id="TEST-M1",
+                run_key="TEST-M1",
                 phase="implement",
                 timeout=120,
                 on_input_needed=handler,
@@ -465,7 +465,7 @@ class TestRunAgentSupervisedDeferral:
             result = await _run_agent_supervised(
                 prompt="Do it",
                 cwd="/tmp/test",
-                issue_id="TEST-NH",
+                run_key="TEST-NH",
                 phase="implement",
                 timeout=60,
                 on_input_needed=None,
@@ -508,7 +508,7 @@ class TestRunAgentSupervisedResume:
             result = await _run_agent_supervised(
                 prompt="Continue working",
                 cwd="/tmp/test",
-                issue_id="TEST-R1",
+                run_key="TEST-R1",
                 phase="implement",
                 timeout=60,
             )
@@ -550,7 +550,7 @@ class TestRunAgentSupervisedExceptions:
             result = await _run_agent_supervised(
                 prompt="Do it",
                 cwd="/tmp/test",
-                issue_id="TEST-EX",
+                run_key="TEST-EX",
                 phase="implement",
                 timeout=60,
             )
@@ -590,7 +590,7 @@ class TestRunAgentSupervisedExceptions:
             result = await _run_agent_supervised(
                 prompt="Do it",
                 cwd="/tmp/test",
-                issue_id="TEST-DC",
+                run_key="TEST-DC",
                 phase="implement",
                 timeout=60,
             )
@@ -631,26 +631,26 @@ class TestRunAgentSupervisedTracking:
             result = await _run_agent_supervised(
                 prompt="Track me",
                 cwd="/tmp/test",
-                issue_id="TEST-T1",
+                run_key="TEST-T1",
                 phase="spec",
                 timeout=60,
             )
 
         # Registry updated to running, then done
         mock_registry.update.assert_any_call(
-            "eng-test-t1-spec", status="running", phase="spec", session_id="",
+            "agent-test-t1-spec", status="running", phase="spec", session_id="",
         )
         mock_registry.update.assert_any_call(
-            "eng-test-t1-spec", status="done", phase="spec",
+            "agent-test-t1-spec", status="done", phase="spec",
             session_id="sess-track",
         )
 
         # Session ID saved
-        mock_save.assert_called_with("eng-test-t1-spec", "sess-track")
+        mock_save.assert_called_with("agent-test-t1-spec", "sess-track")
 
         # Activity logged
         mock_log.assert_any_call("stop", {"session_id": "sess-track"},
-                                 session="eng-test-t1-spec")
+                                 session="agent-test-t1-spec")
 
     @pytest.mark.asyncio
     async def test_registry_updated_on_error(self):
@@ -676,11 +676,11 @@ class TestRunAgentSupervisedTracking:
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             await _run_agent_supervised(
-                prompt="Fail", cwd="/tmp", issue_id="ERR-1",
+                prompt="Fail", cwd="/tmp", run_key="ERR-1",
                 phase="implement", timeout=60,
             )
 
-        mock_registry.update.assert_any_call("eng-err-1-implement", status="error")
+        mock_registry.update.assert_any_call("agent-err-1-implement", status="error")
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +697,7 @@ class TestRunPhaseBlocking:
 
         with patch(SESSION_PATCH, side_effect=fake_cls):
             result = run_phase_blocking(
-                issue_id="SYNC-1", phase="implement",
+                run_key="SYNC-1", phase="implement",
                 cwd="/tmp/test", context="Build auth",
             )
 
@@ -711,7 +711,7 @@ class TestRunPhaseBlocking:
 
         with patch(SESSION_PATCH, side_effect=fake_cls):
             result = run_phase_blocking(
-                issue_id="FAIL-1", phase="implement",
+                run_key="FAIL-1", phase="implement",
                 cwd="/tmp/test", timeout=1,
             )
 
@@ -746,8 +746,8 @@ class TestEmitLifecycleEvent:
     def test_posts_via_cli_post_event(self):
         """_emit_lifecycle_event posts (issue_id, repo, ...) via events.publish.post_event."""
         with patch("modastack.events.publish.post_event") as post:
-            _emit_lifecycle_event("engineer/session.started",
-                                  {"issue_id": "X-1", "repo": "r", "task": ""})
+            _emit_lifecycle_event("agent/session.started",
+                                  {"run_key": "X-1", "project": "r", "task": ""})
             # Runs on a daemon thread — wait for it to drain.
             for t in threading.enumerate():
                 if t.name == "lifecycle-event":
@@ -755,14 +755,14 @@ class TestEmitLifecycleEvent:
 
         post.assert_called_once()
         event_type, data = post.call_args[0]
-        assert event_type == "engineer/session.started"
-        assert data["issue_id"] == "X-1"
+        assert event_type == "agent/session.started"
+        assert data["run_key"] == "X-1"
         # Empty values are stripped from the payload.
         assert "task" not in data
 
     def test_never_raises_on_post_failure(self):
         with patch("modastack.events.publish.post_event", side_effect=RuntimeError("boom")):
-            _emit_lifecycle_event("engineer/session.failed", {"issue_id": "X-2"})
+            _emit_lifecycle_event("agent/session.failed", {"run_key": "X-2"})
             for t in threading.enumerate():
                 if t.name == "lifecycle-event":
                     t.join(timeout=2)
@@ -782,7 +782,7 @@ class TestEmitLifecycleEvent:
 
         with patch("modastack.events.publish.post_event", side_effect=_slow_post):
             _emit_lifecycle_event(
-                "engineer/session.completed", {"issue_id": "X-3"}, blocking=True,
+                "agent/session.completed", {"issue_id": "X-3"}, blocking=True,
             )
             # The POST has already landed by the time the call returns.
             assert landed.is_set()
@@ -797,7 +797,7 @@ class TestEmitLifecycleEvent:
         with patch("modastack.events.publish.post_event", side_effect=_hang):
             start = time.time()
             _emit_lifecycle_event(
-                "engineer/session.completed", {"issue_id": "X-4"},
+                "agent/session.completed", {"issue_id": "X-4"},
                 blocking=True, timeout=0.1,
             )
             elapsed = time.time() - start
@@ -810,7 +810,7 @@ class TestSessionFinishedEvents:
     def test_completed_event_on_success(self):
         calls = []
         result = AgentResult(
-            session_id="sdk-1", issue_id="DONE-1", phase="adhoc",
+            session_id="sdk-1", run_key="DONE-1", phase="adhoc",
             success=True, final_text="all\ndone\nPR up at #42",
         )
         with patch(f"{SDK_PATCH}._emit_lifecycle_event",
@@ -819,9 +819,9 @@ class TestSessionFinishedEvents:
 
         assert len(calls) == 1
         (event_type, data), kwargs = calls[0]
-        assert event_type == "engineer/session.completed"
-        assert data["issue_id"] == "DONE-1"
-        assert data["repo"] == "moda-labs/app"
+        assert event_type == "agent/session.completed"
+        assert data["run_key"] == "DONE-1"
+        assert data["project"] == "moda-labs/app"
         assert data["session_id"] == "adhoc-x"
         assert "PR up at #42" in data["summary"]
         assert "duration" in data
@@ -831,15 +831,15 @@ class TestSessionFinishedEvents:
     def test_failed_event_on_error(self):
         calls = []
         result = AgentResult(
-            session_id="", issue_id="FAIL-1", phase="implement",
+            session_id="", run_key="FAIL-1", phase="implement",
             success=False, error="timeout after 60s",
         )
         with patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda *a, **kw: calls.append((a, kw))):
-            _emit_session_finished(result, "r", "eng-fail-1-implement", 0.0)
+            _emit_session_finished(result, "r", "agent-fail-1-implement", 0.0)
 
         (event_type, data), kwargs = calls[0]
-        assert event_type == "engineer/session.failed"
+        assert event_type == "agent/session.failed"
         assert data["error"] == "timeout after 60s"
         assert kwargs.get("blocking") is True
 
@@ -854,7 +854,7 @@ class TestSpawnAdhocLifecycle:
                    side_effect=lambda et, d, **kw: events.append(et)):
             spawn_adhoc(cwd="/tmp/test", task="Fix the login bug", name="adhoc-x")
 
-        assert events == ["engineer/session.started", "engineer/session.completed"]
+        assert events == ["agent/session.started", "agent/session.completed"]
 
     def test_started_carries_task_and_repo(self):
         captured = []
@@ -867,9 +867,9 @@ class TestSpawnAdhocLifecycle:
             spawn_adhoc(cwd="/repo/path", task="Investigate CI", name="adhoc-y")
 
         et, data = captured[0]
-        assert et == "engineer/session.started"
+        assert et == "agent/session.started"
         assert data["task"] == "Investigate CI"
-        assert data["repo"] == "moda-labs/jobtack"
+        assert data["project"] == "moda-labs/jobtack"
         assert data["session_id"] == "adhoc-y"
 
     def test_requested_by_echoed_on_lifecycle_events(self):
@@ -901,7 +901,7 @@ class TestSpawnAdhocLifecycle:
         started = next(d for et, d in captured if et.endswith("started"))
         assert started["requested_by"] is None
 
-    def test_started_uses_parsed_issue_number_as_id(self):
+    def test_started_uses_explicit_name_as_run_key(self):
         captured = []
         fake_cls = _make_fake_session_class(success=True)
 
@@ -910,13 +910,14 @@ class TestSpawnAdhocLifecycle:
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
             spawn_adhoc(cwd="/repo/path",
-                        task="Write a spec for issue #5: AI Extraction Pipeline")
+                        task="Write a spec for issue #5: AI Extraction Pipeline",
+                        name="5")
 
         et, data = captured[0]
-        assert et == "engineer/session.started"
-        assert data["issue_id"] == "5"
+        assert et == "agent/session.started"
+        assert data["run_key"] == "5"
 
-    def test_started_falls_back_to_adhoc_id_without_issue_ref(self):
+    def test_started_generates_adhoc_id_without_explicit_name(self):
         captured = []
         fake_cls = _make_fake_session_class(success=True)
 
@@ -927,8 +928,8 @@ class TestSpawnAdhocLifecycle:
             spawn_adhoc(cwd="/repo/path", task="Fix the login bug")
 
         et, data = captured[0]
-        assert et == "engineer/session.started"
-        assert data["issue_id"].startswith("adhoc-")
+        assert et == "agent/session.started"
+        assert data["run_key"].startswith("adhoc-")
 
 
 class TestRunPhaseBlockingLifecycle:
@@ -939,10 +940,10 @@ class TestRunPhaseBlockingLifecycle:
         with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: events.append(et)):
-            run_phase_blocking(issue_id="FAIL-1", phase="implement",
+            run_phase_blocking(run_key="FAIL-1", phase="implement",
                                cwd="/tmp", timeout=1)
 
-        assert events == ["engineer/session.started", "engineer/session.failed"]
+        assert events == ["agent/session.started", "agent/session.failed"]
 
 
 # ---------------------------------------------------------------------------
@@ -951,13 +952,19 @@ class TestRunPhaseBlockingLifecycle:
 
 class TestSessionName:
     def test_with_phase(self):
-        assert _session_name("AGD-12", "spec") == "eng-agd-12-spec"
+        assert _session_name("AGD-12", phase="spec") == "agent-agd-12-spec"
 
     def test_without_phase(self):
-        assert _session_name("AGD-12") == "eng-agd-12"
+        assert _session_name("AGD-12") == "agent-agd-12"
 
     def test_lowercased(self):
-        assert _session_name("BET-99", "implement") == "eng-bet-99-implement"
+        assert _session_name("BET-99", phase="implement") == "agent-bet-99-implement"
+
+    def test_with_role(self):
+        assert _session_name("42", role="engineer", phase="spec") == "engineer-42-spec"
+
+    def test_with_role_no_phase(self):
+        assert _session_name("42", role="engineer") == "engineer-42"
 
 
 # ---------------------------------------------------------------------------
@@ -965,7 +972,7 @@ class TestSessionName:
 # ---------------------------------------------------------------------------
 
 class TestBuildPrompt:
-    def test_includes_issue_id(self):
+    def test_includes_run_key(self):
         prompt = _build_prompt("implement", "AGD-12")
         assert "AGD-12" in prompt
 
@@ -1055,7 +1062,7 @@ class TestParseCheckOutput:
 class TestRunCheckBlocking:
     def test_finding_parsed_from_agent_output(self):
         agent_result = AgentResult(
-            session_id="s", issue_id="check-x", phase="check", success=True,
+            session_id="s", run_key="check-x", phase="check", success=True,
             duration_ms=1200, total_cost_usd=0.03,
             final_text='{"finding": true, "summary": "prod down", "details": {"code": 503}}',
         )
@@ -1076,7 +1083,7 @@ class TestRunCheckBlocking:
 
     def test_no_finding(self):
         agent_result = AgentResult(
-            session_id="s", issue_id="check-x", phase="check", success=True,
+            session_id="s", run_key="check-x", phase="check", success=True,
             final_text='Everything healthy.\n{"finding": false}',
         )
 
@@ -1092,7 +1099,7 @@ class TestRunCheckBlocking:
 
     def test_agent_failure_propagates(self):
         agent_result = AgentResult(
-            session_id="", issue_id="check-x", phase="check", success=False,
+            session_id="", run_key="check-x", phase="check", success=False,
             error="CLI crashed",
         )
 
@@ -1120,7 +1127,7 @@ class TestRunCheckBlocking:
 
     def test_registers_monitor_session(self):
         agent_result = AgentResult(
-            session_id="s", issue_id="check-x", phase="check", success=True,
+            session_id="s", run_key="check-x", phase="check", success=True,
             final_text='{"finding": false}',
         )
         mock_registry = MagicMock()
@@ -1136,7 +1143,7 @@ class TestRunCheckBlocking:
         entry = mock_registry.register.call_args[0][0]
         assert entry.role == "monitor"
         assert entry.phase == "check"
-        assert entry.name == "eng-check-deploy-check"
+        assert entry.name == "monitor-check-deploy-check"
 
 
 # ---------------------------------------------------------------------------

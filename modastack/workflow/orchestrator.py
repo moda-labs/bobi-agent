@@ -28,7 +28,6 @@ from modastack.sdk import (
 from modastack.subagent import (
     AgentResult,
     _emit_lifecycle_event,
-    _parse_issue_number,
 )
 from modastack.workflow.schema import Workflow, StepDef
 from modastack.workflow.state import WorkflowRun
@@ -39,7 +38,7 @@ log = logging.getLogger(__name__)
 MAX_HANDOFF_RETRIES = 2
 
 
-def try_resume_for_event(event_type: str, issue_id: str = "", event: dict | None = None) -> bool:
+def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None = None) -> bool:
     """Check if any suspended workflow is waiting for this event type and resume it.
 
     Called by the manager when it receives an event that might unblock a workflow.
@@ -47,7 +46,7 @@ def try_resume_for_event(event_type: str, issue_id: str = "", event: dict | None
     """
     from modastack.workflow.triggers import WorkflowDispatcher
 
-    run = WorkflowRun.find_waiting(event_type, issue_id)
+    run = WorkflowRun.find_waiting(event_type, run_key)
     if not run:
         return False
 
@@ -58,7 +57,7 @@ def try_resume_for_event(event_type: str, issue_id: str = "", event: dict | None
         log.error(f"Cannot resume run {run.run_id}: workflow '{run.workflow_name}' not found")
         return False
 
-    log.info(f"Resuming workflow {run.workflow_name} for {run.issue_id} "
+    log.info(f"Resuming workflow {run.workflow_name} for {run.run_key} "
              f"(run {run.run_id}, awaited '{event_type}')")
 
     import threading
@@ -79,10 +78,10 @@ def _find_project_root(cwd: str) -> Path:
     return get_project_root() or Path(cwd)
 
 
-def make_session_name(workflow_name: str, repo: str, issue_id: str) -> str:
+def make_session_name(workflow_name: str, repo: str, run_key: str) -> str:
     """Deterministic session name for a workflow run."""
     repo_name = repo.split("/")[-1] if "/" in repo else repo
-    return f"wf-{workflow_name}-{repo_name}-{issue_id}"
+    return f"wf-{workflow_name}-{repo_name}-{run_key}"
 
 
 def _setup_worktree(cwd: str, session_name: str) -> str:
@@ -126,42 +125,43 @@ def run_workflow(
     task: str,
     repo: str,
     cwd: str,
-    issue_id: str | None = None,
+    run_key: str | None = None,
     requested_by: dict | None = None,
     timeout: int = 3600,
     interactive: bool = True,
-    role: str = "engineer",
+    role: str = "",
 ) -> bool:
     """Execute a workflow end-to-end with a single agent session."""
-    issue_id = issue_id or _parse_issue_number(task) or "adhoc"
+    run_key = run_key or "adhoc"
     requested_by = requested_by or {}
     started_at = time.time()
 
     # Session dir is created by the registry on register
 
-    session_name = make_session_name(workflow.name, repo, issue_id)
+    session_name = make_session_name(workflow.name, repo, run_key)
     needs_worktree = any(s.worktree for s in workflow.steps)
     work_cwd = _setup_worktree(cwd, session_name) if needs_worktree else cwd
     from modastack.sdk import compute_manifest_hash
     registry = get_registry()
     registry.register(SessionEntry(
         name=session_name, session_id="", role=role,
-        issue_id=issue_id, title=task[:80], phase=workflow.name,
+        run_key=run_key, title=task[:80], phase=workflow.name,
         project=repo, cwd=work_cwd, status="running", pid=os.getpid(),
         requested_by=requested_by,
         image_hash=compute_manifest_hash(Path(cwd)),
     ))
 
-    _emit_lifecycle_event("engineer/workflow.started", {
-        "issue_id": issue_id,
+    _emit_lifecycle_event("agent/workflow.started", {
+        "run_key": run_key,
+        "role": role,
         "workflow": workflow.name,
         "repo": repo,
         "task": task[:500],
-        "text": f"Workflow {workflow.name} started for {issue_id}",
+        "text": f"Workflow {workflow.name} started for {run_key}",
     })
 
     ctx = VariableContext()
-    ctx.set_scope("input", {"task": task, "repo": repo, "issue_id": issue_id})
+    ctx.set_scope("input", {"task": task, "repo": repo, "run_key": run_key})
     if requested_by:
         ctx.set_scope("requested_by", requested_by)
 
@@ -170,24 +170,26 @@ def run_workflow(
 
     success = asyncio.run(
         _run_workflow_async(
-            workflow, task, repo, work_cwd, issue_id, session_name,
+            workflow, task, repo, work_cwd, run_key, session_name,
             registry, ctx, requested_by, timeout, interactive, role=role,
         )
     )
 
     duration = time.time() - started_at
     if success:
-        _emit_lifecycle_event("engineer/workflow.completed", {
-            "issue_id": issue_id,
+        _emit_lifecycle_event("agent/workflow.completed", {
+            "run_key": run_key,
+            "role": role,
             "workflow": workflow.name,
             "duration": round(duration, 1),
-            "text": f"Workflow {workflow.name} completed for {issue_id} in {duration:.0f}s",
+            "text": f"Workflow {workflow.name} completed for {run_key} in {duration:.0f}s",
         }, blocking=True)
     else:
-        _emit_lifecycle_event("engineer/workflow.failed", {
-            "issue_id": issue_id,
+        _emit_lifecycle_event("agent/workflow.failed", {
+            "run_key": run_key,
+            "role": role,
             "workflow": workflow.name,
-            "text": f"Workflow {workflow.name} failed for {issue_id}",
+            "text": f"Workflow {workflow.name} failed for {run_key}",
         }, blocking=True)
 
     registry.mark_done(session_name)
@@ -210,7 +212,7 @@ def resume_workflow(
     from the step after the one that suspended.
     """
     session_name = run.session_name
-    issue_id = run.issue_id
+    run_key = run.run_key
     repo = run.repo
     cwd = run.cwd
     step_idx = run.suspended_at_step
@@ -231,18 +233,18 @@ def resume_workflow(
     run.resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     run.save()
 
-    _emit_lifecycle_event("engineer/workflow.resumed", {
-        "issue_id": issue_id,
+    _emit_lifecycle_event("agent/workflow.resumed", {
+        "run_key": run_key,
         "workflow": workflow.name,
         "run_id": run.run_id,
         "resume_step": workflow.steps[step_idx].name if step_idx < len(workflow.steps) else "end",
-        "text": f"Workflow {workflow.name} resumed for {issue_id}",
+        "text": f"Workflow {workflow.name} resumed for {run_key}",
     })
 
     success = asyncio.run(
         _run_workflow_async(
             workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
-            issue_id, session_name, registry, ctx, {}, timeout, interactive,
+            run_key, session_name, registry, ctx, {}, timeout, interactive,
             start_step=step_idx,
         )
     )
@@ -251,18 +253,18 @@ def resume_workflow(
     if success:
         run.status = "completed"
         run.completed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        _emit_lifecycle_event("engineer/workflow.completed", {
-            "issue_id": issue_id,
+        _emit_lifecycle_event("agent/workflow.completed", {
+            "run_key": run_key,
             "workflow": workflow.name,
             "duration": round(duration, 1),
-            "text": f"Workflow {workflow.name} completed for {issue_id} in {duration:.0f}s",
+            "text": f"Workflow {workflow.name} completed for {run_key} in {duration:.0f}s",
         }, blocking=True)
     else:
         run.status = "failed"
-        _emit_lifecycle_event("engineer/workflow.failed", {
-            "issue_id": issue_id,
+        _emit_lifecycle_event("agent/workflow.failed", {
+            "run_key": run_key,
             "workflow": workflow.name,
-            "text": f"Workflow {workflow.name} failed for {issue_id}",
+            "text": f"Workflow {workflow.name} failed for {run_key}",
         }, blocking=True)
 
     run.save()
@@ -277,7 +279,7 @@ async def _run_workflow_async(
     task: str,
     repo: str,
     cwd: str,
-    issue_id: str,
+    run_key: str,
     session_name: str,
     registry,
     ctx: VariableContext,
@@ -285,7 +287,7 @@ async def _run_workflow_async(
     timeout: int,
     interactive: bool = True,
     start_step: int = 0,
-    role: str = "engineer",
+    role: str = "",
 ) -> bool:
     """Async core: one ClaudeSDKClient session for all steps."""
     from claude_agent_sdk import (
@@ -321,7 +323,7 @@ async def _run_workflow_async(
                 "type": "preset",
                 "preset": "claude_code",
                 "append": (
-                    f"You are an agent working on issue #{issue_id}. "
+                    f"You are an agent working on issue #{run_key}. "
                     + (f"Your working directory is an isolated git worktree at {cwd}. "
                        f"All changes go here — never modify the main repo checkout. "
                        if uses_worktree else
@@ -333,9 +335,9 @@ async def _run_workflow_async(
             },
         )
 
-    _emit_lifecycle_event("engineer/session.started", {
-        "issue_id": issue_id, "repo": repo,
-        "text": f"Engineer started working on {issue_id}",
+    _emit_lifecycle_event("agent/session.started", {
+        "run_key": run_key, "role": role, "project": repo,
+        "text": f"{role or 'Agent'} started working on {run_key}",
     })
 
     # CLI --role always wins; fall back to workflow step's agent field
@@ -355,7 +357,7 @@ async def _run_workflow_async(
             await client.connect(initial_prompt)
             if resume_id:
                 await client.query(task)
-            await _drain_response(client, session_name, issue_id)
+            await _drain_response(client, session_name, run_key)
             break
         except Exception as e:
             if resume_id and attempt == 0:
@@ -394,7 +396,7 @@ async def _run_workflow_async(
 
             # Notify step — deterministic, no LLM
             if step.notify:
-                _execute_notify_step(step, ctx, cwd, issue_id, workflow.name)
+                _execute_notify_step(step, ctx, cwd, run_key, workflow.name)
                 step_idx += 1
                 continue
 
@@ -403,7 +405,7 @@ async def _run_workflow_async(
                 log.info(f"Await step {step.name}: suspending, waiting for '{step.await_event}'")
                 registry.update(session_name, status="waiting", phase=step.name)
 
-                run = WorkflowRun.create(workflow.name, {"data": {"issue_id": issue_id}})
+                run = WorkflowRun.create(workflow.name, {"data": {"run_key": run_key}})
                 run.status = "waiting"
                 run.suspended_at_step = step_idx + 1
                 run.await_event = step.await_event
@@ -411,11 +413,11 @@ async def _run_workflow_async(
                 run.variable_scopes = ctx.scopes
                 run.repo = repo
                 run.cwd = cwd
-                run.issue_id = issue_id
+                run.run_key = run_key
                 run.save()
 
-                _emit_lifecycle_event("engineer/workflow.suspended", {
-                    "issue_id": issue_id,
+                _emit_lifecycle_event("agent/workflow.suspended", {
+                    "run_key": run_key,
                     "workflow": workflow.name,
                     "step": step.name,
                     "await_event": step.await_event,
@@ -433,8 +435,8 @@ async def _run_workflow_async(
             step_start = time.time()
             registry.update(session_name, phase=step.name)
 
-            _emit_lifecycle_event("engineer/step.started", {
-                "issue_id": issue_id,
+            _emit_lifecycle_event("agent/step.started", {
+                "run_key": run_key,
                 "workflow": workflow.name,
                 "step": step.name,
                 "repo": repo,
@@ -445,11 +447,11 @@ async def _run_workflow_async(
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             await client.query(prompt)
-            final_text = await _drain_response(client, session_name, issue_id)
+            final_text = await _drain_response(client, session_name, run_key)
 
             if final_text is None:
                 failed_step = step.name
-                _emit_step_failed(issue_id, workflow.name, step.name,
+                _emit_step_failed(run_key, workflow.name, step.name,
                                   "connection lost")
                 return False
 
@@ -466,14 +468,14 @@ async def _run_workflow_async(
                     f"Please update your handoff file with these fields and confirm."
                 )
                 await client.query(fix_prompt)
-                await _drain_response(client, session_name, issue_id)
+                await _drain_response(client, session_name, run_key)
                 handoff = _read_handoff(session_name, step.name)
                 missing = _validate_handoff(step, handoff)
 
             if missing:
                 failed_step = step.name
                 error = f"Handoff missing required fields after retries: {missing}"
-                _emit_step_failed(issue_id, workflow.name, step.name, error)
+                _emit_step_failed(run_key, workflow.name, step.name, error)
                 return False
 
             # Capture outputs for routing
@@ -485,8 +487,8 @@ async def _run_workflow_async(
                 ctx.set_flat(k, v)
 
             duration = time.time() - step_start
-            _emit_lifecycle_event("engineer/step.completed", {
-                "issue_id": issue_id,
+            _emit_lifecycle_event("agent/step.completed", {
+                "run_key": run_key,
                 "workflow": workflow.name,
                 "step": step.name,
                 "outputs": outputs,
@@ -501,17 +503,17 @@ async def _run_workflow_async(
 
     except Exception as e:
         log.error(f"Workflow error: {e}")
-        _emit_lifecycle_event("engineer/workflow.failed", {
-            "issue_id": issue_id,
+        _emit_lifecycle_event("agent/workflow.failed", {
+            "run_key": run_key,
             "workflow": workflow.name,
             "error": str(e),
             "text": f"Workflow error: {e}",
         }, blocking=True)
         return False
     finally:
-        _emit_lifecycle_event("engineer/session.completed", {
-            "issue_id": issue_id, "repo": repo,
-            "text": f"Engineer finished {issue_id}",
+        _emit_lifecycle_event("agent/session.completed", {
+            "run_key": run_key, "role": role, "project": repo,
+            "text": f"{role or 'Agent'} finished {run_key}",
         }, blocking=True)
         try:
             await client.disconnect()
@@ -519,7 +521,7 @@ async def _run_workflow_async(
             pass
 
 
-async def _drain_response(client, session_name: str, issue_id: str) -> str | None:
+async def _drain_response(client, session_name: str, run_key: str) -> str | None:
     """Drain one turn of the agent's response. Returns final text or None."""
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
@@ -542,9 +544,9 @@ async def _drain_response(client, session_name: str, issue_id: str) -> str | Non
     return None
 
 
-def _emit_step_failed(issue_id, workflow_name, step_name, error):
-    _emit_lifecycle_event("engineer/step.failed", {
-        "issue_id": issue_id,
+def _emit_step_failed(run_key, workflow_name, step_name, error):
+    _emit_lifecycle_event("agent/step.failed", {
+        "run_key": run_key,
         "workflow": workflow_name,
         "step": step_name,
         "error": error,
@@ -556,7 +558,7 @@ def _execute_notify_step(
     step: StepDef,
     ctx: VariableContext,
     cwd: str,
-    issue_id: str,
+    run_key: str,
     workflow_name: str,
 ) -> None:
     """Execute a notify step — deterministic Slack message, no LLM.
@@ -594,7 +596,7 @@ def _execute_notify_step(
         post_slack_message(token, channel, message, thread_ts=thread_ts)
         log.info(f"Notify step {step.name}: posted to {channel}")
         _emit_lifecycle_event("engineer/notify.sent", {
-            "issue_id": issue_id,
+            "run_key": run_key,
             "workflow": workflow_name,
             "step": step.name,
             "channel": channel,
@@ -604,7 +606,7 @@ def _execute_notify_step(
         # Notification failures are non-fatal — log and continue
         log.warning(f"Notify step {step.name}: Slack post failed: {e}")
         _emit_lifecycle_event("engineer/notify.failed", {
-            "issue_id": issue_id,
+            "run_key": run_key,
             "workflow": workflow_name,
             "step": step.name,
             "error": str(e),

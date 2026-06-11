@@ -39,7 +39,7 @@ def post_event(event_type: str, data: dict,
                project_path: Path | None = None) -> bool:
     """Post a synthetic event. Returns True when the server accepted it.
 
-    ``event_type`` is "source/type" (e.g. "engineer/session.started");
+    ``event_type`` is "source/type" (e.g. "agent/session.started");
     a bare type defaults the source to "monitor".
     """
     if "/" in event_type:

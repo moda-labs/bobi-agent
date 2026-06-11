@@ -97,11 +97,23 @@ def _default_spawn_check(monitor, cwd: str | None) -> None:
     out-of-band. Fire-and-forget: the scheduler thread is never blocked,
     and the subprocess posts a result event back to the bus only on a finding.
     """
+    role = getattr(monitor, "role", "") or ""
+    if not role:
+        try:
+            from modastack.config import Config
+            from modastack.sdk import get_project_root
+            root = get_project_root()
+            if root:
+                cfg = Config.load(root)
+                role = cfg.default_role
+        except Exception:
+            pass
+
     cmd = [
         sys.executable, "-m", "modastack.cli",
         "agents", "launch",
         "-w", "adhoc",
-        "--role", "engineer",
+        *(["--role", role] if role else []),
         "--non-interactive",
         "--wait",
         "--task", monitor.description or monitor.name,

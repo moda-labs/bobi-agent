@@ -17,7 +17,7 @@ class Condition:
 # kept in `extra` (e.g. `url:` for a deploy-health check) so new check types
 # need no schema change.
 _RESERVED = {"name", "description", "interval", "event", "check", "command",
-             "enabled", "at", "tz", "notify"}
+             "enabled", "at", "tz", "notify", "role"}
 
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -80,6 +80,7 @@ class Monitor:
     check: str = ""
     command: str = ""
     notify: bool = False
+    role: str = ""
     enabled: bool = True
     extra: dict = field(default_factory=dict)
     source: str = "user"
@@ -101,6 +102,7 @@ class Monitor:
             check=raw.get("check", ""),
             command=raw.get("command", ""),
             notify=bool(raw.get("notify", False)),
+            role=raw.get("role", ""),
             enabled=raw.get("enabled", True),
             extra=extra,
             source=source,
@@ -126,6 +128,8 @@ class Monitor:
             record["command"] = self.command
         if self.notify:
             record["notify"] = True
+        if self.role:
+            record["role"] = self.role
         if not self.enabled:
             record["enabled"] = False
         record.update(self.extra)
