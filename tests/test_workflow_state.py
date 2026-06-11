@@ -19,11 +19,11 @@ def runs_dir(tmp_path, monkeypatch):
 
 
 def _make_run(runs_dir, run_id="abc123", workflow_name="test-wf",
-              status="running", issue_id="", await_event="", **overrides):
+              status="running", run_key="", await_event="", **overrides):
     """Helper to create and save a WorkflowRun."""
     trigger = {"type": "test", "data": {}}
-    if issue_id:
-        trigger["data"]["issue_id"] = issue_id
+    if run_key:
+        trigger["data"]["run_key"] = run_key
     run = WorkflowRun(
         run_id=run_id,
         workflow_name=workflow_name,
@@ -31,7 +31,7 @@ def _make_run(runs_dir, run_id="abc123", workflow_name="test-wf",
         status=status,
         started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         await_event=await_event,
-        issue_id=issue_id,
+        run_key=run_key,
         **overrides,
     )
     run.save()
@@ -97,7 +97,7 @@ class TestSaveLoad:
             session_name="session-1",
             repo="moda-labs/modastack",
             cwd="/tmp/worktree",
-            issue_id="42",
+            run_key="42",
         )
         run.variable_scopes = {"handoff": {"complexity": "medium"}}
         run.suspended_at_step = 3
@@ -107,7 +107,7 @@ class TestSaveLoad:
         assert loaded.session_name == "session-1"
         assert loaded.repo == "moda-labs/modastack"
         assert loaded.cwd == "/tmp/worktree"
-        assert loaded.issue_id == "42"
+        assert loaded.run_key == "42"
         assert loaded.variable_scopes == {"handoff": {"complexity": "medium"}}
         assert loaded.suspended_at_step == 3
         assert loaded.await_event == "approval"
@@ -120,17 +120,17 @@ class TestSaveLoad:
 class TestFindWaiting:
     def test_finds_by_await_event(self, runs_dir):
         _make_run(runs_dir, run_id="w1", status="waiting",
-                  await_event="approval", issue_id="42")
+                  await_event="approval", run_key="42")
         found = WorkflowRun.find_waiting("approval")
         assert found is not None
         assert found.run_id == "w1"
 
-    def test_filters_by_issue_id(self, runs_dir):
+    def test_filters_by_run_key(self, runs_dir):
         _make_run(runs_dir, run_id="w2", status="waiting",
-                  await_event="approval", issue_id="42")
+                  await_event="approval", run_key="42")
         _make_run(runs_dir, run_id="w3", status="waiting",
-                  await_event="approval", issue_id="99")
-        found = WorkflowRun.find_waiting("approval", issue_id="99")
+                  await_event="approval", run_key="99")
+        found = WorkflowRun.find_waiting("approval", run_key="99")
         assert found is not None
         assert found.run_id == "w3"
 

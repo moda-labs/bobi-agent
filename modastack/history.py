@@ -308,8 +308,8 @@ def context_for_events(events: list[dict], max_results: int = 5) -> str:
         data = e.get("data", {})
         if data.get("title"):
             queries.add(data["title"])
-        if data.get("issue_id"):
-            queries.add(data["issue_id"])
+        if data.get("run_key"):
+            queries.add(data["run_key"])
         if data.get("text"):
             text = data["text"]
             if len(text) > 200:

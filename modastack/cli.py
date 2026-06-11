@@ -1136,13 +1136,13 @@ def agents_list():
 
     for a in active:
         state = "running" if a["running"] else "done"
-        label = a.get("name") or f"{a['issue_id']}/{a['phase']}"
+        label = a.get("name") or f"{a['run_key']}/{a['phase']}"
         click.echo(f"  {label} — {state} ({a['elapsed_s']}s)")
 
 
 @agents.command("show")
-@click.argument("issue_id")
-def agents_show(issue_id):
+@click.argument("ref")
+def agents_show(ref):
     """Show details for a specific agent.
 
     Usage:
@@ -1151,14 +1151,14 @@ def agents_show(issue_id):
     import time as _time
     from modastack.subagent import find_agent
 
-    entry = find_agent(issue_id)
+    entry = find_agent(ref)
     if not entry:
-        click.echo(f"No agent found for {issue_id}")
+        click.echo(f"No agent found for {ref}")
         return
 
     click.echo(f"  Session: {entry.name}")
-    if entry.issue_id:
-        click.echo(f"  Issue:   {entry.issue_id}")
+    if entry.run_key:
+        click.echo(f"  Run key: {entry.run_key}")
     click.echo(f"  Phase:   {entry.phase}")
     if entry.status in ("starting", "running", "idle"):
         elapsed = int(_time.time() - entry.started_at)
@@ -1172,8 +1172,8 @@ def agents_show(issue_id):
 
 
 @agents.command("cancel")
-@click.argument("issue_id")
-def agents_cancel(issue_id):
+@click.argument("ref")
+def agents_cancel(ref):
     """Cancel a running agent.
 
     Usage:
@@ -1181,10 +1181,10 @@ def agents_cancel(issue_id):
     """
     from modastack.subagent import cancel_agent
 
-    if cancel_agent(issue_id):
-        click.echo(f"Cancelled {issue_id}")
+    if cancel_agent(ref):
+        click.echo(f"Cancelled {ref}")
     else:
-        click.echo(f"No running agent for {issue_id}")
+        click.echo(f"No running agent for {ref}")
 
 
 
@@ -1231,7 +1231,7 @@ def events(tail, decisions_only):
                     malformed += 1
                     continue
                 data = entry.get("data", {})
-                detail = data.get("text", "") or data.get("title", "") or data.get("issue_id", "")
+                detail = data.get("text", "") or data.get("title", "") or data.get("run_key", "")
                 if len(detail) > 80:
                     detail = detail[:80] + "..."
                 entries.append((
@@ -1410,7 +1410,7 @@ def workflow_status():
         return
     for run in runs[:20]:
         event_data = run.trigger_event.get("data", {})
-        issue = event_data.get("issue_id", run.issue_id or "?")
+        issue = event_data.get("run_key", run.run_key or "?")
         suffix = ""
         if run.suspended_at_step >= 0:
             suffix = f"  step={run.suspended_at_step}"
@@ -1452,7 +1452,7 @@ def workflow_resume(run_id, timeout):
         click.echo(f"Workflow '{run.workflow_name}' not found.", err=True)
         sys.exit(1)
 
-    click.echo(f"Resuming {run.workflow_name} for {run.issue_id} "
+    click.echo(f"Resuming {run.workflow_name} for {run.run_key} "
                f"from step {run.suspended_at_step}...")
     success = resume_workflow(run, wf, timeout=timeout)
     if success:
@@ -1753,6 +1753,7 @@ main.add_command(event_server_cmd)
 @agents.command("launch")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
 @click.option("--role", required=True, help="Agent role (see 'modastack roles list')")
+@click.option("--id", "run_key", default=None, help="Explicit run key for correlation (e.g. issue number)")
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
 @click.option("--wait", is_flag=True, help="Block until the agent completes")
@@ -1766,21 +1767,21 @@ main.add_command(event_server_cmd)
               help="Keep the agent alive after initial task, accepting inbox messages")
 @click.option("--subscribe", multiple=True,
               help="Subscribe to event topics (e.g. moda-labs/modastack, slack:T123)")
-def agents_launch(workflow, role, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe):
+def agents_launch(workflow, role, run_key, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe):
     """Launch an agent with a workflow and role.
 
     Every agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
     Use 'modastack roles list' to see available roles.
 
     Examples:
-        modastack agents launch -w issue-lifecycle --role engineer --task "Work on #42"
+        modastack agents launch -w issue-lifecycle --role engineer --id 42 --task "Work on issue 42"
         modastack agents launch -w adhoc --role engineer --task "Why is CI failing?"
         modastack agents launch -w adhoc --role engineer --task "Be a team lead" --persistent
         modastack agents launch -w adhoc --role manager --subscribe moda-labs/modastack --persistent
     """
     if subscribe:
         persistent = True
-    _dispatch_agent(task=task, workflow=workflow, role=role,
+    _dispatch_agent(task=task, workflow=workflow, role=role, run_key=run_key,
                     timeout=timeout, wait=wait, post_event=post_event,
                     requested_by=requested_by,
                     interactive=not non_interactive,
@@ -1788,8 +1789,8 @@ def agents_launch(workflow, role, task, timeout, wait, post_event, requested_by,
                     subscribe=list(subscribe))
 
 
-def _dispatch_agent(*, task, workflow, role, timeout, wait, post_event, requested_by,
-                    interactive=True, persistent=False, subscribe=None):
+def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait, post_event,
+                    requested_by, interactive=True, persistent=False, subscribe=None):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -1837,6 +1838,7 @@ def _dispatch_agent(*, task, workflow, role, timeout, wait, post_event, requeste
         role=role,
         persistent=persistent,
         subscribe=subscribe or [],
+        run_key=run_key,
     )
     click.echo(f"Agent started: {session_name}")
 

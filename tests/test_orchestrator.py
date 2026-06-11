@@ -287,7 +287,7 @@ class TestRunWorkflow:
 
     def test_single_step_completes(self):
         wf = Workflow(name="adhoc", steps=[StepDef(name="task", prompt="Say hello")])
-        result = self._mock_asyncio_run(wf, task="Say hello", repo="test", cwd="/tmp", issue_id="1")
+        result = self._mock_asyncio_run(wf, task="Say hello", repo="test", cwd="/tmp", run_key="1")
         assert result is True
 
     def test_multi_step_completes(self):
@@ -295,7 +295,7 @@ class TestRunWorkflow:
             StepDef(name="setup", prompt="set up"),
             StepDef(name="build", prompt="build it"),
         ])
-        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="1")
         assert result is True
 
     def test_route_step_branches(self, tmp_path, monkeypatch):
@@ -322,7 +322,7 @@ class TestRunWorkflow:
             StepDef(name="spec", prompt="write spec"),
             StepDef(name="implement", prompt="build it"),
         ])
-        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="1")
         assert result is True
 
     def test_session_name_is_deterministic(self):
@@ -373,7 +373,7 @@ class TestAwaitStep:
             StepDef(name="wait", await_event="approval"),
             StepDef(name="implement", prompt="build it"),
         ])
-        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="1")
         assert result is True
 
         run = WorkflowRun.find_waiting("approval")
@@ -382,7 +382,7 @@ class TestAwaitStep:
         assert run.await_event == "approval"
         assert run.suspended_at_step == 2
         assert run.session_name == "wf-t-r-1"
-        assert run.issue_id == "1"
+        assert run.run_key == "1"
 
     def test_resume_continues_from_suspended_step(self, tmp_path, monkeypatch):
         monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
@@ -392,15 +392,15 @@ class TestAwaitStep:
         (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
 
-        run = WorkflowRun.create("t", {"data": {"issue_id": "1"}})
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
         run.status = "waiting"
         run.suspended_at_step = 1
         run.await_event = "approval"
         run.session_name = "wf-t-r-1"
-        run.variable_scopes = {"input": {"task": "t", "repo": "r", "issue_id": "1"}}
+        run.variable_scopes = {"input": {"task": "t", "repo": "r", "run_key": "1"}}
         run.repo = "r"
         run.cwd = "/tmp"
-        run.issue_id = "1"
+        run.run_key = "1"
         run.save()
 
         wf = Workflow(name="t", steps=[
@@ -434,18 +434,18 @@ class TestAwaitStep:
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
         assert WorkflowRun.find_waiting("approval") is None
 
-    def test_find_waiting_filters_by_issue(self, tmp_path, monkeypatch):
+    def test_find_waiting_filters_by_run_key(self, tmp_path, monkeypatch):
         monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
 
-        run = WorkflowRun.create("t", {"data": {"issue_id": "42"}})
+        run = WorkflowRun.create("t", {"data": {"run_key": "42"}})
         run.status = "waiting"
         run.await_event = "approval"
         run.save()
 
-        assert WorkflowRun.find_waiting("approval", "42") is not None
-        assert WorkflowRun.find_waiting("approval", "99") is None
+        assert WorkflowRun.find_waiting("approval", run_key="42") is not None
+        assert WorkflowRun.find_waiting("approval", run_key="99") is None
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +522,7 @@ class TestQAPhase:
                     handoff=HandoffContract(required=["qa_status"],
                                             optional=["qa_findings"])),
         ])
-        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="1")
         assert result is True
 
     def test_qa_step_skipped_by_agent_for_backend(self, tmp_path, monkeypatch):
@@ -561,7 +561,7 @@ class TestQAPhase:
                     handoff=HandoffContract(required=["qa_status"],
                                             optional=["qa_findings"])),
         ])
-        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", issue_id="1")
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="1")
         assert result is True
 
     def _mock_asyncio_run(self, workflow, **kwargs):
@@ -599,10 +599,10 @@ class TestTryResumeForEvent:
         runs_dir.mkdir(parents=True)
         monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
 
-        run = WorkflowRun.create("nonexistent-wf", {"data": {"issue_id": "1"}})
+        run = WorkflowRun.create("nonexistent-wf", {"data": {"run_key": "1"}})
         run.status = "waiting"
         run.await_event = "approval"
-        run.issue_id = "1"
+        run.run_key = "1"
         run.save()
 
         with patch("modastack.workflow.triggers.WorkflowDispatcher") as mock_cls:
@@ -618,10 +618,10 @@ class TestTryResumeForEvent:
         runs_dir.mkdir(parents=True)
         monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
 
-        run = WorkflowRun.create("test-wf", {"data": {"issue_id": "5"}})
+        run = WorkflowRun.create("test-wf", {"data": {"run_key": "5"}})
         run.status = "waiting"
         run.await_event = "approval"
-        run.issue_id = "5"
+        run.run_key = "5"
         run.session_name = "wf-test-wf-r-5"
         run.save()
 
@@ -638,15 +638,15 @@ class TestTryResumeForEvent:
 
         assert result is True
 
-    def test_filters_by_issue_id(self, tmp_path, monkeypatch):
+    def test_filters_by_run_key(self, tmp_path, monkeypatch):
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
         monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
 
-        run = WorkflowRun.create("test-wf", {"data": {"issue_id": "10"}})
+        run = WorkflowRun.create("test-wf", {"data": {"run_key": "10"}})
         run.status = "waiting"
         run.await_event = "approval"
-        run.issue_id = "10"
+        run.run_key = "10"
         run.save()
 
         assert try_resume_for_event("approval", "999") is False
@@ -664,15 +664,15 @@ class TestResumeWorkflowTimestamps:
         runs_dir.mkdir(parents=True)
         monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
 
-        run = WorkflowRun.create("t", {"data": {"issue_id": "1"}})
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
         run.status = "waiting"
         run.suspended_at_step = 1
         run.await_event = "approval"
         run.session_name = "wf-t-r-1"
-        run.variable_scopes = {"input": {"task": "t", "repo": "r", "issue_id": "1"}}
+        run.variable_scopes = {"input": {"task": "t", "repo": "r", "run_key": "1"}}
         run.repo = "r"
         run.cwd = "/tmp"
-        run.issue_id = "1"
+        run.run_key = "1"
         run.started_at = "2026-01-01T00:00:00"
         run.save()
 

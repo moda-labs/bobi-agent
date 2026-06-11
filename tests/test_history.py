@@ -574,7 +574,7 @@ class TestContextForEvents:
         ])
         index()
 
-        events = [{"data": {"issue_id": "BET-42"}}]
+        events = [{"data": {"run_key": "BET-42"}}]
         ctx = context_for_events(events)
         assert "BET-42" in ctx
 

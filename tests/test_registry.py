@@ -19,7 +19,7 @@ def tmp_registry(tmp_path, monkeypatch):
 class TestSessionEntry:
     def test_defaults(self):
         e = SessionEntry(name="test")
-        assert e.role == "engineer"
+        assert e.role == ""
         assert e.status == "starting"
         assert e.session_id == ""
 
@@ -40,26 +40,26 @@ class TestSessionEntry:
 
 class TestSessionRegistry:
     def test_register_and_get(self, tmp_registry):
-        entry = SessionEntry(name="eng-42", issue_id="42", phase="pickup")
+        entry = SessionEntry(name="agent-42", run_key="42", phase="pickup")
         tmp_registry.register(entry)
-        got = tmp_registry.get("eng-42")
+        got = tmp_registry.get("agent-42")
         assert got is not None
-        assert got.issue_id == "42"
+        assert got.run_key == "42"
 
     def test_update(self, tmp_registry):
-        tmp_registry.register(SessionEntry(name="eng-1", status="starting"))
-        tmp_registry.update("eng-1", status="running")
-        got = tmp_registry.get("eng-1")
+        tmp_registry.register(SessionEntry(name="agent-1", status="starting"))
+        tmp_registry.update("agent-1", status="running")
+        got = tmp_registry.get("agent-1")
         assert got.status == "running"
 
     def test_update_nonexistent_is_noop(self, tmp_registry):
         tmp_registry.update("does-not-exist", status="running")
 
     def test_mark_done_keeps_entry(self, tmp_registry):
-        tmp_registry.register(SessionEntry(name="eng-1", status="running"))
-        tmp_registry.mark_done("eng-1")
-        assert tmp_registry.get("eng-1") is not None
-        assert tmp_registry.get("eng-1").status == "done"
+        tmp_registry.register(SessionEntry(name="agent-1", status="running"))
+        tmp_registry.mark_done("agent-1")
+        assert tmp_registry.get("agent-1") is not None
+        assert tmp_registry.get("agent-1").status == "done"
 
     def test_list_active(self, tmp_registry):
         tmp_registry.register(SessionEntry(name="a", status="running"))
@@ -76,53 +76,53 @@ class TestSessionRegistry:
 
     def test_get_by_role(self, tmp_registry):
         tmp_registry.register(SessionEntry(name="mgr", role="manager"))
-        tmp_registry.register(SessionEntry(name="eng-1", role="engineer"))
-        tmp_registry.register(SessionEntry(name="eng-2", role="engineer"))
+        tmp_registry.register(SessionEntry(name="agent-1", role="engineer"))
+        tmp_registry.register(SessionEntry(name="agent-2", role="engineer"))
         engineers = tmp_registry.get_by_role("engineer")
         assert len(engineers) == 2
 
     def test_dir_per_session(self, tmp_registry, tmp_path):
         """Each session gets its own directory."""
-        tmp_registry.register(SessionEntry(name="eng-42", issue_id="42"))
-        assert (tmp_path / ".modastack" / "sessions" / "eng-42" / "state.json").exists()
+        tmp_registry.register(SessionEntry(name="agent-42", run_key="42"))
+        assert (tmp_path / ".modastack" / "sessions" / "agent-42" / "state.json").exists()
 
     def test_mark_done_clears_pid(self, tmp_registry):
-        tmp_registry.register(SessionEntry(name="eng-1", pid=12345, status="running"))
-        tmp_registry.mark_done("eng-1")
-        got = tmp_registry.get("eng-1")
+        tmp_registry.register(SessionEntry(name="agent-1", pid=12345, status="running"))
+        tmp_registry.mark_done("agent-1")
+        got = tmp_registry.get("agent-1")
         assert got.status == "done"
         assert got.pid == 0
 
     def test_handoff_path(self, tmp_path, monkeypatch):
         monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
-        path = SessionRegistry.handoff_path("eng-42", "setup")
-        assert path == tmp_path / ".modastack" / "sessions" / "eng-42" / "handoff-setup.yaml"
+        path = SessionRegistry.handoff_path("agent-42", "setup")
+        assert path == tmp_path / ".modastack" / "sessions" / "agent-42" / "handoff-setup.yaml"
 
     def test_log_path(self, tmp_path, monkeypatch):
         monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
-        path = SessionRegistry.log_path("eng-42")
-        assert path == tmp_path / ".modastack" / "sessions" / "eng-42" / "log.jsonl"
+        path = SessionRegistry.log_path("agent-42")
+        assert path == tmp_path / ".modastack" / "sessions" / "agent-42" / "log.jsonl"
 
     def test_cross_process_visibility(self, tmp_path, monkeypatch):
         """Two registry instances see each other's entries."""
         monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
 
         r1 = SessionRegistry()
-        r1.register(SessionEntry(name="eng-42", issue_id="42", status="running"))
+        r1.register(SessionEntry(name="agent-42", run_key="42", status="running"))
 
         r2 = SessionRegistry()
-        got = r2.get("eng-42")
+        got = r2.get("agent-42")
         assert got is not None
-        assert got.issue_id == "42"
+        assert got.run_key == "42"
 
     def test_completed_session_stays_for_history(self, tmp_path, monkeypatch):
         monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
 
         r = SessionRegistry()
-        r.register(SessionEntry(name="eng-42", status="running"))
-        r.mark_done("eng-42")
+        r.register(SessionEntry(name="agent-42", status="running"))
+        r.mark_done("agent-42")
 
-        assert r.get("eng-42") is not None
-        assert r.get("eng-42").status == "done"
+        assert r.get("agent-42") is not None
+        assert r.get("agent-42").status == "done"
         assert len(r.list_active()) == 0
         assert len(r.list_all()) == 1

@@ -101,6 +101,8 @@ class Config:
 
     venn_api_key: str = ""
 
+    default_role: str = ""
+
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     monitors: list[dict] = field(default_factory=list)
 
@@ -157,6 +159,7 @@ class Config:
             services=services,
             event_server_url=raw.get("event_server_url", event_server_url),
             registries=raw.get("registries", []),
+            default_role=raw.get("defaults", {}).get("role", "") if isinstance(raw.get("defaults"), dict) else "",
             venn_api_key=raw.get("venn_api_key", ""),
             mcp_servers=raw.get("mcp_servers", {}),
             monitors=raw.get("monitors", []),

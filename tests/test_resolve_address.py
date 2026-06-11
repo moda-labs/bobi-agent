@@ -35,7 +35,7 @@ def _register(project, name, role):
     session_dir = project / ".modastack" / "sessions" / name
     session_dir.mkdir(parents=True)
     entry = SessionEntry(
-        name=name, session_id="sess-x", role=role, issue_id="",
+        name=name, session_id="sess-x", role=role, run_key="",
         phase="", status="running", pid=os.getpid(), inbox_port=12345,
     )
     (session_dir / "state.json").write_text(json.dumps(asdict(entry)))

@@ -14,7 +14,6 @@ from modastack.sdk import SessionEntry
 from modastack.subagent import (
     AgentResult,
     _build_prompt,
-    _parse_issue_number,
     _resolve_project_name,
     cancel_agent,
     find_agent,
@@ -47,41 +46,6 @@ class TestBuildPrompt:
         prompt = _build_prompt("nonexistent", "AGD-12")
         assert "AGD-12" in prompt
 
-
-class TestParseIssueNumber:
-    def test_issue_hash(self):
-        assert _parse_issue_number("Write a spec for issue #5") == "5"
-
-    def test_issue_hash_no_space(self):
-        assert _parse_issue_number("fix issue#42 please") == "42"
-
-    def test_issue_hash_extra_space(self):
-        assert _parse_issue_number("issue # 7 is broken") == "7"
-
-    def test_issue_word_then_number(self):
-        assert _parse_issue_number("Issue 12: AI Extraction Pipeline") == "12"
-
-    def test_issues_plural(self):
-        assert _parse_issue_number("address issues #99 and others") == "99"
-
-    def test_bare_hash(self):
-        assert _parse_issue_number("Investigate #314 regression") == "314"
-
-    def test_case_insensitive(self):
-        assert _parse_issue_number("ISSUE #8 needs attention") == "8"
-
-    def test_prefers_issue_keyword_over_bare_hash(self):
-        # A bare "#3" earlier should not beat the explicit "issue #5".
-        assert _parse_issue_number("see section #3, fix issue #5") == "5"
-
-    def test_no_reference_returns_none(self):
-        assert _parse_issue_number("Fix the login bug") is None
-
-    def test_empty_returns_none(self):
-        assert _parse_issue_number("") is None
-
-    def test_does_not_match_numbers_without_marker(self):
-        assert _parse_issue_number("bump version to 5 today") is None
 
 
 class TestResolveProjectName:
@@ -116,26 +80,26 @@ class TestAgentLifecycle:
                    return_value=_mock_registry([])):
             assert list_agents() == []
 
-    def test_find_agent_by_issue_id(self):
-        entry = SessionEntry(name="eng-agd-12-implement", issue_id="AGD-12",
+    def test_find_agent_by_run_key(self):
+        entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
                              phase="implement", status="running", pid=0)
         with patch("modastack.subagent.get_registry",
                    return_value=_mock_registry([entry])):
             found = find_agent("AGD-12")
             assert found is not None
-            assert found.name == "eng-agd-12-implement"
+            assert found.name == "agent-agd-12-implement"
 
     def test_find_agent_by_session_name(self):
-        entry = SessionEntry(name="eng-agd-12-implement", issue_id="AGD-12",
+        entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
                              phase="implement", status="running", pid=0)
         with patch("modastack.subagent.get_registry",
                    return_value=_mock_registry([entry])):
-            assert find_agent("eng-agd-12-implement") is entry
+            assert find_agent("agent-agd-12-implement") is entry
 
     def test_find_agent_prefers_active(self):
-        done = SessionEntry(name="eng-agd-12-spec", issue_id="AGD-12",
+        done = SessionEntry(name="agent-agd-12-spec", run_key="AGD-12",
                             phase="spec", status="done", pid=0)
-        active = SessionEntry(name="eng-agd-12-implement", issue_id="AGD-12",
+        active = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
                               phase="implement", status="running", pid=0)
         with patch("modastack.subagent.get_registry",
                    return_value=_mock_registry([done, active])):
@@ -144,24 +108,24 @@ class TestAgentLifecycle:
     def test_list_agents_excludes_managers(self):
         mgr = SessionEntry(name="moda-director-x", role="manager",
                            status="running", pid=0)
-        eng = SessionEntry(name="eng-1-implement", issue_id="1",
+        eng = SessionEntry(name="agent-1-implement", run_key="1",
                            phase="implement", status="running", pid=0)
         with patch("modastack.subagent.get_registry",
                    return_value=_mock_registry([mgr, eng])):
             names = [a["name"] for a in list_agents()]
-            assert names == ["eng-1-implement"]
+            assert names == ["agent-1-implement"]
 
     def test_cancel_running_agent_updates_registry(self):
-        entry = SessionEntry(name="eng-agd-12-implement", issue_id="AGD-12",
+        entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
                              phase="implement", status="running", pid=0)
         registry = _mock_registry([entry])
         with patch("modastack.subagent.get_registry", return_value=registry):
             assert cancel_agent("AGD-12")
         registry.update.assert_called_once_with(
-            "eng-agd-12-implement", status="cancelled", pid=0)
+            "agent-agd-12-implement", status="cancelled", pid=0)
 
     def test_cancel_done_agent_returns_false(self):
-        entry = SessionEntry(name="eng-agd-12-implement", issue_id="AGD-12",
+        entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
                              phase="implement", status="done", pid=0)
         with patch("modastack.subagent.get_registry",
                    return_value=_mock_registry([entry])):
@@ -201,7 +165,7 @@ class TestLaunchAgent:
     def test_returns_deterministic_name(self, mock_launch, mock_reg):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
         from modastack.subagent import launch_agent
-        name = launch_agent(task="Fix issue #42", cwd="/tmp/test", workflow_name="adhoc")
+        name = launch_agent(task="Fix issue #42", cwd="/tmp/test", workflow_name="adhoc", run_key="42")
         assert "adhoc" in name
         assert "42" in name
         mock_launch.assert_called_once()

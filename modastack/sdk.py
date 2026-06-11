@@ -1,6 +1,6 @@
 """Session registry — persistent tracking for all Claude Code sessions.
 
-Every session (manager or engineer) is tracked here. Sessions persist
+Every session (manager or agent) is tracked here. Sessions persist
 across restarts via state.json files in per-session directories.
 Each session wraps a ClaudeSDKClient with connect/resume/query/disconnect.
 
@@ -184,8 +184,8 @@ def get_cli_path() -> str:
 class SessionEntry:
     name: str
     session_id: str = ""
-    role: str = "engineer"
-    issue_id: str = ""
+    role: str = ""
+    run_key: str = ""
     title: str = ""
     phase: str = ""
     project: str = ""
