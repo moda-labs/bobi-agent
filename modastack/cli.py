@@ -228,13 +228,15 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
     from modastack.prompts.resolver import build_startup_prompt
     from modastack.subagent import spawn_adhoc
 
-    task = build_startup_prompt(role, project_path, agent_name=agent_name)
+    session_name = _manager_session_name(project_path, role)
+    task = build_startup_prompt(role, project_path, agent_name=agent_name,
+                                session_name=session_name)
 
     log.info(f"Modastack running for {project_path.name}")
     spawn_adhoc(
         cwd=str(project_path),
         task=task,
-        name=_manager_session_name(project_path, role),
+        name=session_name,
         persistent=True,
         role=role,
         mcp_servers=cfg.mcp_servers or None,
