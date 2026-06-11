@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.14.0 — 2026-06-11
+
+Agent teams can now ship runtime files, and the first non-engineering
+pack lands: market-research. Trialed end-to-end in a fresh project
+(install, all three research workflows, manager + inbox + monitors,
+live Linear API).
+
+### Added
+- `context/` pack subdir — team-shipped reference files, installed
+  frozen to `.modastack/context/` (manifest-tracked, doctor-covered).
+  Agents get an index (path + first line) in their prompt and read
+  files on demand; contents are never inlined
+- `workspace/` pack subdir — seed templates for user-owned domain files.
+  Install copies to `<project>/workspace/` only if absent; reinstall
+  never overwrites user or agent edits
+- market-research agent team: persistent `research_manager` coordinating
+  `topic_researcher`, `landscape_scanner`, and `pmf_navigator`; five
+  workflows; KB-backed research corpus with typed entries
+  (`topic::`, `voice::`, `company::`, `snapshot::`, `pmf::`)
+- Prompt-lint test (`tests/test_tool_guides.py`): pack prompts may only
+  reference modastack CLI commands that exist
+
+### Fixed
+- `modastack ask`/`message` resolve the coordinator by the installed
+  `entry_point` role — previously hardcoded the literal role "manager",
+  breaking the interactive loop for any pack with a different
+  coordinator name
+- Tool guides taught nonexistent CLI commands (`modastack slack-send`,
+  a fictional `modastack linear` group); Linear guides rewritten against
+  the real GraphQL API and verified live
+
+### Changed
+- Tool-guide authoring doctrine: guides carry team policy; CLI syntax
+  lives in drift-proof surfaces (`--help`, `modastack skill`); raw-API
+  mechanics only for services the framework doesn't wrap
+- Authoring and onboarding docs cover `context/`, `workspace/`, and the
+  function-vs-policy rule
+
 ## 0.13.0 — 2026-06-10
 
 Full-codebase simplify pass: net −1,300 lines with no behavior changes
