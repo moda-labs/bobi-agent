@@ -2,6 +2,9 @@ agents:
   eng-team:
     version: "1.0.0"
     description: "Multi-repo engineering org — director, project leads, engineers"
+  content-review:
+    version: "1.0.0"
+    description: "Knowledge base management — manager, researcher, editor, fact checker for docs, runbooks, and guides"
   market-research:
     version: "1.0.0"
     description: "Market intelligence — research manager, topic researcher, landscape scanner, PMF navigator"

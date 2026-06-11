@@ -1,0 +1,56 @@
+name: content-review
+trigger: When an issue requests review or audit of existing content for accuracy and freshness.
+description: >
+  Review existing content for accuracy, freshness, and quality.
+  Fact-check claims, verify links, and flag stale information.
+  Open a PR with fixes if issues are found.
+
+steps:
+  - name: setup
+    agent: fact-checker
+    prompt: |
+      Create a git worktree for this issue and set up the workspace.
+      Read the issue to understand which content needs review.
+    handoff:
+      required: [worktree]
+    timeout: 300
+
+  - name: audit
+    agent: fact-checker
+    prompt: |
+      Audit the content specified in the issue. Check for:
+      - Factual accuracy (test any technical instructions)
+      - Stale information (outdated versions, deprecated tools, dead links)
+      - Missing prerequisites or incomplete steps
+      - Style guide compliance
+
+      Write a detailed audit report as a comment on the issue.
+      If you find issues, note them in the handoff.
+    handoff:
+      required: [verdict, issues_count]
+      optional: [issues_found]
+    timeout: 1800
+
+  - name: route_fixes
+    if: "issues_count > 0"
+    goto: fix
+    else: done
+
+  - name: fix
+    agent: editor
+    prompt: |
+      Fix the issues found in the content audit. Read the audit report
+      from the issue comments, then make the corrections.
+      Create a PR with the fixes.
+    handoff:
+      required: [pr_url]
+    timeout: 1200
+
+  - name: done
+    agent: fact-checker
+    prompt: |
+      The content passed review. Comment on the issue confirming the
+      content is accurate and up-to-date, then close it.
+    handoff:
+      required: [status]
+    timeout: 300

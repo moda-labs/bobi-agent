@@ -6,11 +6,12 @@ description: Run integration tests against modastack-dogfood. Tests CLI, event s
 
 You are running a comprehensive integration test battery against modastack
 using the `modastack-dogfood` repo as a test harness. This is a real repo
-at `~/dev/modastack-dogfood` with a custom (non-engineering) agent team.
+at `~/dev/modastack-dogfood` that uses the `content-review` agent team
+shipped in this repo at `agents/content-review/`.
 
-The installed team is whatever `agents/registry.yaml` lists (currently
-`content-review`, with roles researcher/editor/fact_checker/manager).
-Discover the team name from the registry — don't assume it.
+The dogfood repo installs the team from the local modastack source tree
+(not from a remote registry). Discover the team name from the dogfood
+repo's `agents/registry.yaml` — don't assume it.
 
 ## Phase 1: Setup
 
@@ -19,12 +20,11 @@ Discover the team name from the registry — don't assume it.
    gh repo clone moda-labs/modastack-dogfood ~/dev/modastack-dogfood
    ```
 
-2. Check that `agents/registry.yaml` and `.modastack/agent.yaml` exist in
-   the dogfood repo. If `.modastack/agent.yaml` is missing, install the team:
+2. Install the content-review team from the local modastack source tree:
    ```bash
-   cd ~/dev/modastack-dogfood && modastack install agents/<team-name>
+   cd ~/dev/modastack-dogfood && modastack install ~/dev/modastack/agents/content-review
    ```
-   If `agents/registry.yaml` is missing, report misconfiguration and stop.
+   This copies the pack into `.modastack/` and creates `agent.yaml`.
 
 3. Ensure the dev install is active:
    ```bash

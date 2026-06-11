@@ -1,0 +1,45 @@
+version: "1.1.0"
+
+entry_point: manager
+chat: slack
+
+# Cloud event server URL in production (.env), empty for an
+# auto-started local server (CI smoke tests, local dev).
+event_server: ${MODASTACK_EVENT_SERVER}
+
+# GitHub events arrive via webhooks (native adapter auto-detects the
+# repo). Email has no webhook adapter — the new-emails monitor polls
+# Gmail and injects email/received events. The events: true flag on
+# email ensures the CLI subscribes to monitor event topics.
+services:
+  - name: github
+    events: true
+  - name: email
+    events: true
+
+task_tracking:
+  system: github-issues
+  project: PLAYBOOK
+  trigger_labels:
+    - agent
+    - content
+    - research
+  skip_labels:
+    - blocked
+    - human-only
+
+verify:
+  review_required: true
+  auto_merge: false
+
+context:
+  content_dirs: "workspace/guides/ workspace/runbooks/ workspace/research/"
+  style_guide: "Clear, concise, actionable. Write for practitioners, not academics."
+
+venn_api_key: ${VENN_API_KEY}
+
+monitors:
+  - name: new-emails
+    command: 'venn --json tools execute -s gmail -t list_emails -a ''{"userId": "me", "maxResults": 10, "q": "is:unread"}'''
+    interval: 5m
+    event: email/received

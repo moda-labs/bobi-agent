@@ -1,0 +1,26 @@
+name: research-task
+trigger: When an issue with a "research" label is assigned for investigation.
+description: >
+  Pure research task: investigate a topic and produce a research summary.
+  No content drafting or PR — just research and report findings.
+
+steps:
+  - name: setup
+    agent: researcher
+    prompt: |
+      Create a git worktree for this issue and set up the workspace.
+      Read the issue to understand what needs to be researched.
+    handoff:
+      required: [worktree]
+    timeout: 300
+
+  - name: investigate
+    agent: researcher
+    prompt: |
+      Research the topic described in the issue. Follow your research process:
+      investigate thoroughly, gather sources, and write a structured research
+      summary to research/. When done, comment on the issue with your key findings.
+    handoff:
+      required: [research_path, key_findings]
+      optional: [sources, recommendations]
+    timeout: 3600
