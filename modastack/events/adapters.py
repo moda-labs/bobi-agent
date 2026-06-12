@@ -111,6 +111,69 @@ def _parse_github_url(url: str) -> str:
     return ""
 
 
+def _is_channel_id(value: str) -> bool:
+    """True if the value looks like a Slack channel ID (e.g. C0ABC123)."""
+    return bool(value) and value[0] in ("C", "G") and value[1:].isalnum()
+
+
+def _resolve_channel_names(token: str, channels: list[str]) -> list[str]:
+    """Resolve human-readable channel names to Slack channel IDs.
+
+    Accepts a mix of IDs (``C0ABC123``) and names (``#support`` or
+    ``support``).  IDs pass through unchanged; names are resolved via
+    ``conversations.list``.  Unresolvable names are logged and dropped.
+    """
+    names_to_resolve: dict[str, int] = {}  # normalized name -> index
+    resolved: list[str | None] = list(channels)
+
+    for i, ch in enumerate(channels):
+        if _is_channel_id(ch):
+            continue
+        name = ch.lstrip("#").lower()
+        names_to_resolve[name] = i
+
+    if not names_to_resolve:
+        return channels
+
+    # Paginate conversations.list to find matching channels.
+    cursor = ""
+    while True:
+        url = "https://slack.com/api/conversations.list?limit=200&types=public_channel,private_channel"
+        if cursor:
+            url += f"&cursor={cursor}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+
+        if not data.get("ok"):
+            log.warning(f"conversations.list failed: {data.get('error', 'unknown')}")
+            break
+
+        for conv in data.get("channels", []):
+            name = conv.get("name", "").lower()
+            if name in names_to_resolve:
+                idx = names_to_resolve.pop(name)
+                resolved[idx] = conv["id"]
+                log.info(f"Resolved Slack channel #{name} -> {conv['id']}")
+                if not names_to_resolve:
+                    break
+
+        if not names_to_resolve:
+            break
+        cursor = data.get("response_metadata", {}).get("next_cursor", "")
+        if not cursor:
+            break
+
+    for name in names_to_resolve:
+        idx = names_to_resolve[name]
+        log.warning(
+            f"Could not resolve Slack channel name '{channels[idx]}' to an ID — skipping"
+        )
+        resolved[idx] = None
+
+    return [ch for ch in resolved if ch is not None]
+
+
 def _slack_keys(team_id: str, channels: list[str]) -> list[str]:
     """Build Slack subscription keys for a workspace.
 
@@ -129,6 +192,9 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
     """Detect Slack subscription keys from the bot token via auth.test.
 
     Scopes to the slack service's configured `channels` if any are set.
+    Channels can be IDs (``C0ABC123``) or human-readable names
+    (``#support`` or ``support``) — names are resolved to IDs
+    automatically via the Slack API.
     """
     token = cfg.credential("slack", "bot_token")
     if not token:
@@ -143,6 +209,8 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
         if data.get("ok") and data.get("team_id"):
+            if channels:
+                channels = _resolve_channel_names(token, channels)
             keys = _slack_keys(data["team_id"], channels)
             log.info(
                 f"Auto-detected Slack workspace {data['team_id']}; "

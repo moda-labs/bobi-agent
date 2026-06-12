@@ -8,6 +8,8 @@ from modastack.events.adapters import (
     is_registered,
     detect,
     _parse_github_url,
+    _is_channel_id,
+    _resolve_channel_names,
 )
 
 
@@ -93,11 +95,116 @@ class TestSlackDetector:
 
         cfg = Config(services=[
             ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"},
-                          channels=["C_SUPPORT", "C_ALERTS"]),
+                          channels=["C0SUPPORT", "C0ALERTS"]),
         ])
         keys = detect("slack", tmp_path, cfg)
         # per-channel keys, not the whole workspace
-        assert keys == ["slack:T123ABC:C_SUPPORT", "slack:T123ABC:C_ALERTS"]
+        assert keys == ["slack:T123ABC:C0SUPPORT", "slack:T123ABC:C0ALERTS"]
+
+
+    @patch("urllib.request.urlopen")
+    def test_detect_resolves_channel_names_to_ids(self, mock_urlopen, tmp_path):
+        """End-to-end: human-readable channel names get resolved via Slack API."""
+        import json
+
+        # First call: auth.test → team_id.  Second call: conversations.list → name→ID map.
+        auth_resp = type("Resp", (), {
+            "read": lambda self: json.dumps({"ok": True, "team_id": "T123ABC"}).encode(),
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        conv_resp = type("Resp", (), {
+            "read": lambda self: json.dumps({
+                "ok": True,
+                "channels": [
+                    {"id": "C_SUPPORT", "name": "support"},
+                    {"id": "C_GENERAL", "name": "general"},
+                ],
+                "response_metadata": {"next_cursor": ""},
+            }).encode(),
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        mock_urlopen.side_effect = [auth_resp, conv_resp]
+
+        cfg = Config(services=[
+            ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"},
+                          channels=["#support", "general"]),
+        ])
+        keys = detect("slack", tmp_path, cfg)
+        assert keys == ["slack:T123ABC:C_SUPPORT", "slack:T123ABC:C_GENERAL"]
+
+
+class TestChannelNameResolution:
+
+    def test_is_channel_id_recognises_ids(self):
+        assert _is_channel_id("C0ABC123") is True
+        assert _is_channel_id("G0ABC123") is True
+
+    def test_is_channel_id_rejects_names(self):
+        assert _is_channel_id("support") is False
+        assert _is_channel_id("#support") is False
+        assert _is_channel_id("") is False
+
+    @patch("urllib.request.urlopen")
+    def test_resolve_passes_ids_through(self, mock_urlopen):
+        result = _resolve_channel_names("xoxb-test", ["C0AAA", "C0BBB"])
+        assert result == ["C0AAA", "C0BBB"]
+        mock_urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_resolve_looks_up_names(self, mock_urlopen):
+        import json
+        mock_resp = type("Resp", (), {
+            "read": lambda self: json.dumps({
+                "ok": True,
+                "channels": [
+                    {"id": "C_SUPPORT", "name": "support"},
+                    {"id": "C_ALERTS", "name": "alerts"},
+                ],
+                "response_metadata": {"next_cursor": ""},
+            }).encode(),
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        mock_urlopen.return_value = mock_resp
+
+        result = _resolve_channel_names("xoxb-test", ["#support", "alerts"])
+        assert result == ["C_SUPPORT", "C_ALERTS"]
+
+    @patch("urllib.request.urlopen")
+    def test_resolve_mixed_ids_and_names(self, mock_urlopen):
+        import json
+        mock_resp = type("Resp", (), {
+            "read": lambda self: json.dumps({
+                "ok": True,
+                "channels": [{"id": "C_SUPPORT", "name": "support"}],
+                "response_metadata": {"next_cursor": ""},
+            }).encode(),
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        mock_urlopen.return_value = mock_resp
+
+        result = _resolve_channel_names("xoxb-test", ["C0AAA", "#support"])
+        assert result == ["C0AAA", "C_SUPPORT"]
+
+    @patch("urllib.request.urlopen")
+    def test_resolve_drops_unresolvable_names(self, mock_urlopen):
+        import json
+        mock_resp = type("Resp", (), {
+            "read": lambda self: json.dumps({
+                "ok": True,
+                "channels": [],
+                "response_metadata": {"next_cursor": ""},
+            }).encode(),
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *a: False,
+        })()
+        mock_urlopen.return_value = mock_resp
+
+        result = _resolve_channel_names("xoxb-test", ["#nonexistent"])
+        assert result == []
 
 
 def test_slack_keys_helper():
