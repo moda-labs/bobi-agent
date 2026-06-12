@@ -29,11 +29,23 @@ def _get_project_config():
         return None
 
 
+def _thread_key(event: dict) -> tuple[str, str, str]:
+    """Return (source, channel, thread_ts) for placeholder dedup."""
+    fields = event.get("fields", {})
+    channel = fields.get("channel", "")
+    thread_ts = fields.get("thread_ts", "") or fields.get("ts", "")
+    return (event.get("source", ""), channel, thread_ts)
+
+
 def _prepare_chat_events(events: list[dict]) -> list[dict]:
     """Run input channel handlers on chat events, returning augmented copies.
 
     Each handler may post placeholders, set typing status, or inject
     fields (e.g. ``placeholder_ts``) into the event before delivery.
+
+    When multiple events in a batch target the same thread, only the
+    first triggers a placeholder — subsequent events reuse the same
+    ``placeholder_ts`` to avoid duplicate "Evaluating…" messages (#232).
 
     Credential resolution is generic: the handler declares its
     ``credential_key`` and the drain loop resolves it via
@@ -42,6 +54,9 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
     from modastack.events.channels import get_channel_handler
 
     cfg = _get_project_config()
+
+    # Track placeholder_ts per thread so we post at most one per batch.
+    seen_threads: dict[tuple[str, str, str], str] = {}
 
     result: list[dict] = []
     for event in events:
@@ -56,7 +71,20 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
             result.append(event)
             continue
 
-        result.append(handler.prepare(event, token))
+        key = _thread_key(event)
+        existing_ts = seen_threads.get(key)
+
+        if existing_ts is not None:
+            # Reuse the placeholder from the first event in this thread.
+            fields = dict(event.get("fields", {}))
+            fields["placeholder_ts"] = existing_ts
+            result.append(dict(event, fields=fields))
+        else:
+            prepared = handler.prepare(event, token)
+            placeholder_ts = prepared.get("fields", {}).get("placeholder_ts", "")
+            if placeholder_ts:
+                seen_threads[key] = placeholder_ts
+            result.append(prepared)
 
     return result
 
