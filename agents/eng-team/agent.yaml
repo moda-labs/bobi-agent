@@ -41,3 +41,7 @@ auto_dispatch:
       is_pull_request: true
     workflow: pr-feedback
     cooldown: 1800
+
+  - event: github.issues.assigned
+    workflow: issue-lifecycle
+    cooldown: 1800
