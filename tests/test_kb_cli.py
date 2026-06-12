@@ -17,7 +17,7 @@ def setup_project_root(tmp_path, monkeypatch):
     kb_dir.mkdir(parents=True)
     state_dir = tmp_path / ".modastack" / "state"
     state_dir.mkdir(parents=True)
-    monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+    monkeypatch.setattr("modastack.paths._root", tmp_path)
     monkeypatch.setattr("modastack.kb.store._kb_dir", lambda: kb_dir)
     return tmp_path
 

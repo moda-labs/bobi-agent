@@ -40,14 +40,16 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 def load_dotenv(project_path: Path) -> None:
     """Load .modastack/.env into os.environ (existing vars take precedence)."""
-    for key, value in parse_env_file(project_path / ".modastack" / ".env").items():
+    from modastack import paths
+    for key, value in parse_env_file(paths.modastack_dir(project_path) / ".env").items():
         if key not in os.environ:
             os.environ[key] = value
 
 
 def find_required_env_vars(project_path: Path) -> list[str]:
     """Scan .modastack/agent.yaml for ${VAR} references and return var names."""
-    agent_yaml = project_path / ".modastack" / "agent.yaml"
+    from modastack import paths
+    agent_yaml = paths.agent_yaml_path(project_path)
     if not agent_yaml.exists():
         return []
     content = agent_yaml.read_text()
@@ -74,7 +76,8 @@ def _load_yaml(path: Path) -> dict:
 
 
 def _project_config_path(project_path: Path) -> Path:
-    return project_path / ".modastack" / "agent.yaml"
+    from modastack import paths
+    return paths.agent_yaml_path(project_path)
 
 
 def _parse_channels(value) -> list[str]:
@@ -273,14 +276,16 @@ def _safe_session(session: str) -> str:
 
 
 def deployment_state_path(project_path: Path, session: str) -> Path:
-    return (project_path / ".modastack" / "state" / "deployments"
+    from modastack import paths
+    return (paths.state_path(project_path) / "deployments"
             / f"{_safe_session(session)}.json")
 
 
 def session_cursor_path(project_path: Path, session: str) -> Path:
     """Per-session event cursor. Seq numbers are per-deployment, so a shared
     cursor file would corrupt replay positions across sessions."""
-    return (project_path / ".modastack" / "state" / "cursors"
+    from modastack import paths
+    return (paths.state_path(project_path) / "cursors"
             / f"{_safe_session(session)}.json")
 
 
@@ -308,22 +313,3 @@ def save_deployment_state(project_path: Path, session: str,
     }))
 
 
-def resolve_project_root(start: Path) -> Path:
-    """Nearest ancestor (including start) with .modastack/agent.yaml, else start.
-
-    Agent processes inherit whatever cwd their spawner chose. The cwd must
-    not silently decide which config, state, and event subscriptions an
-    agent gets — an agent launched from a repo checkout inside the project
-    must still resolve to the one real project root.
-
-    The marker is agent.yaml (written by install), not the bare .modastack/
-    directory: the runtime drops state-only .modastack/ dirs (sessions/,
-    state/) into repo checkouts, and stopping at one of those binds the
-    agent to a root with no config — engineer dispatch died with
-    "Workflow 'issue-lifecycle' not found" exactly this way.
-    """
-    start = start.resolve()
-    for candidate in (start, *start.parents):
-        if (candidate / ".modastack" / "agent.yaml").is_file():
-            return candidate
-    return start

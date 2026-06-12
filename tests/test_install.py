@@ -198,8 +198,7 @@ class TestPromptSections:
 class TestDoctorIntegrity:
 
     def _set_root(self, project, monkeypatch):
-        from modastack import sdk
-        monkeypatch.setattr(sdk, "get_project_root", lambda: project)
+        monkeypatch.setattr("modastack.paths._root", project)
 
     def test_clean_install_passes(self, pack, project, monkeypatch):
         _install_pack(pack, project)

@@ -87,7 +87,9 @@ PR title format: `[ISSUE-ID] type: description`
 
 ### Where to find ticket info
 
-The handoff file (`.modastack/sessions/<session-name>/handoff-<step>.yaml`) contains:
+The handoff file contains (its absolute path is provided in your task
+prompt — sessions live under the installation root's `.modastack/sessions/`,
+never relative to your working directory):
 - `issue_id`: the ticket identifier (e.g., BET-10)
 - `task_id`: the unique identifier needed for API calls
 - `title`: the ticket title

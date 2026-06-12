@@ -211,11 +211,15 @@ class TestNoFrameworkFallback:
             f"Framework package must not ship workflow YAMLs: {[f.name for f in yamls]}"
         )
 
-    def test_load_all_without_project_loads_nothing(self):
-        """Without a project path, no workflows should load."""
+    def test_load_all_without_project_raises(self, monkeypatch):
+        """Without a project path and without a bound root, loading raises —
+        silently loading nothing was the failure mode that dispatched
+        engineers with no workflows."""
+        import pytest
+        monkeypatch.setattr("modastack.paths._root", None)
         dispatcher = WorkflowDispatcher()
-        dispatcher.load_all_workflows(project_path=None)
-        assert len(dispatcher.workflows) == 0
+        with pytest.raises(RuntimeError, match="not bound"):
+            dispatcher.load_all_workflows(project_path=None)
 
     def test_load_all_uses_only_installed_pack(self, tmp_path):
         """Workflows load exclusively from .modastack/workflows/."""

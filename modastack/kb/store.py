@@ -24,11 +24,8 @@ MIN_CHUNK_CHARS = 100
 
 
 def _kb_dir() -> Path:
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        raise RuntimeError("project root not set")
-    return root / ".modastack" / "kb"
+    from modastack import paths
+    return paths.modastack_dir() / "kb"
 
 
 def _now() -> str:

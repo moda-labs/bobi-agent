@@ -9,8 +9,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 def _runs_dir() -> Path:
-    from modastack.sdk import state_dir
-    d = state_dir() / "workflow" / "runs"
+    from modastack import paths
+    d = paths.state_dir() / "workflow" / "runs"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

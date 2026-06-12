@@ -9,6 +9,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_paths_root():
+    """No test may leak a bound root into the next.
+
+    The binding is process-global and bind_root refuses to rebind to a
+    different path (a process has one identity) — without this reset,
+    any test that binds via a real code path (CLI invoke, _run_agent_entry)
+    poisons every later test that binds a different tmp root.
+    """
+    from modastack import paths
+    before = paths._root
+    yield
+    paths._root = before
+
 import yaml
 
 TEST_AGENT_NAME = "test-agent"
@@ -111,7 +127,7 @@ class ModastackInstall:
 def modastack_install(tmp_path, monkeypatch):
     """Create a fully isolated modastack installation in a temp directory.
 
-    Sets sdk._project_root so all per-project path resolution points at tmp_path.
+    Binds the paths root so all per-project path resolution points at tmp_path.
     No global ~/.modastack directory is created or referenced.
 
     Creates a self-contained test agent team so tests never depend on
@@ -138,7 +154,7 @@ def modastack_install(tmp_path, monkeypatch):
         ],
     }))
 
-    monkeypatch.setattr("modastack.sdk._project_root", repo_path)
+    monkeypatch.setattr("modastack.paths._root", repo_path)
 
     return ModastackInstall(
         repo_path=repo_path,

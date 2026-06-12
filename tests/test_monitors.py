@@ -534,6 +534,8 @@ class TestDefaultSpawnCheckEntryPoint:
         )
 
         monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
+        from modastack import paths as paths_mod
+        monkeypatch.setattr(paths_mod, "_root", project)
 
         captured_cmds = []
 
@@ -576,6 +578,8 @@ class TestDefaultSpawnCheckEntryPoint:
         )
 
         monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
+        from modastack import paths as paths_mod
+        monkeypatch.setattr(paths_mod, "_root", project)
 
         captured_cmds = []
 

@@ -21,11 +21,12 @@ uv tool install modastack
    cd ~/dev/your-repo
    ```
 
-2. Initialize modastack:
+2. Install an agent team (from the directory that will own the
+   installation — this creates the single `.modastack/` with
+   `agent.yaml` inside):
    ```bash
-   modastack init
+   modastack install eng-team
    ```
-   This creates `.modastack/config.yaml` and `.modastack/local.yaml`.
 
 3. Start the manager:
    ```bash
@@ -45,6 +46,6 @@ uv tool install modastack
 
 ## Troubleshooting
 
-- **"Not inside a modastack repo"**: Make sure `.modastack/config.yaml` exists
+- **"no Modastack installation found"**: run from inside the installation tree — the directory where `modastack install` created `.modastack/agent.yaml`
 - **Manager not responding**: Check `modastack doctor` for diagnostics
 - **No events arriving**: Verify event server with `modastack event-server status`

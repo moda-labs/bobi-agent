@@ -18,7 +18,7 @@ from modastack.sdk import (
 
 @pytest.fixture
 def tmp_registry(tmp_path, monkeypatch):
-    monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+    monkeypatch.setattr("modastack.paths._root", tmp_path)
     (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
     return SessionRegistry()
 
@@ -70,7 +70,7 @@ class TestComputeManifestHash:
         assert h1 == h2
 
     def test_uses_project_root_when_no_path(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         _write_manifest(tmp_path, {"x.md": "hash"})
         assert compute_manifest_hash() != ""
 
@@ -109,7 +109,7 @@ class TestSessionEntryImageHash:
 class TestCheckImageRotation:
     def test_rotates_when_hash_changes(self, tmp_path, monkeypatch):
         """Session is cleared when manifest hash differs from stored stamp."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
 
         registry = SessionRegistry()
@@ -131,7 +131,7 @@ class TestCheckImageRotation:
 
     def test_no_rotation_when_hash_matches(self, tmp_path, monkeypatch):
         """Session preserved when manifest hasn't changed."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
 
         registry = SessionRegistry()
@@ -150,7 +150,7 @@ class TestCheckImageRotation:
 
     def test_no_rotation_when_no_prior_hash(self, tmp_path, monkeypatch):
         """First run (empty stored hash) does not rotate."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
 
         registry = SessionRegistry()
@@ -168,7 +168,7 @@ class TestCheckImageRotation:
 
     def test_no_rotation_when_no_saved_session(self, tmp_path, monkeypatch):
         """No session ID → nothing to rotate."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
 
         _write_manifest(tmp_path, {"a.md": "hash"})
@@ -176,7 +176,7 @@ class TestCheckImageRotation:
 
     def test_no_rotation_when_no_manifest(self, tmp_path, monkeypatch):
         """Without an install manifest, rotation never fires."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
 
         session_name = "moda-manager-proj"
@@ -192,7 +192,7 @@ class TestCheckImageRotation:
 class TestSubagentImageStamp:
     def test_stamp_written_at_registration(self, tmp_path, monkeypatch):
         """SessionEntry should carry the current manifest hash."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
 
         _write_manifest(tmp_path, {"tools/github.md": "abc"})
@@ -208,7 +208,7 @@ class TestSubagentImageStamp:
 
     def test_stale_subagent_rotated_on_mismatch(self, tmp_path, monkeypatch):
         """Sub-agent session ID cleared when image hash differs."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
 
         registry = SessionRegistry()
@@ -241,7 +241,7 @@ class TestSubagentImageStamp:
 
     def test_backward_compat_old_state_no_image_hash(self, tmp_path, monkeypatch):
         """Old state.json without image_hash field loads cleanly."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         sessions_dir = tmp_path / ".modastack" / "sessions"
         sessions_dir.mkdir(parents=True)
 

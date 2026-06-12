@@ -64,7 +64,8 @@ def _check_entry_point(cfg, project_path: Path) -> CheckResult:
     if not cfg.entry_point:
         return CheckResult("entry_point", ok=True, detail="not set, defaulting to manager")
 
-    installed_roles = project_path / ".modastack" / "roles"
+    from modastack import paths
+    installed_roles = paths.roles_dir(project_path)
     role_dir = installed_roles / cfg.entry_point
     if role_dir.is_dir():
         return CheckResult("entry_point", ok=True, detail=cfg.entry_point)

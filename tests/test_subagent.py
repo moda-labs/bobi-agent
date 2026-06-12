@@ -3,6 +3,7 @@
 For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 """
 
+import json
 import tempfile
 import shutil
 from pathlib import Path
@@ -29,6 +30,13 @@ def tmp_cwd():
 
 
 class TestBuildPrompt:
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        """_build_prompt reads handoffs via the session registry, which
+        requires a bound root — don't depend on one leaking from tests
+        that ran earlier."""
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
+
     def test_includes_phase_and_issue(self):
         prompt = _build_prompt("pickup", "AGD-12")
         assert "pickup" in prompt
@@ -280,6 +288,12 @@ class TestAlertRequiresFailure:
 class TestLaunchAgent:
     """Test that launch_agent launches a detached subprocess."""
 
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        """launch_agent reads the bound installation root; binding is the
+        spawning process's job, so tests bind explicitly."""
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
+
     @patch("modastack.subagent.check_requires", return_value=[])
     @patch("modastack.subagent.get_registry")
     @patch("modastack.subagent._launch_detached")
@@ -349,5 +363,101 @@ class TestLaunchAgent:
                 launch_agent(task="Fix #1", cwd=str(tmp_path), workflow_name="adhoc")
         mock_alert.assert_called_once()
         mock_launch.assert_not_called()
+
+    @patch("modastack.subagent.check_requires", return_value=[])
+    @patch("modastack.subagent.get_registry")
+    @patch("modastack.subagent._launch_detached")
+    def test_passes_installation_root_to_child(self, mock_launch, mock_reg,
+                                               mock_check, tmp_path, monkeypatch):
+        """The spawner's bound root travels in the args blob — the child
+        inherits its identity instead of inferring it from cwd."""
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        repo = tmp_path / "repos" / "jobtack"
+        repo.mkdir(parents=True)
+
+        from modastack.subagent import launch_agent
+        launch_agent(task="Fix #1", cwd=str(repo), workflow_name="adhoc")
+
+        parsed = json.loads(mock_launch.call_args[0][1][0])
+        assert parsed["root"] == str(tmp_path)
+        assert parsed["cwd"] == str(repo)
+        # Preflight also runs against the root, not the working dir
+        mock_check.assert_called_once_with(tmp_path)
+
+    @patch("modastack.subagent.check_requires", return_value=[])
+    @patch("modastack.subagent.get_registry")
+    @patch("modastack.subagent._launch_detached")
+    def test_raises_when_spawner_unbound(self, mock_launch, mock_reg,
+                                         mock_check, tmp_path, monkeypatch):
+        """An unbound spawning process is a bug — no resolution from cwd,
+        no guessing. It raises before anything is registered or launched."""
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        monkeypatch.setattr("modastack.paths._root", None)
+        repo = tmp_path / "repos" / "jobtack"
+        repo.mkdir(parents=True)
+
+        from modastack.subagent import launch_agent
+        with pytest.raises(RuntimeError, match="not bound"):
+            launch_agent(task="Fix #1", cwd=str(repo), workflow_name="adhoc")
+        mock_launch.assert_not_called()
+
+
+class TestRunAgentEntryRootBinding:
+    """_run_agent_entry binds the root its spawner passed, never cwd."""
+
+    @patch("modastack.subagent.spawn_adhoc")
+    def test_binds_passed_root(self, mock_spawn, tmp_path, monkeypatch):
+        import modastack.sdk as sdk
+        monkeypatch.setattr("modastack.paths._root", None)
+        root = tmp_path / "dev"
+        repo = root / "jobtack"
+        (root / ".modastack").mkdir(parents=True)
+        (root / ".modastack" / "agent.yaml").write_text("name: t\n")
+        repo.mkdir()
+
+        from modastack.subagent import _run_agent_entry
+        _run_agent_entry({
+            "task": "t", "cwd": str(repo), "root": str(root),
+            "workflow_name": "adhoc", "persistent": True, "subscribe": [],
+        })
+
+        assert sdk.get_project_root() == root
+        # cwd stays the working dir for the spawned session
+        assert mock_spawn.call_args.kwargs["cwd"] == str(repo)
+
+    @patch("modastack.subagent.spawn_adhoc")
+    def test_missing_root_is_a_spawner_bug(self, mock_spawn, tmp_path,
+                                           monkeypatch):
+        """An args blob without a root fails loudly — the child never
+        guesses its identity from cwd."""
+        monkeypatch.setattr("modastack.paths._root", None)
+        repo = tmp_path / "dev" / "jobtack"
+        repo.mkdir(parents=True)
+
+        from modastack.subagent import _run_agent_entry
+        with pytest.raises(RuntimeError, match="missing 'root'|no 'root'"):
+            _run_agent_entry({
+                "task": "t", "cwd": str(repo),
+                "workflow_name": "adhoc", "persistent": True, "subscribe": [],
+            })
+        mock_spawn.assert_not_called()
+
+    @patch("modastack.subagent.spawn_adhoc")
+    def test_rejects_root_without_marker(self, mock_spawn, tmp_path,
+                                         monkeypatch):
+        """A root that is not a real installation must be refused — binding
+        it would mkdir a fresh scattered .modastack at a bogus path."""
+        monkeypatch.setattr("modastack.paths._root", None)
+        bogus = tmp_path / "not-an-install"
+        bogus.mkdir()
+
+        from modastack.subagent import _run_agent_entry
+        with pytest.raises(RuntimeError, match="not a Modastack installation"):
+            _run_agent_entry({
+                "task": "t", "cwd": str(bogus), "root": str(bogus),
+                "workflow_name": "adhoc", "persistent": True, "subscribe": [],
+            })
+        mock_spawn.assert_not_called()
 
 

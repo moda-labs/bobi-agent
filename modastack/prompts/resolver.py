@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from modastack import paths
+
 from . import BASE_PATH, PROMPTS_DIR
 
 log = logging.getLogger(__name__)
@@ -13,7 +15,7 @@ log = logging.getLogger(__name__)
 def _resolve_role_prompt(role: str, project: Path | None) -> str | None:
     """Find the role prompt at <project>/.modastack/roles/{role}/ROLE.md."""
     if project:
-        installed = project / ".modastack" / "roles" / role / "ROLE.md"
+        installed = paths.roles_dir(project) / role / "ROLE.md"
         if installed.exists():
             return installed.read_text()
     return None
@@ -28,7 +30,7 @@ def _resolve_tools(project: Path | None) -> str:
     tools: dict[str, str] = {}
 
     if project:
-        tools_dir = project / ".modastack" / "tools"
+        tools_dir = paths.tools_dir(project)
         if tools_dir.is_dir():
             for md in sorted(tools_dir.glob("*.md")):
                 tools[md.stem] = md.read_text()
@@ -62,7 +64,7 @@ def _resolve_context_index(project: Path | None) -> str:
     """
     if not project:
         return ""
-    context_dir = project / ".modastack" / "context"
+    context_dir = paths.context_dir(project)
     if not context_dir.is_dir():
         return ""
     lines = []
@@ -172,8 +174,7 @@ def _load_memory_section(project: Path, session_name: str) -> str:
     """Load the decision log for a session and format it for prompt injection."""
     try:
         from modastack.memory import load_memory, format_memory_prompt
-        state_dir = project / ".modastack" / "state"
-        content = load_memory(state_dir, session_name)
+        content = load_memory(paths.state_dir(project), session_name)
         return format_memory_prompt(content)
     except Exception:
         log.debug("Failed to load memory for %s", session_name, exc_info=True)
@@ -259,7 +260,7 @@ def discover_roles(
 
     if project_path:
         project = Path(project_path)
-        installed_roles = project / ".modastack" / "roles"
+        installed_roles = paths.roles_dir(project)
         for name, path in _discover_roles_in_dir(installed_roles):
             roles[name] = {
                 "name": name,
@@ -290,7 +291,7 @@ def validate_role(
     """Check whether a role exists in the installed .modastack/roles/."""
     if project_path:
         project = Path(project_path)
-        installed_roles = project / ".modastack" / "roles"
+        installed_roles = paths.roles_dir(project)
         if _resolve_role_path(role_name, installed_roles):
             return True
     return False

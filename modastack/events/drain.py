@@ -128,7 +128,16 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
         bulk_events: list[tuple[bool, dict]] = []
         chat_events: list[tuple[bool, dict]] = []
         for e in batch:
-            was_dispatched = reactor.process(e) if reactor else False
+            # A reactor failure on one event must not kill the drain
+            # thread — that would silently stop ALL event delivery while
+            # the queue grows unbounded.
+            was_dispatched = False
+            if reactor:
+                try:
+                    was_dispatched = reactor.process(e)
+                except Exception:
+                    log.exception("Reactor failed processing event %s — "
+                                  "delivering it un-dispatched", e.get("type"))
             target = chat_events if e.get("delivery") == "chat" else bulk_events
             target.append((was_dispatched, e))
 

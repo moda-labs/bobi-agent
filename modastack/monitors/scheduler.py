@@ -64,11 +64,12 @@ def _load_checks(project_path: Path | None = None) -> dict:
     """Load check runners from installed monitors/*_checks.py files."""
     all_checks: dict = {}
     if not project_path:
-        from modastack.sdk import get_project_root
+        from modastack.paths import bound_root as get_project_root
         project_path = get_project_root()
     if not project_path:
         return all_checks
-    checks_dir = project_path / ".modastack" / "monitors"
+    from modastack import paths
+    checks_dir = paths.monitors_dir(project_path)
     if not checks_dir.exists():
         return all_checks
     for py_file in checks_dir.glob("*_checks.py"):
@@ -99,8 +100,8 @@ from .schema import Condition
 log = logging.getLogger(__name__)
 
 def _monitor_state_path() -> Path:
-    from modastack.sdk import state_dir
-    return state_dir() / "monitor_state.json"
+    from modastack import paths
+    return paths.state_dir() / "monitor_state.json"
 
 
 TICK_INTERVAL = 30  # seconds between scheduler ticks
@@ -149,7 +150,7 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
     if not role:
         try:
             from modastack.config import Config
-            from modastack.sdk import get_project_root
+            from modastack.paths import bound_root as get_project_root
             root = get_project_root()
             if root:
                 cfg = Config.load(root)
@@ -167,17 +168,17 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
         "--task", monitor.description or monitor.name,
     ]
 
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        raise RuntimeError("project root not set — call set_project_root() first")
-    log_path = root / ".modastack" / "state" / "manager.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    from modastack import paths
+    log_path = paths.state_dir() / "manager.log"
 
     try:
         with open(log_path, "a") as lf:
+            # cwd pins the child CLI's root resolution to this process's
+            # bound root — never whatever directory the manager happened
+            # to be started from.
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf,
-                                    text=True, start_new_session=True)
+                                    text=True, start_new_session=True,
+                                    cwd=str(paths.modastack_root()))
     except OSError as e:
         log.error(f"Failed to spawn check for monitor {monitor.name}: {e}")
         return
