@@ -29,6 +29,7 @@ from modastack.subagent import (
     _emit_session_started,
     _make_defer_hook,
     _parse_check_output,
+    _parse_check_verdict,
     _run_agent_supervised,
     _session_name,
     _summarize_output,
@@ -1055,6 +1056,39 @@ class TestParseCheckOutput:
         assert details == {}
 
 
+class TestParseCheckVerdict:
+    """A missing verdict must be distinguishable from an explicit finding=false.
+
+    Regression: a check agent that hit a tool-use glitch (emitting a tool call
+    as literal text, then stopping) produced no verdict, which the old code
+    collapsed to finding=false — silently dropping a real support email.
+    """
+
+    def test_explicit_finding_false_returns_verdict(self):
+        assert _parse_check_verdict('{"finding": false}') == {"finding": False}
+
+    def test_finding_true_returns_full_verdict(self):
+        v = _parse_check_verdict('{"finding": true, "summary": "down"}')
+        assert v == {"finding": True, "summary": "down"}
+
+    def test_no_json_returns_none(self):
+        assert _parse_check_verdict("just prose, no verdict") is None
+
+    def test_empty_returns_none(self):
+        assert _parse_check_verdict("") is None
+
+    def test_malformed_tool_call_text_returns_none(self):
+        # The exact failure seen in production: the model emitted a ToolSearch
+        # call as text instead of executing it, then stopped — no verdict.
+        text = ('court\n<invoke name="ToolSearch">\n'
+                '<parameter name="query">select:mcp__Venn__execute_tool</parameter>\n'
+                '</invoke>')
+        assert _parse_check_verdict(text) is None
+
+    def test_non_verdict_json_returns_none(self):
+        assert _parse_check_verdict('{"unrelated": 1}') is None
+
+
 # ---------------------------------------------------------------------------
 # Tests: run_check_blocking
 # ---------------------------------------------------------------------------
@@ -1124,6 +1158,66 @@ class TestRunCheckBlocking:
 
         assert result.success is False
         assert "timeout" in result.error
+
+    def test_no_verdict_is_failure_not_silent_no_finding(self):
+        """Regression: an agent that produces no parseable verdict (malformed
+        tool call, truncated output) must NOT be reported as a healthy
+        finding=false — that silently drops real signals. After exhausting
+        retries it is a failed check."""
+        agent_result = AgentResult(
+            session_id="s", run_key="check-x", phase="check", success=True,
+            final_text='court\n<invoke name="ToolSearch"></invoke>',  # no verdict
+        )
+
+        async def _mock(*a, **kw):
+            return agent_result
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_check_blocking(description="Read inbox", cwd="/tmp", attempts=2)
+
+        assert result.success is False
+        assert result.finding is False
+        assert "verdict" in result.error
+
+    def test_retries_then_succeeds_on_clean_verdict(self):
+        """A transient no-verdict glitch on the first attempt is retried, and a
+        clean verdict on the second attempt is returned."""
+        results = iter([
+            AgentResult(session_id="s", run_key="check-x", phase="check",
+                        success=True, final_text="garbage, no verdict"),
+            AgentResult(session_id="s", run_key="check-x", phase="check",
+                        success=True,
+                        final_text='{"finding": true, "summary": "new email"}'),
+        ])
+
+        async def _mock(*a, **kw):
+            return next(results)
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_check_blocking(description="Read inbox", cwd="/tmp", attempts=2)
+
+        assert result.success is True
+        assert result.finding is True
+        assert result.summary == "new email"
+
+    def test_explicit_finding_false_does_not_retry(self):
+        """A clean finding=false ends the loop immediately — no wasted retry."""
+        calls = {"n": 0}
+
+        async def _mock(*a, **kw):
+            calls["n"] += 1
+            return AgentResult(session_id="s", run_key="check-x", phase="check",
+                               success=True, final_text='{"finding": false}')
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_check_blocking(description="Read inbox", cwd="/tmp", attempts=3)
+
+        assert result.success is True
+        assert result.finding is False
+        assert calls["n"] == 1
 
     def test_registers_monitor_session(self):
         agent_result = AgentResult(
