@@ -99,7 +99,10 @@ def resolve_root(start: Path) -> Path:
 
     When MODASTACK_ROOT is set in the environment, it short-circuits the
     walk-up — managed child processes inherit the correct root without
-    filesystem guessing. An invalid env value falls through to walk-up.
+    filesystem guessing. A set-but-invalid MODASTACK_ROOT raises: the
+    spawning process is broken (stale env, typo, deleted install) and
+    silently walking from cwd would risk binding a different root —
+    the same identity-fork failure mode as #245.
 
     Linked git worktrees (where .git is a file, not a directory) are
     skipped even when they carry a checked-in agent.yaml, preventing
@@ -110,6 +113,12 @@ def resolve_root(start: Path) -> Path:
         p = Path(env_root).resolve()
         if (p / ".modastack" / ROOT_MARKER).is_file():
             return p
+        raise RuntimeError(
+            f"MODASTACK_ROOT is set to {p} but it is not a valid "
+            f"Modastack installation (missing .modastack/{ROOT_MARKER}). "
+            f"The spawning process has a stale or incorrect root — fix "
+            f"the environment rather than falling back to walk-up."
+        )
 
     origin = start.resolve()
     for candidate in (origin, *origin.parents):

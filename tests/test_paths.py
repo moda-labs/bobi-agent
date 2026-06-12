@@ -114,9 +114,10 @@ class TestResolveRoot:
         # Even starting from inside decoy, env var wins
         assert paths.resolve_root(decoy / "src") == real_root
 
-    def test_env_var_invalid_falls_through(self, tmp_path, monkeypatch):
-        """If MODASTACK_ROOT points to a non-installation, fall through
-        to the normal walk-up resolver."""
+    def test_env_var_invalid_raises(self, tmp_path, monkeypatch):
+        """A set-but-invalid MODASTACK_ROOT must raise — the spawning
+        process is broken and silently falling back to walk-up would
+        risk binding a different root (identity-fork)."""
         real_root = tmp_path / "real"
         _install(real_root)
 
@@ -126,7 +127,8 @@ class TestResolveRoot:
 
         deep = real_root / "src"
         deep.mkdir()
-        assert paths.resolve_root(deep) == real_root
+        with pytest.raises(RuntimeError, match="MODASTACK_ROOT"):
+            paths.resolve_root(deep)
 
 
 class TestIsLinkedWorktree:
