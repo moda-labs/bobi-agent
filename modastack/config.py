@@ -95,6 +95,45 @@ def _parse_channels(value) -> list[str]:
 
 
 @dataclass
+class RequiresEntry:
+    """One host-level dependency declared in agent.yaml."""
+
+    name: str
+    check: str
+    why: str = ""
+    fix: str = ""
+
+
+def run_requires_checks(
+    requires: list[RequiresEntry],
+    timeout: float = 10,
+) -> list[tuple[RequiresEntry, bool, str]]:
+    """Run each requires check command and return (entry, passed, detail).
+
+    Shared runner used by both doctor and dispatch-time gate.
+    """
+    import subprocess
+
+    results: list[tuple[RequiresEntry, bool, str]] = []
+    for entry in requires:
+        try:
+            proc = subprocess.run(
+                entry.check, shell=True, timeout=timeout,
+                capture_output=True, text=True,
+            )
+            if proc.returncode == 0:
+                results.append((entry, True, "healthy"))
+            else:
+                detail = proc.stderr.strip()[:200] or f"exit code {proc.returncode}"
+                results.append((entry, False, detail))
+        except subprocess.TimeoutExpired:
+            results.append((entry, False, f"check timed out ({timeout}s)"))
+        except OSError as exc:
+            results.append((entry, False, f"check command failed: {exc}"))
+    return results
+
+
+@dataclass
 class ServiceConfig:
     """One service declaration from agent.yaml."""
 
@@ -127,6 +166,7 @@ class Config:
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     monitors: list[dict] = field(default_factory=list)
     auto_dispatch: list[dict] = field(default_factory=list)
+    requires: list[RequiresEntry] = field(default_factory=list)
 
     def credential(self, service: str, key: str) -> str:
         """Look up a credential value for a named service."""
@@ -147,9 +187,11 @@ class Config:
     @classmethod
     def _parse(cls, path: Path) -> "Config":
         raw_uninterpolated = _load_yaml(path)
-        # Preserve monitor commands verbatim — they may contain ${VAR}
-        # intended for shell expansion, not config interpolation.
+        # Preserve monitor commands and requires check/fix commands
+        # verbatim — they may contain ${VAR} or ~ intended for shell
+        # expansion, not config interpolation.
         monitors_raw = raw_uninterpolated.get("monitors", [])
+        requires_raw = raw_uninterpolated.get("requires", [])
         raw = _interpolate_env(raw_uninterpolated)
         raw["monitors"] = monitors_raw
 
@@ -167,6 +209,20 @@ class Config:
                     credentials={k: str(v) for k, v in creds.items()},
                     channels=_parse_channels(s.get("channels")),
                 ))
+
+        requires = []
+        for r in requires_raw:
+            if not isinstance(r, dict):
+                continue
+            name = r.get("name", "")
+            check = r.get("check", "")
+            if not name or not check:
+                log.warning("requires entry missing name or check, skipping: %s", r)
+                continue
+            requires.append(RequiresEntry(
+                name=name, check=check,
+                why=r.get("why", ""), fix=r.get("fix", ""),
+            ))
 
         event_server = raw.get("event_server", {})
         if isinstance(event_server, str):
@@ -187,6 +243,7 @@ class Config:
             mcp_servers=raw.get("mcp_servers", {}),
             monitors=raw.get("monitors", []),
             auto_dispatch=raw.get("auto_dispatch", []),
+            requires=requires,
         )
 
     @property

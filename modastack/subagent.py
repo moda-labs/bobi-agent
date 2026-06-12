@@ -534,6 +534,79 @@ def _launch_detached(script: str, args: list[str], log_file: Path) -> int:
     return proc.pid
 
 
+# ---------------------------------------------------------------------------
+# Requires: dispatch-time preflight gate
+# ---------------------------------------------------------------------------
+
+_requires_cache: dict[str, tuple[float, list]] = {}
+_REQUIRES_TTL = 120  # seconds
+
+
+def check_requires(project_path: Path) -> list[tuple]:
+    """Run package requires checks with a short-TTL cache.
+
+    Returns list of (RequiresEntry, passed, detail) tuples.
+    Cached results are reused within the TTL to avoid latency
+    growth when multiple agents dispatch in quick succession.
+    """
+    key = str(project_path)
+    now = time.time()
+    cached = _requires_cache.get(key)
+    if cached and (now - cached[0]) < _REQUIRES_TTL:
+        return cached[1]
+
+    from modastack.config import Config, run_requires_checks
+    try:
+        cfg = Config.load(project_path)
+    except Exception:
+        return []
+    if not cfg.requires:
+        return []
+
+    results = run_requires_checks(cfg.requires)
+    _requires_cache[key] = (now, results)
+    return results
+
+
+def _alert_requires_failure(
+    project_path: Path,
+    failures: list[tuple],
+) -> None:
+    """Post a Slack alert about failed requires checks. Best-effort."""
+    try:
+        from modastack.config import Config
+        cfg = Config.load(project_path)
+        slack_svc = next(
+            (s for s in cfg.services if s.name == "slack" and s.channels),
+            None,
+        )
+        if not slack_svc:
+            log.warning("No Slack service with channels configured — "
+                        "cannot alert on requires failure")
+            return
+        token = slack_svc.credentials.get("bot_token", "")
+        if not token:
+            log.warning("Slack bot_token not configured — "
+                        "cannot alert on requires failure")
+            return
+        channel = slack_svc.channels[0]
+        lines = []
+        for entry, detail in failures:
+            line = f"*{entry.name}*: {entry.why or detail}"
+            if entry.fix:
+                line += f"\nFix: `{entry.fix}`"
+            lines.append(line)
+        msg = (
+            "\u26a0\ufe0f Agent dispatch blocked — required dependency "
+            "check failed on this host.\n\n" + "\n\n".join(lines)
+        )
+        from modastack.slack import post_slack_message
+        post_slack_message(token, channel, msg)
+    except Exception:
+        log.warning("Failed to send Slack alert for requires failure",
+                     exc_info=True)
+
+
 def launch_agent(
     task: str,
     cwd: str,
@@ -573,6 +646,17 @@ def launch_agent(
         raise RuntimeError(
             f"A run is already active: {session_name} (status={existing.status}). "
             f"Cancel it first or wait for it to complete."
+        )
+
+    # Preflight: check host-level dependencies declared in agent.yaml
+    req_results = check_requires(Path(cwd))
+    req_failures = [(entry, detail) for entry, ok, detail in req_results if not ok]
+    if req_failures:
+        _alert_requires_failure(Path(cwd), req_failures)
+        names = ", ".join(e.name for e, _ in req_failures)
+        raise RuntimeError(
+            f"Required dependency check failed: {names}. "
+            f"Run `modastack doctor` for details and fix commands."
         )
 
     args_json = json.dumps({
