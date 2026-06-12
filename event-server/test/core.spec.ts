@@ -177,7 +177,8 @@ describe("normalizeSlackPayload", () => {
 		expect(result.skip).toBe(false);
 		expect(result.event!.v).toBe(2);
 		expect(result.event!.type).toBe("slack.mention");
-		expect(result.event!.topics).toEqual(["slack:T123"]);
+		// workspace topic + channel-scoped topic (for per-channel team routing)
+		expect(result.event!.topics).toEqual(["slack:T123", "slack:T123:C456"]);
 		expect(result.event!.delivery).toBe("chat");
 		expect(result.event!.text).toBe("<@U99> hello");
 		expect(result.event!.fields!.user_id).toBe("U123");
@@ -188,6 +189,20 @@ describe("normalizeSlackPayload", () => {
 			channel: "C456",
 			text: "<@U99> hello",
 		});
+	});
+
+	it("emits a channel-scoped topic so teams can split one workspace by channel", () => {
+		const mk = (channel: string) =>
+			normalizeSlackPayload({
+				type: "event_callback",
+				team_id: "T123",
+				event: { type: "app_mention", user: "U1", channel, text: "hi", ts: "1.2" },
+			}).event!.topics;
+		// a message in C_ENG carries the eng channel topic but not the support one
+		expect(mk("C_ENG")).toContain("slack:T123:C_ENG");
+		expect(mk("C_ENG")).not.toContain("slack:T123:C_SUPPORT");
+		// the workspace-level topic is always present (backward compat)
+		expect(mk("C_ENG")).toContain("slack:T123");
 	});
 
 	it("normalizes DM with chat delivery", () => {
@@ -205,6 +220,8 @@ describe("normalizeSlackPayload", () => {
 		});
 		expect(result.event!.type).toBe("slack.dm");
 		expect(result.event!.delivery).toBe("chat");
+		// a DM is not a real channel — it stays workspace-level only
+		expect(result.event!.topics).toEqual(["slack:T123"]);
 	});
 
 	it("normalizes group DM (mpim)", () => {
@@ -420,7 +437,7 @@ describe("subscriptionKeysForEvent", () => {
 			},
 		});
 		const keys = subscriptionKeysForEvent(result.event!);
-		expect(keys).toEqual(["slack:T123"]);
+		expect(keys).toEqual(["slack:T123", "slack:T123:C456"]);
 	});
 
 	it("subscription keys match existing shapes for linear", () => {

@@ -77,6 +77,23 @@ def _project_config_path(project_path: Path) -> Path:
     return project_path / ".modastack" / "agent.yaml"
 
 
+def _parse_channels(value) -> list[str]:
+    """Normalize a `channels:` field to a list of non-empty strings.
+
+    Accepts a list, or a comma-separated string (so it can come from a
+    `${SLACK_CHANNELS}` env var that resolves to "C1,C2"). Empty/None -> [].
+    """
+    if not value:
+        return []
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        items = value
+    else:
+        return []
+    return [str(c).strip() for c in items if str(c).strip()]
+
+
 @dataclass
 class ServiceConfig:
     """One service declaration from agent.yaml."""
@@ -84,6 +101,10 @@ class ServiceConfig:
     name: str
     events: bool = False
     credentials: dict[str, str] = field(default_factory=dict)
+    # Optional event-scoping keys (e.g. Slack channel IDs). When set, the
+    # service subscribes only to these channels rather than the whole
+    # workspace — lets multiple teams share one bot, split by channel.
+    channels: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -144,6 +165,7 @@ class Config:
                     name=s.get("name", ""),
                     events=s.get("events", False),
                     credentials={k: str(v) for k, v in creds.items()},
+                    channels=_parse_channels(s.get("channels")),
                 ))
 
         event_server = raw.get("event_server", {})
