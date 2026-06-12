@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.16.0 — 2026-06-11
+
+Slack routing fixes: channel-scoped team routing and the self-reply loop.
+
+### Added
+- Channel-scoped Slack routing (#208): events emit `slack:TEAM:CHANNEL`
+  alongside the workspace topic; a service's `channels:` (list or
+  comma-separated `${SLACK_CHANNELS}`) scopes its subscription so several
+  teams can share one bot in one workspace, each waking only for its own
+  channel(s). No channels configured = whole workspace, as before. DMs
+  stay workspace-level.
+
+### Fixed
+- Slack self-reply loop (#209): the workspace bot identity is registered
+  with the event server so the bot's own messages no longer come back
+  around as inbound events
+- Release smoke runs against the in-repo pack with no external repo —
+  posts a synthetic event to a subscribed topic and requires a blocking
+  `modastack ask` round-trip; promote regenerates prod config from the
+  released pack (the v0.15.0 stale-config lesson). modastack-dogfood is
+  archived.
+
 ## 0.15.0 — 2026-06-11
 
 Event contract v2 — hard cutover, no compatibility shims (#177–#181).
