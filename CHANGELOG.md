@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.18.0 — 2026-06-12
+
+Unified monitor event path: every monitor flavor publishes through the
+event server on one detect → reconcile → publish chain.
+
+### Changed
+- All monitor flavors (notify, command, native check, description-only)
+  are now pure condition detectors feeding a single dedup + publish path
+  in the scheduler (#237): findings publish through the event server
+  instead of the in-process queue, gaining events.jsonl visibility,
+  seq/replay durability, and delivery to any subscriber
+- Description-only check agents only observe: the scheduler captures
+  the check's verdict, converts it to conditions (keyed on details.key /
+  details.id / summary hash), and dedups deterministically — agent-side
+  dedup-by-judgment is gone, and the check prompt forbids it
+- Topic contract: the event server routes path-topic events onto both
+  the bare type and the source-qualified topic (monitor/<type>), so
+  subscriptions written as the full event string match natively —
+  removing the quirk the #235 hotfix had to encode
+
+### Fixed
+- A monitor condition is recorded active only after its event actually
+  publishes — an unreachable event server means retry next interval,
+  never a silently lost finding
+- Indeterminate detection (failed command, check exception, missing
+  verdict) leaves dedup state untouched instead of clearing active
+  conditions (extends #236 into the state layer)
+
 ## 0.17.0 — 2026-06-11
 
 Auto-dispatch for issue assignment and a monitor subscription fix.
