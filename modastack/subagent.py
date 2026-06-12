@@ -618,7 +618,9 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from modastack.config import Config, load_deployment_state, save_deployment_state
     from modastack.events.client import EventServerClient
     from modastack.events.drain import drain_loop
-    from modastack.events.server import ensure_running, register
+    from modastack.events.server import (
+        ensure_running, register, register_slack_workspaces,
+    )
 
     cfg = Config.load(project_path)
     es_url = cfg.event_server_url
@@ -677,6 +679,11 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         except Exception as e:
             log.info("Subscription update failed (%s) — re-registering", e)
             es_deployment, es_key = _register_with_retry(es_url)
+
+    # Register this agent's Slack workspace bot so the event server can skip
+    # the bot's own messages — without this, an agent's Slack replies are
+    # re-ingested as new events and it loops on itself.
+    register_slack_workspaces(es_url, cfg)
 
     client = EventServerClient(
         server_url=es_url,

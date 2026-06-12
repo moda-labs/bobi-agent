@@ -148,3 +148,62 @@ def register(base_url: str, name: str,
     with urllib.request.urlopen(req, timeout=15) as resp:
         result = json.loads(resp.read())
     return result["deployment_id"], result["api_key"]
+
+
+def _slack_team_id(token: str) -> str:
+    """Resolve a Slack workspace (team) id from a bot token via auth.test."""
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        if data.get("ok"):
+            return data.get("team_id", "") or ""
+    except Exception as e:  # best-effort — never block startup
+        log.debug("Slack auth.test failed during workspace registration: %s", e)
+    return ""
+
+
+def register_slack_workspaces(base_url: str, cfg) -> list[str]:
+    """Register the agent's Slack workspace(s) with the event server.
+
+    The event server uses the registered ``bot_id`` to skip the bot's OWN
+    messages (``event.bot_id == selfBotId``). Without this, an agent's own
+    Slack reply is re-ingested as a fresh inbound event and it loops on
+    itself. This wires the missing registration so that loop prevention
+    actually engages. Best-effort: logs and continues on any failure so a
+    registration hiccup never blocks startup. Returns the workspace ids
+    successfully registered.
+    """
+    import urllib.request
+
+    try:
+        token = cfg.credential("slack", "bot_token")
+    except Exception:
+        token = ""
+    if not token:
+        return []
+    team_id = _slack_team_id(token)
+    if not team_id:
+        return []
+    try:
+        body = json.dumps({"workspace_id": team_id, "bot_token": token}).encode()
+        req = urllib.request.Request(
+            f"{base_url}/slack/workspaces",
+            data=body,
+            headers={"Content-Type": "application/json", "User-Agent": "modastack"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            json.loads(resp.read())
+        log.info(
+            "Registered Slack workspace %s with event server "
+            "(self-reply loop prevention)", team_id,
+        )
+        return [team_id]
+    except Exception as e:
+        log.warning("Slack workspace registration failed for %s: %s", team_id, e)
+        return []
