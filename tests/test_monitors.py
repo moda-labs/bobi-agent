@@ -505,3 +505,43 @@ class TestCommandMonitor:
         sched.run_monitor(m, reg, _fixed_now())
         assert len(injected) == 1
         assert injected[0]["data"]["id"] == "cmd"
+
+
+class TestDefaultSpawnCheckRoleFallback:
+    """Regression test for #212: packs with entry_point but no defaults.role."""
+
+    def test_entry_point_used_when_default_role_empty(self, tmp_path, monkeypatch):
+        """A pack with only entry_point set should produce a spawn command
+        containing --role <entry_point>."""
+        from modastack.monitors.scheduler import _default_spawn_check
+
+        # Set up a minimal project with agent.yaml that has entry_point but no defaults.role
+        project = tmp_path / "proj"
+        (project / ".modastack").mkdir(parents=True)
+        (project / ".modastack" / "agent.yaml").write_text(
+            "agent: test-pack\nentry_point: manager\n"
+        )
+
+        import modastack.sdk as sdk_mod
+        monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
+
+        # Capture the Popen call to inspect the command
+        import subprocess as sp
+        captured_cmds = []
+
+        class FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured_cmds.append(cmd)
+
+        monkeypatch.setattr(sp, "Popen", FakePopen)
+
+        m = Monitor(name="check-thing", description="check something",
+                    event="monitor/check-thing")
+
+        _default_spawn_check(m, str(project))
+
+        assert len(captured_cmds) == 1
+        cmd = captured_cmds[0]
+        assert "--role" in cmd
+        role_idx = cmd.index("--role")
+        assert cmd[role_idx + 1] == "manager"
