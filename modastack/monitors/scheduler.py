@@ -105,7 +105,7 @@ def _default_spawn_check(monitor, cwd: str | None) -> None:
             root = get_project_root()
             if root:
                 cfg = Config.load(root)
-                role = cfg.default_role
+                role = cfg.default_role or cfg.entry_point
         except Exception:
             pass
 
