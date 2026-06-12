@@ -270,6 +270,18 @@ class TestStatusRefreshLoop:
         last_call = mock_status.call_args_list[-1]
         assert last_call == call("xoxb-test", "C123", "171.42", "")
 
+    @patch("modastack.slack.set_thread_status")
+    def test_self_terminates_at_max_seconds(self, mock_status):
+        # Safety cap: even if nothing ever calls stop(), the loop must clear
+        # the status and exit on its own — no forever "is thinking…".
+        loop = StatusRefreshLoop(
+            "xoxb-test", "C123", "171.42", interval=0.02, max_seconds=0.05,
+        )
+        loop.start()
+        loop.join(timeout=2)
+        assert not loop.is_alive()
+        assert mock_status.call_args_list[-1] == call("xoxb-test", "C123", "171.42", "")
+
 
 # ---------------------------------------------------------------------------
 # SlackInputChannel (framework-level channel handler)
@@ -427,6 +439,22 @@ class TestStopRefreshLoop:
 
         # Should not raise
         stop_refresh_loop("C999", "999.99")
+
+    def test_stop_all_stops_every_loop(self):
+        # This is what actually clears the indicator on turn completion (the
+        # per-reply stop_refresh_loop runs in the CLI subprocess and can't
+        # reach the manager's loops).
+        from modastack.events.channels import _active_loops, stop_all_refresh_loops
+
+        l1, l2 = MagicMock(), MagicMock()
+        _active_loops[("C1", "1.1")] = l1
+        _active_loops[("C2", "2.2")] = l2
+
+        stop_all_refresh_loops()
+
+        l1.stop.assert_called_once_with(clear=True)
+        l2.stop.assert_called_once_with(clear=True)
+        assert _active_loops == {}
 
 
 # ---------------------------------------------------------------------------

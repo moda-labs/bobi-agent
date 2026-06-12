@@ -130,3 +130,20 @@ def stop_refresh_loop(channel: str, thread_ts: str) -> None:
     loop = _active_loops.pop(key, None)
     if loop is not None:
         loop.stop(clear=True)  # type: ignore[union-attr]
+
+
+def stop_all_refresh_loops() -> None:
+    """Stop and clear every active status refresh loop.
+
+    Called when a manager turn completes. The per-reply ``stop_refresh_loop``
+    runs in the ``slack-reply`` CLI *subprocess*, where ``_active_loops`` is a
+    different (empty) dict — so it can never reach the manager's loops. This
+    in-process sweep is what actually clears the "is thinking…" indicator once
+    the agent is done, so it does not linger forever.
+    """
+    for key, loop in list(_active_loops.items()):
+        try:
+            loop.stop(clear=True)  # type: ignore[union-attr]
+        except Exception:
+            pass
+        _active_loops.pop(key, None)
