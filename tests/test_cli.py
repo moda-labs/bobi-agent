@@ -218,6 +218,37 @@ class TestAgentCommand:
 # --- modastack events (malformed line handling) --------------------------------
 
 
+class TestMonitorEventSubscription:
+    """Regression for #216: coordinator must subscribe to monitor events
+    even when all event services use native adapters."""
+
+    def test_monitor_events_subscribed_from_registry(self, modastack_install):
+        """Monitor events from defaults.yaml must appear in the subscribe list,
+        regardless of adapter configuration."""
+        collected_subscribe = []
+
+        def fake_start_event_subscription(session_name, subscribe, project_path):
+            collected_subscribe.extend(subscribe)
+
+        with patch("modastack.subagent._start_event_subscription",
+                   side_effect=fake_start_event_subscription) as mock_sub, \
+             patch("modastack.cli._manager_session_name", return_value="moda-director-repo"), \
+             patch("modastack.monitors.scheduler.MonitorScheduler"), \
+             patch("modastack.prompts.resolver.build_startup_prompt", return_value="go"), \
+             patch("modastack.subagent.spawn_adhoc"), \
+             patch("modastack.events.subscriptions.discover_subscriptions",
+                   return_value=["github:o/r"]):
+            from modastack.config import Config
+            cfg = Config.load(modastack_install.repo_path)
+            from modastack.cli import _run_from_config
+            _run_from_config(modastack_install.repo_path, cfg)
+
+        mock_sub.assert_called_once()
+        assert "monitor/test" in collected_subscribe, (
+            "Monitor event topic from defaults.yaml was not subscribed"
+        )
+
+
 class TestEventsCommand:
     """The events command must not crash on malformed JSONL lines."""
 
