@@ -6,6 +6,11 @@ re-deriving the analysis. Research session covered runtime inventory,
 isolation options, sizing, auth handling, scale-to-zero, and an internal-first
 scoping pass.
 
+Amended 2026-06-12: Anthropic auth decision + subscription login bootstrap
+(§6.1, C23), deploy/update automation (C22), MVP cut for the EC2 → Fly
+migration (§10 "MVP cut"), C12 promoted into the MVP, open question 3
+resolved.
+
 Related designs:
 - `docs/design/AUTH.md` (#142) — event-server auth. Complementary, not a
   dependency: this design deliberately keeps integration auth **outside** the
@@ -28,7 +33,10 @@ a SaaS product later. That framing drives two hard constraints:
    credentials only as env vars (already modastack's contract via `${VAR}`
    refs in `agent.yaml`). How those env vars get populated — a human running
    `fly secrets set` today, a token broker later — is invisible to the
-   instance.
+   instance. (One scoped exception: subscription-mode Anthropic auth
+   persists OAuth credentials on the volume rather than in env — see §6.1;
+   the separation principle still holds because nothing inside the instance
+   manages how they got there.)
 2. **Control-plane work is minimized.** For the internal phase, the "control
    plane" is the existing Cloudflare Worker plus a provisioning script. No
    database, no dashboard, no new services. Slack (which agents already use)
@@ -109,7 +117,13 @@ via REST API (Phase 2 wake), private networking, and a provisioner that's a
 script rather than an operator. Fly is an independent provider (not AWS);
 Firecracker is the AWS-originated open-source hypervisor it runs on. The
 exit path if needed is Fargate/Cloud Run/K8s+gVisor — a provisioner rewrite,
-not an architecture change, because of §2.
+not an architecture change, because of §2. (Why not AWS directly: Fargate
+also runs on Firecracker, but AWS exposes only ephemeral tasks — no
+resumable stateful microVM, which is exactly the primitive Phase 2 needs.
+EC2 stop/start is 30–90 s + AMI management; the per-tenant cost floor of an
+always-running instance defeats scale-to-zero economics. The current EC2
+director *is* the AWS version of this design and is fine for one always-on
+box; Fly is specifically the bet on Phase 2.)
 
 Event server: the existing Worker. Local Node event server is not deployed
 in instances.
@@ -164,6 +178,49 @@ instance.
 
 Event-server auth (deployment `api_key`, `config.py:178-199`) is unchanged
 here and evolves separately under `docs/design/AUTH.md`.
+
+### 6.1 Anthropic auth: API key vs subscription (decided 2026-06-12)
+
+Two supported per-instance modes, selected at provision time
+(`MODASTACK_AUTH=api_key|subscription`); the C8 image supports both.
+
+**Fleet default: per-instance workspace API keys** with console spend caps
+(C14). This is the only option with per-instance cost isolation.
+
+**Subscription mode (internal dogfood instances only).** The proven
+mechanism is what the EC2 director already does: one interactive
+`claude /login`, OAuth credentials persisted to
+`~/.claude/.credentials.json` on the volume (i.e. inside `$HOME`),
+refresh-token rotation rewriting the file in place — verified live on prod
+2026-06-12 (`subscriptionType: max`, file mtime same-day, no
+`ANTHROPIC_API_KEY` anywhere). Rules:
+
+- **One login per machine.** Each login gets its own refresh-token chain.
+  Never copy `.credentials.json` between machines — shared chains
+  invalidate each other on refresh.
+- **`ANTHROPIC_API_KEY` must be entirely absent** in this mode: in the
+  auth precedence order it silently beats `CLAUDE_CODE_OAUTH_TOKEN` and
+  subscription credentials, and bills the API instead.
+- `claude setup-token` (the nominally official headless path) was
+  evaluated and **rejected** for now: 1-year stated lifetime, but repeated
+  field reports of tokens dying in 8–12 h headless because refresh isn't
+  handled (claude-code issues #12447, #31095). Revisit if fixed.
+- **Economics, effective 2026-06-15:** Agent SDK usage bills a separate
+  per-user monthly credit pool, not interactive plan limits — $200/mo on
+  Max 20x, per account, non-shareable. All subscription instances on one
+  account draw from that single pool with no per-instance attribution
+  (only fleet-wide view: claude.ai/settings/usage for the logged-in
+  account). Multiple always-on autonomous instances on one consumer
+  account is also account-sharing gray zone under the usage policy. Both
+  accepted for internal dogfooding only; D2 (token broker / API keys) is
+  the durable answer.
+- **Migration note:** the EC2 director rides a Max subscription today.
+  Moving instances to API-key mode is the moment modastack token spend
+  becomes a real line item — budget before migrating, not after. The
+  June 15 metering also hits the existing EC2 box regardless.
+
+First-login UX is C23 (Slack + event-bus bootstrap); `fly ssh console`
+then `/login` is the manual fallback.
 
 ## 7. Scale-to-zero (Phase 2)
 
@@ -242,13 +299,33 @@ unbounded); `doctor` disk check + retention policy in C13.
 | Token broker | populates the same env vars; C21 recycling = refresh point |
 | LLM gateway (per-tenant metering) | `ANTHROPIC_BASE_URL` env var |
 | Egress filtering | D1, Smokescreen + proxy env vars |
-| Provisioner service | replaces the C10 script behind the same contract |
+| Provisioner service | replaces the C10 script + C22 Action behind the same contract |
 
 ## 10. Work breakdown (ticket this, in order)
 
 Ticket IDs below are local to this doc (C-numbers); file as GitHub issues
 and back-link them here. Phases are strict dependency layers; tickets within
 a phase are parallelizable unless noted.
+
+### MVP cut — EC2 → Fly migration (decided 2026-06-12)
+
+Target state: the single EC2 director model replaced by ~3 internal
+instances (one per agent team in the registry) on Fly, updatable for both
+team-package and modastack-version changes. Always-on; no Phase 2.
+
+**File these 12:** C1, C2, C3, C5, C6, C7, C8, C9, C10, C12, C22, C23.
+
+- C3 is in despite being skippable-by-sizing: both 2026-06-11 EC2
+  incidents (disk fill, RAM thrash) were uncapped concurrent sessions —
+  don't migrate the failure mode.
+- C7 is in because the MVP's point is rolling image updates against
+  volumes that outlive them.
+- C12 is in because three teams share one Slack workspace and GitHub org
+  from day one. It is blocked on #177 — the #177 → C12 chain is the only
+  schedule risk; everything else is parallel.
+
+**Deferred from MVP** (fast-follows, not gates): C4, C11, C13, C14 (as
+runbook), all of Phase 2.
 
 ### Phase 0 — framework prep (no infra dependency, all in modastack/)
 
@@ -309,10 +386,13 @@ on `PATH`, fastembed model pre-downloaded (set `HF_HOME` to an image path
 seeded at build), **non-root user**, `tini` + `modastack start --foreground`
 entrypoint, no Node. Verify headless SDK auth via `ANTHROPIC_API_KEY` and
 that `bypassPermissions` works as the non-root user (root would require
-`IS_SANDBOX=1` — do not run as root).
+`IS_SANDBOX=1` — do not run as root). Support both auth modes (§6.1) via
+`MODASTACK_AUTH`; in subscription mode assert `ANTHROPIC_API_KEY` is unset
+(precedence gotcha) and use volume credentials.
 *Accept:* `docker run` with a mounted empty volume + env vars reaches a
 healthy manager that completes one `modastack ask` round-trip against the
-real API.
+real API; subscription mode reaches the same state from a volume holding
+valid `.credentials.json`.
 
 **C9 — First-boot entrypoint logic.**
 If the volume is empty: `install <team> --non-interactive` with team name
@@ -325,13 +405,15 @@ set secrets from a local env file, register a deployment with the Worker
 (capture `deployment_id`/`api_key` into secrets), launch machine
 (4 GB / shared-2x, `auto_stop: false` for now). Also `destroy-instance`.
 The volume's `agent.yaml` is the config source of truth after seeding — the
-script never re-writes it.
+script never re-writes it. Secrets set depend on auth mode (§6.1): skip the
+Anthropic key entirely for subscription instances.
 *Accept:* one command → working instance reachable through Slack; runbook
 in the script header.
 
 **C11 — Backup script.**
 Nightly: `.modastack/` (minus `state/*.pid`, logs), `workspace/`,
-`~/.claude/projects/` → object storage (Tigris/S3), per-instance prefix,
+`~/.claude/projects/` → object storage (S3 — deliberately outside Fly, so
+tenant state is never hostage to the platform), per-instance prefix,
 simple retention. Fly volume snapshots are single-host, daily, ~5-day
 retention — not sufficient alone. Include a tested restore path.
 *Accept:* restore drill: new volume from backup boots and resumes an
@@ -343,7 +425,10 @@ Worker + subscription keys (`events/subscriptions.py`) route Slack events
 per-channel and GitHub events per-repo to the right deployment, rather than
 broadcast-and-filter (tolerable internally, a cross-tenant leak for SaaS —
 if broadcast is what exists, file the fix as a blocker on D-phase).
-**Sequence after #177** (event contract v2).
+**Sequence after #177** (event contract v2). **Promoted into the MVP cut**
+(2026-06-12): with three teams on one workspace/org from day one,
+broadcast-and-filter means each instance receives — and burns tokens
+triaging — every other team's events.
 *Accept:* two live instances, disjoint channels/repos, no cross-delivery in
 `events.jsonl`.
 
@@ -353,8 +438,50 @@ for transcripts, `events.jsonl`, `history.db`.
 
 **C14 — Cost-control runbook.** Per-instance Anthropic workspace keys with
 console spend caps; document key issuance in the provisioning runbook (C10).
-No gateway yet. *Accept:* documented; each running instance has a capped
-key.
+No gateway yet. Record the §6.1 decision: subscription auth was evaluated
+as fleet default and rejected (no per-instance cost isolation, shared
+per-account credit pool, account-sharing policy) — do not re-litigate.
+*Accept:* documented; each running api_key-mode instance has a capped key.
+
+**C22 — Deploy/update automation (GitOps).**
+The agent-teams repo doubles as the registry (`registry.py` already
+fetches remote teams). One GitHub Action on push to main, diffing team
+dirs:
+- **Added team** → run C10 `provision-instance.sh <team>` (secrets from
+  per-team GitHub environment secrets, e.g. `TEAM_<NAME>_*`; an instance
+  with unpopulated secrets provisions but sits unhealthy until filled —
+  same seam D2 plugs into).
+- **Changed team** → trigger `modastack agents update` on the matching
+  instance. Never re-provision: volume `agent.yaml` is source of truth,
+  reinstall must not clobber workspace edits.
+- **modastack release** → scripted `fly deploy` loop over the fleet.
+  Volumes and sessions survive; C9 idempotency makes restart safe; C7
+  guards format-version skew.
+- **Deleted team** → nothing automatic; `destroy-instance` stays human.
+
+Keep it a script + ~50-line workflow — no deploy service, no deployment
+DB; the Fly API is the state store, the Action log is the deploy log.
+This implements the §9 provisioner seam; replace with a service only when
+instance count makes the loop creak (§11.3).
+*Accept:* push a new team dir → live instance with no manual step beyond
+secrets; push a team edit → matching instance updated, workspace intact;
+tag a modastack release → all instances on the new version with sessions
+resumed.
+
+**C23 — Subscription login bootstrap over Slack + event bus.**
+For `MODASTACK_AUTH=subscription` first boot with no `.credentials.json`
+on the volume: run `claude /login` under a pty and scrape the auth URL;
+post it to a **private** Slack channel/DM via the `SLACK_BOT_TOKEN`
+already in env; connect the event-server WebSocket and wait for the
+human's reply (the pasted code) to arrive as a normal
+Slack→Worker→deployment event; write the code to the pty; verify
+`.credentials.json` appeared; exec `start --foreground`. Private channel
+is a hard requirement — the code is short-lived/single-use but grants the
+login to whoever pastes it first. Refresh rotation makes this a
+once-per-machine ceremony (§6.1). Fallback: `fly ssh console` + `/login`.
+Touches C8 (auth-mode switch) and C10 (skip Anthropic key secret).
+*Accept:* fresh subscription-mode instance reaches healthy where the only
+human actions are one browser login and one Slack reply.
 
 ### Phase 2 — scale-to-zero (depends: Phase 1 live; Worker work after #177)
 
@@ -418,7 +545,13 @@ continuity; RSS drops after recycle.
 2. Does `/browse` (Playwright Chromium, ~250 MB + system libs) ship in the
    base image or a variant? Default: leave it out; add a variant if dogfood
    demand appears.
-3. Fleet upgrade mechanics — `fly deploy` per app, scripted loop is fine
-   internally; revisit when instance count grows.
+3. ~~Fleet upgrade mechanics~~ — **resolved 2026-06-12 → C22** (scripted
+   `fly deploy` loop + GitHub Action); revisit only when instance count
+   makes the loop creak.
 4. C12 outcome decides whether subscription routing needs Worker changes
    before SaaS (potential new ticket under the event contract v2 umbrella).
+5. Subscription credit monitoring: all subscription-mode instances on one
+   account share a single monthly Agent SDK pool (§6.1) with no
+   per-instance attribution — how do we notice one team starving the
+   others before work silently stalls? Only fleet-wide view today is
+   claude.ai/settings/usage.
