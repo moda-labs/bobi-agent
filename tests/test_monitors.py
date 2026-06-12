@@ -505,3 +505,88 @@ class TestCommandMonitor:
         sched.run_monitor(m, reg, _fixed_now())
         assert len(injected) == 1
         assert injected[0]["data"]["id"] == "cmd"
+
+
+# === Spawn check entry_point (#212) ===
+
+class TestDefaultSpawnCheckEntryPoint:
+    """Regression tests for #212: monitor spawn checks use entry_point
+    for --role, matching how `modastack start` resolves the role."""
+
+    def test_entry_point_used_for_role(self, tmp_path, monkeypatch):
+        """entry_point from agent.yaml produces --role <entry_point>
+        in the spawn command."""
+        from modastack.monitors.scheduler import _default_spawn_check
+        import modastack.sdk as sdk_mod
+
+        # Minimal project: entry_point set, no defaults.role
+        project = tmp_path / "proj"
+        (project / ".modastack" / "state").mkdir(parents=True)
+        (project / ".modastack" / "agent.yaml").write_text(
+            "agent: test-pack\nentry_point: support_manager\n"
+        )
+
+        monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
+
+        captured_cmds = []
+
+        class FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured_cmds.append(cmd)
+
+        monkeypatch.setattr("subprocess.Popen", FakePopen)
+
+        m = Monitor(name="email-watch", description="check for new emails",
+                    event="monitor/email-watch")
+        _default_spawn_check(m, str(project))
+
+        assert len(captured_cmds) == 1
+        cmd = captured_cmds[0]
+        assert "--role" in cmd, f"--role missing from command: {cmd}"
+        role_idx = cmd.index("--role")
+        assert cmd[role_idx + 1] == "support_manager"
+
+    def test_entry_point_used_even_when_defaults_role_set(self, tmp_path, monkeypatch):
+        """entry_point is always used for monitor spawns, even when
+        defaults.role is set (defaults.role is for ad-hoc launches)."""
+        from modastack.monitors.scheduler import _default_spawn_check
+        import modastack.sdk as sdk_mod
+
+        project = tmp_path / "proj"
+        (project / ".modastack" / "state").mkdir(parents=True)
+        (project / ".modastack" / "agent.yaml").write_text(
+            "agent: test-pack\nentry_point: monitor_role\n"
+            "defaults:\n  role: adhoc_role\n"
+        )
+
+        monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
+
+        captured_cmds = []
+
+        class FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured_cmds.append(cmd)
+
+        monkeypatch.setattr("subprocess.Popen", FakePopen)
+
+        m = Monitor(name="check", description="check something",
+                    event="monitor/check")
+        _default_spawn_check(m, str(project))
+
+        assert len(captured_cmds) == 1
+        cmd = captured_cmds[0]
+        role_idx = cmd.index("--role")
+        assert cmd[role_idx + 1] == "monitor_role"
+
+    def test_description_only_monitor_spawns_check(self, tmp_path):
+        """End-to-end: a description-only monitor invokes spawn_check
+        (proving the check actually runs, not silently fails)."""
+        m = Monitor(name="custom", description="check the thing",
+                    event="monitor/custom")
+        spawned = []
+        sched, injected = _scheduler(tmp_path, [m], spawned=spawned)
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        assert len(spawned) == 1
+        assert spawned[0][0] is m
+        assert injected == []  # no direct injection — check runs out-of-band
