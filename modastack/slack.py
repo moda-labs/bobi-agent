@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -203,6 +204,7 @@ class StatusRefreshLoop(threading.Thread):
         *,
         interval: float = 90,
         status_text: str = "is thinking\u2026",
+        max_seconds: float = 600,
     ):
         super().__init__(daemon=True, name="slack-status-refresh")
         self._token = token
@@ -210,11 +212,20 @@ class StatusRefreshLoop(threading.Thread):
         self._thread_ts = thread_ts
         self._interval = interval
         self._status_text = status_text
+        self._max_seconds = max_seconds
         self._stop_event = threading.Event()
         self._clear_on_stop = False
 
     def run(self) -> None:
+        deadline = time.monotonic() + self._max_seconds
         while not self._stop_event.wait(self._interval):
+            if time.monotonic() >= deadline:
+                # Safety cap \u2014 never leave the indicator refreshing forever
+                # if something failed to stop the loop. Clear and exit.
+                set_thread_status(
+                    self._token, self._channel, self._thread_ts, "",
+                )
+                return
             set_thread_status(
                 self._token, self._channel, self._thread_ts, self._status_text,
             )

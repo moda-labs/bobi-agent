@@ -122,6 +122,16 @@ class Session:
             self._set_state("error")
             registry.update(self.name, status="error")
 
+        # Turn complete — clear any "is thinking…" Slack indicators the drain
+        # loop started for this turn. The slack-reply CLI can't do this (it
+        # runs in a subprocess without the manager's loop registry), so the
+        # indicator would otherwise refresh itself forever.
+        try:
+            from modastack.events.channels import stop_all_refresh_loops
+            stop_all_refresh_loops()
+        except Exception:
+            pass
+
         return self._last_response
 
     async def _process_message(self, msg: Message) -> None:
