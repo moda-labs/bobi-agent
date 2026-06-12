@@ -939,14 +939,18 @@ def _extract_json_objects(text: str) -> list[str]:
     return objects
 
 
-def _parse_check_output(text: str) -> tuple[bool, str, dict]:
-    """Extract the trailing JSON verdict from a check agent's final message.
+def _parse_check_verdict(text: str) -> dict | None:
+    """Return the trailing JSON verdict object a check agent emitted, or None.
 
-    Returns (finding, summary, details). Falls back to finding=False when no
-    parseable verdict object is present.
+    None means the agent produced NO parseable verdict. That is NOT the same as
+    a healthy ``{"finding": false}`` — the agent must state finding=false
+    explicitly. A missing verdict means the run was malformed or truncated
+    (e.g. the model emitted a tool call as literal text and then stopped), i.e.
+    an indeterminate check that should be retried, never silently treated as
+    "nothing found".
     """
     if not text:
-        return False, "", {}
+        return None
     # Prefer the last parseable object that actually looks like a verdict.
     for chunk in reversed(_extract_json_objects(text)):
         try:
@@ -954,13 +958,26 @@ def _parse_check_output(text: str) -> tuple[bool, str, dict]:
         except (json.JSONDecodeError, ValueError):
             continue
         if isinstance(parsed, dict) and "finding" in parsed:
-            finding = bool(parsed.get("finding"))
-            summary = str(parsed.get("summary", "")) if finding else ""
-            details = parsed.get("details") or {}
-            if not isinstance(details, dict):
-                details = {}
-            return finding, summary, details
-    return False, "", {}
+            return parsed
+    return None
+
+
+def _parse_check_output(text: str) -> tuple[bool, str, dict]:
+    """Extract the trailing JSON verdict as (finding, summary, details).
+
+    Back-compat shim over _parse_check_verdict: defaults to (False, "", {})
+    when no verdict is present. Callers that must distinguish a missing verdict
+    from an explicit finding=false should use _parse_check_verdict directly.
+    """
+    verdict = _parse_check_verdict(text)
+    if verdict is None:
+        return False, "", {}
+    finding = bool(verdict.get("finding"))
+    summary = str(verdict.get("summary", "")) if finding else ""
+    details = verdict.get("details") or {}
+    if not isinstance(details, dict):
+        details = {}
+    return finding, summary, details
 
 
 def run_check_blocking(
@@ -969,53 +986,91 @@ def run_check_blocking(
     name: str | None = None,
     extra: dict[str, Any] | None = None,
     timeout: int = CHECK_TIMEOUT,
+    attempts: int = 2,
 ) -> CheckResult:
     """Run a one-shot, non-interactive check agent and parse its verdict.
 
     Reuses the same supervised agent loop as agent phases, but with a
     constrained read-only prompt and no input handler. Blocks until the
     agent finishes or times out.
+
+    A check that errors or produces NO parseable verdict is retried up to
+    ``attempts`` times before giving up. An indeterminate run (e.g. a
+    transient tool-use glitch where the model emits a tool call as text and
+    stops) must NOT be reported as a clean ``finding: false`` — that silently
+    drops real signals (a real support email going untriaged) until the next
+    interval. Only a genuine verdict — finding true OR an explicit
+    finding=false — ends the loop; exhausting all attempts returns
+    ``success=False`` so the scheduler treats it as a failed check, not a
+    healthy one.
     """
     import hashlib
 
     short_hash = hashlib.sha256(description.encode()).hexdigest()[:8]
     slug = name or f"check-{short_hash}"
-    run_key = slug
     phase = "check"
-    session = _session_name(run_key, role="monitor", phase=phase)
+    session = _session_name(slug, role="monitor", phase=phase)
 
     prompt = _build_check_prompt(description, extra)
 
     registry = get_registry()
     registry.register(SessionEntry(
         name=session, session_id="", role="monitor",
-        run_key=run_key, title=description[:80], phase=phase,
+        run_key=slug, title=description[:80], phase=phase,
         cwd=cwd, status="starting",
     ))
 
-    try:
-        result = asyncio.run(
-            asyncio.wait_for(
-                _run_agent_supervised(prompt, cwd, run_key, phase, timeout, role="monitor"),
-                timeout=timeout,
+    last_error = "check did not run"
+    last_result: AgentResult | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        # Use a fresh run_key on retry: the supervised runner resumes a saved
+        # session id, so reusing the key would replay the botched transcript
+        # instead of starting a clean agent turn.
+        run_key = slug if attempt == 1 else f"{slug}-retry{attempt}"
+        try:
+            result = asyncio.run(
+                asyncio.wait_for(
+                    _run_agent_supervised(prompt, cwd, run_key, phase, timeout, role="monitor"),
+                    timeout=timeout,
+                )
             )
-        )
-    except asyncio.TimeoutError:
-        registry.update(session, status="error")
-        return CheckResult(success=False, error=f"timeout after {timeout}s")
+        except asyncio.TimeoutError:
+            registry.update(session, status="error")
+            last_error = f"timeout after {timeout}s"
+            log.warning(f"Check '{slug}' attempt {attempt}/{attempts}: {last_error}")
+            continue
 
-    if not result.success:
+        last_result = result
+        if not result.success:
+            last_error = result.error or "check agent failed"
+            log.warning(f"Check '{slug}' attempt {attempt}/{attempts} failed: {last_error}")
+            continue
+
+        verdict = _parse_check_verdict(result.final_text)
+        if verdict is None:
+            last_error = ("check produced no parseable verdict — likely a "
+                          "malformed tool call or truncated output")
+            log.warning(f"Check '{slug}' attempt {attempt}/{attempts}: {last_error}")
+            continue
+
+        finding = bool(verdict.get("finding"))
+        summary = str(verdict.get("summary", "")) if finding else ""
+        details = verdict.get("details") or {}
+        if not isinstance(details, dict):
+            details = {}
         return CheckResult(
-            success=False, error=result.error or "check agent failed",
+            success=True, finding=finding, summary=summary, details=details,
             raw_output=result.final_text, duration_ms=result.duration_ms,
             total_cost_usd=result.total_cost_usd,
         )
 
-    finding, summary, details = _parse_check_output(result.final_text)
+    # Exhausted attempts without a clean verdict — indeterminate, not healthy.
+    registry.update(session, status="error")
     return CheckResult(
-        success=True, finding=finding, summary=summary, details=details,
-        raw_output=result.final_text, duration_ms=result.duration_ms,
-        total_cost_usd=result.total_cost_usd,
+        success=False, error=last_error,
+        raw_output=last_result.final_text if last_result else "",
+        duration_ms=last_result.duration_ms if last_result else 0,
+        total_cost_usd=last_result.total_cost_usd if last_result else 0.0,
     )
 
 
