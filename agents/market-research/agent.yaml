@@ -1,4 +1,4 @@
-version: "1.0.0"
+version: "1.1.0"
 
 # Entry point role for `modastack start`
 entry_point: research_manager
@@ -14,11 +14,9 @@ event_server: ${MODASTACK_EVENT_SERVER}
 services:
   - name: slack
     events: true
+    credentials:
+      bot_token: ${SLACK_BOT_TOKEN}
   - name: linear
     events: true
-
-slack:
-  bot_token: ${SLACK_BOT_TOKEN}
-
-linear:
-  api_key: ${LINEAR_API_KEY}
+    credentials:
+      api_key: ${LINEAR_API_KEY}

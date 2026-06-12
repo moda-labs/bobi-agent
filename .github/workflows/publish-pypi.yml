@@ -37,6 +37,10 @@ jobs:
       DOGFOOD_REPO: moda-labs/modastack-dogfood
       PROD_DIR: /home/ubuntu/dev
     steps:
+      # The pack now lives in this repo (#180); the dogfood repo is only
+      # the issue/webhook sink for the smoke run until it's archived.
+      - uses: actions/checkout@v4
+
       - name: Extract version
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
@@ -82,7 +86,7 @@ jobs:
           # stays unset so the smoke instance runs an isolated local event
           # server instead of the production Cloudflare Worker.
           grep '^VENN_API_KEY=' "$PROD_DIR/modastack-dogfood/.modastack/.env" > .modastack/.env || true
-          "$SMOKE/venv/bin/modastack" install agents/dogfood-content-review < /dev/null
+          "$SMOKE/venv/bin/modastack" install "$GITHUB_WORKSPACE/agents/dogfood-content-review" < /dev/null
           "$SMOKE/venv/bin/modastack" start
 
           LOG=".modastack/state/manager.log"

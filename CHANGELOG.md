@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.15.0 — 2026-06-11
+
+Event contract v2 — hard cutover, no compatibility shims (#177–#181).
+Existing installs must re-run `modastack install <team>` and
+`modastack start --fresh` after upgrading (see
+docs/design/EVENT_CONTRACT_V2.md §6 for the runbook).
+
+### Changed (breaking)
+- v2 event envelope in both runtimes; legacy top-level `repo`/
+  `team_key`/`workspace`/`channel`/`installation_id` fields removed (#177)
+- Config loader reads credentials only from `services:` descriptors —
+  legacy `slack:`/`linear:` blocks are ignored; `modastack install`
+  regenerates agent.yaml (#178)
+- Lifecycle topics `engineer/*` → `agent/*`; session names are
+  role-parameterized; run identity is an explicit `run_key`
+  (`agents launch --id`), no more issue-regex extraction (#179, #165)
+- Runtime resolution uses only the installed pack — framework
+  fallbacks removed (#176); monitor defaults likewise (#172)
+
+### Added
+- Agent decision log (memory primitive): per-agent persistent notes at
+  `.modastack/state/memory/<session>/`, loaded at session start —
+  decisions survive `--fresh` and session rotation (#174)
+- Session rotation when the installed image changes (#173)
+- Deterministic `auto_dispatch` rules: event→workflow routing that fires
+  before the manager LLM sees the event (#205)
+- support-manager agent pack (#200)
+- dogfood-content-review pack absorbed in-repo; release battery installs
+  into throwaway temp projects; modastack-dogfood retired (#180)
+- Slack placeholder + typing status indicator (#189); Slack
+  notification steps in issue-lifecycle (#192)
+- Director onboarding and reconciliation from the decision log (#175)
+- Chat SDK bridge adapter spike, Cloudflare Workers validated (#191)
+
+### Fixed
+- events.jsonl interleaved-write corruption; `modastack events` no
+  longer crashes on malformed lines (#182)
+- Project lead prompt delegates all work, stays responsive (#149)
+- market-research pack migrated to v2 service-descriptor credentials —
+  legacy blocks would silently resolve to empty tokens
+- Release smoke job installs the in-repo pack from the tagged checkout
+  (the renamed path didn't exist in the dogfood clone)
+
 ## 0.14.2 — 2026-06-11
 
 Same code as 0.14.0 plus pipeline and diagnosability fixes.

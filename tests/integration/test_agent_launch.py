@@ -41,8 +41,7 @@ class TestAdhocAgentLaunch:
 
         result = cli_run(
             "agents", "launch",
-            "-w", "adhoc", "--role", "engineer",
-
+            "-w", "adhoc", "--role", "engineer", "--id", "102",
             "--task", "Say 'hello world' and exit. Issue #102",
             timeout=10,
         )
@@ -71,8 +70,7 @@ class TestAdhocAgentLaunch:
 
         cli_run(
             "agents", "launch",
-            "-w", "adhoc", "--role", "engineer",
-
+            "-w", "adhoc", "--role", "engineer", "--id", "103",
             "--task", "Reply with DONE. Issue #103",
             timeout=10,
         )
