@@ -44,21 +44,17 @@ def discover_subscriptions(project_path: Path) -> list[str]:
 def monitor_subscription_keys(monitor_events: list[str]) -> list[str]:
     """Topics the manager must subscribe to so monitor findings get delivered.
 
-    A description-only monitor posts its finding through
+    The scheduler publishes every monitor finding through
     ``events.publish.post_event(monitor.event, ...)``, which splits the event
-    on the first ``/`` and POSTs only the *type* to ``/events/<type>`` (the
-    ``monitor`` source goes into the body). The event server's
-    ``createTopicEvent`` then routes that POST onto the **path topic** — the
-    bare type, e.g. ``support.email`` — because the body carries no
-    repo/team/workspace routing field.
+    on the first ``/`` and POSTs the *type* to ``/events/<type>`` with the
+    source in the body. Current event servers route that onto BOTH the bare
+    type (``support.email``) and the source-qualified topic
+    (``monitor/support.email``) — see ``createTopicEvent``.
 
-    So the topic a finding is *delivered* on is the type, NOT the full
-    ``monitor/support.email`` string. Subscribing to the raw event string
-    (as the manager did before) never matches, and the finding is silently
-    dropped with ``delivered_to: 0``. Subscribe to the delivered topic.
-
-    The raw event string is also kept for defensiveness/back-compat — it is
-    harmless if nothing is ever delivered on it.
+    Both forms are returned anyway: older deployed servers (pre-#235 topic
+    contract) deliver only on the bare type, so subscribing to both keeps the
+    manager working across server versions. ``deliver()`` dedupes deployments
+    across matched topics, so a double subscription never double-delivers.
     """
     keys: list[str] = []
     for event in monitor_events:

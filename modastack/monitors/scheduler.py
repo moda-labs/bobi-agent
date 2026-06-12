@@ -1,34 +1,55 @@
-"""Monitor scheduler — runs monitors on their intervals and injects events.
+"""Monitor scheduler — runs monitors on their intervals and publishes findings.
 
 Runs as a background thread inside the manager process (alongside the event
 drain loop). Every tick it reloads the registry (so monitors added at runtime
-take effect without a restart), runs any monitor that's due, deduplicates the
-detected conditions against persisted state, and injects a synthetic event
-into the manager's event stream for each newly-appeared condition.
+take effect without a restart) and runs any monitor that's due.
 
-Synthetic events are pushed onto the same `event_queue` webhooks use, so the
-manager receives and routes them exactly like a real webhook event.
+Every monitor flavor is just a condition detector; what happens to detected
+conditions is one shared path:
+
+    detect (notify | command | native check | check agent)
+      -> conditions
+      -> _reconcile: dedup against persisted state
+      -> _fire: publish to the event server
+      -> subscribers (the manager included) receive it like any other event
+
+Nothing is injected in-process. Findings travel through the event server's
+topic routing, so they reach every subscriber, appear in events.jsonl, and
+get seq/replay durability — identically for all flavors.
+
+Detectors return a list of conditions, or None when the detection itself
+failed (command error, check exception, no verdict). None is indeterminate:
+state is left untouched — active conditions are not cleared and nothing
+fires — and the next interval retries. An empty list means "all clear" and
+clears active conditions.
+
+A condition is recorded active only after its event actually publishes, so a
+failed publish (event server briefly down) is retried on the next interval
+instead of being lost.
 
 Monitors run on an `interval` (e.g. '15m') or at wall-clock times
 (`at: ["06:00", "18:00"]`, optionally pinned to a timezone with
 `tz: America/Los_Angeles`). At-monitors don't fire on first sight — the
 first tick records a baseline, then each scheduled time fires once.
 
-Monitors come in three flavors:
-  - Notification (`notify: true`) — fires its event straight to the manager
-    every time it's due. No condition detection, no dedup. For scheduled
-    nudges like a twice-daily status roundup.
+Monitor flavors:
+  - Notification (`notify: true`) — detects a single condition keyed to the
+    due time, so dedup never suppresses it. For scheduled nudges like a
+    twice-daily status roundup.
+  - Command (`command:`) — runs a shell command and parses its JSON output
+    into conditions.
   - Native check (`check:` field) — a deterministic Python runner in
-    checks.py that the scheduler calls directly and deduplicates.
+    checks.py that the scheduler calls directly.
   - Description-only — the scheduler launches a short-lived, non-interactive
-    check agent out-of-band (via `modastack spawn --non-interactive`), which
-    performs the check and posts a result event back to the bus only if it
-    finds something. The manager never sees the check process itself — just
-    the eventual finding — so its context stays clean and responsive.
+    check agent out-of-band (via `modastack agents launch`), captures its
+    verdict, and converts it into conditions. The check agent only observes
+    and reports — dedup and publishing happen here, on the same path as
+    every other flavor. The manager never sees the check process itself.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import logging
@@ -73,6 +94,7 @@ def _parse_iso(value: str):
         dt = dt.replace(tzinfo=_tz.utc)
     return dt
 from .registry import MonitorRegistry
+from .schema import Condition
 
 log = logging.getLogger(__name__)
 
@@ -84,18 +106,44 @@ def _monitor_state_path() -> Path:
 TICK_INTERVAL = 30  # seconds between scheduler ticks
 
 
-def _default_inject(event: dict) -> None:
-    """Push a synthetic event onto the webhook event queue."""
-    from modastack.events.client import event_queue
-    event_queue.put(event)
+def _default_publish(event: str, data: dict) -> bool:
+    """Publish a monitor finding to the event server.
+
+    Returns True when the server accepted it. The same wire path every
+    out-of-band agent uses — there is no in-process shortcut.
+    """
+    from modastack.events.publish import post_event
+    return post_event(event, data)
 
 
-def _default_spawn_check(monitor, cwd: str | None) -> None:
-    """Launch a non-interactive check as a background subprocess.
+def _parse_verdict(output: str) -> dict | None:
+    """Extract the trailing verdict JSON a check process printed, or None.
 
-    Uses `modastack agents launch --wait --post-event` so the check runs
-    out-of-band. Fire-and-forget: the scheduler thread is never blocked,
-    and the subprocess posts a result event back to the bus only on a finding.
+    `modastack agents launch --wait` prints the check's verdict as a single
+    JSON line ({"success": ..., "finding": ...}). None means the process
+    produced no parseable verdict — an indeterminate run, never "all clear".
+    """
+    for line in reversed((output or "").strip().splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and "finding" in parsed:
+            return parsed
+    return None
+
+
+def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
+    """Launch a non-interactive check subprocess and report its verdict.
+
+    Runs `modastack agents launch --wait` out-of-band so the scheduler thread
+    is never blocked, captures the check's stdout, and hands the trailing
+    verdict JSON (or None) to ``on_verdict`` from a waiter thread when the
+    process exits. The check agent only observes — converting the verdict to
+    conditions, dedup, and publishing all happen in the scheduler.
     """
     role = getattr(monitor, "role", "") or ""
     if not role:
@@ -117,27 +165,52 @@ def _default_spawn_check(monitor, cwd: str | None) -> None:
         "--non-interactive",
         "--wait",
         "--task", monitor.description or monitor.name,
-        "--post-event", monitor.event,
     ]
 
+    from modastack.sdk import get_project_root
+    root = get_project_root()
+    if not root:
+        raise RuntimeError("project root not set — call set_project_root() first")
+    log_path = root / ".modastack" / "state" / "manager.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
     try:
-        from modastack.sdk import get_project_root
-        root = get_project_root()
-        if not root:
-            raise RuntimeError("project root not set — call set_project_root() first")
-        log_path = root / ".modastack" / "state" / "manager.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a") as lf:
-            subprocess.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf,
+                                    text=True, start_new_session=True)
     except OSError as e:
         log.error(f"Failed to spawn check for monitor {monitor.name}: {e}")
+        return
+
+    def _wait() -> None:
+        from modastack.subagent import CHECK_TIMEOUT
+        # run_check_blocking retries internally (attempts=2, each bounded by
+        # CHECK_TIMEOUT), so allow both attempts plus startup slack.
+        budget = 2 * CHECK_TIMEOUT + 120
+        try:
+            out, _ = proc.communicate(timeout=budget)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            log.error(f"Check for monitor {monitor.name} exceeded {budget}s — killed")
+            on_verdict(None)
+            return
+        if out:  # keep the check's output observable in manager.log
+            try:
+                with open(log_path, "a") as lf:
+                    lf.write(out)
+            except OSError:
+                pass
+        on_verdict(_parse_verdict(out))
+
+    threading.Thread(target=_wait, daemon=True,
+                     name=f"check-wait-{monitor.name}").start()
 
 
 class MonitorScheduler:
-    def __init__(self, inject_event=None, state_path: Path | None = None,
+    def __init__(self, publish=None, state_path: Path | None = None,
                  now=None, registry_loader=None, spawn_check=None,
                  project_path: Path | None = None):
-        self.inject_event = inject_event or _default_inject
+        self.publish = publish or _default_publish
         self.spawn_check = spawn_check or _default_spawn_check
         self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -147,6 +220,9 @@ class MonitorScheduler:
             lambda **kw: MonitorRegistry.load(project_path=project_path, **kw)
         )
         self.state: dict = self._load_state()
+        # Waiter threads for out-of-band checks reconcile concurrently with
+        # the scheduler thread — all state mutation goes through this lock.
+        self._state_lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -211,8 +287,9 @@ class MonitorScheduler:
             return False
         last = _parse_iso(last_run) if last_run else None
         if last is None:
-            self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
-            self._save_state()
+            with self._state_lock:
+                self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
+                self._save_state()
             return False
         return scheduled > last
 
@@ -232,59 +309,85 @@ class MonitorScheduler:
         return max(candidates)
 
     def run_monitor(self, monitor, registry: MonitorRegistry, now: datetime) -> None:
+        """Detect conditions for one monitor and reconcile them.
+
+        Detection is the only flavor-specific step. Description-only checks
+        detect out-of-band: nothing reconciles here, the waiter thread calls
+        back into _reconcile when the verdict lands.
+        """
         if monitor.notify:
-            # Scheduled notification — no condition to detect, no dedup.
-            # The event goes straight to the manager every time it's due.
-            from .schema import Condition
-            self._fire(monitor, Condition(key=now.isoformat(),
-                                          data={"description": monitor.description}))
+            # Scheduled notification — keyed to the due time, so the shared
+            # dedup path never suppresses it.
+            conditions: list | None = [
+                Condition(key=now.isoformat(),
+                          data={"description": monitor.description})
+            ]
         elif monitor.command:
-            self._run_command_check(monitor)
+            conditions = self._command_conditions(monitor)
         elif monitor.check:
-            check = self._checks.get(monitor.check)
-            if check is None:
-                log.warning(f"Monitor {monitor.name} names unknown check "
-                            f"'{monitor.check}' — skipping")
-            else:
-                try:
-                    conditions = check(monitor, registry.projects_for(monitor))
-                    self._reconcile(monitor, conditions)
-                except Exception as e:
-                    log.error(f"Check '{monitor.check}' for {monitor.name} failed: {e}")
+            conditions = self._check_conditions(monitor, registry)
         else:
             self._spawn_check(monitor, registry.projects_for(monitor))
+            conditions = None  # detection in flight — reconciled on verdict
 
-        self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
-        self._save_state()
+        if conditions is not None:
+            self._reconcile(monitor, conditions)
+
+        with self._state_lock:
+            self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
+            self._save_state()
 
     def _reconcile(self, monitor, conditions: list) -> None:
-        """Fire events only for conditions that weren't active last time."""
-        entry = self.state.setdefault(monitor.state_key, {})
-        previous = set(entry.get("active", []))
-        current = {c.key: c for c in conditions}
-        for key, condition in current.items():
-            if key not in previous:
-                self._fire(monitor, condition)
-        # Conditions that disappeared drop out; if they recur later they fire
-        # again. This is the deduplication: a still-present condition is never
-        # re-fired on the next interval.
-        entry["active"] = list(current.keys())
+        """The single dedup + publish chokepoint for every monitor flavor.
 
-    def _fire(self, monitor, condition) -> None:
-        source, etype = monitor.event_parts
-        event = {
-            "type": etype,
-            "source": source,
-            "data": {"monitor": monitor.name, **condition.data},
-        }
-        log.info(f"Monitor {monitor.name} fired {monitor.event} ({condition.key})")
-        self.inject_event(event)
+        Fires events only for conditions that weren't active last time.
+        Conditions that disappeared drop out; if they recur later they fire
+        again. A still-present condition is never re-fired on the next
+        interval. A new condition is recorded active only once its event
+        actually published — a failed publish retries next interval.
+        """
+        with self._state_lock:
+            entry = self.state.setdefault(monitor.state_key, {})
+            previous = set(entry.get("active", []))
+            current = {c.key: c for c in conditions}
+            active: list[str] = []
+            for key, condition in current.items():
+                if key in previous or self._fire(monitor, condition):
+                    active.append(key)
+            entry["active"] = active
+            self._save_state()
 
-    def _run_command_check(self, monitor) -> None:
-        """Run a shell command, parse JSON output, diff against last run."""
-        import hashlib
-        from .schema import Condition
+    def _fire(self, monitor, condition) -> bool:
+        event = monitor.event or f"monitor/{monitor.name}"
+        ok = self.publish(event, {"monitor": monitor.name, **condition.data})
+        if ok:
+            log.info(f"Monitor {monitor.name} fired {event} ({condition.key})")
+        else:
+            log.warning(f"Monitor {monitor.name} failed to publish {event} "
+                        f"({condition.key}) — will retry next interval")
+        return ok
 
+    # --- detectors ------------------------------------------------------
+
+    def _check_conditions(self, monitor, registry: MonitorRegistry) -> list | None:
+        """Run a native check runner. None when the check itself failed."""
+        check = self._checks.get(monitor.check)
+        if check is None:
+            log.warning(f"Monitor {monitor.name} names unknown check "
+                        f"'{monitor.check}' — skipping")
+            return None
+        try:
+            return check(monitor, registry.projects_for(monitor))
+        except Exception as e:
+            log.error(f"Check '{monitor.check}' for {monitor.name} failed: {e}")
+            return None
+
+    def _command_conditions(self, monitor) -> list | None:
+        """Run a shell command and parse its JSON output into conditions.
+
+        None when the command failed or printed garbage (indeterminate);
+        an empty list when it succeeded with no output (all clear).
+        """
         try:
             result = subprocess.run(
                 monitor.command, shell=True, capture_output=True, text=True,
@@ -292,26 +395,25 @@ class MonitorScheduler:
             )
         except subprocess.TimeoutExpired:
             log.error(f"Command monitor {monitor.name} timed out")
-            return
+            return None
         except OSError as e:
             log.error(f"Command monitor {monitor.name} failed to run: {e}")
-            return
+            return None
 
         if result.returncode != 0:
             stderr = result.stderr.strip()[:200] if result.stderr else ""
             log.warning(f"Command monitor {monitor.name} exited {result.returncode}: {stderr}")
-            return
+            return None
 
         stdout = result.stdout.strip()
         if not stdout:
-            self._reconcile(monitor, [])
-            return
+            return []
 
         try:
             data = json.loads(stdout)
         except json.JSONDecodeError:
             log.warning(f"Command monitor {monitor.name} returned non-JSON output")
-            return
+            return None
 
         items = data if isinstance(data, list) else [data]
         conditions = []
@@ -322,18 +424,17 @@ class MonitorScheduler:
                     json.dumps(item, sort_keys=True).encode()
                 ).hexdigest()[:12]
                 conditions.append(Condition(key=str(key), data=item))
-
-        self._reconcile(monitor, conditions)
+        return conditions
 
     def _spawn_check(self, monitor, projects: list[Path]) -> None:
-        """No native check — run the description as a non-interactive check.
+        """No native check — run the description as an out-of-band detector.
 
         Rather than injecting a check-due event into the manager (which would
         pollute its context and tie it up every interval), the scheduler
-        launches a short-lived, out-of-band check agent. That process performs
-        the check from the monitor's description and posts a result event back
-        to the bus only if it finds something — so the manager only ever sees
-        an actionable finding, never the check itself.
+        launches a short-lived, non-interactive check agent. The waiter thread
+        hands its verdict to _on_check_verdict, which reconciles through the
+        same path as every other flavor — the manager only ever sees an
+        actionable finding, never the check itself.
 
         The check just needs a working directory to run read-only commands in;
         it runs once in the first applicable project (or no project for a pure
@@ -341,7 +442,40 @@ class MonitorScheduler:
         """
         cwd = str(projects[0]) if projects else None
         log.info(f"Monitor {monitor.name} due — spawning non-interactive check")
-        self.spawn_check(monitor, cwd)
+        self.spawn_check(monitor, cwd,
+                         lambda verdict: self._on_check_verdict(monitor, verdict))
+
+    def _on_check_verdict(self, monitor, verdict: dict | None) -> None:
+        """Reconcile an out-of-band check's verdict (waiter-thread callback)."""
+        conditions = self._verdict_conditions(verdict)
+        if conditions is None:
+            log.warning(f"Monitor {monitor.name}: check indeterminate — "
+                        "leaving state untouched, retrying next interval")
+            return
+        self._reconcile(monitor, conditions)
+
+    @staticmethod
+    def _verdict_conditions(verdict: dict | None) -> list | None:
+        """Convert a check verdict into conditions for the shared path.
+
+        None / success=false is indeterminate. An explicit finding=false is
+        all clear. A finding keys on details.key (or details.id) when the
+        check supplied one, else a hash of the summary — so the same condition
+        observed by successive checks dedups exactly like a native check's.
+        """
+        if not isinstance(verdict, dict) or not verdict.get("success", False):
+            return None
+        if not verdict.get("finding"):
+            return []
+        details = verdict.get("details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        summary = str(verdict.get("summary", ""))
+        key = str(details.get("key") or details.get("id") or "")
+        if not key:
+            key = hashlib.sha256(summary.encode()).hexdigest()[:12]
+        return [Condition(key=key, data={"summary": summary, "text": summary,
+                                         **details})]
 
     # --- state persistence ---------------------------------------------
 

@@ -463,12 +463,45 @@ describe("createTopicEvent", () => {
 		expect(event.payload).toEqual({ key: "value" });
 		expect(event.id).toBeTruthy();
 		expect(event.timestamp).toBeTruthy();
-		expect(event.topics).toEqual(["my-topic"]);
+		expect(event.topics).toEqual(["my-topic", "my-app/my-topic"]);
 	});
 
 	it("uses body as payload when no payload field", () => {
 		const event = createTopicEvent("test", { foo: "bar" });
 		expect(event.payload).toEqual({ foo: "bar" });
+	});
+
+	it("routes path-topic events on both the bare and source-qualified topic", () => {
+		// The topic contract: publishers strip the source into the body
+		// (POST /events/<type> with {"source": ...}), so subscriptions
+		// written as the full "source/type" event string must still match.
+		const event = createTopicEvent("support.email", {
+			source: "monitor",
+			payload: { summary: "new email" },
+		});
+		expect(event.topics).toEqual(["support.email", "monitor/support.email"]);
+	});
+
+	it("does not double-qualify when the path already carries the source", () => {
+		const event = createTopicEvent("monitor/support.email", {
+			source: "monitor",
+			payload: {},
+		});
+		expect(event.topics).toEqual(["monitor/support.email"]);
+	});
+
+	it("omits the qualified topic when no source is given", () => {
+		const event = createTopicEvent("support.email", { payload: {} });
+		expect(event.topics).toEqual(["support.email"]);
+	});
+
+	it("routing fields suppress path topics entirely", () => {
+		const event = createTopicEvent("deploy.complete", {
+			source: "ci",
+			repo: "org/repo",
+			payload: {},
+		});
+		expect(event.topics).toEqual(["github:org/repo"]);
 	});
 
 	it("generates topics from routing fields in body", () => {

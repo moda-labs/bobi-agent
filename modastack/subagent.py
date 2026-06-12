@@ -899,7 +899,13 @@ def _build_check_prompt(description: str, extra: dict[str, Any] | None = None) -
         '  {"finding": true, "summary": "<one-line description of what needs '
         'attention>", "details": {<optional structured fields>}}\n'
         '  {"finding": false}\n'
-        "Use finding=false when everything is healthy and nothing needs attention."
+        "Use finding=false when everything is healthy and nothing needs attention. "
+        "When reporting a finding, include a stable identifier for the underlying "
+        'condition as a "key" field inside details (e.g. an email message id, PR '
+        "number, or URL). The scheduler deduplicates findings by that key across "
+        "repeated checks — do NOT try to deduplicate yourself or suppress a "
+        "finding because it may have been reported before; report exactly what "
+        "you observe right now."
     )
     return "\n\n".join(parts)
 

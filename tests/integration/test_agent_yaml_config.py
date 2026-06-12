@@ -159,18 +159,17 @@ class TestCommandMonitorIntegration:
                 return []
 
         sched = MonitorScheduler(
-            inject_event=injected.append,
+            publish=lambda event, data: (injected.append({"event": event, "data": data}), True)[1],
             state_path=tmp_path / "state.json",
             now=lambda: datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
             registry_loader=lambda: FakeRegistry(),
-            spawn_check=lambda _m, _c: None,
+            spawn_check=lambda _m, _c, _cb: None,
         )
 
         sched.tick()
 
         assert len(injected) == 2
-        assert injected[0]["source"] == "test"
-        assert injected[0]["type"] == "items"
+        assert injected[0]["event"] == "test/items"
         assert injected[0]["data"]["value"] == "hello"
         assert injected[1]["data"]["value"] == "world"
 
@@ -210,11 +209,11 @@ class TestCommandMonitorIntegration:
                 return []
 
         sched = MonitorScheduler(
-            inject_event=injected.append,
+            publish=lambda event, data: (injected.append({"event": event, "data": data}), True)[1],
             state_path=tmp_path / "state.json",
             now=lambda: t,
             registry_loader=lambda: FakeRegistry(),
-            spawn_check=lambda _m, _c: None,
+            spawn_check=lambda _m, _c, _cb: None,
         )
 
         sched.tick()

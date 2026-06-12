@@ -66,8 +66,18 @@ export function createTopicEvent(
 	if (body.repo) topics.push(`github:${body.repo as string}`);
 	if (body.team_key) topics.push(`linear:${body.team_key as string}`);
 	if (body.workspace) topics.push(`slack:${body.workspace as string}`);
-	// Fallback: the topic path itself acts as the subscription key
-	if (topics.length === 0) topics.push(topic);
+	// Fallback: the topic path itself acts as the subscription key, plus the
+	// source-qualified form (e.g. "monitor/support.email") so subscriptions
+	// written as the full event string match too. Publishers strip the source
+	// to the body when POSTing (see modastack events/publish.py) — without
+	// this, "source/type" subscriptions silently never match (#235).
+	if (topics.length === 0) {
+		topics.push(topic);
+		const source = body.source as string | undefined;
+		if (source && !topic.startsWith(`${source}/`)) {
+			topics.push(`${source}/${topic}`);
+		}
+	}
 
 	const text = (body.text as string) || "";
 
