@@ -667,6 +667,93 @@ class TestDrainChannelIntegration:
         assert len(delivered) == 1
 
     @patch("modastack.events.channels.SlackInputChannel.prepare")
+    def test_drain_deduplicates_placeholders_per_thread(self, mock_prepare,
+                                                         monkeypatch):
+        """When multiple Slack events for the same thread are batched,
+        only one placeholder is posted and all events share its ts."""
+        from queue import SimpleQueue
+        from modastack.events.drain import drain_loop, DRAIN_INTERVAL
+
+        e1 = _make_slack_event(ts="171.50", text="first message")
+        e2 = _make_slack_event(ts="171.51", text="second message")
+
+        # prepare() is called only for the first event; returns augmented copy
+        augmented = dict(e1, fields=dict(e1["fields"], placeholder_ts="171.99"))
+        mock_prepare.return_value = augmented
+
+        q = SimpleQueue()
+        q.put(e1)
+        q.put(e2)
+
+        delivered = []
+
+        def fake_deliver(session, text, sender=""):
+            delivered.append(text)
+            raise SystemExit
+
+        def fake_formatter(ev):
+            lines = [f"Event: {ev['source']}/{ev['type']}"]
+            for k, v in ev.get("fields", {}).items():
+                lines.append(f"  {k}: {v}")
+            return "\n".join(lines)
+
+        cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
+        monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
+        monkeypatch.setattr("modastack.events.drain.DRAIN_INTERVAL", 0)
+
+        with patch("modastack.inbox.deliver", fake_deliver):
+            with pytest.raises(SystemExit):
+                drain_loop("test-session", queue=q, formatter=fake_formatter)
+
+        # prepare() should only be called once (for the first event)
+        mock_prepare.assert_called_once_with(e1, "xoxb-test")
+        # Both events should appear in the delivered text with placeholder_ts
+        assert len(delivered) == 1  # all chat events delivered in one batch
+        assert delivered[0].count("placeholder_ts") == 2
+        assert delivered[0].count("171.99") == 2
+
+    @patch("modastack.events.channels.SlackInputChannel.prepare")
+    def test_drain_separate_placeholders_for_different_threads(self, mock_prepare,
+                                                                monkeypatch):
+        """Events in different threads each get their own placeholder."""
+        from queue import SimpleQueue
+        from modastack.events.drain import drain_loop
+
+        e1 = _make_slack_event(thread_ts="171.42", ts="171.50")
+        e2 = _make_slack_event(thread_ts="172.00", ts="172.01")
+
+        aug1 = dict(e1, fields=dict(e1["fields"], placeholder_ts="p1"))
+        aug2 = dict(e2, fields=dict(e2["fields"], placeholder_ts="p2"))
+        mock_prepare.side_effect = [aug1, aug2]
+
+        q = SimpleQueue()
+        q.put(e1)
+        q.put(e2)
+
+        delivered = []
+
+        def fake_deliver(session, text, sender=""):
+            delivered.append(text)
+            raise SystemExit
+
+        def fake_formatter(ev):
+            lines = [f"Event: {ev['source']}/{ev['type']}"]
+            for k, v in ev.get("fields", {}).items():
+                lines.append(f"  {k}: {v}")
+            return "\n".join(lines)
+
+        cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
+        monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
+        monkeypatch.setattr("modastack.events.drain.DRAIN_INTERVAL", 0)
+
+        with patch("modastack.inbox.deliver", fake_deliver):
+            with pytest.raises(SystemExit):
+                drain_loop("test-session", queue=q, formatter=fake_formatter)
+
+        # prepare() should be called once per distinct thread
+        assert mock_prepare.call_count == 2
+
+    @patch("modastack.events.channels.SlackInputChannel.prepare")
     def test_drain_skips_handler_without_config(self, mock_prepare,
                                                  monkeypatch):
         """No channel handler called when project config is unavailable."""
