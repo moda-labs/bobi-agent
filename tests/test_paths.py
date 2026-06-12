@@ -60,6 +60,95 @@ class TestResolveRoot:
         assert paths.resolve_root(deeper) == nested
         assert paths.resolve_root(tmp_path) == tmp_path
 
+    def test_skips_linked_worktree(self, tmp_path):
+        """A git linked worktree that carries .modastack/agent.yaml from
+        its repo must NOT capture root resolution (#247). resolve_root
+        detects linked worktrees via .git being a file (not a directory)
+        and skips them, continuing to walk up to the real installation."""
+        import subprocess as sp
+
+        repo = tmp_path / "repo"
+        _install(repo)
+        sp.run(["git", "init", str(repo)], capture_output=True, check=True)
+        sp.run(["git", "-C", str(repo), "config", "user.email", "t@t"], capture_output=True)
+        sp.run(["git", "-C", str(repo), "config", "user.name", "t"], capture_output=True)
+        sp.run(["git", "-C", str(repo), "add", "."], capture_output=True)
+        sp.run(["git", "-C", str(repo), "commit", "-m", "init"], capture_output=True, check=True)
+
+        # Place worktree INSIDE the repo (matches real layout: .claude/worktrees/)
+        wt = repo / ".claude" / "worktrees" / "feat"
+        sp.run(["git", "-C", str(repo), "worktree", "add", "-b", "feat", str(wt)],
+               capture_output=True, check=True)
+
+        # Worktree has the marker (checked-in) but .git is a file
+        assert (wt / ".modastack" / "agent.yaml").is_file()
+        assert (wt / ".git").is_file()
+
+        deep = wt / "src"
+        deep.mkdir()
+        # Must skip the worktree and resolve to the main repo
+        assert paths.resolve_root(deep) == repo
+
+    def test_main_worktree_not_skipped(self, tmp_path):
+        """The main working tree (.git is a directory) must still resolve
+        normally — the worktree skip only applies to linked worktrees."""
+        import subprocess as sp
+
+        repo = tmp_path / "repo"
+        _install(repo)
+        sp.run(["git", "init", str(repo)], capture_output=True, check=True)
+
+        assert (repo / ".git").is_dir()
+        assert paths.resolve_root(repo) == repo
+
+    def test_env_var_overrides_walk(self, tmp_path, monkeypatch):
+        """MODASTACK_ROOT env var short-circuits the walk-up resolver,
+        pinning the root for managed child processes (#247)."""
+        real_root = tmp_path / "real"
+        _install(real_root)
+
+        decoy = tmp_path / "decoy"
+        _install(decoy)
+
+        monkeypatch.setenv("MODASTACK_ROOT", str(real_root))
+        # Even starting from inside decoy, env var wins
+        assert paths.resolve_root(decoy / "src") == real_root
+
+    def test_env_var_invalid_falls_through(self, tmp_path, monkeypatch):
+        """If MODASTACK_ROOT points to a non-installation, fall through
+        to the normal walk-up resolver."""
+        real_root = tmp_path / "real"
+        _install(real_root)
+
+        bogus = tmp_path / "bogus"
+        bogus.mkdir()
+        monkeypatch.setenv("MODASTACK_ROOT", str(bogus))
+
+        deep = real_root / "src"
+        deep.mkdir()
+        assert paths.resolve_root(deep) == real_root
+
+
+class TestIsLinkedWorktree:
+    def test_linked_worktree_detected(self, tmp_path):
+        """A linked worktree has a .git file starting with 'gitdir:'."""
+        (tmp_path / ".git").write_text("gitdir: /some/path/.git/worktrees/foo\n")
+        assert paths._is_linked_worktree(tmp_path) is True
+
+    def test_main_repo_not_detected(self, tmp_path):
+        """A main repo has a .git directory, not a file."""
+        (tmp_path / ".git").mkdir()
+        assert paths._is_linked_worktree(tmp_path) is False
+
+    def test_no_git_not_detected(self, tmp_path):
+        """A directory with no .git at all is not a worktree."""
+        assert paths._is_linked_worktree(tmp_path) is False
+
+    def test_git_file_without_gitdir_not_detected(self, tmp_path):
+        """A .git file that doesn't start with 'gitdir:' is not a worktree."""
+        (tmp_path / ".git").write_text("something else\n")
+        assert paths._is_linked_worktree(tmp_path) is False
+
 
 class TestNoSideEffects:
     def test_find_runtime_root_probe_creates_nothing(self, tmp_path):
