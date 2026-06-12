@@ -106,11 +106,20 @@ class EventReactor:
         review_state = fields.get("review_state", "")
         event_type = event.get("type", "")
 
-        parts = [f"PR #{number} in {repo} received review feedback"]
-        if review_state:
-            parts.append(f"(review: {review_state})")
-        parts.append(f"[event: {event_type}].")
-        parts.append("Address the reviewer's comments.")
+        if event_type.startswith("github.issues"):
+            assignee = fields.get("assignee", "unknown")
+            title = fields.get("title", "")
+            parts = [f"Issue #{number} in {repo} assigned to {assignee}"]
+            if title:
+                parts.append(f"({title})")
+            parts.append(f"[event: {event_type}].")
+            parts.append("Begin the issue lifecycle.")
+        else:
+            parts = [f"PR #{number} in {repo} received review feedback"]
+            if review_state:
+                parts.append(f"(review: {review_state})")
+            parts.append(f"[event: {event_type}].")
+            parts.append("Address the reviewer's comments.")
         task = " ".join(parts)
 
         log.info("Auto-dispatching %s for %s", rule.workflow, key)

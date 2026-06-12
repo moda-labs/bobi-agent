@@ -282,6 +282,39 @@ class TestEventReactor:
         assert reactor.process(event) is False
         mock_launch.assert_not_called()
 
+    @patch("modastack.subagent.launch_agent")
+    def test_dispatches_issue_lifecycle_on_assignment(self, mock_launch):
+        """github.issues.assigned triggers issue-lifecycle workflow."""
+        mock_launch.return_value = "wf-issue-lifecycle-test-99"
+        rule = AutoDispatchRule(
+            event="github.issues.assigned",
+            workflow="issue-lifecycle",
+            cooldown=1800,
+        )
+        reactor = EventReactor(rules=[rule], cwd="/tmp/project")
+        event = {
+            "type": "github.issues.assigned",
+            "source": "github",
+            "topics": ["github:moda-labs/test"],
+            "fields": {
+                "action": "assigned",
+                "number": 99,
+                "title": "Add rate limiting",
+                "assignee": "alice",
+            },
+        }
+
+        dispatched = reactor.process(event)
+
+        assert dispatched is True
+        mock_launch.assert_called_once()
+        call_kwargs = mock_launch.call_args[1]
+        assert call_kwargs["workflow_name"] == "issue-lifecycle"
+        assert "#99" in call_kwargs["task"]
+        assert "moda-labs/test" in call_kwargs["task"]
+        assert "alice" in call_kwargs["task"]
+        assert "issue-lifecycle" not in call_kwargs["task"]  # workflow name shouldn't leak into task text
+
 
 class TestEventReactorFromConfig:
     """EventReactor.from_config builds a reactor from auto_dispatch config."""
