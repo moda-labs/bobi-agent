@@ -545,6 +545,7 @@ def launch_agent(
     persistent: bool = False,
     subscribe: list[str] | None = None,
     run_key: str | None = None,
+    input_fields: dict | None = None,
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
@@ -586,6 +587,7 @@ def launch_agent(
         "role": role,
         "persistent": persistent,
         "subscribe": subscribe or [],
+        "input_fields": input_fields or {},
     })
     script = (
         "import json, sys; "
@@ -720,6 +722,7 @@ def _run_agent_entry(args: dict) -> None:
     role = args.get("role", "")
     persistent = args.get("persistent", False)
     subscribe = args.get("subscribe", [])
+    input_fields = args.get("input_fields", {})
 
     from modastack.sdk import set_project_root
     project_root = Path(cwd).resolve()
@@ -761,6 +764,7 @@ def _run_agent_entry(args: dict) -> None:
         timeout=timeout,
         interactive=interactive,
         role=role,
+        input_fields=input_fields,
     )
 
 

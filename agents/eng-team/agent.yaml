@@ -45,3 +45,9 @@ auto_dispatch:
   - event: github.issues.assigned
     workflow: issue-lifecycle
     cooldown: 1800
+
+  - event: github.pull_request
+    match:
+      action: closed
+    workflow: pr-closed
+    cooldown: 60

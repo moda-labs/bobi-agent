@@ -1,0 +1,30 @@
+name: pr-closed
+trigger: When a pull request is closed (merged or unmerged).
+description: >
+  Deterministic post-close cleanup. Removes the worktree and branch
+  associated with the PR's head ref. If merged, also closes the
+  linked issue.
+
+steps:
+  - name: cleanup
+    action: cleanup_worktree
+    timeout: 120
+
+  - name: route-merged
+    if: "merged == true"
+    goto: close-issue
+    else: done
+
+  - name: close-issue
+    agent: engineer
+    prompt: |
+      PR #${{ input.pr_number }} in ${{ input.repo }} was merged.
+      Close the linked issue with a comment referencing the PR.
+      If no linked issue can be determined, skip gracefully.
+    handoff:
+      required: [status]
+    timeout: 300
+
+  - name: done
+    notify: slack
+    message: "PR #${{ input.pr_number }} closed (merged=${{ input.merged }}). Worktree cleanup complete."

@@ -98,20 +98,27 @@ class EventReactor:
             del self._dispatched[k]
 
     def _dispatch(self, rule: AutoDispatchRule, event: dict, key: str) -> None:
-        """Launch the workflow for a matched event."""
+        """Launch the workflow for a matched event.
+
+        Builds a task description from the event fields, adapting the text
+        to the event type (PR review feedback, PR closed, issue assigned, etc.).
+        """
         fields = event.get("fields", {})
         number = fields.get("number", "?")
         topics = event.get("topics", [])
         repo = topics[0].removeprefix("github:") if topics else "unknown"
-        review_state = fields.get("review_state", "")
         event_type = event.get("type", "")
 
-        parts = [f"PR #{number} in {repo} received review feedback"]
-        if review_state:
-            parts.append(f"(review: {review_state})")
-        parts.append(f"[event: {event_type}].")
-        parts.append("Address the reviewer's comments.")
-        task = " ".join(parts)
+        task = self._build_task(rule, event_type, fields, number, repo)
+
+        # Pass event fields into the workflow's input scope so native
+        # actions and route conditions can resolve ${{ input.* }} variables.
+        input_fields = {
+            "event_type": event_type,
+            "repo": repo,
+            "pr_number": number,
+        }
+        input_fields.update(fields)
 
         log.info("Auto-dispatching %s for %s", rule.workflow, key)
         try:
@@ -120,9 +127,44 @@ class EventReactor:
                 cwd=self.cwd,
                 workflow_name=rule.workflow,
                 role="engineer",
+                input_fields=input_fields,
             )
         except RuntimeError as e:
             # Session already active — the workflow is already handling this PR
             log.info("Auto-dispatch launch skipped (already active): %s — %s", key, e)
         except Exception:
             log.exception("Auto-dispatch failed for %s", key)
+
+    @staticmethod
+    def _build_task(rule: AutoDispatchRule, event_type: str, fields: dict,
+                    number, repo: str) -> str:
+        """Build a human-readable task description from event context."""
+        action = fields.get("action", "")
+
+        # PR closed (merged or abandoned)
+        if event_type == "github.pull_request" and action == "closed":
+            merged = fields.get("merged", False)
+            head_branch = fields.get("head_branch", "")
+            parts = [f"PR #{number} in {repo} closed (merged={merged})."]
+            if head_branch:
+                parts.append(f"Head branch: {head_branch}.")
+            parts.append("Run cleanup.")
+            return " ".join(parts)
+
+        # PR review feedback
+        if "review" in event_type or "comment" in event_type:
+            review_state = fields.get("review_state", "")
+            parts = [f"PR #{number} in {repo} received review feedback"]
+            if review_state:
+                parts.append(f"(review: {review_state})")
+            parts.append(f"[event: {event_type}].")
+            parts.append("Address the reviewer's comments.")
+            return " ".join(parts)
+
+        # Issue assigned
+        if event_type == "github.issues.assigned":
+            title = fields.get("title", "")
+            return f"Issue #{number} in {repo} assigned: {title}. Begin work."
+
+        # Generic fallback
+        return f"Event {event_type} on #{number} in {repo} [action: {action}]. Process via {rule.workflow}."

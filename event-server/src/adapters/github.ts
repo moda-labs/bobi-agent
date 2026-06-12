@@ -45,6 +45,13 @@ export function normalizeGitHubWebhook(
 		}
 	}
 
+	// PR-specific fields — merged status and head branch for cleanup dispatch
+	if (pr) {
+		const head = pr.head as Record<string, unknown> | undefined;
+		if (head?.ref) fields.head_branch = head.ref as string;
+		if (typeof pr.merged === "boolean") fields.merged = pr.merged;
+	}
+
 	// Review-specific fields — pull_request_review and pull_request_review_comment
 	// carry a review/comment object with state, body, and file context that the
 	// consuming agent needs to decide whether to dispatch pr-feedback.
