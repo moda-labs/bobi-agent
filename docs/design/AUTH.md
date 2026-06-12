@@ -8,10 +8,13 @@ Status: **two layers.**
   identity**, and ships first. Described in the next section.
 - **v2 — Accounts & tenancy (the rest of this doc).** Identity, service
   connections, and the per-resource ACL that **binds onto** v1 bubbles.
-  Still **thought collection**; tracked by **#142** and **#239**. The prior
-  attempt (PR #143) was closed as stale with a
-  [salvage map](https://github.com/moda-labs/modastack/pull/143) — read it
-  before writing v2 code.
+  Still **thought collection**; tracked by **#239** (the v2 epic). The
+  original OAuth-login spec (**#142**) and its implementation attempt
+  (**PR #143**) are both closed as superseded — #142's GitHub-OAuth-App
+  approach was reversed by the one-GitHub-App decision below, and its package
+  paths (`manager/`) are deleted. Read the
+  [#143 salvage map](https://github.com/moda-labs/modastack/pull/143) before
+  writing v2 code; the login-flow mechanics carry over (see Salvage, bottom).
 
 Sequencing: v1 ships now (no dependencies). v2 lands **after #177** (event
 contract v2 worker adapter refactor), so it's written once against the
