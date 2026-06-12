@@ -19,8 +19,8 @@ import websocket
 log = logging.getLogger(__name__)
 
 def _state_path(name: str) -> Path:
-    from modastack.sdk import state_dir
-    return state_dir() / name
+    from modastack import paths
+    return paths.state_dir() / name
 
 # Normalized events land here for the consumer to drain.
 event_queue: SimpleQueue = SimpleQueue()

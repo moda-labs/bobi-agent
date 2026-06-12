@@ -48,8 +48,8 @@ def post_event(event_type: str, data: dict,
         source, etype = "monitor", event_type
 
     if project_path is None:
-        from modastack.sdk import get_project_root
-        project_path = get_project_root() or Path.cwd().resolve()
+        from modastack.paths import modastack_root
+        project_path = modastack_root()
 
     es_url = _event_server_url(project_path)
 

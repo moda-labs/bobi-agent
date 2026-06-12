@@ -21,15 +21,17 @@ class WorkflowDispatcher:
 
     def load_all_workflows(self, project_path: Path | None = None,
                            agent_name: str | None = None):
-        """Load workflows from the installed pack at .modastack/workflows/."""
-        if project_path is None:
-            from modastack.sdk import get_project_root
-            project_path = get_project_root()
+        """Load workflows from the installed pack at .modastack/workflows/.
 
-        if project_path:
-            installed_wf_dir = project_path / ".modastack" / "workflows"
-            if installed_wf_dir.exists():
-                self._load_from(installed_wf_dir, source=agent_name or str(project_path))
+        With no explicit project_path this reads from the bound
+        installation root — an unbound process raises rather than
+        silently loading nothing.
+        """
+        from modastack import paths
+        installed_wf_dir = paths.workflows_dir(project_path)
+        if installed_wf_dir.exists():
+            self._load_from(installed_wf_dir,
+                            source=agent_name or str(installed_wf_dir.parent.parent))
 
     def _load_from(self, directory: Path, source: str):
         if not directory.exists():

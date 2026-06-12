@@ -1,12 +1,12 @@
-"""Tests for cross-project agent discovery (GitHub issue #145).
+"""Tests for agent discovery under the single .modastack root.
 
 Covers:
-- Walk-up runtime root resolution (find_runtime_root)
-- _sessions_dir using the runtime root when a manager is running
-- _sessions_dir falling back to local project root with no manager
+- find_runtime_root live-manager detection (nested-start guard)
+- _sessions_dir always under the explicitly bound installation root
+- Agents in repo checkouts sharing the registry via explicit binding
 - list_agents merging in-memory and registry sources
 - Nested runtime prevention in the start command
-- Message routing across project boundaries
+- CLI from a repo checkout resolving to the installation root
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ def tree(tmp_path):
     parent.mkdir()
     (parent / ".modastack" / "state").mkdir(parents=True)
     (parent / ".modastack" / "sessions").mkdir(parents=True)
+    (parent / ".modastack" / "agent.yaml").write_text("name: test-agent\n")
 
     child = parent / "jobtack"
     child.mkdir()
@@ -62,10 +63,11 @@ def tree(tmp_path):
 def reset_project_root():
     """Reset the global project root after each test."""
     import modastack.sdk as sdk
-    old = sdk._project_root
+    from modastack import paths
+    old = paths._root
     sdk._registry = None
     yield
-    sdk._project_root = old
+    paths._root = old
     sdk._registry = None
 
 
@@ -130,13 +132,13 @@ class TestFindRuntimeRoot:
         assert result is None
 
     def test_returns_none_when_start_is_none(self):
-        import modastack.sdk as sdk
-        old = sdk._project_root
-        sdk._project_root = None
+        from modastack import paths
+        old = paths._root
+        paths._root = None
         try:
             assert find_runtime_root(None) is None
         finally:
-            sdk._project_root = old
+            paths._root = old
 
     def test_uses_project_root_as_default(self, tree):
         parent, _ = tree
@@ -165,37 +167,30 @@ class TestFindRuntimeRoot:
 
 
 # ---------------------------------------------------------------------------
-# Tests: _sessions_dir with walk-up
+# Tests: _sessions_dir is always the bound root
 # ---------------------------------------------------------------------------
 
-class TestSessionsDirWalkUp:
-    def test_uses_runtime_root_when_manager_running(self, tree):
-        parent, child = tree
-        # Manager running at parent
-        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
-
-        set_project_root(child)
-        sd = _sessions_dir()
-        assert sd == parent / ".modastack" / "sessions"
-
-    def test_falls_back_to_project_root_without_manager(self, tree):
-        _, child = tree
-        set_project_root(child)
-        sd = _sessions_dir()
-        assert sd == child / ".modastack" / "sessions"
-
-    def test_uses_local_when_manager_is_self(self, tree):
+class TestSessionsDirBoundRoot:
+    def test_uses_bound_root(self, tree):
         parent, _ = tree
-        # Manager running at same level
-        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
-
         set_project_root(parent)
         sd = _sessions_dir()
         assert sd == parent / ".modastack" / "sessions"
 
+    def test_no_walk_up_even_with_live_ancestor_manager(self, tree):
+        """Sessions never escape the bound root. The old walk-up to a live
+        manager.pid let a mis-bound agent scatter state across repo
+        checkouts; binding is explicit now, so the bound root is final."""
+        parent, child = tree
+        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
+
+        set_project_root(child)
+        sd = _sessions_dir()
+        assert sd == child / ".modastack" / "sessions"
+
     def test_raises_without_project_root(self):
         set_project_root(None)
-        with pytest.raises(RuntimeError, match="project root not set"):
+        with pytest.raises(RuntimeError, match="not bound"):
             _sessions_dir()
 
 
@@ -204,13 +199,14 @@ class TestSessionsDirWalkUp:
 # ---------------------------------------------------------------------------
 
 class TestRegistryCrossProject:
-    def test_agent_registered_in_child_visible_from_parent(self, tree):
+    def test_agent_working_in_child_visible_from_parent(self, tree):
         parent, child = tree
         # Manager at parent
         (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
 
-        # Sub-agent sets its project root to child
-        set_project_root(child)
+        # Sub-agent works in the child repo but binds the installation
+        # root its spawner passed — identity is inherited, not inferred.
+        set_project_root(parent)
         registry = SessionRegistry()
 
         entry = SessionEntry(
@@ -353,11 +349,14 @@ class TestNestedRuntimePrevention:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Message routing across projects
+# Tests: CLI from a repo checkout reaches the installation registry
 # ---------------------------------------------------------------------------
 
 class TestMessageRoutingCrossProject:
-    def test_resolve_address_finds_agent_in_runtime_root(self, tree):
+    def test_cli_from_child_resolves_root_and_finds_agent(self, tree):
+        """A human running the CLI inside a repo checkout binds the
+        installation root (agent.yaml walk-up), so the registry they see
+        is the manager's — the child's stray state dir doesn't fork it."""
         parent, child = tree
         (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
 
@@ -377,8 +376,11 @@ class TestMessageRoutingCrossProject:
         from dataclasses import asdict
         (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
 
-        # Simulate CLI running from child project
-        set_project_root(child)
+        # CLI entry points bind via the agent.yaml walk-up, not raw cwd —
+        # the child's .modastack here is state-only, so resolution must
+        # pass over it and land on the installed root.
+        from modastack.paths import resolve_root
+        set_project_root(resolve_root(child))
         import modastack.sdk as sdk
         sdk._registry = None
 

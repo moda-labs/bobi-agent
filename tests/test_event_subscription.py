@@ -187,41 +187,46 @@ def _install_root(path):
     (path / ".modastack" / "agent.yaml").write_text("name: test-agent\n")
 
 
-def test_resolve_project_root_walks_up_to_modastack(tmp_path):
+def test_resolve_root_walks_up_to_modastack(tmp_path):
     """An agent spawned from a repo checkout inside the project must bind to
     the real project root, not fork its own config/state/subscriptions."""
-    from modastack.config import resolve_project_root
+    from modastack.paths import resolve_root
 
     _install_root(tmp_path)
     checkout = tmp_path / "repos" / "some-repo" / "src"
     checkout.mkdir(parents=True)
 
-    assert resolve_project_root(checkout) == tmp_path
-    assert resolve_project_root(tmp_path) == tmp_path
+    assert resolve_root(checkout) == tmp_path
+    assert resolve_root(tmp_path) == tmp_path
 
 
-def test_resolve_project_root_skips_state_only_modastack(tmp_path):
+def test_resolve_root_skips_state_only_modastack(tmp_path):
     """A state-only .modastack/ (sessions/state dropped into a repo checkout
     by the runtime) must not capture resolution — the walk continues to the
     installed root above it. Regression: engineer dispatch resolved a repo's
     state-only dir as project root and died with workflow-not-found."""
-    from modastack.config import resolve_project_root
+    from modastack.paths import resolve_root
 
     _install_root(tmp_path)
     repo = tmp_path / "repos" / "some-repo"
     (repo / ".modastack" / "sessions").mkdir(parents=True)
     (repo / ".modastack" / "state").mkdir()
 
-    assert resolve_project_root(repo) == tmp_path
-    assert resolve_project_root(repo / ".modastack" / "state") == tmp_path
+    assert resolve_root(repo) == tmp_path
+    assert resolve_root(repo / ".modastack" / "state") == tmp_path
 
 
-def test_resolve_project_root_without_modastack_returns_start(tmp_path):
-    from modastack.config import resolve_project_root
+def test_resolve_root_raises_without_installation(tmp_path):
+    """No installed root above the start dir is an error, not a guess —
+    resolving to the bare start dir was the fallback that let processes
+    invent roots."""
+    import pytest
+    from modastack.paths import resolve_root
 
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert resolve_project_root(plain) == plain
+    with pytest.raises(RuntimeError, match="no Modastack installation"):
+        resolve_root(plain)
 
 
 # --- Slack workspace registration (self-reply loop prevention) ---------------

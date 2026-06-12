@@ -20,8 +20,8 @@ log = logging.getLogger(__name__)
 
 
 def _state_dir() -> Path:
-    from modastack.sdk import state_dir
-    return state_dir()
+    from modastack import paths
+    return paths.state_dir()
 
 
 def _pid_path() -> Path:

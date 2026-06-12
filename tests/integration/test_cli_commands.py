@@ -197,9 +197,9 @@ class TestOutsideProject:
             capture_output=True, text=True, timeout=10,
             cwd=str(tmp_path), env={**os.environ},
         )
-        assert result.returncode == 0
-        combined = result.stdout + result.stderr
-        assert "no .modastack" in combined.lower() or "warning" in combined.lower()
+        # No installation → clean usage error, never an invented root.
+        assert result.returncode != 0
+        assert "no modastack installation" in (result.stdout + result.stderr).lower()
 
     def test_agents_list_outside_project(self, tmp_path):
         result = subprocess.run(
@@ -208,7 +208,8 @@ class TestOutsideProject:
             cwd=str(tmp_path), env={**os.environ},
         )
         combined = result.stdout + result.stderr
-        assert "no .modastack" in combined.lower() or "warning" in combined.lower()
+        assert result.returncode != 0
+        assert "no modastack installation" in combined.lower()
 
     def test_doctor_outside_project(self, tmp_path):
         result = subprocess.run(
@@ -216,5 +217,7 @@ class TestOutsideProject:
             capture_output=True, text=True, timeout=10,
             cwd=str(tmp_path), env={**os.environ},
         )
+        # doctor is advisory: it runs anywhere and reports the missing
+        # installation per-check instead of refusing to start.
         combined = result.stdout + result.stderr
-        assert "no .modastack" in combined.lower() or "warning" in combined.lower()
+        assert "no project detected" in combined.lower()

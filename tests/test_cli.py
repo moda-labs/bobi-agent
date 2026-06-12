@@ -120,9 +120,12 @@ def test_workflow_list_empty_without_pack(tmp_path):
     assert "No workflows loaded" in result.output
 
 
-def test_workflow_list_no_errors():
+def test_workflow_list_no_errors(tmp_path):
+    (tmp_path / ".modastack" / "workflows").mkdir(parents=True)
+    (tmp_path / ".modastack" / "agent.yaml").write_text("name: t\n")
     runner = CliRunner()
-    result = runner.invoke(main, ["workflows", "list"])
+    with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        result = runner.invoke(main, ["workflows", "list"])
     assert result.exit_code == 0
 
 
@@ -192,13 +195,15 @@ class TestAgentCommand:
         assert result.exit_code == 0
 
     def test_requires_repo(self):
+        import click
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=None):
+        with patch("modastack.cli._detect_project_root",
+                   side_effect=click.UsageError("no Modastack installation found above /x")):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "engineer", "--task", "do a thing",
             ])
         assert result.exit_code != 0
-        assert "not inside a modastack project" in result.output.lower()
+        assert "no modastack installation" in result.output.lower()
 
     def test_passes_requested_by(self, tmp_path):
         runner = CliRunner()

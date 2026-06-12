@@ -99,8 +99,8 @@ def main():
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    state_dir = args.project_root / ".modastack" / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
+    from modastack import paths
+    state_dir = paths.state_dir(args.project_root)
     pid_file = state_dir / "embedding-sidecar.pid"
     port_file = state_dir / "embedding-sidecar.port"
 

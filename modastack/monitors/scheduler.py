@@ -68,7 +68,8 @@ def _load_checks(project_path: Path | None = None) -> dict:
         project_path = get_project_root()
     if not project_path:
         return all_checks
-    checks_dir = project_path / ".modastack" / "monitors"
+    from modastack import paths
+    checks_dir = paths.monitors_dir(project_path)
     if not checks_dir.exists():
         return all_checks
     for py_file in checks_dir.glob("*_checks.py"):
@@ -99,8 +100,8 @@ from .schema import Condition
 log = logging.getLogger(__name__)
 
 def _monitor_state_path() -> Path:
-    from modastack.sdk import state_dir
-    return state_dir() / "monitor_state.json"
+    from modastack import paths
+    return paths.state_dir() / "monitor_state.json"
 
 
 TICK_INTERVAL = 30  # seconds between scheduler ticks
@@ -167,12 +168,8 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
         "--task", monitor.description or monitor.name,
     ]
 
-    from modastack.sdk import get_project_root
-    root = get_project_root()
-    if not root:
-        raise RuntimeError("project root not set — call set_project_root() first")
-    log_path = root / ".modastack" / "state" / "manager.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    from modastack import paths
+    log_path = paths.state_dir() / "manager.log"
 
     try:
         with open(log_path, "a") as lf:

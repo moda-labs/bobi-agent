@@ -28,6 +28,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_claude_cli())
     results.append(_check_claude_auth())
     results.append(_check_local_config())
+    results.append(_check_single_root())
     results.append(_check_install_integrity())
     results.extend(_check_package_requires())
     results.extend(_check_services())
@@ -83,11 +84,12 @@ def _check_install_integrity() -> CheckResult:
     import hashlib
     import json
 
-    from modastack.sdk import get_project_root
+    from modastack.paths import bound_root as get_project_root
     root = get_project_root()
     if not root:
         return CheckResult("Installed team", ok=True, detail="no project")
-    dest = root / ".modastack"
+    from modastack import paths
+    dest = paths.modastack_dir(root)
     manifest_path = dest / "install-manifest.json"
     if not manifest_path.exists():
         return CheckResult("Installed team", ok=True,
@@ -122,7 +124,7 @@ def _check_install_integrity() -> CheckResult:
 def _check_package_requires() -> list[CheckResult]:
     """Check host-level dependencies declared in agent.yaml requires: block."""
     from modastack.config import Config, run_requires_checks
-    from modastack.sdk import get_project_root
+    from modastack.paths import bound_root as get_project_root
 
     root = get_project_root()
     if not root:
@@ -150,7 +152,7 @@ def _check_package_requires() -> list[CheckResult]:
 
 def _check_local_config() -> CheckResult:
     from modastack.config import _project_config_path
-    from modastack.sdk import get_project_root
+    from modastack.paths import bound_root as get_project_root
     root = get_project_root()
     if not root:
         return CheckResult("Project config", ok=False,
@@ -164,9 +166,43 @@ def _check_local_config() -> CheckResult:
                        hint="Create .modastack/agent.yaml with entry_point, services, and credentials")
 
 
+def _check_single_root() -> CheckResult:
+    """Exactly one .modastack/ per installation — flag strays below it.
+
+    Stray .modastack/ dirs in repo checkouts under the root are leftovers
+    from the old cwd-as-root resolution. They hold orphaned state at best;
+    at worst one contains an agent.yaml and captures project-root
+    resolution for anything launched from that subtree.
+    """
+    from modastack.paths import bound_root as get_project_root
+    root = get_project_root()
+    if not root:
+        return CheckResult("Single .modastack root", ok=True,
+                           detail="no project root bound")
+    strays = []
+    for pattern in ("*/.modastack", "*/*/.modastack"):
+        for p in root.glob(pattern):
+            if not p.is_dir():
+                continue
+            rel = p.relative_to(root)
+            # The root's own .modastack contains worktrees etc. — not strays.
+            if rel.parts[0] == ".modastack":
+                continue
+            strays.append(str(rel.parent))
+    if not strays:
+        return CheckResult("Single .modastack root", ok=True,
+                           detail="no stray .modastack dirs below root")
+    return CheckResult(
+        "Single .modastack root", ok=False,
+        detail="stray .modastack/ in: " + ", ".join(sorted(strays)),
+        hint="Config and state live only at the installation root. Inspect "
+             "and remove the stray dirs (tar them up first if unsure); a "
+             "stray containing agent.yaml will hijack root resolution.")
+
+
 def _check_services() -> list[CheckResult]:
     """Run service validation — native credentials, Venn, MCP servers."""
-    from modastack.sdk import get_project_root
+    from modastack.paths import bound_root as get_project_root
     root = get_project_root()
     if not root:
         return []
@@ -201,7 +237,7 @@ def _check_event_server() -> CheckResult:
     """Probe the event server /health endpoint."""
     from modastack.config import Config
     from modastack.events.server import health
-    from modastack.sdk import get_project_root
+    from modastack.paths import bound_root as get_project_root
 
     root = get_project_root()
     if root:
@@ -209,7 +245,8 @@ def _check_event_server() -> CheckResult:
             cfg = Config.load(root)
             # Deployment state is per-session (state/deployments/<session>.json);
             # any registered session means the remote server is in use.
-            deployments_dir = root / ".modastack" / "state" / "deployments"
+            from modastack import paths
+            deployments_dir = paths.modastack_dir(root) / "state" / "deployments"
             registered = (deployments_dir.is_dir()
                           and any(deployments_dir.glob("*.json")))
             if cfg.event_server_url and registered:
@@ -227,11 +264,12 @@ def _check_event_server() -> CheckResult:
 
 
 def _check_recent_events() -> CheckResult:
-    from modastack.sdk import get_project_root
+    from modastack.paths import bound_root as get_project_root
     root = get_project_root()
     if not root:
         return CheckResult("Recent events", ok=False, detail="no project detected")
-    events_file = root / ".modastack" / "state" / "events.jsonl"
+    from modastack import paths
+    events_file = paths.modastack_dir(root) / "state" / "events.jsonl"
     if not events_file.exists():
         return CheckResult("Recent events", ok=True, detail="no events yet")
     lines = events_file.read_text().strip().splitlines()
@@ -240,11 +278,12 @@ def _check_recent_events() -> CheckResult:
 
 def _check_memory() -> CheckResult:
     """Check agent decision logs — flag agents with empty current-state blocks."""
-    from modastack.sdk import get_project_root
+    from modastack.paths import bound_root as get_project_root
     root = get_project_root()
     if not root:
         return CheckResult("Decision log", ok=True, detail="no project detected")
-    memory_root = root / ".modastack" / "state" / "memory"
+    from modastack import paths
+    memory_root = paths.modastack_dir(root) / "state" / "memory"
     if not memory_root.is_dir():
         return CheckResult("Decision log", ok=True, detail="no decision logs yet")
 

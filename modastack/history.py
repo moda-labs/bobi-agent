@@ -14,8 +14,8 @@ CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
 def _db_path() -> Path:
-    from modastack.sdk import state_dir
-    return state_dir() / "history.db"
+    from modastack import paths
+    return paths.state_dir() / "history.db"
 
 
 def _init_db(conn: sqlite3.Connection):

@@ -73,9 +73,11 @@ def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None 
 
 
 def _find_project_root(cwd: str) -> Path:
-    """Return the project root — the directory modastack was started in."""
-    from modastack.sdk import get_project_root
-    return get_project_root() or Path(cwd)
+    """Return the installation root. The process bound it at its entry
+    point; cwd plays no part — guessing from it is how workflow state
+    forked into repo checkouts."""
+    from modastack.paths import modastack_root
+    return modastack_root()
 
 
 def make_session_name(workflow_name: str, repo: str, run_key: str) -> str:

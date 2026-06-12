@@ -111,7 +111,7 @@ class ModastackInstall:
 def modastack_install(tmp_path, monkeypatch):
     """Create a fully isolated modastack installation in a temp directory.
 
-    Sets sdk._project_root so all per-project path resolution points at tmp_path.
+    Binds the paths root so all per-project path resolution points at tmp_path.
     No global ~/.modastack directory is created or referenced.
 
     Creates a self-contained test agent team so tests never depend on
@@ -138,7 +138,7 @@ def modastack_install(tmp_path, monkeypatch):
         ],
     }))
 
-    monkeypatch.setattr("modastack.sdk._project_root", repo_path)
+    monkeypatch.setattr("modastack.paths._root", repo_path)
 
     return ModastackInstall(
         repo_path=repo_path,

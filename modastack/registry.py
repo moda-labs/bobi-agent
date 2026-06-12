@@ -26,6 +26,8 @@ from pathlib import Path
 import certifi
 import yaml
 
+from modastack import paths
+
 log = logging.getLogger(__name__)
 
 DEFAULT_REPO = "moda-labs/modastack"
@@ -33,7 +35,7 @@ GITHUB_RAW = "https://raw.githubusercontent.com"
 
 
 def _cache_dir(project_path: Path) -> Path:
-    return project_path / ".modastack" / "agents"
+    return paths.agents_dir(project_path)
 
 
 def _all_registries(project_path: Path) -> list[str]:

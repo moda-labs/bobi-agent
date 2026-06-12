@@ -4,13 +4,12 @@ Every session (manager or agent) is tracked here. Sessions persist
 across restarts via state.json files in per-session directories.
 Each session wraps a ClaudeSDKClient with connect/resume/query/disconnect.
 
-All state lives under <runtime_root>/.modastack/sessions/. The runtime
-root is the nearest ancestor (including self) whose .modastack/ has a
-live manager.pid — i.e. the directory where `modastack start` was
-invoked. This walk-up resolution lets sub-agents launched into child
-repos register in the same registry as the director that spawned them.
-When no live manager is found, the project root itself is used (the
-single-project, no-manager case).
+All state lives under <installation_root>/.modastack/sessions/. There is
+exactly one .modastack/ per installation, holding both config and state;
+every process binds it explicitly — the manager when it starts, children
+via the `root` their spawner passes in the args blob. Nothing resolves
+state paths from cwd: that was the old multi-root model, where agents
+launched into repo checkouts scattered .modastack/ dirs across them.
 """
 
 from __future__ import annotations
@@ -24,15 +23,11 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+from modastack import paths
+
 log = logging.getLogger(__name__)
 
 CLAUDE_CLI = shutil.which("claude") or "/opt/homebrew/bin/claude"
-
-_project_root: Path | None = None
-
-# Resolved sessions dir per project root. Runtime-root resolution walks the
-# filesystem and probes pids; it runs on every registry op without this cache.
-_sessions_dir_cache: dict[str, Path] = {}
 
 
 def compute_manifest_hash(project_path: Path | None = None) -> str:
@@ -44,10 +39,7 @@ def compute_manifest_hash(project_path: Path | None = None) -> str:
     """
     import hashlib
 
-    root = project_path or _project_root
-    if not root:
-        return ""
-    manifest = root / ".modastack" / "install-manifest.json"
+    manifest = paths.install_manifest_path(project_path)
     try:
         data = json.loads(manifest.read_text())
         files = data.get("files", {})
@@ -81,14 +73,13 @@ def check_image_rotation(session_name: str, project_path: Path) -> bool:
 
 
 def set_project_root(path: Path) -> None:
-    """Set the project root for all session state paths."""
-    global _project_root
-    _project_root = path
-    _sessions_dir_cache.clear()
+    """Bind the installation root (delegates to modastack.paths)."""
+    paths.bind_root(path)
 
 
 def get_project_root() -> Path | None:
-    return _project_root
+    """The bound installation root, or None (delegates to modastack.paths)."""
+    return paths.bound_root()
 
 
 def pid_alive(pid: int) -> bool:
@@ -120,17 +111,18 @@ def _pid_file_alive(pid_path: Path) -> bool:
 def find_runtime_root(start: Path | None = None) -> Path | None:
     """Walk up from *start* to find the nearest .modastack/ with a live manager.
 
-    Returns the directory containing the live .modastack/, or None if no
-    ancestor has one. The search starts at *start* (defaulting to
-    _project_root) and stops at the filesystem root.
+    This is a liveness DETECTOR (used by the nested-start guard), not
+    config resolution — config resolution is paths.resolve_root(). Returns
+    the directory containing the live .modastack/, or None if no ancestor
+    has one. The search starts at *start* (defaulting to the bound root)
+    and stops at the filesystem root.
     """
-    current = (start or _project_root)
+    current = (start or paths.bound_root())
     if current is None:
         return None
     current = current.resolve()
     while True:
-        candidate = current / ".modastack" / "state" / "manager.pid"
-        if _pid_file_alive(candidate):
+        if _pid_file_alive(paths.manager_pid_path(current)):
             return current
         parent = current.parent
         if parent == current:
@@ -140,40 +132,20 @@ def find_runtime_root(start: Path | None = None) -> Path | None:
 
 
 def _sessions_dir() -> Path:
-    """Per-project sessions directory, resolved via walk-up to runtime root.
+    """Sessions directory under the bound installation root.
 
-    If a live manager is running in an ancestor directory, sessions are
-    stored under that ancestor's .modastack/sessions/ so all agents in the
-    runtime are visible to each other. Falls back to the local project
-    root when no ancestor manager is found. The resolution is cached per
-    project root (cleared by set_project_root).
+    The root is bound explicitly in every process (manager at start,
+    children via the spawn args' `root`), so sessions always share one
+    registry without probing the filesystem. The old walk-up to a live
+    manager.pid existed because children bound their cwd as root and had
+    to escape repo checkouts at read time.
     """
-    if not _project_root:
-        raise RuntimeError("project root not set — call set_project_root() first")
-    key = str(_project_root)
-    cached = _sessions_dir_cache.get(key)
-    if cached is not None:
-        return cached
-    runtime = find_runtime_root(_project_root) or _project_root
-    d = runtime / ".modastack" / "sessions"
-    d.mkdir(parents=True, exist_ok=True)
-    _sessions_dir_cache[key] = d
-    return d
-
-
-_created_state_dirs: set[str] = set()
+    return paths.sessions_dir()
 
 
 def state_dir(project_path: Path | None = None) -> Path:
-    """Runtime state directory: <project>/.modastack/state (created on demand)."""
-    root = project_path or _project_root
-    if not root:
-        raise RuntimeError("project root not set — call set_project_root() first")
-    d = root / ".modastack" / "state"
-    if str(d) not in _created_state_dirs:
-        d.mkdir(parents=True, exist_ok=True)
-        _created_state_dirs.add(str(d))
-    return d
+    """Runtime state directory (delegates to modastack.paths)."""
+    return paths.state_dir(project_path)
 
 
 def get_cli_path() -> str:

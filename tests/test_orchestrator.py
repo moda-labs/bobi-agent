@@ -140,7 +140,7 @@ class TestHandoffValidation:
 
 class TestReadHandoff:
     def test_reads_yaml(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
         tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
         session_dir = tmp_path / "wf-test-42"
@@ -151,13 +151,13 @@ class TestReadHandoff:
         assert result["needs_spec"] is True
 
     def test_missing_handoff_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
         tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
         assert _read_handoff("wf-test-999", "setup") == {}
 
     def test_step_specific_handoffs(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
         tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
         session_dir = tmp_path / "wf-test-1"
@@ -173,6 +173,13 @@ class TestReadHandoff:
 # ---------------------------------------------------------------------------
 
 class TestBuildStepPrompt:
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        """Prompt building reads handoffs via the session registry, which
+        needs a bound root — bind explicitly, don't rely on leakage from
+        earlier tests."""
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
+
     def test_includes_handoff_contract(self):
         step = StepDef(name="setup", prompt="Do work",
                        handoff=HandoffContract(required=["a"], optional=["b"]))
@@ -265,6 +272,10 @@ class FakeClient:
 
 
 class TestRunWorkflow:
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
+
     def _mock_asyncio_run(self, workflow, **kwargs):
         """Run the workflow with a mocked SDK client."""
         cwd = kwargs.get("cwd", "/tmp")
@@ -299,7 +310,7 @@ class TestRunWorkflow:
         assert result is True
 
     def test_route_step_branches(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
         tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
 
@@ -361,10 +372,10 @@ class TestAwaitStep:
             return run_workflow(workflow, **kwargs)
 
     def test_await_suspends_workflow(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
         tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
 
@@ -385,10 +396,10 @@ class TestAwaitStep:
         assert run.run_key == "1"
 
     def test_resume_continues_from_suspended_step(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
         tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
 
@@ -429,13 +440,13 @@ class TestAwaitStep:
         assert reloaded.status == "completed"
 
     def test_find_waiting_returns_none_when_no_match(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
         assert WorkflowRun.find_waiting("approval") is None
 
     def test_find_waiting_filters_by_run_key(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
         (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
 
@@ -488,7 +499,7 @@ class TestQAPhase:
 
     def test_qa_workflow_with_frontend(self, tmp_path, monkeypatch):
         """Full workflow: frontend project runs QA step."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         sessions = tmp_path / "_repo" / ".modastack" / "sessions"
         sessions.mkdir(parents=True)
 
@@ -527,7 +538,7 @@ class TestQAPhase:
 
     def test_qa_step_skipped_by_agent_for_backend(self, tmp_path, monkeypatch):
         """Backend project: QA step still runs but agent reports not_applicable."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         sessions = tmp_path / "_repo" / ".modastack" / "sessions"
         sessions.mkdir(parents=True)
 
@@ -659,7 +670,7 @@ class TestTryResumeForEvent:
 class TestResumeWorkflowTimestamps:
     def test_resume_sets_started_at_on_run(self, tmp_path, monkeypatch):
         (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
         monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
@@ -712,7 +723,7 @@ class TestHandoffEdgeCases:
     def test_corrupted_yaml_returns_empty(self, tmp_path, monkeypatch):
         sessions_dir = tmp_path / ".modastack" / "sessions"
         sessions_dir.mkdir(parents=True)
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         session_dir = sessions_dir / "wf-test-corrupt"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text(": : : invalid yaml [[[")
@@ -722,7 +733,7 @@ class TestHandoffEdgeCases:
     def test_empty_file_returns_empty(self, tmp_path, monkeypatch):
         sessions_dir = tmp_path / ".modastack" / "sessions"
         sessions_dir.mkdir(parents=True)
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         session_dir = sessions_dir / "wf-test-empty"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("")

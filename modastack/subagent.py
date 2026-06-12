@@ -399,9 +399,9 @@ def _load_memory_for_session(cwd: str, session_name: str) -> str:
     is best-effort and must not block session startup.
     """
     try:
+        from modastack import paths
         from modastack.memory import load_memory, format_memory_prompt
-        state_dir = Path(cwd) / ".modastack" / "state"
-        content = load_memory(state_dir, session_name)
+        content = load_memory(paths.state_dir(), session_name)
         return format_memory_prompt(content)
     except Exception:
         log.debug("Failed to load memory for %s", session_name, exc_info=True)
@@ -649,11 +649,20 @@ def launch_agent(
             f"Cancel it first or wait for it to complete."
         )
 
+    # The installation root travels with the spawn explicitly. cwd is the
+    # agent's WORKING dir (often a repo checkout) and must not double as
+    # its identity — agent.yaml, install-manifest.json, and workflows all
+    # live at the root, not wherever the agent happens to work. The
+    # spawning process bound its root at its entry point; an unbound
+    # process here is a bug and raises rather than guessing.
+    from modastack.paths import modastack_root
+    root = modastack_root()
+
     # Preflight: check host-level dependencies declared in agent.yaml
-    req_results = check_requires(Path(cwd))
+    req_results = check_requires(root)
     req_failures = [(entry, detail) for entry, ok, detail in req_results if not ok]
     if req_failures:
-        _alert_requires_failure(Path(cwd), req_failures)
+        _alert_requires_failure(root, req_failures)
         names = ", ".join(e.name for e, _ in req_failures)
         raise RuntimeError(
             f"Required dependency check failed: {names}. "
@@ -663,6 +672,7 @@ def launch_agent(
     args_json = json.dumps({
         "task": task,
         "cwd": cwd,
+        "root": str(root),
         "workflow_name": workflow_name,
         "timeout": timeout,
         "requested_by": requested_by or {},
@@ -681,7 +691,7 @@ def launch_agent(
 
     # Auto-rotate when the installed image has changed since the last run.
     from modastack.sdk import check_image_rotation, compute_manifest_hash
-    check_image_rotation(session_name, Path(cwd))
+    check_image_rotation(session_name, root)
 
     # Register first so the session dir exists for the log file
     registry.register(SessionEntry(
@@ -689,7 +699,7 @@ def launch_agent(
         run_key=run_key, title=task[:80], phase=workflow_name,
         project=project, cwd=cwd, status="starting",
         requested_by=requested_by or {},
-        image_hash=compute_manifest_hash(Path(cwd)),
+        image_hash=compute_manifest_hash(root),
     ))
 
     log_file = SessionRegistry.log_path(session_name)
@@ -828,14 +838,13 @@ def _run_agent_entry(args: dict) -> None:
     subscribe = args.get("subscribe", [])
     input_fields = args.get("input_fields", {})
 
-    from modastack.config import resolve_project_root
-    from modastack.sdk import set_project_root
-    # The spawner's cwd choice must not fork the agent's identity: config,
-    # state, and event subscriptions all resolve from the project root, so
-    # an agent launched from e.g. a repo checkout inside the project still
-    # binds to the one real .modastack root. cwd stays the working dir.
-    project_root = resolve_project_root(Path(cwd))
-    set_project_root(project_root)
+    from modastack.paths import bind_root, modastack_root
+    # The spawner tells the child its installation root — identity is
+    # inherited, never inferred from cwd, so it survives repos that live
+    # outside the installation tree. A blob without a root is a spawner
+    # bug; failing loudly here beats guessing. cwd stays the working dir.
+    bind_root(Path(args["root"]))
+    project_root = modastack_root()
 
     if subscribe and project_root:
         _start_event_subscription(run_key, subscribe, project_root)

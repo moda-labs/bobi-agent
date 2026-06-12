@@ -101,11 +101,8 @@ def ensure_running(port: int, webhook_secret: str = "",
         log.info("Building local event server...")
         _run_npm(["npm", "run", "build:local"], es_dir)
 
-    from modastack.sdk import get_project_root, state_dir
-    rp = project_path or get_project_root()
-    if rp is None:
-        raise RuntimeError("project_path required for event server")
-    state = state_dir(rp)
+    from modastack import paths
+    state = paths.state_dir(project_path)
     log_file = state / "event-server.log"
     pid_file = state / "event-server.pid"
 

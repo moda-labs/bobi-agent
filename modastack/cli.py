@@ -12,6 +12,8 @@ truststore.inject_into_ssl()
 
 import click
 
+from modastack import paths
+
 from .__version__ import __version__
 
 _PACKAGE_DIR = Path(__file__).parent
@@ -65,21 +67,24 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
 
 
 def _detect_project_root(cwd: Path | None = None) -> Path:
-    """Return the project root — the nearest ancestor with .modastack/.
+    """Resolve and bind the installation root for this CLI invocation.
 
-    Falls back to the starting directory when no project is found above
-    it. Commands must work identically from anywhere inside the project
-    tree: binding to a raw cwd is how an agent launched from a repo
-    checkout forked its own config, state, and event subscriptions.
+    Commands must work identically from anywhere inside the installation
+    tree, so this goes through the one root resolver (the agent.yaml
+    walk-up) and binds what it finds. No installation → raises; commands
+    that need a root fail loudly rather than inventing one.
     """
-    from modastack.config import resolve_project_root
-    return resolve_project_root(cwd or Path.cwd())
+    try:
+        root = paths.resolve_root(cwd or Path.cwd())
+    except RuntimeError as e:
+        raise click.UsageError(str(e))
+    paths.bind_root(root)
+    return root
 
 
 def _project_state_dir(project_path: Path) -> Path:
     """Runtime state directory for a project's manager."""
-    from modastack.sdk import state_dir
-    return state_dir(project_path)
+    return paths.state_dir(project_path)
 
 
 
@@ -94,21 +99,16 @@ def main():
         datefmt="%H:%M:%S",
         handlers=[logging.StreamHandler()],
     )
-    project = _detect_project_root()
-    if project:
-        dot_moda = project / ".modastack"
-        if dot_moda.is_dir():
-            click.echo(f"Running from {project}")
-        else:
-            click.echo(
-                click.style("Warning: ", fg="yellow")
-                + f"No .modastack/ found in {project} — some commands may not work as expected."
-            )
-    if project:
-        from modastack.sdk import set_project_root
-        set_project_root(project)
-        state = _project_state_dir(project)
-        logging.getLogger().addHandler(logging.FileHandler(state / "manager.log"))
+    # Best-effort at the group level: subcommands like `install` must run
+    # in directories with no installation yet. Commands that need a root
+    # resolve it themselves and raise when there is none.
+    try:
+        project = _detect_project_root()
+    except click.UsageError:
+        return
+    click.echo(f"Running from {project}")
+    state = _project_state_dir(project)
+    logging.getLogger().addHandler(logging.FileHandler(state / "manager.log"))
 
 
 def _has_systemd_service() -> bool:
@@ -149,7 +149,7 @@ def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
     visible = project_path / "agents" / name
     if visible.is_dir():
         return visible
-    hidden = project_path / ".modastack" / "agents" / name
+    hidden = paths.agents_dir(project_path) / name
     if hidden.is_dir():
         return hidden
     return None
@@ -159,7 +159,7 @@ def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
     """List available agent teams with their source."""
     packs: dict[str, str] = {}
     for agents_dir, label in [
-        (project_path / ".modastack" / "agents", "cached"),
+        (paths.agents_dir(project_path), "cached"),
         (project_path / "agents", "local"),
     ]:
         if agents_dir.is_dir():
@@ -201,8 +201,7 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
         if key not in subscribe:
             subscribe.append(key)
 
-    state_dir = project_path / ".modastack" / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir = paths.state_dir(project_path)
 
     pid_str = str(os.getpid())
     (state_dir / "manager.pid").write_text(pid_str)
@@ -232,7 +231,7 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
                                   subscribe, project_path)
 
     has_monitors = (
-        (project_path / ".modastack" / "monitors").is_dir()
+        paths.monitors_dir(project_path).is_dir()
         or cfg.monitors
     )
     if has_monitors:
@@ -300,9 +299,8 @@ def start(foreground, fresh, subscribe):
             click.echo("\nStartup blocked — fix the issues above.", err=True)
             raise SystemExit(1)
 
-    state_dir = project_path / ".modastack" / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    pid_path = state_dir / "manager.pid"
+    pid_path = paths.manager_pid_path(project_path)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
 
     if pid_path.exists():
         try:
@@ -317,7 +315,7 @@ def start(foreground, fresh, subscribe):
     from modastack.sdk import find_runtime_root
     ancestor = find_runtime_root(project_path.parent)
     if ancestor and ancestor != project_path:
-        ancestor_pid_path = ancestor / ".modastack" / "state" / "manager.pid"
+        ancestor_pid_path = paths.manager_pid_path(ancestor)
         try:
             anc_pid = int(ancestor_pid_path.read_text().strip())
         except (ValueError, OSError):
@@ -376,7 +374,7 @@ def _install_pack(pack_dir: Path, project_path: Path,
     import shutil
     import yaml as _yaml
 
-    dest = project_path / ".modastack"
+    dest = paths.modastack_dir(project_path)
     dest.mkdir(parents=True, exist_ok=True)
 
     for subdir in ["roles", "tools", "workflows", "monitors", "context"]:
@@ -473,7 +471,7 @@ def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
     if local_source:
         entries += ["roles/", "tools/", "workflows/", "monitors/", "context/",
                     "agent.md", "agent.yaml"]
-    gitignore = project_path / ".modastack" / ".gitignore"
+    gitignore = paths.modastack_dir(project_path) / ".gitignore"
     gitignore.write_text("\n".join(entries) + "\n")
 
 
@@ -522,7 +520,7 @@ def install(pack):
     # Local source of truth: the team source lives in the repo (outside
     # .modastack/), so the installed copies are gitignored build artifacts.
     # Downloaded/external: the installed copy is the source of truth.
-    dot_moda = project_path / ".modastack"
+    dot_moda = paths.modastack_dir(project_path)
     local_source = (
         pack_dir.is_relative_to(project_path)
         and not pack_dir.is_relative_to(dot_moda)
@@ -534,7 +532,7 @@ def install(pack):
     agent_name = pack_dir.name
     click.echo(f"Installed '{agent_name}' into .modastack/")
 
-    installed = project_path / ".modastack"
+    installed = paths.modastack_dir(project_path)
     parts = []
     for subdir in ["roles", "tools", "workflows", "monitors", "context"]:
         d = installed / subdir
@@ -677,9 +675,8 @@ def stop(force):
     else:
         click.echo("No PID file found — modastack is not running.")
 
-    from modastack.sdk import get_project_root, set_project_root
-    if not get_project_root():
-        set_project_root(_detect_project_root())
+    if paths.bound_root() is None:
+        _detect_project_root()
     from modastack.kb.embedder import stop as stop_embedder
     stop_embedder()
 
@@ -1149,15 +1146,16 @@ def agents():
 def agents_list():
     """List active agents from the on-disk registry.
 
-    Detached agents launched into child repos are discovered via the
-    SessionRegistry's walk-up resolution — they register in the runtime
-    root's .modastack/sessions/.
+    All agents register in the installation root's .modastack/sessions/ —
+    their spawner passes the root down, so one registry covers agents
+    working in any repo checkout.
 
     Usage:
         modastack agents list
     """
     from modastack.subagent import list_agents as _list_agents
 
+    _detect_project_root()
     active = _list_agents()
     if not active:
         click.echo("No active agents.")
@@ -1251,7 +1249,7 @@ def events(tail, decisions_only):
     malformed = 0
 
     if not decisions_only:
-        events_path = (project_path / ".modastack" / "state" / "events.jsonl") if project_path else None
+        events_path = paths.state_dir(project_path) / "events.jsonl"
         if events_path and events_path.exists():
             for line in events_path.read_text().strip().splitlines():
                 try:
@@ -1269,7 +1267,7 @@ def events(tail, decisions_only):
                     + (f"\n    {detail}" if detail else ""),
                 ))
 
-    decisions_path = (project_path / ".modastack" / "state" / "decisions.jsonl") if project_path else None
+    decisions_path = paths.state_dir(project_path) / "decisions.jsonl"
     if decisions_path and decisions_path.exists():
         for line in decisions_path.read_text().strip().splitlines():
             try:
@@ -1417,8 +1415,9 @@ def workflow_list():
     """
     from .workflow.triggers import WorkflowDispatcher
 
+    project_path = _detect_project_root()
     dispatcher = WorkflowDispatcher()
-    dispatcher.load_all_workflows()
+    dispatcher.load_all_workflows(project_path)
     click.echo(dispatcher.format_workflow_menu())
 
 
@@ -1828,10 +1827,8 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait, post_e
     if not task:
         task = f"Run workflow {workflow}"
 
+    # Raises a clean UsageError when run outside an installation.
     project_path = _detect_project_root()
-    if not project_path:
-        click.echo("Not inside a modastack project.", err=True)
-        raise SystemExit(1)
     cwd = str(project_path)
 
     if wait:
@@ -2094,9 +2091,8 @@ def kb_create(name):
         modastack kb create docs
     """
     from modastack.kb.store import KBStore
-    from modastack.sdk import get_project_root, set_project_root
-    if not get_project_root():
-        set_project_root(_detect_project_root())
+    if paths.bound_root() is None:
+        _detect_project_root()
     try:
         store = KBStore.create(name)
         click.echo(f"Created KB '{name}'")
@@ -2119,9 +2115,8 @@ def kb_add(name, file_path, text):
     """
     from modastack.kb.store import KBStore
     from modastack.kb.embedder import embed
-    from modastack.sdk import get_project_root, set_project_root
-    if not get_project_root():
-        set_project_root(_detect_project_root())
+    if paths.bound_root() is None:
+        _detect_project_root()
 
     try:
         store = KBStore(name)
@@ -2159,9 +2154,8 @@ def kb_search(name, query, limit, mode):
     """
     from modastack.kb.store import KBStore
     from modastack.kb.embedder import embed
-    from modastack.sdk import get_project_root, set_project_root
-    if not get_project_root():
-        set_project_root(_detect_project_root())
+    if paths.bound_root() is None:
+        _detect_project_root()
 
     try:
         store = KBStore(name)
@@ -2193,9 +2187,8 @@ def kb_list():
         modastack kb list
     """
     from modastack.kb.store import KBStore
-    from modastack.sdk import get_project_root, set_project_root
-    if not get_project_root():
-        set_project_root(_detect_project_root())
+    if paths.bound_root() is None:
+        _detect_project_root()
 
     kbs = KBStore.list_kbs()
     if not kbs:
@@ -2214,9 +2207,8 @@ def kb_info(name):
         modastack kb info docs
     """
     from modastack.kb.store import KBStore
-    from modastack.sdk import get_project_root, set_project_root
-    if not get_project_root():
-        set_project_root(_detect_project_root())
+    if paths.bound_root() is None:
+        _detect_project_root()
 
     try:
         store = KBStore(name)
@@ -2246,9 +2238,8 @@ def kb_remove(name):
         modastack kb remove docs
     """
     from modastack.kb.store import KBStore
-    from modastack.sdk import get_project_root, set_project_root
-    if not get_project_root():
-        set_project_root(_detect_project_root())
+    if paths.bound_root() is None:
+        _detect_project_root()
 
     try:
         KBStore.remove(name)

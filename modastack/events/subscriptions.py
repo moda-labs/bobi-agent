@@ -18,7 +18,8 @@ def discover_subscriptions(project_path: Path) -> list[str]:
     2. agent.yaml services with events: true (adapters auto-detect keys)
     3. Fallback to project directory name
     """
-    agent_yaml = project_path / ".modastack" / "agent.yaml"
+    from modastack import paths
+    agent_yaml = paths.agent_yaml_path(project_path)
     if agent_yaml.exists():
         try:
             raw = yaml.safe_load(agent_yaml.read_text()) or {}

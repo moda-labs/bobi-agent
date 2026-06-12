@@ -214,7 +214,7 @@ class TestExecuteNotifyStep:
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("entry_point: manager\n")
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
 
         step = StepDef(name="notify_start", notify="slack", message="Hello")
         ctx = self._make_ctx()
@@ -263,7 +263,7 @@ class TestExecuteNotifyStep:
             "    credentials:\n"
             "      bot_token: 'xoxb-test'\n"
         )
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +337,7 @@ class TestNotifyStepInWorkflow:
 
     def test_notify_step_executed_not_sent_to_llm(self, tmp_path, monkeypatch):
         """Notify steps call _execute_notify_step and do not query the LLM."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path)
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
         (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
 
         wf = Workflow(name="t", steps=[
@@ -355,7 +355,7 @@ class TestNotifyStepInWorkflow:
 
     def test_workflow_with_notify_at_both_ends(self, tmp_path, monkeypatch):
         """Workflow with notify at start and end completes successfully."""
-        monkeypatch.setattr("modastack.sdk._project_root", tmp_path / "_repo")
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
         sessions = tmp_path / "_repo" / ".modastack" / "sessions"
         sessions.mkdir(parents=True)
 

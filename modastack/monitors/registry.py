@@ -15,6 +15,8 @@ from pathlib import Path
 
 import yaml
 
+from modastack import paths
+
 from .schema import Monitor
 
 log = logging.getLogger(__name__)
@@ -30,7 +32,7 @@ def _defaults_path(project_path: Path | None = None) -> Path | None:
         project_path = get_project_root()
     if not project_path:
         return None
-    return project_path / ".modastack" / "monitors" / "defaults.yaml"
+    return paths.monitors_dir(project_path) / "defaults.yaml"
 
 
 def _read_records(path: Path | None) -> list[dict]:
@@ -74,8 +76,8 @@ class MonitorRegistry:
         for project_path in project_paths:
             project_key = str(project_path)
             project_sources = [
-                project_path / ".modastack" / "monitors.yaml",
-                project_path / ".modastack" / "agent.yaml",
+                paths.modastack_dir(project_path) / "monitors.yaml",
+                paths.agent_yaml_path(project_path),
             ]
             for config_path in project_sources:
                 for raw in _read_records(config_path):
@@ -121,7 +123,7 @@ class MonitorRegistry:
     @staticmethod
     def add_project(monitor: Monitor, project_path: Path) -> None:
         """Append or replace a monitor in .modastack/monitors.yaml."""
-        monitors_path = project_path / ".modastack" / "monitors.yaml"
+        monitors_path = paths.modastack_dir(project_path) / "monitors.yaml"
         monitors_path.parent.mkdir(parents=True, exist_ok=True)
         records = _read_records(monitors_path)
         records = [r for r in records if r.get("name") != monitor.name]
@@ -162,7 +164,7 @@ class MonitorRegistry:
         it instead), or "not-found".
         """
         if project_path is not None:
-            monitors_path = project_path / ".modastack" / "monitors.yaml"
+            monitors_path = paths.modastack_dir(project_path) / "monitors.yaml"
             records = _read_records(monitors_path)
             kept = [r for r in records if r.get("name") != name]
             if len(kept) == len(records):
