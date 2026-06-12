@@ -507,15 +507,15 @@ class TestCommandMonitor:
         assert injected[0]["data"]["id"] == "cmd"
 
 
-# === Spawn check role fallback (#212) ===
+# === Spawn check entry_point (#212) ===
 
-class TestDefaultSpawnCheckRoleFallback:
-    """Regression tests for #212: packs with entry_point but no defaults.role
-    must still produce a valid --role flag when spawning monitor checks."""
+class TestDefaultSpawnCheckEntryPoint:
+    """Regression tests for #212: monitor spawn checks use entry_point
+    for --role, matching how `modastack start` resolves the role."""
 
-    def test_entry_point_used_when_no_default_role(self, tmp_path, monkeypatch):
-        """A pack with only entry_point (no defaults.role) produces
-        --role <entry_point> in the spawn command."""
+    def test_entry_point_used_for_role(self, tmp_path, monkeypatch):
+        """entry_point from agent.yaml produces --role <entry_point>
+        in the spawn command."""
         from modastack.monitors.scheduler import _default_spawn_check
         import modastack.sdk as sdk_mod
 
@@ -546,16 +546,17 @@ class TestDefaultSpawnCheckRoleFallback:
         role_idx = cmd.index("--role")
         assert cmd[role_idx + 1] == "support_manager"
 
-    def test_default_role_preferred_over_entry_point(self, tmp_path, monkeypatch):
-        """When defaults.role IS set, it takes precedence over entry_point."""
+    def test_entry_point_used_even_when_defaults_role_set(self, tmp_path, monkeypatch):
+        """entry_point is always used for monitor spawns, even when
+        defaults.role is set (defaults.role is for ad-hoc launches)."""
         from modastack.monitors.scheduler import _default_spawn_check
         import modastack.sdk as sdk_mod
 
         project = tmp_path / "proj"
         (project / ".modastack" / "state").mkdir(parents=True)
         (project / ".modastack" / "agent.yaml").write_text(
-            "agent: test-pack\nentry_point: fallback\n"
-            "defaults:\n  role: preferred\n"
+            "agent: test-pack\nentry_point: monitor_role\n"
+            "defaults:\n  role: adhoc_role\n"
         )
 
         monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
@@ -575,7 +576,7 @@ class TestDefaultSpawnCheckRoleFallback:
         assert len(captured_cmds) == 1
         cmd = captured_cmds[0]
         role_idx = cmd.index("--role")
-        assert cmd[role_idx + 1] == "preferred"
+        assert cmd[role_idx + 1] == "monitor_role"
 
     def test_description_only_monitor_spawns_check(self, tmp_path):
         """End-to-end: a description-only monitor invokes spawn_check
