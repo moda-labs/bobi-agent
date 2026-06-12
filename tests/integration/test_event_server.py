@@ -299,6 +299,77 @@ class TestSlackSelfReplyLoop:
         assert len(slack_events) >= 1, "Human message was incorrectly filtered"
 
 
+class TestMonitorEventDelivery:
+    """Regression: a description-only monitor's finding must reach a coordinator
+    that subscribed using the manager's monitor-subscription logic.
+
+    The bug (production, all support-manager email tests silently failed):
+    the manager subscribed to each monitor's raw ``event`` string,
+    ``monitor/support.email``. But ``events.publish.post_event`` strips the
+    source and POSTs to ``/events/support.email``; ``createTopicEvent`` then
+    routes that onto the bare-type topic ``support.email`` (no repo/team/
+    workspace field). Exact-string subscription matching never matched
+    ``monitor/support.email`` against ``support.email`` → ``delivered_to: 0``
+    → the finding vanished, and the check agent deduped it so it never
+    re-fired.
+
+    This drives the real path: subscriptions built by
+    ``monitor_subscription_keys`` for a monitor whose event is
+    ``monitor/support.email``, then a finding posted exactly the way
+    ``publish.post_event`` posts it, must be delivered.
+    """
+
+    def test_monitor_finding_reaches_subscriber(self, event_server):
+        from modastack.events.subscriptions import monitor_subscription_keys
+
+        base_url, _ = event_server
+        subs = monitor_subscription_keys(["monitor/support.email"])
+        dep = _post_json(f"{base_url}/deployments", {
+            "name": "monitor-delivery-test",
+            "subscriptions": subs,
+        })
+        dep_id, api_key = dep["deployment_id"], dep["api_key"]
+
+        # publish.post_event("monitor/support.email", data) POSTs to
+        # /events/support.email with {"source": "monitor", "payload": data}.
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
+            f"{base_url}/events/support.email",
+            {"source": "monitor",
+             "payload": {"summary": "new real-customer support email"}},
+        ))
+
+        monitor_events = [e for e in events if e.get("source") == "monitor"]
+        assert len(monitor_events) >= 1, (
+            "Monitor finding was not delivered — the subscription topic does "
+            "not match the topic the event server routes /events/support.email "
+            f"onto. Subscriptions were {subs}."
+        )
+        assert monitor_events[0]["type"] == "support.email"
+        assert monitor_events[0]["payload"]["summary"] == (
+            "new real-customer support email"
+        )
+
+    def test_raw_event_string_subscription_does_not_match(self, event_server):
+        """Pin the root cause: subscribing to the raw "monitor/<type>" string
+        alone delivers nothing — proves why the helper must map to the type."""
+        base_url, _ = event_server
+        dep = _post_json(f"{base_url}/deployments", {
+            "name": "raw-event-sub-test",
+            "subscriptions": ["monitor/support.email"],
+        })
+        dep_id, api_key = dep["deployment_id"], dep["api_key"]
+
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
+            f"{base_url}/events/support.email",
+            {"source": "monitor", "payload": {"summary": "x"}},
+        ), timeout=3)
+
+        assert [e for e in events if e.get("source") == "monitor"] == [], (
+            "raw 'monitor/support.email' subscription should NOT match the "
+            "'support.email' delivery topic — if it does, the routing changed"
+        )
+
+
 class TestWebSocketDrain:
 
     def test_multiple_events_ordered(self, deployment):
