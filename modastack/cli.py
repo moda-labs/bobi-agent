@@ -179,12 +179,12 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
     subscribe = discover_subscriptions(project_path)
     subscribe += [s for s in (extra_subscribe or []) if s not in subscribe]
 
-    # Monitor event topics need a subscription when a service without a
-    # registered adapter delivers events (adapted services route via webhooks).
-    from modastack.events.adapters import is_registered
-    if any(not is_registered(s.name) for s in cfg.event_services):
-        subscribe += [m["event"] for m in cfg.monitors
-                      if m.get("event") and m["event"] not in subscribe]
+    # Subscribe to every effective monitor's event topic so the coordinator
+    # receives monitor findings regardless of adapter configuration.
+    from modastack.monitors.registry import MonitorRegistry
+    for m in MonitorRegistry.load(project_path=project_path).effective_monitors():
+        if m.event and m.event not in subscribe:
+            subscribe.append(m.event)
 
     state_dir = project_path / ".modastack" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
