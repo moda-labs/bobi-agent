@@ -850,4 +850,18 @@ describe("handleSlackWorkspaceRegister", () => {
 		const result = await handleSlackWorkspaceRegister(store, { workspace_id: "T1" });
 		expect(result.status).toBe(400);
 	});
+
+	it("uses explicit bot_id without calling auth.test", async () => {
+		const store = createMockStorage();
+		const result = await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T_EXPLICIT",
+			bot_token: "xoxb-test",
+			bot_id: "B_EXPLICIT",
+		});
+		expect(result.status).toBe(200);
+		const body = result.body as Record<string, unknown>;
+		expect(body.bot_id).toBe("B_EXPLICIT");
+		const ws = store.slackWorkspaces.get("T_EXPLICIT");
+		expect(ws?.bot_id).toBe("B_EXPLICIT");
+	});
 });
