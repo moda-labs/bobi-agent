@@ -157,12 +157,133 @@ class TestLaunchDetached:
         assert cmd[-2:] == ["a", "b"]
 
 
+class TestCheckRequires:
+    """Test the dispatch-time requires check with TTL cache."""
+
+    def test_returns_pass_for_healthy_deps(self, tmp_path):
+        from modastack.subagent import check_requires, _requires_cache
+        _requires_cache.clear()
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n")
+        results = check_requires(tmp_path)
+        assert len(results) == 1
+        assert results[0][1] is True
+
+    def test_returns_fail_for_broken_deps(self, tmp_path):
+        from modastack.subagent import check_requires, _requires_cache
+        _requires_cache.clear()
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "entry_point: x\nrequires:\n  - name: bad\n    check: 'false'\n")
+        results = check_requires(tmp_path)
+        assert len(results) == 1
+        assert results[0][1] is False
+
+    def test_cache_hit_within_ttl(self, tmp_path):
+        from modastack.subagent import check_requires, _requires_cache
+        _requires_cache.clear()
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n")
+        # First call populates cache
+        check_requires(tmp_path)
+        # Overwrite config to make check fail — cache should still return pass
+        (config_dir / "agent.yaml").write_text(
+            "entry_point: x\nrequires:\n  - name: ok\n    check: 'false'\n")
+        results = check_requires(tmp_path)
+        assert results[0][1] is True  # cached pass, not fresh fail
+
+    def test_cache_expired(self, tmp_path):
+        import time as _time
+        from modastack.subagent import check_requires, _requires_cache
+        _requires_cache.clear()
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n")
+        check_requires(tmp_path)
+        # Manually expire the cache entry
+        key = str(tmp_path)
+        ts, cached = _requires_cache[key]
+        _requires_cache[key] = (ts - 300, cached)  # 5 min ago
+        # Now change config
+        (config_dir / "agent.yaml").write_text(
+            "entry_point: x\nrequires:\n  - name: bad\n    check: 'false'\n")
+        results = check_requires(tmp_path)
+        assert results[0][1] is False  # re-ran, got fresh fail
+
+    def test_empty_requires(self, tmp_path):
+        from modastack.subagent import check_requires, _requires_cache
+        _requires_cache.clear()
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text("entry_point: x\n")
+        results = check_requires(tmp_path)
+        assert results == []
+
+    def test_no_config(self, tmp_path):
+        from modastack.subagent import check_requires, _requires_cache
+        _requires_cache.clear()
+        results = check_requires(tmp_path)
+        assert results == []
+
+
+class TestAlertRequiresFailure:
+    """Test the Slack alerting helper for failed requires checks."""
+
+    @patch("modastack.slack.post_slack_message")
+    def test_posts_to_slack(self, mock_post, tmp_path):
+        from modastack.config import RequiresEntry
+        from modastack.subagent import _alert_requires_failure
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "entry_point: x\nservices:\n  - name: slack\n    channels: [C123]\n"
+            "    credentials:\n      bot_token: xoxb-test\n")
+        failures = [(RequiresEntry(name="gstack", check="false",
+                                   why="skills needed", fix="run setup"), "check failed")]
+        _alert_requires_failure(tmp_path, failures)
+        mock_post.assert_called_once()
+        args = mock_post.call_args
+        assert "gstack" in args[0][2] or "gstack" in str(args)
+
+    @patch("modastack.slack.post_slack_message", side_effect=Exception("network error"))
+    def test_slack_failure_does_not_crash(self, mock_post, tmp_path):
+        from modastack.config import RequiresEntry
+        from modastack.subagent import _alert_requires_failure
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "entry_point: x\nservices:\n  - name: slack\n    channels: [C123]\n"
+            "    credentials:\n      bot_token: xoxb-test\n")
+        failures = [(RequiresEntry(name="gstack", check="false",
+                                   why="skills", fix="setup"), "failed")]
+        # Should not raise
+        _alert_requires_failure(tmp_path, failures)
+
+    def test_no_slack_service_does_not_crash(self, tmp_path):
+        from modastack.config import RequiresEntry
+        from modastack.subagent import _alert_requires_failure
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text("entry_point: x\n")
+        failures = [(RequiresEntry(name="gstack", check="false",
+                                   why="skills", fix="setup"), "failed")]
+        # Should not raise
+        _alert_requires_failure(tmp_path, failures)
+
+
 class TestLaunchAgent:
     """Test that launch_agent launches a detached subprocess."""
 
+    @patch("modastack.subagent.check_requires", return_value=[])
     @patch("modastack.subagent.get_registry")
     @patch("modastack.subagent._launch_detached")
-    def test_returns_deterministic_name(self, mock_launch, mock_reg):
+    def test_returns_deterministic_name(self, mock_launch, mock_reg, mock_check):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
         from modastack.subagent import launch_agent
         name = launch_agent(task="Fix issue #42", cwd="/tmp/test", workflow_name="adhoc", run_key="42")
@@ -170,18 +291,20 @@ class TestLaunchAgent:
         assert "42" in name
         mock_launch.assert_called_once()
 
+    @patch("modastack.subagent.check_requires", return_value=[])
     @patch("modastack.subagent.get_registry")
     @patch("modastack.subagent._launch_detached")
-    def test_subprocess_calls_entry(self, mock_launch, mock_reg):
+    def test_subprocess_calls_entry(self, mock_launch, mock_reg, mock_check):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
         from modastack.subagent import launch_agent
         launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc")
         script = mock_launch.call_args[0][0]
         assert "_run_agent_entry" in script
 
+    @patch("modastack.subagent.check_requires", return_value=[])
     @patch("modastack.subagent.get_registry")
     @patch("modastack.subagent._launch_detached")
-    def test_rejects_active_run(self, mock_launch, mock_reg):
+    def test_rejects_active_run(self, mock_launch, mock_reg, mock_check):
         active = MagicMock()
         active.status = "running"
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=active))
@@ -189,9 +312,10 @@ class TestLaunchAgent:
         with pytest.raises(RuntimeError, match="already active"):
             launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc")
 
+    @patch("modastack.subagent.check_requires", return_value=[])
     @patch("modastack.subagent.get_registry")
     @patch("modastack.subagent._launch_detached")
-    def test_allows_after_done(self, mock_launch, mock_reg):
+    def test_allows_after_done(self, mock_launch, mock_reg, mock_check):
         done = MagicMock()
         done.status = "done"
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=done))
@@ -199,9 +323,10 @@ class TestLaunchAgent:
         name = launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc")
         assert name  # no exception
 
+    @patch("modastack.subagent.check_requires", return_value=[])
     @patch("modastack.subagent.get_registry")
     @patch("modastack.subagent._launch_detached")
-    def test_passes_requested_by(self, mock_launch, mock_reg):
+    def test_passes_requested_by(self, mock_launch, mock_reg, mock_check):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
         from modastack.subagent import launch_agent
         req = {"from": "Alice", "channel": "C1"}
@@ -210,5 +335,19 @@ class TestLaunchAgent:
         import json
         parsed = json.loads(args[0])
         assert parsed["requested_by"] == req
+
+    @patch("modastack.subagent._alert_requires_failure")
+    @patch("modastack.subagent.get_registry")
+    @patch("modastack.subagent._launch_detached")
+    def test_blocks_on_failed_requires(self, mock_launch, mock_reg, mock_alert, tmp_path):
+        from modastack.config import RequiresEntry
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        failed = [(RequiresEntry(name="gstack", check="false"), False, "check failed")]
+        with patch("modastack.subagent.check_requires", return_value=failed):
+            from modastack.subagent import launch_agent
+            with pytest.raises(RuntimeError, match="dependency check failed"):
+                launch_agent(task="Fix #1", cwd=str(tmp_path), workflow_name="adhoc")
+        mock_alert.assert_called_once()
+        mock_launch.assert_not_called()
 
 

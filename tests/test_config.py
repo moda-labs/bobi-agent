@@ -415,3 +415,123 @@ def test_service_config_credentials_parsed(tmp_path):
     cfg = Config.load(tmp_path)
     assert cfg.services[0].credentials == {}
     assert cfg.services[1].credentials == {"bot_token": "xoxb-test"}
+
+
+# --- requires: parsing ---
+
+
+def test_requires_parsed(tmp_path):
+    """Valid requires: block populates Config.requires."""
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+        requires:
+          - name: gstack
+            why: "skills needed"
+            check: "test -e /tmp/gstack"
+            fix: "install gstack"
+    """)
+    cfg = Config.load(tmp_path)
+    assert len(cfg.requires) == 1
+    assert cfg.requires[0].name == "gstack"
+    assert cfg.requires[0].why == "skills needed"
+    assert cfg.requires[0].check == "test -e /tmp/gstack"
+    assert cfg.requires[0].fix == "install gstack"
+
+
+def test_requires_empty(tmp_path):
+    """Empty or missing requires: yields empty list."""
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+        requires: []
+    """)
+    cfg = Config.load(tmp_path)
+    assert cfg.requires == []
+
+
+def test_requires_missing_key(tmp_path):
+    """No requires: key at all yields empty list."""
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+    """)
+    cfg = Config.load(tmp_path)
+    assert cfg.requires == []
+
+
+def test_requires_skips_invalid_entries(tmp_path):
+    """Entries missing name or check are skipped."""
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+        requires:
+          - name: good
+            check: "true"
+          - name: no-check
+          - check: "no-name"
+          - name: also-good
+            check: "echo ok"
+    """)
+    cfg = Config.load(tmp_path)
+    assert len(cfg.requires) == 2
+    assert cfg.requires[0].name == "good"
+    assert cfg.requires[1].name == "also-good"
+
+
+def test_requires_not_env_interpolated(tmp_path, monkeypatch):
+    """check: and fix: strings are NOT interpolated via _interpolate_env."""
+    monkeypatch.setenv("HOME", "/home/testuser")
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+        requires:
+          - name: gstack
+            check: "test -e ${HOME}/gstack"
+            fix: "cd ${HOME}/gstack && ./setup"
+    """)
+    cfg = Config.load(tmp_path)
+    # The ${HOME} should remain literal (for shell expansion), not resolved
+    assert "${HOME}" in cfg.requires[0].check
+    assert "${HOME}" in cfg.requires[0].fix
+
+
+# --- run_requires_checks() shared runner ---
+
+
+def test_run_requires_checks_all_pass():
+    from modastack.config import RequiresEntry, run_requires_checks
+    entries = [
+        RequiresEntry(name="true-cmd", check="true"),
+        RequiresEntry(name="echo-cmd", check="echo ok"),
+    ]
+    results = run_requires_checks(entries)
+    assert len(results) == 2
+    for entry, ok, detail in results:
+        assert ok is True
+
+
+def test_run_requires_checks_failure():
+    from modastack.config import RequiresEntry, run_requires_checks
+    entries = [RequiresEntry(name="fail", check="false")]
+    results = run_requires_checks(entries)
+    assert len(results) == 1
+    entry, ok, detail = results[0]
+    assert ok is False
+
+
+def test_run_requires_checks_timeout():
+    from modastack.config import RequiresEntry, run_requires_checks
+    entries = [RequiresEntry(name="slow", check="sleep 60")]
+    results = run_requires_checks(entries, timeout=0.1)
+    entry, ok, detail = results[0]
+    assert ok is False
+    assert "timed out" in detail
+
+
+def test_run_requires_checks_command_not_found():
+    from modastack.config import RequiresEntry, run_requires_checks
+    entries = [RequiresEntry(name="missing", check="nonexistent_cmd_xyz_12345")]
+    results = run_requires_checks(entries)
+    entry, ok, detail = results[0]
+    assert ok is False
+
+
+def test_run_requires_checks_empty():
+    from modastack.config import run_requires_checks
+    assert run_requires_checks([]) == []

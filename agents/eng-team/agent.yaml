@@ -22,6 +22,14 @@ services:
     credentials:
       api_key: ${LINEAR_API_KEY}
 
+# Host-level dependencies. Checked by `modastack doctor` and enforced
+# at dispatch time — agents cannot launch if a required dep is broken.
+requires:
+  - name: gstack
+    why: "QA, browse, ship, and review skills used throughout the eng lifecycle"
+    check: "test -e ~/.claude/skills/browse/SKILL.md && test -x ~/.claude/skills/gstack/browse/dist/browse"
+    fix: "git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && ./setup"
+
 # Deterministic event→workflow routing. These rules fire BEFORE the
 # manager LLM sees the event, guaranteeing the workflow is launched
 # regardless of prompt compliance.

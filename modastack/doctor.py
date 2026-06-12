@@ -29,6 +29,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_claude_auth())
     results.append(_check_local_config())
     results.append(_check_install_integrity())
+    results.extend(_check_package_requires())
     results.extend(_check_services())
     results.append(_check_workflows())
     results.append(_check_event_server())
@@ -116,6 +117,35 @@ def _check_install_integrity() -> CheckResult:
                  "pack source and re-run `modastack install`")
     return CheckResult("Installed team", ok=True,
                        detail=f"{manifest.get('agent', '?')} (frozen, clean)")
+
+
+def _check_package_requires() -> list[CheckResult]:
+    """Check host-level dependencies declared in agent.yaml requires: block."""
+    from modastack.config import Config, run_requires_checks
+    from modastack.sdk import get_project_root
+
+    root = get_project_root()
+    if not root:
+        return []
+    try:
+        cfg = Config.load(root)
+    except Exception:
+        return []
+    if not cfg.requires:
+        return []
+
+    results = []
+    for entry, ok, detail in run_requires_checks(cfg.requires):
+        if ok:
+            results.append(CheckResult(
+                f"Requires: {entry.name}", ok=True, detail="healthy"))
+        else:
+            hint = f"Fix: {entry.fix}" if entry.fix else ""
+            results.append(CheckResult(
+                f"Requires: {entry.name}", ok=False,
+                detail=entry.why or detail,
+                hint=hint))
+    return results
 
 
 def _check_local_config() -> CheckResult:
