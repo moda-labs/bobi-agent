@@ -351,17 +351,21 @@ export async function handleSlackWorkspaceRegister(
 		return { status: 400, body: { error: "workspace_id and bot_token required" } };
 	}
 
-	let botId: string | undefined;
-	try {
-		const resp = await fetch("https://slack.com/api/auth.test", {
-			headers: { Authorization: `Bearer ${botToken}` },
-		});
-		const data = (await resp.json()) as Record<string, unknown>;
-		if (data.ok) {
-			botId = data.bot_id as string;
+	// Accept an explicit bot_id when the caller already knows it (e.g. tests,
+	// or a Python client that resolved it locally).  Fall back to auth.test.
+	let botId = (body.bot_id as string) || undefined;
+	if (!botId) {
+		try {
+			const resp = await fetch("https://slack.com/api/auth.test", {
+				headers: { Authorization: `Bearer ${botToken}` },
+			});
+			const data = (await resp.json()) as Record<string, unknown>;
+			if (data.ok) {
+				botId = data.bot_id as string;
+			}
+		} catch {
+			// best-effort — self-loop filtering degrades gracefully without bot_id
 		}
-	} catch {
-		// best-effort — self-loop filtering degrades gracefully without bot_id
 	}
 
 	await storage.putSlackWorkspace(workspaceId, { bot_token: botToken, bot_id: botId });

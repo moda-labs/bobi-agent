@@ -224,6 +224,81 @@ class TestSlackWebhook:
         assert len(mention_events) >= 1
 
 
+class TestSlackSelfReplyLoop:
+    """Regression: register workspace → bot-authored payload → zero deliveries.
+
+    PR #209 fixed a self-reply loop where the agent's own Slack messages were
+    re-ingested as inbound events.  The event server filters messages whose
+    ``event.bot_id`` matches the registered workspace ``bot_id``.  These tests
+    verify the full HTTP path: workspace registration, webhook ingestion, and
+    WebSocket delivery.
+    """
+
+    @pytest.fixture
+    def deployment_with_workspace(self, event_server):
+        """Register a deployment + workspace with a known bot_id."""
+        base_url, _ = event_server
+        dep = _post_json(f"{base_url}/deployments", {
+            "name": "self-loop-test",
+            "subscriptions": ["slack:T_SELF"],
+        })
+        dep_id, api_key = dep["deployment_id"], dep["api_key"]
+        # Register workspace with explicit bot_id (skips auth.test)
+        ws = _post_json(f"{base_url}/slack/workspaces", {
+            "workspace_id": "T_SELF",
+            "bot_token": "xoxb-fake-for-test",
+            "bot_id": "B_SELF",
+        })
+        assert ws["bot_id"] == "B_SELF"
+        return base_url, dep_id, api_key
+
+    def test_bot_own_message_not_delivered(self, deployment_with_workspace):
+        """A message authored by the registered bot must be silently dropped."""
+        base_url, dep_id, api_key = deployment_with_workspace
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
+            f"{base_url}/webhooks/slack",
+            {"type": "event_callback", "team_id": "T_SELF",
+             "event": {"type": "app_mention", "user": "U_SELF",
+                       "bot_id": "B_SELF",
+                       "channel": "C_ENG", "channel_type": "channel",
+                       "text": "I just replied to a thread",
+                       "ts": "1700000010.000001"}},
+        ), timeout=3)
+        slack_events = [e for e in events if e.get("source") == "slack"]
+        assert len(slack_events) == 0, (
+            f"Bot's own message was delivered — self-reply loop not prevented: {slack_events}"
+        )
+
+    def test_other_bot_message_still_delivered(self, deployment_with_workspace):
+        """Messages from a different bot must pass through normally."""
+        base_url, dep_id, api_key = deployment_with_workspace
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
+            f"{base_url}/webhooks/slack",
+            {"type": "event_callback", "team_id": "T_SELF",
+             "event": {"type": "app_mention", "user": "U_OTHER",
+                       "bot_id": "B_OTHER",
+                       "channel": "C_ENG", "channel_type": "channel",
+                       "text": "message from another bot",
+                       "ts": "1700000011.000001"}},
+        ))
+        slack_events = [e for e in events if e.get("source") == "slack"]
+        assert len(slack_events) >= 1, "Other bot's message was incorrectly filtered"
+
+    def test_human_message_still_delivered(self, deployment_with_workspace):
+        """Human messages (no bot_id) must pass through normally."""
+        base_url, dep_id, api_key = deployment_with_workspace
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
+            f"{base_url}/webhooks/slack",
+            {"type": "event_callback", "team_id": "T_SELF",
+             "event": {"type": "message", "user": "U_HUMAN",
+                       "channel": "D_DM", "channel_type": "im",
+                       "text": "hello from a human",
+                       "ts": "1700000012.000001"}},
+        ))
+        slack_events = [e for e in events if e.get("source") == "slack"]
+        assert len(slack_events) >= 1, "Human message was incorrectly filtered"
+
+
 class TestWebSocketDrain:
 
     def test_multiple_events_ordered(self, deployment):
