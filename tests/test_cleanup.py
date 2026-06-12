@@ -2,6 +2,7 @@
 action step support in the orchestrator.
 
 Covers issue #227: worktree + branch removal on pull_request.closed.
+Covers issue #246: cleanup must resolve repo from input, not installation root.
 """
 
 import subprocess
@@ -301,3 +302,131 @@ class TestGitHubAdapterPrFields:
         }
         assert event["fields"]["merged"] is True
         assert event["fields"]["head_branch"] == "agent/issue-42"
+
+
+# ---------------------------------------------------------------------------
+# Issue #246 — cleanup must not run against installation root
+# ---------------------------------------------------------------------------
+
+class TestCleanupWorktreeRejectsNonGitDir:
+    """cleanup_worktree must return status:error when repo_root is not a git
+    repository, rather than falling through to prune/delete-branch against
+    the wrong directory."""
+
+    def test_non_git_dir_returns_error(self, tmp_path):
+        from modastack.workflow.cleanup import cleanup_worktree
+
+        # tmp_path is a plain directory, not a git repo
+        result = cleanup_worktree(str(tmp_path), "agent/issue-99")
+        assert result["status"] == "error"
+        assert "not a git repository" in result["reason"]
+
+
+class TestResolveRepoRoot:
+    """_resolve_repo_root must find the local checkout from input.repo,
+    not fall back to the installation root."""
+
+    def _make_ctx(self, repo_slug: str) -> "VariableContext":
+        from modastack.workflow.variables import VariableContext
+
+        ctx = VariableContext()
+        ctx.set_scope("input", {"repo": repo_slug, "head_branch": "agent/x"})
+        return ctx
+
+    def test_director_layout_finds_child_repo(self, tmp_path):
+        """When the installation root contains a child dir matching the repo
+        name and that child is a git repo, resolve to it."""
+        from modastack.workflow.orchestrator import _resolve_repo_root
+
+        # Set up: installation root with a child git repo
+        child = tmp_path / "myrepo"
+        child.mkdir()
+        subprocess.run(["git", "init"], cwd=child, capture_output=True)
+
+        ctx = self._make_ctx("org/myrepo")
+        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+            result = _resolve_repo_root(ctx)
+
+        assert result == str(child)
+
+    def test_single_repo_layout(self, tmp_path):
+        """When the installation root itself is a git repo, resolve to it."""
+        from modastack.workflow.orchestrator import _resolve_repo_root
+
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+
+        ctx = self._make_ctx("org/somerepo")
+        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+            result = _resolve_repo_root(ctx)
+
+        assert result == str(tmp_path)
+
+    def test_no_repo_found_returns_none(self, tmp_path):
+        """When no matching checkout exists, return None."""
+        from modastack.workflow.orchestrator import _resolve_repo_root
+
+        ctx = self._make_ctx("org/missing")
+        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+            result = _resolve_repo_root(ctx)
+
+        assert result is None
+
+    def test_no_repo_in_input_returns_none(self):
+        """When input.repo is missing, return None."""
+        from modastack.workflow.orchestrator import _resolve_repo_root
+        from modastack.workflow.variables import VariableContext
+
+        ctx = VariableContext()
+        ctx.set_scope("input", {"head_branch": "agent/x"})
+        with patch("modastack.paths.modastack_root"):
+            result = _resolve_repo_root(ctx)
+
+        assert result is None
+
+
+class TestCleanupActionUsesInputRepo:
+    """_cleanup_worktree_action must resolve repo from input.repo,
+    not from _find_project_root. Issue #246."""
+
+    def test_action_resolves_repo_from_input(self, tmp_path):
+        """The action should call cleanup_worktree with the resolved repo
+        path, not the installation root."""
+        from modastack.workflow.orchestrator import _cleanup_worktree_action
+        from modastack.workflow.variables import VariableContext
+
+        # Set up a child git repo under a non-git installation root
+        child = tmp_path / "testrepo"
+        child.mkdir()
+        subprocess.run(["git", "init"], cwd=child, capture_output=True)
+
+        ctx = VariableContext()
+        ctx.set_scope("input", {
+            "repo": "org/testrepo",
+            "head_branch": "agent/issue-246",
+        })
+
+        with patch("modastack.paths.modastack_root", return_value=tmp_path), \
+             patch("modastack.workflow.cleanup.cleanup_worktree") as mock_cleanup:
+            mock_cleanup.return_value = {"status": "cleaned", "paths_removed": [], "branch": "agent/issue-246"}
+            result = _cleanup_worktree_action(ctx, str(tmp_path))
+
+        # cleanup_worktree must be called with the child repo, not tmp_path
+        mock_cleanup.assert_called_once_with(str(child), "agent/issue-246")
+        assert result["status"] == "cleaned"
+
+    def test_action_returns_error_when_repo_unresolvable(self):
+        """When input.repo can't be resolved to a local checkout, return error."""
+        from modastack.workflow.orchestrator import _cleanup_worktree_action
+        from modastack.workflow.variables import VariableContext
+
+        ctx = VariableContext()
+        ctx.set_scope("input", {
+            "repo": "org/nonexistent",
+            "head_branch": "agent/issue-246",
+        })
+
+        with patch("modastack.paths.modastack_root", return_value=Path("/tmp/empty")):
+            result = _cleanup_worktree_action(ctx, "/tmp/empty")
+
+        assert result["status"] == "error"
+        assert "could not resolve" in result["reason"]

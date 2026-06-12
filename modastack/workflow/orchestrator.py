@@ -580,6 +580,36 @@ def _emit_step_failed(run_key, workflow_name, step_name, error):
     }, blocking=True)
 
 
+def _resolve_repo_root(ctx: VariableContext) -> str | None:
+    """Resolve the local checkout for the repo identified by ``input.repo``.
+
+    ``input.repo`` is a GitHub slug like ``org/name``.  The checkout lives
+    either as a child directory of the installation root (director-style
+    layout) or *is* the installation root (single-repo layout).
+
+    Returns ``None`` when the repo cannot be found locally.
+    """
+    from modastack.paths import modastack_root
+
+    repo_slug = ctx.resolve("${{ input.repo }}") if "input" in ctx.scopes else ""
+    if not repo_slug or repo_slug.startswith("${{"):
+        return None
+
+    root = modastack_root()
+    repo_name = repo_slug.split("/")[-1] if "/" in repo_slug else repo_slug
+
+    # Director-style: repo is a child directory of the installation root
+    candidate = root / repo_name
+    if candidate.is_dir() and (candidate / ".git").exists():
+        return str(candidate)
+
+    # Single-repo: the installation root IS the repo
+    if (root / ".git").exists():
+        return str(root)
+
+    return None
+
+
 def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
     """Native action: clean up the worktree for a closed PR's head branch."""
     from modastack.workflow.cleanup import cleanup_worktree
@@ -588,7 +618,9 @@ def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
     if not head_branch or head_branch.startswith("${{"):
         return {"status": "skipped", "reason": "no head_branch in input"}
 
-    repo_root = str(_find_project_root(cwd))
+    repo_root = _resolve_repo_root(ctx)
+    if repo_root is None:
+        return {"status": "error", "reason": "could not resolve target repo from input"}
     return cleanup_worktree(repo_root, head_branch)
 
 
