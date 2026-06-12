@@ -106,7 +106,7 @@ modastack/                        # Framework (Python package)
     ├── schema.py                 # Monitor record + interval parsing
     ├── registry.py               # Installed defaults + project overrides
     ├── checks.py                 # Native check runners (pr_conflicts, stale_prs)
-    └── scheduler.py              # Interval scheduler, dedup, event injection
+    └── scheduler.py              # Interval scheduler; sole dedup + publish path for findings
 
 skills/                           # Claude Code skill files (also in modastack/skills/ as package data)
 ├── create-agent.md               # Guide for designing new agent teams
@@ -191,9 +191,13 @@ See `skills/create-agent.md` for the full YAML reference.
 ### Monitors
 
 Scheduled polling for conditions no webhook covers (merge conflicts,
-stale PRs, deploy health). A monitor with `check:` uses a native
-runner. Without one, the scheduler launches a short-lived check agent
-that posts an event only if it finds something.
+stale PRs, deploy health). Every monitor flavor (notify, command, native
+`check:`, description-only check agent) is just a condition detector;
+dedup and publishing are one shared path — the scheduler reconciles
+detected conditions against persisted state and publishes new ones
+through the event server, like any other event. A description-only
+monitor's check agent runs out-of-band, only observes, and returns a
+verdict; the scheduler converts it to conditions and publishes.
 
 ### Handoff contract
 

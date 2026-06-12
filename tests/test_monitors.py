@@ -234,13 +234,21 @@ def _fixed_now():
     return datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def _scheduler(tmp_path, monitors, check_results=None, spawned=None):
-    """Build a scheduler over a hand-built registry and capture injected events.
+def _scheduler(tmp_path, monitors, check_results=None, spawned=None,
+               publish=None):
+    """Build a scheduler over a hand-built registry and capture published events.
 
-    `spawned` (if a list) captures (monitor, cwd) tuples from spawn_check so
-    description-only monitors don't launch real subprocesses in tests.
+    `published` records {"event": ..., "data": ...} for every publish — the
+    single path all monitor flavors fire through. Pass `publish` to override
+    (e.g. to simulate event-server failures). `spawned` (if a list) captures
+    (monitor, cwd, on_verdict) tuples from spawn_check so description-only
+    monitors don't launch real subprocesses in tests.
     """
-    injected = []
+    published = []
+
+    def _record_publish(event, data):
+        published.append({"event": event, "data": data})
+        return True
 
     class FakeRegistry:
         def effective_monitors(self):
@@ -250,14 +258,14 @@ def _scheduler(tmp_path, monitors, check_results=None, spawned=None):
             return [Path("/repo")]
 
     sched = MonitorScheduler(
-        inject_event=injected.append,
+        publish=publish or _record_publish,
         state_path=tmp_path / "state.json",
         now=_fixed_now,
         registry_loader=lambda: FakeRegistry(),
-        spawn_check=(lambda mon, cwd: spawned.append((mon, cwd)))
-        if spawned is not None else (lambda mon, cwd: None),
+        spawn_check=(lambda mon, cwd, on_verdict: spawned.append((mon, cwd, on_verdict)))
+        if spawned is not None else (lambda mon, cwd, on_verdict: None),
     )
-    return sched, injected
+    return sched, published
 
 
 # === Scheduler ===
@@ -328,21 +336,19 @@ class TestNotifyMonitor:
         assert spawned == []      # no out-of-band check agent
         assert len(injected) == 2  # no dedup — fires every time it's due
         ev = injected[0]
-        assert ev["source"] == "monitor"
-        assert ev["type"] == "status.roundup_due"
+        assert ev["event"] == "monitor/status.roundup_due"
         assert ev["data"]["monitor"] == "roundup"
         assert ev["data"]["description"] == "ping the leads"
 
 
 class TestSchedulerReconcile:
-    def test_new_condition_fires_event_with_clean_type(self, tmp_path):
+    def test_new_condition_publishes_full_event(self, tmp_path):
         m = Monitor(name="pr-conflict-check", event="monitor/pr.conflict_detected")
         sched, injected = _scheduler(tmp_path, [m])
         sched._reconcile(m, [Condition(key="r#1", data={"pr_number": 1, "repo": "r"})])
         assert len(injected) == 1
         ev = injected[0]
-        assert ev["source"] == "monitor"
-        assert ev["type"] == "pr.conflict_detected"
+        assert ev["event"] == "monitor/pr.conflict_detected"
         assert ev["data"]["monitor"] == "pr-conflict-check"
         assert ev["data"]["pr_number"] == 1
 
@@ -390,13 +396,14 @@ class TestSchedulerRun:
         sched, injected = _scheduler(tmp_path, [m], spawned=spawned)
         reg = sched._registry_loader()
         sched.run_monitor(m, reg, _fixed_now())
-        # The manager is never injected into for a description-only monitor —
-        # the check runs out-of-band and posts its own event on a finding.
+        # Nothing publishes at spawn time for a description-only monitor —
+        # detection runs out-of-band and reconciles when the verdict lands.
         assert injected == []
         assert len(spawned) == 1
-        mon, cwd = spawned[0]
+        mon, cwd, on_verdict = spawned[0]
         assert mon is m
         assert cwd == "/repo"  # first applicable project
+        assert callable(on_verdict)
         assert sched.state["custom"]["last_run"] == _fixed_now().isoformat()
 
     def test_unknown_check_is_skipped_gracefully(self, tmp_path):
@@ -534,17 +541,26 @@ class TestDefaultSpawnCheckEntryPoint:
             def __init__(self, cmd, **kwargs):
                 captured_cmds.append(cmd)
 
+            def communicate(self, timeout=None):
+                return ("", "")
+
+            def kill(self):
+                pass
+
         monkeypatch.setattr("subprocess.Popen", FakePopen)
 
         m = Monitor(name="email-watch", description="check for new emails",
                     event="monitor/email-watch")
-        _default_spawn_check(m, str(project))
+        _default_spawn_check(m, str(project), lambda verdict: None)
 
         assert len(captured_cmds) == 1
         cmd = captured_cmds[0]
         assert "--role" in cmd, f"--role missing from command: {cmd}"
         role_idx = cmd.index("--role")
         assert cmd[role_idx + 1] == "support_manager"
+        # The check agent no longer publishes — the scheduler does, after
+        # converting the verdict to conditions on the shared reconcile path.
+        assert "--post-event" not in cmd
 
     def test_entry_point_used_even_when_defaults_role_set(self, tmp_path, monkeypatch):
         """entry_point is always used for monitor spawns, even when
@@ -567,11 +583,17 @@ class TestDefaultSpawnCheckEntryPoint:
             def __init__(self, cmd, **kwargs):
                 captured_cmds.append(cmd)
 
+            def communicate(self, timeout=None):
+                return ("", "")
+
+            def kill(self):
+                pass
+
         monkeypatch.setattr("subprocess.Popen", FakePopen)
 
         m = Monitor(name="check", description="check something",
                     event="monitor/check")
-        _default_spawn_check(m, str(project))
+        _default_spawn_check(m, str(project), lambda verdict: None)
 
         assert len(captured_cmds) == 1
         cmd = captured_cmds[0]
@@ -590,3 +612,135 @@ class TestDefaultSpawnCheckEntryPoint:
         assert len(spawned) == 1
         assert spawned[0][0] is m
         assert injected == []  # no direct injection — check runs out-of-band
+
+
+# === Unified path: description-only verdicts flow through reconcile ===
+
+class TestCheckVerdictFlow:
+    """Description-only checks are just another condition detector: the
+    scheduler converts the check agent's verdict into conditions and runs
+    them through the same _reconcile -> publish path as every other flavor.
+    The check agent never publishes and never dedups."""
+
+    def _spawn(self, tmp_path, monitors=None):
+        m = (monitors or [Monitor(name="email-watch", description="check inbox",
+                                  event="monitor/support.email")])[0]
+        spawned = []
+        sched, published = _scheduler(tmp_path, [m], spawned=spawned)
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        _, _, on_verdict = spawned[0]
+        return m, sched, published, on_verdict
+
+    def test_finding_publishes_through_shared_path(self, tmp_path):
+        m, sched, published, on_verdict = self._spawn(tmp_path)
+        on_verdict({"success": True, "finding": True, "summary": "new email",
+                    "details": {"key": "msg-123", "from": "a@b.example"}})
+        assert len(published) == 1
+        assert published[0]["event"] == "monitor/support.email"
+        assert published[0]["data"]["monitor"] == "email-watch"
+        assert published[0]["data"]["summary"] == "new email"
+        assert published[0]["data"]["from"] == "a@b.example"
+
+    def test_same_key_dedups_across_checks(self, tmp_path):
+        """The same condition reported by successive checks fires once —
+        dedup is the scheduler's, by details.key, not the agent's judgment."""
+        m, sched, published, on_verdict = self._spawn(tmp_path)
+        verdict = {"success": True, "finding": True, "summary": "new email",
+                   "details": {"key": "msg-123"}}
+        on_verdict(verdict)
+        on_verdict(verdict)
+        assert len(published) == 1
+
+    def test_resolved_then_recurs_refires(self, tmp_path):
+        m, sched, published, on_verdict = self._spawn(tmp_path)
+        finding = {"success": True, "finding": True, "summary": "s",
+                   "details": {"key": "msg-1"}}
+        on_verdict(finding)
+        on_verdict({"success": True, "finding": False})  # all clear -> resolved
+        on_verdict(finding)                              # recurs -> refires
+        assert len(published) == 2
+
+    def test_indeterminate_leaves_state_untouched(self, tmp_path):
+        """No verdict / failed check must not clear an active condition (it
+        would refire spuriously) and must not fire anything itself."""
+        m, sched, published, on_verdict = self._spawn(tmp_path)
+        finding = {"success": True, "finding": True, "summary": "s",
+                   "details": {"key": "msg-1"}}
+        on_verdict(finding)
+        on_verdict(None)                                  # no parseable verdict
+        on_verdict({"success": False, "finding": False})  # failed check
+        on_verdict(finding)                               # still active -> dedup
+        assert len(published) == 1
+
+    def test_missing_key_falls_back_to_summary_hash(self, tmp_path):
+        m, sched, published, on_verdict = self._spawn(tmp_path)
+        on_verdict({"success": True, "finding": True, "summary": "same thing"})
+        on_verdict({"success": True, "finding": True, "summary": "same thing"})
+        on_verdict({"success": True, "finding": True, "summary": "other thing"})
+        assert len(published) == 2
+
+    def test_details_id_works_as_key(self, tmp_path):
+        m, sched, published, on_verdict = self._spawn(tmp_path)
+        on_verdict({"success": True, "finding": True, "summary": "a",
+                    "details": {"id": "PR-7"}})
+        on_verdict({"success": True, "finding": True, "summary": "reworded",
+                    "details": {"id": "PR-7"}})
+        assert len(published) == 1
+
+
+class TestPublishRetry:
+    """A condition is recorded active only after its event actually
+    publishes — a failed publish (event server down) retries next interval
+    instead of being silently lost."""
+
+    def test_failed_publish_refires_next_reconcile(self, tmp_path):
+        outcomes = iter([False, True])
+        calls = []
+
+        def flaky_publish(event, data):
+            ok = next(outcomes)
+            calls.append(ok)
+            return ok
+
+        m = Monitor(name="x", event="monitor/x")
+        sched, _ = _scheduler(tmp_path, [m], publish=flaky_publish)
+
+        sched._reconcile(m, [Condition(key="k", data={})])
+        assert sched.state["x"]["active"] == []  # not active until published
+
+        sched._reconcile(m, [Condition(key="k", data={})])
+        assert sched.state["x"]["active"] == ["k"]
+        assert calls == [False, True]
+
+    def test_successful_publish_marks_active(self, tmp_path):
+        m = Monitor(name="x", event="monitor/x")
+        sched, published = _scheduler(tmp_path, [m])
+        sched._reconcile(m, [Condition(key="k", data={})])
+        assert sched.state["x"]["active"] == ["k"]
+        assert len(published) == 1
+
+
+class TestParseVerdict:
+    def test_extracts_trailing_verdict_line(self):
+        from modastack.monitors.scheduler import _parse_verdict
+        out = ('Launching check...\n'
+               '{"success": true, "finding": true, "summary": "s", "details": {}}\n')
+        v = _parse_verdict(out)
+        assert v == {"success": True, "finding": True, "summary": "s",
+                     "details": {}}
+
+    def test_ignores_non_verdict_json(self):
+        from modastack.monitors.scheduler import _parse_verdict
+        assert _parse_verdict('{"unrelated": 1}\n') is None
+
+    def test_no_output_is_none(self):
+        from modastack.monitors.scheduler import _parse_verdict
+        assert _parse_verdict("") is None
+        assert _parse_verdict(None) is None
+
+    def test_last_verdict_wins(self):
+        from modastack.monitors.scheduler import _parse_verdict
+        out = ('{"finding": false}\n'
+               '{"success": true, "finding": true, "summary": "s"}\n')
+        assert _parse_verdict(out)["finding"] is True

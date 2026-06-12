@@ -180,11 +180,11 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
     subscribe += [s for s in (extra_subscribe or []) if s not in subscribe]
 
     # Subscribe to every effective monitor's event topic so the coordinator
-    # receives monitor findings regardless of adapter configuration. A finding
-    # posted via the topic endpoint is routed onto the bare type (the source is
-    # stripped to the URL path), so subscribe to that delivered topic — not the
-    # raw "monitor/<type>" string, which never matches. See
-    # monitor_subscription_keys.
+    # receives monitor findings regardless of adapter configuration. Current
+    # event servers route a posted finding onto both the bare type and the
+    # source-qualified "monitor/<type>" topic; monitor_subscription_keys
+    # subscribes to both forms so older deployed servers (bare type only,
+    # pre-#235 contract) still deliver.
     from modastack.events.subscriptions import monitor_subscription_keys
     from modastack.monitors.registry import MonitorRegistry
     monitor_events = [

@@ -300,23 +300,17 @@ class TestSlackSelfReplyLoop:
 
 
 class TestMonitorEventDelivery:
-    """Regression: a description-only monitor's finding must reach a coordinator
-    that subscribed using the manager's monitor-subscription logic.
+    """Monitor findings travel the unified path: the scheduler publishes every
+    flavor's finding via ``events.publish.post_event`` (POST /events/<type>
+    with the source in the body), and the event server routes it onto BOTH the
+    bare-type topic and the source-qualified topic — so subscriptions written
+    either way (``support.email`` or ``monitor/support.email``) match.
 
-    The bug (production, all support-manager email tests silently failed):
-    the manager subscribed to each monitor's raw ``event`` string,
-    ``monitor/support.email``. But ``events.publish.post_event`` strips the
-    source and POSTs to ``/events/support.email``; ``createTopicEvent`` then
-    routes that onto the bare-type topic ``support.email`` (no repo/team/
-    workspace field). Exact-string subscription matching never matched
-    ``monitor/support.email`` against ``support.email`` → ``delivered_to: 0``
-    → the finding vanished, and the check agent deduped it so it never
-    re-fired.
-
-    This drives the real path: subscriptions built by
-    ``monitor_subscription_keys`` for a monitor whose event is
-    ``monitor/support.email``, then a finding posted exactly the way
-    ``publish.post_event`` posts it, must be delivered.
+    History: #235 found that exact-string matching delivered only on the bare
+    type, so the manager's raw ``monitor/<type>`` subscriptions never matched
+    and findings vanished with ``delivered_to: 0``. The topic contract now
+    carries the source; ``monitor_subscription_keys`` (which subscribes to
+    both forms) is kept for skew tolerance against older deployed servers.
     """
 
     def test_monitor_finding_reaches_subscriber(self, event_server):
@@ -330,8 +324,8 @@ class TestMonitorEventDelivery:
         })
         dep_id, api_key = dep["deployment_id"], dep["api_key"]
 
-        # publish.post_event("monitor/support.email", data) POSTs to
-        # /events/support.email with {"source": "monitor", "payload": data}.
+        # The scheduler's publish path: post_event("monitor/support.email",
+        # data) POSTs to /events/support.email with {"source": "monitor"}.
         events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
             f"{base_url}/events/support.email",
             {"source": "monitor",
@@ -349,9 +343,12 @@ class TestMonitorEventDelivery:
             "new real-customer support email"
         )
 
-    def test_raw_event_string_subscription_does_not_match(self, event_server):
-        """Pin the root cause: subscribing to the raw "monitor/<type>" string
-        alone delivers nothing — proves why the helper must map to the type."""
+    def test_raw_event_string_subscription_matches(self, event_server):
+        """The topic contract: a subscription written as the full
+        ``monitor/<type>`` event string — exactly what a monitor's ``event:``
+        field says — matches, because the server routes path-topic events onto
+        the source-qualified topic too. (Before this contract, #235, it
+        silently never matched.)"""
         base_url, _ = event_server
         dep = _post_json(f"{base_url}/deployments", {
             "name": "raw-event-sub-test",
@@ -362,11 +359,39 @@ class TestMonitorEventDelivery:
         events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
             f"{base_url}/events/support.email",
             {"source": "monitor", "payload": {"summary": "x"}},
-        ), timeout=3)
+        ))
 
-        assert [e for e in events if e.get("source") == "monitor"] == [], (
-            "raw 'monitor/support.email' subscription should NOT match the "
-            "'support.email' delivery topic — if it does, the routing changed"
+        monitor_events = [e for e in events if e.get("source") == "monitor"]
+        assert len(monitor_events) == 1, (
+            "A 'monitor/support.email' subscription must match an event "
+            "POSTed to /events/support.email with source=monitor — the "
+            "source-qualified topic is part of the routing contract now."
+        )
+
+    def test_dual_subscription_delivers_exactly_once(self, event_server):
+        """A deployment subscribed to BOTH forms (what
+        monitor_subscription_keys produces) gets one copy, not two — deliver()
+        dedupes deployments across matched topics."""
+        from modastack.events.subscriptions import monitor_subscription_keys
+
+        base_url, _ = event_server
+        subs = monitor_subscription_keys(["monitor/support.email"])
+        assert len(subs) == 2  # both forms — the premise of this test
+        dep = _post_json(f"{base_url}/deployments", {
+            "name": "dual-sub-test",
+            "subscriptions": subs,
+        })
+        dep_id, api_key = dep["deployment_id"], dep["api_key"]
+
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
+            f"{base_url}/events/support.email",
+            {"source": "monitor", "payload": {"summary": "once"}},
+        ))
+
+        monitor_events = [e for e in events if e.get("source") == "monitor"]
+        assert len(monitor_events) == 1, (
+            f"Expected exactly one delivery, got {len(monitor_events)} — "
+            "matching both topic forms must not double-deliver."
         )
 
 
@@ -538,3 +563,74 @@ def _drain_ws(base_url: str, dep_id: str, api_key: str,
     finally:
         ws.close()
     return events
+
+
+class TestSchedulerEndToEnd:
+    """The unified monitor path, end to end with a REAL scheduler and a REAL
+    event server: a native check's condition is published by the scheduler
+    through events.publish.post_event and delivered to a subscriber registered
+    with the manager's monitor-subscription keys. This is the wiring that the
+    old in-process inject shortcut never exercised — and why #235 stayed
+    hidden until a description-only monitor hit it in production.
+    """
+
+    def test_native_check_finding_delivered_to_subscriber(
+            self, event_server, modastack_env):
+        from modastack.events import publish as publish_mod
+        from modastack.events.subscriptions import monitor_subscription_keys
+        from modastack.monitors.schema import Condition, Monitor
+        from modastack.monitors.scheduler import MonitorScheduler
+
+        base_url, _ = event_server
+
+        # Point the (session-scoped) project at this test server; restore
+        # after, and drop publish's per-project URL cache both ways.
+        agent_yaml = modastack_env.project_path / ".modastack" / "agent.yaml"
+        original = agent_yaml.read_text()
+        agent_yaml.write_text(original + f"\nevent_server_url: {base_url}\n")
+        publish_mod._es_url_cache.clear()
+        try:
+            m = Monitor(name="pr-conflict-check",
+                        event="monitor/pr.conflict_detected",
+                        check="conflicts", interval="1m")
+
+            class FakeRegistry:
+                def effective_monitors(self):
+                    return [m]
+
+                def projects_for(self, _m):
+                    return []
+
+            sched = MonitorScheduler(
+                state_path=modastack_env.state_dir / "e2e_monitor_state.json",
+                registry_loader=lambda: FakeRegistry(),
+                project_path=modastack_env.project_path,
+            )
+            sched._checks["conflicts"] = lambda mon, repos: [
+                Condition(key="repo#7", data={"pr_number": 7, "repo": "org/repo"})
+            ]
+
+            subs = monitor_subscription_keys(["monitor/pr.conflict_detected"])
+            dep = _post_json(f"{base_url}/deployments", {
+                "name": "scheduler-e2e-test",
+                "subscriptions": subs,
+            })
+            dep_id, api_key = dep["deployment_id"], dep["api_key"]
+
+            events = _send_and_drain(base_url, dep_id, api_key, sched.tick)
+
+            monitor_events = [e for e in events if e.get("source") == "monitor"]
+            assert len(monitor_events) == 1, (
+                "Scheduler tick did not deliver the native-check finding "
+                f"through the event server. Subscriptions: {subs}; "
+                f"received: {events}"
+            )
+            ev = monitor_events[0]
+            assert ev["type"] == "pr.conflict_detected"
+            assert ev["payload"]["monitor"] == "pr-conflict-check"
+            assert ev["payload"]["pr_number"] == 7
+            # Transactional dedup: published -> recorded active.
+            assert sched.state["pr-conflict-check"]["active"] == ["repo#7"]
+        finally:
+            agent_yaml.write_text(original)
+            publish_mod._es_url_cache.clear()
