@@ -581,6 +581,27 @@ def _emit_step_failed(run_key, workflow_name, step_name, error):
     }, blocking=True)
 
 
+def _remote_matches_slug(origin_url: str, repo_slug: str) -> bool:
+    """Return True if *origin_url* points at *repo_slug* (``owner/repo``).
+
+    Handles both HTTPS (``https://github.com/owner/repo.git``) and SSH
+    (``git@github.com:owner/repo.git``) URLs by normalising to the
+    ``owner/repo`` suffix and comparing with ``==`` to avoid substring
+    false-positives (e.g. ``org/api`` matching ``org/api-private``).
+    """
+    # Normalise: strip trailing .git, grab the last two path components.
+    url = origin_url.rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    # SSH URLs use ":" before the path; HTTPS uses "/".
+    path_part = url.split(":")[-1] if ":" in url else url
+    parts = path_part.rsplit("/", 2)
+    if len(parts) >= 2:
+        normalised = f"{parts[-2]}/{parts[-1]}"
+        return normalised == repo_slug
+    return False
+
+
 def _resolve_repo_root(ctx: VariableContext) -> str | None:
     """Resolve the local checkout for the repo identified by ``input.repo``.
 
@@ -597,7 +618,12 @@ def _resolve_repo_root(ctx: VariableContext) -> str | None:
         return None
 
     root = modastack_root()
-    repo_name = repo_slug.split("/")[-1] if "/" in repo_slug else repo_slug
+    repo_name = repo_slug.split("/")[-1]
+
+    # Reject path-traversal components in the repo name so a crafted
+    # input.repo like "org/.." cannot escape the installation root.
+    if not repo_name or repo_name in (".", "..") or "/" in repo_name or "\\" in repo_name:
+        return None
 
     # Director-style: repo is a child directory of the installation root
     candidate = root / repo_name
@@ -617,7 +643,7 @@ def _resolve_repo_root(ctx: VariableContext) -> str | None:
             ).stdout.strip()
         except Exception:
             origin_url = ""
-        if repo_slug in origin_url or f"/{repo_name}" in origin_url.split(":")[-1]:
+        if _remote_matches_slug(origin_url, repo_slug):
             return str(root)
 
     return None

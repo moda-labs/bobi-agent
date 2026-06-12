@@ -411,6 +411,57 @@ class TestResolveRepoRoot:
         )
         assert "agent/x" in branches.stdout
 
+    def test_path_traversal_rejected(self, tmp_path):
+        """A crafted input.repo with '..' must not escape the install root."""
+        from modastack.workflow.orchestrator import _resolve_repo_root
+
+        # Create a parent dir that happens to be a git repo
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        install = parent / "install"
+        install.mkdir()
+        subprocess.run(["git", "init"], cwd=parent, capture_output=True)
+
+        ctx = self._make_ctx("org/..")
+        with patch("modastack.paths.modastack_root", return_value=install):
+            result = _resolve_repo_root(ctx)
+
+        assert result is None
+
+    def test_substring_slug_does_not_match(self, tmp_path):
+        """A slug like 'org/api' must NOT match a remote for 'org/api-private'."""
+        from modastack.workflow.orchestrator import _resolve_repo_root
+
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/org/api-private.git"],
+            cwd=tmp_path,
+            capture_output=True,
+        )
+
+        ctx = self._make_ctx("org/api")
+        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+            result = _resolve_repo_root(ctx)
+
+        assert result is None
+
+    def test_ssh_remote_url_matches(self, tmp_path):
+        """SSH remote URLs (git@github.com:org/repo.git) must match."""
+        from modastack.workflow.orchestrator import _resolve_repo_root
+
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:org/somerepo.git"],
+            cwd=tmp_path,
+            capture_output=True,
+        )
+
+        ctx = self._make_ctx("org/somerepo")
+        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+            result = _resolve_repo_root(ctx)
+
+        assert result == str(tmp_path)
+
     def test_no_repo_found_returns_none(self, tmp_path):
         """When no matching checkout exists, return None."""
         from modastack.workflow.orchestrator import _resolve_repo_root
