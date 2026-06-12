@@ -39,3 +39,33 @@ def discover_subscriptions(project_path: Path) -> list[str]:
             return subs
 
     return [project_path.name]
+
+
+def monitor_subscription_keys(monitor_events: list[str]) -> list[str]:
+    """Topics the manager must subscribe to so monitor findings get delivered.
+
+    A description-only monitor posts its finding through
+    ``events.publish.post_event(monitor.event, ...)``, which splits the event
+    on the first ``/`` and POSTs only the *type* to ``/events/<type>`` (the
+    ``monitor`` source goes into the body). The event server's
+    ``createTopicEvent`` then routes that POST onto the **path topic** — the
+    bare type, e.g. ``support.email`` — because the body carries no
+    repo/team/workspace routing field.
+
+    So the topic a finding is *delivered* on is the type, NOT the full
+    ``monitor/support.email`` string. Subscribing to the raw event string
+    (as the manager did before) never matches, and the finding is silently
+    dropped with ``delivered_to: 0``. Subscribe to the delivered topic.
+
+    The raw event string is also kept for defensiveness/back-compat — it is
+    harmless if nothing is ever delivered on it.
+    """
+    keys: list[str] = []
+    for event in monitor_events:
+        if not event:
+            continue
+        delivered_topic = event.split("/", 1)[1] if "/" in event else event
+        for key in (delivered_topic, event):
+            if key not in keys:
+                keys.append(key)
+    return keys
