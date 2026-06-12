@@ -65,8 +65,15 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
 
 
 def _detect_project_root(cwd: Path | None = None) -> Path:
-    """Return the project root — the given directory or cwd."""
-    return (cwd or Path.cwd()).resolve()
+    """Return the project root — the nearest ancestor with .modastack/.
+
+    Falls back to the starting directory when no project is found above
+    it. Commands must work identically from anywhere inside the project
+    tree: binding to a raw cwd is how an agent launched from a repo
+    checkout forked its own config, state, and event subscriptions.
+    """
+    from modastack.config import resolve_project_root
+    return resolve_project_root(cwd or Path.cwd())
 
 
 def _project_state_dir(project_path: Path) -> Path:
@@ -487,7 +494,10 @@ def install(pack):
         modastack install /path/to/my-agent
         modastack install eng-team              # fetches from registry
     """
-    project_path = _detect_project_root()
+    # install targets the current directory literally — never walk up to
+    # an enclosing project, or nesting a new project inside an existing
+    # one would silently install into the parent.
+    project_path = Path.cwd().resolve()
 
     pack_path = Path(pack).resolve()
     if pack_path.is_dir() and (pack_path / "agent.yaml").exists():

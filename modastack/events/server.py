@@ -150,8 +150,8 @@ def register(base_url: str, name: str,
     return result["deployment_id"], result["api_key"]
 
 
-def _slack_team_id(token: str) -> str:
-    """Resolve a Slack workspace (team) id from a bot token via auth.test."""
+def _slack_auth_info(token: str) -> tuple[str, str]:
+    """Resolve (team_id, bot_id) from a bot token via auth.test."""
     import urllib.request
 
     try:
@@ -162,10 +162,10 @@ def _slack_team_id(token: str) -> str:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
         if data.get("ok"):
-            return data.get("team_id", "") or ""
+            return data.get("team_id", "") or "", data.get("bot_id", "") or ""
     except Exception as e:  # best-effort — never block startup
         log.debug("Slack auth.test failed during workspace registration: %s", e)
-    return ""
+    return "", ""
 
 
 def register_slack_workspaces(base_url: str, cfg) -> list[str]:
@@ -187,11 +187,17 @@ def register_slack_workspaces(base_url: str, cfg) -> list[str]:
         token = ""
     if not token:
         return []
-    team_id = _slack_team_id(token)
+    team_id, bot_id = _slack_auth_info(token)
     if not team_id:
         return []
     try:
-        body = json.dumps({"workspace_id": team_id, "bot_token": token}).encode()
+        # Send bot_id explicitly when known: the server's own auth.test
+        # fallback is best-effort, and a registration without bot_id
+        # silently disables self-reply filtering for the whole workspace.
+        record: dict = {"workspace_id": team_id, "bot_token": token}
+        if bot_id:
+            record["bot_id"] = bot_id
+        body = json.dumps(record).encode()
         req = urllib.request.Request(
             f"{base_url}/slack/workspaces",
             data=body,

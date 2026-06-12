@@ -26,18 +26,21 @@ def _state_path(name: str) -> Path:
 event_queue: SimpleQueue = SimpleQueue()
 
 
-def _load_cursor() -> int:
+def _load_cursor(path: Path | None = None) -> int:
+    path = path or _state_path("cursor.json")
     try:
-        if _state_path("cursor.json").exists():
-            data = json.loads(_state_path("cursor.json").read_text())
+        if path.exists():
+            data = json.loads(path.read_text())
             return data.get("last_seen", 0)
     except (json.JSONDecodeError, OSError):
         pass
     return 0
 
 
-def _save_cursor(seq: int) -> None:
-    _state_path("cursor.json").write_text(json.dumps({"last_seen": seq}))
+def _save_cursor(seq: int, path: Path | None = None) -> None:
+    path = path or _state_path("cursor.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"last_seen": seq}))
 
 
 def _log_event(event: dict) -> None:
@@ -139,11 +142,13 @@ class EventServerClient:
     """
 
     def __init__(self, server_url: str, deployment_id: str, api_key: str,
-                 on_event: callable = None):
+                 on_event: callable = None, cursor_path: Path | None = None):
         self.server_url = server_url.rstrip("/")
         self.deployment_id = deployment_id
         self.api_key = api_key
         self.on_event = on_event
+        # Seq numbers are per-deployment — sessions must not share a cursor.
+        self.cursor_path = cursor_path
         self._ws: websocket.WebSocketApp | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -177,7 +182,7 @@ class EventServerClient:
             self._reconnect_delay = min(self._reconnect_delay * 2, 60)
 
     def _connect(self) -> None:
-        last_seen = _load_cursor()
+        last_seen = _load_cursor(self.cursor_path)
         ws_url = (
             f"{self.server_url.replace('https://', 'wss://').replace('http://', 'ws://')}"
             f"/deployments/{self.deployment_id}/subscribe?last_seen={last_seen}"
@@ -211,7 +216,7 @@ class EventServerClient:
                     self.on_event(data)
 
                 if seq > 0:
-                    _save_cursor(seq)
+                    _save_cursor(seq, self.cursor_path)
                     ws.send(json.dumps({"type": "ack", "seq": seq}))
 
         def on_error(ws, error):

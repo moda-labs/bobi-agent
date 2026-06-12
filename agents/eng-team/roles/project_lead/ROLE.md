@@ -13,6 +13,11 @@ with humans. You post status updates to Slack directly for visibility, but
 the director is the primary human interface. When you need human input,
 message the director.
 
+**Never answer inbound Slack messages from humans.** You are not subscribed
+to Slack; conversations with humans (DMs especially) belong to the director.
+If a human's Slack message ever reaches your inbox anyway, do not reply on
+Slack — forward it to the director and let them respond.
+
 ## Communication
 
 ### Receiving work from the director

@@ -29,8 +29,10 @@ def project(tmp_path):
     return tmp_path
 
 
-def _state_file(project):
-    return project / ".modastack" / "state" / "deployment.json"
+def _state_file(project, session="sess"):
+    # Deployment state is per-session — sharing one deployment across
+    # sessions is the bug that broadcast the user's DMs to every agent.
+    return project / ".modastack" / "state" / "deployments" / f"{session}.json"
 
 
 @patch("modastack.events.drain.drain_loop")
@@ -125,6 +127,82 @@ def test_failed_put_falls_back_to_register(mock_register, mock_urlopen,
     assert saved["deployment_id"] == "dep-new"
 
 
+# --- Per-session deployment isolation (DM broadcast incident) ----------------
+
+
+@patch("modastack.events.drain.drain_loop")
+@patch("modastack.events.client.EventServerClient")
+@patch("urllib.request.urlopen")
+@patch("modastack.events.server.register")
+def test_each_session_registers_its_own_deployment(mock_register, mock_urlopen,
+                                                   mock_client, _drain, project):
+    """Two sessions from one project root must NOT share a deployment.
+
+    Regression for the prod incident: the second session PUT-added its
+    repo-scoped subscriptions onto the first session's deployment, so the
+    event server fanned the director's Slack DMs out to every project lead.
+    """
+    mock_register.side_effect = [("dep-director", "key-d"), ("dep-lead", "key-l")]
+
+    _start_event_subscription("director", ["slack:T1"], project)
+    _start_event_subscription("lead", ["github:o/r"], project)
+
+    # No cross-session PUT: the lead registers fresh, never touching the
+    # director's deployment.
+    mock_urlopen.assert_not_called()
+    assert mock_register.call_count == 2
+    assert json.loads(_state_file(project, "director").read_text())[
+        "deployment_id"] == "dep-director"
+    assert json.loads(_state_file(project, "lead").read_text())[
+        "deployment_id"] == "dep-lead"
+
+    # Each client connects to its own deployment with its own cursor.
+    dep_ids = [c.kwargs["deployment_id"] for c in mock_client.call_args_list]
+    assert dep_ids == ["dep-director", "dep-lead"]
+    cursors = [c.kwargs["cursor_path"] for c in mock_client.call_args_list]
+    assert cursors[0] != cursors[1]
+
+
+@patch("modastack.events.drain.drain_loop")
+@patch("modastack.events.client.EventServerClient")
+@patch("urllib.request.urlopen")
+@patch("modastack.events.server.register")
+def test_fresh_register_resets_session_cursor(mock_register, _urlopen,
+                                              _client, _drain, project):
+    """A new deployment starts a new seq space — a leftover cursor from a
+    previous deployment must not survive registration."""
+    from modastack.config import session_cursor_path
+    cursor = session_cursor_path(project, "sess")
+    cursor.parent.mkdir(parents=True)
+    cursor.write_text(json.dumps({"last_seen": 37}))
+    mock_register.return_value = ("dep-1", "key-1")
+
+    _start_event_subscription("sess", ["github:o/r"], project)
+
+    assert not cursor.exists()
+
+
+def test_resolve_project_root_walks_up_to_modastack(tmp_path):
+    """An agent spawned from a repo checkout inside the project must bind to
+    the real project root, not fork its own config/state/subscriptions."""
+    from modastack.config import resolve_project_root
+
+    (tmp_path / ".modastack").mkdir()
+    checkout = tmp_path / "repos" / "some-repo" / "src"
+    checkout.mkdir(parents=True)
+
+    assert resolve_project_root(checkout) == tmp_path
+    assert resolve_project_root(tmp_path) == tmp_path
+
+
+def test_resolve_project_root_without_modastack_returns_start(tmp_path):
+    from modastack.config import resolve_project_root
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert resolve_project_root(plain) == plain
+
+
 # --- Slack workspace registration (self-reply loop prevention) ---------------
 
 def _slack_resp(payload):
@@ -163,7 +241,12 @@ def test_register_slack_workspaces_posts_bot_token(monkeypatch):
 
     assert result == ["T0952"]
     assert captured["url"] == "http://localhost:8080/slack/workspaces"
-    assert captured["body"] == {"workspace_id": "T0952", "bot_token": "xoxb-test"}
+    # bot_id travels with the registration: relying on the server's own
+    # auth.test fallback left self-reply filtering silently disabled
+    # whenever that second lookup failed.
+    assert captured["body"] == {"workspace_id": "T0952",
+                                "bot_token": "xoxb-test",
+                                "bot_id": "BSELF"}
 
 
 def test_register_slack_workspaces_noop_without_token(monkeypatch):
