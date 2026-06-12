@@ -182,17 +182,38 @@ def test_fresh_register_resets_session_cursor(mock_register, _urlopen,
     assert not cursor.exists()
 
 
+def _install_root(path):
+    (path / ".modastack").mkdir(parents=True)
+    (path / ".modastack" / "agent.yaml").write_text("name: test-agent\n")
+
+
 def test_resolve_project_root_walks_up_to_modastack(tmp_path):
     """An agent spawned from a repo checkout inside the project must bind to
     the real project root, not fork its own config/state/subscriptions."""
     from modastack.config import resolve_project_root
 
-    (tmp_path / ".modastack").mkdir()
+    _install_root(tmp_path)
     checkout = tmp_path / "repos" / "some-repo" / "src"
     checkout.mkdir(parents=True)
 
     assert resolve_project_root(checkout) == tmp_path
     assert resolve_project_root(tmp_path) == tmp_path
+
+
+def test_resolve_project_root_skips_state_only_modastack(tmp_path):
+    """A state-only .modastack/ (sessions/state dropped into a repo checkout
+    by the runtime) must not capture resolution — the walk continues to the
+    installed root above it. Regression: engineer dispatch resolved a repo's
+    state-only dir as project root and died with workflow-not-found."""
+    from modastack.config import resolve_project_root
+
+    _install_root(tmp_path)
+    repo = tmp_path / "repos" / "some-repo"
+    (repo / ".modastack" / "sessions").mkdir(parents=True)
+    (repo / ".modastack" / "state").mkdir()
+
+    assert resolve_project_root(repo) == tmp_path
+    assert resolve_project_root(repo / ".modastack" / "state") == tmp_path
 
 
 def test_resolve_project_root_without_modastack_returns_start(tmp_path):

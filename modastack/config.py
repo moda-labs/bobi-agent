@@ -309,15 +309,21 @@ def save_deployment_state(project_path: Path, session: str,
 
 
 def resolve_project_root(start: Path) -> Path:
-    """Nearest ancestor (including start) containing .modastack/, else start.
+    """Nearest ancestor (including start) with .modastack/agent.yaml, else start.
 
     Agent processes inherit whatever cwd their spawner chose. The cwd must
     not silently decide which config, state, and event subscriptions an
     agent gets — an agent launched from a repo checkout inside the project
     must still resolve to the one real project root.
+
+    The marker is agent.yaml (written by install), not the bare .modastack/
+    directory: the runtime drops state-only .modastack/ dirs (sessions/,
+    state/) into repo checkouts, and stopping at one of those binds the
+    agent to a root with no config — engineer dispatch died with
+    "Workflow 'issue-lifecycle' not found" exactly this way.
     """
     start = start.resolve()
     for candidate in (start, *start.parents):
-        if (candidate / ".modastack").is_dir():
+        if (candidate / ".modastack" / "agent.yaml").is_file():
             return candidate
     return start
