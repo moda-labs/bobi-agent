@@ -160,7 +160,7 @@ class TestDoctorMemoryCheck:
     """doctor flags mismatch between running persistent agents and memory."""
 
     def test_passes_when_no_memory(self, tmp_path):
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_memory
             r = _check_memory()
         assert r.ok
@@ -169,7 +169,7 @@ class TestDoctorMemoryCheck:
         state_dir = tmp_path / ".modastack" / "state"
         mem_dir = state_dir / "memory" / "moda-director-proj"
         _write_index(mem_dir, {"managed_repos": ["org/app"]})
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_memory
             r = _check_memory()
         assert r.ok
@@ -181,7 +181,7 @@ class TestDoctorMemoryCheck:
         mem_dir.mkdir(parents=True)
         # Index with empty current-state block
         (mem_dir / "INDEX.md").write_text("---\n---\n")
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_memory
             r = _check_memory()
         assert not r.ok  # all logs empty = likely drift
@@ -194,7 +194,7 @@ class TestDoctorMemoryCheck:
         _write_index(populated, {"managed_repos": ["org/app"]})
         empty_dir = state_dir / "memory" / "moda-lead-proj"
         empty_dir.mkdir(parents=True)
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_memory
             r = _check_memory()
         assert r.ok  # some populated = ok, just note the empty one

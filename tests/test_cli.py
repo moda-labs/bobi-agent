@@ -167,9 +167,10 @@ class TestAgentCommand:
         result = runner.invoke(main, ["agents", "launch", "--role", "engineer", "--task", "X"])
         assert result.exit_code != 0
 
-    def test_role_required(self):
+    def test_role_required(self, tmp_path):
         runner = CliRunner()
-        result = runner.invoke(main, ["agents", "launch", "-w", "adhoc", "--task", "X"])
+        with patch("modastack.paths._root", tmp_path):
+            result = runner.invoke(main, ["agents", "launch", "-w", "adhoc", "--task", "X"])
         assert result.exit_code != 0
         assert "--role" in result.output
 

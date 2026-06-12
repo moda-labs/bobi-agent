@@ -221,3 +221,27 @@ class TestOutsideProject:
         # installation per-check instead of refusing to start.
         combined = result.stdout + result.stderr
         assert "no project detected" in combined.lower()
+
+    def test_transcript_outside_project(self, tmp_path):
+        """Group-level binding: transcript subcommands fail with a clean
+        usage error, not a raw 'root not bound' RuntimeError."""
+        result = subprocess.run(
+            [sys.executable, "-m", "modastack.cli", "transcript", "sessions"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(tmp_path), env={**os.environ},
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert "no modastack installation" in combined.lower()
+        assert "Traceback" not in combined
+
+    def test_workflows_status_outside_project(self, tmp_path):
+        result = subprocess.run(
+            [sys.executable, "-m", "modastack.cli", "workflows", "status"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(tmp_path), env={**os.environ},
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert "no modastack installation" in combined.lower()
+        assert "Traceback" not in combined

@@ -28,10 +28,10 @@ class WorkflowDispatcher:
         silently loading nothing.
         """
         from modastack import paths
-        installed_wf_dir = paths.workflows_dir(project_path)
+        root = project_path if project_path is not None else paths.modastack_root()
+        installed_wf_dir = paths.workflows_dir(root)
         if installed_wf_dir.exists():
-            self._load_from(installed_wf_dir,
-                            source=agent_name or str(installed_wf_dir.parent.parent))
+            self._load_from(installed_wf_dir, source=agent_name or str(root))
 
     def _load_from(self, directory: Path, source: str):
         if not directory.exists():

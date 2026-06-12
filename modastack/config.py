@@ -277,7 +277,7 @@ def _safe_session(session: str) -> str:
 
 def deployment_state_path(project_path: Path, session: str) -> Path:
     from modastack import paths
-    return (paths.modastack_dir(project_path) / "state" / "deployments"
+    return (paths.state_path(project_path) / "deployments"
             / f"{_safe_session(session)}.json")
 
 
@@ -285,7 +285,7 @@ def session_cursor_path(project_path: Path, session: str) -> Path:
     """Per-session event cursor. Seq numbers are per-deployment, so a shared
     cursor file would corrupt replay positions across sessions."""
     from modastack import paths
-    return (paths.modastack_dir(project_path) / "state" / "cursors"
+    return (paths.state_path(project_path) / "cursors"
             / f"{_safe_session(session)}.json")
 
 

@@ -18,6 +18,16 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def bound_root(tmp_path, monkeypatch):
+    """spawn_adhoc and prompt building read the bound installation root
+    (roles, registry, memory) — bind explicitly instead of relying on a
+    root leaked from earlier test files."""
+    (tmp_path / ".modastack").mkdir()
+    monkeypatch.setattr("modastack.paths._root", tmp_path)
+
+
 from modastack.subagent import (
     AgentResult,
     CheckResult,

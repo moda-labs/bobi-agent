@@ -18,16 +18,14 @@ A new repo needs AI agent management.
    cd ~/dev/new-repo
    ```
 
-2. **Initialize modastack**
-   ```bash
-   modastack init
-   ```
-   This creates:
-   - `.modastack/config.yaml` — shared team config (check this in)
-   - `.modastack/local.yaml` — your operator credentials (gitignored)
+2. **Check the installation**
+   New repos don't get their own modastack setup — there is exactly one
+   `.modastack/` per installation, at the root where `modastack install`
+   was run. Clone the repo under that root and keep the checkout clean
+   (no `.modastack/` inside it).
 
 3. **Configure task tracking**
-   Edit `.modastack/config.yaml`:
+   Edit `.modastack/agent.yaml` at the installation root:
    ```yaml
    task_tracking:
      system: github-issues  # or "linear"

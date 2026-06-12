@@ -235,6 +235,10 @@ class TestAgentConfig:
 
 
 class TestSubscribeFlag:
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
+
 
     def test_subscribe_implies_persistent(self):
         from click.testing import CliRunner

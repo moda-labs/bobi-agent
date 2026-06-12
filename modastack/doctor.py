@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
+
+from modastack.paths import bound_root
 
 
 @dataclass
@@ -84,8 +87,7 @@ def _check_install_integrity() -> CheckResult:
     import hashlib
     import json
 
-    from modastack.paths import bound_root as get_project_root
-    root = get_project_root()
+    root = bound_root()
     if not root:
         return CheckResult("Installed team", ok=True, detail="no project")
     from modastack import paths
@@ -124,9 +126,8 @@ def _check_install_integrity() -> CheckResult:
 def _check_package_requires() -> list[CheckResult]:
     """Check host-level dependencies declared in agent.yaml requires: block."""
     from modastack.config import Config, run_requires_checks
-    from modastack.paths import bound_root as get_project_root
 
-    root = get_project_root()
+    root = bound_root()
     if not root:
         return []
     try:
@@ -152,8 +153,7 @@ def _check_package_requires() -> list[CheckResult]:
 
 def _check_local_config() -> CheckResult:
     from modastack.config import _project_config_path
-    from modastack.paths import bound_root as get_project_root
-    root = get_project_root()
+    root = bound_root()
     if not root:
         return CheckResult("Project config", ok=False,
                            detail="no project detected",
@@ -174,36 +174,53 @@ def _check_single_root() -> CheckResult:
     at worst one contains an agent.yaml and captures project-root
     resolution for anything launched from that subtree.
     """
-    from modastack.paths import bound_root as get_project_root
-    root = get_project_root()
+    root = bound_root()
     if not root:
         return CheckResult("Single .modastack root", ok=True,
                            detail="no project root bound")
-    strays = []
-    for pattern in ("*/.modastack", "*/*/.modastack"):
-        for p in root.glob(pattern):
-            if not p.is_dir():
-                continue
-            rel = p.relative_to(root)
-            # The root's own .modastack contains worktrees etc. — not strays.
-            if rel.parts[0] == ".modastack":
-                continue
-            strays.append(str(rel.parent))
-    if not strays:
+    import os
+    state_only, installs = [], []
+    for dirpath, dirnames, _files in os.walk(root):
+        cur = Path(dirpath)
+        if cur == root:
+            # The root's own .modastack (worktrees, sessions, ...) is the
+            # installation, not a stray; heavy trees aren't worth walking.
+            dirnames[:] = [d for d in dirnames
+                           if d not in (".modastack", ".git", "node_modules")]
+            continue
+        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules")]
+        if ".modastack" in dirnames:
+            rel = str(cur.relative_to(root))
+            if (cur / ".modastack" / "agent.yaml").is_file():
+                installs.append(rel)
+            else:
+                state_only.append(rel)
+            dirnames.remove(".modastack")
+    if not state_only and not installs:
         return CheckResult("Single .modastack root", ok=True,
                            detail="no stray .modastack dirs below root")
+    parts, hints = [], []
+    if installs:
+        parts.append("nested installs (agent.yaml — these CAPTURE root "
+                      "resolution for anything below them): "
+                      + ", ".join(sorted(installs)))
+        hints.append("Nested installs may be deliberate (`modastack install` "
+                     "in a subdir) — if not, they are hijack vectors; remove "
+                     "the marker or the dir.")
+    if state_only:
+        parts.append("state-only strays: " + ", ".join(sorted(state_only)))
+        hints.append("State-only dirs are leftovers from cwd-bound agents — "
+                     "they may hold live cursors/sessions from before the "
+                     "upgrade; tar them up before removing.")
     return CheckResult(
         "Single .modastack root", ok=False,
-        detail="stray .modastack/ in: " + ", ".join(sorted(strays)),
-        hint="Config and state live only at the installation root. Inspect "
-             "and remove the stray dirs (tar them up first if unsure); a "
-             "stray containing agent.yaml will hijack root resolution.")
+        detail="; ".join(parts),
+        hint=" ".join(hints))
 
 
 def _check_services() -> list[CheckResult]:
     """Run service validation — native credentials, Venn, MCP servers."""
-    from modastack.paths import bound_root as get_project_root
-    root = get_project_root()
+    root = bound_root()
     if not root:
         return []
     try:
@@ -218,6 +235,10 @@ def _check_services() -> list[CheckResult]:
 
 
 def _check_workflows() -> CheckResult:
+    if bound_root() is None:
+        return CheckResult("Workflows", ok=False,
+                           detail="no project detected",
+                           hint="Run from inside a Modastack installation")
     try:
         from modastack.workflow.triggers import WorkflowDispatcher
         d = WorkflowDispatcher()
@@ -237,16 +258,15 @@ def _check_event_server() -> CheckResult:
     """Probe the event server /health endpoint."""
     from modastack.config import Config
     from modastack.events.server import health
-    from modastack.paths import bound_root as get_project_root
 
-    root = get_project_root()
+    root = bound_root()
     if root:
         try:
             cfg = Config.load(root)
             # Deployment state is per-session (state/deployments/<session>.json);
             # any registered session means the remote server is in use.
             from modastack import paths
-            deployments_dir = paths.modastack_dir(root) / "state" / "deployments"
+            deployments_dir = paths.state_path(root) / "deployments"
             registered = (deployments_dir.is_dir()
                           and any(deployments_dir.glob("*.json")))
             if cfg.event_server_url and registered:
@@ -264,12 +284,11 @@ def _check_event_server() -> CheckResult:
 
 
 def _check_recent_events() -> CheckResult:
-    from modastack.paths import bound_root as get_project_root
-    root = get_project_root()
+    root = bound_root()
     if not root:
         return CheckResult("Recent events", ok=False, detail="no project detected")
     from modastack import paths
-    events_file = paths.modastack_dir(root) / "state" / "events.jsonl"
+    events_file = paths.state_path(root) / "events.jsonl"
     if not events_file.exists():
         return CheckResult("Recent events", ok=True, detail="no events yet")
     lines = events_file.read_text().strip().splitlines()
@@ -278,12 +297,11 @@ def _check_recent_events() -> CheckResult:
 
 def _check_memory() -> CheckResult:
     """Check agent decision logs — flag agents with empty current-state blocks."""
-    from modastack.paths import bound_root as get_project_root
-    root = get_project_root()
+    root = bound_root()
     if not root:
         return CheckResult("Decision log", ok=True, detail="no project detected")
     from modastack import paths
-    memory_root = paths.modastack_dir(root) / "state" / "memory"
+    memory_root = paths.state_path(root) / "memory"
     if not memory_root.is_dir():
         return CheckResult("Decision log", ok=True, detail="no decision logs yet")
 

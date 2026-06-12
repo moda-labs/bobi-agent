@@ -247,18 +247,26 @@ modastack roles list
 
 See the setup guides for [Slack](skills/slack-setup.md) and [Linear](skills/linear-setup.md).
 
-Machine-wide credentials in `~/.modastack/config.yaml`:
+There is exactly one `.modastack/` directory per installation — created by
+`modastack install` at the directory you run it from — holding both config
+and state. `agent.yaml` is the single config file (roles, services,
+monitors, credentials); secrets use `${ENV_VAR}` references resolved from
+the environment, with `.modastack/.env` loaded at startup:
 
 ```yaml
-slack:
-  bot_token: xoxb-...
-event_server:
-  url: https://modastack-events.example.workers.dev
-linear:
-  api_key: lin_api_...
+# .modastack/agent.yaml
+services:
+  - name: slack
+    bot_token: ${SLACK_BOT_TOKEN}
+  - name: linear
+    api_key: ${LINEAR_API_KEY}
+event_server_url: https://modastack-events.example.workers.dev
 ```
 
-Per-project overrides in `.modastack/` — custom roles, workflows, monitors, and tools that take priority over the agent team defaults.
+Custom roles, workflows, monitors, and tools live under the same
+`.modastack/` and take priority over the agent team defaults. There is no
+global `~/.modastack/` and no per-repo config — repos managed by the
+installation stay clean.
 
 ## Development
 

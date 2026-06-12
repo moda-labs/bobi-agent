@@ -34,9 +34,24 @@ _root: Path | None = None
 
 
 def bind_root(path: Path | None) -> None:
-    """Bind this process's installation root (None unbinds, tests only)."""
+    """Bind this process's installation root (None unbinds, tests only).
+
+    A process has exactly one identity: rebinding to a DIFFERENT root is
+    a bug (it would silently re-identify a running process — registry,
+    state, and log writes would split across two roots), so it raises.
+    Rebinding to the same resolved path is a no-op.
+    """
     global _root
-    _root = path.resolve() if path is not None else None
+    if path is None:
+        _root = None
+        return
+    resolved = path.resolve()
+    if _root is not None and resolved != _root:
+        raise RuntimeError(
+            f"Modastack root already bound to {_root} — refusing to rebind "
+            f"to {resolved}. A process binds its identity exactly once."
+        )
+    _root = resolved
 
 
 def bound_root() -> Path | None:
@@ -118,16 +133,23 @@ def monitors_dir(root: Path | None = None) -> Path:
     return modastack_dir(root) / "monitors"
 
 
+def state_path(root: Path | None = None) -> Path:
+    """State directory path only — no mkdir, safe for read-only contexts
+    (doctor probes, list commands, path constructors)."""
+    return modastack_dir(root) / "state"
+
+
 def state_dir(root: Path | None = None) -> Path:
-    """Runtime state directory (created on demand)."""
-    d = modastack_dir(root) / "state"
+    """Runtime state directory (created on demand). Writers use this;
+    read-only contexts use state_path()."""
+    d = state_path(root)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def manager_pid_path(root: Path | None = None) -> Path:
     """Path only — no mkdir, safe to probe on unowned directories."""
-    return modastack_dir(root) / "state" / "manager.pid"
+    return state_path(root) / "manager.pid"
 
 
 def sessions_dir(root: Path | None = None) -> Path:

@@ -42,13 +42,13 @@ class TestCheckProjectConfig:
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text("entry_point: manager\nevent_server_url: https://events.test\n")
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_local_config
             r = _check_local_config()
         assert r.ok
 
     def test_fails_when_missing(self, tmp_path):
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_local_config
             r = _check_local_config()
         assert not r.ok
@@ -62,7 +62,7 @@ class TestCheckSingleRoot:
     def test_passes_with_only_root_modastack(self, tmp_path):
         (tmp_path / ".modastack" / "worktrees" / "x").mkdir(parents=True)
         (tmp_path / "jobtack").mkdir()
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_single_root
             r = _check_single_root()
         assert r.ok
@@ -71,12 +71,39 @@ class TestCheckSingleRoot:
         (tmp_path / ".modastack").mkdir()
         (tmp_path / "jobtack" / ".modastack" / "state").mkdir(parents=True)
         (tmp_path / "repos" / "other" / ".modastack").mkdir(parents=True)
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_single_root
             r = _check_single_root()
         assert not r.ok
         assert "jobtack" in r.detail
         assert "repos/other" in r.detail
+        assert "state-only" in r.detail
+
+    def test_flags_stray_at_any_depth(self, tmp_path):
+        """Depth must not bound the scan — monorepo packages and worktree
+        layouts nest .modastack leftovers 3+ levels down."""
+        (tmp_path / ".modastack").mkdir()
+        deep = tmp_path / "repos" / "org" / "app" / ".modastack"
+        deep.mkdir(parents=True)
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
+            from modastack.doctor import _check_single_root
+            r = _check_single_root()
+        assert not r.ok
+        assert "repos/org/app" in r.detail
+
+    def test_classifies_nested_install_as_capture_risk(self, tmp_path):
+        """A stray containing agent.yaml CAPTURES root resolution — it must
+        be called out separately from removable state-only leftovers."""
+        (tmp_path / ".modastack").mkdir()
+        nested = tmp_path / "checkout" / ".modastack"
+        nested.mkdir(parents=True)
+        (nested / "agent.yaml").write_text("name: rogue\n")
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
+            from modastack.doctor import _check_single_root
+            r = _check_single_root()
+        assert not r.ok
+        assert "checkout" in r.detail
+        assert "CAPTURE" in r.detail
         assert "hijack" in r.hint
 
     def test_ignores_roots_own_modastack_subtree(self, tmp_path):
@@ -84,13 +111,13 @@ class TestCheckSingleRoot:
         even when a checkout inside it carries a .modastack dir."""
         stray_in_worktree = tmp_path / ".modastack" / "worktrees" / ".modastack"
         stray_in_worktree.mkdir(parents=True)
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_single_root
             r = _check_single_root()
         assert r.ok
 
     def test_passes_without_bound_root(self):
-        with patch("modastack.paths.bound_root", return_value=None):
+        with patch("modastack.doctor.bound_root", return_value=None):
             from modastack.doctor import _check_single_root
             r = _check_single_root()
         assert r.ok
@@ -116,7 +143,7 @@ class TestCheckPackageRequires:
               - name: good-dep
                 check: "true"
                 fix: "install it" """)
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_package_requires
             results = _check_package_requires()
         assert len(results) == 1
@@ -129,7 +156,7 @@ class TestCheckPackageRequires:
                 check: "false"
                 why: "needed for tests"
                 fix: "run setup" """)
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_package_requires
             results = _check_package_requires()
         assert len(results) == 1
@@ -140,13 +167,13 @@ class TestCheckPackageRequires:
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "agent.yaml").write_text("entry_point: manager\n")
-        with patch("modastack.paths.bound_root", return_value=tmp_path):
+        with patch("modastack.doctor.bound_root", return_value=tmp_path):
             from modastack.doctor import _check_package_requires
             results = _check_package_requires()
         assert results == []
 
     def test_no_project_root(self):
-        with patch("modastack.paths.bound_root", return_value=None):
+        with patch("modastack.doctor.bound_root", return_value=None):
             from modastack.doctor import _check_package_requires
             results = _check_package_requires()
         assert results == []

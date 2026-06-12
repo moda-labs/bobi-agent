@@ -28,7 +28,7 @@ def _defaults_path(project_path: Path | None = None) -> Path | None:
     fallback.  Returns None when no project is detected.
     """
     if not project_path:
-        from modastack.sdk import get_project_root
+        from modastack.paths import bound_root as get_project_root
         project_path = get_project_root()
     if not project_path:
         return None
@@ -148,7 +148,7 @@ class MonitorRegistry:
             return True
         if existing is None:
             return False
-        from modastack.sdk import get_project_root
+        from modastack.paths import bound_root as get_project_root
         rp = get_project_root()
         if rp:
             existing.enabled = False

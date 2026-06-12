@@ -413,6 +413,7 @@ class TestRunAgentEntryRootBinding:
         root = tmp_path / "dev"
         repo = root / "jobtack"
         (root / ".modastack").mkdir(parents=True)
+        (root / ".modastack" / "agent.yaml").write_text("name: t\n")
         repo.mkdir()
 
         from modastack.subagent import _run_agent_entry
@@ -435,9 +436,26 @@ class TestRunAgentEntryRootBinding:
         repo.mkdir(parents=True)
 
         from modastack.subagent import _run_agent_entry
-        with pytest.raises(KeyError):
+        with pytest.raises(RuntimeError, match="missing 'root'|no 'root'"):
             _run_agent_entry({
                 "task": "t", "cwd": str(repo),
+                "workflow_name": "adhoc", "persistent": True, "subscribe": [],
+            })
+        mock_spawn.assert_not_called()
+
+    @patch("modastack.subagent.spawn_adhoc")
+    def test_rejects_root_without_marker(self, mock_spawn, tmp_path,
+                                         monkeypatch):
+        """A root that is not a real installation must be refused — binding
+        it would mkdir a fresh scattered .modastack at a bogus path."""
+        monkeypatch.setattr("modastack.paths._root", None)
+        bogus = tmp_path / "not-an-install"
+        bogus.mkdir()
+
+        from modastack.subagent import _run_agent_entry
+        with pytest.raises(RuntimeError, match="not a Modastack installation"):
+            _run_agent_entry({
+                "task": "t", "cwd": str(bogus), "root": str(bogus),
                 "workflow_name": "adhoc", "persistent": True, "subscribe": [],
             })
         mock_spawn.assert_not_called()

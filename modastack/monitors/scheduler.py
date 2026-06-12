@@ -64,7 +64,7 @@ def _load_checks(project_path: Path | None = None) -> dict:
     """Load check runners from installed monitors/*_checks.py files."""
     all_checks: dict = {}
     if not project_path:
-        from modastack.sdk import get_project_root
+        from modastack.paths import bound_root as get_project_root
         project_path = get_project_root()
     if not project_path:
         return all_checks
@@ -150,7 +150,7 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
     if not role:
         try:
             from modastack.config import Config
-            from modastack.sdk import get_project_root
+            from modastack.paths import bound_root as get_project_root
             root = get_project_root()
             if root:
                 cfg = Config.load(root)
@@ -173,8 +173,12 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
 
     try:
         with open(log_path, "a") as lf:
+            # cwd pins the child CLI's root resolution to this process's
+            # bound root — never whatever directory the manager happened
+            # to be started from.
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf,
-                                    text=True, start_new_session=True)
+                                    text=True, start_new_session=True,
+                                    cwd=str(paths.modastack_root()))
     except OSError as e:
         log.error(f"Failed to spawn check for monitor {monitor.name}: {e}")
         return

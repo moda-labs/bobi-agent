@@ -346,7 +346,7 @@ def run_phase_blocking(
         f"You are a {label} agent working on issue #{run_key}, "
         f"phase: {phase}. Follow the skill file instructions exactly."
     )
-    memory_prompt = _load_memory_for_session(cwd, name)
+    memory_prompt = _load_memory_for_session(name)
     if memory_prompt:
         append_text += "\n\n" + memory_prompt
 
@@ -392,7 +392,7 @@ def _resolve_project_name(cwd: str) -> str:
     return Path(cwd).name or cwd
 
 
-def _load_memory_for_session(cwd: str, session_name: str) -> str:
+def _load_memory_for_session(session_name: str) -> str:
     """Load the decision log for a session, returning formatted prompt text.
 
     Returns empty string if no memory exists. Never raises — memory loading
@@ -439,8 +439,10 @@ def spawn_adhoc(
     _emit_session_started(run_key, project, task, run_key, phase="adhoc",
                           requested_by=requested_by, role=role)
 
+    from modastack.paths import modastack_root
     from modastack.prompts.resolver import _resolve_role_prompt
-    role_prompt = _resolve_role_prompt(role, Path(cwd))
+    # Roles live at the installation root; cwd is the agent's working dir.
+    role_prompt = _resolve_role_prompt(role, modastack_root())
     label = role or "agent"
     append_parts = [
         f"You are a {label} agent working on an adhoc task. "
@@ -458,7 +460,7 @@ def spawn_adhoc(
     # Skip if the task prompt already contains it (e.g. entry-point agent
     # where build_startup_prompt() already injected memory).
     if "## Decision Log" not in task:
-        memory_prompt = _load_memory_for_session(cwd, run_key)
+        memory_prompt = _load_memory_for_session(run_key)
         if memory_prompt:
             append_parts.append(memory_prompt)
 
@@ -843,8 +845,23 @@ def _run_agent_entry(args: dict) -> None:
     # inherited, never inferred from cwd, so it survives repos that live
     # outside the installation tree. A blob without a root is a spawner
     # bug; failing loudly here beats guessing. cwd stays the working dir.
+    if "root" not in args:
+        raise RuntimeError(
+            "spawn args blob has no 'root' — the spawning process is running "
+            "older code than what is installed on disk. Restart the manager "
+            "(modastack restart) after upgrading, then re-dispatch."
+        )
     bind_root(Path(args["root"]))
     project_root = modastack_root()
+    # The root must be a real installation: state/sessions writes below
+    # would otherwise mkdir a fresh scattered .modastack at a bogus path.
+    from modastack.paths import agent_yaml_path
+    if not agent_yaml_path().is_file():
+        raise RuntimeError(
+            f"spawn args root {project_root} is not a Modastack installation "
+            f"(no .modastack/agent.yaml) — refusing to run with an unverified "
+            f"identity."
+        )
 
     if subscribe and project_root:
         _start_event_subscription(run_key, subscribe, project_root)

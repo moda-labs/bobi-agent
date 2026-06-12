@@ -87,6 +87,13 @@ def _project_state_dir(project_path: Path) -> Path:
     return paths.state_dir(project_path)
 
 
+def _ensure_root_bound() -> Path:
+    """Bind the installation root if no entry point has yet — the call is
+    for its side effect. Raises a clean UsageError outside an install."""
+    root = paths.bound_root()
+    return root if root is not None else _detect_project_root()
+
+
 
 
 @click.group()
@@ -341,7 +348,7 @@ def start(foreground, fresh, subscribe):
                          if isinstance(h, logging.FileHandler)]
         _run_from_config(project_path, cfg, extra_subscribe=extra_subscribe)
     else:
-        log_file = state_dir / "manager.log"
+        log_file = _project_state_dir(project_path) / "manager.log"
         env = os.environ.copy()
         venv_bin = str(Path(sys.executable).parent)
         local_bin = str(Path.home() / ".local" / "bin")
@@ -675,8 +682,7 @@ def stop(force):
     else:
         click.echo("No PID file found — modastack is not running.")
 
-    if paths.bound_root() is None:
-        _detect_project_root()
+    _ensure_root_bound()
     from modastack.kb.embedder import stop as stop_embedder
     stop_embedder()
 
@@ -696,10 +702,11 @@ def restart(fresh):
         modastack restart --fresh   # fresh manager session
     """
     if _has_systemd_service():
+        # Resolve before touching systemd so a missing installation fails
+        # here, not after the service has already been restarted.
+        project_path = _detect_project_root()
         if fresh:
-            project_path = _detect_project_root()
-            if project_path:
-                _clear_manager_session(project_path)
+            _clear_manager_session(project_path)
         click.echo("Restarting via systemd...")
         _systemctl("restart")
         result = subprocess.run(
@@ -707,8 +714,7 @@ def restart(fresh):
             capture_output=True, text=True, timeout=5,
         )
         pid = result.stdout.strip()
-        project_path = _detect_project_root()
-        log_path = _project_state_dir(project_path) / "manager.log" if project_path else "stderr"
+        log_path = _project_state_dir(project_path) / "manager.log"
         click.echo(f"Modastack restarted (pid {pid}). Logs: {log_path}")
         return
 
@@ -853,7 +859,7 @@ def slack_reply(text, workspace, channel, thread, edit_ts):
 @main.group()
 def transcript():
     """Session transcripts — view, search, and index conversation history."""
-    pass
+    _ensure_root_bound()
 
 
 @transcript.command("show")
@@ -1063,6 +1069,13 @@ def doctor(browser, fix):
     """
     from .doctor import run_doctor
 
+    # doctor is advisory and must run anywhere — but never silently: a
+    # green report outside an installation would be a lie.
+    if paths.bound_root() is None:
+        click.echo(click.style("⚠ No Modastack installation found at or above "
+                               "this directory — project-level checks will "
+                               "report 'no project detected'.", fg="yellow"))
+
     results = run_doctor()
 
     if browser:
@@ -1139,7 +1152,7 @@ def _offer_sandbox_fix(browser_mod) -> None:
 @main.group()
 def agents():
     """Agent management — launch, list, inspect, and cancel agents."""
-    pass
+    _ensure_root_bound()
 
 
 @agents.command("list")
@@ -1155,7 +1168,6 @@ def agents_list():
     """
     from modastack.subagent import list_agents as _list_agents
 
-    _detect_project_root()
     active = _list_agents()
     if not active:
         click.echo("No active agents.")
@@ -1249,8 +1261,8 @@ def events(tail, decisions_only):
     malformed = 0
 
     if not decisions_only:
-        events_path = paths.state_dir(project_path) / "events.jsonl"
-        if events_path and events_path.exists():
+        events_path = paths.state_path(project_path) / "events.jsonl"
+        if events_path.exists():
             for line in events_path.read_text().strip().splitlines():
                 try:
                     entry = json.loads(line)
@@ -1267,8 +1279,8 @@ def events(tail, decisions_only):
                     + (f"\n    {detail}" if detail else ""),
                 ))
 
-    decisions_path = paths.state_dir(project_path) / "decisions.jsonl"
-    if decisions_path and decisions_path.exists():
+    decisions_path = paths.state_path(project_path) / "decisions.jsonl"
+    if decisions_path.exists():
         for line in decisions_path.read_text().strip().splitlines():
             try:
                 entry = json.loads(line)
@@ -1403,7 +1415,7 @@ def transcript_inspect(session_id, limit):
 @main.group()
 def workflows():
     """Workflow engine — manage YAML-based DAG workflows."""
-    pass
+    _ensure_root_bound()
 
 
 @workflows.command("list")
@@ -2079,7 +2091,7 @@ def agents_browse():
 @main.group()
 def kb():
     """Knowledge base — create, populate, and search named KBs."""
-    pass
+    _ensure_root_bound()
 
 
 @kb.command("create")
@@ -2091,8 +2103,7 @@ def kb_create(name):
         modastack kb create docs
     """
     from modastack.kb.store import KBStore
-    if paths.bound_root() is None:
-        _detect_project_root()
+    _ensure_root_bound()
     try:
         store = KBStore.create(name)
         click.echo(f"Created KB '{name}'")
@@ -2115,8 +2126,7 @@ def kb_add(name, file_path, text):
     """
     from modastack.kb.store import KBStore
     from modastack.kb.embedder import embed
-    if paths.bound_root() is None:
-        _detect_project_root()
+    _ensure_root_bound()
 
     try:
         store = KBStore(name)
@@ -2154,8 +2164,7 @@ def kb_search(name, query, limit, mode):
     """
     from modastack.kb.store import KBStore
     from modastack.kb.embedder import embed
-    if paths.bound_root() is None:
-        _detect_project_root()
+    _ensure_root_bound()
 
     try:
         store = KBStore(name)
@@ -2187,8 +2196,7 @@ def kb_list():
         modastack kb list
     """
     from modastack.kb.store import KBStore
-    if paths.bound_root() is None:
-        _detect_project_root()
+    _ensure_root_bound()
 
     kbs = KBStore.list_kbs()
     if not kbs:
@@ -2207,8 +2215,7 @@ def kb_info(name):
         modastack kb info docs
     """
     from modastack.kb.store import KBStore
-    if paths.bound_root() is None:
-        _detect_project_root()
+    _ensure_root_bound()
 
     try:
         store = KBStore(name)
@@ -2238,8 +2245,7 @@ def kb_remove(name):
         modastack kb remove docs
     """
     from modastack.kb.store import KBStore
-    if paths.bound_root() is None:
-        _detect_project_root()
+    _ensure_root_bound()
 
     try:
         KBStore.remove(name)

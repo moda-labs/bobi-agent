@@ -297,7 +297,7 @@ class Session:
                 status="starting",
                 inbox_port=self.inbox.port,
                 pid=os.getpid(),
-                image_hash=compute_manifest_hash(Path(self.cwd)),
+                image_hash=compute_manifest_hash(),
             )
         )
 
