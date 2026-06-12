@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -603,9 +604,21 @@ def _resolve_repo_root(ctx: VariableContext) -> str | None:
     if candidate.is_dir() and (candidate / ".git").exists():
         return str(candidate)
 
-    # Single-repo: the installation root IS the repo
+    # Single-repo: the installation root IS the repo — but only if the
+    # remote URL contains the slug so we don't run git ops against the
+    # wrong repo (e.g. an event for org/other-repo hitting the install root).
     if (root / ".git").exists():
-        return str(root)
+        try:
+            origin_url = subprocess.run(
+                ["git", "-C", str(root), "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+        except Exception:
+            origin_url = ""
+        if repo_slug in origin_url or f"/{repo_name}" in origin_url.split(":")[-1]:
+            return str(root)
 
     return None
 

@@ -5,6 +5,7 @@ Covers issue #227: worktree + branch removal on pull_request.closed.
 Covers issue #246: cleanup must resolve repo from input, not installation root.
 """
 
+import os
 import subprocess
 import textwrap
 from pathlib import Path
@@ -350,16 +351,65 @@ class TestResolveRepoRoot:
         assert result == str(child)
 
     def test_single_repo_layout(self, tmp_path):
-        """When the installation root itself is a git repo, resolve to it."""
+        """When the installation root itself is a git repo whose remote
+        matches the slug, resolve to it."""
         from modastack.workflow.orchestrator import _resolve_repo_root
 
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/org/somerepo.git"],
+            cwd=tmp_path,
+            capture_output=True,
+        )
 
         ctx = self._make_ctx("org/somerepo")
         with patch("modastack.paths.modastack_root", return_value=tmp_path):
             result = _resolve_repo_root(ctx)
 
         assert result == str(tmp_path)
+
+    def test_single_repo_slug_mismatch_returns_none(self, tmp_path):
+        """When the installation root is a git repo but its remote does NOT
+        match the event's slug, return None — do not run git ops against
+        the wrong repo.  Regression: a same-named branch must survive."""
+        from modastack.workflow.orchestrator import _resolve_repo_root
+
+        # Installation root is a git repo for a *different* project
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/org/install-repo.git"],
+            cwd=tmp_path,
+            capture_output=True,
+        )
+        # Need a commit before we can create branches
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            cwd=tmp_path,
+            capture_output=True,
+            env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+                 "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"},
+        )
+        # Create a branch with the same name the cleanup would target
+        subprocess.run(
+            ["git", "checkout", "-b", "agent/x"],
+            cwd=tmp_path,
+            capture_output=True,
+        )
+
+        ctx = self._make_ctx("org/some-other-repo")
+        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+            result = _resolve_repo_root(ctx)
+
+        assert result is None
+
+        # The branch must still exist — no git ops should have run
+        branches = subprocess.run(
+            ["git", "branch", "--list", "agent/x"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+        assert "agent/x" in branches.stdout
 
     def test_no_repo_found_returns_none(self, tmp_path):
         """When no matching checkout exists, return None."""
