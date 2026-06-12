@@ -15,6 +15,13 @@ monitors:
     event: monitor/pr.stale
     check: stale_prs
 
+  - name: disk-free-check
+    description: Alert when disk usage exceeds threshold (prevents disk-full incidents)
+    interval: 5m
+    event: monitor/system.disk_low
+    check: disk_free
+    threshold_pct: 85
+
   - name: team-status-roundup
     description: >
       Twice-daily status roundup. The director pings every project lead

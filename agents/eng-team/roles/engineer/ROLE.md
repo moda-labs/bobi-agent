@@ -267,18 +267,15 @@ of implementing the wrong thing is hours of wasted work.
 
 ### Worktree setup
 
-Each ticket gets its own git worktree. The worktree base path is provided
-in your prompt as `Worktree base: <path>`. Use it to create worktrees:
+Worktrees are managed by the workflow orchestrator. Your working directory
+is already set to the worktree path — you do not need to create one manually.
 
-```bash
-WORKTREE_BASE="<worktree-base-from-prompt>"
-mkdir -p "$WORKTREE_BASE"
-git worktree add -b agent/<issue-id> "$WORKTREE_BASE/<issue-id>"
-cd "$WORKTREE_BASE/<issue-id>"
-```
+The worktree lives at `.claude/worktrees/<session-name>` inside the repo root.
+The branch name follows the `agent/<issue-id>` convention.
 
-If the branch already exists: `git worktree add "$WORKTREE_BASE/<issue-id>" agent/<issue-id>`
-If the worktree already exists: just `cd` into it.
+**Cleanup is automatic.** When a PR is closed (merged or abandoned), the
+`pr-closed` workflow removes the worktree and branch deterministically.
+You never need to clean up worktrees manually.
 
 ### Push
 

@@ -130,6 +130,7 @@ def run_workflow(
     timeout: int = 3600,
     interactive: bool = True,
     role: str = "",
+    input_fields: dict | None = None,
 ) -> bool:
     """Execute a workflow end-to-end with a single agent session."""
     run_key = run_key or "adhoc"
@@ -161,7 +162,10 @@ def run_workflow(
     })
 
     ctx = VariableContext()
-    ctx.set_scope("input", {"task": task, "repo": repo, "run_key": run_key})
+    input_scope = {"task": task, "repo": repo, "run_key": run_key}
+    if input_fields:
+        input_scope.update(input_fields)
+    ctx.set_scope("input", input_scope)
     if requested_by:
         ctx.set_scope("requested_by", requested_by)
 
@@ -394,6 +398,23 @@ async def _run_workflow_async(
                 step_idx += 1
                 continue
 
+            # Native action step — deterministic, no LLM
+            if step.action:
+                log.info(f"Native action step {step.name}: {step.action}")
+                result = _execute_native_action(step, ctx, cwd)
+                ctx.set_scope(step.name, result)
+                for k, v in result.items():
+                    ctx.set_flat(k, v)
+                _emit_lifecycle_event("agent/step.completed", {
+                    "run_key": run_key,
+                    "workflow": workflow.name,
+                    "step": step.name,
+                    "outputs": result,
+                    "text": f"Native step {step.name} completed: {result.get('status', '')}",
+                })
+                step_idx += 1
+                continue
+
             # Notify step — deterministic, no LLM
             if step.notify:
                 _execute_notify_step(step, ctx, cwd, run_key, workflow.name)
@@ -552,6 +573,38 @@ def _emit_step_failed(run_key, workflow_name, step_name, error):
         "error": error,
         "text": f"Step {step_name} failed: {error}",
     }, blocking=True)
+
+
+def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
+    """Native action: clean up the worktree for a closed PR's head branch."""
+    from modastack.workflow.cleanup import cleanup_worktree
+
+    head_branch = ctx.resolve("${{ input.head_branch }}") if "input" in ctx.scopes else ""
+    if not head_branch or head_branch.startswith("${{"):
+        return {"status": "skipped", "reason": "no head_branch in input"}
+
+    repo_root = str(_find_project_root(cwd))
+    return cleanup_worktree(repo_root, head_branch)
+
+
+# Registry of native action functions.
+# Each receives (ctx: VariableContext, cwd: str) and returns a dict.
+_NATIVE_ACTIONS: dict = {
+    "cleanup_worktree": _cleanup_worktree_action,
+}
+
+
+def _execute_native_action(step: StepDef, ctx: VariableContext, cwd: str) -> dict:
+    """Run a registered native action. Returns the action's result dict."""
+    action_fn = _NATIVE_ACTIONS.get(step.action)
+    if action_fn is None:
+        log.error(f"Unknown native action: {step.action}")
+        return {"status": "error", "reason": f"unknown action: {step.action}"}
+    try:
+        return action_fn(ctx, cwd)
+    except Exception as e:
+        log.error(f"Native action {step.action} failed: {e}")
+        return {"status": "error", "reason": str(e)}
 
 
 def _execute_notify_step(

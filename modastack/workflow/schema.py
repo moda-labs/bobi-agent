@@ -5,6 +5,7 @@ A workflow is a linear sequence of steps. Each step is either:
 - A route step: deterministic branch based on handoff outputs
 - An await step: suspends the workflow waiting for an external event
 - A notify step: deterministic notification (e.g. Slack message)
+- A native action step: runs a registered Python function, no LLM
 """
 
 from __future__ import annotations
@@ -42,6 +43,9 @@ class StepDef:
     # Notify step fields
     notify: str = ""         # notification target (e.g. "slack")
     message: str = ""        # message template (supports ${{scope.key}})
+
+    # Native action step fields
+    action: str = ""         # registered action name (e.g. "cleanup_worktree")
 
 
 @dataclass
@@ -89,6 +93,7 @@ def load_workflow(path: Path) -> Workflow:
             await_event=s.get("await", ""),
             notify=s.get("notify", ""),
             message=s.get("message", ""),
+            action=s.get("action", ""),
         )
         steps.append(step)
 
