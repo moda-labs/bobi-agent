@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.17.0 — 2026-06-11
+
+Auto-dispatch for issue assignment and a monitor subscription fix.
+
+### Added
+- Issue assignment auto-dispatches to the issue-lifecycle workflow
+  (#226): `github.issues.assigned` events route deterministically to the
+  workflow instead of relying on the manager LLM to route them
+- Integration test for Slack self-reply loop prevention (#218):
+  workspace registration accepts an optional `bot_id` so tests can
+  bypass Slack `auth.test`
+
+### Fixed
+- Monitor event subscription is unconditional via MonitorRegistry
+  (#219): packs using only native adapters (slack/linear/github) never
+  subscribed to monitor topics, and `cfg.monitors` was empty for
+  install-model packs since monitors live in `monitors/defaults.yaml`
+
 ## 0.16.0 — 2026-06-11
 
 Slack routing fixes: channel-scoped team routing and the self-reply loop.
