@@ -1,18 +1,26 @@
 # Auth & Tenancy — Accounts, Connections, and the Hosted Event Server
 
-Status: **thought collection — not started.** This doc accumulates design
-thinking until the work begins. Tracked by **#142**; the prior
-implementation attempt (PR #143) was closed as stale with a
-[salvage map](https://github.com/moda-labs/modastack/pull/143) — read it
-before writing any code.
+Status: **two layers.**
 
-Sequencing: **after #177** (event contract v2 worker adapter refactor), so
-auth is written once against the stable adapter structure instead of being
-refactored through the v2 cutover.
+- **v1 — Bubble-scoped isolation + HMAC signing (anonymous).** Specced and
+  ready to build: epic **#238**, core **#240**, loopback bind **#241**,
+  observability **#242**. Draws the transport trust boundary with **no
+  identity**, and ships first. Described in the next section.
+- **v2 — Accounts & tenancy (the rest of this doc).** Identity, service
+  connections, and the per-resource ACL that **binds onto** v1 bubbles.
+  Still **thought collection**; tracked by **#142** and **#239**. The prior
+  attempt (PR #143) was closed as stale with a
+  [salvage map](https://github.com/moda-labs/modastack/pull/143) — read it
+  before writing v2 code.
 
-Scope note: this started as "GitHub OAuth login" and grew. The real
-subject is **tenancy**: who may subscribe to which events, and how the
-boundary is enforced. Login is one piece of that.
+Sequencing: v1 ships now (no dependencies). v2 lands **after #177** (event
+contract v2 worker adapter refactor), so it's written once against the
+stable adapter structure.
+
+Scope note: this started as "GitHub OAuth login" and grew. The real subject
+is **tenancy**: who may subscribe to which events, and how the boundary is
+enforced. v1 draws that boundary anonymously (bubbles); v2 attaches identity
+to it. Login is one piece of v2.
 
 ---
 
@@ -34,6 +42,72 @@ Goals (from #142, restated for the multi-tenant frame):
 Non-goals for the first cut: no org model (no sharing connections between
 accounts), no fine-grained roles, no encryption-at-rest story beyond the
 platform's.
+
+## v1 — Bubble-scoped isolation + HMAC signing (anonymous, ships first)
+
+Status: **specced, ready to build** — epic #238, core #240, loopback bind
+#241, observability #242. This layer needs none of the accounts machinery
+below; v2 binds identity onto it later.
+
+The accounts model in the rest of this doc is the destination, but it's
+blocked on the GitHub-App login flow and the v2 adapter cutover — and
+meanwhile `POST /events/{topic}` drives autonomous agents while
+unauthenticated. v1 closes that now, without identity.
+
+**Bubbles.** A bubble is a trust domain on the event server. Every modastack
+instance owns one bubble, shared by all its agents. Events are scoped to a
+bubble — a publish reaches only same-bubble subscribers; cross-bubble read
+and write are impossible. Registration is **open and self-namespacing**:
+registering creates or joins a bubble and grants access to *that bubble
+only*. A stranger who registers lands in their own empty bubble — harmless.
+So there is **no registration gate, no shared registration token, no
+`wrangler secret put`**; the boundary is "what a registration grants" (its
+own bubble), not "who may register." Registration becomes **mint-or-join**:
+the first `modastack start` mints the bubble (server returns `bubble_id` +
+key); each agent session then joins by signing its registration with the
+stored key.
+
+**A bubble is a proto-account.** Today it's anonymous, self-minted on first
+`start`. The accounts model below is the graduation (#239): registration
+gains an account identity and the anonymous bubble binds to it — same flow,
+identity added as one parameter. Everything below (connections,
+`authorizeSubscription`) then layers on top of bubbles.
+
+**Credential — HMAC, not bearer.** Each bubble has a secret key, established
+once at registration (over TLS) and **never transmitted again**. Every
+publish and every WS subscribe is **HMAC-signed** with the bubble key (the
+construction the worker already uses for webhook signatures), with a signed
+timestamp for replay protection. The key rides the wire once, not per
+request. → This **supersedes** the old "Generic topics" v1 fix (deployment
+`api_key` as a bearer token) and invariant #3's "api_key remains the WS
+credential" below. HMAC is symmetric — the server holds the key to verify;
+if a hosted multi-tenant server ever becomes an untrusted party, the
+graduation is **asymmetric signing (Ed25519)**, and the wire format reserves
+an algorithm field for it.
+
+**Webhooks stay global in v1.** Inbound GitHub/Slack/Linear events
+authenticate by source signature and fan out to whatever subscribed to the
+resource topic, **regardless of bubble** — `github:org/repo` is a global
+key. Authorizing a resource subscription needs an account that owns the
+resource, so inbound subscription ACL is v2 (the `authorizeSubscription`
+work below). Single-operator it's a non-issue; it's the boundary v2 closes
+before multi-tenant.
+
+**Local server.** A co-located local server is safe by **loopback bind**
+(#241) — `127.0.0.1` unless explicitly widened — so it needs no ACL. The
+bubble/HMAC path secures the shared/remote (worker) surface. This refines
+the "local gets no auth" decision below: local stays zero-config, but the
+reason is loopback.
+
+---
+
+## v2 — Accounts & tenancy
+
+Everything from here down is the v2 layer: it attaches identity to the v1
+bubbles above. Where it says "deployment holds an `api_key`" or "api_key is
+the WS credential," read that as v1's bubble key + HMAC; v2's addition is
+the *account binding* and the *per-resource ACL*, not a new transport
+credential.
 
 ## Settled decisions
 
@@ -83,8 +157,11 @@ platform's.
   on the EC2 box (copy `auth.yaml`, see open questions) → `modastack
   restart`. A grace mode is compatibility machinery for a fleet that
   doesn't exist.
-- **Local event server gets no auth.** Auth handlers live in `core.ts`;
-  `local.ts` doesn't mount them. Local is single-operator by construction.
+- **Local event server is safe by loopback, not by an ACL.** v1 binds the
+  local server to `127.0.0.1` unless explicitly widened (#241), so a
+  co-located server needs no account ACL. The v2 account handlers (login,
+  connections) live in `core.ts` and are worker-only — `local.ts` doesn't
+  mount them. Local stays single-operator, zero-config.
 
 ## The tenancy model
 
@@ -111,8 +188,9 @@ account (github user)
    below.
 3. **Delivery is exact-match between the two.** No wildcard or prefix
    subscriptions that can span tenants; the deployment asserts nothing at
-   delivery time. The per-deployment `api_key` remains the WebSocket
-   credential; session tokens gate management endpoints only.
+   delivery time. Publish and WS subscribe are **HMAC-signed with the bubble
+   key** (v1 — supersedes the old per-deployment-`api_key`-as-bearer);
+   session tokens gate management endpoints only.
 
 If those hold, a deployment receives only the subscriptions implied by its
 keys, because keys can't be registered without authorization and events
@@ -218,14 +296,14 @@ pattern as Slack. Key-shape change coordinates with the v2 adapter work
 
 ### Generic topics
 
-`POST /events/{topic}` is currently **unauthenticated and global** — in a
-multi-tenant world that's an event-injection vector (worse than reading:
-events drive autonomous agents) and a cross-tenant broadcast (two tenants
-using topic `deploy.failed` hear each other). v1 fix:
-
-- Posting requires a deployment `api_key`.
-- Topics are implicitly namespaced to the posting deployment's account, on
-  both publish and subscribe. Single-tenant users never notice.
+**Solved by v1 bubbles** (see the v1 section; #240). `POST /events/{topic}`
+was unauthenticated and global — an event-injection vector (events drive
+autonomous agents) and a cross-tenant broadcast (two tenants on topic
+`deploy.failed` hearing each other). v1 closes both: publishing is
+HMAC-signed with the bubble key, and topics are namespaced to the posting
+bubble on publish and subscribe, so generic events never cross bubbles. v2
+adds nothing here — when bubbles bind to accounts, the namespacing becomes
+identity-aware for free.
 
 ### Outbound endpoints
 
@@ -289,6 +367,10 @@ outbound, not just to event delivery.**
   user-to-server token; CLI and session model unaffected. No action now.
 
 ## Rollout
+
+This is the **v2** rollout. v1 bubbles need none of it — an instance
+self-mints its bubble key at first `start`, registration is open, and there
+is no secret to set, so v1 ships with no cutover and no manual step.
 
 1. Deploy worker with auth required (hard cutover — new registrations
    need a session; existing deployment api_keys keep working for WS/event
