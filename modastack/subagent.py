@@ -700,8 +700,20 @@ def launch_agent(
 
 def _start_event_subscription(session_name: str, subscribe: list[str],
                                project_path: Path) -> None:
-    """Start event client + drain loop for a subscribing agent."""
-    from modastack.config import Config, load_deployment_state, save_deployment_state
+    """Start event client + drain loop for a subscribing agent.
+
+    Each session registers its OWN event-server deployment, scoped to
+    exactly its subscribe list. Deployments are never shared between
+    sessions: the server fans every matching event out to every WebSocket
+    on a deployment, so a shared deployment unions all sessions'
+    subscriptions and every agent receives everyone's events (the incident
+    where every project lead received and answered the user's Slack DMs
+    to the director).
+    """
+    from modastack.config import (
+        Config, load_deployment_state, save_deployment_state,
+        session_cursor_path,
+    )
     from modastack.events.client import EventServerClient
     from modastack.events.drain import drain_loop
     from modastack.events.server import (
@@ -710,16 +722,20 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
 
     cfg = Config.load(project_path)
     es_url = cfg.event_server_url
-    state = load_deployment_state(project_path)
+    state = load_deployment_state(project_path, session_name)
     es_key = state.get("api_key", "")
     es_deployment = state.get("deployment_id", "")
+    cursor_path = session_cursor_path(project_path, session_name)
 
     def _register_with_retry(url: str, attempts: int = 3) -> tuple[str, str]:
         last_err: Exception | None = None
         for attempt in range(attempts):
             try:
                 dep, key = register(url, session_name, subscribe)
-                save_deployment_state(project_path, dep, key)
+                save_deployment_state(project_path, session_name, dep, key)
+                # A fresh deployment starts a fresh seq space — a leftover
+                # cursor would skip or mis-replay events on first connect.
+                cursor_path.unlink(missing_ok=True)
                 return dep, key
             except Exception as e:
                 last_err = e
@@ -745,10 +761,13 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             log.info("Connected to existing local event server on port %d", es_port)
         es_deployment, es_key = _register_with_retry(es_url)
     elif not (es_deployment and es_key):
-        # No saved deployment — register fresh rather than PUT to a
-        # guaranteed-400 empty deployment URL.
+        # No saved deployment for this session — register fresh rather
+        # than PUT to a guaranteed-400 empty deployment URL.
         es_deployment, es_key = _register_with_retry(es_url)
     else:
+        # This session restarting with its own saved deployment — sync any
+        # new subscription keys onto it. Never PUT to another session's
+        # deployment; state is per-session by construction.
         import json as _json, urllib.request
         try:
             req = urllib.request.Request(
@@ -775,6 +794,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         server_url=es_url,
         deployment_id=es_deployment,
         api_key=es_key,
+        cursor_path=cursor_path,
     )
     client.start()
 
@@ -808,8 +828,13 @@ def _run_agent_entry(args: dict) -> None:
     subscribe = args.get("subscribe", [])
     input_fields = args.get("input_fields", {})
 
+    from modastack.config import resolve_project_root
     from modastack.sdk import set_project_root
-    project_root = Path(cwd).resolve()
+    # The spawner's cwd choice must not fork the agent's identity: config,
+    # state, and event subscriptions all resolve from the project root, so
+    # an agent launched from e.g. a repo checkout inside the project still
+    # binds to the one real .modastack root. cwd stays the working dir.
+    project_root = resolve_project_root(Path(cwd))
     set_project_root(project_root)
 
     if subscribe and project_root:

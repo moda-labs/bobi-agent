@@ -199,7 +199,7 @@ def _check_workflows() -> CheckResult:
 
 def _check_event_server() -> CheckResult:
     """Probe the event server /health endpoint."""
-    from modastack.config import Config, load_deployment_state
+    from modastack.config import Config
     from modastack.events.server import health
     from modastack.sdk import get_project_root
 
@@ -207,8 +207,12 @@ def _check_event_server() -> CheckResult:
     if root:
         try:
             cfg = Config.load(root)
-            state = load_deployment_state(root)
-            if cfg.event_server_url and state.get("api_key"):
+            # Deployment state is per-session (state/deployments/<session>.json);
+            # any registered session means the remote server is in use.
+            deployments_dir = root / ".modastack" / "state" / "deployments"
+            registered = (deployments_dir.is_dir()
+                          and any(deployments_dir.glob("*.json")))
+            if cfg.event_server_url and registered:
                 return CheckResult("Event server", ok=True,
                                    detail=f"remote ({cfg.event_server_url})")
         except FileNotFoundError:

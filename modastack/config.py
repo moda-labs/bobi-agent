@@ -259,12 +259,35 @@ class Config:
 
 
 # --- Event server deployment state (ephemeral, auto-registered) ---
+#
+# One deployment per SESSION, never shared. When sessions shared one
+# deployment (a single deployment.json per project), every agent's
+# subscriptions were unioned onto it and the event server fanned every
+# matching event out to every connected agent — project leads received
+# the user's Slack DMs to the director and replied to them.
 
 
-def load_deployment_state(project_path: Path) -> dict:
-    """Load event server deployment_id + api_key from state dir."""
+def _safe_session(session: str) -> str:
+    import re
+    return re.sub(r"[^A-Za-z0-9._-]", "_", session) or "_"
+
+
+def deployment_state_path(project_path: Path, session: str) -> Path:
+    return (project_path / ".modastack" / "state" / "deployments"
+            / f"{_safe_session(session)}.json")
+
+
+def session_cursor_path(project_path: Path, session: str) -> Path:
+    """Per-session event cursor. Seq numbers are per-deployment, so a shared
+    cursor file would corrupt replay positions across sessions."""
+    return (project_path / ".modastack" / "state" / "cursors"
+            / f"{_safe_session(session)}.json")
+
+
+def load_deployment_state(project_path: Path, session: str) -> dict:
+    """Load a session's event server deployment_id + api_key."""
     import json
-    state_file = project_path / ".modastack" / "state" / "deployment.json"
+    state_file = deployment_state_path(project_path, session)
     if not state_file.exists():
         return {}
     try:
@@ -273,13 +296,34 @@ def load_deployment_state(project_path: Path) -> dict:
         return {}
 
 
-def save_deployment_state(project_path: Path, deployment_id: str, api_key: str) -> None:
-    """Save event server deployment_id + api_key to state dir."""
+def save_deployment_state(project_path: Path, session: str,
+                          deployment_id: str, api_key: str) -> None:
+    """Save a session's event server deployment_id + api_key."""
     import json
-    state_dir = project_path / ".modastack" / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    state_file = state_dir / "deployment.json"
+    state_file = deployment_state_path(project_path, session)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text(json.dumps({
         "deployment_id": deployment_id,
         "api_key": api_key,
     }))
+
+
+def resolve_project_root(start: Path) -> Path:
+    """Nearest ancestor (including start) with .modastack/agent.yaml, else start.
+
+    Agent processes inherit whatever cwd their spawner chose. The cwd must
+    not silently decide which config, state, and event subscriptions an
+    agent gets — an agent launched from a repo checkout inside the project
+    must still resolve to the one real project root.
+
+    The marker is agent.yaml (written by install), not the bare .modastack/
+    directory: the runtime drops state-only .modastack/ dirs (sessions/,
+    state/) into repo checkouts, and stopping at one of those binds the
+    agent to a root with no config — engineer dispatch died with
+    "Workflow 'issue-lifecycle' not found" exactly this way.
+    """
+    start = start.resolve()
+    for candidate in (start, *start.parents):
+        if (candidate / ".modastack" / "agent.yaml").is_file():
+            return candidate
+    return start
