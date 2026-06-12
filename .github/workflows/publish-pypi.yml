@@ -28,17 +28,22 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
-  dogfood:
-    name: Dogfood end-to-end
+  smoke:
+    # Verifies the published artifact end-to-end with no external repo:
+    # install the in-repo pack into a throwaway project, then prove the
+    # agent (a) comes up, (b) receives an event from the outside world
+    # through the real pipeline (event server -> drain -> inbox), and
+    # (c) responds to a blocking `modastack ask`. The old flow dogfooded
+    # GitHub issue-lifecycle against moda-labs/modastack-dogfood; that
+    # repo is archived (#181) and issue-lifecycle is the eng-team pack's
+    # job, not the release gate's.
+    name: Release smoke (agent up + responsive)
     needs: publish
     runs-on: self-hosted
     timeout-minutes: 20
     env:
-      DOGFOOD_REPO: moda-labs/modastack-dogfood
       PROD_DIR: /home/ubuntu/dev
     steps:
-      # The pack now lives in this repo (#180); the dogfood repo is only
-      # the issue/webhook sink for the smoke run until it's archived.
       - uses: actions/checkout@v4
 
       - name: Extract version
@@ -60,14 +65,14 @@ jobs:
           exit 1
 
       - name: Set up isolated smoke environment
-        # Validation runs in a throwaway dir with its own venv and a fresh
-        # dogfood clone. The production deployment in ~/dev (director +
-        # repos + uv tool install) is not touched until promotion below.
+        # Validation runs in a throwaway project dir with its own venv.
+        # The production deployment in ~/dev (director + repos + uv tool
+        # install) is not touched until promotion below.
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           VERSION="${{ steps.version.outputs.version }}"
           SMOKE="$RUNNER_TEMP/smoke"
-          rm -rf "$SMOKE" && mkdir -p "$SMOKE"
+          rm -rf "$SMOKE" && mkdir -p "$SMOKE/project"
           echo "SMOKE=$SMOKE" >> "$GITHUB_ENV"
           uv venv "$SMOKE/venv"
           # CPU-only torch first: the smoke env needs embeddings, not CUDA —
@@ -75,100 +80,71 @@ jobs:
           uv pip install -p "$SMOKE/venv/bin/python" torch --index-url https://download.pytorch.org/whl/cpu
           uv pip install -p "$SMOKE/venv/bin/python" "modastack==$VERSION"
           "$SMOKE/venv/bin/modastack" --version
-          git clone "https://github.com/$DOGFOOD_REPO" "$SMOKE/modastack-dogfood"
 
       - name: Install agent pack and start smoke instance
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
-          cd "$SMOKE/modastack-dogfood"
+          cd "$SMOKE/project"
+          git init -q
           mkdir -p .modastack
-          # Only the Venn key carries over from prod. MODASTACK_EVENT_SERVER
-          # stays unset so the smoke instance runs an isolated local event
-          # server instead of the production Cloudflare Worker.
-          grep '^VENN_API_KEY=' "$PROD_DIR/modastack-dogfood/.modastack/.env" > .modastack/.env || true
+          # Only the Venn key carries over from prod (the pack's email
+          # service preflights it). MODASTACK_EVENT_SERVER stays unset so
+          # the smoke instance runs an isolated local event server instead
+          # of the production Cloudflare Worker.
+          grep '^VENN_API_KEY=' "$PROD_DIR/.modastack/.env" > .modastack/.env
           "$SMOKE/venv/bin/modastack" install "$GITHUB_WORKSPACE/agents/dogfood-content-review" < /dev/null
           "$SMOKE/venv/bin/modastack" start
 
           LOG=".modastack/state/manager.log"
           for i in $(seq 1 90); do
-            grep -q "Drain loop active\|Modastack running" "$LOG" 2>/dev/null && break
+            grep -q "Drain loop active" "$LOG" 2>/dev/null && break
             sleep 2
           done
+          grep -q "Drain loop active" "$LOG" || { echo "Manager never became ready"; tail -40 "$LOG"; exit 1; }
           test -f .modastack/state/manager.pid
           echo "Smoke instance ready"
 
-      - name: Create issue and assign to modastack
-        id: issue
+      - name: 'Smoke 1: event from the outside world reaches the agent'
+        # Post a synthetic event to a topic the manager actually subscribed
+        # to (read from its own log, so this tracks pack changes) and assert
+        # the event server delivered it to a live subscriber, then that it
+        # landed in the project event log.
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
-          cd "$SMOKE/modastack-dogfood"
+          cd "$SMOKE/project"
+          VERSION="${{ steps.version.outputs.version }}"
+          LOG=".modastack/state/manager.log"
+
+          TOPIC=$(grep "Event subscription started" "$LOG" | tail -1 | grep -oE "'[^']+'" | tail -1 | tr -d "'")
+          test -n "$TOPIC" || { echo "No subscribed topics found"; exit 1; }
+          echo "Posting smoke event to topic: $TOPIC"
+
+          RESP=$(curl -sf -X POST "http://localhost:8080/events/$TOPIC" \
+            -H "Content-Type: application/json" \
+            -d "{\"type\":\"smoke.ping\",\"source\":\"release-pipeline\",\"payload\":{\"version\":\"$VERSION\",\"text\":\"Automated release smoke ping — no action required.\"}}")
+          echo "Event server response: $RESP"
+          DELIVERED=$(echo "$RESP" | grep -oE '"delivered_to":[0-9]+' | grep -oE '[0-9]+')
+          [ "${DELIVERED:-0}" -ge 1 ] || { echo "Event was not delivered to any subscriber"; exit 1; }
+
+          for i in $(seq 1 15); do
+            "$SMOKE/venv/bin/modastack" events 2>/dev/null | grep -q "release-pipeline" && { echo "Event visible in project event log"; exit 0; }
+            sleep 2
+          done
+          echo "Event never appeared in the project event log"
+          exit 1
+
+      - name: 'Smoke 2: agent responds to a blocking ask'
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+          cd "$SMOKE/project"
           VERSION="${{ steps.version.outputs.version }}"
 
-          # Label is smoke-test ONLY (no trigger labels like 'agent') so the
-          # production director, which also subscribes to this repo via the
-          # cloud event server, ignores it. The smoke instance is driven by
-          # the direct webhook injection below, not by labels.
-          ISSUE_URL=$(gh issue create \
-            --repo "$DOGFOOD_REPO" \
-            --title "[CI] Release smoke test v${VERSION}" \
-            --body "Automated smoke test for modastack v${VERSION}. Write a one-line file, commit, and close this issue." \
-            --label "smoke-test" \
-            --assignee "modastack")
-          ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
-          echo "issue_num=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
-          echo "Created issue #$ISSUE_NUM"
-
-          # Notify the manager about the new issue.
-          # Try the event server webhook first; fall back to the CLI
-          # inbox if the local event server isn't running (fixes #157).
-          WEBHOOK_PAYLOAD="{
-            \"action\": \"assigned\",
-            \"issue\": {
-              \"number\": $ISSUE_NUM,
-              \"title\": \"[CI] Release smoke test v${VERSION}\",
-              \"state\": \"open\",
-              \"labels\": [{\"name\": \"smoke-test\"}],
-              \"assignees\": [{\"login\": \"modastack\"}],
-              \"user\": {\"login\": \"github-actions\"},
-              \"body\": \"Automated smoke test. Write a one-line file, commit, and close this issue.\",
-              \"html_url\": \"$ISSUE_URL\"
-            },
-            \"repository\": {\"full_name\": \"$DOGFOOD_REPO\"},
-            \"sender\": {\"login\": \"github-actions\"}
-          }"
-
-          if curl -sf -X POST "http://localhost:8080/webhooks/github" \
-            -H "Content-Type: application/json" \
-            -H "x-github-event: issues" \
-            -H "x-github-delivery: smoke-$(date +%s)" \
-            -d "$WEBHOOK_PAYLOAD" 2>/dev/null; then
-            echo "Event delivered via webhook"
-          else
-            echo "Event server not reachable — delivering via CLI inbox"
-            "$SMOKE/venv/bin/modastack" message "GitHub issue assigned: issue #${ISSUE_NUM} '[CI] Release smoke test v${VERSION}' in ${DOGFOOD_REPO} was assigned to modastack. Action: assigned. Labels: smoke-test. Body: Automated smoke test. Write a one-line file, commit, and close this issue. URL: ${ISSUE_URL}"
-          fi
-
-      - name: Wait for modastack to close the issue
-        run: |
-          export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
-          ISSUE_NUM="${{ steps.issue.outputs.issue_num }}"
-
-          echo "Waiting for modastack to close issue #$ISSUE_NUM..."
-          for i in $(seq 1 60); do
-            STATE=$(gh issue view "$ISSUE_NUM" --repo "$DOGFOOD_REPO" --json state --jq '.state' 2>/dev/null)
-            if [ "$STATE" = "CLOSED" ]; then
-              echo "Issue #$ISSUE_NUM closed by modastack"
-              echo "=== SMOKE TEST PASSED ==="
-              exit 0
-            fi
-            echo "  Poll $i/60: state=$STATE"
-            sleep 10
-          done
-
-          echo "Issue #$ISSUE_NUM was not closed within 10 minutes"
-          echo "Final state: $(gh issue view $ISSUE_NUM --repo $DOGFOOD_REPO --json state,comments --jq '{state: .state, comments: (.comments | length)}')"
-          echo "=== SMOKE TEST FAILED ==="
-          exit 1
+          RESPONSE=$("$SMOKE/venv/bin/modastack" ask \
+            "Release smoke check for v${VERSION}: reply with exactly the string SMOKE-OK and nothing else." \
+            --timeout 240)
+          echo "Manager response: $RESPONSE"
+          echo "$RESPONSE" | grep -q "SMOKE-OK" || { echo "=== SMOKE TEST FAILED ==="; exit 1; }
+          echo "=== SMOKE TEST PASSED ==="
 
       - name: Promote release to production
         # Runs only if the smoke test passed. This is the ONLY step that
@@ -189,6 +165,14 @@ jobs:
           cd "$PROD_DIR"
           modastack stop 2>/dev/null || true
           sleep 2
+          # Regenerate prod config from the released pack (v0.15.0 cutover
+          # lesson: restarting a new CLI against a stale installed config
+          # degrades silently). Sync the prod checkout's agents/ to the tag
+          # so the established source-of-truth path stays valid; session
+          # rotation on image change (#173) handles freshness.
+          git -C modastack fetch origin --tags
+          git -C modastack checkout "refs/tags/v$VERSION" -- agents/
+          modastack install modastack/agents/eng-team < /dev/null
           # Strip RUNNER_TRACKING_ID or the Actions runner kills the
           # daemonized director during post-job process cleanup.
           env -u RUNNER_TRACKING_ID modastack start
@@ -201,18 +185,10 @@ jobs:
         if: always()
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
-          if [ -d "$SMOKE/modastack-dogfood" ]; then
-            cd "$SMOKE/modastack-dogfood"
+          if [ -d "$SMOKE/project" ]; then
+            cd "$SMOKE/project"
             "$SMOKE/venv/bin/modastack" stop --force 2>/dev/null || true
             "$SMOKE/venv/bin/modastack" event-server stop 2>/dev/null || true
-          fi
-          ISSUE_NUM="${{ steps.issue.outputs.issue_num }}"
-          if [ -n "$ISSUE_NUM" ]; then
-            STATE=$(gh issue view "$ISSUE_NUM" --repo "$DOGFOOD_REPO" --json state --jq '.state' 2>/dev/null)
-            if [ "$STATE" = "OPEN" ]; then
-              gh issue close "$ISSUE_NUM" --repo "$DOGFOOD_REPO" \
-                --comment "Smoke test did not complete. Closing (cleanup)." 2>/dev/null || true
-            fi
           fi
           rm -rf "$SMOKE"
 
