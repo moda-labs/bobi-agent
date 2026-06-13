@@ -231,6 +231,56 @@ class TestLogEvent:
         assert len(lines) == 2
         assert content.endswith("\n")
 
+    def test_per_session_writes_to_session_file(self, tmp_path):
+        """When session_id is provided, _log_event writes to events-<session>.jsonl."""
+        with patch("modastack.events.client._state_path",
+                   side_effect=lambda name: tmp_path / name):
+            _log_event({"type": "push", "source": "github", "seq": 5}, session_id="lead-abc")
+
+        session_file = tmp_path / "events-lead-abc.jsonl"
+        assert session_file.exists()
+        entry = json.loads(session_file.read_text().strip())
+        assert entry["type"] == "push"
+        assert entry["seq"] == 5
+        # Legacy file should NOT be written
+        assert not (tmp_path / "events.jsonl").exists()
+
+    def test_per_session_includes_seq_and_deployment(self, tmp_path):
+        """Per-session log entries include seq and deployment_id for dedup."""
+        with patch("modastack.events.client._state_path",
+                   side_effect=lambda name: tmp_path / name):
+            _log_event({"type": "a", "source": "x", "seq": 10, "deployment_id": "dep-1"},
+                       session_id="sess1")
+
+        session_file = tmp_path / "events-sess1.jsonl"
+        entry = json.loads(session_file.read_text().strip())
+        assert entry["seq"] == 10
+        assert entry["deployment_id"] == "dep-1"
+
+    def test_no_session_id_writes_to_legacy_path(self, tmp_path):
+        """Without session_id, _log_event writes to events.jsonl (backward compat)."""
+        jsonl = tmp_path / "events.jsonl"
+        with patch("modastack.events.client._state_path", return_value=jsonl):
+            _log_event({"type": "a", "source": "x"})
+
+        assert jsonl.exists()
+
+    def test_two_sessions_write_separate_files(self, tmp_path):
+        """Two sessions writing concurrently produce separate files."""
+        with patch("modastack.events.client._state_path",
+                   side_effect=lambda name: tmp_path / name):
+            _log_event({"type": "push", "source": "github", "seq": 1}, session_id="sess-a")
+            _log_event({"type": "pr", "source": "github", "seq": 1}, session_id="sess-b")
+
+        file_a = tmp_path / "events-sess-a.jsonl"
+        file_b = tmp_path / "events-sess-b.jsonl"
+        assert file_a.exists()
+        assert file_b.exists()
+        entry_a = json.loads(file_a.read_text().strip())
+        entry_b = json.loads(file_b.read_text().strip())
+        assert entry_a["type"] == "push"
+        assert entry_b["type"] == "pr"
+
 
 class TestEventQueue:
 

@@ -149,6 +149,81 @@ class TestFindWaiting:
                             lambda: tmp_path / "nonexistent")
         assert WorkflowRun.find_waiting("approval") is None
 
+    def test_filters_by_repo(self, runs_dir):
+        """find_waiting with repo filters out runs from other repos."""
+        _make_run(runs_dir, run_id="w-mod", status="waiting",
+                  await_event="approval", run_key="42",
+                  repo="moda-labs/modastack")
+        _make_run(runs_dir, run_id="w-job", status="waiting",
+                  await_event="approval", run_key="42",
+                  repo="moda-labs/jobtack")
+        found = WorkflowRun.find_waiting("approval", run_key="42",
+                                         repo="moda-labs/jobtack")
+        assert found is not None
+        assert found.run_id == "w-job"
+
+    def test_repo_empty_matches_all(self, runs_dir):
+        """find_waiting with repo='' matches any repo (backward compat)."""
+        _make_run(runs_dir, run_id="w-any", status="waiting",
+                  await_event="approval", run_key="10",
+                  repo="moda-labs/modastack")
+        found = WorkflowRun.find_waiting("approval", run_key="10", repo="")
+        assert found is not None
+        assert found.run_id == "w-any"
+
+    def test_repo_mismatch_returns_none(self, runs_dir):
+        """find_waiting with wrong repo returns None even if run_key matches."""
+        _make_run(runs_dir, run_id="w-other", status="waiting",
+                  await_event="approval", run_key="42",
+                  repo="moda-labs/modastack")
+        found = WorkflowRun.find_waiting("approval", run_key="42",
+                                         repo="moda-labs/jobtack")
+        assert found is None
+
+
+# ---------------------------------------------------------------------------
+# WorkflowRun.claim
+# ---------------------------------------------------------------------------
+
+class TestClaim:
+    def test_claim_returns_true_on_first_call(self, runs_dir):
+        """claim() returns True and renames the file to .resuming.json."""
+        run = _make_run(runs_dir, run_id="cl1", status="waiting",
+                        await_event="approval")
+        assert run.claim()
+        assert run.status == "resuming"
+        assert run.resumed_at != ""
+        # Original file removed, .resuming.json exists
+        assert not (runs_dir / "cl1.json").exists()
+        assert (runs_dir / "cl1.resuming.json").exists()
+
+    def test_claim_returns_false_on_second_call(self, runs_dir):
+        """Second claim() on the same run returns False (race lost)."""
+        run = _make_run(runs_dir, run_id="cl2", status="waiting",
+                        await_event="approval")
+        assert run.claim()
+        assert not run.claim()
+
+    def test_claimed_run_excluded_from_find_waiting(self, runs_dir):
+        """After claim(), find_waiting no longer returns the run."""
+        run = _make_run(runs_dir, run_id="cl3", status="waiting",
+                        await_event="approval", run_key="5")
+        run.claim()
+        found = WorkflowRun.find_waiting("approval", run_key="5")
+        assert found is None
+
+    def test_claim_concurrent_only_one_wins(self, runs_dir):
+        """Simulate two processes finding the same run — only one claim succeeds."""
+        _make_run(runs_dir, run_id="cl4", status="waiting",
+                  await_event="approval", run_key="7")
+        # Both load the same run
+        run_a = WorkflowRun.load("cl4")
+        run_b = WorkflowRun.load("cl4")
+        result_a = run_a.claim()
+        result_b = run_b.claim()
+        assert result_a != result_b  # exactly one wins
+        assert (result_a and not result_b) or (not result_a and result_b)
+
 
 # ---------------------------------------------------------------------------
 # WorkflowRun.list_runs

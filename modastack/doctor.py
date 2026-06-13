@@ -288,11 +288,17 @@ def _check_recent_events() -> CheckResult:
     if not root:
         return CheckResult("Recent events", ok=False, detail="no project detected")
     from modastack import paths
-    events_file = paths.state_path(root) / "events.jsonl"
-    if not events_file.exists():
+    state_dir = paths.state_path(root)
+    # Count lines across per-session files and legacy events.jsonl.
+    event_files = list(state_dir.glob("events-*.jsonl"))
+    legacy = state_dir / "events.jsonl"
+    if legacy.exists():
+        event_files.append(legacy)
+    if not event_files:
         return CheckResult("Recent events", ok=True, detail="no events yet")
-    lines = events_file.read_text().strip().splitlines()
-    return CheckResult("Recent events", ok=True, detail=f"{len(lines)} events logged")
+    total = sum(len(f.read_text().strip().splitlines()) for f in event_files)
+    return CheckResult("Recent events", ok=True,
+                       detail=f"{total} events logged across {len(event_files)} file(s)")
 
 
 def _check_memory() -> CheckResult:

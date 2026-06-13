@@ -293,3 +293,47 @@ class TestEventsCommand:
         assert result.exit_code == 0, result.output
         assert "deploy" in result.output
         assert "1 malformed" in result.output
+
+    def test_reads_per_session_event_files(self, tmp_path):
+        """modastack events reads events-*.jsonl files and merges them."""
+        state = tmp_path / ".modastack" / "state"
+        state.mkdir(parents=True)
+        ev1 = {"timestamp": "2026-01-01T00:00:01", "source": "github", "type": "push", "seq": 1, "deployment_id": "d1"}
+        ev2 = {"timestamp": "2026-01-01T00:00:02", "source": "github", "type": "pr", "seq": 2, "deployment_id": "d1"}
+        (state / "events-sess-a.jsonl").write_text(json.dumps(ev1) + "\n")
+        (state / "events-sess-b.jsonl").write_text(json.dumps(ev2) + "\n")
+        runner = CliRunner()
+        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+            result = runner.invoke(main, ["events"])
+        assert result.exit_code == 0, result.output
+        assert "push" in result.output
+        assert "pr" in result.output
+
+    def test_deduplicates_events_by_seq_deployment(self, tmp_path):
+        """Same (seq, deployment_id) from different session files is shown once."""
+        state = tmp_path / ".modastack" / "state"
+        state.mkdir(parents=True)
+        ev = {"timestamp": "2026-01-01T00:00:01", "source": "github", "type": "push", "seq": 5, "deployment_id": "d1"}
+        (state / "events-sess-a.jsonl").write_text(json.dumps(ev) + "\n")
+        (state / "events-sess-b.jsonl").write_text(json.dumps(ev) + "\n")
+        runner = CliRunner()
+        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+            result = runner.invoke(main, ["events"])
+        assert result.exit_code == 0, result.output
+        # "push" should appear exactly once in the output
+        assert result.output.count("push") == 1
+
+    def test_legacy_and_session_files_merged(self, tmp_path):
+        """Legacy events.jsonl is merged with per-session files."""
+        state = tmp_path / ".modastack" / "state"
+        state.mkdir(parents=True)
+        legacy = {"timestamp": "2026-01-01T00:00:01", "source": "github", "type": "legacy_push"}
+        session = {"timestamp": "2026-01-01T00:00:02", "source": "github", "type": "new_pr", "seq": 1, "deployment_id": "d1"}
+        (state / "events.jsonl").write_text(json.dumps(legacy) + "\n")
+        (state / "events-sess-a.jsonl").write_text(json.dumps(session) + "\n")
+        runner = CliRunner()
+        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+            result = runner.invoke(main, ["events"])
+        assert result.exit_code == 0, result.output
+        assert "legacy_push" in result.output
+        assert "new_pr" in result.output

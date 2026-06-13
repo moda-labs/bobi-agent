@@ -43,14 +43,23 @@ def _save_cursor(seq: int, path: Path | None = None) -> None:
     path.write_text(json.dumps({"last_seen": seq}))
 
 
-def _log_event(event: dict) -> None:
+def _log_event(event: dict, session_id: str = "") -> None:
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "type": event.get("type", ""),
         "source": event.get("source", ""),
         "payload": event.get("payload", event.get("data", {})),
     }
-    path = _state_path("events.jsonl")
+    # Include seq and deployment_id for cross-session dedup when present.
+    seq = event.get("seq")
+    deployment_id = event.get("deployment_id")
+    if seq is not None:
+        entry["seq"] = seq
+    if deployment_id is not None:
+        entry["deployment_id"] = deployment_id
+
+    filename = f"events-{session_id}.jsonl" if session_id else "events.jsonl"
+    path = _state_path(filename)
     prefix = ""
     if path.exists() and path.stat().st_size > 0:
         with open(path, "rb") as f:
@@ -208,7 +217,7 @@ class EventServerClient:
                 data = msg.get("data", {})
                 seq = data.get("seq", 0)
 
-                _log_event(data)
+                _log_event(data, session_id=self.deployment_id)
                 event_queue.put(data)
                 log.info(f"Event queued: {data.get('source', '?')}/{data.get('type', '?')}")
 
