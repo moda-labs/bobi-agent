@@ -224,6 +224,17 @@ class TestClaim:
         assert result_a != result_b  # exactly one wins
         assert (result_a and not result_b) or (not result_a and result_b)
 
+    def test_save_after_claim_cleans_up_resuming_file(self, runs_dir):
+        """save() after claim() removes the orphaned .resuming.json file."""
+        run = _make_run(runs_dir, run_id="cl5", status="waiting",
+                        await_event="approval")
+        run.claim()
+        assert (runs_dir / "cl5.resuming.json").exists()
+        run.status = "running"
+        run.save()
+        assert (runs_dir / "cl5.json").exists()
+        assert not (runs_dir / "cl5.resuming.json").exists()
+
 
 # ---------------------------------------------------------------------------
 # WorkflowRun.list_runs

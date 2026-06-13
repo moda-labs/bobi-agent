@@ -44,6 +44,10 @@ class WorkflowRun:
         tmp = path.with_name(f".{self.run_id}.json.tmp")
         tmp.write_text(data)
         tmp.replace(path)
+        # Clean up the .resuming.json left by claim() if it exists.
+        resuming = path.with_name(f"{self.run_id}.resuming.json")
+        if resuming.exists():
+            resuming.unlink()
 
     @classmethod
     def from_dict(cls, data: dict) -> WorkflowRun:
