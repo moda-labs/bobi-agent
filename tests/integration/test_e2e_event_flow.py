@@ -136,19 +136,21 @@ class TestEndToEndEventFlow:
         urllib.request.urlopen(req, timeout=5)
 
         # Wait for the event to be processed — look for the manager's
-        # response in the events.jsonl state file
-        events_file = modastack_env.state_dir / "events.jsonl"
+        # response in per-session event files (events-*.jsonl)
         deadline = time.monotonic() + 60
         event_logged = False
         while time.monotonic() < deadline:
-            if events_file.exists():
-                content = events_file.read_text()
+            event_files = list(modastack_env.state_dir.glob("events-*.jsonl"))
+            for ef in event_files:
+                content = ef.read_text()
                 if "503" in content or "Update docs" in content:
                     event_logged = True
                     break
+            if event_logged:
+                break
             time.sleep(1)
 
-        assert event_logged, "Event not found in events.jsonl"
+        assert event_logged, "Event not found in events-*.jsonl files"
 
 
 def _find_event_server_port(log_file) -> int:

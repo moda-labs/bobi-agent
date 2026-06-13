@@ -58,7 +58,7 @@ def _log_event(event: dict, session_id: str = "") -> None:
     if deployment_id is not None:
         entry["deployment_id"] = deployment_id
 
-    filename = f"events-{session_id}.jsonl" if session_id else "events.jsonl"
+    filename = f"events-{session_id or 'default'}.jsonl"
     path = _state_path(filename)
     prefix = ""
     if path.exists() and path.stat().st_size > 0:

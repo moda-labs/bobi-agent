@@ -289,11 +289,7 @@ def _check_recent_events() -> CheckResult:
         return CheckResult("Recent events", ok=False, detail="no project detected")
     from modastack import paths
     state_dir = paths.state_path(root)
-    # Count lines across per-session files and legacy events.jsonl.
     event_files = list(state_dir.glob("events-*.jsonl"))
-    legacy = state_dir / "events.jsonl"
-    if legacy.exists():
-        event_files.append(legacy)
     if not event_files:
         return CheckResult("Recent events", ok=True, detail="no events yet")
     total = sum(len(f.read_text().strip().splitlines()) for f in event_files)

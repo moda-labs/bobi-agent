@@ -1262,11 +1262,7 @@ def events(tail, decisions_only):
 
     if not decisions_only:
         state_dir = paths.state_path(project_path)
-        # Read per-session event files (events-*.jsonl) and legacy events.jsonl.
         event_files = list(state_dir.glob("events-*.jsonl"))
-        legacy = state_dir / "events.jsonl"
-        if legacy.exists():
-            event_files.append(legacy)
 
         seen_events: set[tuple] = set()  # (seq, deployment_id) dedup
 

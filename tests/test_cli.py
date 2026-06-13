@@ -266,7 +266,7 @@ class TestEventsCommand:
         state.mkdir(parents=True)
         good = {"timestamp": "2026-01-01T00:00:00", "source": "github", "type": "push", "data": {}}
         # Write a good line, a corrupted line, and another good line
-        (state / "events.jsonl").write_text(
+        (state / "events-default.jsonl").write_text(
             json.dumps(good) + "\n"
             + "NOT VALID JSON\n"
             + json.dumps({**good, "type": "pr"}) + "\n"
@@ -323,8 +323,8 @@ class TestEventsCommand:
         # "push" should appear exactly once in the output
         assert result.output.count("push") == 1
 
-    def test_legacy_and_session_files_merged(self, tmp_path):
-        """Legacy events.jsonl is merged with per-session files."""
+    def test_ignores_legacy_events_jsonl(self, tmp_path):
+        """Legacy events.jsonl (without session prefix) is not read."""
         state = tmp_path / ".modastack" / "state"
         state.mkdir(parents=True)
         legacy = {"timestamp": "2026-01-01T00:00:01", "source": "github", "type": "legacy_push"}
@@ -335,5 +335,5 @@ class TestEventsCommand:
         with patch("modastack.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, ["events"])
         assert result.exit_code == 0, result.output
-        assert "legacy_push" in result.output
+        assert "legacy_push" not in result.output
         assert "new_pr" in result.output
