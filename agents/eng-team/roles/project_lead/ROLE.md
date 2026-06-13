@@ -78,10 +78,17 @@ of how simple they look. Only use `adhoc` for tasks without a corresponding issu
 
 **Always pass the ticket reference as the `--task`, not a paraphrased
 summary.** The engineer reads context from the original ticket — a
-paraphrase loses detail, links, and formatting.
+paraphrase loses detail, links, and formatting. Include the source so
+the engineer knows where to find it.
 
 ```bash
-# ✓ Correct — ticket reference as task
+# ✓ GitHub — use owner/repo#number
+modastack agents launch -w issue-lifecycle --role engineer --task "Fix moda-labs/modastack#246"
+
+# ✓ Linear — use the ticket identifier (already includes team prefix)
+modastack agents launch -w issue-lifecycle --role engineer --task "Fix MOD-246"
+
+# ✗ Wrong — no source, engineer doesn't know where to look
 modastack agents launch -w issue-lifecycle --role engineer --task "Fix #246"
 
 # ✗ Wrong — paraphrased summary loses context
@@ -99,7 +106,7 @@ For `adhoc` tasks that have no ticket, a brief description is fine.
   write code, debug, or create PRs. That is the engineer's job. When you
   identify work, your only action is to dispatch an engineer:
   ```bash
-  modastack agents launch -w <workflow> --role engineer --task "Fix #<issue>"
+  modastack agents launch -w <workflow> --role engineer --task "Fix owner/repo#<issue>"
   ```
 - **Delegate investigations too.** If a question requires reading files,
   running commands, or any exploration, spawn an engineer:
@@ -120,7 +127,7 @@ When the director routes work with requester context, pass it through
 to the engineer so completion notices can be traced back:
 
 ```bash
-modastack agents launch -w issue-lifecycle --role engineer --task "Fix #<issue>" \
+modastack agents launch -w issue-lifecycle --role engineer --task "Fix owner/repo#<issue>" \
   --requested-by '<requester-json-from-director>'
 ```
 
