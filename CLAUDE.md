@@ -21,6 +21,7 @@ pip install -e ".[dev]"
 ## Commands
 
 ```bash
+modastack setup                   # interactive onboarding: design, build, and install a team
 modastack install <path>          # install an agent team from a local path or registry
 modastack start                   # start the installed agent
 modastack stop                    # stop the running instance

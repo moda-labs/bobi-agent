@@ -553,7 +553,8 @@ def install(pack):
         click.echo("\n".join(parts))
 
     # Prompt for any required env vars and write .modastack/.env
-    from modastack.config import find_required_env_vars, parse_env_file
+    from modastack.config import (find_required_env_vars, parse_env_file,
+                                  write_env_file)
     env_vars = find_required_env_vars(project_path)
     if env_vars:
         env_file = installed / ".env"
@@ -571,9 +572,7 @@ def install(pack):
                 if value:
                     existing[var] = value
 
-            env_file.write_text(
-                "\n".join(f"{k}={v}" for k, v in sorted(existing.items())) + "\n"
-            )
+            write_env_file(env_file, existing)
             click.echo(f"Credentials saved to .modastack/.env")
 
     if local_source:
@@ -586,6 +585,53 @@ def install(pack):
         click.echo("\nSource of truth: .modastack/ — edit in place and check in to customize.")
 
     click.echo(f"Run `modastack start` to launch.")
+
+
+@main.command()
+@click.option("--model", default=None,
+              help="Model for the setup session (alias or full ID).")
+@click.option("--resume", is_flag=True, help="Resume an interrupted setup.")
+def setup(model, resume):
+    """Interactively design, build, and install an agent team.
+
+    A guided conversation that goes from an idea to a runnable agent
+    team: pick an existing team or design your own, connect services,
+    discover monitors, and install. Interrupt anytime — `--resume`
+    picks up where you left off.
+    """
+    # Like install, setup targets the current directory literally — it
+    # CREATES the installation root, so it never walks up to an
+    # enclosing project.
+    project_path = Path.cwd().resolve()
+
+    # Setup is often the very first command a new user runs — fail with
+    # a pointed message instead of a spawn error deep in the SDK.
+    import shutil as _shutil
+    from modastack.sdk import get_cli_path
+    if not _shutil.which("claude") and not Path(get_cli_path()).exists():
+        raise click.UsageError(
+            "the Claude Code CLI is required for setup — install it first "
+            "(https://claude.com/claude-code), then re-run `modastack setup`.")
+
+    if not resume:
+        from modastack.setup.state import SetupState
+        from modastack.setup.tools import installed_team_name
+
+        in_progress = SetupState.load(project_path)
+        if in_progress and not in_progress.finished:
+            click.confirm(
+                f"An interrupted setup exists (stage: {in_progress.stage.value}) "
+                "— resume it with `modastack setup --resume`. Start over and "
+                "discard it?", abort=True)
+
+        name = installed_team_name(project_path)
+        if name:
+            click.confirm(
+                f"'{name}' is already installed here — setup can replace it. "
+                "Continue?", abort=True)
+
+    from modastack.setup import run_setup
+    raise SystemExit(run_setup(project_path, model=model, resume=resume))
 
 
 def _manager_session_name(project_path: Path, role: str | None = None) -> str:
