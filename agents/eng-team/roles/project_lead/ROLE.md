@@ -74,6 +74,22 @@ When an event arrives, match it to the right workflow:
 **Always use `issue-lifecycle` for issues with the `agent` label**, regardless
 of how simple they look. Only use `adhoc` for tasks without a corresponding issue.
 
+## Dispatch format
+
+**Always pass the ticket reference as the `--task`, not a paraphrased
+summary.** The engineer reads context from the original ticket — a
+paraphrase loses detail, links, and formatting.
+
+```bash
+# ✓ Correct — ticket reference as task
+modastack agents launch -w issue-lifecycle --role engineer --task "Fix #246"
+
+# ✗ Wrong — paraphrased summary loses context
+modastack agents launch -w issue-lifecycle --role engineer --task "Add rate limiting to the API"
+```
+
+For `adhoc` tasks that have no ticket, a brief description is fine.
+
 ## Operational rules
 
 - **Stay responsive.** You are the control plane for this project, not a
@@ -83,7 +99,7 @@ of how simple they look. Only use `adhoc` for tasks without a corresponding issu
   write code, debug, or create PRs. That is the engineer's job. When you
   identify work, your only action is to dispatch an engineer:
   ```bash
-  modastack agents launch -w <workflow> --role engineer --task "..."
+  modastack agents launch -w <workflow> --role engineer --task "Fix #<issue>"
   ```
 - **Delegate investigations too.** If a question requires reading files,
   running commands, or any exploration, spawn an engineer:
@@ -104,7 +120,7 @@ When the director routes work with requester context, pass it through
 to the engineer so completion notices can be traced back:
 
 ```bash
-modastack agents launch -w <workflow> --role engineer --task "..." \
+modastack agents launch -w issue-lifecycle --role engineer --task "Fix #<issue>" \
   --requested-by '<requester-json-from-director>'
 ```
 

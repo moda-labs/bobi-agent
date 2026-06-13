@@ -1814,7 +1814,7 @@ def agents_launch(workflow, role, run_key, task, timeout, wait, post_event, requ
     Use 'modastack roles list' to see available roles.
 
     Examples:
-        modastack agents launch -w issue-lifecycle --role engineer --id 42 --task "Work on issue 42"
+        modastack agents launch -w issue-lifecycle --role engineer --id 42 --task "Fix #42"
         modastack agents launch -w adhoc --role engineer --task "Why is CI failing?"
         modastack agents launch -w adhoc --role engineer --task "Be a team lead" --persistent
         modastack agents launch -w adhoc --role manager --subscribe moda-labs/modastack --persistent
