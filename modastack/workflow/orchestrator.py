@@ -39,16 +39,24 @@ log = logging.getLogger(__name__)
 MAX_HANDOFF_RETRIES = 2
 
 
-def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None = None) -> bool:
+def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None = None,
+                         repo: str = "") -> bool:
     """Check if any suspended workflow is waiting for this event type and resume it.
 
     Called by the manager when it receives an event that might unblock a workflow.
     Returns True if a workflow was resumed.
+
+    *repo* scopes the lookup to a specific repository so that identical
+    run_keys in different repos do not collide.
     """
     from modastack.workflow.triggers import WorkflowDispatcher
 
-    run = WorkflowRun.find_waiting(event_type, run_key)
+    run = WorkflowRun.find_waiting(event_type, run_key, repo=repo)
     if not run:
+        return False
+
+    if not run.claim():
+        log.info(f"Run {run.run_id} already claimed by another process")
         return False
 
     dispatcher = WorkflowDispatcher()

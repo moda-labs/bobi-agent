@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -43,6 +44,10 @@ class WorkflowRun:
         tmp = path.with_name(f".{self.run_id}.json.tmp")
         tmp.write_text(data)
         tmp.replace(path)
+        # Clean up the .resuming.json left by claim() if it exists.
+        resuming = path.with_name(f"{self.run_id}.resuming.json")
+        if resuming.exists():
+            resuming.unlink()
 
     @classmethod
     def from_dict(cls, data: dict) -> WorkflowRun:
@@ -68,9 +73,45 @@ class WorkflowRun:
         path = _runs_dir() / f"{run_id}.json"
         return cls.from_dict(json.loads(path.read_text()))
 
+    def claim(self) -> bool:
+        """Atomically claim this run for resume.
+
+        Renames ``<run_id>.json`` → ``<run_id>.resuming.json`` using
+        ``os.replace``.  On POSIX this is atomic — exactly one process
+        wins when multiple try concurrently.  Returns True if claimed,
+        False if another process already claimed it.
+        """
+        src = _runs_dir() / f"{self.run_id}.json"
+        dst = _runs_dir() / f"{self.run_id}.resuming.json"
+        self.status = "resuming"
+        self.resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        data = json.dumps(asdict(self), indent=2)
+        try:
+            # Write updated state to a temp, then atomically rename the
+            # source to the .resuming path.  If the source is gone (race
+            # lost), FileNotFoundError is raised by os.replace.
+            tmp = src.with_name(f".{self.run_id}.claim.tmp")
+            tmp.write_text(data)
+            os.replace(str(src), str(dst))
+            # Source is now gone; move the tmp content into the .resuming file.
+            os.replace(str(tmp), str(dst))
+            return True
+        except FileNotFoundError:
+            # Another process already renamed (claimed) the source file.
+            tmp = src.with_name(f".{self.run_id}.claim.tmp")
+            if tmp.exists():
+                tmp.unlink()
+            return False
+
     @classmethod
-    def find_waiting(cls, await_event: str, run_key: str = "") -> WorkflowRun | None:
-        """Find a run suspended and waiting for a specific event type."""
+    def find_waiting(cls, await_event: str, run_key: str = "",
+                     repo: str = "") -> WorkflowRun | None:
+        """Find a run suspended and waiting for a specific event type.
+
+        When *repo* is non-empty, only runs whose ``repo`` field matches
+        are returned.  This prevents cross-repo collisions when multiple
+        repos share the same state directory.
+        """
         if not _runs_dir().exists():
             return None
         for path in _runs_dir().glob("*.json"):
@@ -84,6 +125,8 @@ class WorkflowRun:
                     trigger_data = data.get("trigger_event", {}).get("data", {})
                     if trigger_data.get("run_key") != run_key:
                         continue
+                if repo and data.get("repo", "") != repo:
+                    continue
                 return cls.from_dict(data)
             except (json.JSONDecodeError, KeyError):
                 continue
