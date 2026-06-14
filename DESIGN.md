@@ -37,10 +37,10 @@ serves the copy layer, not the chrome.
 fun from screen one and reach a delightful, visible result fast. Everything else
 is subordinate to this.
 - **First screen IS the on-ramp to magic, not a chooser.** For the scratch path,
-  collapse **Start → Sketch**: open with a warm, Bob-voiced invitation to just say
+  collapse **Start → Design**: open with a warm, Bob-voiced invitation to just say
   what you want; "start from a template / open one of yours" is a quiet secondary.
   Talking to bobbi within seconds of launch.
-- **Three escalating magic beats — front-load the first:** (1) **Sketch
+- **Three escalating magic beats — front-load the first:** (1) **Design
   reflection** — type a rough line, bobbi instantly reflects back a smart, alive
   understanding (~seconds, the early hook); (2) **Automate suggestions** — "it
   thought of things I didn't"; (3) **the Build pour** — the payoff. Don't make the
@@ -186,9 +186,9 @@ Stages (rail, renamed from the old plan):
 | stage | create | open |
 |---|---|---|
 | **Start** | from scratch | pick a source → fetch to local working copy |
-| **Sketch** | you sketch what it does → bobbi designs | bobbi summarizes the pack → "use as-is or customize?" |
+| **Design** | you describe what it does → bobbi shapes it | bobbi summarizes the pack → "use as-is or customize?" |
 | **Automate** | bobbi *suggests* proactive behaviors → pick + set leash | confirm the pack's automate + add/remove |
-| **Connect** | connect the services the sketch + automate imply | connect services the pack declares (pre-filled) |
+| **Connect** | connect the services Design + Automate imply | connect services the pack declares (pre-filled) |
 | **Build** | author all files (the "pour") | as-is → auto-pass; customize → regenerate affected files |
 | **Review** | review/edit authored files | browse/edit fetched files |
 | **Install** | freeze to `.bobbi/` + write `.env` | same |
@@ -214,7 +214,7 @@ Principles:
   add what was missed and remove what they don't want. Each is a card: granted
   scopes + connect/authorize (Venn OAuth or token) + live connection check.
   Ambiguous-but-implied tools ("triage issues", no tracker named) get asked
-  conversationally in Sketch when possible, else surface as an explicit pick here.
+  conversationally in Design when possible, else surface as an explicit pick here.
 - **Automate is the twin of Connect — the other boundary decision.** Principle:
   *expose the team's boundary with the world (Connect = what it can reach) and with
   time (Automate = when it acts on its own); keep internal structure (roles,
@@ -229,10 +229,10 @@ Principles:
   Maps to the existing `monitors/` (scheduled checks) + scheduled/triggered
   workflows. Three design points:
   - **Before Connect, not after.** Automate is about *capability/intent* (what the
-    team does), which flows from Sketch; Connect is *housekeeping* (plumbing the
+    team does), which flows from Design; Connect is *housekeeping* (plumbing the
     access those capabilities need). Putting it first keeps the intent-shaped steps
-    together (Sketch → Automate) and makes Connect the *consequence* of intent —
-    its connector list is seeded by both Sketch and Automate ("you asked for
+    together (Design → Automate) and makes Connect the *consequence* of intent —
+    its connector list is seeded by both Design and Automate ("you asked for
     morning stale-PR alerts → connect GitHub + Slack").
   - **Per-behavior leash, to defuse the "Automate = no oversight" fear.** Each item
     carries an autonomy level: **notify** (bobbi tells you, you act) / **ask first**
@@ -249,11 +249,11 @@ Principles:
     what's worth doing unprompted. The user toggles, edits, adds, or skips. This is
     a big "it did more than I expected" magic moment.
 - **Layout adapts per stage** (not a fixed 3-pane shell): a single centered
-  **conversation** column for Sketch (and the other talk stages —
+  **conversation** column for Design (and the other talk stages —
   Automate/Connect lead with conversation too); calm single column for
   Start/Install/Done; slab-as-hero for Build; rail|tree|editor for Review.
-  Sketch is **chat-only** — there is no separate "answer" textarea beside the
-  chat (see the Sketch note in the eng-review locks).
+  Design is **chat-only** — there is no separate "answer" textarea beside the
+  chat (see the Design note in the eng-review locks).
 
 ## Customization / policy model
 - **The conversation is primary; structure is its output.** The UI's job is to
@@ -315,7 +315,7 @@ guard, loopback-only, secrets never in the LLM loop). The module layout
 
 What this doc CHANGES vs that plan (build to these):
 - **Adaptive per-stage layout**, not a persistent 3-pane shell. Stages:
-  `Start · Sketch · Automate · Connect · Build · Review · Install · Done`.
+  `Start · Design · Automate · Connect · Build · Review · Install · Done`.
 - **One mode-aware machine** (create / open) with a **source resolver** (scratch /
   registry / local pack / installed) → local working copy; the wizard is the
   re-entrant editor. Reuse `registry.py` for fetch.
@@ -326,8 +326,8 @@ What this doc CHANGES vs that plan (build to these):
   seed topics / generated index. Build authors both for scratch packs.
 - **Automate** maps to `monitors/` + scheduled/triggered workflows, with a
   per-behavior leash (notify / ask-first / act).
-- **Time-to-magic** governs: first-screen-as-conversation (collapse Start→Sketch
-  for scratch), instant Sketch reflection, Connect always deferrable.
+- **Time-to-magic** governs: first-screen-as-conversation (collapse Start→Design
+  for scratch), instant Design reflection, Connect always deferrable.
 
 Build order (refined post-eng-review 2026-06-14; reflects the locks above):
 1. **`actions.py`** — extract the pure deterministic bodies from `tools.py`
@@ -383,7 +383,7 @@ decisions. These are now binding for the implementation:
   affected) to milestone 2 — it reuses the same stages, so it's additive, and
   the build order already lists it last.
 - **`state.py`: rewrite the machine, keep the persistence.** Rewrite the
-  `Stage` enum to `Start·Sketch·Automate·Connect·Build·Review·Install·Done`
+  `Stage` enum to `Start·Design·Automate·Connect·Build·Review·Install·Done`
   and `can_advance`/`require_stage`/`advance_blocker` to the new gates. Drop
   `INTERVIEW_KEYS`/`REQUIRED_INTERVIEW_KEYS`, `discovery_skipped_reason`, and
   the use-as-is jump (returns with open mode). Keep `save/load/clear`,
@@ -412,9 +412,9 @@ decisions. These are now binding for the implementation:
   service named + connected-or-deferred). That signal drives bobbi's one good
   follow-up and a calm "got it ✓ / still fuzzy" cue — it never gates. The only
   hard floor is `goal` non-empty (so Build has something to author).
-- **Sketch keeps structure behind the curtain** — a quiet readiness cue at
+- **Design keeps structure behind the curtain** — a quiet readiness cue at
   most, no live spec panel (per "magic in-process, transparency at the end").
-- **Sketch is one centered conversation, not two input boxes.** The mockup's
+- **Design is one centered conversation, not two input boxes.** The mockup's
   `describe` view (a structured "answer" textarea + a separate right-side
   "brainstorm" chat with a "Use this →" button) is a **relic of the dead model**
   where the chat populated a form field a deterministic endpoint then committed.
@@ -426,19 +426,20 @@ decisions. These are now binding for the implementation:
   the "Use this →" commit button does not. "Next" stays in the rail, always
   available, never pushed.
 - **Parked (real, not dropped):** redacting secrets a user pastes into the
-  freeform Sketch chat before they reach the LLM / rolling summary. The
+  freeform Design chat before they reach the LLM / rolling summary. The
   `SECRET_SHAPES` scan today only covers generated files; the freeform surface
-  is a new credential-leak vector. Decide before Sketch chat ships.
+  is a new credential-leak vector. Decide before Design chat ships.
 
 ## Open decisions
 1. ~~Phosphor accent~~ — **RESOLVED: amber** (2026-06-13). Reserve distinct
    success/error hues since amber is the brand accent.
-2. **Step names.** Working set (8): `Start · Sketch · Automate · Connect ·
+2. **Step names.** Working set (8): `Start · Design · Automate · Connect ·
    Build · Review · Install · Done`. **Automate** is settled (2026-06-14 —
    renamed from "Autopilot", which read as unsupervised autonomy; plain verb +
-   the leash keep the "you're in control" framing). Still provisional: **Sketch**
-   (was Describe — wanted something more fun/less dry; alts: Shape, Conjure,
-   Craft). Still gut-check `Build` vs `Forge`, `Done` vs
+   the leash keep the "you're in control" framing). **Design** is settled too
+   (2026-06-14 — Describe → Sketch → Design; "Design → Build" is the clearest
+   pairing; minor in-repo overload with `DESIGN.md`/`/design-*` is invisible to
+   users). Still gut-check `Build` vs `Forge`, `Done` vs
    `Launch`; whether **Review** is its own step; and whether Connect + Automate
    stay two steps (current) or merge.
 3. **Command name.** `bobbi setup` reads one-shot but the UI is also the
@@ -468,4 +469,5 @@ decisions. These are now binding for the implementation:
 | 2026-06-14 | Eng-review: stateless one-shot per turn + rolling summary (no live session) | "stateful" satisfied by server-held spec; clean def/async split; trivial resume + hermetic tests |
 | 2026-06-14 | Eng-review: soft non-blocking readiness over a multi-turn conversation | forgiving north star; certainty signal guides the follow-up, never walls; floor = goal non-empty |
 | 2026-06-14 | Rename stage **Autopilot → Automate** | simpler plain verb; "Autopilot" read as unsupervised autonomy (its own flagged risk); leash keeps user-in-control |
-| 2026-06-14 | **Sketch is one centered conversation**, not two input boxes | the two-box (textarea + brainstorm drawer) was a relic of the dead chat-populates-a-field model; chat is the only interaction |
+| 2026-06-14 | Rename stage **Sketch → Design** (Describe → Sketch → Design) | "Design → Build" is the clearest pairing; legibility over Sketch's low-pressure warmth |
+| 2026-06-14 | **Design is one centered conversation**, not two input boxes | the two-box (textarea + brainstorm drawer) was a relic of the dead chat-populates-a-field model; chat is the only interaction |

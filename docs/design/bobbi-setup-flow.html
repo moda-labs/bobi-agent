@@ -96,7 +96,7 @@
   .chat .ch-input input{flex:1;font-family:var(--font-sans);font-size:13px;border:1px solid var(--border-strong);border-radius:8px;padding:9px 11px;background:var(--raised);}
   .chat .ch-input input:focus{outline:none;border-color:var(--accent);}
 
-  /* Sketch — single centered conversation (no separate answer box) */
+  /* Design step — single centered conversation (no separate answer box); .sketch class kept internal */
   .chat.sketch{width:min(760px,100%);margin:0 auto;border-left:0;background:transparent;}
   .chat.sketch .sketch-top{display:flex;align-items:center;justify-content:space-between;padding:16px 28px 0;}
   .chat.sketch .sketch-eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);}
@@ -181,7 +181,7 @@
 <script>
   const STEPS = [
     {id:'start',     label:'Start'},
-    {id:'describe',  label:'Sketch'},
+    {id:'describe',  label:'Design'},
     {id:'automate', label:'Automate'},
     {id:'connect',   label:'Connect'},
     {id:'build',     label:'Build'},
@@ -219,7 +219,7 @@
 
     describe: ()=>{ document.getElementById('panes').style.gridTemplateColumns='216px 1fr'; return `<main class="node" style="padding:0;overflow:hidden;display:flex;">
       <section class="chat sketch">
-        <div class="sketch-top"><span class="sketch-eyebrow">Sketch · talk it through</span><button class="btn ghost sketch-next" data-go="automate">Next: Automate →</button></div>
+        <div class="sketch-top"><span class="sketch-eyebrow">Design · talk it through</span><button class="btn ghost sketch-next" data-go="automate">Next: Automate →</button></div>
         <div class="ch-body">
           <div class="msg bob">Hi — I'm bobbi. Tell me what you want this team to do, in your own words. Rough is fine; we'll sharpen it together.</div>
           <div class="msg you">watch our github and figure out who should handle each issue</div>
