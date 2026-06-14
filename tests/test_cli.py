@@ -323,8 +323,7 @@ class TestSetupCommand:
                             lambda *a, **k: called.setdefault("ran", True) and 0)
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
-            SetupState(stage=Stage.INTERVIEW, branch="build",
-                       team_name="t").save(Path(fs))
+            SetupState(stage=Stage.DESIGN, team_name="t").save(Path(fs))
             declined = runner.invoke(main, ["setup"], input="n\n")
             assert declined.exit_code != 0
             assert "--resume" in declined.output

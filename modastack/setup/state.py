@@ -1,18 +1,29 @@
-"""Setup state machine: stages, gating rules, and persistence.
+"""Setup state machine: the 8-stage create spine, gating, and persistence.
 
-The session's system prompt describes the stages; this module is what
-actually enforces them. Tool handlers call `can_advance` / `require_stage`
-and refuse with an actionable reason instead of trusting the prompt.
+The web wizard drives navigation; this module is the source of truth for
+*where* setup is and *what it knows so far*. The conversation routes the
+user's messages into a four-slot accumulating `Spec`
+(goal / roles / autonomous / services) — `SetupState` is authoritative,
+the LLM owns routing and content, the wizard owns structure (it computes
+the file manifest at Build).
 
-State is checkpointed to .modastack/state/setup.json after every tool
-call so an interrupted setup resumes with `modastack setup --resume`.
+Readiness is **soft**: each slot self-scores empty/thin/enough to guide
+bobbi's follow-up and a calm UI cue, but it never gates. The only hard
+floors are structural — goal must be non-empty to author anything at
+Build, a fresh validation to Install, an install to finish.
+
+State is checkpointed to .modastack/state/setup.json after every change
+so an interrupted setup resumes with `modastack setup --resume`.
+
+v1 is the **create** spine. Open mode (editing an existing pack) reuses
+these same stages and is deferred to M2 — `mode` carries the seam.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -20,27 +31,15 @@ from modastack import paths
 
 STATE_FILENAME = "setup.json"
 
-# The seven interview questions, by canonical key. The first four must
-# have substantive answers before the interview can close; the last
-# three must be recorded but may be "none".
-INTERVIEW_KEYS = [
-    "purpose",          # 1. what is this agent going to do?
-    "roles",            # 2. distinct roles and the job each performs
-    "services",         # 3. services the team reads from / writes to
-    "chat",             # 4. interaction channel (slack | telegram | none)
-    "schedules",        # 5. recurring jobs ("none" allowed)
-    "event_triggers",   # 6. events to react to ("none" allowed)
-    "gates",            # 7. human-in-the-loop gates ("none" allowed)
-]
-REQUIRED_INTERVIEW_KEYS = INTERVIEW_KEYS[:4]
-
 
 class Stage(str, Enum):
-    CHOOSE = "choose"
-    INTERVIEW = "interview"
-    SERVICES = "services"
-    DISCOVERY = "discovery"
-    GENERATE = "generate"
+    START = "start"
+    DESIGN = "design"
+    AUTOMATE = "automate"
+    CONNECT = "connect"        # what the team can reach (services it operates on)
+    CHAT = "chat"              # how you reach the team (slack / telegram / cli)
+    BUILD = "build"
+    REVIEW = "review"
     INSTALL = "install"
     DONE = "done"
 
@@ -48,21 +47,72 @@ class Stage(str, Enum):
 STAGE_ORDER = list(Stage)
 
 
+class Readiness(str, Enum):
+    EMPTY = "empty"   # nothing said yet
+    THIN = "thin"     # touched, but under-specified
+    ENOUGH = "enough"  # the brain judged this slot well-formed
+
+
+# The four accumulating spec slots, by canonical key. The conversation
+# routes each turn into one or more of these; Build authors files from them.
+SPEC_SLOTS = ("goal", "roles", "autonomous", "services")
+
+
+@dataclass
+class Spec:
+    """The accumulating, route-then-author spec. Lists hold plain dicts
+    (not nested dataclasses) so the digestion delta format can evolve
+    without reshaping persistence; the wizard reads them at Build."""
+
+    goal: str = ""                              # one sentence: what it does + outcome
+    roles: list = field(default_factory=list)   # [{"name", "responsibility"}]
+    autonomous: list = field(default_factory=list)  # [{"description","leash","cadence"}]
+    services: list = field(default_factory=list)    # [{"name","status"}]
+
+    # Autonomous is "enough" only once explicitly confirmed — even when the
+    # answer is "nothing proactive" (an empty list is a real decision here).
+    autonomous_confirmed: bool = False
+
+    # Brain-emitted self-scores per slot (slot -> Readiness value). Absent
+    # until the digestion prompt scores it; readiness_for() falls back to a
+    # structural guess in the meantime.
+    readiness: dict = field(default_factory=dict)
+
+    def readiness_for(self, slot: str) -> Readiness:
+        """The slot's readiness — the brain's score if it has one, else a
+        structural fallback from whether the slot holds anything."""
+        if slot not in SPEC_SLOTS:
+            raise ValueError(f"unknown spec slot '{slot}'")
+        stored = self.readiness.get(slot)
+        if stored:
+            return Readiness(stored)
+        if slot == "autonomous":
+            return Readiness.THIN if self.autonomous_confirmed else Readiness.EMPTY
+        value = getattr(self, slot)
+        has = bool(value.strip()) if isinstance(value, str) else bool(value)
+        return Readiness.THIN if has else Readiness.EMPTY
+
+
 @dataclass
 class SetupState:
-    stage: Stage = Stage.CHOOSE
-    branch: str = ""                 # "use-as-is" | "build"
+    stage: Stage = Stage.START
+    mode: str = "create"             # "create" | "open" (open → M2)
     team_name: str = ""
-    answers: dict = field(default_factory=dict)
+    chat: str = ""                   # how you talk to the team: "cli"|"slack"|"telegram"
+    spec: Spec = field(default_factory=Spec)
+
+    # Stateless-one-shot brain memory: a rolling summary refreshed each
+    # digestion turn, plus the raw transcript (the context assembler takes
+    # the last N for the next call).
+    summary: str = ""
+    messages: list = field(default_factory=list)
+
     credentials_saved: list = field(default_factory=list)
-    monitors_recorded: list = field(default_factory=list)
-    discovery_skipped_reason: str = ""
     validated: bool = False
     validated_hash: str = ""         # source tree hash at validation time
     installed: bool = False
     finished: bool = False
     session_id: str = ""
-    stage_summaries: dict = field(default_factory=dict)
 
     # --- gating ---------------------------------------------------------
 
@@ -72,78 +122,51 @@ class SetupState:
             return None
         allowed = " or ".join(f"'{s.value}'" for s in stages)
         return (
-            f"this tool is only available in stage {allowed}; "
+            f"this action is only available in stage {allowed}; "
             f"setup is currently in '{self.stage.value}'"
         )
 
-    def can_advance(self, to: Stage) -> str | None:
-        """None when the transition is legal, else the refusal reason."""
-        cur = self.stage
-        if to == cur:
-            return f"already in stage '{cur.value}'"
-
-        # The one sanctioned jump: a picked team goes straight to install.
-        if cur == Stage.CHOOSE and to == Stage.INSTALL:
-            if self.branch != "use-as-is":
-                return "skipping to install requires branch 'use-as-is' (call select_team first)"
-            if not self.team_name:
-                return "no team selected (call select_team first)"
-            return None
-
-        # Discovery is skippable, but only deliberately.
-        if cur == Stage.SERVICES and to == Stage.GENERATE:
-            if not self.discovery_skipped_reason:
-                return (
-                    "discovery has not happened — either advance to 'discovery' "
-                    "and explore venn tools, or call skip_discovery with a reason"
-                )
-            return None
-
-        if STAGE_ORDER.index(to) != STAGE_ORDER.index(cur) + 1:
-            return (
-                f"cannot move from '{cur.value}' to '{to.value}' — stages "
-                f"advance in order: {' → '.join(s.value for s in STAGE_ORDER)}"
-            )
-
-        # Leaving discovery requires having actually discovered something
-        # or a deliberate skip — otherwise passing through the stage
-        # without a single probe would hollow out the skip gate above.
-        if cur == Stage.DISCOVERY and to == Stage.GENERATE:
-            if not self.monitors_recorded and not self.discovery_skipped_reason:
-                return (
-                    "discovery produced nothing — record at least one "
-                    "monitor (record_monitor) or call skip_discovery with "
-                    "a reason"
-                )
-
-        if to == Stage.INTERVIEW:
-            if self.branch != "build":
-                return "the interview is for branch 'build' (call select_team first)"
-            if not self.team_name:
-                return "no pack name chosen (call select_team first)"
-        elif to == Stage.SERVICES:
-            missing = [k for k in REQUIRED_INTERVIEW_KEYS
-                       if not str(self.answers.get(k, "")).strip()]
-            unrecorded = [k for k in INTERVIEW_KEYS if k not in self.answers]
-            if missing or unrecorded:
-                gaps = sorted(set(missing) | set(unrecorded))
-                return (
-                    "the interview is incomplete — record answers for: "
-                    + ", ".join(gaps)
-                    + " (schedules/event_triggers/gates may be 'none', but say so)"
-                )
-        elif to == Stage.INSTALL:
-            if not self.validated:
-                return "the team source has not passed validate_team yet"
-        elif to == Stage.DONE:
-            if not self.installed:
-                return "the team is not installed yet (call install_team)"
+    def _hard_floor(self, to: Stage) -> str | None:
+        """Structural gates — the only things that actually block. Readiness
+        is soft and never appears here."""
+        if to == Stage.BUILD and not self.spec.goal.strip():
+            return "tell bobbi what the team should do — the goal is still empty"
+        if to == Stage.INSTALL and not self.validated:
+            return "the team source hasn't passed validation yet"
+        if to == Stage.DONE and not self.installed:
+            return "the team isn't installed yet"
         return None
+
+    def can_advance(self, to: Stage) -> str | None:
+        """None when moving to `to` is legal, else the refusal reason.
+
+        Backward moves are always allowed (the wizard is a re-entrant
+        editor). Forward moves require every hard floor between here and
+        the target to be clear; soft readiness never blocks.
+        """
+        if to == self.stage:
+            return f"already in stage '{to.value}'"
+        cur_i, to_i = STAGE_ORDER.index(self.stage), STAGE_ORDER.index(to)
+        if to_i < cur_i:
+            return None
+        for s in STAGE_ORDER[cur_i + 1:to_i + 1]:
+            blocker = self._hard_floor(s)
+            if blocker:
+                return blocker
+        return None
+
+    def advance_blocker(self) -> str | None:
+        """Why the 'Next' affordance to the following stage is blocked, or
+        None. Serialized for the UI so it can explain a gated step."""
+        i = STAGE_ORDER.index(self.stage)
+        if i + 1 >= len(STAGE_ORDER):
+            return None
+        return self.can_advance(STAGE_ORDER[i + 1])
 
     # --- persistence ----------------------------------------------------
 
     def save(self, project_path: Path) -> None:
-        data = asdict(self)
+        data = asdict(self)            # recurses into Spec → dict
         data["stage"] = self.stage.value
         path = paths.state_dir(project_path) / STATE_FILENAME
         path.write_text(json.dumps(data, indent=1))
@@ -155,10 +178,15 @@ class SetupState:
             return None
         try:
             data = json.loads(path.read_text())
-            data["stage"] = Stage(data.get("stage", Stage.CHOOSE.value))
+            data["stage"] = Stage(data.get("stage", Stage.START.value))
         except (ValueError, KeyError, json.JSONDecodeError):
             return None
-        known = {f for f in cls.__dataclass_fields__}
+        raw_spec = data.get("spec")
+        if isinstance(raw_spec, dict):
+            spec_fields = set(Spec.__dataclass_fields__)
+            data["spec"] = Spec(**{k: v for k, v in raw_spec.items()
+                                   if k in spec_fields})
+        known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in known})
 
     @classmethod

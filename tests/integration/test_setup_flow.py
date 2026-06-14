@@ -1,31 +1,29 @@
-"""Integration tests for `modastack setup` — real Claude sessions driving
-the full onboarding state machine against an isolated tmp project.
+"""Integration test for `bobbi setup` — a real Claude-backed create flow
+driven through the HTTP API against an isolated tmp project.
 
-Each test runs run_repl in-process with a scripted input queue and a
-non-interactive secret prompt, then asserts on the artifacts setup is
-supposed to leave behind: a valid team source, a frozen install image,
-manifest, and gitignore.
+The web server's `build_app` is exercised with Starlette's TestClient and
+the *real* LLM source (no injected fake): a Design message routes into the
+spec via the digestion brain, the Build pour authors the pack with the
+file-authoring prompts, and validate + install leave the real artifacts —
+a valid team source and a frozen install image.
+
+v1 is the create-only spine; open mode (use-as-is) and Venn CLI discovery
+are deferred to M2, so the old REPL-driven cases are gone with the REPL.
 """
 
-import asyncio
 import json
-import shutil
 import subprocess
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
 import yaml
+from fastapi.testclient import TestClient
 
-from modastack.setup.repl import run_repl
+from modastack.setup.state import SetupState
+from modastack.setup.webui import server
 from .conftest import requires_claude
 
-PACKAGE_ROOT = Path(__file__).parent.parent.parent
-
-# A drained queue keeps nudging the model to wrap up rather than pausing.
-NUDGE = ("Proceed with your best judgment, do not ask me anything else, "
-         "and finish the setup.")
+NONCE = "integration-nonce"
 
 
 def _fresh_project(tmp_path: Path) -> Path:
@@ -35,171 +33,78 @@ def _fresh_project(tmp_path: Path) -> Path:
     return project
 
 
-def _drive_setup(project: Path, first_message: str, secrets: dict | None = None,
-                 nudges: int = 30) -> int:
-    queue = [first_message] + [NUDGE] * nudges
-
-    def input_fn():
-        return queue.pop(0) if queue else None
-
-    def secret_prompt(var, service, instructions):
-        return (secrets or {}).get(var, "")
-
-    return asyncio.run(run_repl(project, input_fn=input_fn,
-                                secret_prompt_fn=secret_prompt))
+def _client(state, project):
+    app = server.build_app(state, project, nonce=NONCE)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    c.headers.update({server.NONCE_HEADER: NONCE})
+    return c
 
 
-def _assert_installed_image(project: Path, team: str):
-    installed = yaml.safe_load((project / ".modastack" / "agent.yaml").read_text())
-    assert installed.get("agent") == team
-    assert (project / ".modastack" / "install-manifest.json").exists()
-    gitignore = (project / ".modastack" / ".gitignore").read_text()
-    assert "roles/" in gitignore  # local-source install: image is an artifact
+def _events(sse_text: str) -> list[tuple[str, dict]]:
+    out = []
+    for block in sse_text.split("\n\n"):
+        if not block.strip():
+            continue
+        ev, data = "message", ""
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                ev = line[6:].strip()
+            elif line.startswith("data:"):
+                data += line[5:].strip()
+        try:
+            out.append((ev, json.loads(data)))
+        except json.JSONDecodeError:
+            out.append((ev, {}))
+    return out
 
 
 @requires_claude
 @pytest.mark.timeout(900)
-class TestBuildYourOwn:
-    def test_idea_to_runnable_pack(self, tmp_path):
+class TestCreateFlow:
+    def test_idea_to_installed_pack(self, tmp_path):
         project = _fresh_project(tmp_path)
-        first = (
-            "I want to build an agent team named exactly 'support-triage'. "
-            "Purpose: triage GitHub issues for a small open-source project. "
-            "Roles: a single 'triager' role that labels new issues and "
-            "drafts a first reply. Services: github only. Chat: none. "
-            "No scheduled jobs. Event triggers: only GitHub issue opens "
-            "(native webhooks, no monitors needed). No approval gates. "
-            "Skip discovery (no venn services) and skip any credentials. "
-            "Do not ask me any questions — make every remaining decision "
-            "yourself, generate the team, validate it, install it, and "
-            "finish the setup."
-        )
-        code = _drive_setup(project, first)
-        assert code == 0, "setup did not reach finish_setup"
+        state = SetupState()
+        c = _client(state, project)
 
-        pack = project / "agents" / "support-triage"
+        # 1. Design — one clear message; the brain routes it into the spec.
+        msg = ("Build a team that triages incoming GitHub issues for a small "
+               "open-source project: label each new issue and draft a first "
+               "reply. One role, a 'triager'. It uses GitHub. Nothing "
+               "proactive. Keep it simple.")
+        r = c.post("/api/message", json={"text": msg})
+        assert r.status_code == 200
+        events = _events(r.text)
+        assert any(ev == "delta" for ev, _ in events), "bob never replied"
+        final = next(d for ev, d in events if ev == "state")
+        assert final["spec"]["goal"].strip(), "goal slot stayed empty"
+
+        # 2. Build — the real pour authors the pack to disk.
+        r = c.post("/api/build")
+        assert r.status_code == 200
+        build_events = _events(r.text)
+        authored = {d["path"] for ev, d in build_events if ev == "file_start"}
+        assert "agent.yaml" in authored and "agent.md" in authored
+        assert any(p.startswith("roles/") for p in authored)
+
+        team = state.team_name
+        pack = project / "agents" / team
         cfg = yaml.safe_load((pack / "agent.yaml").read_text())
         entry = cfg["entry_point"]
-        assert (pack / "roles" / entry / "ROLE.md").exists()
         role_text = (pack / "roles" / entry / "ROLE.md").read_text()
-        assert len(role_text) > 200, "role prompt is a placeholder"
+        assert len(role_text) > 200, "role prompt looks like a placeholder"
 
         from modastack.workflow.schema import load_workflow
         load_workflow(pack / "workflows" / "adhoc.yaml")
 
-        _assert_installed_image(project, "support-triage")
-        # setup state cleared on success
-        assert not (project / ".modastack" / "state" / "setup.json").exists()
+        # 3. Validate — the real structural validator must pass.
+        v = c.post("/api/validate").json()
+        assert v["passed"] is True, v["report"]
 
-
-@requires_claude
-@pytest.mark.timeout(600)
-class TestUseAsIs:
-    def test_existing_team_straight_to_install(self, tmp_path):
-        project = _fresh_project(tmp_path)
-        src = PACKAGE_ROOT / "agents" / "dogfood-content-review"
-        shutil.copytree(src, project / "agents" / "dogfood-content-review")
-
-        first = (
-            "Install the existing team 'dogfood-content-review' exactly "
-            "as it is. Skip every credential (leave them blank) and do not "
-            "ask me anything — install it and finish the setup."
-        )
-        code = _drive_setup(project, first)
-        assert code == 0, "setup did not reach finish_setup"
-
-        _assert_installed_image(project, "dogfood-content-review")
-        # use-as-is generates nothing new
-        assert (project / ".modastack" / "roles").is_dir()
-
-
-class _VennStub(BaseHTTPRequestHandler):
-    """Minimal Venn REST stub: every POST answers list_servers."""
-
-    def do_POST(self):
-        body = json.dumps({
-            "success": True,
-            "result": {"servers": [
-                {"server_id": "work-gmail", "server_name": "gmail",
-                 "connected": True},
-            ]},
-        }).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-
-FAKE_VENN = r'''#!/bin/bash
-# Replays recorded venn CLI output for setup discovery tests.
-case "$*" in
-  "help list_servers"*)
-    echo '[{"server_id": "work-gmail", "server_name": "gmail", "connected": true}]' ;;
-  *"tools search"*)
-    echo '[{"server_id": "work-gmail", "tool": "list_messages", "rank": 1}]' ;;
-  *"tools describe"*)
-    echo '{"name": "list_messages", "args": {"maxResults": "int", "q": "string"}}' ;;
-  *"tools execute"*)
-    echo '[{"id": "msg-1", "subject": "Hello"}, {"id": "msg-2", "subject": "Re: Hi"}]' ;;
-  *)
-    echo "unknown venn invocation: $*" >&2; exit 1 ;;
-esac
-'''
-
-
-@requires_claude
-@pytest.mark.timeout(900)
-class TestVennDiscovery:
-    def test_discovery_records_tested_command_monitor(self, tmp_path, monkeypatch):
-        project = _fresh_project(tmp_path)
-
-        # Fake venn binary on PATH + REST stub for check_venn.
-        bin_dir = tmp_path / "bin"
-        bin_dir.mkdir()
-        venn = bin_dir / "venn"
-        venn.write_text(FAKE_VENN)
-        venn.chmod(0o755)
-        import os
-        monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
-
-        server = HTTPServer(("127.0.0.1", 0), _VennStub)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        monkeypatch.setenv("MODASTACK_VENN_API_BASE",
-                           f"http://127.0.0.1:{server.server_port}")
-        try:
-            first = (
-                "I want to build an agent team named exactly 'inbox-watch'. "
-                "Purpose: watch my email inbox and summarize important "
-                "unread messages. Roles: a single 'watcher' role. Services: "
-                "email (via venn). Chat: none. No scheduled jobs. Event "
-                "trigger: new unread emails, polled via a venn command "
-                "monitor — discover the right venn tool, test it, and "
-                "record a command monitor for it. No approval gates. When "
-                "you collect the venn API key with save_credential I will "
-                "provide it. Do not ask me any questions — make every "
-                "remaining decision yourself, generate the team including "
-                "monitors/defaults.yaml, validate it, install it, and "
-                "finish the setup."
-            )
-            code = _drive_setup(project, first,
-                                secrets={"VENN_API_KEY": "venn-test-key"})
-        finally:
-            server.shutdown()
-
-        assert code == 0, "setup did not reach finish_setup"
-
-        pack = project / "agents" / "inbox-watch"
-        monitors = yaml.safe_load((pack / "monitors" / "defaults.yaml").read_text())
-        records = monitors["monitors"]
-        assert any("venn" in (m.get("command") or "") for m in records), (
-            f"no venn command monitor recorded: {records}")
-
-        env_text = (project / ".modastack" / ".env").read_text()
-        assert "VENN_API_KEY=venn-test-key" in env_text
-
-        _assert_installed_image(project, "inbox-watch")
+        # 4. Install — freeze the image.
+        i = c.post("/api/install").json()
+        assert i["installed"] == team
+        installed = yaml.safe_load(
+            (project / ".modastack" / "agent.yaml").read_text())
+        assert installed.get("agent") == team
+        assert (project / ".modastack" / "install-manifest.json").exists()
+        assert (project / ".modastack" / ".gitignore").exists()

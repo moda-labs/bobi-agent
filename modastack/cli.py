@@ -594,10 +594,11 @@ def install(pack):
 def setup(model, resume):
     """Interactively design, build, and install an agent team.
 
-    A guided conversation that goes from an idea to a runnable agent
-    team: pick an existing team or design your own, connect services,
-    discover monitors, and install. Interrupt anytime — `--resume`
-    picks up where you left off.
+    Opens a local web UI (on 127.0.0.1) that goes from an idea to a
+    runnable agent team: describe what you want, let bobbi suggest what
+    it can do on its own, connect services, watch it build the pack, then
+    review and install. Interrupt anytime — `--resume` picks up where you
+    left off.
     """
     # Like install, setup targets the current directory literally — it
     # CREATES the installation root, so it never walks up to an
@@ -615,7 +616,7 @@ def setup(model, resume):
 
     if not resume:
         from modastack.setup.state import SetupState
-        from modastack.setup.tools import installed_team_name
+        from modastack.setup.actions import installed_team_name
 
         in_progress = SetupState.load(project_path)
         if in_progress and not in_progress.finished:

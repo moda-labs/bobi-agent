@@ -1,0 +1,250 @@
+"""The digestion brain — one stateful prompt, run stateless per turn.
+
+This is the through-line intelligence (DESIGN.md "the magic is in the
+digestion prompt"). Each conversation turn:
+
+  1. the user's message is appended to the transcript;
+  2. a context is assembled — the spec so far + rolling summary + the last
+     N raw messages — and sent as a single stateless streaming call;
+  3. the model streams a warm, Bob-voiced **reply** (relayed to the UI
+     token-by-token), then a sentinel, then a JSON **payload** that routes
+     the turn into the four spec slots, refreshes the rolling summary, and
+     self-scores each slot's readiness;
+  4. the payload is applied to `SetupState` (authoritative) and persisted.
+
+The model owns routing + content; the wizard owns structure. Readiness is
+soft — it tunes bobbi's next follow-up and a calm UI cue, never a gate.
+
+The context assembler is one tunable function (`assemble_context`); the
+output contract is one tunable prompt (`DIGESTION_SYSTEM_PROMPT`). You
+iterate these, not the screens.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+
+from modastack.setup import llm
+from modastack.setup.state import SPEC_SLOTS, Readiness, SetupState
+
+# Separates the streamed conversational reply from the trailing JSON payload.
+# The server relays everything before it to the UI and buffers the rest.
+SPEC_SENTINEL = "===BOBBI-SPEC==="
+
+_READINESS_VALUES = {r.value for r in Readiness}
+
+
+DIGESTION_SYSTEM_PROMPT = f"""\
+You are bobbi, helping a developer design an autonomous agent **team** by
+talking with them. bobbi's voice: dry, witty, geeky, warm, and reassuring —
+never corporate, never gushing. Plain language, not tech-industry lingo:
+never say "ship it", "let's ship", "lock(ed) in", "lock it in", "dial it in",
+"supercharge", "leverage", "10x", "let's gooo", or similar startup clichés.
+Keep replies short (1–4 sentences). Reflect back a smart, *alive*
+understanding of what they want, and ask at most ONE good follow-up that
+moves the design forward. Rough input is fine — the team is editable later;
+never make the user feel they must get it perfect now.
+
+You are quietly structuring the conversation into a spec with four slots:
+- **goal**: one sentence — what the team does and the outcome it produces.
+- **roles**: the distinct roles on the team, each with a one-line
+  responsibility. A small team is fine (often one role).
+- **autonomous**: things the team should do on its own, unprompted
+  (proactive checks / scheduled or triggered behavior). Each carries a
+  leash: "notify" (tell the user), "ask" (propose, wait for approval), or
+  "act" (do it, report). An empty list is a valid, deliberate answer — but
+  only once the user has actually weighed in (set autonomous_confirmed).
+- **services**: the outside services the team reads from or writes to
+  (e.g. github, slack, email, a CRM). Name each one.
+
+Route what the user says into these slots. When a slot changes, emit its
+**full new value** (not a diff). Don't invent services or roles the user
+hasn't implied. Keep the user's own framing.
+
+After your conversational reply, output a line containing exactly
+{SPEC_SENTINEL} and then a single JSON object — nothing after it. Shape:
+
+{{
+  "deltas": {{
+    "goal": "string (only if it changed)",
+    "roles": [{{"name": "...", "responsibility": "..."}}],
+    "autonomous": [{{"description": "...", "leash": "notify|ask|act",
+                     "cadence": "e.g. 1d, 15m, or an event"}}],
+    "services": [{{"name": "..."}}]
+  }},
+  "autonomous_confirmed": true,
+  "summary": "refreshed 2–4 sentence running summary of the whole design",
+  "readiness": {{"goal": "empty|thin|enough", "roles": "...",
+                 "autonomous": "...", "services": "..."}}
+}}
+
+Only include keys in "deltas" for slots that changed this turn. Always
+include "summary" and "readiness". Score a slot "enough" only when it's
+genuinely well-formed (goal: one clear sentence with an outcome; roles: at
+least one named role with a responsibility; autonomous: explicitly
+confirmed, even if empty; services: each implied service named). The reply
+and the JSON are both required, in that order.
+"""
+
+
+@dataclass
+class DigestionResult:
+    reply: str
+    deltas: dict = field(default_factory=dict)
+    summary: str = ""
+    readiness: dict = field(default_factory=dict)
+    autonomous_confirmed: bool | None = None
+
+
+# --- context assembly (tunable) ------------------------------------------
+
+def assemble_context(state: SetupState, last_n: int = 12) -> str:
+    """Build the single user prompt for one digestion turn: the spec so
+    far + rolling summary + the last N raw messages."""
+    spec = state.spec
+    snapshot = {
+        "goal": spec.goal,
+        "roles": spec.roles,
+        "autonomous": spec.autonomous,
+        "autonomous_confirmed": spec.autonomous_confirmed,
+        "services": spec.services,
+        "readiness": {s: spec.readiness_for(s).value for s in SPEC_SLOTS},
+    }
+    parts = ["SPEC SO FAR:", json.dumps(snapshot, indent=2)]
+    if state.summary:
+        parts += ["", "SUMMARY SO FAR:", state.summary]
+    parts += ["", "RECENT MESSAGES:"]
+    for m in state.messages[-last_n:]:
+        parts.append(f"{m.get('role', 'user')}: {m.get('content', '')}")
+    parts += ["", "Reply to the latest user message, then emit the spec block."]
+    return "\n".join(parts)
+
+
+# --- output parsing ------------------------------------------------------
+
+def _extract_json(text: str) -> dict | None:
+    """Parse the first JSON object in `text`, tolerating trailing prose."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def parse_digestion(full_text: str) -> DigestionResult:
+    """Split a completed digestion response into reply + structured payload.
+
+    Degrades gracefully: with no sentinel or bad JSON, the whole text is the
+    reply and nothing is routed (the conversation never crashes on a
+    malformed turn)."""
+    idx = full_text.find(SPEC_SENTINEL)
+    if idx == -1:
+        return DigestionResult(reply=full_text.strip())
+    reply = full_text[:idx].strip()
+    payload = _extract_json(full_text[idx + len(SPEC_SENTINEL):])
+    if not payload:
+        return DigestionResult(reply=reply)
+    return DigestionResult(
+        reply=reply,
+        deltas=payload.get("deltas") or {},
+        summary=payload.get("summary") or "",
+        readiness=payload.get("readiness") or {},
+        autonomous_confirmed=payload.get("autonomous_confirmed"),
+    )
+
+
+def apply_deltas(state: SetupState, result: DigestionResult) -> None:
+    """Route a parsed digestion result into the authoritative spec. Each
+    provided slot carries its full new value (replace, not merge)."""
+    spec = state.spec
+    d = result.deltas or {}
+    if isinstance(d.get("goal"), str):
+        spec.goal = d["goal"].strip()
+    if isinstance(d.get("roles"), list):
+        spec.roles = d["roles"]
+    if isinstance(d.get("services"), list):
+        spec.services = d["services"]
+    if isinstance(d.get("autonomous"), list):
+        spec.autonomous = d["autonomous"]
+    if result.autonomous_confirmed is not None:
+        spec.autonomous_confirmed = bool(result.autonomous_confirmed)
+    for slot, value in (result.readiness or {}).items():
+        if slot in SPEC_SLOTS and value in _READINESS_VALUES:
+            spec.readiness[slot] = value
+    if result.summary:
+        state.summary = result.summary
+
+
+# --- streaming reply splitter --------------------------------------------
+
+class _ReplySplitter:
+    """Emits the pre-sentinel reply incrementally as chunks arrive, holding
+    back a short tail so a sentinel split across chunks is never leaked."""
+
+    def __init__(self, sentinel: str) -> None:
+        self.sentinel = sentinel
+        self.text = ""
+        self._emitted = 0
+        self._cut: int | None = None
+
+    def feed(self, chunk: str) -> str:
+        self.text += chunk
+        if self._cut is None:
+            i = self.text.find(self.sentinel)
+            if i != -1:
+                self._cut = i
+        if self._cut is not None:
+            safe_end = self._cut
+        else:
+            hold = len(self.sentinel) - 1
+            safe_end = max(0, len(self.text) - hold)
+        if safe_end > self._emitted:
+            out = self.text[self._emitted:safe_end]
+            self._emitted = safe_end
+            return out
+        return ""
+
+    def flush(self) -> str:
+        end = self._cut if self._cut is not None else len(self.text)
+        if end > self._emitted:
+            out = self.text[self._emitted:end]
+            self._emitted = end
+            return out
+        return ""
+
+
+# --- the turn ------------------------------------------------------------
+
+async def digest_turn(state: SetupState, project, user_message: str, *,
+                      model: str | None = None, cwd: str | None = None,
+                      stream_fn=None):
+    """Run one digestion turn. Async-generator: yields reply text chunks for
+    the UI, and as a side effect routes the payload into `state` and
+    checkpoints it. Consume to completion before re-reading `state`.
+
+    Defense-in-depth: any secret-shaped substring the user pastes is redacted
+    here before it reaches the LLM, the rolling summary, or the persisted
+    transcript — credentials belong in Connect, never the conversation."""
+    from modastack.setup.actions import redact_secrets
+    user_message, _ = redact_secrets(user_message)
+    state.messages.append({"role": "user", "content": user_message})
+    splitter = _ReplySplitter(SPEC_SENTINEL)
+    async for chunk in llm.stream(DIGESTION_SYSTEM_PROMPT,
+                                  assemble_context(state),
+                                  model=model, cwd=cwd, stream_fn=stream_fn):
+        out = splitter.feed(chunk)
+        if out:
+            yield out
+    tail = splitter.flush()
+    if tail:
+        yield tail
+
+    result = parse_digestion(splitter.text)
+    apply_deltas(state, result)
+    state.messages.append({"role": "assistant",
+                           "content": result.reply or splitter.text.strip()})
+    state.save(project)

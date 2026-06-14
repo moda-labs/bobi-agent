@@ -1,10 +1,10 @@
-"""Interactive agent-guided onboarding (`modastack setup`).
+"""Interactive agent-guided onboarding (`bobbi setup`).
 
-One persistent Claude session drives the conversation with the user at
-the terminal; the setup state machine is enforced by in-process tools
-that refuse out-of-order calls (see state.py, tools.py). Python owns
-the REPL loop and every deterministic action: registry listing,
-credential capture, venn checks, validation, install, preflight.
+A local web UI (FastAPI on 127.0.0.1, foreground) drives a mode-aware
+stage machine; the wizard owns navigation and every deterministic action
+(see state.py, actions.py), while the LLM serves the digestion brain
+(conversation → spec) and the Build pour (spec → pack files). See
+`webui/server.py` for the app and launcher.
 
 Like `modastack install`, setup targets its literal cwd — it CREATES
 the installation root, so it never calls paths.resolve_root().
@@ -17,9 +17,7 @@ from pathlib import Path
 
 def run_setup(project_path: Path, model: str | None = None,
               resume: bool = False) -> int:
-    """Run the interactive setup session. Returns a process exit code."""
-    import asyncio
+    """Launch the local web UI for setup. Returns a process exit code."""
+    from modastack.setup.webui.server import serve
 
-    from modastack.setup.repl import run_repl
-
-    return asyncio.run(run_repl(project_path, model=model, resume=resume))
+    return serve(project_path, model=model, resume=resume)
