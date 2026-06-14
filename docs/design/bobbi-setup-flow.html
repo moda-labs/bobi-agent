@@ -96,6 +96,17 @@
   .chat .ch-input input{flex:1;font-family:var(--font-sans);font-size:13px;border:1px solid var(--border-strong);border-radius:8px;padding:9px 11px;background:var(--raised);}
   .chat .ch-input input:focus{outline:none;border-color:var(--accent);}
 
+  /* Sketch — single centered conversation (no separate answer box) */
+  .chat.sketch{width:min(760px,100%);margin:0 auto;border-left:0;background:transparent;}
+  .chat.sketch .sketch-top{display:flex;align-items:center;justify-content:space-between;padding:16px 28px 0;}
+  .chat.sketch .sketch-eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);}
+  .chat.sketch .sketch-next{padding:6px 12px;font-size:13px;}
+  .chat.sketch .ch-body{padding:26px 28px 8px;gap:14px;}
+  .chat.sketch .msg{font-size:14px;max-width:82%;padding:10px 13px;}
+  .chat.sketch .chips{padding:2px 28px 8px;margin:0;}
+  .chat.sketch .ch-input{border-top:0;padding:6px 28px 22px;}
+  .chat.sketch .ch-input input{font-size:14.5px;padding:13px 15px;border-radius:10px;}
+
   /* dark slab (Build / Review) */
   .slab{background:var(--slab-bg);display:flex;flex-direction:column;position:relative;min-width:0;overflow:hidden;}
   .slab::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--slab-accent) 18%,var(--slab-accent) 82%,transparent);opacity:.9;}
@@ -171,7 +182,7 @@
   const STEPS = [
     {id:'start',     label:'Start'},
     {id:'describe',  label:'Sketch'},
-    {id:'autopilot', label:'Autopilot'},
+    {id:'automate', label:'Automate'},
     {id:'connect',   label:'Connect'},
     {id:'build',     label:'Build'},
     {id:'review',    label:'Review'},
@@ -206,38 +217,34 @@
       <div class="actions"><button class="btn ghost" disabled>Back</button><button class="btn primary" data-go="describe">Next: Describe →</button></div>
     </main>`,
 
-    describe: ()=>{ document.getElementById('panes').style.gridTemplateColumns='216px 1fr 340px'; return `<main class="node narrow">
-      <div class="eyebrow">Sketch · 2 of 7</div>
-      <h1>What should this team handle?</h1>
-      <p class="lede">Rough is fine — a sentence or two in plain language. Not sure how to phrase it? Riff with bobbi on the right and it'll shape this for you.</p>
-      <textarea class="answer" rows="4">Watch our GitHub repo and triage incoming issues — route each one to the right engineer and keep humans posted in Slack.</textarea>
-      <div class="chips"><span class="chip">+ also handle PR reviews</span><span class="chip">+ post a daily summary</span><span class="chip">+ escalate blockers</span></div>
-      <div class="actions"><button class="btn ghost" data-go="start">Back</button><button class="btn primary" data-go="autopilot">Next: Autopilot →</button><span class="note">⏎ to continue</span></div>
-    </main>
-    <aside class="chat">
-      <div class="ch-head"><span class="star">✦</span> brainstorm with bobbi</div>
-      <div class="ch-body">
-        <div class="msg you">it should watch our github and figure out who should handle each issue</div>
-        <div class="msg bob">Got it — sounds like a <b>triage director</b> that reads new issues and assigns them, plus engineers who pick up the work. Want me to set the team's focus to:<br><br>"Triage incoming GitHub issues and route them to the right engineer, posting status to Slack."<button class="use" data-go="describe">Use this →</button></div>
-        <div class="msg you">yeah and keep the team posted in slack</div>
-        <div class="msg bob">Added Slack updates. I'll wire the Slack connection in the next step.</div>
-      </div>
-      <div class="ch-input"><input placeholder="Tell bobbi more…"><button class="btn primary" style="padding:9px 13px">↑</button></div>
-    </aside>`; },
+    describe: ()=>{ document.getElementById('panes').style.gridTemplateColumns='216px 1fr'; return `<main class="node" style="padding:0;overflow:hidden;display:flex;">
+      <section class="chat sketch">
+        <div class="sketch-top"><span class="sketch-eyebrow">Sketch · talk it through</span><button class="btn ghost sketch-next" data-go="automate">Next: Automate →</button></div>
+        <div class="ch-body">
+          <div class="msg bob">Hi — I'm bobbi. Tell me what you want this team to do, in your own words. Rough is fine; we'll sharpen it together.</div>
+          <div class="msg you">watch our github and figure out who should handle each issue</div>
+          <div class="msg bob">Got it — a team that <b>triages incoming GitHub issues and routes each to the right engineer</b>. Who picks up the work: a couple of engineers, or one generalist?</div>
+          <div class="msg you">a couple engineers, and keep everyone posted in slack</div>
+          <div class="msg bob">Nice — I'll have it post status to Slack too. Tell me more, or I can show you a few things it could handle on its own next.</div>
+        </div>
+        <div class="chips"><span class="chip">+ also handle PR reviews</span><span class="chip">+ post a daily summary</span><span class="chip">+ escalate blockers</span></div>
+        <div class="ch-input"><input placeholder="Tell bobbi what you want to build…"><button class="btn primary" style="padding:9px 14px">↑</button></div>
+      </section>
+    </main>`; },
 
     connect: ()=>`<main class="node narrow">
       <div class="eyebrow">Connect</div>
       <h1>Give the team its tools</h1>
-      <p class="lede">From what you sketched (and your autopilot picks), bobbi needs these. Connect what you want — skip any and add them later.</p>
+      <p class="lede">From what you sketched (and your automate picks), bobbi needs these. Connect what you want — skip any and add them later.</p>
       <div class="cardgrid" style="grid-template-columns:1fr;">
         <div class="pcard sel"><div class="pt">GitHub <span style="color:var(--accent);font-size:12px;font-family:var(--font-mono)">· connected</span></div><div class="pd">Read issues and PRs, comment, manage labels.</div></div>
         <div class="pcard"><div class="pt">Slack</div><div class="pd">Post updates and take messages in a channel.</div></div>
       </div>
-      <div class="actions"><button class="btn ghost" data-go="autopilot">Back</button><button class="btn primary" data-go="build">Next: Build →</button></div>
+      <div class="actions"><button class="btn ghost" data-go="automate">Back</button><button class="btn primary" data-go="build">Next: Build →</button></div>
     </main>`,
 
-    autopilot: ()=>`<main class="node narrow">
-      <div class="eyebrow">Autopilot · bobbi's ideas</div>
+    automate: ()=>`<main class="node narrow">
+      <div class="eyebrow">Automate · bobbi's ideas</div>
       <h1>Anything you want bobbi to do on its own?</h1>
       <p class="lede">Without you asking. From what you sketched, bobbi came up with a few — switch on what's useful, set how much leash each one gets, or skip the lot. You're always in control of what's on.</p>
       <div class="cardgrid" style="grid-template-columns:1fr;">

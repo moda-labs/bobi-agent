@@ -42,7 +42,7 @@ is subordinate to this.
   Talking to bobbi within seconds of launch.
 - **Three escalating magic beats — front-load the first:** (1) **Sketch
   reflection** — type a rough line, bobbi instantly reflects back a smart, alive
-  understanding (~seconds, the early hook); (2) **Autopilot suggestions** — "it
+  understanding (~seconds, the early hook); (2) **Automate suggestions** — "it
   thought of things I didn't"; (3) **the Build pour** — the payoff. Don't make the
   user climb to (3) to feel anything.
 - **Housekeeping never gates magic.** Connect/auth must be **always deferrable**
@@ -187,8 +187,8 @@ Stages (rail, renamed from the old plan):
 |---|---|---|
 | **Start** | from scratch | pick a source → fetch to local working copy |
 | **Sketch** | you sketch what it does → bobbi designs | bobbi summarizes the pack → "use as-is or customize?" |
-| **Autopilot** | bobbi *suggests* proactive behaviors → pick + set leash | confirm the pack's autopilot + add/remove |
-| **Connect** | connect the services the sketch + autopilot imply | connect services the pack declares (pre-filled) |
+| **Automate** | bobbi *suggests* proactive behaviors → pick + set leash | confirm the pack's automate + add/remove |
+| **Connect** | connect the services the sketch + automate imply | connect services the pack declares (pre-filled) |
 | **Build** | author all files (the "pour") | as-is → auto-pass; customize → regenerate affected files |
 | **Review** | review/edit authored files | browse/edit fetched files |
 | **Install** | freeze to `.bobbi/` + write `.env` | same |
@@ -215,9 +215,9 @@ Principles:
   scopes + connect/authorize (Venn OAuth or token) + live connection check.
   Ambiguous-but-implied tools ("triage issues", no tracker named) get asked
   conversationally in Sketch when possible, else surface as an explicit pick here.
-- **Autopilot is the twin of Connect — the other boundary decision.** Principle:
+- **Automate is the twin of Connect — the other boundary decision.** Principle:
   *expose the team's boundary with the world (Connect = what it can reach) and with
-  time (Autopilot = when it acts on its own); keep internal structure (roles,
+  time (Automate = when it acts on its own); keep internal structure (roles,
   workflows, policies) invisible.* It's an explicit step because **granting
   initiative is a trust decision** — proactive behavior (message you each morning,
   poll an outside source, launch agents on a schedule) should be consciously opted
@@ -228,19 +228,20 @@ Principles:
   **"Are there things you want bobbi to do on its own, without you asking?"**
   Maps to the existing `monitors/` (scheduled checks) + scheduled/triggered
   workflows. Three design points:
-  - **Before Connect, not after.** Autopilot is about *capability/intent* (what the
+  - **Before Connect, not after.** Automate is about *capability/intent* (what the
     team does), which flows from Sketch; Connect is *housekeeping* (plumbing the
     access those capabilities need). Putting it first keeps the intent-shaped steps
-    together (Sketch → Autopilot) and makes Connect the *consequence* of intent —
-    its connector list is seeded by both Sketch and Autopilot ("you asked for
+    together (Sketch → Automate) and makes Connect the *consequence* of intent —
+    its connector list is seeded by both Sketch and Automate ("you asked for
     morning stale-PR alerts → connect GitHub + Slack").
-  - **Per-behavior leash, to defuse the "Autopilot = no oversight" fear.** Each item
+  - **Per-behavior leash, to defuse the "Automate = no oversight" fear.** Each item
     carries an autonomy level: **notify** (bobbi tells you, you act) / **ask first**
     (bobbi proposes, waits for approval) / **act** (bobbi does it, reports). The
-    user is always in control of what's on and how much leash each gets. (The name
-    "Autopilot" is provisional and a known risk for implying unsupervised autonomy —
-    validate in testing; fallbacks: "On its own", "Standing orders".)
-  - **bobbi *suggests*, it doesn't just collect.** Autopilot runs a **dedicated LLM
+    user is always in control of what's on and how much leash each gets. (Named
+    **Automate** as of 2026-06-14 — chosen over "Autopilot", which read as
+    unsupervised autonomy; the per-behavior leash plus the plain verb keep the
+    "you're in control" framing. Earlier alts: "On its own", "Standing orders".)
+  - **bobbi *suggests*, it doesn't just collect.** Automate runs a **dedicated LLM
     generation with a specialized prompt** that *ideates* high-value proactive
     behaviors from the team's intent (distinct from the digestion prompt: this is
     generative ideation, not routing). The prompt is tuned to propose concrete,
@@ -249,7 +250,7 @@ Principles:
     a big "it did more than I expected" magic moment.
 - **Layout adapts per stage** (not a fixed 3-pane shell): a single centered
   **conversation** column for Sketch (and the other talk stages —
-  Autopilot/Connect lead with conversation too); calm single column for
+  Automate/Connect lead with conversation too); calm single column for
   Start/Install/Done; slab-as-hero for Build; rail|tree|editor for Review.
   Sketch is **chat-only** — there is no separate "answer" textarea beside the
   chat (see the Sketch note in the eng-review locks).
@@ -295,7 +296,7 @@ picture. You iterate the prompt, not the screens.
 
 It's a *small family* of prompts, not literally one: the main **digestion prompt**
 (routes the conversation → pack artifacts) plus **specialized generators** with
-their own jobs and quality bars — notably the **Autopilot suggester** (ideates
+their own jobs and quality bars — notably the **Automate suggester** (ideates
 proactive behaviors from intent) and the **file authoring** prompt(s). The
 digestion brain is the through-line; the specialists are tuned for tasks the brain
 shouldn't do inline.
@@ -314,16 +315,16 @@ guard, loopback-only, secrets never in the LLM loop). The module layout
 
 What this doc CHANGES vs that plan (build to these):
 - **Adaptive per-stage layout**, not a persistent 3-pane shell. Stages:
-  `Start · Sketch · Autopilot · Connect · Build · Review · Install · Done`.
+  `Start · Sketch · Automate · Connect · Build · Review · Install · Done`.
 - **One mode-aware machine** (create / open) with a **source resolver** (scratch /
   registry / local pack / installed) → local working copy; the wizard is the
   re-entrant editor. Reuse `registry.py` for fetch.
 - **A small prompt family**, not per-node `InterpretSpec` extractors: the stateful
-  **digestion prompt** (routes conversation → pack artifacts), the **Autopilot
+  **digestion prompt** (routes conversation → pack artifacts), the **Automate
   suggester** (ideates proactive behaviors), and **file-authoring** prompt(s).
 - **Policy:** `POLICY.md` (prose, roles reference it) is primary; `policy.yaml` =
   seed topics / generated index. Build authors both for scratch packs.
-- **Autopilot** maps to `monitors/` + scheduled/triggered workflows, with a
+- **Automate** maps to `monitors/` + scheduled/triggered workflows, with a
   per-behavior leash (notify / ask-first / act).
 - **Time-to-magic** governs: first-screen-as-conversation (collapse Start→Sketch
   for scratch), instant Sketch reflection, Connect always deferrable.
@@ -356,7 +357,7 @@ Build order (refined post-eng-review 2026-06-14; reflects the locks above):
    foreground socket→uvicorn launcher.
 6. **`webui/static/*`** — port from `docs/design/bobbi-setup-flow.html` (the
    adaptive stage machine) + `bobbi-setup-mockup.html` (slab/retro).
-7. **Autopilot suggester** prompt (separate one-shot, auto-runs on stage enter)
+7. **Automate suggester** prompt (separate one-shot, auto-runs on stage enter)
    + **Connect** cards.
 8. **Rewire `cli.py`**, delete `repl.py`/`tools.py` + their tests, adapt
    `tests/integration/test_setup_flow.py` to drive the HTTP API.
@@ -382,7 +383,7 @@ decisions. These are now binding for the implementation:
   affected) to milestone 2 — it reuses the same stages, so it's additive, and
   the build order already lists it last.
 - **`state.py`: rewrite the machine, keep the persistence.** Rewrite the
-  `Stage` enum to `Start·Sketch·Autopilot·Connect·Build·Review·Install·Done`
+  `Stage` enum to `Start·Sketch·Automate·Connect·Build·Review·Install·Done`
   and `can_advance`/`require_stage`/`advance_blocker` to the new gates. Drop
   `INTERVIEW_KEYS`/`REQUIRED_INTERVIEW_KEYS`, `discovery_skipped_reason`, and
   the use-as-is jump (returns with open mode). Keep `save/load/clear`,
@@ -432,13 +433,13 @@ decisions. These are now binding for the implementation:
 ## Open decisions
 1. ~~Phosphor accent~~ — **RESOLVED: amber** (2026-06-13). Reserve distinct
    success/error hues since amber is the brand accent.
-2. **Step names.** Working set (8): `Start · Sketch · Autopilot · Connect ·
-   Build · Review · Install · Done`. Provisional picks to validate: **Sketch**
+2. **Step names.** Working set (8): `Start · Sketch · Automate · Connect ·
+   Build · Review · Install · Done`. **Automate** is settled (2026-06-14 —
+   renamed from "Autopilot", which read as unsupervised autonomy; plain verb +
+   the leash keep the "you're in control" framing). Still provisional: **Sketch**
    (was Describe — wanted something more fun/less dry; alts: Shape, Conjure,
-   Craft) and **Autopilot** (the proactive step — fun + on-theme, but risks
-   implying unsupervised autonomy; alts: On its own, Standing orders; mitigated
-   by the per-behavior leash). Still gut-check `Build` vs `Forge`, `Done` vs
-   `Launch`; whether **Review** is its own step; and whether Connect + Autopilot
+   Craft). Still gut-check `Build` vs `Forge`, `Done` vs
+   `Launch`; whether **Review** is its own step; and whether Connect + Automate
    stay two steps (current) or merge.
 3. **Command name.** `bobbi setup` reads one-shot but the UI is also the
    re-entrant editor — may want a broader command later.
@@ -456,9 +457,9 @@ decisions. These are now binding for the implementation:
 | 2026-06-13 | Agent-as-router, invisible in-process | magic in-process, inspect at end |
 | 2026-06-13 | One stateful digestion prompt, not per-field extractors | holds full picture; the prompt is the product |
 | 2026-06-13 | Accent LOCKED: amber phosphor | warmest, cohesive with paper, most distinctive; reserve success/error hues |
-| 2026-06-13 | Add proactive step, named **Autopilot**, BEFORE Connect | capability/intent before housekeeping; Connect becomes consequence of intent |
-| 2026-06-13 | Per-behavior leash on Autopilot (notify/ask/act) | defuses "Autopilot = no oversight"; user controls how much initiative each gets |
-| 2026-06-13 | Autopilot has a dedicated suggestion-generation prompt | ideates proactive behaviors from intent; "did more than I expected" magic |
+| 2026-06-13 | Add proactive step, named **Automate**, BEFORE Connect | capability/intent before housekeeping; Connect becomes consequence of intent |
+| 2026-06-13 | Per-behavior leash on Automate (notify/ask/act) | defuses "Automate = no oversight"; user controls how much initiative each gets |
+| 2026-06-13 | Automate has a dedicated suggestion-generation prompt | ideates proactive behaviors from intent; "did more than I expected" magic |
 | 2026-06-13 | Rename Describe → **Sketch** (provisional) | warmer/lower-pressure, contrasts with Build (rough idea → built thing) |
 | 2026-06-13 | **Time-to-magic** is the governing metric; fun from screen 1 | short attention; front-load magic, defer housekeeping, keep it alive/evolvable |
 | 2026-06-14 | Eng-review: v1 = create-only spine; open mode → M2 | prove time-to-magic on create first; open mode is additive, reuses same stages |
@@ -466,3 +467,5 @@ decisions. These are now binding for the implementation:
 | 2026-06-14 | Eng-review: 4-slot spec (goal/roles/autonomous/services), route-then-author | conversation guides messy→structured; `SetupState` authoritative; wizard owns the manifest |
 | 2026-06-14 | Eng-review: stateless one-shot per turn + rolling summary (no live session) | "stateful" satisfied by server-held spec; clean def/async split; trivial resume + hermetic tests |
 | 2026-06-14 | Eng-review: soft non-blocking readiness over a multi-turn conversation | forgiving north star; certainty signal guides the follow-up, never walls; floor = goal non-empty |
+| 2026-06-14 | Rename stage **Autopilot → Automate** | simpler plain verb; "Autopilot" read as unsupervised autonomy (its own flagged risk); leash keeps user-in-control |
+| 2026-06-14 | **Sketch is one centered conversation**, not two input boxes | the two-box (textarea + brainstorm drawer) was a relic of the dead chat-populates-a-field model; chat is the only interaction |
