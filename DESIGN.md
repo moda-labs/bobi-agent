@@ -325,17 +325,42 @@ What this doc CHANGES vs that plan (build to these):
 - **Time-to-magic** governs: first-screen-as-conversation (collapse Start→Sketch
   for scratch), instant Sketch reflection, Connect always deferrable.
 
-Suggested build order (unchanged early steps from the plan, then the new surface):
-1. `actions.py` (extract `tools.py` bodies; keep tests green).
-2. `services.py` (Venn/Slack catalog) + `llm.py` (streaming one-shot).
-3. The **digestion prompt** + `authoring.py` (routing → typed artifacts; the brain
-   is the long pole — prototype it against real sessions early).
-4. `webui/server.py` (build_app, serialize_state, SSE, nonce/Host, launcher).
-5. `webui/static/*` — port from `docs/design/bobbi-setup-flow.html` (already the
-   adaptive stage machine in vanilla HTML/CSS/JS) + `mockup.html` (the slab/retro).
-6. Autopilot suggester prompt; policy.yaml + `POLICY.md` authoring; open-mode
-   resolver + summarize.
-7. Rewire `cli.py`, delete `repl.py`/`tools.py`, adapt integration test.
+Build order (refined post-eng-review 2026-06-14; reflects the locks above):
+1. **`actions.py`** — extract the pure deterministic bodies from `tools.py`
+   (validate, install, preflight, credential save, env helpers,
+   `_resolve_or_fetch`, `_validate_pack`, `SECRET_SHAPES`/`PACK_SLUG`). NO
+   stage-gating inside `actions` — gating becomes a server/state concern. Keep
+   `tools.py`'s `@tool` wrappers calling the new functions so
+   `test_setup_tools.py` stays green; add `test_setup_actions.py`. The old REPL
+   machine still runs after this step.
+2. **`state.py` rewrite** (lock #2) — new 8-stage `Stage`,
+   `can_advance`/`require_stage`/`advance_blocker` for the create machine, the
+   4-slot spec fields (`goal`/`roles`/`autonomous`/`services`) + per-slot
+   readiness; keep `save/load/clear`, `source_tree_hash`, validated-hash freeze.
+   Rewrite `test_setup_state.py`. ⚠️ This is where the old `tools.py`/`repl.py`
+   gating diverges (they reference the old enum). Cleanest path: do steps 2→5 as
+   one push so the new machine immediately has the web server as its consumer,
+   then delete `repl.py`/`tools.py` in step 8 — don't try to keep the dead REPL
+   gating green against the new enum.
+3. **`services.py`** (Venn/Slack catalog) + **`llm.py`** (stateless one-shot
+   streaming per lock #4; hermetic fake-client test).
+4. **Digestion prompt + `authoring.py`** — the brain (lock #3): route each turn
+   → 4-slot spec deltas + refreshed rolling summary + readiness; Build authors
+   files from the spec (wizard computes the manifest). The long pole — prototype
+   against real sessions early.
+5. **`webui/server.py`** — `build_app`, `serialize_state` (exposes
+   `advance_blocker`), SSE `def`/`async def` split, nonce + Host guard,
+   foreground socket→uvicorn launcher.
+6. **`webui/static/*`** — port from `docs/design/bobbi-setup-flow.html` (the
+   adaptive stage machine) + `bobbi-setup-mockup.html` (slab/retro).
+7. **Autopilot suggester** prompt (separate one-shot, auto-runs on stage enter)
+   + **Connect** cards.
+8. **Rewire `cli.py`**, delete `repl.py`/`tools.py` + their tests, adapt
+   `tests/integration/test_setup_flow.py` to drive the HTTP API.
+
+Deferred to **M2** (do NOT build in v1): open-mode source resolver +
+summarize-existing + regenerate-affected; `POLICY.md` as a first-class spec slot.
+Do not re-litigate the six locked decisions above without explicit approval.
 
 Before coding, a fresh `/plan-eng-review` pass against this doc is worth it — the
 old plan predates the model.
@@ -343,6 +368,52 @@ old plan predates the model.
 The design artifacts (`docs/design/bobbi-setup-mockup.html`,
 `bobbi-setup-flow.html`) are working vanilla HTML/CSS/JS and are a direct head
 start on `webui/static/` — not throwaway.
+
+### Eng-review locks (2026-06-14)
+
+The `/plan-eng-review` pass against this doc settled the build-defining
+decisions. These are now binding for the implementation:
+
+- **v1 cut = create-only spine.** Ship all 8 stages for the scratch/create
+  path. Defer **open mode** (source resolver, summarize-existing, regenerate-
+  affected) to milestone 2 — it reuses the same stages, so it's additive, and
+  the build order already lists it last.
+- **`state.py`: rewrite the machine, keep the persistence.** Rewrite the
+  `Stage` enum to `Start·Sketch·Autopilot·Connect·Build·Review·Install·Done`
+  and `can_advance`/`require_stage`/`advance_blocker` to the new gates. Drop
+  `INTERVIEW_KEYS`/`REQUIRED_INTERVIEW_KEYS`, `discovery_skipped_reason`, and
+  the use-as-is jump (returns with open mode). Keep `save/load/clear`,
+  `source_tree_hash`, and the `validated`/`validated_hash` freeze model as-is.
+  (The handoff's "state.py as-is" was wrong for the gating; this corrects it.)
+- **Digestion contract = 4-slot accumulating spec, route-then-author.** The
+  conversation fills a server-owned spec with four slots — `goal`, `roles`,
+  `autonomous` (events/monitors), `services` — that accumulates across stages.
+  Each turn the digestion prompt **routes** the user's message into slot
+  update(s); `SetupState` is the source of truth. At **Build**, the wizard
+  computes the file manifest (file list + `entry_point` are computed, never
+  LLM-decided) and per-file authoring prompts stream raw md/yaml to disk. LLM
+  owns routing + content; the wizard owns structure. (`POLICY.md` is **not** a
+  v1 slot — it folds into goal/roles prose at Build; revisit in M2.)
+- **Brain state = stateless one-shot per turn + rolling summary.** No
+  long-lived SDK session. Each turn is a fresh streaming call fed
+  `spec-so-far + rolling-summary + last-N raw msgs`. The digestion output
+  emits a **refreshed rolling summary** alongside the deltas (no extra
+  summarize round-trip). The context assembler is one tunable function.
+- **Readiness = soft, non-blocking, trajectory-based.** Each conversation
+  stage is a **sustained multi-turn dialogue**, not a one-shot prompt — the
+  stage does not auto-advance; it loops until the user clicks on. The brain
+  self-scores each slot (`enough`/`thin`/`empty`) against a rubric (goal: one
+  sentence naming what-it-does + outcome; roles: ≥1 named role w/ responsibility;
+  autonomous: explicitly confirmed even if "none"; services: each implied
+  service named + connected-or-deferred). That signal drives bobbi's one good
+  follow-up and a calm "got it ✓ / still fuzzy" cue — it never gates. The only
+  hard floor is `goal` non-empty (so Build has something to author).
+- **Sketch keeps structure behind the curtain** — a quiet readiness cue at
+  most, no live spec panel (per "magic in-process, transparency at the end").
+- **Parked (real, not dropped):** redacting secrets a user pastes into the
+  freeform Sketch chat before they reach the LLM / rolling summary. The
+  `SECRET_SHAPES` scan today only covers generated files; the freeform surface
+  is a new credential-leak vector. Decide before Sketch chat ships.
 
 ## Open decisions
 1. ~~Phosphor accent~~ — **RESOLVED: amber** (2026-06-13). Reserve distinct
@@ -376,3 +447,8 @@ start on `webui/static/` — not throwaway.
 | 2026-06-13 | Autopilot has a dedicated suggestion-generation prompt | ideates proactive behaviors from intent; "did more than I expected" magic |
 | 2026-06-13 | Rename Describe → **Sketch** (provisional) | warmer/lower-pressure, contrasts with Build (rough idea → built thing) |
 | 2026-06-13 | **Time-to-magic** is the governing metric; fun from screen 1 | short attention; front-load magic, defer housekeeping, keep it alive/evolvable |
+| 2026-06-14 | Eng-review: v1 = create-only spine; open mode → M2 | prove time-to-magic on create first; open mode is additive, reuses same stages |
+| 2026-06-14 | Eng-review: rewrite `state.py` machine, keep persistence/hash/freeze | stages changed wholesale; gating is the spine — don't map dead gates onto a new machine |
+| 2026-06-14 | Eng-review: 4-slot spec (goal/roles/autonomous/services), route-then-author | conversation guides messy→structured; `SetupState` authoritative; wizard owns the manifest |
+| 2026-06-14 | Eng-review: stateless one-shot per turn + rolling summary (no live session) | "stateful" satisfied by server-held spec; clean def/async split; trivial resume + hermetic tests |
+| 2026-06-14 | Eng-review: soft non-blocking readiness over a multi-turn conversation | forgiving north star; certainty signal guides the follow-up, never walls; floor = goal non-empty |
