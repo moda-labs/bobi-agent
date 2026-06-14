@@ -198,17 +198,18 @@ class TestFormatEventForManager:
 
 
 class TestLogEvent:
-    """_log_event appends to events.jsonl without corrupting existing lines."""
+    """_log_event appends to per-session event files without corrupting existing lines."""
 
     def test_appends_on_fresh_line_when_file_missing_trailing_newline(self, tmp_path):
-        """If events.jsonl doesn't end with a newline (e.g. truncated write),
+        """If the event file doesn't end with a newline (e.g. truncated write),
         _log_event must start a new line so it doesn't merge with the last entry."""
-        jsonl = tmp_path / "events.jsonl"
+        jsonl = tmp_path / "events-default.jsonl"
         # Simulate a prior write that lost its trailing newline
         first = {"timestamp": "2026-01-01T00:00:00", "type": "a", "source": "x", "payload": {}}
         jsonl.write_text(json.dumps(first))  # no trailing \n
 
-        with patch("modastack.events.client._state_path", return_value=jsonl):
+        with patch("modastack.events.client._state_path",
+                   side_effect=lambda name: tmp_path / name):
             _log_event({"type": "b", "source": "y"})
 
         lines = jsonl.read_text().splitlines()
@@ -219,17 +220,66 @@ class TestLogEvent:
 
     def test_normal_append_no_blank_line(self, tmp_path):
         """When file ends with newline (normal case), no extra blank line inserted."""
-        jsonl = tmp_path / "events.jsonl"
+        jsonl = tmp_path / "events-default.jsonl"
         first = {"timestamp": "2026-01-01T00:00:00", "type": "a", "source": "x", "payload": {}}
         jsonl.write_text(json.dumps(first) + "\n")
 
-        with patch("modastack.events.client._state_path", return_value=jsonl):
+        with patch("modastack.events.client._state_path",
+                   side_effect=lambda name: tmp_path / name):
             _log_event({"type": "b", "source": "y"})
 
         content = jsonl.read_text()
         lines = content.splitlines()
         assert len(lines) == 2
         assert content.endswith("\n")
+
+    def test_per_session_writes_to_session_file(self, tmp_path):
+        """When session_id is provided, _log_event writes to events-<session>.jsonl."""
+        with patch("modastack.events.client._state_path",
+                   side_effect=lambda name: tmp_path / name):
+            _log_event({"type": "push", "source": "github", "seq": 5}, session_id="lead-abc")
+
+        session_file = tmp_path / "events-lead-abc.jsonl"
+        assert session_file.exists()
+        entry = json.loads(session_file.read_text().strip())
+        assert entry["type"] == "push"
+        assert entry["seq"] == 5
+
+    def test_per_session_includes_seq_and_deployment(self, tmp_path):
+        """Per-session log entries include seq and deployment_id for dedup."""
+        with patch("modastack.events.client._state_path",
+                   side_effect=lambda name: tmp_path / name):
+            _log_event({"type": "a", "source": "x", "seq": 10, "deployment_id": "dep-1"},
+                       session_id="sess1")
+
+        session_file = tmp_path / "events-sess1.jsonl"
+        entry = json.loads(session_file.read_text().strip())
+        assert entry["seq"] == 10
+        assert entry["deployment_id"] == "dep-1"
+
+    def test_no_session_id_writes_to_default_file(self, tmp_path):
+        """Without session_id, _log_event writes to events-default.jsonl."""
+        with patch("modastack.events.client._state_path",
+                   side_effect=lambda name: tmp_path / name):
+            _log_event({"type": "a", "source": "x"})
+
+        assert (tmp_path / "events-default.jsonl").exists()
+
+    def test_two_sessions_write_separate_files(self, tmp_path):
+        """Two sessions writing concurrently produce separate files."""
+        with patch("modastack.events.client._state_path",
+                   side_effect=lambda name: tmp_path / name):
+            _log_event({"type": "push", "source": "github", "seq": 1}, session_id="sess-a")
+            _log_event({"type": "pr", "source": "github", "seq": 1}, session_id="sess-b")
+
+        file_a = tmp_path / "events-sess-a.jsonl"
+        file_b = tmp_path / "events-sess-b.jsonl"
+        assert file_a.exists()
+        assert file_b.exists()
+        entry_a = json.loads(file_a.read_text().strip())
+        entry_b = json.loads(file_b.read_text().strip())
+        assert entry_a["type"] == "push"
+        assert entry_b["type"] == "pr"
 
 
 class TestEventQueue:

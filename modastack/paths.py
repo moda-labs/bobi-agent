@@ -24,6 +24,7 @@ projects into enclosing ones.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # The artifact that marks an installed root. Written verbatim by
@@ -74,16 +75,56 @@ def modastack_root() -> Path:
     return _root
 
 
+def _is_linked_worktree(path: Path) -> bool:
+    """True when path is a git linked worktree (not a main working tree).
+
+    Git linked worktrees have a .git FILE (not directory) whose content
+    starts with 'gitdir:'. The main working tree has a .git DIRECTORY.
+    """
+    dot_git = path / ".git"
+    if dot_git.is_file():
+        try:
+            return dot_git.read_text().strip().startswith("gitdir:")
+        except OSError:
+            return False
+    return False
+
+
 def resolve_root(start: Path) -> Path:
     """THE filesystem resolver for the Modastack working directory.
 
     Walks up from `start` to the nearest ancestor whose .modastack/
     contains agent.yaml and returns it. Raises when no installed root
     exists. Only entry points call this, and they bind what it returns.
+
+    When MODASTACK_ROOT is set in the environment, it short-circuits the
+    walk-up — managed child processes inherit the correct root without
+    filesystem guessing. A set-but-invalid MODASTACK_ROOT raises: the
+    spawning process is broken (stale env, typo, deleted install) and
+    silently walking from cwd would risk binding a different root —
+    the same identity-fork failure mode as #245.
+
+    Linked git worktrees (where .git is a file, not a directory) are
+    skipped even when they carry a checked-in agent.yaml, preventing
+    the worktree from capturing root resolution (#247).
     """
+    env_root = os.environ.get("MODASTACK_ROOT")
+    if env_root:
+        p = Path(env_root).resolve()
+        if (p / ".modastack" / ROOT_MARKER).is_file():
+            return p
+        raise RuntimeError(
+            f"MODASTACK_ROOT is set to {p} but it is not a valid "
+            f"Modastack installation (missing .modastack/{ROOT_MARKER}). "
+            f"The spawning process has a stale or incorrect root — fix "
+            f"the environment rather than falling back to walk-up."
+        )
+
     origin = start.resolve()
     for candidate in (origin, *origin.parents):
         if (candidate / ".modastack" / ROOT_MARKER).is_file():
+            if _is_linked_worktree(candidate):
+                continue
             return candidate
     raise RuntimeError(
         f"no Modastack installation found above {origin} — "

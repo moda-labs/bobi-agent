@@ -24,6 +24,14 @@ def cleanup_worktree(repo_root: str, head_branch: str) -> dict:
       - ``{"status": "not_found"}`` if no worktree matched
     """
     root = Path(repo_root).resolve()
+
+    # Fail loudly if repo_root is not a git repository — running worktree
+    # prune / branch -D against a non-repo (e.g. the installation root) is
+    # destructive and wrong.  See issue #246.
+    if not (root / ".git").exists():
+        log.error("cleanup_worktree called on non-git directory: %s", root)
+        return {"status": "error", "reason": f"not a git repository: {root}"}
+
     worktree_paths = _find_worktrees_for_branch(str(root), head_branch)
 
     if not worktree_paths:

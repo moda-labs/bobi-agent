@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess as sp
 import sys
 import threading
@@ -527,12 +528,14 @@ def spawn_adhoc(
     return result
 
 
-def _launch_detached(script: str, args: list[str], log_file: Path) -> int:
+def _launch_detached(script: str, args: list[str], log_file: Path,
+                     env: dict[str, str] | None = None) -> int:
     """Launch a detached subprocess that survives parent exit. Returns pid."""
     cmd = [sys.executable, "-c", script, *args]
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with open(log_file, "a") as lf:
-        proc = sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
+        proc = sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True,
+                        env=env)
     return proc.pid
 
 
@@ -705,7 +708,11 @@ def launch_agent(
     ))
 
     log_file = SessionRegistry.log_path(session_name)
-    pid = _launch_detached(script, [args_json], log_file)
+    # Pin MODASTACK_ROOT so CLI commands run inside worktrees by the child
+    # resolve to the real installation, not the worktree's checked-in
+    # agent.yaml (#247).
+    child_env = {**os.environ, "MODASTACK_ROOT": str(root)}
+    pid = _launch_detached(script, [args_json], log_file, env=child_env)
     registry.update(session_name, pid=pid)
     return session_name
 

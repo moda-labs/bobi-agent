@@ -1308,14 +1308,28 @@ def events(tail, decisions_only):
     malformed = 0
 
     if not decisions_only:
-        events_path = paths.state_path(project_path) / "events.jsonl"
-        if events_path.exists():
+        state_dir = paths.state_path(project_path)
+        event_files = list(state_dir.glob("events-*.jsonl"))
+
+        seen_events: set[tuple] = set()  # (seq, deployment_id) dedup
+
+        for events_path in event_files:
             for line in events_path.read_text().strip().splitlines():
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     malformed += 1
                     continue
+
+                # Deduplicate by (seq, deployment_id) when both are present.
+                seq = entry.get("seq")
+                dep = entry.get("deployment_id")
+                if seq is not None and dep is not None:
+                    key = (seq, dep)
+                    if key in seen_events:
+                        continue
+                    seen_events.add(key)
+
                 data = entry.get("data", {})
                 detail = data.get("text", "") or data.get("title", "") or data.get("run_key", "")
                 if len(detail) > 80:
@@ -1861,7 +1875,7 @@ def agents_launch(workflow, role, run_key, task, timeout, wait, post_event, requ
     Use 'modastack roles list' to see available roles.
 
     Examples:
-        modastack agents launch -w issue-lifecycle --role engineer --id 42 --task "Work on issue 42"
+        modastack agents launch -w issue-lifecycle --role engineer --id 42 --task "Fix moda-labs/modastack#42"
         modastack agents launch -w adhoc --role engineer --task "Why is CI failing?"
         modastack agents launch -w adhoc --role engineer --task "Be a team lead" --persistent
         modastack agents launch -w adhoc --role manager --subscribe moda-labs/modastack --persistent

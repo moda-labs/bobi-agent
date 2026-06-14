@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -38,16 +39,24 @@ log = logging.getLogger(__name__)
 MAX_HANDOFF_RETRIES = 2
 
 
-def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None = None) -> bool:
+def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None = None,
+                         repo: str = "") -> bool:
     """Check if any suspended workflow is waiting for this event type and resume it.
 
     Called by the manager when it receives an event that might unblock a workflow.
     Returns True if a workflow was resumed.
+
+    *repo* scopes the lookup to a specific repository so that identical
+    run_keys in different repos do not collide.
     """
     from modastack.workflow.triggers import WorkflowDispatcher
 
-    run = WorkflowRun.find_waiting(event_type, run_key)
+    run = WorkflowRun.find_waiting(event_type, run_key, repo=repo)
     if not run:
+        return False
+
+    if not run.claim():
+        log.info(f"Run {run.run_id} already claimed by another process")
         return False
 
     dispatcher = WorkflowDispatcher()
@@ -580,6 +589,74 @@ def _emit_step_failed(run_key, workflow_name, step_name, error):
     }, blocking=True)
 
 
+def _remote_matches_slug(origin_url: str, repo_slug: str) -> bool:
+    """Return True if *origin_url* points at *repo_slug* (``owner/repo``).
+
+    Handles both HTTPS (``https://github.com/owner/repo.git``) and SSH
+    (``git@github.com:owner/repo.git``) URLs by normalising to the
+    ``owner/repo`` suffix and comparing with ``==`` to avoid substring
+    false-positives (e.g. ``org/api`` matching ``org/api-private``).
+    """
+    # Normalise: strip trailing .git, grab the last two path components.
+    url = origin_url.rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    # SSH URLs use ":" before the path; HTTPS uses "/".
+    path_part = url.split(":")[-1] if ":" in url else url
+    parts = path_part.rsplit("/", 2)
+    if len(parts) >= 2:
+        normalised = f"{parts[-2]}/{parts[-1]}"
+        return normalised == repo_slug
+    return False
+
+
+def _resolve_repo_root(ctx: VariableContext) -> str | None:
+    """Resolve the local checkout for the repo identified by ``input.repo``.
+
+    ``input.repo`` is a GitHub slug like ``org/name``.  The checkout lives
+    either as a child directory of the installation root (director-style
+    layout) or *is* the installation root (single-repo layout).
+
+    Returns ``None`` when the repo cannot be found locally.
+    """
+    from modastack.paths import modastack_root
+
+    repo_slug = ctx.resolve("${{ input.repo }}") if "input" in ctx.scopes else ""
+    if not repo_slug or repo_slug.startswith("${{"):
+        return None
+
+    root = modastack_root()
+    repo_name = repo_slug.split("/")[-1]
+
+    # Reject path-traversal components in the repo name so a crafted
+    # input.repo like "org/.." cannot escape the installation root.
+    if not repo_name or repo_name in (".", "..") or "/" in repo_name or "\\" in repo_name:
+        return None
+
+    # Director-style: repo is a child directory of the installation root
+    candidate = root / repo_name
+    if candidate.is_dir() and (candidate / ".git").exists():
+        return str(candidate)
+
+    # Single-repo: the installation root IS the repo — but only if the
+    # remote URL contains the slug so we don't run git ops against the
+    # wrong repo (e.g. an event for org/other-repo hitting the install root).
+    if (root / ".git").exists():
+        try:
+            origin_url = subprocess.run(
+                ["git", "-C", str(root), "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+        except Exception:
+            origin_url = ""
+        if _remote_matches_slug(origin_url, repo_slug):
+            return str(root)
+
+    return None
+
+
 def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
     """Native action: clean up the worktree for a closed PR's head branch."""
     from modastack.workflow.cleanup import cleanup_worktree
@@ -588,7 +665,9 @@ def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
     if not head_branch or head_branch.startswith("${{"):
         return {"status": "skipped", "reason": "no head_branch in input"}
 
-    repo_root = str(_find_project_root(cwd))
+    repo_root = _resolve_repo_root(ctx)
+    if repo_root is None:
+        return {"status": "error", "reason": "could not resolve target repo from input"}
     return cleanup_worktree(repo_root, head_branch)
 
 

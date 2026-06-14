@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.19.0 — 2026-06-12
+
+Single `.modastack/` per installation, and event delivery scoped to what
+each session actually subscribed to.
+
+### Changed
+- One `.modastack/` directory per installation, holding both config and
+  state (#245): `modastack/paths.py` is the only module that constructs
+  `.modastack` paths; `resolve_root()` (agent.yaml walk-up) is the single
+  filesystem resolver; every process binds its root exactly once at its
+  entry point — the manager at start, children from the `root` their
+  spawner passes in the args blob, CLI commands on first resolve. All
+  cwd-based fallback chains are gone: an unbound process raises instead
+  of inventing a root, and `bind_root` refuses to re-identify a running
+  process
+- One event-server deployment per session (#244): subscriptions are no
+  longer unioned across agents sharing a project root, so project leads
+  stop receiving (and answering) the director's Slack DMs; per-session
+  event cursors replace the shared cursor file
+- CLI commands fail with a clean usage error outside an installation
+  (previously: silent cwd binding, or raw tracebacks from `transcript`
+  and `workflows` subcommands); `doctor` warns instead of reporting
+  green when no installation is found
+- `modastack doctor` gains a single-root check: recursive scan for stray
+  `.modastack/` dirs below the installation, classifying agent.yaml-
+  bearing strays (root-capture risk) separately from removable
+  state-only leftovers
+
+### Fixed
+- Engineer dispatch died with "Workflow 'issue-lifecycle' not found"
+  when a state-only `.modastack/` in a repo checkout captured root
+  resolution (prod 2026-06-12) — the marker is now `agent.yaml`, which
+  only `install` writes
+- `modastack start` (default daemonized path) crashed with NameError
+  after the state-dir refactor; only `--foreground` was exercised in CI
+- Image rotation was silently disabled for workflow/worktree sessions:
+  manifest hashing ran against cwd (no manifest there) instead of the
+  installation root; role prompts and monitor check subprocesses had the
+  same cwd-as-identity bug
+- A child spawned with an args blob missing `root` (old manager + new
+  code during an upgrade window) raises a diagnostic naming the fix —
+  restart the manager — instead of a bare KeyError; a root without
+  agent.yaml is refused before any state is written
+- The event drain thread survives reactor exceptions instead of dying
+  silently while its queue grows unbounded
+- Slack workspace registration sends `bot_id` explicitly, hardening the
+  self-reply filter that let leads' own replies re-ingest as DMs
+
 ## 0.18.0 — 2026-06-12
 
 Unified monitor event path: every monitor flavor publishes through the
