@@ -247,9 +247,12 @@ Principles:
     genuinely-useful, non-spammy behaviors with sane cadence — "think right" about
     what's worth doing unprompted. The user toggles, edits, adds, or skips. This is
     a big "it did more than I expected" magic moment.
-- **Layout adapts per stage** (not a fixed 3-pane shell): single column for
-  Start/Sketch/Autopilot/Connect/Install/Done (+ optional brainstorm drawer),
-  slab-as-hero for Build, rail|tree|editor for Review.
+- **Layout adapts per stage** (not a fixed 3-pane shell): a single centered
+  **conversation** column for Sketch (and the other talk stages —
+  Autopilot/Connect lead with conversation too); calm single column for
+  Start/Install/Done; slab-as-hero for Build; rail|tree|editor for Review.
+  Sketch is **chat-only** — there is no separate "answer" textarea beside the
+  chat (see the Sketch note in the eng-review locks).
 
 ## Customization / policy model
 - **The conversation is primary; structure is its output.** The UI's job is to
@@ -410,6 +413,17 @@ decisions. These are now binding for the implementation:
   hard floor is `goal` non-empty (so Build has something to author).
 - **Sketch keeps structure behind the curtain** — a quiet readiness cue at
   most, no live spec panel (per "magic in-process, transparency at the end").
+- **Sketch is one centered conversation, not two input boxes.** The mockup's
+  `describe` view (a structured "answer" textarea + a separate right-side
+  "brainstorm" chat with a "Use this →" button) is a **relic of the dead model**
+  where the chat populated a form field a deterministic endpoint then committed.
+  That model is gone: there is no form field — the single conversation routes
+  into the 4-slot spec behind the curtain. So the chat is the only interaction
+  surface. The mockup's `describe` view is the one screen the build agent must
+  **not** port verbatim — rebuild it as a single centered chat column. The
+  enrichment chips survive as one-tap conversational quick-adds near the input;
+  the "Use this →" commit button does not. "Next" stays in the rail, always
+  available, never pushed.
 - **Parked (real, not dropped):** redacting secrets a user pastes into the
   freeform Sketch chat before they reach the LLM / rolling summary. The
   `SECRET_SHAPES` scan today only covers generated files; the freeform surface
