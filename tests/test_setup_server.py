@@ -380,6 +380,52 @@ class TestIntro:
         assert "legacy-bot" in names
         assert data["default_location"] == "bobbi"
 
+    def test_intro_finds_team_created_in_bobbi(self, project):
+        # Create writes the team straight into bobbi/ (folder is "bobbi", the
+        # real name lives in agent.yaml) — modify-existing must still find it,
+        # showing the agent.yaml name, not the folder name.
+        src = project / "bobbi"
+        (src / "roles" / "aide").mkdir(parents=True)
+        (src / "agent.yaml").write_text(
+            "agent: personal-assistant\nversion: 0.1.0\nentry_point: aide\n")
+        (src / "agent.md").write_text("# pa\n\nHelp out.\n")
+        (src / "roles" / "aide" / "ROLE.md").write_text("# Aide\n\nHelp.\n")
+        c = _client(SetupState(), project)
+        teams = c.get("/api/intro").json()["teams"]
+        assert {"name": "personal-assistant", "path": "bobbi"} in teams
+
+    def test_intro_finds_teams_in_bobbi_subfolders(self, project):
+        src = project / "bobbi" / "triage-bot"
+        src.mkdir(parents=True)
+        (src / "agent.yaml").write_text("agent: triage-bot\n")
+        c = _client(SetupState(), project)
+        paths = {t["path"] for t in c.get("/api/intro").json()["teams"]}
+        assert "bobbi/triage-bot" in paths
+
+    def test_start_open_rejects_fork_inside_source(self, project):
+        src = project / "bobbi"
+        src.mkdir()
+        (src / "agent.yaml").write_text("agent: pa\n")
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "open", "team": "pa",
+                                       "location": "bobbi/fork"})
+        assert r.status_code == 400  # can't copy a folder into its own subdir
+
+    def test_start_open_in_place_is_a_noop_copy(self, project):
+        # The default modify location is the team's own path — copy_into is a
+        # no-op and the cards reverse-fill from it in place.
+        src = project / "bobbi" / "aide-team"
+        (src / "roles" / "aide").mkdir(parents=True)
+        (src / "agent.yaml").write_text(
+            "agent: aide-team\nversion: 0.1.0\nentry_point: aide\n")
+        (src / "agent.md").write_text("# aide-team\n\nDraft replies.\n")
+        (src / "roles" / "aide" / "ROLE.md").write_text("# Aide\n\nDraft.\n")
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "open", "team": "aide-team",
+                                       "location": "bobbi/aide-team"})
+        assert r.status_code == 200
+        assert r.json()["spec"]["goal"]  # reverse-filled in place
+
     def test_start_create_sets_location_and_advances(self, project):
         c = _client(SetupState(), project)
         r = c.post("/api/start", json={"mode": "create", "name": "My Triage Team",

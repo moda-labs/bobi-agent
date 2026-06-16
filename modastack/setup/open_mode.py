@@ -21,20 +21,41 @@ def _is_team(d: Path) -> bool:
     return d.is_dir() and (d / "agent.yaml").is_file()
 
 
+def _team_display_name(d: Path) -> str:
+    """The team's declared name (agent.yaml `agent:`), falling back to the
+    folder name — so a team in `bobbi/` shows its real name, not 'bobbi'."""
+    try:
+        cfg = yaml.safe_load((d / "agent.yaml").read_text()) or {}
+        if isinstance(cfg, dict) and cfg.get("agent"):
+            return str(cfg["agent"])
+    except Exception:
+        pass
+    return d.name
+
+
 def list_local_teams(project: Path) -> list[dict]:
     """Editable team sources under the project — every folder with an
-    agent.yaml in agents/ or agent-teams/."""
+    agent.yaml under `bobbi/`, `agents/`, or `agent-teams/`. Each of those may
+    itself be a team (the create default writes the team straight into `bobbi/`)
+    or a container of team folders, so both are checked."""
     teams: list[dict] = []
     seen: set[str] = set()
-    for parent in ("agents", "agent-teams"):
+
+    def _add(d: Path) -> None:
+        rel = d.relative_to(project).as_posix()
+        if not _is_team(d) or rel in seen:
+            return
+        seen.add(rel)
+        teams.append({"name": _team_display_name(d), "path": rel})
+
+    for parent in ("bobbi", "agents", "agent-teams"):
         base = project / parent
         if not base.is_dir():
             continue
-        for d in sorted(base.iterdir()):
-            if _is_team(d) and d.name not in seen:
-                seen.add(d.name)
-                teams.append({"name": d.name,
-                              "path": d.relative_to(project).as_posix()})
+        _add(base)                       # the folder itself may be a team
+        for d in sorted(base.iterdir()):  # …or it may contain team folders
+            if d.is_dir():
+                _add(d)
     return teams
 
 
@@ -182,6 +203,9 @@ def copy_into(source: Path, dest: Path) -> None:
     source, dest = source.resolve(), dest.resolve()
     if source == dest:
         return
+    if source in dest.parents:
+        raise ValueError("the working location can't be inside the team's own "
+                         "folder — pick a different folder to fork into")
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, dest, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__"))

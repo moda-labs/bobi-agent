@@ -218,7 +218,10 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                           if t["name"] == team or t["path"] == team), None)
             if not match:
                 return JSONResponse({"error": "unknown team"}, status_code=400)
-            open_mode.copy_into(project / match["path"], abs_loc)
+            try:
+                open_mode.copy_into(project / match["path"], abs_loc)
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
             open_mode.reverse_fill(state, abs_loc)
         elif mode == "registry":
             team = (payload.get("team") or "").strip()

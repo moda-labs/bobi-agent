@@ -136,11 +136,11 @@
     } else if (introMode === "open") {
       el.innerHTML = `
         <div class="iteams">${introTeams.map((t, i) =>
-          `<label class="iteam"><input type="radio" name="iteam" value="${esc(t.name)}" ${i === 0 ? "checked" : ""}>
+          `<label class="iteam"><input type="radio" name="iteam" value="${esc(t.name)}" data-path="${esc(t.path)}" ${i === 0 ? "checked" : ""}>
             <b>${esc(t.name)}</b><span>${esc(t.path)}</span></label>`).join("")}</div>
-        ${locFieldHTML("Work on a copy at (the original is left untouched)", `${introBase}/${(introTeams[0] || {}).name || ""}`)}`;
+        ${locFieldHTML("Edit this team in place (or point somewhere else to fork it)", (introTeams[0] || {}).path || "")}`;
       const loc = $("#introloc");
-      const sync = () => { if (!loc.dataset.touched) { const r = document.querySelector("input[name=iteam]:checked"); loc.value = `${introBase}/${(r && r.value) || "team"}`; } };
+      const sync = () => { if (!loc.dataset.touched) { const r = document.querySelector("input[name=iteam]:checked"); loc.value = (r && r.dataset.path) || ""; } };
       el.querySelectorAll("input[name=iteam]").forEach(r => r.addEventListener("change", sync));
       loc.addEventListener("input", () => loc.dataset.touched = "1");
       wireBrowse();
