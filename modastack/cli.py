@@ -94,6 +94,16 @@ def _ensure_root_bound() -> Path:
     return root if root is not None else _detect_project_root()
 
 
+def _try_detect_project_root() -> Path | None:
+    """Best-effort root detection — returns ``None`` instead of raising
+    when no installation is found.  Used by discovery commands that can
+    degrade gracefully (e.g. ``agents browse``, ``workflows list``)."""
+    try:
+        return _detect_project_root()
+    except click.UsageError:
+        return None
+
+
 
 
 @click.group()
@@ -1152,7 +1162,7 @@ def _offer_sandbox_fix(browser_mod) -> None:
 @main.group()
 def agents():
     """Agent management — launch, list, inspect, and cancel agents."""
-    _ensure_root_bound()
+    pass
 
 
 @agents.command("list")
@@ -1166,6 +1176,7 @@ def agents_list():
     Usage:
         modastack agents list
     """
+    _ensure_root_bound()
     from modastack.subagent import list_agents as _list_agents
 
     active = _list_agents()
@@ -1187,6 +1198,7 @@ def agents_show(ref):
     Usage:
         modastack agents show AGD-12
     """
+    _ensure_root_bound()
     import time as _time
     from modastack.subagent import find_agent
 
@@ -1218,6 +1230,7 @@ def agents_cancel(ref):
     Usage:
         modastack agents cancel AGD-12
     """
+    _ensure_root_bound()
     from modastack.subagent import cancel_agent
 
     if cancel_agent(ref):
@@ -1429,7 +1442,7 @@ def transcript_inspect(session_id, limit):
 @main.group()
 def workflows():
     """Workflow engine — manage YAML-based DAG workflows."""
-    _ensure_root_bound()
+    pass
 
 
 @workflows.command("list")
@@ -1441,9 +1454,10 @@ def workflow_list():
     """
     from .workflow.triggers import WorkflowDispatcher
 
-    project_path = _detect_project_root()
+    project_path = _try_detect_project_root()
     dispatcher = WorkflowDispatcher()
-    dispatcher.load_all_workflows(project_path)
+    if project_path is not None:
+        dispatcher.load_all_workflows(project_path)
     click.echo(dispatcher.format_workflow_menu())
 
 
@@ -1457,6 +1471,7 @@ def workflow_status():
     Usage:
         modastack workflows status
     """
+    _ensure_root_bound()
     from .workflow.state import WorkflowRun
     runs = WorkflowRun.list_runs()
     if not runs:
@@ -1485,6 +1500,7 @@ def workflow_resume(run_id, timeout):
     Usage:
         modastack workflows resume abc123
     """
+    _ensure_root_bound()
     from .workflow.state import WorkflowRun
     from .workflow.triggers import WorkflowDispatcher
     from .workflow.orchestrator import resume_workflow
@@ -2065,7 +2081,7 @@ def agents_browse():
     """
     from modastack.registry import list_remote, list_cached, DEFAULT_REPO
 
-    project_path = _detect_project_root()
+    project_path = _try_detect_project_root()
     remote = list_remote(project_path)
     if not remote:
         click.echo("Could not fetch remote registry.", err=True)
@@ -2105,7 +2121,7 @@ def agents_browse():
 @main.group()
 def kb():
     """Knowledge base — create, populate, and search named KBs."""
-    _ensure_root_bound()
+    pass
 
 
 @kb.command("create")
