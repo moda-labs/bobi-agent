@@ -113,6 +113,16 @@ def build_service_records(state: SetupState, catalog=None) -> list[dict]:
     return svcs
 
 
+def has_venn_services(state: SetupState, catalog=None) -> bool:
+    """Whether the team uses any Venn-backed service — those reach the world
+    through the shared VENN_API_KEY, so agent.yaml must declare it."""
+    names = [(s.get("name") if isinstance(s, dict) else str(s))
+             for s in state.spec.services]
+    return any((n or "").strip()
+               and services.resolve(n, venn_catalog=catalog).kind == "venn"
+               for n in names)
+
+
 def build_agent_cfg(state: SetupState, catalog=None) -> dict:
     cfg: dict = {
         "agent": derive_team_name(state),
@@ -122,6 +132,11 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
     svcs = build_service_records(state, catalog)
     if svcs:
         cfg["services"] = svcs
+    # Venn-backed services authenticate with the one shared key — declare it so
+    # `modastack start` resolves it from the environment / .env (else preflight
+    # reports "venn — no API key" despite the key being set).
+    if has_venn_services(state, catalog):
+        cfg["venn_api_key"] = "${VENN_API_KEY}"
     if state.chat and state.chat != "cli":
         cfg["chat"] = state.chat
     return cfg
@@ -148,6 +163,8 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
     cfg["agent"] = managed["agent"]
     cfg.setdefault("version", managed.get("version", "0.1.0"))
     cfg["entry_point"] = managed["entry_point"]
+    if managed.get("venn_api_key"):
+        cfg.setdefault("venn_api_key", managed["venn_api_key"])
     # Union services by name: keep every existing entry untouched, append only
     # services the pack doesn't already declare.
     existing_svcs = cfg.get("services") if isinstance(cfg.get("services"), list) else []

@@ -63,6 +63,21 @@ class TestDeterministicBodies:
         assert slack["credentials"]["bot_token"] == "${SLACK_BOT_TOKEN}"
         assert slack["events"] is True
 
+    def test_venn_services_declare_the_shared_key(self):
+        # A team using Venn-backed services must declare venn_api_key so
+        # `modastack start` resolves it from the env / .env (else preflight
+        # fails "venn — no API key" despite the key being set).
+        s = SetupState(team_name="inbox-monitor")
+        s.spec.goal = "Watch the inbox."
+        s.spec.roles = [{"name": "inbox-monitor", "responsibility": "watch"}]
+        s.spec.services = [{"name": "email"}, {"name": "calendar"}]
+        cfg = yaml.safe_load(build_agent_yaml(s))
+        assert cfg["venn_api_key"] == "${VENN_API_KEY}"
+
+    def test_native_only_team_has_no_venn_key(self):
+        cfg = yaml.safe_load(build_agent_yaml(_spec_state()))  # github + slack
+        assert "venn_api_key" not in cfg
+
     def test_chat_slack_writes_chat_and_folds_service(self):
         s = _spec_state()
         s.chat = "slack"
