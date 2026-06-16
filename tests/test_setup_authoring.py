@@ -165,6 +165,19 @@ class TestAuthorPour:
         assert starts == ends
         assert "agent.md" in starts
 
+    def test_create_lands_in_named_subfolder_under_the_base(self, tmp_path):
+        # Create's location is a BASE; the team lands at <base>/<name> so every
+        # team gets its own folder (no collision between two creates).
+        s = _spec_state()                 # team_name="triage-bot", mode=create
+        s.source_dir = "bobbi"            # the base the user chose
+        _run(_collect(authoring.author_pack(
+            s, tmp_path, stream_fn=self._fake_stream())))
+        assert (tmp_path / "bobbi" / "triage-bot" / "agent.yaml").is_file()
+        # the concrete path is persisted (idempotent — not re-appended)
+        assert s.source_dir == "bobbi/triage-bot"
+        s.team_name = "triage-bot"
+        assert actions.team_source_dir(tmp_path, s) == tmp_path / "bobbi" / "triage-bot"
+
     def test_pour_strips_wrapping_code_fence(self, tmp_path):
         async def fenced(*, system_prompt, user_prompt, model, cwd):
             yield "```markdown\n# Title\n\nBody text.\n```"

@@ -146,9 +146,19 @@ def venn_key(project: Path) -> str:
 
 def team_source_dir(project: Path, state: SetupState) -> Path:
     """Where the team source lives: the user-chosen location when set, else the
-    legacy agents/<team_name>. Relative locations resolve against the project."""
+    legacy agents/<team_name>. Relative locations resolve against the project.
+
+    In **create** mode the chosen location is the *base* folder (e.g. `bobbi/`);
+    the team lives in a named subfolder `<base>/<team_name>` so every team gets
+    its own folder (consistent with modify/registry). The append is idempotent —
+    once the concrete path is persisted (its last component is the team name),
+    it isn't appended again. Open/registry locations are already the team folder.
+    """
     if state.source_dir:
         p = Path(state.source_dir)
+        if (state.mode == "create" and state.team_name
+                and p.name != state.team_name):
+            p = p / state.team_name
         return p if p.is_absolute() else project / p
     return project / "agents" / state.team_name
 

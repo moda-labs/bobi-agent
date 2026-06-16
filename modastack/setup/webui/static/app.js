@@ -129,8 +129,8 @@
   function drawIntroBody() {
     const el = $("#introbody");
     if (introMode === "create") {
-      el.innerHTML = `<p class="ihint">bobbi names the team for you as you describe what it should do — you can rename it any time.</p>
-        ${locFieldHTML("Location (a folder you own — not .bobbi/)", introBase + "/")}`;
+      el.innerHTML = `<p class="ihint">bobbi names the team for you as you describe what it should do — you can rename it any time. The team gets its own folder under here.</p>
+        ${locFieldHTML("Where teams go (a folder you own — not .bobbi/)", introBase + "/")}`;
       $("#introloc").focus();
       wireBrowse();
     } else if (introMode === "open") {
