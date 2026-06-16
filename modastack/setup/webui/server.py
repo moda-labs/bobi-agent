@@ -49,6 +49,7 @@ def serialize_state(state: SetupState) -> dict:
         "stages": [s.value for s in STAGE_ORDER],
         "mode": state.mode,
         "team_name": state.team_name,
+        "source_dir": state.source_dir,
         "chat": state.chat,
         "spec": {
             "goal": spec.goal,
@@ -61,6 +62,8 @@ def serialize_state(state: SetupState) -> dict:
         },
         "summary": state.summary,
         "messages": state.messages,
+        "suggestions": state.suggestions,
+        "credentials_saved": state.credentials_saved,
         "advance_blocker": state.advance_blocker(),
         "validated": state.validated,
         "installed": state.installed,
@@ -119,6 +122,122 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     def get_state() -> dict:
         return serialize_state(state)
 
+    # --- intro: create / modify-existing / from-registry + a location --
+    @app.get("/api/intro")
+    def intro() -> dict:
+        from modastack.setup import open_mode
+        return {"teams": open_mode.list_local_teams(project),
+                "default_location": "bobbi"}
+
+    @app.get("/api/registry")
+    def registry_teams() -> dict:
+        # Network-backed and lazy — only fetched when the user opens the
+        # "from a registry" tab, so the intro screen never blocks on it.
+        from modastack.setup import open_mode
+        return {"teams": open_mode.list_registry_teams(project)}
+
+    @app.get("/api/browse")
+    def browse(request: Request) -> JSONResponse:
+        # A project-scoped directory lister for the location picker: a native
+        # OS folder dialog isn't reachable from a localhost page, so we walk
+        # the tree server-side. Confined to the project root.
+        root = project.resolve()
+        rel = (request.query_params.get("path") or "").strip().lstrip("/")
+        here = (root / rel).resolve() if rel else root
+        if here != root and root not in here.parents:
+            here = root
+        if not here.is_dir():
+            return JSONResponse({"error": "not a directory"}, status_code=404)
+        dirs = sorted(d.name for d in here.iterdir()
+                      if d.is_dir() and not d.name.startswith("."))
+        cur = here.relative_to(root).as_posix()
+        parent = (here.parent.relative_to(root).as_posix()
+                  if here != root else None)
+        return JSONResponse({"path": cur, "parent": parent, "dirs": dirs})
+
+    @app.post("/api/rename")
+    def rename(payload: dict) -> JSONResponse:
+        from modastack.setup.actions import team_source_dir
+        from modastack.setup.authoring import slug
+        new = slug(payload.get("name", ""))
+        if not new:
+            return JSONResponse({"error": "give the team a name"},
+                                status_code=400)
+        old = state.team_name
+        # When the working source folder is named after the team (modify and
+        # registry default to <location>/<team-name>), rename the folder on disk
+        # to match so it reflects the new name. Create's "bobbi/" folder isn't
+        # team-named, so it's left as the user chose it.
+        if old and state.source_dir and Path(state.source_dir).name == old:
+            src = team_source_dir(project, state)
+            dest = src.parent / new
+            if src.resolve() != dest.resolve():
+                if dest.exists():
+                    return JSONResponse(
+                        {"error": f"a folder named '{new}' already exists there"},
+                        status_code=409)
+                if src.is_dir():
+                    src.rename(dest)
+                rel = Path(state.source_dir)
+                state.source_dir = (str(rel.parent / new)
+                                    if str(rel.parent) not in (".", "") else new)
+                # the source tree moved — any prior validation is stale
+                state.validated = False
+                state.validated_hash = ""
+        state.team_name = new
+        state.save(project)
+        return JSONResponse(serialize_state(state))
+
+    @app.post("/api/start")
+    def start(payload: dict) -> JSONResponse:
+        from modastack import paths
+        from modastack.setup import open_mode
+        from modastack.setup.authoring import slug
+        mode = payload.get("mode", "create")
+        if mode not in ("create", "open", "registry"):
+            return JSONResponse(
+                {"error": "mode must be create, open, or registry"},
+                status_code=400)
+        location = (payload.get("location") or "").strip()
+        if not location:
+            return JSONResponse({"error": "choose a location for the team"},
+                                status_code=400)
+        loc = Path(location)
+        abs_loc = (loc if loc.is_absolute() else project / loc).resolve()
+        dot = paths.modastack_dir(project).resolve()
+        if abs_loc == dot or dot in abs_loc.parents:
+            return JSONResponse({"error": "pick a location outside .bobbi/"},
+                                status_code=400)
+        state.source_dir = location
+        # Both modify-local and from-registry land in the same non-lossy
+        # edit-in-place authoring path; only create authors from scratch.
+        state.mode = "create" if mode == "create" else "open"
+        if mode == "open":
+            team = payload.get("team", "")
+            match = next((t for t in open_mode.list_local_teams(project)
+                          if t["name"] == team or t["path"] == team), None)
+            if not match:
+                return JSONResponse({"error": "unknown team"}, status_code=400)
+            open_mode.copy_into(project / match["path"], abs_loc)
+            open_mode.reverse_fill(state, abs_loc)
+        elif mode == "registry":
+            team = (payload.get("team") or "").strip()
+            if not team:
+                return JSONResponse({"error": "pick a team to download"},
+                                    status_code=400)
+            try:
+                open_mode.fetch_into(project, team, abs_loc)
+            except Exception as e:
+                return JSONResponse({"error": f"couldn't download '{team}': {e}"},
+                                    status_code=502)
+            open_mode.reverse_fill(state, abs_loc)
+        else:
+            name = (payload.get("name") or "").strip()
+            state.team_name = slug(name) if name else ""
+        state.stage = Stage.DESIGN
+        state.save(project)
+        return JSONResponse(serialize_state(state))
+
     # --- conversation turn (streaming) ---------------------------------
     @app.post("/api/message")
     async def message(request: Request) -> StreamingResponse:
@@ -166,9 +285,17 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     def connect() -> dict:
         from modastack.setup import services
         connected = services.venn_connected_names(project)
+        # The real Venn catalog (live from the `venn` CLI when a key is present)
+        # classifies each service as venn-backed vs custom — fetched once here.
+        venn_catalog = services.live_venn_catalog(project)
         cards = services.cards_for(state.spec.services, project,
-                                   connected=connected)
-        return {"cards": cards, "catalog": services.catalog_cards()}
+                                   connected=connected, catalog=venn_catalog)
+        # The connector catalog (every known connector, for on-demand setup like
+        # Slack as a chat channel) is env-aware too, so a just-saved token reads
+        # as connected.
+        catalog = services.cards_for(list(services.CATALOG.keys()), project,
+                                     connected=connected, catalog=venn_catalog)
+        return {"cards": cards, "catalog": catalog}
 
     # --- automate (suggester + commit) ---------------------------------
     @app.post("/api/automate/suggest")
@@ -201,6 +328,19 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         state.save(project)
         return JSONResponse(serialize_state(state))
 
+    @app.get("/api/credential/value")
+    def credential_value(request: Request) -> JSONResponse:
+        # Copy-to-clipboard support: returns a saved credential value to the
+        # local page so it can be copied without being shown. Loopback + nonce
+        # only; the value already lives in plaintext in .env on this machine.
+        import os
+        from modastack.setup import actions
+        var = request.query_params.get("var", "")
+        val = actions.read_env(project).get(var) or os.environ.get(var, "")
+        if not val:
+            return JSONResponse({"error": "not set"}, status_code=404)
+        return JSONResponse({"value": val})
+
     @app.post("/api/credential")
     def credential(payload: dict) -> JSONResponse:
         from modastack.setup import actions
@@ -232,7 +372,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
     # --- review: browse / edit the authored pack source ----------------
     def _pack_dir() -> Path:
-        return (project / "agents" / state.team_name).resolve()
+        from modastack.setup import actions
+        return actions.team_source_dir(project, state).resolve()
 
     def _safe_target(rel: str) -> Path | None:
         pack = _pack_dir()
@@ -250,6 +391,27 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                       for p in pack.rglob("*")
                       if p.is_file() and "__pycache__" not in p.parts)
         return {"files": rels}
+
+    @app.post("/api/reveal")
+    def reveal() -> JSONResponse:
+        # Open the team's source folder in the OS file manager. Safe because
+        # the server is loopback-bound and nonce-guarded — it reveals a folder
+        # on the same machine the user is running setup on.
+        import subprocess
+        import sys
+        target = _pack_dir()
+        if not target.is_dir():
+            return JSONResponse({"error": "no folder yet"}, status_code=404)
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(target)])
+            elif sys.platform.startswith("win"):
+                subprocess.Popen(["explorer", str(target)])
+            else:
+                subprocess.Popen(["xdg-open", str(target)])
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"ok": True, "path": str(target)})
 
     @app.get("/api/file")
     def read_file(path: str) -> JSONResponse:

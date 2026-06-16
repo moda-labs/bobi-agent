@@ -35,22 +35,44 @@ def _fake_llm():
     """Scripted stream source: digestion → reply + spec, suggester → ideas,
     authoring → markdown. Matches what the prompts ask for so the UI advances
     exactly as it would with a real model, minus the latency and nondeterminism.
+
+    Digestion is keyword-driven over the WHOLE assembled context (which carries
+    the recent messages), so triggers are cumulative across the conversation —
+    e.g. once the user mentions automating something, the automations slot stays
+    "enough" on later turns. This lets e2e drive the five-slot Finish gate.
     """
     async def fn(*, system_prompt, user_prompt, model, cwd):
         if "BOBBI-SPEC" in system_prompt:                       # digestion
-            reply = ("Got it — a team that triages incoming GitHub issues and "
-                     "routes each to the right owner.")
-            payload = {
-                "deltas": {
-                    "goal": "Triage incoming GitHub issues and route each to an owner.",
-                    "roles": [{"name": "triager",
-                               "responsibility": "classify and route new issues"}],
-                    "services": [{"name": "github"}],
-                },
-                "summary": "A GitHub issue-triage team.",
-                "readiness": {"goal": "enough", "roles": "thin",
-                              "autonomous": "empty", "services": "thin"},
+            ctx = (user_prompt or "").lower()
+            deltas = {
+                "goal": "Triage incoming GitHub issues and route each to an owner.",
+                "roles": [{"name": "triager",
+                           "responsibility": "classify and route new issues"}],
+                "services": [{"name": "github"}],
             }
+            readiness = {"goal": "enough", "roles": "enough",
+                         "autonomous": "empty", "services": "enough"}
+            payload = {"deltas": deltas, "summary": "A GitHub issue-triage team.",
+                       "readiness": readiness,
+                       "suggestions": ["Also post a daily digest",
+                                       "Flag urgent issues first"]}
+            # Venn-backed services appear only once the user implies them.
+            if "email" in ctx or "calendar" in ctx:
+                deltas["services"] += [{"name": "email"}, {"name": "calendar"}]
+            # Automations settle once the user weighs in on proactive behavior.
+            if any(k in ctx for k in ("automat", "proactive", "stale",
+                                      "on its own", "nothing")):
+                deltas["autonomous"] = [{"description": "Flag stale PRs",
+                                         "leash": "notify", "cadence": "1d"}]
+                readiness["autonomous"] = "enough"
+                payload["autonomous_confirmed"] = True
+            # Chat interface settles when they say how they'll reach the team.
+            if "slack" in ctx:
+                deltas["chat"] = "slack"
+            elif any(k in ctx for k in ("cli", "terminal", "command line")):
+                deltas["chat"] = "cli"
+            reply = ("Got it — a GitHub issue-triage team that routes each issue "
+                     "to the right owner.")
             yield reply + "\n===BOBBI-SPEC===\n" + json.dumps(payload)
         elif "proactive behaviors" in system_prompt:            # automate suggester
             yield json.dumps([{"description": "Flag stale PRs idle 48h",
@@ -61,12 +83,33 @@ def _fake_llm():
     return fn
 
 
+@pytest.fixture(autouse=True)
+def _isolate_env():
+    """Credential capture writes straight to os.environ (so the running setup
+    session picks it up). The e2e server runs in-process, so without this those
+    writes would leak across tests — a saved GITHUB_TOKEN would make a later
+    test see GitHub as already connected. Snapshot and restore around each test.
+    """
+    import os
+    snap = dict(os.environ)
+    for v in ("GITHUB_TOKEN", "SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET",
+              "LINEAR_API_KEY", "VENN_API_KEY"):
+        os.environ.pop(v, None)
+    yield
+    os.environ.clear()
+    os.environ.update(snap)
+
+
 @pytest.fixture
 def bobbi_url(tmp_path):
     """Boot the setup server with a fake LLM on a free loopback port; yield
     the page URL (nonce in the query string). Torn down after the test."""
     project = tmp_path / "project"
     project.mkdir()
+    # A couple of real subfolders so the location folder-picker has something to
+    # browse (dotfiles like .git are hidden by the picker).
+    (project / "agents").mkdir()
+    (project / "workspace").mkdir()
     subprocess.run(["git", "init"], cwd=project, capture_output=True)
 
     app = server.build_app(SetupState(), project, nonce=NONCE,

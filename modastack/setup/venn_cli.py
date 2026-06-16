@@ -11,13 +11,14 @@ Discovery is read-only: `--confirm` (venn's write gate) is refused.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
 
-MAX_OUTPUT_CHARS = 8_000
+MAX_OUTPUT_CHARS = 32_000
 DEFAULT_TIMEOUT = 60
 
 
@@ -95,3 +96,37 @@ def run_venn(args: str, api_key: str, timeout: int = DEFAULT_TIMEOUT) -> VennRes
     if proc.returncode != 0:
         out = (out + "\n" + proc.stderr).strip()
     return VennResult(ok=proc.returncode == 0, output=_truncate(out))
+
+
+def list_servers(api_key: str, *, refresh: bool = False) -> list[dict]:
+    """Venn's servers for this account, via the canonical `venn` CLI:
+    `[{"name": str, "connected": bool}, ...]`. The full set — connected or not
+    — is the catalog of services Venn can reach. This is the CLI port of the
+    list-services capability; setup uses it as the source of the real Venn
+    catalog (with the REST client in `modastack.venn` as a fallback).
+
+    Read-only and defensive — returns [] on a missing binary, a refusal, a
+    non-zero exit, or unparseable output.
+    """
+    args = "--json help list_servers" + (" --refresh" if refresh else "")
+    res = run_venn(args, api_key)
+    if not res.ok:
+        return []
+    try:
+        data = json.loads(res.output)
+    except (ValueError, TypeError):
+        return []
+    servers = ((data or {}).get("result") or {}).get("servers") or []
+    out: list[dict] = []
+    for s in servers:
+        if not isinstance(s, dict):
+            continue
+        name = (s.get("server_name") or "").strip()
+        if name:
+            out.append({"name": name, "connected": bool(s.get("connected"))})
+    return out
+
+
+def list_service_names(api_key: str) -> set[str]:
+    """Lowercased names of every service Venn supports for this account."""
+    return {s["name"].lower() for s in list_servers(api_key)}

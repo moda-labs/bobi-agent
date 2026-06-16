@@ -205,3 +205,126 @@ class TestAuthorPour:
         _run(_collect(authoring.author_pack(s, tmp_path, stream_fn=empty)))
         agent_md = (tmp_path / "agents" / "t" / "agent.md").read_text()
         assert agent_md.strip()  # non-empty stub, not a blank file
+
+
+class TestNonLossyMerges:
+    """Open/modify mode must never drop content the pack already carries."""
+
+    def test_merge_agent_yaml_unions_services_and_keeps_extra_keys(self):
+        existing = (
+            "agent: legacy\nversion: 9.9.9\nentry_point: lead\n"
+            "context:\n  - rubric.md\n"
+            "services:\n  - name: github\n    events: true\n"
+            "    credentials:\n      token: ${GH}\n")
+        s = _spec_state()                      # spec services: github + slack
+        s.team_name, s.chat = "legacy", "slack"
+        merged = yaml.safe_load(authoring.merge_agent_yaml(existing, s))
+        assert merged["context"] == ["rubric.md"]       # hand-written key kept
+        assert merged["version"] == "9.9.9"             # not clobbered to 0.1.0
+        names = {x["name"] for x in merged["services"]}
+        assert names == {"github", "slack"}             # slack unioned in
+        gh = next(x for x in merged["services"] if x["name"] == "github")
+        assert gh["credentials"] == {"token": "${GH}"}  # rich entry untouched
+        assert merged["entry_point"] == "triage-lead"   # recomputed from spec
+
+    def test_merge_agent_yaml_updates_name_on_rename(self):
+        # `agent` is the team name (setup-managed) — a rename must take, even
+        # though the existing file already declares the old name.
+        existing = "agent: old-name\nversion: 0.1.0\nentry_point: lead\n"
+        s = _spec_state()
+        s.team_name = "new-name"
+        merged = yaml.safe_load(authoring.merge_agent_yaml(existing, s))
+        assert merged["agent"] == "new-name"
+
+    def test_merge_monitors_unions_by_name(self):
+        existing = ("monitors:\n  - name: hand-written\n"
+                    "    description: keep me\n    interval: 1d\n")
+        s = _spec_state(autonomous=[{"description": "daily digest",
+                                     "leash": "notify", "cadence": "1d"}])
+        merged = yaml.safe_load(authoring.merge_monitors_yaml(existing, s))
+        names = {m["name"] for m in merged["monitors"]}
+        assert "hand-written" in names                  # kept
+        assert "daily-digest" in names                  # added from spec
+
+
+class TestCustomServiceTools:
+    """A service Venn doesn't cover gets an authored tools guide + its own
+    API-key credential in agent.yaml (the #4 'posthog.md' path)."""
+
+    def _state_with_custom(self):
+        s = _spec_state()
+        # github is native; posthog is custom (empty Venn catalog forces it).
+        s.spec.services = [{"name": "github"}, {"name": "posthog"}]
+        return s
+
+    def test_manifest_includes_a_guide_for_each_custom_service(self):
+        s = self._state_with_custom()
+        paths = [f.path for f in compute_manifest(s, catalog=set())]
+        assert "tools/posthog.md" in paths
+        # native services don't get a custom guide
+        assert "tools/github.md" not in paths
+
+    def test_custom_service_gets_api_key_credential_in_agent_yaml(self):
+        s = self._state_with_custom()
+        cfg = yaml.safe_load(authoring.build_agent_yaml(s, catalog=set()))
+        ph = next(x for x in cfg["services"] if x["name"] == "posthog")
+        assert ph["credentials"] == {"api_key": "${POSTHOG_API_KEY}"}
+
+    def test_in_catalog_service_is_not_treated_as_custom(self):
+        s = _spec_state()
+        s.spec.services = [{"name": "zendesk"}]
+        paths = [f.path for f in compute_manifest(s, catalog={"zendesk"})]
+        assert not any(p.startswith("tools/") for p in paths)
+
+
+class TestAuthorOpenModeNonLossy:
+    """author_pack in open mode edits in place — it must preserve files the
+    manifest never models and never blank an existing prose file."""
+
+    def _existing_team(self, root, name="legacy"):
+        src = root / "bobbi" / name
+        (src / "roles" / "lead").mkdir(parents=True)
+        (src / "agent.yaml").write_text(
+            f"agent: {name}\nversion: 0.1.0\nentry_point: lead\n")
+        (src / "agent.md").write_text("# Legacy\n\nHand-written base.\n")
+        (src / "roles" / "lead" / "ROLE.md").write_text(
+            "# Lead\n\nDeep hand-written role with specifics A, B, C.\n")
+        (src / "tools").mkdir()
+        (src / "tools" / "github.md").write_text("custom tool guide\n")
+        return src
+
+    def _open_state(self, name="legacy"):
+        s = SetupState(team_name=name, mode="open", source_dir=f"bobbi/{name}")
+        s.spec.goal = "Watch the repo."
+        s.spec.roles = [{"name": "lead", "responsibility": "classify"}]
+        return s
+
+    def test_preserves_unmodeled_files_and_uses_edit_prompt(self, tmp_path):
+        self._existing_team(tmp_path)
+        s = self._open_state()
+        prompts = []
+
+        async def fake(*, system_prompt, user_prompt, model, cwd):
+            prompts.append((system_prompt, user_prompt))
+            yield "EDITED.\n"
+
+        _run(_collect(authoring.author_pack(s, tmp_path, stream_fn=fake)))
+        pack = tmp_path / "bobbi" / "legacy"
+        # a file outside the manifest is never touched
+        assert (pack / "tools" / "github.md").read_text() == "custom tool guide\n"
+        # prose files went through the EDIT path (editing prompt + original shown)
+        assert any("revise ONE existing file" in sp for sp, _ in prompts)
+        assert any("specifics A, B, C" in up for _, up in prompts)
+
+    def test_blank_edit_keeps_the_original_file(self, tmp_path):
+        self._existing_team(tmp_path)
+        s = self._open_state()
+
+        async def blank(*, system_prompt, user_prompt, model, cwd):
+            return
+            yield  # pragma: no cover
+
+        _run(_collect(authoring.author_pack(s, tmp_path, stream_fn=blank)))
+        role = (tmp_path / "bobbi" / "legacy"
+                / "roles" / "lead" / "ROLE.md").read_text()
+        assert "specifics A, B, C" in role  # original survived an empty edit

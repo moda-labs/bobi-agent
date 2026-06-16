@@ -184,6 +184,18 @@ class TestConnect:
                                             "value": "x"})
         assert r.status_code == 400
 
+    def test_credential_value_for_copy(self, project, monkeypatch):
+        # Copy-to-clipboard support: the value is retrievable on loopback so the
+        # page can copy it without rendering it.
+        monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+        c = _client(SetupState(), project)
+        c.post("/api/credential", json={"var_name": "LINEAR_API_KEY",
+                                        "value": "lin_api_copyme"})
+        r = c.get("/api/credential/value?var=LINEAR_API_KEY")
+        assert r.status_code == 200
+        assert r.json()["value"] == "lin_api_copyme"
+        assert c.get("/api/credential/value?var=NOPE_TOKEN").status_code == 404
+
 
 # --- build + validate + install ------------------------------------------
 
@@ -294,6 +306,24 @@ class TestReviewFiles:
         r = c.get("/api/file", params={"path": "../../../etc/passwd"})
         assert r.status_code == 404
 
+    def test_reveal_opens_the_source_folder(self, project, monkeypatch):
+        import subprocess
+        calls = []
+        monkeypatch.setattr(subprocess, "Popen",
+                            lambda argv, *a, **k: calls.append(argv))
+        _, c = self._built(project)
+        r = c.post("/api/reveal")
+        assert r.status_code == 200 and r.json()["ok"] is True
+        # launched the OS file manager on the team's source dir
+        assert calls and str(project / "agents" / "triage-bot") in calls[0]
+
+    def test_reveal_404_when_no_source_yet(self, project, monkeypatch):
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run")))
+        c = _client(SetupState(team_name="ghost"), project)
+        assert c.post("/api/reveal").status_code == 404
+
     def test_write_invalidates_validation(self, project):
         s, c = self._built(project)
         c.post("/api/validate")
@@ -325,3 +355,166 @@ class TestFinish:
         assert r.json()["finished"] is True
         assert called.get("done") is True
         assert s.finished is True
+
+
+# --- intro: create / open + location -------------------------------------
+
+def _seed_team(project, name="legacy-bot"):
+    """Write a minimal valid team source under agents/<name>/."""
+    src = project / "agents" / name
+    (src / "roles" / "lead").mkdir(parents=True)
+    (src / "agent.yaml").write_text(
+        "agent: " + name + "\nversion: 0.1.0\nentry_point: lead\n"
+        "services:\n  - name: github\n    events: true\nchat: slack\n")
+    (src / "agent.md").write_text("# " + name + "\n\nWatch the repo and triage issues.\n")
+    (src / "roles" / "lead" / "ROLE.md").write_text("# Lead\n\nClassify and route issues.\n")
+    return src
+
+
+class TestIntro:
+    def test_intro_lists_local_teams(self, project):
+        _seed_team(project, "legacy-bot")
+        c = _client(SetupState(), project)
+        data = c.get("/api/intro").json()
+        names = {t["name"] for t in data["teams"]}
+        assert "legacy-bot" in names
+        assert data["default_location"] == "bobbi"
+
+    def test_start_create_sets_location_and_advances(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "create", "name": "My Triage Team",
+                                       "location": "agent-teams/my-triage-team"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["stage"] == "design"
+        assert d["mode"] == "create"
+        assert d["source_dir"] == "agent-teams/my-triage-team"
+        assert d["team_name"] == "my-triage-team"
+
+    def test_start_open_reverse_fills_and_copies(self, project):
+        _seed_team(project, "legacy-bot")
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "open", "team": "legacy-bot",
+                                       "location": "agent-teams/legacy-bot"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["stage"] == "design"
+        assert d["mode"] == "open"
+        # cards reverse-filled from the existing pack
+        assert d["spec"]["goal"]
+        assert any(role["name"] == "lead" for role in d["spec"]["roles"])
+        assert {s["name"] for s in d["spec"]["services"]} == {"github"}
+        assert d["chat"] == "slack"
+        assert d["spec"]["readiness"]["goal"] == "enough"
+        # source copied into the working location
+        assert (project / "agent-teams" / "legacy-bot" / "agent.yaml").is_file()
+        # the chat opens with a recap of what the team already does (not the
+        # blank "what do you want to build?" greeting)
+        assert d["messages"], "expected a seeded summary message"
+        opener = d["messages"][0]
+        assert opener["role"] == "assistant"
+        assert "legacy-bot" in opener["content"]
+        assert "github" in opener["content"]      # its services are recapped
+        assert "Slack" in opener["content"]        # its chat channel is recapped
+
+    def test_start_rejects_modastack_location(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "create",
+                                       "location": ".modastack/team"})
+        assert r.status_code == 400
+
+    def test_start_open_unknown_team_400(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "open", "team": "ghost",
+                                       "location": "agent-teams/ghost"})
+        assert r.status_code == 400
+
+    def test_start_registry_fetches_and_reverse_fills(self, project, monkeypatch):
+        # The registry fetch is stubbed: it materializes a team at `dest`,
+        # mirroring registry.fetch + copy_into without hitting the network.
+        from modastack.setup import open_mode
+
+        def fake_fetch_into(proj, name, dest):
+            _seed_team(proj, name)  # writes agents/<name>/
+            open_mode.copy_into(proj / "agents" / name, dest)
+
+        monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team",
+                                       "location": "bobbi/eng-team"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["stage"] == "design"
+        # Registry-derived teams use the non-lossy edit path (mode "open").
+        assert d["mode"] == "open"
+        assert d["spec"]["goal"]
+        assert (project / "bobbi" / "eng-team" / "agent.yaml").is_file()
+
+    def test_start_registry_without_team_400(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "registry",
+                                       "location": "bobbi/x"})
+        assert r.status_code == 400
+
+    def test_browse_lists_project_dirs(self, project):
+        (project / "agents" / "alpha").mkdir(parents=True)
+        (project / "agents" / "beta").mkdir(parents=True)
+        (project / "agents" / ".hidden").mkdir(parents=True)
+        c = _client(SetupState(), project)
+        d = c.get("/api/browse", params={"path": "agents"}).json()
+        assert d["path"] == "agents"
+        assert d["parent"] == "."  # parent of a top-level dir is the root
+        assert "alpha" in d["dirs"] and "beta" in d["dirs"]
+        assert ".hidden" not in d["dirs"]  # dotfiles hidden
+
+    def test_browse_confined_to_project(self, project):
+        c = _client(SetupState(), project)
+        # An escape attempt collapses back to the project root.
+        d = c.get("/api/browse", params={"path": "../../etc"}).json()
+        assert d["path"] == "."
+        assert d["parent"] is None
+
+    def test_rename_sets_team_name(self, project):
+        st = SetupState(stage=Stage.DESIGN, team_name="auto-name")
+        c = _client(st, project)
+        d = c.post("/api/rename", json={"name": "My Cooler Team"}).json()
+        assert d["team_name"] == "my-cooler-team"
+
+    def test_rename_rejects_empty(self, project):
+        c = _client(SetupState(stage=Stage.DESIGN), project)
+        r = c.post("/api/rename", json={"name": "   "})
+        assert r.status_code == 400
+
+    def test_rename_renames_the_team_named_source_folder(self, project):
+        # modify/registry put the source at <location>/<team-name>; renaming
+        # must move that folder and repoint source_dir so the folder on disk
+        # matches the new name.
+        src = project / "bobbi" / "a-personal-assistant-team"
+        src.mkdir(parents=True)
+        (src / "agent.yaml").write_text("agent: a-personal-assistant-team\n")
+        st = SetupState(stage=Stage.DESIGN, team_name="a-personal-assistant-team",
+                        source_dir="bobbi/a-personal-assistant-team")
+        c = _client(st, project)
+        d = c.post("/api/rename", json={"name": "personal-assistant"}).json()
+        assert d["team_name"] == "personal-assistant"
+        assert d["source_dir"] == "bobbi/personal-assistant"
+        assert (project / "bobbi" / "personal-assistant" / "agent.yaml").is_file()
+        assert not (project / "bobbi" / "a-personal-assistant-team").exists()
+
+    def test_rename_leaves_non_team_named_folder_alone(self, project):
+        # create's folder is "bobbi", not named after the team — left as chosen.
+        (project / "bobbi").mkdir()
+        st = SetupState(stage=Stage.DESIGN, team_name="triage", source_dir="bobbi")
+        c = _client(st, project)
+        d = c.post("/api/rename", json={"name": "triage-bot"}).json()
+        assert d["team_name"] == "triage-bot"
+        assert d["source_dir"] == "bobbi"
+
+    def test_rename_conflict_when_target_folder_exists(self, project):
+        (project / "bobbi" / "old").mkdir(parents=True)
+        (project / "bobbi" / "taken").mkdir(parents=True)
+        st = SetupState(stage=Stage.DESIGN, team_name="old", source_dir="bobbi/old")
+        c = _client(st, project)
+        r = c.post("/api/rename", json={"name": "taken"})
+        assert r.status_code == 409
+        assert (project / "bobbi" / "old").exists()  # original untouched

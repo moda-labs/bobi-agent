@@ -108,6 +108,21 @@ class TestApplyDeltas:
         apply_deltas(s, DigestionResult(reply="", summary=""))
         assert s.summary == "existing"
 
+    def test_auto_names_a_new_team_from_the_first_name_delta(self):
+        s = SetupState(mode="create")          # unnamed create
+        apply_deltas(s, DigestionResult(reply="", deltas={"name": "GitHub Triage"}))
+        assert s.team_name == "github-triage"  # slugged
+
+    def test_auto_name_is_set_once_and_then_stable(self):
+        s = SetupState(mode="create", team_name="github-triage")
+        apply_deltas(s, DigestionResult(reply="", deltas={"name": "Something Else"}))
+        assert s.team_name == "github-triage"  # not overwritten once named
+
+    def test_open_mode_never_auto_renames(self):
+        s = SetupState(mode="open", team_name="legacy-bot")
+        apply_deltas(s, DigestionResult(reply="", deltas={"name": "New Name"}))
+        assert s.team_name == "legacy-bot"     # existing team keeps its name
+
 
 class TestReplySplitter:
     def test_emits_reply_before_sentinel_only(self):

@@ -83,16 +83,11 @@ def derive_team_name(state: SetupState) -> str:
 
 # --- deterministic file bodies -------------------------------------------
 
-def build_agent_yaml(state: SetupState) -> str:
-    cfg: dict = {
-        "agent": derive_team_name(state),
-        "version": "0.1.0",
-        "entry_point": compute_entry_point(state),
-    }
-    # The chat channel you talk to the team through is itself a service the
-    # team must connect (Slack); CLI needs nothing. Fold it into the service
-    # list so its credentials land in agent.yaml. (Telegram: framework support
-    # pending — CLI + Slack are the v1 channels.)
+def build_service_records(state: SetupState, catalog=None) -> list[dict]:
+    """The agent.yaml `services:` block from the spec. The chat channel you
+    talk to the team through is itself a service it must connect (Slack); CLI
+    needs nothing. (Telegram: framework support pending.) Custom services
+    (neither native nor on Venn) carry their own API-key credential."""
     service_names = [(s.get("name") if isinstance(s, dict) else str(s))
                      for s in state.spec.services]
     if state.chat == "slack":
@@ -102,7 +97,7 @@ def build_agent_yaml(state: SetupState) -> str:
     for name in service_names:
         if not (name or "").strip():
             continue
-        conn = services.resolve(name)
+        conn = services.resolve(name, venn_catalog=catalog)
         if conn.key in seen:
             continue
         seen.add(conn.key)
@@ -112,9 +107,57 @@ def build_agent_yaml(state: SetupState) -> str:
             if conn.credential_var:
                 key = _CRED_KEY.get(conn.key, "token")
                 rec["credentials"] = {key: f"${{{conn.credential_var}}}"}
+        elif conn.kind == "custom" and conn.credential_var:
+            rec["credentials"] = {"api_key": f"${{{conn.credential_var}}}"}
         svcs.append(rec)
+    return svcs
+
+
+def build_agent_cfg(state: SetupState, catalog=None) -> dict:
+    cfg: dict = {
+        "agent": derive_team_name(state),
+        "version": "0.1.0",
+        "entry_point": compute_entry_point(state),
+    }
+    svcs = build_service_records(state, catalog)
     if svcs:
         cfg["services"] = svcs
+    if state.chat and state.chat != "cli":
+        cfg["chat"] = state.chat
+    return cfg
+
+
+def build_agent_yaml(state: SetupState, catalog=None) -> str:
+    return yaml.dump(build_agent_cfg(state, catalog), sort_keys=False)
+
+
+def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str:
+    """Non-lossy agent.yaml update for open/modify: overlay the keys setup
+    manages (entry_point, chat) onto the existing config and UNION the
+    services by name — never drop a service or a hand-written key the pack
+    already carries (custom workflows refs, context, richer credentials)."""
+    try:
+        cfg = yaml.safe_load(existing_text) or {}
+    except yaml.YAMLError:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    managed = build_agent_cfg(state, catalog)
+    # `agent` (the team name) and `entry_point` are setup-managed — overwrite so
+    # a rename actually takes; `version` and any hand-written keys are preserved.
+    cfg["agent"] = managed["agent"]
+    cfg.setdefault("version", managed.get("version", "0.1.0"))
+    cfg["entry_point"] = managed["entry_point"]
+    # Union services by name: keep every existing entry untouched, append only
+    # services the pack doesn't already declare.
+    existing_svcs = cfg.get("services") if isinstance(cfg.get("services"), list) else []
+    have = {(s.get("name") if isinstance(s, dict) else str(s)) for s in existing_svcs}
+    merged = list(existing_svcs)
+    for rec in managed.get("services", []):
+        if rec["name"] not in have:
+            merged.append(rec)
+    if merged:
+        cfg["services"] = merged
     if state.chat and state.chat != "cli":
         cfg["chat"] = state.chat
     return yaml.dump(cfg, sort_keys=False)
@@ -151,6 +194,20 @@ def build_monitors_yaml(state: SetupState) -> str:
     return yaml.dump({"monitors": mons}, sort_keys=False)
 
 
+def merge_monitors_yaml(existing_text: str, state: SetupState) -> str:
+    """Union the spec's monitors into an existing monitors file by name —
+    keep every hand-written monitor, add only the ones the pack lacks."""
+    try:
+        cur = yaml.safe_load(existing_text) or {}
+    except yaml.YAMLError:
+        cur = {}
+    existing = cur.get("monitors") if isinstance(cur.get("monitors"), list) else []
+    have = {m.get("name") for m in existing if isinstance(m, dict)}
+    fresh = yaml.safe_load(build_monitors_yaml(state)).get("monitors", [])
+    merged = list(existing) + [m for m in fresh if m.get("name") not in have]
+    return yaml.dump({"monitors": merged}, sort_keys=False)
+
+
 def has_monitors(state: SetupState) -> bool:
     return any((b.get("description") if isinstance(b, dict) else str(b))
                for b in state.spec.autonomous)
@@ -178,6 +235,35 @@ Write for the agents who will execute this file, not for a human reader:
 """
 
 
+# Open/modify mode edits an existing file rather than authoring from scratch.
+# The lock: preserve everything the user already wrote; change ONLY what the
+# current design now requires. This is what makes modify non-lossy.
+EDITING_SYSTEM_PROMPT = """\
+You revise ONE existing file in a modastack agent-team package to match an
+updated team design. You are EDITING, not rewriting.
+
+Rules:
+- Preserve the author's existing structure, wording, depth, and any content
+  the design does not speak to. Make the SMALLEST change that brings the file
+  in line with the design.
+- If the file already reflects the design, return it UNCHANGED, verbatim.
+- Output ONLY the raw, complete file contents — no code fences, no preamble,
+  no commentary, no TODOs or placeholders.
+- NEVER write a literal secret or token — reference credentials as ${ENV_VAR}.
+"""
+
+
+def edit_prompt(state: SetupState, what: str, current: str) -> str:
+    """An edit instruction: here is the file now, here is the team design —
+    bring it in line, minimally."""
+    return (f"{_spec_brief(state)}\n\n"
+            f"You are revising {what}. Here is the file's CURRENT contents:\n"
+            f"-----\n{current}\n-----\n\n"
+            "Update it so it reflects the team design above. Change only what "
+            "the design now requires; keep everything else exactly as written. "
+            "If it already matches, return it unchanged.")
+
+
 def _spec_brief(state: SetupState) -> str:
     spec = state.spec
     roles = "; ".join(f"{r['name']}: {r['responsibility']}"
@@ -202,6 +288,57 @@ def agent_md_prompt(state: SetupState) -> str:
             "The rules every role follows — how they coordinate, when to "
             "escalate, how work hands off.\n"
             "Keep it tight: this is a shared base prompt, not an essay.")
+
+
+# A custom service (not native, not on Venn) gets its own API guide so the
+# agent knows how to call it. This is the #4 "write a posthog.md" path.
+TOOLS_AUTHORING_SYSTEM_PROMPT = """\
+You author ONE service guide (tools/<service>.md) in a modastack agent-team
+package — operational instructions the LLM agents read to call an external
+service's API at runtime. Output ONLY the raw markdown file contents: no
+wrapping code fence, no preamble, no sign-off.
+
+Write for the agent that will make the calls:
+- One or two lines on what the service is and what this team uses it for.
+- The concrete API surface the agent needs: base URL, the auth header (using
+  the ${ENV_VAR} the team stores its key in — NEVER a literal key), and the
+  specific endpoints/operations relevant to the team's goal, with short
+  example requests.
+- Note rate limits, pagination, or common pitfalls when they matter.
+- Keep it tight and operational — every line should help the agent make a
+  correct call.
+"""
+
+
+def tools_prompt(state: SetupState, conn) -> str:
+    var = conn.credential_var or _env_var_fallback(conn.name)
+    return (f"{_spec_brief(state)}\n\n"
+            f"Write tools/{slug(conn.key)}.md — the usage guide for "
+            f"**{conn.name}**, which this team reaches through its own API "
+            f"(Venn does not cover it). The team stores its API key in the env "
+            f"var {var}; reference it as ${{{var}}}, never a literal key. Focus "
+            f"on the parts of {conn.name}'s API the team needs for its goal.")
+
+
+def _env_var_fallback(name: str) -> str:
+    import re
+    s = re.sub(r"[^A-Z0-9]+", "_", (name or "").strip().upper()).strip("_")
+    return f"{s or 'SERVICE'}_API_KEY"
+
+
+def custom_services(state: SetupState, catalog=None) -> list:
+    """The spec's services that are custom (not native, not on Venn) — each
+    needs an authored tools guide. Deduped by connector key."""
+    out, seen = [], set()
+    for s in state.spec.services:
+        name = s.get("name") if isinstance(s, dict) else str(s)
+        if not (name or "").strip():
+            continue
+        conn = services.resolve(name, venn_catalog=catalog)
+        if conn.kind == "custom" and conn.key not in seen:
+            seen.add(conn.key)
+            out.append(conn)
+    return out
 
 
 def role_md_prompt(state: SetupState, role: dict) -> str:
@@ -235,11 +372,13 @@ class FileSpec:
         return self.content is not None
 
 
-def compute_manifest(state: SetupState) -> list[FileSpec]:
+def compute_manifest(state: SetupState, catalog=None) -> list[FileSpec]:
     """The full ordered file list for a scratch pack. Structure is the
-    wizard's; prose files carry authoring prompts."""
+    wizard's; prose files carry authoring prompts. `catalog` is the Venn
+    service catalog used to decide which services are custom (and so need an
+    authored tools guide)."""
     files: list[FileSpec] = [
-        FileSpec("agent.yaml", content=build_agent_yaml(state)),
+        FileSpec("agent.yaml", content=build_agent_yaml(state, catalog)),
         FileSpec("agent.md", system=AUTHORING_SYSTEM_PROMPT,
                  user=agent_md_prompt(state)),
     ]
@@ -252,6 +391,12 @@ def compute_manifest(state: SetupState) -> list[FileSpec]:
     if has_monitors(state):
         files.append(FileSpec("monitors/defaults.yaml",
                               content=build_monitors_yaml(state)))
+    # A guide for each custom (non-native, non-Venn) service the team uses.
+    for conn in custom_services(state, catalog):
+        files.append(FileSpec(
+            f"tools/{slug(conn.key)}.md",
+            system=TOOLS_AUTHORING_SYSTEM_PROMPT,
+            user=tools_prompt(state, conn)))
     return files
 
 
@@ -266,31 +411,65 @@ def _strip_fences(text: str) -> str:
     return (m.group(1) if m else text).strip() + "\n"
 
 
+def _deterministic_body(spec: "FileSpec", target: Path, state: SetupState,
+                        catalog=None) -> str:
+    """The bytes for a deterministic file in open/modify mode: merge into the
+    existing file (non-lossy) where one exists, else the from-scratch body."""
+    if not target.is_file():
+        return spec.content
+    existing = target.read_text()
+    if spec.path == "agent.yaml":
+        return merge_agent_yaml(existing, state, catalog)
+    if spec.path.startswith("monitors/"):
+        return merge_monitors_yaml(existing, state)
+    # adhoc.yaml and anything else already present: leave it exactly as written.
+    return existing
+
+
 async def author_pack(state: SetupState, project: Path, *,
                       model: str | None = None, stream_fn=None):
-    """Author the pack source at agents/<team_name>/, yielding pour events.
-    Side effect: writes files and persists `state`."""
+    """Author the pack source at the team's source location, yielding pour
+    events. In **create** mode every file is written from scratch; in
+    **open/modify** mode existing files are merged/edited in place so nothing
+    the user already wrote is lost. Side effect: writes files, persists state."""
+    from modastack.setup import services
+    from modastack.setup.actions import team_source_dir
     state.team_name = derive_team_name(state)
-    pack = project / "agents" / state.team_name
+    pack = team_source_dir(project, state)
+    editing = state.mode != "create"
+    # Classify services against Venn's real catalog (live when a key is present)
+    # so custom services get an authored tools guide and the right credentials.
+    catalog = services.live_venn_catalog(project)
     base_md = ""   # the authored agent.md, threaded into ROLE.md for coherence
 
-    for spec in compute_manifest(state):
+    for spec in compute_manifest(state, catalog):
         target = pack / spec.path
         target.parent.mkdir(parents=True, exist_ok=True)
+        existed = target.is_file()
         yield {"type": "file_start", "path": spec.path}
 
         if spec.deterministic:
-            target.write_text(spec.content)
-            yield {"type": "delta", "path": spec.path, "text": spec.content}
+            body = (_deterministic_body(spec, target, state, catalog)
+                    if editing else spec.content)
+            target.write_text(body)
+            yield {"type": "delta", "path": spec.path, "text": body}
         else:
-            user = spec.user
-            if spec.with_base and base_md:
-                user += ("\n\nThe team already has this shared base prompt "
-                         "(agent.md) — align with it, do not contradict or "
-                         "repeat it:\n\n" + base_md)
+            # Open mode edits a file that already exists; otherwise (create, or
+            # a newly added role) author it from scratch.
+            original = target.read_text() if existed else ""
+            if editing and existed:
+                system = EDITING_SYSTEM_PROMPT
+                user = edit_prompt(state, spec.path, original)
+            else:
+                system = spec.system
+                user = spec.user
+                if spec.with_base and base_md:
+                    user += ("\n\nThe team already has this shared base prompt "
+                             "(agent.md) — align with it, do not contradict or "
+                             "repeat it:\n\n" + base_md)
             parts: list[str] = []
             with target.open("w") as f:
-                async for chunk in llm.stream(spec.system, user,
+                async for chunk in llm.stream(system, user,
                                               model=model, cwd=str(project),
                                               stream_fn=stream_fn):
                     f.write(chunk)
@@ -298,10 +477,11 @@ async def author_pack(state: SetupState, project: Path, *,
                     parts.append(chunk)
                     yield {"type": "delta", "path": spec.path, "text": chunk}
             # Normalize once: strip an accidental wrapping code fence; a
-            # model that produced nothing usable gets a stub, never a blank.
+            # model that produced nothing usable keeps the prior file (open) or
+            # gets a stub (create), never a blank.
             cleaned = _strip_fences("".join(parts))
             if not cleaned.strip():
-                cleaned = f"# {spec.path}\n"
+                cleaned = original or f"# {spec.path}\n"
             target.write_text(cleaned)
             if spec.path == "agent.md":
                 base_md = cleaned

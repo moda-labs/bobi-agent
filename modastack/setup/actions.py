@@ -145,6 +145,11 @@ def venn_key(project: Path) -> str:
 # --- team / source resolution --------------------------------------------
 
 def team_source_dir(project: Path, state: SetupState) -> Path:
+    """Where the team source lives: the user-chosen location when set, else the
+    legacy agents/<team_name>. Relative locations resolve against the project."""
+    if state.source_dir:
+        p = Path(state.source_dir)
+        return p if p.is_absolute() else project / p
     return project / "agents" / state.team_name
 
 
@@ -332,7 +337,10 @@ def install_team(state: SetupState, project: Path) -> dict:
     """
     from modastack.cli import (_install_pack, _resolve_agent_pack,
                                _write_install_gitignore)
-    pack_dir = _resolve_agent_pack(state.team_name, project)
+    # Prefer the chosen source location; fall back to registry resolution.
+    pack_dir = team_source_dir(project, state)
+    if not pack_dir.is_dir():
+        pack_dir = _resolve_agent_pack(state.team_name, project)
     if not pack_dir:
         raise ActionError(f"team source for '{state.team_name}' not found")
 

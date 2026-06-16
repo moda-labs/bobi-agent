@@ -88,3 +88,35 @@ class TestExecution:
         result = run_venn("tools search big", "key")
         assert "truncated" in result.output
         assert len(result.output) < MAX_OUTPUT_CHARS + 100
+
+
+class TestListServers:
+    @patch("modastack.setup.venn_cli.venn_binary", return_value="/usr/bin/venn")
+    @patch("modastack.setup.venn_cli.subprocess.run")
+    def test_parses_servers_and_names(self, mock_run, _):
+        import json as _json
+        from modastack.setup.venn_cli import list_servers, list_service_names
+        mock_run.return_value = _completed(stdout=_json.dumps({"result": {"servers": [
+            {"server_id": "s1", "server_name": "gmail", "connected": True},
+            {"server_id": "s2", "server_name": "PostHog", "connected": False},
+        ]}}))
+        servers = list_servers("key")
+        assert {s["name"] for s in servers} == {"gmail", "PostHog"}
+        assert next(s for s in servers if s["name"] == "gmail")["connected"] is True
+        # all names (connected or not) form the catalog, lowercased
+        assert list_service_names("key") == {"gmail", "posthog"}
+        # the global --json flag precedes the subcommand
+        argv = mock_run.call_args.args[0]
+        assert argv[:4] == ["/usr/bin/venn", "--json", "help", "list_servers"]
+
+    @patch("modastack.setup.venn_cli.venn_binary", return_value=None)
+    def test_missing_binary_returns_empty(self, _):
+        from modastack.setup.venn_cli import list_servers
+        assert list_servers("key") == []
+
+    @patch("modastack.setup.venn_cli.venn_binary", return_value="/usr/bin/venn")
+    @patch("modastack.setup.venn_cli.subprocess.run")
+    def test_unparseable_output_returns_empty(self, mock_run, _):
+        from modastack.setup.venn_cli import list_servers
+        mock_run.return_value = _completed(stdout="not json at all")
+        assert list_servers("key") == []

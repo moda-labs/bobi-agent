@@ -96,8 +96,12 @@ class Spec:
 @dataclass
 class SetupState:
     stage: Stage = Stage.START
-    mode: str = "create"             # "create" | "open" (open → M2)
+    mode: str = "create"             # "create" | "open"
     team_name: str = ""
+    # Where the team source lives — a real, owned folder (e.g.
+    # agent-teams/<name>/), authored/edited here and installed into .modastack/
+    # at Finish. Empty falls back to agents/<team_name> (legacy/tests).
+    source_dir: str = ""
     chat: str = ""                   # how you talk to the team: "cli"|"slack"|"telegram"
     spec: Spec = field(default_factory=Spec)
 
@@ -106,6 +110,10 @@ class SetupState:
     # the last N for the next call).
     summary: str = ""
     messages: list = field(default_factory=list)
+
+    # Context-aware quick-add chips for the next turn, refreshed by the brain.
+    # Transient UI hint, not part of the spec.
+    suggestions: list = field(default_factory=list)
 
     credentials_saved: list = field(default_factory=list)
     validated: bool = False

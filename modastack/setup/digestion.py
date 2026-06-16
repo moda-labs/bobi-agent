@@ -58,33 +58,48 @@ You are quietly structuring the conversation into a spec with four slots:
 - **services**: the outside services the team reads from or writes to
   (e.g. github, slack, email, a CRM). Name each one.
 
+You also help them settle one more thing: **chat** — how they'll talk to the
+team day to day. Options: "cli" (the command line, nothing to set up — the
+sensible default), "slack" (message the bot in a channel), or "telegram"
+(coming soon). Bring this up naturally once the team's shape is clear; route
+their choice into the chat field.
+
 Route what the user says into these slots. When a slot changes, emit its
 **full new value** (not a diff). Don't invent services or roles the user
 hasn't implied. Keep the user's own framing.
+
+Drive toward a complete design: across the conversation, make sure all four
+slots and the chat choice get settled, asking one good question at a time.
 
 After your conversational reply, output a line containing exactly
 {SPEC_SENTINEL} and then a single JSON object — nothing after it. Shape:
 
 {{
   "deltas": {{
+    "name": "short-kebab-team-name (a 2-4 word slug for the team, drawn from the goal — only include the FIRST time the goal becomes clear, so the team gets a name automatically)",
     "goal": "string (only if it changed)",
     "roles": [{{"name": "...", "responsibility": "..."}}],
     "autonomous": [{{"description": "...", "leash": "notify|ask|act",
                      "cadence": "e.g. 1d, 15m, or an event"}}],
-    "services": [{{"name": "..."}}]
+    "services": [{{"name": "..."}}],
+    "chat": "cli|slack|telegram (only if they indicated how they'll talk to it)"
   }},
   "autonomous_confirmed": true,
   "summary": "refreshed 2–4 sentence running summary of the whole design",
   "readiness": {{"goal": "empty|thin|enough", "roles": "...",
-                 "autonomous": "...", "services": "..."}}
+                 "autonomous": "...", "services": "..."}},
+  "suggestions": ["short next thing they might add", "..."]
 }}
 
 Only include keys in "deltas" for slots that changed this turn. Always
-include "summary" and "readiness". Score a slot "enough" only when it's
-genuinely well-formed (goal: one clear sentence with an outcome; roles: at
-least one named role with a responsibility; autonomous: explicitly
-confirmed, even if empty; services: each implied service named). The reply
-and the JSON are both required, in that order.
+include "summary" and "readiness". Score a slot "enough" once it's genuinely
+settled — goal: one clear sentence with an outcome; roles: at least one named
+role with a responsibility; autonomous: explicitly confirmed (an empty list
+counts); services: each implied service named, OR the user has confirmed none
+are needed. "suggestions": 0–3 SHORT, context-aware next steps the user might
+want, drawn from THIS conversation (e.g. "Also flag stale PRs", "Post a daily
+digest") — phrased as things they'd say; never generic. The reply and the JSON
+are both required, in that order.
 """
 
 
@@ -95,6 +110,7 @@ class DigestionResult:
     summary: str = ""
     readiness: dict = field(default_factory=dict)
     autonomous_confirmed: bool | None = None
+    suggestions: list = field(default_factory=list)
 
 
 # --- context assembly (tunable) ------------------------------------------
@@ -148,20 +164,31 @@ def parse_digestion(full_text: str) -> DigestionResult:
     payload = _extract_json(full_text[idx + len(SPEC_SENTINEL):])
     if not payload:
         return DigestionResult(reply=reply)
+    suggestions = payload.get("suggestions")
     return DigestionResult(
         reply=reply,
         deltas=payload.get("deltas") or {},
         summary=payload.get("summary") or "",
         readiness=payload.get("readiness") or {},
         autonomous_confirmed=payload.get("autonomous_confirmed"),
+        suggestions=[str(s) for s in suggestions][:3]
+        if isinstance(suggestions, list) else [],
     )
 
 
 def apply_deltas(state: SetupState, result: DigestionResult) -> None:
     """Route a parsed digestion result into the authoritative spec. Each
     provided slot carries its full new value (replace, not merge)."""
+    from modastack.setup.authoring import slug
     spec = state.spec
     d = result.deltas or {}
+    # Auto-name a brand-new team from the goal the moment one is proposed.
+    # Set once (when still unnamed) so the name is stable; the panel header is
+    # click-to-edit for an explicit rename. Never auto-rename an existing
+    # (open/modify) team — its name comes from the pack.
+    if (state.mode == "create" and not state.team_name
+            and isinstance(d.get("name"), str) and d["name"].strip()):
+        state.team_name = slug(d["name"])
     if isinstance(d.get("goal"), str):
         spec.goal = d["goal"].strip()
     if isinstance(d.get("roles"), list):
@@ -170,6 +197,8 @@ def apply_deltas(state: SetupState, result: DigestionResult) -> None:
         spec.services = d["services"]
     if isinstance(d.get("autonomous"), list):
         spec.autonomous = d["autonomous"]
+    if d.get("chat") in ("cli", "slack", "telegram"):
+        state.chat = d["chat"]
     if result.autonomous_confirmed is not None:
         spec.autonomous_confirmed = bool(result.autonomous_confirmed)
     for slot, value in (result.readiness or {}).items():
@@ -177,6 +206,8 @@ def apply_deltas(state: SetupState, result: DigestionResult) -> None:
             spec.readiness[slot] = value
     if result.summary:
         state.summary = result.summary
+    # Refresh the context-aware quick-add chips (empty list clears them).
+    state.suggestions = result.suggestions
 
 
 # --- streaming reply splitter --------------------------------------------
