@@ -11,6 +11,18 @@ from playwright.sync_api import expect
 GOAL_MSG = "triage our github issues and route to the right engineer"
 
 
+def _seed_library_team(home, name="legacy-bot"):
+    """Write a minimal valid team source into the ~/bobbi-agents library."""
+    src = home / "bobbi-agents" / name
+    (src / "roles" / "lead").mkdir(parents=True)
+    (src / "agent.yaml").write_text(
+        "agent: " + name + "\nversion: 0.1.0\nentry_point: lead\n"
+        "services:\n  - name: github\n    events: true\nchat: slack\n")
+    (src / "agent.md").write_text("# " + name + "\n\nWatch the repo.\n")
+    (src / "roles" / "lead" / "ROLE.md").write_text("# Lead\n\nRoute issues.\n")
+    return src
+
+
 def _enter(page, url):
     """Pass through the intro (create-new, default location) into the editor."""
     page.goto(url)
@@ -178,12 +190,13 @@ def test_intro_offers_three_ways_in_and_starts_editor(page, bobbi_url):
     # Three ways in: create, modify existing, from a registry.
     expect(page.locator("[data-intromode='create']")).to_be_visible()
     expect(page.locator("[data-intromode='registry']")).to_be_visible()
-    # No local teams in a fresh project → Modify-existing is disabled.
-    expect(page.locator("[data-intromode='open']")).to_be_disabled()
+    # Modify-existing is always available — it lets you pick which folder to
+    # scan, even when the default library is empty.
+    expect(page.locator("[data-intromode='open']")).to_be_enabled()
     # Create has no name field — the team is auto-named in the chat. Location
-    # defaults to the bobbi/ working folder.
+    # defaults to the machine-wide ~/bobbi-agents library.
     expect(page.locator("#introname")).to_have_count(0)
-    expect(page.locator("#introloc")).to_have_value("bobbi/")
+    assert page.locator("#introloc").input_value().endswith("/bobbi-agents/")
     page.click("#introstart")
     expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
     expect(page.locator(".uni-panel .up-title")).to_have_text("Your team")
@@ -194,11 +207,51 @@ def test_folder_picker_browses_and_fills_location(page, bobbi_url):
     expect(page.locator("#introloc")).to_be_visible()
     page.click("#introbrowse")
     expect(page.locator(".picker")).to_be_visible()
-    # The project root lists its folders; drilling into one fills the field.
+    # Opens in the (empty) library; step up to home, which has real folders.
+    # Drilling into one fills the field with that folder's absolute path.
+    page.click(".pnode.up")
     target = page.locator(".pnode:not(.up)").first
     expect(target).to_be_visible()
     name = target.inner_text().replace("📁", "").strip()
     target.click()
     page.click("#pick-use")
     expect(page.locator(".picker")).to_have_count(0)
-    expect(page.locator("#introloc")).to_have_value(name)
+    val = page.locator("#introloc").input_value()
+    assert val.startswith("/") and val.rstrip("/").endswith(name)
+
+
+def test_escape_closes_popup(page, bobbi_url):
+    # Escape dismisses the topmost popup (here, the folder picker).
+    page.goto(bobbi_url)
+    page.click("#introbrowse")
+    expect(page.locator(".picker")).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(page.locator(".picker")).to_have_count(0)
+
+
+def test_modify_scans_a_chosen_folder(page, bobbi):
+    # A team sitting in the library shows up under Modify; the scan defaults
+    # there, and the team is selectable to edit in place.
+    _seed_library_team(bobbi.home, "legacy-bot")
+    page.goto(bobbi.url)
+    page.click("[data-intromode='open']")
+    # The scan dir defaults to the library, which now holds one team.
+    assert page.locator("#introscan").input_value().endswith("/bobbi-agents")
+    team = page.locator(".iteam", has_text="legacy-bot")
+    expect(team).to_be_visible()
+    team.locator("input[name=iteam]").check()
+    page.click("#introstart")
+    # Lands in the editor with the existing team's goal reverse-filled.
+    expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
+
+
+def test_disconnect_overlay_when_server_dies(page, bobbi):
+    # The page is useless without its local server — if it dies, the UI must
+    # say so and stop pretending to be live (heartbeat catches it within ~4s).
+    page.goto(bobbi.url)
+    expect(page.get_by_role("heading", name="Build an agent team")).to_be_visible()
+    expect(page.locator("#disc-ov")).to_have_count(0)   # live: no overlay
+    bobbi.stop()                                        # server gone
+    expect(page.locator("#disc-ov")).to_be_visible(timeout=8_000)
+    expect(page.get_by_role("heading", name="Setup server disconnected")
+           ).to_be_visible()

@@ -161,6 +161,17 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .pick-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 16px;border-top:1px solid var(--border);}
 .pick-cur{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
+/* Disconnect overlay — the local setup server is gone; the page is frozen. */
+.disc{position:fixed;inset:0;background:rgba(31,27,22,.62);z-index:200;display:grid;place-items:center;backdrop-filter:blur(2px);}
+.disc-panel{width:min(440px,92vw);background:var(--surface);border:1px solid var(--border-strong);border-radius:14px;padding:26px 28px;text-align:center;box-shadow:0 24px 60px -20px rgba(40,30,16,.5);}
+.disc-dot{width:11px;height:11px;border-radius:50%;background:#C8612B;margin:0 auto 14px;box-shadow:0 0 0 5px rgba(200,97,43,.16);animation:disc-pulse 1.6s ease-in-out infinite;}
+@keyframes disc-pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+.disc-panel h2{margin:0 0 8px;font-size:17px;}
+.disc-panel p{margin:0 0 10px;font-size:13.5px;color:var(--muted);line-height:1.5;}
+.disc-cmd{font-family:var(--font-mono);font-size:12.5px;color:var(--text);background:var(--raised);border:1px solid var(--border-strong);border-radius:8px;padding:9px 12px;margin:14px 0;}
+.disc-cmd .pr{color:var(--faint);margin-right:7px;}
+.disc-sub{font-size:12px;color:var(--faint);}
+
 /* unified onboarding — chat (left) + team materializing as cards (right) */
 .uni-chat{border-right:1px solid var(--border);min-height:0;}
 .uni-panel{display:flex;flex-direction:column;min-width:0;min-height:0;background:linear-gradient(var(--surface),#F1ECE3);}

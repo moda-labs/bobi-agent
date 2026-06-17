@@ -17,8 +17,13 @@ import yaml
 from modastack.setup.state import SPEC_SLOTS, SetupState
 
 
-def _is_team(d: Path) -> bool:
+def is_team(d: Path) -> bool:
+    """A directory is a team source if it holds an agent.yaml."""
     return d.is_dir() and (d / "agent.yaml").is_file()
+
+
+# Internal alias kept for the module's existing call sites.
+_is_team = is_team
 
 
 def _team_display_name(d: Path) -> str:
@@ -33,29 +38,37 @@ def _team_display_name(d: Path) -> str:
     return d.name
 
 
-def list_local_teams(project: Path) -> list[dict]:
-    """Editable team sources under the project — every folder with an
-    agent.yaml under `bobbi/`, `agents/`, or `agent-teams/`. Each of those may
-    itself be a team (the create default writes the team straight into `bobbi/`)
-    or a container of team folders, so both are checked."""
+def list_teams_in(scan_dir: Path) -> list[dict]:
+    """Editable team sources found in `scan_dir` — every folder with an
+    agent.yaml. The directory itself may be a team (the create default writes
+    the team straight into its own folder) or a container of team folders, so
+    both are checked. Paths are returned absolute, since a team source can live
+    anywhere the user points the scan at (the `~/bobbi-agents` library by
+    default, a project repo, wherever). Best-effort — a missing or unreadable
+    directory simply yields nothing."""
     teams: list[dict] = []
     seen: set[str] = set()
 
     def _add(d: Path) -> None:
-        rel = d.relative_to(project).as_posix()
-        if not _is_team(d) or rel in seen:
+        try:
+            key = str(d.resolve())
+        except OSError:
             return
-        seen.add(rel)
-        teams.append({"name": _team_display_name(d), "path": rel})
+        if not _is_team(d) or key in seen:
+            return
+        seen.add(key)
+        teams.append({"name": _team_display_name(d), "path": key})
 
-    for parent in ("bobbi", "agents", "agent-teams"):
-        base = project / parent
-        if not base.is_dir():
-            continue
-        _add(base)                       # the folder itself may be a team
-        for d in sorted(base.iterdir()):  # …or it may contain team folders
-            if d.is_dir():
-                _add(d)
+    if not scan_dir.is_dir():
+        return teams
+    _add(scan_dir)                        # the folder itself may be a team
+    try:
+        children = sorted(scan_dir.iterdir())
+    except OSError:
+        children = []
+    for d in children:                    # …or it may contain team folders
+        if d.is_dir():
+            _add(d)
     return teams
 
 

@@ -27,16 +27,53 @@
   let S = null;            // latest serialized state
   let _connData = null;    // last /api/connect payload (drives connect cards)
 
+  // --- connection state --------------------------------------------------
+  // The page is useless without its local setup server. If that server dies
+  // (Ctrl-C, closed terminal, crash) the UI must say so and stop pretending to
+  // be live — every action would silently fail otherwise. A heartbeat plus
+  // fetch-failure detection flips a blocking overlay; it clears itself if the
+  // server comes back (e.g. `bobbi setup --resume`).
+  let _finished = false;        // set when the user intentionally finishes
+  let _disconnected = false;
+  function markDisconnected() {
+    if (_finished || _disconnected) return;
+    _disconnected = true;
+    if (document.getElementById("disc-ov")) return;
+    const ov = document.createElement("div");
+    ov.id = "disc-ov";
+    ov.className = "disc";
+    ov.innerHTML = `<div class="disc-panel">
+      <div class="disc-dot"></div>
+      <h2>Setup server disconnected</h2>
+      <p>The local <code>bobbi setup</code> server stopped — closed, interrupted, or crashed. Nothing here works until it's back.</p>
+      <div class="disc-cmd"><span class="pr">$</span> bobbi setup --resume</div>
+      <p class="disc-sub">Run that in your terminal — this page reconnects on its own. Your progress is saved.</p></div>`;
+    document.body.appendChild(ov);
+  }
+  function markConnected() {
+    if (!_disconnected) return;
+    _disconnected = false;
+    const ov = document.getElementById("disc-ov");
+    if (ov) ov.remove();
+  }
+
   // --- api helpers -------------------------------------------------------
   async function getJSON(path) {
-    const r = await fetch(path, { headers: H });
+    let r;
+    try { r = await fetch(path, { headers: H }); }
+    catch (e) { markDisconnected(); throw e; }   // network failure = server gone
+    markConnected();
     return r.json();
   }
   async function postJSON(path, body) {
-    const r = await fetch(path, {
-      method: "POST", headers: { ...H, "content-type": "application/json" },
-      body: JSON.stringify(body || {}),
-    });
+    let r;
+    try {
+      r = await fetch(path, {
+        method: "POST", headers: { ...H, "content-type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+    } catch (e) { markDisconnected(); throw e; }
+    markConnected();
     return { ok: r.ok, status: r.status, data: await r.json().catch(() => ({})) };
   }
   function parseSSE(raw) {
@@ -49,15 +86,22 @@
     catch { return { event: ev, data: {} }; }
   }
   async function sse(path, body, handlers) {
-    const res = await fetch(path, {
-      method: "POST", headers: { ...H, "content-type": "application/json" },
-      body: JSON.stringify(body || {}),
-    });
+    let res;
+    try {
+      res = await fetch(path, {
+        method: "POST", headers: { ...H, "content-type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+    } catch (e) { markDisconnected(); throw e; }
+    markConnected();
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
     for (;;) {
-      const { value, done } = await reader.read();
+      let chunk;
+      try { chunk = await reader.read(); }
+      catch (e) { markDisconnected(); throw e; }  // stream cut = server gone
+      const { value, done } = chunk;
       if (done) break;
       buf += dec.decode(value, { stream: true });
       let i;
@@ -89,13 +133,14 @@
   // Three ways in, all landing in the same chat+cards editor. Create authors
   // from scratch (auto-named in the chat); modify and registry reverse-fill an
   // existing team and edit it non-lossily.
-  let introTeams = [], introRegistry = null, introBase = "bobbi", introMode = "create";
+  let introTeams = [], introRegistry = null, introBase = "bobbi",
+      introScanDir = "", introMode = "create";
   async function renderIntro() {
     setPanes("1fr");
     const data = await getJSON("/api/intro");
     introTeams = data.teams || [];
-    introBase = data.default_location || "bobbi";
-    if (introMode === "open" && !introTeams.length) introMode = "create";
+    introBase = data.default_location || introBase;
+    introScanDir = data.scan_dir || introBase;
     drawIntro();
   }
   function drawIntro() {
@@ -105,7 +150,7 @@
       <p class="lede">Start fresh, modify a team you already have, or pull one from a registry. bobbi keeps the source in a folder you choose, then installs it into <code>.bobbi/</code> when you're done.</p>
       <div class="introtabs">
         <button class="itab ${introMode === "create" ? "on" : ""}" data-intromode="create">Create new</button>
-        <button class="itab ${introMode === "open" ? "on" : ""}" data-intromode="open" ${introTeams.length ? "" : "disabled"}>Modify existing${introTeams.length ? "" : " · none found"}</button>
+        <button class="itab ${introMode === "open" ? "on" : ""}" data-intromode="open">Modify existing</button>
         <button class="itab ${introMode === "registry" ? "on" : ""}" data-intromode="registry">From a registry</button>
       </div>
       <div id="introbody"></div>
@@ -126,6 +171,46 @@
       const loc = $("#introloc"); loc.value = p; loc.dataset.touched = "1";
     }));
   }
+  // Modify's "which folder holds your teams?" — a scan dir, defaulting to the
+  // library, that the user can point anywhere under home.
+  function scanFieldHTML(value) {
+    return `<label class="ifield"><span>Folder to scan for teams</span>
+      <div class="locrow"><input id="introscan" autocomplete="off" value="${esc(value)}">
+        <button type="button" class="btn ghost xs" id="introscanbrowse">Browse…</button></div></label>`;
+  }
+  function teamListHTML(teams) {
+    if (!teams.length)
+      return `<p class="ihint" id="iteams-empty">No teams in that folder. Point the scan at one that has them, or create a new team.</p>`;
+    return teams.map((t, i) =>
+      `<label class="iteam"><input type="radio" name="iteam" value="${esc(t.name)}" data-path="${esc(t.path)}" ${i === 0 ? "checked" : ""}>
+        <b>${esc(t.name)}</b><span>${esc(t.path)}</span></label>`).join("");
+  }
+  async function rescan(dir) {
+    const d = await getJSON("/api/teams?dir=" + encodeURIComponent(dir || ""));
+    if (d.error) { toast(d.error); return; }
+    introScanDir = d.dir || dir;
+    introTeams = d.teams || [];
+    drawOpenBody();
+  }
+  function drawOpenBody() {
+    const el = $("#introbody");
+    el.innerHTML = `
+      ${scanFieldHTML(introScanDir)}
+      <div class="iteams" id="iteams">${teamListHTML(introTeams)}</div>
+      ${locFieldHTML("Edit this team in place (or point somewhere else to fork it)", (introTeams[0] || {}).path || "")}`;
+    const loc = $("#introloc");
+    const sync = () => { if (!loc.dataset.touched) { const r = document.querySelector("input[name=iteam]:checked"); loc.value = (r && r.dataset.path) || ""; } };
+    el.querySelectorAll("input[name=iteam]").forEach(r => r.addEventListener("change", sync));
+    loc.addEventListener("input", () => loc.dataset.touched = "1");
+    // Rescan when the scan dir changes (Enter or blur), or via its own Browse.
+    const scan = $("#introscan");
+    const doScan = () => { const v = scan.value.trim(); if (v && v !== introScanDir) rescan(v); };
+    scan.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); doScan(); } });
+    scan.addEventListener("blur", doScan);
+    $("#introscanbrowse").addEventListener("click", () =>
+      openFolderPicker(p => { scan.value = p; rescan(p); }));
+    wireBrowse();
+  }
   function drawIntroBody() {
     const el = $("#introbody");
     if (introMode === "create") {
@@ -134,16 +219,7 @@
       $("#introloc").focus();
       wireBrowse();
     } else if (introMode === "open") {
-      el.innerHTML = `
-        <div class="iteams">${introTeams.map((t, i) =>
-          `<label class="iteam"><input type="radio" name="iteam" value="${esc(t.name)}" data-path="${esc(t.path)}" ${i === 0 ? "checked" : ""}>
-            <b>${esc(t.name)}</b><span>${esc(t.path)}</span></label>`).join("")}</div>
-        ${locFieldHTML("Edit this team in place (or point somewhere else to fork it)", (introTeams[0] || {}).path || "")}`;
-      const loc = $("#introloc");
-      const sync = () => { if (!loc.dataset.touched) { const r = document.querySelector("input[name=iteam]:checked"); loc.value = (r && r.dataset.path) || ""; } };
-      el.querySelectorAll("input[name=iteam]").forEach(r => r.addEventListener("change", sync));
-      loc.addEventListener("input", () => loc.dataset.touched = "1");
-      wireBrowse();
+      drawOpenBody();
     } else {  // registry
       if (introRegistry === null) {
         el.innerHTML = `<p class="ihint">Looking for teams in your registries…</p>`;
@@ -175,8 +251,13 @@
     const loc = (($("#introloc") || {}).value || "").trim();
     if (!loc) { toast("choose a location"); return; }
     const body = { mode: introMode, location: loc };
-    if (introMode === "open") body.team = (document.querySelector("input[name=iteam]:checked") || {}).value || "";
-    else if (introMode === "registry") body.team = (document.querySelector("input[name=rteam]:checked") || {}).value || "";
+    if (introMode === "open") {
+      const sel = document.querySelector("input[name=iteam]:checked");
+      if (!sel) { toast("pick a team to modify (or scan a folder that has one)"); return; }
+      body.team_path = sel.dataset.path || "";
+    } else if (introMode === "registry") {
+      body.team = (document.querySelector("input[name=rteam]:checked") || {}).value || "";
+    }
     const start = $("#introstart");
     if (start) { start.disabled = true; start.textContent = introMode === "registry" ? "Downloading…" : "Starting…"; }
     const r = await postJSON("/api/start", body);
@@ -202,14 +283,14 @@
     const load = async (path) => {
       const d = await getJSON("/api/browse?path=" + encodeURIComponent(path || ""));
       if (d.error) return;
-      cur = d.path;
-      $("#pick-path").textContent = cur === "." ? "/" : "/" + cur;
-      $("#pick-cur").textContent = cur === "." ? "project root" : cur;
+      cur = d.path;                       // absolute, home-rooted
+      $("#pick-path").textContent = cur;
+      $("#pick-cur").textContent = cur;
       let rows = "";
       if (d.parent !== null && d.parent !== undefined)
         rows += `<div class="pnode up" data-pick="${esc(d.parent)}">⬆ ..</div>`;
       rows += (d.dirs || []).map(name => {
-        const child = cur === "." ? name : cur + "/" + name;
+        const child = cur.replace(/\/$/, "") + "/" + name;
         return `<div class="pnode" data-pick="${esc(child)}">📁 ${esc(name)}</div>`;
       }).join("");
       $("#pick-list").innerHTML = rows || `<div class="pempty">no subfolders here</div>`;
@@ -217,7 +298,7 @@
     await load("");
     ov.addEventListener("click", (e) => {
       if (e.target.id === "pick-close" || e.target === ov) { ov.remove(); return; }
-      if (e.target.id === "pick-use") { onPick(cur === "." ? introBase : cur); ov.remove(); return; }
+      if (e.target.id === "pick-use") { onPick(cur || introBase); ov.remove(); return; }
       const n = e.target.closest("[data-pick]"); if (n) load(n.dataset.pick);
     });
   }
@@ -766,7 +847,8 @@
     });
     $("#fd-finish").addEventListener("click", async () => {
       $("#fd-finish").disabled = true;
-      await postJSON("/api/finish", {});   // also stops the local setup server
+      _finished = true;   // the server is about to stop on purpose — not a disconnect
+      try { await postJSON("/api/finish", {}); } catch { /* server stopped mid-response */ }
       renderFinished();
     });
 
@@ -848,6 +930,27 @@
     const vsv = e.target.closest("[data-vennsave]");
     if (vsv) { vennSave(); return; }
   });
+
+  // Escape closes the topmost dismissible popup — the folder picker or a
+  // connection-setup overlay (Venn / native token). The disconnect overlay is
+  // a blocking state, not a popup, so it's deliberately left alone.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const popups = document.querySelectorAll(".picker, .secret-ov");
+    if (popups.length) { popups[popups.length - 1].remove(); e.preventDefault(); }
+  });
+
+  // Heartbeat: detect a dead server even while the page sits idle (no fetch
+  // would otherwise fire). ~4s cadence — quick enough to notice, light enough
+  // to ignore. Recovers automatically if the server returns.
+  async function heartbeat() {
+    if (_finished) return;
+    try {
+      const r = await fetch("/api/ping", { headers: H });
+      if (r.ok) markConnected(); else markDisconnected();
+    } catch { markDisconnected(); }
+  }
+  setInterval(heartbeat, 4000);
 
   refresh();
 })();

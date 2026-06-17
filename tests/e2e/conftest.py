@@ -100,20 +100,39 @@ def _isolate_env():
     os.environ.update(snap)
 
 
+class _Bobbi:
+    """A booted setup server: the page URL, its home/project dirs, and a stop()
+    the test can call to simulate the server dying mid-session."""
+    def __init__(self, url, home, project, srv, thread):
+        self.url = url
+        self.home = home
+        self.project = project
+        self._srv = srv
+        self._thread = thread
+
+    def stop(self):
+        self._srv.should_exit = True
+        self._thread.join(timeout=5)
+
+
 @pytest.fixture
-def bobbi_url(tmp_path):
-    """Boot the setup server with a fake LLM on a free loopback port; yield
-    the page URL (nonce in the query string). Torn down after the test."""
+def bobbi(tmp_path):
+    """Boot the setup server with a fake LLM on a free loopback port; yield a
+    _Bobbi handle. Torn down after the test."""
     project = tmp_path / "project"
     project.mkdir()
-    # A couple of real subfolders so the location folder-picker has something to
-    # browse (dotfiles like .git are hidden by the picker).
-    (project / "agents").mkdir()
     (project / "workspace").mkdir()
     subprocess.run(["git", "init"], cwd=project, capture_output=True)
 
+    # A stand-in home so the ~/bobbi-agents library and the folder picker stay
+    # off the real filesystem. A couple of real subfolders give the picker
+    # (now rooted at home) something to browse — dotfiles are hidden.
+    home = tmp_path / "home"
+    (home / "bobbi-agents").mkdir(parents=True)
+    (home / "projects").mkdir()
+
     app = server.build_app(SetupState(), project, nonce=NONCE,
-                           stream_fn=_fake_llm())
+                           stream_fn=_fake_llm(), home_root=home)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -135,7 +154,12 @@ def bobbi_url(tmp_path):
         except Exception:
             time.sleep(0.05)
 
-    yield f"{base}/?n={NONCE}"
+    handle = _Bobbi(f"{base}/?n={NONCE}", home, project, srv, thread)
+    yield handle
+    handle.stop()
 
-    srv.should_exit = True
-    thread.join(timeout=5)
+
+@pytest.fixture
+def bobbi_url(bobbi):
+    """The page URL alone — what most tests need."""
+    return bobbi.url

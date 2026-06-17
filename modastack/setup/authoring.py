@@ -454,7 +454,8 @@ async def author_pack(state: SetupState, project: Path, *,
     state.team_name = derive_team_name(state)
     pack = team_source_dir(project, state)
     # Persist the concrete location (create resolved <base>/<name>) so the Done
-    # screen, /api/files, install, and list_local_teams all agree on it.
+    # screen, /api/files, install, and list_teams_in all agree on it. A source
+    # in the home library lives outside the project, so it stays absolute.
     try:
         state.source_dir = pack.relative_to(project).as_posix()
     except ValueError:

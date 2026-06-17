@@ -79,12 +79,20 @@ def _sse(event: str, data) -> str:
 
 def build_app(state: SetupState, project: Path, *, nonce: str,
               model: str | None = None, stream_fn=None,
-              on_finish=None):
+              on_finish=None, home_root: Path | None = None):
     """Construct the FastAPI app. `stream_fn` overrides the LLM source
-    (tests inject a fake); `on_finish` is called when setup completes."""
+    (tests inject a fake); `on_finish` is called when setup completes.
+    `home_root` is the user's home (defaults to `Path.home()`) — it roots the
+    `~/bobbi-agents` team-source library and the folder picker; tests point it
+    at a tmpdir."""
     app = FastAPI()
     app.state.stream_fn = stream_fn
     app.state.model = model
+    # The machine-wide library of editable team sources. A team isn't tied to
+    # the cwd it's installed into, so its source defaults here rather than
+    # littering whatever directory setup runs in.
+    home = (home_root or Path.home()).resolve()
+    library = home / "bobbi-agents"
 
     # --- security middleware: Host guard + nonce on /api ---------------
     @app.middleware("http")
@@ -122,12 +130,43 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     def get_state() -> dict:
         return serialize_state(state)
 
+    # A cheap liveness check for the client heartbeat: if this stops
+    # answering (Ctrl-C, closed terminal, crash), the page knows the setup
+    # server is gone and freezes itself instead of looking live.
+    @app.get("/api/ping")
+    def ping() -> dict:
+        return {"ok": True}
+
     # --- intro: create / modify-existing / from-registry + a location --
     @app.get("/api/intro")
     def intro() -> dict:
         from modastack.setup import open_mode
-        return {"teams": open_mode.list_local_teams(project),
-                "default_location": "bobbi"}
+        # Create defaults the team source into the library; Modify defaults to
+        # scanning the same library, but the user can point the scan elsewhere
+        # (a project repo, a thumb drive, wherever) via /api/teams. Install
+        # still targets the project's .bobbi/ unchanged — a source outside the
+        # project copies in like a registry team (see actions.install_team).
+        return {"teams": open_mode.list_teams_in(library),
+                "default_location": str(library),
+                "scan_dir": str(library)}
+
+    @app.get("/api/teams")
+    def teams(request: Request) -> JSONResponse:
+        # Scan a user-chosen directory for editable team sources (Modify's
+        # "which folder holds your teams?"). Accepts an absolute path or one
+        # relative to home; confined to the home tree, like the picker.
+        from modastack.setup import open_mode
+        raw = (request.query_params.get("dir") or "").strip()
+        target = Path(raw).expanduser() if raw else library
+        if not target.is_absolute():
+            target = home / target
+        target = target.resolve()
+        if target != home and home not in target.parents:
+            return JSONResponse(
+                {"error": "pick a folder inside your home directory"},
+                status_code=400)
+        return JSONResponse({"dir": str(target),
+                             "teams": open_mode.list_teams_in(target)})
 
     @app.get("/api/registry")
     def registry_teams() -> dict:
@@ -138,22 +177,26 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
     @app.get("/api/browse")
     def browse(request: Request) -> JSONResponse:
-        # A project-scoped directory lister for the location picker: a native
-        # OS folder dialog isn't reachable from a localhost page, so we walk
-        # the tree server-side. Confined to the project root.
-        root = project.resolve()
-        rel = (request.query_params.get("path") or "").strip().lstrip("/")
-        here = (root / rel).resolve() if rel else root
-        if here != root and root not in here.parents:
-            here = root
+        # A home-scoped directory lister for the location picker: a native OS
+        # folder dialog isn't reachable from a localhost page, so we walk the
+        # tree server-side. Rooted at the user's home (the library and most dev
+        # repos live there); confined to it so the localhost page can't list
+        # the whole filesystem. Paths are absolute. Anything outside home can
+        # still be typed into the location field directly.
+        library.mkdir(parents=True, exist_ok=True)  # so it's navigable on day one
+        raw = (request.query_params.get("path") or "").strip()
+        here = Path(raw).expanduser().resolve() if raw else library
+        if here != home and home not in here.parents:
+            here = home
         if not here.is_dir():
             return JSONResponse({"error": "not a directory"}, status_code=404)
-        dirs = sorted(d.name for d in here.iterdir()
-                      if d.is_dir() and not d.name.startswith("."))
-        cur = here.relative_to(root).as_posix()
-        parent = (here.parent.relative_to(root).as_posix()
-                  if here != root else None)
-        return JSONResponse({"path": cur, "parent": parent, "dirs": dirs})
+        try:
+            dirs = sorted(d.name for d in here.iterdir()
+                          if d.is_dir() and not d.name.startswith("."))
+        except OSError:
+            dirs = []
+        parent = str(here.parent) if here != home else None
+        return JSONResponse({"path": str(here), "parent": parent, "dirs": dirs})
 
     @app.post("/api/rename")
     def rename(payload: dict) -> JSONResponse:
@@ -213,13 +256,19 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # edit-in-place authoring path; only create authors from scratch.
         state.mode = "create" if mode == "create" else "open"
         if mode == "open":
-            team = payload.get("team", "")
-            match = next((t for t in open_mode.list_local_teams(project)
-                          if t["name"] == team or t["path"] == team), None)
-            if not match:
-                return JSONResponse({"error": "unknown team"}, status_code=400)
+            # The UI sends the team's source path (from a scan of whatever
+            # folder the user chose), not just a name — teams can live anywhere
+            # now, so a name alone is ambiguous.
+            team_path = (payload.get("team_path") or payload.get("team") or "").strip()
+            src = Path(team_path).expanduser()
+            if not src.is_absolute():
+                src = project / src
+            src = src.resolve()
+            if not open_mode.is_team(src):
+                return JSONResponse({"error": "that folder isn't a team "
+                                     "(no agent.yaml)"}, status_code=400)
             try:
-                open_mode.copy_into(project / match["path"], abs_loc)
+                open_mode.copy_into(src, abs_loc)
             except ValueError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
             open_mode.reverse_fill(state, abs_loc)

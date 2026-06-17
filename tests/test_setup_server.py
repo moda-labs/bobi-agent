@@ -47,6 +47,15 @@ def project(tmp_path):
     return tmp_path
 
 
+@pytest.fixture
+def home(tmp_path):
+    """A stand-in for the user's home, so the ~/bobbi-agents library and the
+    folder picker stay off the real filesystem. Pass home_root=home to _client."""
+    h = tmp_path / "home"
+    h.mkdir()
+    return h
+
+
 # --- security ------------------------------------------------------------
 
 class TestSecurity:
@@ -359,9 +368,9 @@ class TestFinish:
 
 # --- intro: create / open + location -------------------------------------
 
-def _seed_team(project, name="legacy-bot"):
-    """Write a minimal valid team source under agents/<name>/."""
-    src = project / "agents" / name
+def _seed_team(project, name="legacy-bot", *, parent="agents"):
+    """Write a minimal valid team source under <project>/<parent>/<name>/."""
+    src = project / parent / name
     (src / "roles" / "lead").mkdir(parents=True)
     (src / "agent.yaml").write_text(
         "agent: " + name + "\nversion: 0.1.0\nentry_point: lead\n"
@@ -371,58 +380,71 @@ def _seed_team(project, name="legacy-bot"):
     return src
 
 
+def _seed_library_team(home, name="legacy-bot"):
+    """Write a minimal valid team source into the ~/bobbi-agents library."""
+    return _seed_team(home / "bobbi-agents", name, parent=".")
+
+
 class TestIntro:
-    def test_intro_lists_local_teams(self, project):
-        _seed_team(project, "legacy-bot")
-        c = _client(SetupState(), project)
+    def test_intro_scans_the_library_by_default(self, project, home):
+        # The default scan + create location is the machine-wide library
+        # (~/bobbi-agents), not the cwd — a team isn't tied to where it installs.
+        _seed_library_team(home, "legacy-bot")
+        c = _client(SetupState(), project, home_root=home)
         data = c.get("/api/intro").json()
         names = {t["name"] for t in data["teams"]}
         assert "legacy-bot" in names
-        assert data["default_location"] == "bobbi"
+        library = str((home / "bobbi-agents").resolve())
+        assert data["default_location"] == library
+        assert data["scan_dir"] == library
 
-    def test_intro_finds_team_created_in_bobbi(self, project):
-        # Create writes the team straight into bobbi/ (folder is "bobbi", the
-        # real name lives in agent.yaml) — modify-existing must still find it,
-        # showing the agent.yaml name, not the folder name.
-        src = project / "bobbi"
+    def test_intro_finds_team_at_library_root(self, project, home):
+        # The library folder itself may be a team (create writes straight into
+        # its named subfolder, but a flat layout is fine too) — show the
+        # agent.yaml name, not the folder name.
+        src = home / "bobbi-agents"
         (src / "roles" / "aide").mkdir(parents=True)
         (src / "agent.yaml").write_text(
             "agent: personal-assistant\nversion: 0.1.0\nentry_point: aide\n")
         (src / "agent.md").write_text("# pa\n\nHelp out.\n")
         (src / "roles" / "aide" / "ROLE.md").write_text("# Aide\n\nHelp.\n")
-        c = _client(SetupState(), project)
+        c = _client(SetupState(), project, home_root=home)
         teams = c.get("/api/intro").json()["teams"]
-        assert {"name": "personal-assistant", "path": "bobbi"} in teams
+        assert {"name": "personal-assistant",
+                "path": str(src.resolve())} in teams
 
-    def test_intro_finds_teams_in_bobbi_subfolders(self, project):
-        src = project / "bobbi" / "triage-bot"
+    def test_teams_scans_a_chosen_directory(self, project, home):
+        # Modify asks which folder to scan — point it anywhere under home.
+        elsewhere = home / "projects" / "acme"
+        _seed_team(elsewhere, "triage-bot", parent="agents")
+        c = _client(SetupState(), project, home_root=home)
+        scan = str(elsewhere / "agents")
+        d = c.get("/api/teams", params={"dir": scan}).json()
+        assert d["dir"] == str((elsewhere / "agents").resolve())
+        paths = {t["path"] for t in d["teams"]}
+        assert str((elsewhere / "agents" / "triage-bot").resolve()) in paths
+
+    def test_teams_rejects_path_outside_home(self, project, home):
+        c = _client(SetupState(), project, home_root=home)
+        r = c.get("/api/teams", params={"dir": "/etc"})
+        assert r.status_code == 400
+
+    def test_start_open_rejects_fork_inside_source(self, project, home):
+        src = home / "bobbi-agents" / "pa"
         src.mkdir(parents=True)
-        (src / "agent.yaml").write_text("agent: triage-bot\n")
-        c = _client(SetupState(), project)
-        paths = {t["path"] for t in c.get("/api/intro").json()["teams"]}
-        assert "bobbi/triage-bot" in paths
-
-    def test_start_open_rejects_fork_inside_source(self, project):
-        src = project / "bobbi"
-        src.mkdir()
         (src / "agent.yaml").write_text("agent: pa\n")
-        c = _client(SetupState(), project)
-        r = c.post("/api/start", json={"mode": "open", "team": "pa",
-                                       "location": "bobbi/fork"})
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "open", "team_path": str(src),
+                                       "location": str(src / "fork")})
         assert r.status_code == 400  # can't copy a folder into its own subdir
 
-    def test_start_open_in_place_is_a_noop_copy(self, project):
+    def test_start_open_in_place_is_a_noop_copy(self, project, home):
         # The default modify location is the team's own path — copy_into is a
         # no-op and the cards reverse-fill from it in place.
-        src = project / "bobbi" / "aide-team"
-        (src / "roles" / "aide").mkdir(parents=True)
-        (src / "agent.yaml").write_text(
-            "agent: aide-team\nversion: 0.1.0\nentry_point: aide\n")
-        (src / "agent.md").write_text("# aide-team\n\nDraft replies.\n")
-        (src / "roles" / "aide" / "ROLE.md").write_text("# Aide\n\nDraft.\n")
-        c = _client(SetupState(), project)
-        r = c.post("/api/start", json={"mode": "open", "team": "aide-team",
-                                       "location": "bobbi/aide-team"})
+        src = _seed_library_team(home, "aide-team")
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "open", "team_path": str(src),
+                                       "location": str(src)})
         assert r.status_code == 200
         assert r.json()["spec"]["goal"]  # reverse-filled in place
 
@@ -437,10 +459,10 @@ class TestIntro:
         assert d["source_dir"] == "agent-teams/my-triage-team"
         assert d["team_name"] == "my-triage-team"
 
-    def test_start_open_reverse_fills_and_copies(self, project):
-        _seed_team(project, "legacy-bot")
-        c = _client(SetupState(), project)
-        r = c.post("/api/start", json={"mode": "open", "team": "legacy-bot",
+    def test_start_open_reverse_fills_and_copies(self, project, home):
+        src = _seed_library_team(home, "legacy-bot")
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "open", "team_path": str(src),
                                        "location": "agent-teams/legacy-bot"})
         assert r.status_code == 200
         d = r.json()
@@ -452,7 +474,7 @@ class TestIntro:
         assert {s["name"] for s in d["spec"]["services"]} == {"github"}
         assert d["chat"] == "slack"
         assert d["spec"]["readiness"]["goal"] == "enough"
-        # source copied into the working location
+        # source copied into the working location (relative → under the project)
         assert (project / "agent-teams" / "legacy-bot" / "agent.yaml").is_file()
         # the chat opens with a recap of what the team already does (not the
         # blank "what do you want to build?" greeting)
@@ -469,11 +491,12 @@ class TestIntro:
                                        "location": ".modastack/team"})
         assert r.status_code == 400
 
-    def test_start_open_unknown_team_400(self, project):
-        c = _client(SetupState(), project)
-        r = c.post("/api/start", json={"mode": "open", "team": "ghost",
-                                       "location": "agent-teams/ghost"})
-        assert r.status_code == 400
+    def test_start_open_unknown_team_400(self, project, home):
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={
+            "mode": "open", "team_path": str(home / "bobbi-agents" / "ghost"),
+            "location": "agent-teams/ghost"})
+        assert r.status_code == 400  # not a team (no agent.yaml)
 
     def test_start_registry_fetches_and_reverse_fills(self, project, monkeypatch):
         # The registry fetch is stubbed: it materializes a team at `dest`,
@@ -502,22 +525,29 @@ class TestIntro:
                                        "location": "bobbi/x"})
         assert r.status_code == 400
 
-    def test_browse_lists_project_dirs(self, project):
-        (project / "agents" / "alpha").mkdir(parents=True)
-        (project / "agents" / "beta").mkdir(parents=True)
-        (project / "agents" / ".hidden").mkdir(parents=True)
-        c = _client(SetupState(), project)
-        d = c.get("/api/browse", params={"path": "agents"}).json()
-        assert d["path"] == "agents"
-        assert d["parent"] == "."  # parent of a top-level dir is the root
+    def test_browse_lists_home_dirs(self, project, home):
+        (home / "work" / "alpha").mkdir(parents=True)
+        (home / "work" / "beta").mkdir(parents=True)
+        (home / "work" / ".hidden").mkdir(parents=True)
+        c = _client(SetupState(), project, home_root=home)
+        work = home / "work"
+        d = c.get("/api/browse", params={"path": str(work)}).json()
+        assert d["path"] == str(work.resolve())
+        assert d["parent"] == str(home.resolve())  # one level up is home
         assert "alpha" in d["dirs"] and "beta" in d["dirs"]
         assert ".hidden" not in d["dirs"]  # dotfiles hidden
 
-    def test_browse_confined_to_project(self, project):
-        c = _client(SetupState(), project)
-        # An escape attempt collapses back to the project root.
-        d = c.get("/api/browse", params={"path": "../../etc"}).json()
-        assert d["path"] == "."
+    def test_browse_defaults_to_library(self, project, home):
+        c = _client(SetupState(), project, home_root=home)
+        d = c.get("/api/browse").json()  # no path → the library, created on demand
+        assert d["path"] == str((home / "bobbi-agents").resolve())
+        assert (home / "bobbi-agents").is_dir()
+
+    def test_browse_confined_to_home(self, project, home):
+        c = _client(SetupState(), project, home_root=home)
+        # An escape attempt collapses back to the home root.
+        d = c.get("/api/browse", params={"path": "/etc"}).json()
+        assert d["path"] == str(home.resolve())
         assert d["parent"] is None
 
     def test_rename_sets_team_name(self, project):
