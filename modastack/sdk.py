@@ -166,6 +166,10 @@ class SessionEntry:
     pid: int = 0
     inbox_port: int = 0
     image_hash: str = ""
+    model: str = ""
+    provider: str = ""
+    total_cost_usd: float = 0.0
+    model_usage: dict = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     requested_by: dict = field(default_factory=dict)
@@ -206,6 +210,36 @@ class SessionRegistry:
         for k, v in kwargs.items():
             if k in data:
                 data[k] = v
+        data["last_activity"] = time.time()
+        path.write_text(json.dumps(data, indent=2))
+
+    def record_cost(self, name: str, cost_usd: float,
+                    model: str = "", provider: str = "",
+                    input_tokens: int = 0, output_tokens: int = 0) -> None:
+        """Accumulate cost and model_usage on a session entry."""
+        path = self._state_path(name)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, TypeError):
+            return
+        data["total_cost_usd"] = data.get("total_cost_usd", 0.0) + cost_usd
+        if model or provider:
+            usage = data.get("model_usage", {})
+            key = f"{provider}:{model}" if provider else model
+            if key:
+                entry = usage.get(key, {"cost_usd": 0.0, "input_tokens": 0,
+                                         "output_tokens": 0})
+                entry["cost_usd"] = entry.get("cost_usd", 0.0) + cost_usd
+                entry["input_tokens"] = entry.get("input_tokens", 0) + input_tokens
+                entry["output_tokens"] = entry.get("output_tokens", 0) + output_tokens
+                usage[key] = entry
+                data["model_usage"] = usage
+        if model and not data.get("model"):
+            data["model"] = model
+        if provider and not data.get("provider"):
+            data["provider"] = provider
         data["last_activity"] = time.time()
         path.write_text(json.dumps(data, indent=2))
 

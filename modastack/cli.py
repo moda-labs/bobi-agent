@@ -2335,5 +2335,38 @@ def kb_remove(name):
 main.add_command(kb)
 
 
+# ---------------------------------------------------------------------------
+# costs command
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.option("--by", "group_by", default="provider",
+              type=click.Choice(["provider", "model", "session", "role"]),
+              help="Group costs by dimension")
+def costs(group_by):
+    """Show cost attribution across sessions, grouped by provider/model/role.
+
+    Aggregates total_cost_usd and model_usage from all session state files.
+
+    Usage:
+        modastack costs
+        modastack costs --by model
+        modastack costs --by role
+        modastack costs --by session
+    """
+    from .costs import rollup_costs, format_costs
+
+    project_path = _detect_project_root()
+    sessions_dir = paths.sessions_dir(project_path)
+    summary = rollup_costs(sessions_dir, group_by=group_by)
+
+    if summary.sessions_counted == 0:
+        click.echo("No cost data found. Costs are recorded as sessions run.")
+        return
+
+    click.echo(format_costs(summary, group_by=group_by))
+
+
 if __name__ == "__main__":
     main()

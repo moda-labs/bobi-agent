@@ -351,6 +351,17 @@ def run_phase_blocking(
     if memory_prompt:
         append_text += "\n\n" + memory_prompt
 
+    # Inject built-in MCP servers so workflow step agents also have access
+    # to image generation and other connection-based tools.
+    from modastack.paths import modastack_root as _mr
+    from modastack.config import Config as _Config
+    from modastack.mcp.inject import inject_builtin_mcp_servers
+    try:
+        _cfg = _Config.load(_mr())
+        _mcp = inject_builtin_mcp_servers(_cfg.mcp_servers, _cfg.connections)
+    except Exception:
+        _mcp = None
+
     session = Session(
         name=name,
         cwd=cwd,
@@ -359,7 +370,11 @@ def run_phase_blocking(
             "preset": "claude_code",
             "append": append_text,
         },
-        extra_options={"skills": "all", "max_turns": 200},
+        extra_options={
+            "skills": "all",
+            "max_turns": 200,
+            **({"mcp_servers": _mcp} if _mcp else {}),
+        },
     )
 
     ok = session.start(startup_prompt=prompt, timeout=effective_timeout)
@@ -465,6 +480,19 @@ def spawn_adhoc(
         if memory_prompt:
             append_parts.append(memory_prompt)
 
+    # Inject built-in MCP servers (e.g. image generation) based on config.
+    # Done here so all spawn paths (CLI, workflow, subagent) go through one
+    # call site.
+    from modastack.paths import modastack_root as _mr
+    from modastack.config import Config as _Config
+    from modastack.mcp.inject import inject_builtin_mcp_servers
+    try:
+        _cfg = _Config.load(_mr())
+        merged_mcp = inject_builtin_mcp_servers(
+            mcp_servers or _cfg.mcp_servers, _cfg.connections)
+    except Exception:
+        merged_mcp = mcp_servers
+
     session = Session(
         name=run_key,
         cwd=cwd,
@@ -476,7 +504,7 @@ def spawn_adhoc(
         extra_options={
             "skills": "all",
             "max_turns": 200,
-            **({"mcp_servers": mcp_servers} if mcp_servers else {}),
+            **({"mcp_servers": merged_mcp} if merged_mcp else {}),
         },
         role=role,
     )
