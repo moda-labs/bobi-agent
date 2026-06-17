@@ -146,16 +146,22 @@ def _format_requester(requester: dict) -> str:
 class EventServerClient:
     """WebSocket client that connects to the centralized event server.
 
-    Normalized events are pushed to `event_queue` for the consumer to drain.
-    The WebSocket callback never blocks on inject or Slack replies.
+    Normalized events are pushed to the client's queue for the consumer to
+    drain. Each session/deployment uses its OWN queue (passed in) so that
+    multiple clients in one process — e.g. sequential workflow phase sessions —
+    never compete for events on a shared queue. Callers that don't pass one
+    fall back to the process-global ``event_queue``. The WebSocket callback
+    never blocks on inject or Slack replies.
     """
 
     def __init__(self, server_url: str, deployment_id: str, api_key: str,
-                 on_event: callable = None, cursor_path: Path | None = None):
+                 on_event: callable = None, cursor_path: Path | None = None,
+                 queue: SimpleQueue | None = None):
         self.server_url = server_url.rstrip("/")
         self.deployment_id = deployment_id
         self.api_key = api_key
         self.on_event = on_event
+        self._queue = queue if queue is not None else event_queue
         # Seq numbers are per-deployment — sessions must not share a cursor.
         self.cursor_path = cursor_path
         self._ws: websocket.WebSocketApp | None = None
@@ -218,7 +224,7 @@ class EventServerClient:
                 seq = data.get("seq", 0)
 
                 _log_event(data, session_id=self.deployment_id)
-                event_queue.put(data)
+                self._queue.put(data)
                 log.info(f"Event queued: {data.get('source', '?')}/{data.get('type', '?')}")
 
                 if self.on_event:

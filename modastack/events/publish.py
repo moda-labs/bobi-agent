@@ -36,18 +36,13 @@ def _event_server_url(project_path: Path) -> str:
     return url
 
 
-def post_event(event_type: str, data: dict,
-               project_path: Path | None = None) -> bool:
-    """Post a synthetic event. Returns True when the server accepted it.
+def _post_topic(topic: str, source: str, data: dict,
+                project_path: Path | None) -> bool:
+    """POST a v2 event to ``/events/{topic}`` with the given source.
 
-    ``event_type`` is "source/type" (e.g. "agent/session.started");
-    a bare type defaults the source to "monitor".
+    The server builds the event's routing topics from the URL ``topic`` and
+    the body ``source`` (``createTopicEvent`` in event-server/src/core.ts).
     """
-    if "/" in event_type:
-        source, etype = event_type.split("/", 1)
-    else:
-        source, etype = "monitor", event_type
-
     if project_path is None:
         from modastack.paths import modastack_root
         project_path = modastack_root()
@@ -56,12 +51,44 @@ def post_event(event_type: str, data: dict,
 
     try:
         resp = pooled.post(
-            f"{es_url}/events/{etype}",
+            f"{es_url}/events/{topic}",
             json={"source": source, "payload": data},
             timeout=10.0,
         )
         resp.json()
         return True
     except (httpx.HTTPError, OSError, TimeoutError, ValueError) as e:
-        log.warning(f"Failed to post event {event_type}: {e}")
+        log.warning(f"Failed to post event {source}/{topic}: {e}")
         return False
+
+
+def post_event(event_type: str, data: dict,
+               project_path: Path | None = None) -> bool:
+    """Post a synthetic event. Returns True when the server accepted it.
+
+    ``event_type`` is "source/type" (e.g. "agent/session.started");
+    a bare type defaults the source to "monitor". The source is stripped to
+    the body and the bare type becomes the topic path, so the server routes
+    onto both the bare type and the source-qualified topic.
+    """
+    if "/" in event_type:
+        source, etype = event_type.split("/", 1)
+    else:
+        source, etype = "monitor", event_type
+
+    return _post_topic(etype, source, data, project_path)
+
+
+def publish_inbox(session: str, payload: dict,
+                  project_path: Path | None = None) -> bool:
+    """Publish an inter-agent message to a session's ``inbox/<session>`` topic.
+
+    Posts to ``/events/inbox/<session>`` with ``source="inbox"``. Because the
+    URL topic path already carries the ``inbox/`` source prefix, the server's
+    ``createTopicEvent`` emits exactly ``["inbox/<session>"]`` as the routing
+    topics — byte-identical to the subscription key a session registers
+    (``inbox/<session>``). This is the integration seam for comms-v1: publish
+    key == subscribe key. See tests/test_inbox.py and
+    event-server/test/core.spec.ts.
+    """
+    return _post_topic(f"inbox/{session}", "inbox", payload, project_path)

@@ -14,6 +14,11 @@ log = logging.getLogger(__name__)
 
 DRAIN_INTERVAL = 2
 
+# Poison pill: pushing this onto a drain's queue makes drain_loop return, so a
+# session can stop its drain thread cleanly on shutdown (the loop otherwise
+# blocks forever on queue.get()).
+_DRAIN_STOP = object()
+
 
 def _get_project_config():
     """Load the project Config, or return None if unavailable."""
@@ -27,6 +32,16 @@ def _get_project_config():
         return Config.load(root)
     except Exception:
         return None
+
+
+def _is_inbox_event(event: dict) -> bool:
+    """Whether an event is a directed inbox/<session> message.
+
+    Inbox events carry source ``inbox`` and type ``inbox/<session>`` (see
+    ``events.publish.publish_inbox``). They bypass auto-dispatch and formatting.
+    """
+    return (event.get("source") == "inbox"
+            or str(event.get("type", "")).startswith("inbox/"))
 
 
 def _thread_key(event: dict) -> tuple[str, str, str]:
@@ -110,24 +125,66 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
     if formatter is None:
         from modastack.events.client import format_event_for_manager
         formatter = format_event_for_manager
-    from modastack.inbox import deliver
+    from modastack.inbox import get_local_inbox, Message, _msg_id
 
     log.info("Drain loop active — delivering events to session inbox")
 
     while True:
         event = queue.get()
+        if event is _DRAIN_STOP:
+            return
 
         time.sleep(DRAIN_INTERVAL)
         batch = [event]
+        stop_after = False
         while not queue.empty():
-            batch.append(queue.get_nowait())
+            nxt = queue.get_nowait()
+            if nxt is _DRAIN_STOP:
+                stop_after = True
+                break
+            batch.append(nxt)
+
+        # The drain runs in the same process as its session, so it pushes
+        # straight into the session's in-process inbox queue — never back
+        # through the transport (which would re-deliver to this same drain).
+        inbox = get_local_inbox(session_name)
+        if inbox is None:
+            log.warning("No local inbox for %s — dropping %d event(s)",
+                        session_name, len(batch))
+            if stop_after:
+                return
+            continue
+
+        # inbox/* events are already addressed agent→agent messages: deliver
+        # them raw and skip auto-dispatch (they're not external triggers to
+        # route) and skip formatting (the text is the message itself).
+        external: list[dict] = []
+        for e in batch:
+            if _is_inbox_event(e):
+                payload = e.get("payload") or {}
+                text = payload.get("text", "")
+                if not text:
+                    continue
+                inbox.push(Message(
+                    id=payload.get("id") or _msg_id(),
+                    sender=payload.get("sender", ""),
+                    text=text,
+                    wait=bool(payload.get("wait", False)),
+                ))
+            else:
+                external.append(e)
+
+        if not external:
+            if stop_after:
+                return
+            continue
 
         # Single pass: auto-dispatch + group by delivery class.
         # Bulk events are delivered first so the agent sees context
         # before interactive messages that may need an immediate reply.
         bulk_events: list[tuple[bool, dict]] = []
         chat_events: list[tuple[bool, dict]] = []
-        for e in batch:
+        for e in external:
             # A reactor failure on one event must not kill the drain
             # thread — that would silently stop ALL event delivery while
             # the queue grows unbounded.
@@ -163,6 +220,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             text = "\n\n".join(lines)
 
             log.info(f"Delivering {len(group)} event(s) to {session_name}")
-            ok, _ = deliver(session_name, text, sender="event-bus")
-            if not ok:
-                log.warning(f"Event delivery failed for {len(group)} event(s)")
+            inbox.push(Message(id=_msg_id(), sender="event-bus", text=text))
+
+        if stop_after:
+            return

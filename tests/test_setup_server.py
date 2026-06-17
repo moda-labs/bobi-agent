@@ -42,6 +42,21 @@ def _client(state, project, **kw):
     return c
 
 
+@pytest.fixture(autouse=True)
+def _isolate_environ():
+    """Saving a credential writes the secret into ``os.environ`` (actions.py
+    ``save_credential`` does ``os.environ[var] = value``) so the live setup
+    process can use it immediately. ``monkeypatch`` can't undo that direct app
+    write, so without isolation a saved ``VENN_API_KEY``/token bleeds into later
+    tests and changes their build/author behavior. Snapshot and restore the
+    environment around every test in this module."""
+    import os
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
 @pytest.fixture
 def project(tmp_path):
     return tmp_path

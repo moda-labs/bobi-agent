@@ -47,15 +47,20 @@ class TestBuildSubscriptions:
 class TestDrainLoop:
 
     def test_batches_and_delivers(self):
+        from modastack.inbox import register_local_inbox, unregister_local_inbox
+
         queue = SimpleQueue()
-        delivered = []
+        pushed = []
+
+        class _CaptureInbox:
+            def push(self, msg):
+                pushed.append(msg)
 
         def mock_formatter(event):
             return f"formatted:{event['type']}"
 
-        with patch("modastack.inbox.deliver") as mock_deliver:
-            mock_deliver.return_value = (True, "")
-
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
             thread = threading.Thread(
                 target=drain_loop,
                 args=("test-session", queue, mock_formatter),
@@ -68,18 +73,24 @@ class TestDrainLoop:
 
             time.sleep(DRAIN_INTERVAL + 1)
 
-            assert mock_deliver.called
-            call_args = mock_deliver.call_args
-            assert call_args[0][0] == "test-session"
-            assert "formatted:task.opened" in call_args[0][1]
+            assert pushed
+            assert "formatted:task.opened" in pushed[0].text
+        finally:
+            unregister_local_inbox("test-session")
 
     def test_chat_events_delivered_separately(self):
         """Chat-delivery events (e.g. Slack) are batched separately from bulk."""
+        from modastack.inbox import register_local_inbox, unregister_local_inbox
+
         queue = SimpleQueue()
+        pushed = []
 
-        with patch("modastack.inbox.deliver") as mock_deliver:
-            mock_deliver.return_value = (True, "")
+        class _CaptureInbox:
+            def push(self, msg):
+                pushed.append(msg)
 
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
             thread = threading.Thread(
                 target=drain_loop,
                 args=("test-session", queue, format_event_for_manager),
@@ -96,7 +107,10 @@ class TestDrainLoop:
 
             time.sleep(DRAIN_INTERVAL + 1)
 
-            assert mock_deliver.call_count >= 2
+            # Bulk group and chat group are pushed separately.
+            assert len(pushed) >= 2
+        finally:
+            unregister_local_inbox("test-session")
 
 
 # ---------------------------------------------------------------------------

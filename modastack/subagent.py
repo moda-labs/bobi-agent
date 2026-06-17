@@ -210,6 +210,13 @@ async def _run_agent_supervised(
     When on_input_needed is provided, AskUserQuestion calls are deferred
     via a PreToolUse hook. The deferred question is routed through the
     callback, and the agent is resumed with the answer.
+
+    Unlike Session-backed agents, this path runs a raw ``ClaudeSDKClient``
+    with no inbox and no ``inbox/<self>`` subscription, so it is **not
+    addressable** over the event server. That is intentional: its only caller
+    is the out-of-band monitor check (``run_check_blocking``), a short-lived,
+    read-only, observe-and-report agent that no one needs to message mid-run.
+    Any agent that must be reachable goes through ``Session`` instead.
     """
     from claude_agent_sdk import (
         AssistantMessage,
@@ -433,11 +440,15 @@ def spawn_adhoc(
     persistent: bool = False,
     role: str = "",
     mcp_servers: dict | None = None,
+    subscribe: list[str] | None = None,
 ) -> AgentResult:
     """Spawn an agent with a freeform task prompt.
 
     Creates a Session with the task as the startup prompt. The session
     has an inbox so other sessions can message it during execution.
+
+    ``subscribe`` adds event topics beyond the session's own ``inbox/<self>``
+    (the manager passes its external resource topics here).
 
     With ``persistent=True`` the session stays alive after the initial
     task completes, accepting messages via its inbox until explicitly
@@ -507,6 +518,7 @@ def spawn_adhoc(
             **({"mcp_servers": merged_mcp} if merged_mcp else {}),
         },
         role=role,
+        subscribe=subscribe,
     )
 
     ok = session.start(startup_prompt=task, timeout=timeout)
@@ -745,9 +757,44 @@ def launch_agent(
     return session_name
 
 
+@dataclass
+class Subscription:
+    """Teardownable handle for a session's event subscription.
+
+    Owns the WebSocket client + drain thread + queue so ``Session.stop()`` can
+    shut them down. Without this, each session leaked a live WS connection and a
+    blocked drain thread, and a same-name restart in one process left the old
+    drain pushing duplicates into the new inbox.
+    """
+
+    client: "Any"
+    drain_thread: "threading.Thread"
+    queue: "Any"
+
+    def stop(self, timeout: float = 5.0) -> None:
+        try:
+            self.client.stop()
+        except Exception:
+            log.debug("Event client stop failed", exc_info=True)
+        # Poison-pill the drain so its blocking queue.get() returns.
+        from modastack.events.drain import _DRAIN_STOP
+        try:
+            self.queue.put(_DRAIN_STOP)
+            self.drain_thread.join(timeout=timeout)
+        except Exception:
+            log.debug("Drain thread stop failed", exc_info=True)
+
+
 def _start_event_subscription(session_name: str, subscribe: list[str],
-                               project_path: Path) -> None:
+                               project_path: Path) -> "Subscription":
     """Start event client + drain loop for a subscribing agent.
+
+    Every session subscribes — at minimum to its own ``inbox/<self>`` topic, so
+    it is addressable for inter-agent messages. Sessions that also subscribe to
+    external resource topics (the manager: ``github:…``, ``slack:…``, monitor
+    topics) additionally register their Slack workspace and load the
+    auto-dispatch reactor; an inbox-only session skips both — it neither ingests
+    Slack nor needs to route external triggers.
 
     Each session registers its OWN event-server deployment, scoped to
     exactly its subscribe list. Deployments are never shared between
@@ -830,33 +877,49 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             log.info("Subscription update failed (%s) — re-registering", e)
             es_deployment, es_key = _register_with_retry(es_url)
 
-    # Register this agent's Slack workspace bot so the event server can skip
-    # the bot's own messages — without this, an agent's Slack replies are
-    # re-ingested as new events and it loops on itself.
-    register_slack_workspaces(es_url, cfg)
+    # A session that subscribes to anything beyond its own inbox ingests
+    # external resources (the manager). Only such a session needs Slack-bot
+    # registration and the auto-dispatch reactor; an inbox-only worker skips
+    # both, avoiding pointless per-session churn.
+    has_external = any(not k.startswith("inbox/") for k in subscribe)
+
+    if has_external:
+        # Register this agent's Slack workspace bot so the event server can skip
+        # the bot's own messages — without this, an agent's Slack replies are
+        # re-ingested as new events and it loops on itself.
+        register_slack_workspaces(es_url, cfg)
+
+    # Dedicated queue per session: multiple clients can live in one process
+    # (sequential workflow phases), and a shared queue would let one session's
+    # drain steal and drop another's events.
+    from queue import SimpleQueue
+    session_queue: SimpleQueue = SimpleQueue()
 
     client = EventServerClient(
         server_url=es_url,
         deployment_id=es_deployment,
         api_key=es_key,
         cursor_path=cursor_path,
+        queue=session_queue,
     )
     client.start()
 
     # Build auto-dispatch reactor from config (if rules are defined).
     reactor = None
-    if cfg.auto_dispatch:
+    if has_external and cfg.auto_dispatch:
         from modastack.events.reactor import EventReactor
         reactor = EventReactor.from_config(cfg.auto_dispatch, cwd=str(project_path))
         log.info("Auto-dispatch reactor loaded with %d rule(s)", len(reactor.rules))
 
     drain_thread = threading.Thread(
         target=drain_loop, args=(session_name,),
-        kwargs={"reactor": reactor},
+        kwargs={"reactor": reactor, "queue": session_queue},
         daemon=True, name="agent-drain",
     )
     drain_thread.start()
     log.info(f"Event subscription started for {session_name}: {subscribe}")
+
+    return Subscription(client=client, drain_thread=drain_thread, queue=session_queue)
 
 
 def _run_agent_entry(args: dict) -> None:
@@ -896,9 +959,10 @@ def _run_agent_entry(args: dict) -> None:
             f"identity."
         )
 
-    if subscribe and project_root:
-        _start_event_subscription(run_key, subscribe, project_root)
-
+    # Subscription is owned by the Session now: every Session subscribes to
+    # inbox/<self> on start, and extra topics (the persistent agent's
+    # --subscribe list) flow in via the Session's `subscribe` argument. The
+    # workflow path's phase Sessions each self-subscribe to their own inbox.
     if persistent:
         spawn_adhoc(
             cwd=cwd,
@@ -908,6 +972,7 @@ def _run_agent_entry(args: dict) -> None:
             requested_by=requested_by,
             persistent=True,
             role=role,
+            subscribe=subscribe,
         )
         return
 

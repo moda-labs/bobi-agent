@@ -46,25 +46,30 @@ class TestDrainAutoDispatch:
         return EventReactor(rules=rules, cwd="/tmp/proj")
 
     def _run_drain_one_batch(self, events, reactor=None):
-        """Run drain_loop for exactly one batch and capture deliveries."""
+        """Run drain_loop for exactly one batch and capture pushed messages."""
+        from modastack.inbox import register_local_inbox, unregister_local_inbox
+
         q = _OneShotQueue(events)
         delivered = []
+
+        class _CaptureInbox:
+            def push(self, msg):
+                delivered.append(msg.text)
 
         def fake_formatter(event):
             return event.get("text", "")
 
-        def fake_deliver(session, text, sender=""):
-            delivered.append(text)
-            return True, None
-
-        with patch("modastack.events.drain.time.sleep"):
-            with patch("modastack.inbox.deliver", fake_deliver):
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
+            with patch("modastack.events.drain.time.sleep"):
                 try:
                     drain_loop("test-session", queue=q,
                                formatter=fake_formatter,
                                reactor=reactor)
                 except KeyboardInterrupt:
                     pass
+        finally:
+            unregister_local_inbox("test-session")
 
         return delivered
 

@@ -47,18 +47,19 @@ out = Path(sys.argv[4])
 from modastack.sdk import set_project_root
 set_project_root(project)
 
-# Capture the drain loop's final hop (session inbox delivery) to a file the
-# test can read. Everything upstream — registration, WebSocket, queue,
-# drain — is real.
+# Capture the drain loop's final hop (push into the session's in-process
+# inbox) to a file the test can read. Everything upstream — registration,
+# WebSocket, queue, drain — is real. The drain resolves the inbox by session
+# name via the process-local registry, so register a capturing stand-in.
 import modastack.inbox as inbox
 
-def _capture(session_name, text, sender=""):
-    with open(out, "a") as f:
-        f.write(json.dumps({"session": session_name, "text": text}) + "\\n")
-        f.flush()
-    return True, "captured"
+class _CaptureInbox:
+    def push(self, msg):
+        with open(out, "a") as f:
+            f.write(json.dumps({"session": session, "text": msg.text}) + "\\n")
+            f.flush()
 
-inbox.deliver = _capture
+inbox.register_local_inbox(session, _CaptureInbox())
 
 from modastack.subagent import _start_event_subscription
 _start_event_subscription(session, subs, project)

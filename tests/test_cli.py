@@ -224,18 +224,16 @@ class TestMonitorEventSubscription:
 
     def test_monitor_events_subscribed_from_registry(self, modastack_install):
         """Monitor events from defaults.yaml must appear in the subscribe list,
-        regardless of adapter configuration."""
-        collected_subscribe = []
+        regardless of adapter configuration.
 
-        def fake_start_event_subscription(session_name, subscribe, project_path):
-            collected_subscribe.extend(subscribe)
-
-        with patch("modastack.subagent._start_event_subscription",
-                   side_effect=fake_start_event_subscription) as mock_sub, \
-             patch("modastack.cli._manager_session_name", return_value="moda-director-repo"), \
+        Subscription is now owned by the manager Session: ``_run_from_config``
+        passes the discovered topics to ``spawn_adhoc(subscribe=...)``, and the
+        Session subscribes to ``inbox/<self>`` plus those on start.
+        """
+        with patch("modastack.cli._manager_session_name", return_value="moda-director-repo"), \
              patch("modastack.monitors.scheduler.MonitorScheduler"), \
              patch("modastack.prompts.resolver.build_startup_prompt", return_value="go"), \
-             patch("modastack.subagent.spawn_adhoc"), \
+             patch("modastack.subagent.spawn_adhoc") as mock_spawn, \
              patch("modastack.events.subscriptions.discover_subscriptions",
                    return_value=["github:o/r"]):
             from modastack.config import Config
@@ -243,8 +241,9 @@ class TestMonitorEventSubscription:
             from modastack.cli import _run_from_config
             _run_from_config(modastack_install.repo_path, cfg)
 
-        mock_sub.assert_called_once()
-        assert "monitor/test" in collected_subscribe, (
+        mock_spawn.assert_called_once()
+        subscribe = mock_spawn.call_args[1]["subscribe"]
+        assert "monitor/test" in subscribe, (
             "Monitor event topic from defaults.yaml was not subscribed"
         )
 

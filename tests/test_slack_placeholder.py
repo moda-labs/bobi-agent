@@ -599,9 +599,12 @@ class TestDrainChannelIntegration:
 
         delivered = []
 
-        def fake_deliver(session, text, sender=""):
-            delivered.append(text)
-            raise SystemExit
+        from modastack.inbox import register_local_inbox, unregister_local_inbox
+
+        class _CaptureInbox:
+            def push(self, msg):
+                delivered.append(msg.text)
+                raise SystemExit
 
         def fake_formatter(ev):
             lines = [f"Event: {ev['source']}/{ev['type']}"]
@@ -612,9 +615,12 @@ class TestDrainChannelIntegration:
         cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
         monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
 
-        with patch("modastack.inbox.deliver", fake_deliver):
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
             with pytest.raises(SystemExit):
                 drain_loop("test-session", queue=q, formatter=fake_formatter)
+        finally:
+            unregister_local_inbox("test-session")
 
         mock_prepare.assert_called_once_with(event, "xoxb-test")
         # placeholder_ts should appear in the delivered text via formatter
@@ -637,16 +643,22 @@ class TestDrainChannelIntegration:
 
         delivered = []
 
-        def fake_deliver(session, text, sender=""):
-            delivered.append(text)
-            raise SystemExit
+        from modastack.inbox import register_local_inbox, unregister_local_inbox
+
+        class _CaptureInbox:
+            def push(self, msg):
+                delivered.append(msg.text)
+                raise SystemExit
 
         def fake_formatter(event):
             return f"Event: {event['source']}/{event['type']}"
 
-        with patch("modastack.inbox.deliver", fake_deliver):
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
             with pytest.raises(SystemExit):
                 drain_loop("test-session", queue=q, formatter=fake_formatter)
+        finally:
+            unregister_local_inbox("test-session")
 
         assert len(delivered) == 1
         assert "github.push" in delivered[0]
@@ -663,9 +675,12 @@ class TestDrainChannelIntegration:
 
         delivered = []
 
-        def fake_deliver(session, text, sender=""):
-            delivered.append(text)
-            raise SystemExit
+        from modastack.inbox import register_local_inbox, unregister_local_inbox
+
+        class _CaptureInbox:
+            def push(self, msg):
+                delivered.append(msg.text)
+                raise SystemExit
 
         def fake_formatter(event):
             return f"Event: {event['source']}/{event['type']}"
@@ -673,9 +688,12 @@ class TestDrainChannelIntegration:
         cfg = _FakeConfig()  # No credentials configured
         monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
 
-        with patch("modastack.inbox.deliver", fake_deliver):
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
             with pytest.raises(SystemExit):
                 drain_loop("test-session", queue=q, formatter=fake_formatter)
+        finally:
+            unregister_local_inbox("test-session")
 
         mock_prepare.assert_not_called()
         assert len(delivered) == 1
@@ -701,9 +719,12 @@ class TestDrainChannelIntegration:
 
         delivered = []
 
-        def fake_deliver(session, text, sender=""):
-            delivered.append(text)
-            raise SystemExit
+        from modastack.inbox import register_local_inbox, unregister_local_inbox
+
+        class _CaptureInbox:
+            def push(self, msg):
+                delivered.append(msg.text)
+                raise SystemExit
 
         def fake_formatter(ev):
             lines = [f"Event: {ev['source']}/{ev['type']}"]
@@ -715,9 +736,12 @@ class TestDrainChannelIntegration:
         monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
         monkeypatch.setattr("modastack.events.drain.DRAIN_INTERVAL", 0)
 
-        with patch("modastack.inbox.deliver", fake_deliver):
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
             with pytest.raises(SystemExit):
                 drain_loop("test-session", queue=q, formatter=fake_formatter)
+        finally:
+            unregister_local_inbox("test-session")
 
         # prepare() should only be called once (for the first event)
         mock_prepare.assert_called_once_with(e1, "xoxb-test")
@@ -746,9 +770,12 @@ class TestDrainChannelIntegration:
 
         delivered = []
 
-        def fake_deliver(session, text, sender=""):
-            delivered.append(text)
-            raise SystemExit
+        from modastack.inbox import register_local_inbox, unregister_local_inbox
+
+        class _CaptureInbox:
+            def push(self, msg):
+                delivered.append(msg.text)
+                raise SystemExit
 
         def fake_formatter(ev):
             lines = [f"Event: {ev['source']}/{ev['type']}"]
@@ -760,9 +787,12 @@ class TestDrainChannelIntegration:
         monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
         monkeypatch.setattr("modastack.events.drain.DRAIN_INTERVAL", 0)
 
-        with patch("modastack.inbox.deliver", fake_deliver):
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
             with pytest.raises(SystemExit):
                 drain_loop("test-session", queue=q, formatter=fake_formatter)
+        finally:
+            unregister_local_inbox("test-session")
 
         # prepare() should be called once per distinct thread
         assert mock_prepare.call_count == 2
@@ -779,18 +809,24 @@ class TestDrainChannelIntegration:
 
         delivered = []
 
-        def fake_deliver(session, text, sender=""):
-            delivered.append(text)
-            raise SystemExit
+        from modastack.inbox import register_local_inbox, unregister_local_inbox
+
+        class _CaptureInbox:
+            def push(self, msg):
+                delivered.append(msg.text)
+                raise SystemExit
 
         def fake_formatter(event):
             return f"Event: {event['source']}/{event['type']}"
 
         monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: None)
 
-        with patch("modastack.inbox.deliver", fake_deliver):
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
             with pytest.raises(SystemExit):
                 drain_loop("test-session", queue=q, formatter=fake_formatter)
+        finally:
+            unregister_local_inbox("test-session")
 
         mock_prepare.assert_not_called()
         assert len(delivered) == 1

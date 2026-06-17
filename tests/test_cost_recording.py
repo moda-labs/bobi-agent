@@ -52,7 +52,7 @@ class TestSessionEntryNewFields:
             "last_activity": 1000.0,
             "requested_by": {},
         }
-        entry = SessionEntry(**data)
+        entry = SessionEntry.from_dict(data)
         assert entry.model == "claude-sonnet-4-20250514"
         assert entry.total_cost_usd == 1.23
 
@@ -78,9 +78,20 @@ class TestSessionEntryNewFields:
             "requested_by": {},
         }
         # This should work — new fields have defaults
-        entry = SessionEntry(**data)
+        entry = SessionEntry.from_dict(data)
         assert entry.model == ""
         assert entry.total_cost_usd == 0.0
+
+    def test_from_dict_drops_retired_keys(self):
+        """from_dict ignores keys no longer in the schema (e.g. inbox_port)
+        so state.json written by pre-#268 code still loads after upgrade."""
+        from modastack.sdk import SessionEntry
+        entry = SessionEntry.from_dict({
+            "name": "n", "cwd": "/tmp", "inbox_port": 5555,
+            "some_future_field": "x",
+        })
+        assert entry.name == "n"
+        assert not hasattr(entry, "inbox_port")
 
 
 class TestRecordCost:

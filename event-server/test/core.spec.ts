@@ -490,6 +490,21 @@ describe("createTopicEvent", () => {
 		expect(event.topics).toEqual(["monitor/support.email"]);
 	});
 
+	it("routes inter-agent inbox events on exactly inbox/<session> (comms-v1 seam)", () => {
+		// publish_inbox() POSTs to /events/inbox/<session> with source "inbox".
+		// The routing key MUST be byte-identical to the subscription key a
+		// session registers (inbox/<session>) — the server matches exactly.
+		const event = createTopicEvent("inbox/engineer-42-implement", {
+			source: "inbox",
+			payload: { id: "m1", sender: "manager", text: "ping", wait: false },
+		});
+		const keys = subscriptionKeysForEvent(event);
+		expect(keys).toEqual(["inbox/engineer-42-implement"]);
+		expect(event.payload).toEqual({
+			id: "m1", sender: "manager", text: "ping", wait: false,
+		});
+	});
+
 	it("omits the qualified topic when no source is given", () => {
 		const event = createTopicEvent("support.email", { payload: {} });
 		expect(event.topics).toEqual(["support.email"]);

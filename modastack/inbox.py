@@ -1,9 +1,17 @@
-"""Session inbox — in-memory queue with HTTP delivery.
+"""Session inbox — in-memory queue fed by the event server.
 
-Every session has an inbox: a queue fed by a tiny HTTP server on a
-random port. Messages arrive via POST /inbox and are picked up by
-the session's drain loop. Blocking (wait) mode holds the HTTP
-connection open until the session responds or timeout.
+Every session has an inbox: an in-memory queue its run loop drains. Messages
+arrive as ``inbox/<session>`` events on the configured event server, are
+delivered over the session's subscription/drain path (the same path lifecycle
+events use), and pushed into this queue by the drain loop (see
+``events/drain.py``). There is no per-session HTTP server — the inbox is
+purely in-process state; the transport is the event server.
+
+``deliver()`` publishes an ``inbox/<target>`` event. For ``wait=True`` it
+blocks on a transitional file-based reply rendezvous (a one-shot CLI ``ask``
+is a separate process from its target, so the reply can't be held on an
+in-process handle). That rendezvous is replaced by reply-topic request/reply
+in #269; the ``deliver()`` signature is frozen so call sites don't change.
 """
 
 from __future__ import annotations
@@ -11,16 +19,22 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import re
 import secrets
 import threading
 import time
 from dataclasses import dataclass
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from socketserver import ThreadingMixIn
-
-import httpx
+from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# Poll cadence for the transitional wait=True reply rendezvous (see below).
+_REPLY_POLL_INTERVAL = 0.2
+
+# Correlation ids are server-routed wire input (drain reconstructs them from the
+# event payload), so they must never be trusted as a filename component. Only
+# ids matching the _msg_id() shape are allowed near the replies directory.
+_SAFE_CORR_ID = re.compile(r"^[0-9a-f]{1,16}-[0-9a-f]{1,32}$")
 
 
 def _msg_id() -> str:
@@ -36,112 +50,88 @@ class Message:
     wait: bool = False
 
 
-class _PendingReply:
-    __slots__ = ("event", "response", "error")
+# ---------------------------------------------------------------------------
+# Process-local inbox registry
+# ---------------------------------------------------------------------------
+#
+# A session's drain loop runs in the same process as its Session (one
+# event-server deployment == one session by construction). The drain looks up
+# the live Inbox by name here and pushes events straight into its queue,
+# rather than crossing any transport to reach its own session.
 
-    def __init__(self) -> None:
-        self.event = threading.Event()
-        self.response: str = ""
-        self.error: str = ""
-
-
-class _InboxHandler(BaseHTTPRequestHandler):
-    def do_POST(self) -> None:
-        if self.path != "/inbox":
-            self.send_error(404)
-            return
-
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length)) if length else {}
-        except (json.JSONDecodeError, ValueError):
-            self._json_response(400, {"ok": False, "error": "invalid JSON"})
-            return
-
-        inbox: Inbox = self.server.inbox  # type: ignore[attr-defined]
-
-        msg = Message(
-            id=body.get("id", _msg_id()),
-            sender=body.get("sender", ""),
-            text=body.get("text", ""),
-            wait=body.get("wait", False),
-        )
-
-        if not msg.text:
-            self._json_response(400, {"ok": False, "error": "empty message"})
-            return
-
-        if msg.wait:
-            pending = _PendingReply()
-            inbox._pending[msg.id] = pending
-            inbox._queue.put(msg)
-
-            timeout = body.get("timeout", 300)
-            if pending.event.wait(timeout=timeout):
-                if pending.error:
-                    self._json_response(500, {"ok": False, "error": pending.error})
-                else:
-                    self._json_response(200, {"ok": True, "response": pending.response})
-            else:
-                inbox._pending.pop(msg.id, None)
-                self._json_response(408, {"ok": False, "error": f"no response within {timeout}s"})
-        else:
-            inbox._queue.put(msg)
-            self._json_response(200, {"ok": True})
-
-    def do_GET(self) -> None:
-        if self.path == "/health":
-            inbox: Inbox = self.server.inbox  # type: ignore[attr-defined]
-            self._json_response(200, {"ok": True, "session": inbox.session_name})
-        else:
-            self.send_error(404)
-
-    def _json_response(self, code: int, data: dict) -> None:
-        body = json.dumps(data).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format, *args) -> None:  # noqa: A002
-        pass
+_local_inboxes: dict[str, "Inbox"] = {}
+_local_inboxes_lock = threading.Lock()
 
 
-class _ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
+def register_local_inbox(name: str, inbox: "Inbox") -> None:
+    with _local_inboxes_lock:
+        _local_inboxes[name] = inbox
+
+
+def unregister_local_inbox(name: str) -> None:
+    with _local_inboxes_lock:
+        _local_inboxes.pop(name, None)
+
+
+def get_local_inbox(name: str) -> "Inbox | None":
+    with _local_inboxes_lock:
+        return _local_inboxes.get(name)
+
+
+# ---------------------------------------------------------------------------
+# Reply rendezvous (transitional — replaced by reply-topic pub/sub in #269)
+# ---------------------------------------------------------------------------
+#
+# Pub/sub is fire-and-forget, but ``deliver(wait=True)`` must return the
+# target's reply. Until #269 lands the proper reply-topic request/reply, the
+# target writes its reply to ``<state>/replies/<corr_id>.json`` and the waiting
+# sender polls for it. Both processes share one installation root, so the file
+# is a shared rendezvous point in both same-process and cross-process cases.
+
+
+def _replies_dir() -> Path:
+    from modastack import paths
+    d = paths.state_dir() / "replies"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _reply_path(corr_id: str) -> Path:
+    # corr_id reaches us from the event payload (untrusted). Refuse anything
+    # that isn't a well-formed message id so it can't escape the replies dir
+    # (e.g. id="../../etc/cron" writing the agent's response outside state/).
+    if not _SAFE_CORR_ID.match(corr_id or ""):
+        raise ValueError(f"unsafe correlation id: {corr_id!r}")
+    return _replies_dir() / f"{corr_id}.json"
+
+
+def _write_reply(corr_id: str, response: str) -> None:
+    """Atomically write a reply for a waiting ``deliver(wait=True)`` caller."""
+    try:
+        path = _reply_path(corr_id)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"response": response}))
+        tmp.replace(path)
+    except (OSError, ValueError) as e:
+        log.warning("Failed to write reply for %s: %s", corr_id, e)
 
 
 class Inbox:
-    """In-memory message queue with an HTTP server for delivery."""
+    """In-memory message queue drained by a session's run loop."""
 
     def __init__(self, session_name: str) -> None:
         self.session_name = session_name
-        self.port: int = 0
         self._queue: queue.SimpleQueue[Message] = queue.SimpleQueue()
-        self._pending: dict[str, _PendingReply] = {}
-        self._server: _ThreadedHTTPServer | None = None
-        self._server_thread: threading.Thread | None = None
         self._closed = False
 
-    def start(self) -> int:
-        """Start the HTTP server. Returns the assigned port."""
-        if self._server:
-            return self.port
+    def start(self) -> None:
+        """Make the inbox addressable in-process for its drain loop."""
+        register_local_inbox(self.session_name, self)
+        log.info(f"Inbox for '{self.session_name}' active")
 
-        self._server = _ThreadedHTTPServer(("127.0.0.1", 0), _InboxHandler)
-        self._server.inbox = self  # type: ignore[attr-defined]
-        self.port = self._server.server_address[1]
-
-        self._server_thread = threading.Thread(
-            target=self._server.serve_forever,
-            daemon=True,
-            name=f"inbox-{self.session_name}",
-        )
-        self._server_thread.start()
-        log.info(f"Inbox for '{self.session_name}' listening on port {self.port}")
-        return self.port
+    def push(self, msg: Message) -> None:
+        """Enqueue a message for the session's run loop to pick up."""
+        self._queue.put(msg)
 
     def recv(self, timeout: float = 2.0) -> Message | None:
         """Block until a message arrives. Returns None on timeout."""
@@ -151,26 +141,17 @@ class Inbox:
             return None
 
     def respond(self, msg_id: str, response: str) -> None:
-        """Respond to a wait-mode message. Unblocks the sender's HTTP request."""
-        pending = self._pending.pop(msg_id, None)
-        if pending:
-            pending.response = response
-            pending.event.set()
+        """Return a reply for a wait-mode message to its waiting sender.
+
+        Writes the reply to the file rendezvous the sender polls. Replaced by
+        reply-topic pub/sub in #269.
+        """
+        _write_reply(msg_id, response)
 
     def close(self) -> None:
-        """Shut down: unblock all pending asks, stop HTTP server."""
+        """Stop being addressable; drop the queue."""
         self._closed = True
-        for pending in self._pending.values():
-            pending.error = "session closed"
-            pending.event.set()
-        self._pending.clear()
-
-        if self._server:
-            self._server.shutdown()
-            self._server = None
-        if self._server_thread:
-            self._server_thread.join(timeout=5)
-            self._server_thread = None
+        unregister_local_inbox(self.session_name)
 
 
 def deliver(
@@ -180,13 +161,16 @@ def deliver(
     wait: bool = False,
     timeout: int = 300,
 ) -> tuple[bool, str]:
-    """Deliver a message to a session by name.
+    """Deliver a message to a session by name over the event server.
 
-    Looks up the target's inbox port from the session registry and
-    POSTs to its HTTP server. If wait=True, blocks until the session
-    responds or timeout.
+    Publishes an ``inbox/<to>`` event; the target's subscription delivers it to
+    its in-process queue. A registry presence-check preserves the historical
+    "session not found / dead" failures even though publish itself succeeds with
+    no subscriber. If ``wait=True``, blocks on the reply rendezvous until the
+    target responds or ``timeout`` elapses.
 
-    Returns (success, response_text).
+    Returns (success, response_text). Signature is frozen — call sites
+    (cli.py message/ask, subagent handoffs, monitors) must not change.
     """
     from modastack.sdk import get_registry, pid_alive
 
@@ -194,41 +178,43 @@ def deliver(
     if not entry:
         return False, f"session '{to}' not found"
 
-    if not entry.inbox_port:
-        return False, f"session '{to}' has no inbox"
-
     if entry.pid and not pid_alive(entry.pid):
         return False, f"session '{to}' process is dead"
 
-    payload = json.dumps({
-        "id": _msg_id(),
+    # A terminal session has torn down its subscription/inbox; publishing to it
+    # would succeed but no one would consume it (a wait=True sender would just
+    # burn the full timeout). pid_alive isn't enough — one process can outlive a
+    # stopped phase session, or a SIGKILL'd pid can be recycled.
+    if entry.status in ("stopped", "error", "cancelled", "done"):
+        return False, f"session '{to}' is {entry.status}"
+
+    from modastack.events.publish import publish_inbox
+
+    msg_id = _msg_id()
+    ok = publish_inbox(to, {
+        "id": msg_id,
         "sender": sender,
         "text": text,
         "wait": wait,
-        "timeout": timeout,
-    }).encode()
+    })
+    if not ok:
+        return False, f"could not publish message to '{to}'"
 
-    from modastack import http as pooled
+    if not wait:
+        return True, ""
 
+    # Transitional blocking reply via file rendezvous (replaced by #269).
+    reply_path = _reply_path(msg_id)
+    deadline = time.monotonic() + timeout
     try:
-        http_timeout = timeout + 10 if wait else 10
-        resp = pooled.post(
-            f"http://127.0.0.1:{entry.inbox_port}/inbox",
-            content=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=float(http_timeout),
-        )
-        result = resp.json()
-        if result.get("ok"):
-            return True, result.get("response", "")
-        return False, result.get("error", "unknown error")
-    except httpx.HTTPStatusError as e:
-        try:
-            body = e.response.json()
-            return False, body.get("error", f"HTTP {e.response.status_code}")
-        except Exception:
-            return False, f"HTTP {e.response.status_code}"
-    except (httpx.HTTPError, OSError) as e:
-        return False, f"cannot reach session '{to}': {e}"
-    except TimeoutError:
+        while time.monotonic() < deadline:
+            if reply_path.exists():
+                try:
+                    data = json.loads(reply_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    data = {}
+                return True, data.get("response", "")
+            time.sleep(_REPLY_POLL_INTERVAL)
         return False, f"no response within {timeout}s"
+    finally:
+        reply_path.unlink(missing_ok=True)

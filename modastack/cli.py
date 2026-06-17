@@ -244,11 +244,6 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
 
     log.info(f"Modastack starting for {project_path.name} (role={role})")
 
-    if subscribe:
-        from modastack.subagent import _start_event_subscription
-        _start_event_subscription(_manager_session_name(project_path, role),
-                                  subscribe, project_path)
-
     has_monitors = (
         paths.monitors_dir(project_path).is_dir()
         or cfg.monitors
@@ -267,6 +262,8 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
                                 session_name=session_name)
 
     log.info(f"Modastack running for {project_path.name}")
+    # The manager Session subscribes to inbox/<self> (always-on) plus the
+    # discovered external resource + monitor topics. One deployment, one cursor.
     spawn_adhoc(
         cwd=str(project_path),
         task=task,
@@ -274,6 +271,7 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
         persistent=True,
         role=role,
         mcp_servers=cfg.mcp_servers or None,
+        subscribe=subscribe,
     )
 
 
