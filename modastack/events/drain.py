@@ -170,6 +170,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                     sender=payload.get("sender", ""),
                     text=text,
                     wait=bool(payload.get("wait", False)),
+                    reply_to=payload.get("reply_to", ""),
                 ))
             else:
                 external.append(e)

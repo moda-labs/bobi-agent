@@ -1,25 +1,26 @@
 """Unit tests for the inbox module — no Claude sessions needed.
 
 Tests the in-memory queue, the process-local inbox registry, and the
-``deliver()`` publish path + transitional reply rendezvous. The inbox no
-longer runs an HTTP server: messages arrive as ``inbox/<session>`` events on
-the event server and are pushed into the queue by the drain loop.
+``deliver()`` publish path + async request/reply (#269). The inbox no longer
+runs an HTTP server: messages arrive as ``inbox/<session>`` events on the
+event server and are pushed into the queue by the drain loop. A blocking
+``deliver(wait=True)`` subscribes to a transient ``reply/<uuid>`` topic and
+matches the reply on its correlation id; the target replies by publishing to
+that topic (``Inbox.respond``).
 """
 
 import os
+import queue
 import time
 from unittest.mock import patch
-
-import pytest
 
 from modastack.inbox import (
     Inbox,
     Message,
     deliver,
     get_local_inbox,
+    _await_reply,
     _msg_id,
-    _reply_path,
-    _write_reply,
 )
 
 
@@ -75,47 +76,87 @@ class TestLocalInboxRegistry:
         assert get_local_inbox("never-registered") is None
 
 
-class TestReplyRendezvous:
-    """respond() writes a reply file the waiting sender polls (transitional)."""
+class TestRespond:
+    """respond() publishes the reply to the message's reply_to topic."""
 
-    def test_respond_writes_reply_file(self, modastack_install):
-        import json
+    def test_respond_publishes_to_reply_to(self):
         inbox = Inbox("test-resp")
-        cid = _msg_id()
-        inbox.respond(cid, "the answer")
-        path = _reply_path(cid)
-        assert path.exists()
-        assert json.loads(path.read_text())["response"] == "the answer"
+        msg = Message(id="cid-1", sender="x", text="q", wait=True,
+                      reply_to="reply/abc")
+        with patch("modastack.events.publish.publish_reply",
+                   return_value=True) as pub:
+            inbox.respond(msg, "the answer")
+        pub.assert_called_once_with("reply/abc", "cid-1", "the answer")
 
-    def test_write_reply_is_atomic_overwrite(self, modastack_install):
-        import json
-        _write_reply("ab-cd", "first")
-        _write_reply("ab-cd", "second")
-        assert json.loads(_reply_path("ab-cd").read_text())["response"] == "second"
+    def test_respond_noops_without_reply_to(self):
+        # A fire-and-forget message has no reply channel — respond must not
+        # try to publish anywhere.
+        inbox = Inbox("test-resp-noop")
+        msg = Message(id="cid-2", sender="x", text="q", wait=False)
+        with patch("modastack.events.publish.publish_reply") as pub:
+            inbox.respond(msg, "ignored")
+        pub.assert_not_called()
 
-    def test_reply_path_rejects_traversal_ids(self, modastack_install):
-        # corr_id is reconstructed from the wire payload — it must never be
-        # usable to escape the replies dir.
-        for bad in ["../../etc/cron", "..", "a/b", "x.json", "WHATEVER", ""]:
-            with pytest.raises(ValueError):
-                _reply_path(bad)
+    def test_respond_rejects_non_reply_topic(self):
+        # reply_to is wire input — a crafted request must not be able to
+        # redirect the agent's response into an arbitrary topic (e.g. another
+        # session's inbox). Only reply/ topics are honored.
+        inbox = Inbox("test-resp-evil")
+        msg = Message(id="cid-3", sender="x", text="q", wait=True,
+                      reply_to="inbox/victim")
+        with patch("modastack.events.publish.publish_reply") as pub:
+            inbox.respond(msg, "secret agent output")
+        pub.assert_not_called()
 
-    def test_respond_swallows_unsafe_id_without_writing(self, modastack_install):
-        # A malicious inbound id must not cause a write anywhere; respond()
-        # logs and no-ops instead of traversing.
-        from modastack import paths
-        inbox = Inbox("test-evil")
-        inbox.respond("../../../pwned", "secret response")
-        assert not (paths.state_dir() / "replies" / "..").exists()
-        # A real msg id still round-trips.
-        mid = _msg_id()
-        inbox.respond(mid, "ok")
-        assert _reply_path(mid).exists()
+
+class TestAwaitReply:
+    """_await_reply correlates strictly on corr_id (no crossed replies)."""
+
+    def _chan(self):
+        class _FakeChannel:
+            def __init__(self):
+                self.queue = queue.SimpleQueue()
+        return _FakeChannel()
+
+    def test_returns_matching_reply(self):
+        chan = self._chan()
+        chan.queue.put({"payload": {"corr_id": "mine", "response": "for me"}})
+        ok, resp = _await_reply(chan, "mine", time.monotonic() + 5, 5)
+        assert ok and resp == "for me"
+
+    def test_ignores_mismatched_corr_id(self):
+        # A reply for a different in-flight ask must be skipped, not returned.
+        chan = self._chan()
+        chan.queue.put({"payload": {"corr_id": "other", "response": "not mine"}})
+        chan.queue.put({"payload": {"corr_id": "mine", "response": "for me"}})
+        ok, resp = _await_reply(chan, "mine", time.monotonic() + 5, 5)
+        assert ok and resp == "for me"
+
+    def test_times_out_when_no_reply(self):
+        chan = self._chan()
+        ok, resp = _await_reply(chan, "mine", time.monotonic() + 1, 1)
+        assert not ok and "no response within 1s" in resp
 
 
 def _register_live_session(name):
     from modastack.sdk import get_registry, SessionEntry
     get_registry().register(SessionEntry(name=name, cwd="/tmp", pid=os.getpid()))
+
+
+class _FakeChannel:
+    """Stand-in for a transient reply subscription in deliver() unit tests."""
+
+    def __init__(self, connected=True):
+        self.queue = queue.SimpleQueue()
+        self.topic = "reply/unit-test"
+        self.closed = False
+        self._connected = connected
+
+    def wait_connected(self, timeout):
+        return self._connected
+
+    def close(self):
+        self.closed = True
 
 
 class TestDeliver:
@@ -163,38 +204,56 @@ class TestDeliver:
         assert not ok
         assert "could not publish" in resp
 
-    def test_blocking_deliver_round_trips_via_reply_file(self, modastack_install):
+    def test_blocking_deliver_round_trips_via_reply_topic(self, modastack_install):
         _register_live_session("test-block")
+        chan = _FakeChannel()
 
-        # Simulate the target: as soon as the message is published, the target
-        # session would process it and call inbox.respond(id, ...). Here we just
-        # write the reply file for the published correlation id.
+        # Stand in for the target: as soon as the request is published, the
+        # target session would reply on the request's reply_to topic. Here we
+        # push the correlated reply straight onto the channel's queue.
         def fake_publish(to, payload, project_path=None):
-            _write_reply(payload["id"], "the answer")
+            assert payload["reply_to"] == chan.topic
+            chan.queue.put({"payload": {"corr_id": payload["id"],
+                                        "response": "the answer"}})
             return True
 
-        with patch("modastack.events.publish.publish_inbox", side_effect=fake_publish):
+        with patch("modastack.inbox._open_reply_channel", return_value=chan), \
+             patch("modastack.events.publish.publish_inbox", side_effect=fake_publish):
             ok, resp = deliver("test-block", "question?", wait=True, timeout=10)
         assert ok
         assert resp == "the answer"
+        assert chan.closed  # transient subscription torn down
 
     def test_blocking_deliver_times_out(self, modastack_install):
         _register_live_session("test-timeout")
-        # publish succeeds but no reply ever lands.
-        with patch("modastack.events.publish.publish_inbox", return_value=True):
+        chan = _FakeChannel()
+        # publish succeeds but no reply ever lands on the channel.
+        with patch("modastack.inbox._open_reply_channel", return_value=chan), \
+             patch("modastack.events.publish.publish_inbox", return_value=True):
             ok, resp = deliver("test-timeout", "question?", wait=True, timeout=1)
         assert not ok
         assert "no response" in resp
+        assert chan.closed
 
-    def test_blocking_deliver_cleans_up_reply_file(self, modastack_install):
-        _register_live_session("test-cleanup")
-        captured = {}
+    def test_blocking_deliver_reports_channel_failure(self, modastack_install):
+        # If the reply channel can't be opened (event server unreachable),
+        # a blocking deliver fails fast rather than hanging.
+        _register_live_session("test-nochan")
+        with patch("modastack.inbox._open_reply_channel", return_value=None):
+            ok, resp = deliver("test-nochan", "q", wait=True, timeout=1)
+        assert not ok
+        assert "could not publish" in resp
 
-        def fake_publish(to, payload, project_path=None):
-            captured["id"] = payload["id"]
-            _write_reply(payload["id"], "done")
-            return True
-
-        with patch("modastack.events.publish.publish_inbox", side_effect=fake_publish):
-            deliver("test-cleanup", "q", wait=True, timeout=10)
-        assert not _reply_path(captured["id"]).exists()
+    def test_blocking_deliver_does_not_publish_until_connected(self, modastack_install):
+        # Subscribe-before-publish: if the reply subscription never connects,
+        # deliver must NOT publish the request (the reply would be lost) and
+        # must report a timeout instead of hanging.
+        _register_live_session("test-noconnect")
+        chan = _FakeChannel(connected=False)
+        with patch("modastack.inbox._open_reply_channel", return_value=chan), \
+             patch("modastack.events.publish.publish_inbox") as pub:
+            ok, resp = deliver("test-noconnect", "q", wait=True, timeout=1)
+        assert not ok
+        assert "no response" in resp
+        pub.assert_not_called()  # never published without a live subscription
+        assert chan.closed

@@ -167,6 +167,14 @@ class EventServerClient:
         self._ws: websocket.WebSocketApp | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # Set when the server sends its "connected" frame, i.e. the subscription
+        # is live and future matching events will be pushed. A fresh deployment
+        # connects with last_seen=0 and the server only REPLAYS buffered events
+        # when last_seen>0, so a publisher that needs subscribe-before-publish
+        # (the reply channel in inbox.deliver) must wait on this before
+        # publishing — otherwise an event sent during the connect window is
+        # buffered but never replayed to this brand-new subscriber.
+        self._connected = threading.Event()
         self._reconnect_delay = 1
 
     def start(self) -> threading.Thread:
@@ -175,6 +183,10 @@ class EventServerClient:
         self._thread.start()
         log.info(f"Event client connecting to {self.server_url}")
         return self._thread
+
+    def wait_connected(self, timeout: float) -> bool:
+        """Block until the WS subscription is live. Returns False on timeout."""
+        return self._connected.wait(timeout)
 
     def stop(self) -> None:
         self._stop.set()
@@ -214,6 +226,7 @@ class EventServerClient:
             if msg_type == "connected":
                 log.info(f"Event client connected (next_seq: {msg.get('next_seq')})")
                 self._reconnect_delay = 1
+                self._connected.set()
                 return
 
             if msg_type == "pong":

@@ -58,7 +58,7 @@ class TestInputReadyWake:
         msg = _make_msg(wait=True)
         await session._process_message(msg)
 
-        session.inbox.respond.assert_called_once_with("m1", "response text")
+        session.inbox.respond.assert_called_once_with(msg, "response text")
 
     @pytest.mark.asyncio
     async def test_wake_on_stopped(self, session):
@@ -74,7 +74,7 @@ class TestInputReadyWake:
         asyncio.create_task(transition())
         await session._process_message(msg)
 
-        session.inbox.respond.assert_called_once_with("m1", "session stopped")
+        session.inbox.respond.assert_called_once_with(msg, "session stopped")
 
     @pytest.mark.asyncio
     async def test_wake_on_error(self, session):
@@ -90,7 +90,7 @@ class TestInputReadyWake:
         asyncio.create_task(transition())
         await session._process_message(msg)
 
-        session.inbox.respond.assert_called_once_with("m1", "session error")
+        session.inbox.respond.assert_called_once_with(msg, "session error")
 
     @pytest.mark.asyncio
     async def test_no_poll_latency(self, session):
