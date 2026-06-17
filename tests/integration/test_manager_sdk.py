@@ -1,7 +1,16 @@
 """Integration tests for the SDK-based manager session.
 
-These tests drive real Claude Code sessions via ClaudeSDKClient.
-Requires the `claude` CLI to be installed.
+These tests drive real Claude Code sessions via ClaudeSDKClient and require the
+`claude` CLI. They are a low-level SDK smoke test — run them manually
+(`pytest tests/integration/test_manager_sdk.py`).
+
+NOT wired into CI on purpose: real `client.connect()` calls intermittently hang
+(seen as a pytest-timeout in the kqueue selector) when several sessions run
+back-to-back, which would flake the nightly/release `integration-claude` job.
+The manager's real-session behavior that matters for releases is gated there by
+`test_manager_lifecycle.py` instead. Keep this file out of `tests/` root — the
+unit job globs that, and a dev machine with `claude` installed would run (and
+flake) these.
 """
 
 import asyncio
