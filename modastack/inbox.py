@@ -168,7 +168,8 @@ class _ReplyChannel:
                 self.client.api_key,  # type: ignore[attr-defined]
             )
         except Exception:
-            log.debug("Reply channel deregister failed", exc_info=True)
+            log.warning("Reply channel deregister failed — server-side "
+                        "deployment may leak", exc_info=True)
         self.cursor_path.unlink(missing_ok=True)
         # The shared EventServerClient also writes a per-deployment events log
         # (events/client.py _log_event). For a throwaway reply channel that's
