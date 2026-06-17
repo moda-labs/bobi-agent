@@ -9,6 +9,7 @@ between a "manager" and an "agent" is what feeds the inbox.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import threading
@@ -25,6 +26,9 @@ from modastack.sdk import (
 )
 
 log = logging.getLogger(__name__)
+
+# Default rotation cap — absolute input_tokens, not a window fraction.
+DEFAULT_ROTATION_TOKEN_CAP = 275_000
 
 
 class Session:
@@ -48,7 +52,9 @@ class Session:
             "preset": "claude_code",
         }
         self._on_response = on_response
-        self._extra_options = extra_options or {}
+        opts = extra_options or {}
+        self._rotation_token_cap = opts.pop("rotation_token_cap", DEFAULT_ROTATION_TOKEN_CAP)
+        self._extra_options = opts
 
         self._client = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -63,6 +69,12 @@ class Session:
         self._total_duration_ms = 0
         self._total_turns = 0
 
+        # Context rotation state (Steps 1-4, #273)
+        self._rotate_pending = False
+        self._rotation_count = 0
+        self._flush_snapshot_mtime = 0.0
+        self._flush_snapshot_hash = ""
+
     @property
     def port(self) -> int:
         return self.inbox.port
@@ -75,6 +87,141 @@ class Session:
         self._state = state
         if state in ("waiting_input", "stopped", "error") and self._input_ready:
             self._input_ready.set()
+
+    # -----------------------------------------------------------------
+    # Context rotation (Steps 1, 4 — #273)
+    # -----------------------------------------------------------------
+
+    def _verify_flush(self) -> bool:
+        """Check that the decision log changed after a flush prompt.
+
+        Returns True if INDEX.md was modified (mtime or content hash
+        changed), False if the flush was a no-op.
+        """
+        try:
+            from modastack import paths
+            from modastack.memory import memory_dir_for_session
+            index = memory_dir_for_session(paths.state_dir(), self.name) / "INDEX.md"
+            if not index.is_file():
+                return False
+            new_mtime = index.stat().st_mtime
+            new_hash = hashlib.md5(index.read_bytes()).hexdigest()
+            changed = (
+                new_mtime != self._flush_snapshot_mtime
+                or new_hash != self._flush_snapshot_hash
+            )
+            if not changed:
+                log.warning(
+                    "Flush no-op for '%s' — INDEX.md unchanged, skipping rotation",
+                    self.name,
+                )
+            return changed
+        except Exception:
+            log.debug("Flush verification failed for '%s'", self.name, exc_info=True)
+            return False
+
+    def _snapshot_index(self) -> None:
+        """Capture INDEX.md mtime + content hash before injecting flush prompt."""
+        try:
+            from modastack import paths
+            from modastack.memory import memory_dir_for_session
+            index = memory_dir_for_session(paths.state_dir(), self.name) / "INDEX.md"
+            if index.is_file():
+                self._flush_snapshot_mtime = index.stat().st_mtime
+                self._flush_snapshot_hash = hashlib.md5(index.read_bytes()).hexdigest()
+            else:
+                self._flush_snapshot_mtime = 0.0
+                self._flush_snapshot_hash = ""
+        except Exception:
+            self._flush_snapshot_mtime = 0.0
+            self._flush_snapshot_hash = ""
+
+    async def _rotate(self) -> None:
+        """Lightweight client cycle — keep inbox alive, only swap the SDK client.
+
+        Step 1: Does NOT call stop()/start() which would tear down the inbox
+        HTTP server and event subscription. Only cycles self._client.
+        """
+        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
+        log.info("Rotating session '%s' (rotation #%d)", self.name, self._rotation_count + 1)
+
+        # Clear saved session ID so next connect is fresh
+        save_session_id(self.name, "")
+
+        # Disconnect old client
+        if self._client:
+            await self._client.disconnect()
+            self._client = None
+
+        # Rebuild system prompt — reloads the decision log
+        self._system_prompt = self._rebuild_system_prompt()
+
+        # Create fresh client with resume=None
+        options = ClaudeAgentOptions(
+            cwd=self.cwd,
+            permission_mode="bypassPermissions",
+            cli_path=get_cli_path(),
+            system_prompt=self._system_prompt,
+            **self._extra_options,
+        )
+        self._client = ClaudeSDKClient(options)
+        await self._client.connect()
+
+        # Drain the connect turn (system prompt acknowledgment)
+        await self._drain_turn()
+
+        self._rotate_pending = False
+        self._rotation_count += 1
+
+        # Step 6: Observability — log rotation event
+        log_activity(
+            "rotation",
+            {
+                "count": self._rotation_count,
+                "reason": "input_tokens_cap",
+            },
+            session=self.name,
+        )
+        # Also emit to events.jsonl via the event client
+        try:
+            from modastack.events.client import _log_event
+            _log_event(
+                {
+                    "type": "session.rotated",
+                    "source": "modastack",
+                    "payload": {
+                        "session": self.name,
+                        "rotation_count": self._rotation_count,
+                        "reason": "input_tokens_cap",
+                    },
+                },
+                session_id=self.name,
+            )
+        except Exception:
+            pass
+
+        registry = get_registry()
+        registry.update(self.name, status="idle", rotation_count=self._rotation_count)
+        log.info("Session '%s' rotated successfully (count=%d)", self.name, self._rotation_count)
+
+    def _rebuild_system_prompt(self) -> dict:
+        """Rebuild the system prompt, reloading the decision log."""
+        try:
+            from modastack.subagent import _load_memory_for_session
+            memory_prompt = _load_memory_for_session(self.name)
+            if memory_prompt and isinstance(self._system_prompt, dict):
+                base_append = self._system_prompt.get("append", "")
+                # Strip old decision log section if present
+                if "## Decision Log" in base_append:
+                    base_append = base_append.split("## Decision Log")[0].rstrip()
+                new_append = base_append
+                if memory_prompt:
+                    new_append = f"{base_append}\n\n{memory_prompt}" if base_append else memory_prompt
+                return {**self._system_prompt, "append": new_append}
+        except Exception:
+            log.debug("Failed to reload memory for '%s'", self.name, exc_info=True)
+        return self._system_prompt
 
     async def _drain_turn(self) -> str:
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
@@ -135,6 +282,15 @@ class Session:
                     else:
                         self._set_state("waiting_input")
                         registry.update(self.name, status="idle", session_id=msg.session_id)
+                        # Step 2: Check rotation cap — input_tokens IS the
+                        # whole conversation size, so it directly measures fill.
+                        if input_tokens >= self._rotation_token_cap:
+                            log.info(
+                                "Session '%s' input_tokens=%d exceeds cap=%d — "
+                                "rotation pending",
+                                self.name, input_tokens, self._rotation_token_cap,
+                            )
+                            self._rotate_pending = True
         except Exception as e:
             log.error(f"Drain failed for '{self.name}': {e}")
             self._set_state("error")
@@ -203,9 +359,48 @@ class Session:
             if msg is None:
                 if self._keep_alive and self._keep_alive.is_set():
                     break
+                # Step 3: Act at idle — rotate when pending and queue is empty
+                if self._rotate_pending and self.inbox._queue.empty():
+                    await self._do_flush_and_rotate()
                 continue
 
             await self._process_message(msg)
+
+    async def _do_flush_and_rotate(self) -> None:
+        """Flush the decision log, verify it, and rotate if successful."""
+        log.info("Session '%s' idle with rotation pending — flushing decision log", self.name)
+
+        # Step 4: Snapshot INDEX.md before flush
+        self._snapshot_index()
+
+        # Inject flush prompt to ask the agent to save its decision log
+        flush_prompt = (
+            "SYSTEM: Context rotation imminent. Your conversation is approaching "
+            "the context limit. Before rotation, update your decision log at "
+            ".modastack/state/memory/{session}/ — write any important decisions, "
+            "context, or operational state to INDEX.md that you'll need after "
+            "restart. Be thorough: this is your only continuity mechanism."
+        ).format(session=self.name)
+
+        try:
+            await self._client.query(flush_prompt)
+            await self._drain_turn()
+        except Exception as e:
+            log.warning("Flush prompt failed for '%s': %s", self.name, e)
+            # Don't rotate on flush failure — retry next idle cycle
+            return
+
+        # Step 4: Verify the flush actually changed INDEX.md
+        if not self._verify_flush():
+            # No-op flush — skip rotation, retry next idle cycle
+            return
+
+        # Flush verified — rotate
+        try:
+            await self._rotate()
+        except Exception as e:
+            log.error("Rotation failed for '%s': %s", self.name, e, exc_info=True)
+            self._rotate_pending = False  # Don't retry indefinitely
 
     async def _run(self, startup_prompt: str | None = None) -> None:
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient

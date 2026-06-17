@@ -1108,7 +1108,8 @@ def status():
 
     click.echo(f"  Sub-agents: {len(active)} active")
     for e in active:
-        click.echo(f"    {e.name} ({e.role}) — {e.status}")
+        rotation_info = f", rotations={e.rotation_count}" if e.rotation_count else ""
+        click.echo(f"    {e.name} ({e.role}) — {e.status}{rotation_info}")
 
 
 @main.command()
