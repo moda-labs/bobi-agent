@@ -108,5 +108,8 @@ jobs:
       - name: Manager lifecycle
         run: .venv/bin/pytest tests/integration/test_manager_lifecycle.py --timeout=180 -v
 
+      - name: Manager SDK (direct ClaudeSDKClient)
+        run: .venv/bin/pytest tests/integration/test_manager_sdk.py --timeout=180 -v
+
       - name: End-to-end event flow
         run: .venv/bin/pytest tests/integration/test_e2e_event_flow.py --timeout=180 -v

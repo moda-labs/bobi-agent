@@ -1,16 +1,14 @@
 """Integration tests for the SDK-based manager session.
 
 These tests drive real Claude Code sessions via ClaudeSDKClient and require the
-`claude` CLI. They are a low-level SDK smoke test — run them manually
-(`pytest tests/integration/test_manager_sdk.py`).
+`claude` CLI. They run in CI as a step of the `integration-claude` job
+(self-hosted EC2, gated to nightly / workflow_dispatch / the `ci:claude` label),
+alongside the other real-Claude integration tests — so they exercise on a real
+schedule without gating every PR on real-session latency.
 
-NOT wired into CI on purpose: real `client.connect()` calls intermittently hang
-(seen as a pytest-timeout in the kqueue selector) when several sessions run
-back-to-back, which would flake the nightly/release `integration-claude` job.
-The manager's real-session behavior that matters for releases is gated there by
-`test_manager_lifecycle.py` instead. Keep this file out of `tests/` root — the
-unit job globs that, and a dev machine with `claude` installed would run (and
-flake) these.
+Keep this file under `tests/integration/`, NOT `tests/` root: the PR unit job
+globs `tests/` (minus integration/e2e) and a dev machine with `claude` installed
+would run these there, where real-session hangs would flake the unit suite.
 """
 
 import asyncio
