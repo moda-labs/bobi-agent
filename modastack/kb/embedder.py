@@ -6,14 +6,12 @@ start if needed, poll until ready.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import signal
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -47,11 +45,12 @@ def _read_port() -> int | None:
 
 
 def _check_health(port: int) -> bool:
+    from modastack import http as pooled
+
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/health")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = json.loads(resp.read())
-            return data.get("status") == "ok"
+        resp = pooled.get(f"http://127.0.0.1:{port}/health", timeout=2.0)
+        data = resp.json()
+        return data.get("status") == "ok"
     except Exception:
         return False
 
@@ -107,14 +106,14 @@ _verified_port: int | None = None
 
 
 def _post_embed(port: int, texts: list[str]) -> list[list[float]]:
-    data = json.dumps({"texts": texts}).encode()
-    req = urllib.request.Request(
+    from modastack import http as pooled
+
+    resp = pooled.post(
         f"http://127.0.0.1:{port}/embed",
-        data=data,
-        headers={"Content-Type": "application/json"},
+        json={"texts": texts},
+        timeout=60.0,
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        result = json.loads(resp.read())
+    result = resp.json()
     return result["embeddings"]
 
 

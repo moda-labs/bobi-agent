@@ -4,12 +4,14 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
 from modastack.__version__ import __version__
 from modastack.cli import main
 from modastack.subagent import CheckResult
+from modastack import http as pooled
 
 
 def test_version_flag():
@@ -32,22 +34,15 @@ def test_post_event_posts_to_event_server():
 
     captured = {}
 
-    class FakeResp:
-        def __enter__(self):
-            return self
+    def _handler(request):
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"delivered_to": 0})
 
-        def __exit__(self, *a):
-            return False
+    transport = httpx.MockTransport(_handler)
+    mock_client = httpx.Client(transport=transport)
 
-        def read(self):
-            return json.dumps({"delivered_to": 0}).encode()
-
-    def fake_urlopen(req, timeout=10):
-        captured["url"] = req.full_url
-        captured["body"] = json.loads(req.data)
-        return FakeResp()
-
-    with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+    with patch.object(pooled, '_client', mock_client), \
          patch("modastack.config.Config.load") as mock_pc:
         mock_pc.return_value = type("PC", (), {"event_server_url": "https://events.test"})()
         ok = publish.post_event("monitor/deploy.down", {"summary": "down"},
@@ -64,22 +59,15 @@ def test_post_event_defaults_source_when_no_slash():
 
     captured = {}
 
-    class FakeResp:
-        def __enter__(self):
-            return self
+    def _handler(request):
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"delivered_to": 1})
 
-        def __exit__(self, *a):
-            return False
+    transport = httpx.MockTransport(_handler)
+    mock_client = httpx.Client(transport=transport)
 
-        def read(self):
-            return json.dumps({"delivered_to": 1}).encode()
-
-    def fake_urlopen(req, timeout=10):
-        captured["url"] = req.full_url
-        captured["body"] = json.loads(req.data)
-        return FakeResp()
-
-    with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+    with patch.object(pooled, '_client', mock_client), \
          patch("modastack.config.Config.load") as mock_pc:
         mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
         publish.post_event("deploy_down", {}, project_path=Path("/tmp/repo"))
@@ -90,9 +78,14 @@ def test_post_event_defaults_source_when_no_slash():
 
 def test_post_event_returns_false_on_connection_error():
     publish = _fresh_publish()
-    import urllib.error
 
-    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("nope")), \
+    def _raise(request):
+        raise httpx.ConnectError("nope")
+
+    transport = httpx.MockTransport(_raise)
+    mock_client = httpx.Client(transport=transport)
+
+    with patch.object(pooled, '_client', mock_client), \
          patch("modastack.config.Config.load") as mock_pc:
         mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
         assert publish.post_event("monitor/x", {}, project_path=Path("/tmp/repo")) is False

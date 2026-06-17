@@ -14,8 +14,10 @@ import json
 import time
 from unittest.mock import patch, MagicMock, call
 
+import httpx
 import pytest
 
+from modastack import http as pooled
 from modastack.slack import (
     post_slack_message,
     update_slack_message,
@@ -29,13 +31,24 @@ from modastack.slack import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _mock_urlopen(response_data):
-    """Create a mock urlopen that returns the given response dict."""
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps(response_data).encode()
-    mock_resp.__enter__ = lambda s: s
-    mock_resp.__exit__ = MagicMock(return_value=False)
-    return mock_resp
+def _make_mock_client(response_data, *, requests_log=None, side_effect=None):
+    """Create an httpx.Client with a MockTransport returning *response_data*.
+
+    If *requests_log* is provided (a list), each incoming request is
+    appended so callers can inspect URL, headers and body.
+
+    If *side_effect* is provided it should be a callable(request) that is
+    invoked instead of returning the canned response (useful for raising).
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        if requests_log is not None:
+            requests_log.append(request)
+        if side_effect is not None:
+            return side_effect(request)
+        return httpx.Response(200, json=response_data)
+
+    transport = httpx.MockTransport(handler)
+    return httpx.Client(transport=transport)
 
 
 def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
@@ -78,43 +91,42 @@ def _make_slack_event(channel="C123", thread_ts="171.42",
 # ---------------------------------------------------------------------------
 
 class TestUpdateSlackMessage:
-    @patch("urllib.request.urlopen")
-    def test_basic_update(self, mock_urlopen):
-        mock_urlopen.return_value = _mock_urlopen({"ok": True})
+    def test_basic_update(self):
+        reqs = []
+        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
-        result = update_slack_message(
-            "xoxb-test", "C123", "1720165787.123456", "Real response"
-        )
+        with patch.object(pooled, '_client', mock_client):
+            result = update_slack_message(
+                "xoxb-test", "C123", "1720165787.123456", "Real response"
+            )
         assert result["ok"] is True
 
-        req = mock_urlopen.call_args[0][0]
-        assert req.full_url == "https://slack.com/api/chat.update"
-        body = json.loads(req.data)
+        req = reqs[0]
+        assert str(req.url) == "https://slack.com/api/chat.update"
+        body = json.loads(req.content)
         assert body["channel"] == "C123"
         assert body["ts"] == "1720165787.123456"
         assert body["text"] == "Real response"
 
-    @patch("urllib.request.urlopen")
-    def test_formats_markdown(self, mock_urlopen):
-        mock_urlopen.return_value = _mock_urlopen({"ok": True})
+    def test_formats_markdown(self):
+        reqs = []
+        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
-        update_slack_message(
-            "xoxb-test", "C123", "171.42", "**bold** and [link](https://example.com)"
-        )
+        with patch.object(pooled, '_client', mock_client):
+            update_slack_message(
+                "xoxb-test", "C123", "171.42", "**bold** and [link](https://example.com)"
+            )
 
-        req = mock_urlopen.call_args[0][0]
-        body = json.loads(req.data)
+        body = json.loads(reqs[0].content)
         assert "*bold*" in body["text"]
         assert "<https://example.com|link>" in body["text"]
 
-    @patch("urllib.request.urlopen")
-    def test_api_error_raises(self, mock_urlopen):
-        mock_urlopen.return_value = _mock_urlopen(
-            {"ok": False, "error": "message_not_found"}
-        )
+    def test_api_error_raises(self):
+        mock_client = _make_mock_client({"ok": False, "error": "message_not_found"})
 
-        with pytest.raises(RuntimeError, match="message_not_found"):
-            update_slack_message("xoxb-test", "C123", "171.42", "text")
+        with patch.object(pooled, '_client', mock_client):
+            with pytest.raises(RuntimeError, match="message_not_found"):
+                update_slack_message("xoxb-test", "C123", "171.42", "text")
 
 
 # ---------------------------------------------------------------------------
@@ -122,47 +134,49 @@ class TestUpdateSlackMessage:
 # ---------------------------------------------------------------------------
 
 class TestSetThreadStatus:
-    @patch("urllib.request.urlopen")
-    def test_set_status(self, mock_urlopen):
-        mock_urlopen.return_value = _mock_urlopen({"ok": True})
+    def test_set_status(self):
+        reqs = []
+        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
-        set_thread_status(
-            "xoxb-test", "C123", "1720165787.123456", "is thinking..."
-        )
+        with patch.object(pooled, '_client', mock_client):
+            set_thread_status(
+                "xoxb-test", "C123", "1720165787.123456", "is thinking..."
+            )
 
-        req = mock_urlopen.call_args[0][0]
-        assert req.full_url == "https://slack.com/api/assistant.threads.setStatus"
-        body = json.loads(req.data)
+        req = reqs[0]
+        assert str(req.url) == "https://slack.com/api/assistant.threads.setStatus"
+        body = json.loads(req.content)
         assert body["channel_id"] == "C123"
         assert body["thread_ts"] == "1720165787.123456"
         assert body["status"] == "is thinking..."
 
-    @patch("urllib.request.urlopen")
-    def test_clear_status(self, mock_urlopen):
-        mock_urlopen.return_value = _mock_urlopen({"ok": True})
+    def test_clear_status(self):
+        reqs = []
+        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
-        set_thread_status("xoxb-test", "C123", "171.42", "")
+        with patch.object(pooled, '_client', mock_client):
+            set_thread_status("xoxb-test", "C123", "171.42", "")
 
-        req = mock_urlopen.call_args[0][0]
-        body = json.loads(req.data)
+        body = json.loads(reqs[0].content)
         assert body["status"] == ""
 
-    @patch("urllib.request.urlopen")
-    def test_failure_does_not_raise(self, mock_urlopen):
+    def test_failure_does_not_raise(self):
         """setStatus failures are non-fatal (logged, not raised)."""
-        mock_urlopen.return_value = _mock_urlopen(
-            {"ok": False, "error": "not_allowed"}
-        )
+        mock_client = _make_mock_client({"ok": False, "error": "not_allowed"})
 
-        # Should not raise — failures are debug-logged and swallowed
-        set_thread_status("xoxb-test", "C123", "171.42", "is thinking...")
+        with patch.object(pooled, '_client', mock_client):
+            # Should not raise — failures are debug-logged and swallowed
+            set_thread_status("xoxb-test", "C123", "171.42", "is thinking...")
 
-    @patch("urllib.request.urlopen")
-    def test_no_thread_ts_is_noop(self, mock_urlopen):
+    def test_no_thread_ts_is_noop(self):
         """Without thread_ts, setStatus silently does nothing."""
-        set_thread_status("xoxb-test", "C123", "", "is thinking...")
+        reqs = []
+        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
-        mock_urlopen.assert_not_called()
+        with patch.object(pooled, '_client', mock_client):
+            set_thread_status("xoxb-test", "C123", "", "is thinking...")
+
+        assert len(reqs) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -462,27 +476,28 @@ class TestStopRefreshLoop:
 # ---------------------------------------------------------------------------
 
 class TestSlackReplyEdit:
-    @patch("urllib.request.urlopen")
-    def test_edit_calls_chat_update(self, mock_urlopen, tmp_path, monkeypatch):
+    def test_edit_calls_chat_update(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
-        mock_urlopen.return_value = _mock_urlopen({"ok": True})
+        reqs = []
+        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
         from click.testing import CliRunner
         from modastack.cli import main
 
         runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T123", "-c", "C456",
-            "-t", "171.42",
-            "--edit", "171.99",
-            "Real response here",
-        ])
+        with patch.object(pooled, '_client', mock_client):
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T123", "-c", "C456",
+                "-t", "171.42",
+                "--edit", "171.99",
+                "Real response here",
+            ])
         assert result.exit_code == 0, result.output
 
         # First call should be chat.update (second is setStatus to clear)
-        update_req = mock_urlopen.call_args_list[0][0][0]
-        assert "chat.update" in update_req.full_url
-        body = json.loads(update_req.data)
+        update_req = reqs[0]
+        assert "chat.update" in str(update_req.url)
+        body = json.loads(update_req.content)
         assert body["ts"] == "171.99"
         assert body["channel"] == "C456"
         assert body["text"] == "Real response here"
@@ -512,46 +527,45 @@ class TestSlackReplyEdit:
             "xoxb-test", "C456", "171.42", "",
         )
 
-    @patch("urllib.request.urlopen")
-    def test_edit_without_thread_skips_status(self, mock_urlopen,
-                                               tmp_path, monkeypatch):
+    def test_edit_without_thread_skips_status(self, tmp_path, monkeypatch):
         """--edit without -t still updates the message but skips status clear."""
         _setup_project(tmp_path, monkeypatch)
-        mock_urlopen.return_value = _mock_urlopen({"ok": True})
+        reqs = []
+        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
         from click.testing import CliRunner
         from modastack.cli import main
 
         runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T123", "-c", "C456",
-            "--edit", "171.99",
-            "Response",
-        ])
+        with patch.object(pooled, '_client', mock_client):
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T123", "-c", "C456",
+                "--edit", "171.99",
+                "Response",
+            ])
         assert result.exit_code == 0, result.output
 
-        req = mock_urlopen.call_args[0][0]
-        assert "chat.update" in req.full_url
+        assert any("chat.update" in str(r.url) for r in reqs)
 
-    @patch("urllib.request.urlopen")
-    def test_normal_reply_unchanged(self, mock_urlopen, tmp_path, monkeypatch):
+    def test_normal_reply_unchanged(self, tmp_path, monkeypatch):
         """Without --edit, slack-reply still posts a new message."""
         _setup_project(tmp_path, monkeypatch)
-        mock_urlopen.return_value = _mock_urlopen({"ok": True})
+        reqs = []
+        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
         from click.testing import CliRunner
         from modastack.cli import main
 
         runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T123", "-c", "C456",
-            "-t", "171.42",
-            "Normal reply",
-        ])
+        with patch.object(pooled, '_client', mock_client):
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T123", "-c", "C456",
+                "-t", "171.42",
+                "Normal reply",
+            ])
         assert result.exit_code == 0, result.output
 
-        req = mock_urlopen.call_args[0][0]
-        assert "chat.postMessage" in req.full_url
+        assert any("chat.postMessage" in str(r.url) for r in reqs)
 
 
 # ---------------------------------------------------------------------------

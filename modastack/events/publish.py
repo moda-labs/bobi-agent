@@ -7,11 +7,12 @@ the CLI module to publish an event.
 
 from __future__ import annotations
 
-import json
 import logging
-import urllib.error
-import urllib.request
 from pathlib import Path
+
+import httpx
+
+from modastack import http as pooled
 
 log = logging.getLogger(__name__)
 
@@ -53,16 +54,14 @@ def post_event(event_type: str, data: dict,
 
     es_url = _event_server_url(project_path)
 
-    payload = json.dumps({"source": source, "payload": data}).encode()
     try:
-        req = urllib.request.Request(
+        resp = pooled.post(
             f"{es_url}/events/{etype}",
-            data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": "modastack"},
+            json={"source": source, "payload": data},
+            timeout=10.0,
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            json.loads(resp.read())
+        resp.json()
         return True
-    except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError) as e:
+    except (httpx.HTTPError, OSError, TimeoutError, ValueError) as e:
         log.warning(f"Failed to post event {event_type}: {e}")
         return False

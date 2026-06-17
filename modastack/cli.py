@@ -230,6 +230,8 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
                 pid_file.unlink(missing_ok=True)
         except OSError:
             pass
+        from modastack import http as pooled_http
+        pooled_http.close()
     atexit.register(_cleanup)
 
     log = logging.getLogger(__name__)
@@ -879,7 +881,7 @@ def slack_reply(text, workspace, channel, thread, edit_ts):
         modastack slack-reply -w T0952RZRZ0X -c C123 -t 1780165787.159589 "Thread reply"
         modastack slack-reply -w T0952RZRZ0X -c C123 -t 171.42 --edit 171.99 "Real response"
     """
-    import urllib.error
+    import httpx
 
     from .slack import post_slack_message, update_slack_message, set_thread_status
 
@@ -908,7 +910,7 @@ def slack_reply(text, workspace, channel, thread, edit_ts):
     except RuntimeError as e:
         click.echo(str(e), err=True)
         sys.exit(1)
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
+    except (httpx.HTTPError, OSError, TimeoutError) as e:
         click.echo(f"Failed: {e}", err=True)
         sys.exit(1)
 

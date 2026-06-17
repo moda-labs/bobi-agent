@@ -5,9 +5,11 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from textwrap import dedent
 
+import httpx
 from click.testing import CliRunner
 
 from modastack.cli import main
+from modastack import http as pooled
 
 
 def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
@@ -28,50 +30,64 @@ def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
     monkeypatch.chdir(tmp_path)
 
 
+def _mock_client(handler):
+    """Create an httpx.Client with a MockTransport backed by *handler*."""
+    transport = httpx.MockTransport(handler)
+    return httpx.Client(transport=transport)
+
+
+def _ok_handler(request: httpx.Request) -> httpx.Response:
+    """Default handler that returns {"ok": True}."""
+    return httpx.Response(200, json={"ok": True})
+
+
 class TestSlackReplyCommand:
 
-    @patch("urllib.request.urlopen")
-    def test_success(self, mock_urlopen, tmp_path, monkeypatch):
+    def test_success(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": True}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        requests_made: list[httpx.Request] = []
 
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T123", "-c", "D456", "Hello world",
-        ])
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests_made.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        mock_client = _mock_client(handler)
+        with patch.object(pooled, '_client', mock_client):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T123", "-c", "D456", "Hello world",
+            ])
         assert result.exit_code == 0
         assert "Sent to D456" in result.output
 
-        req = mock_urlopen.call_args[0][0]
-        body = json.loads(req.data)
+        assert len(requests_made) >= 1
+        req = requests_made[0]
+        body = json.loads(req.content)
         assert body["channel"] == "D456"
         assert body["text"] == "Hello world"
         assert "thread_ts" not in body
 
-    @patch("urllib.request.urlopen")
-    def test_with_thread(self, mock_urlopen, tmp_path, monkeypatch):
+    def test_with_thread(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": True}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        requests_made: list[httpx.Request] = []
 
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T123", "-c", "C789",
-            "-t", "1780165787.159589", "Thread reply",
-        ])
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests_made.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        mock_client = _mock_client(handler)
+        with patch.object(pooled, '_client', mock_client):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T123", "-c", "C789",
+                "-t", "1780165787.159589", "Thread reply",
+            ])
         assert result.exit_code == 0
 
-        req = mock_urlopen.call_args[0][0]
-        body = json.loads(req.data)
+        req = requests_made[0]
+        body = json.loads(req.content)
         assert body["thread_ts"] == "1780165787.159589"
 
     def test_missing_token(self, tmp_path, monkeypatch):
@@ -84,83 +100,84 @@ class TestSlackReplyCommand:
         assert result.exit_code != 0
         assert "bot token" in result.output.lower()
 
-    @patch("urllib.request.urlopen")
-    def test_markdown_conversion(self, mock_urlopen, tmp_path, monkeypatch):
+    def test_markdown_conversion(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": True}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        requests_made: list[httpx.Request] = []
 
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T123", "-c", "D456",
-            "**bold** and [link](https://example.com)",
-        ])
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests_made.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        mock_client = _mock_client(handler)
+        with patch.object(pooled, '_client', mock_client):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T123", "-c", "D456",
+                "**bold** and [link](https://example.com)",
+            ])
         assert result.exit_code == 0
 
-        req = mock_urlopen.call_args[0][0]
-        body = json.loads(req.data)
+        req = requests_made[0]
+        body = json.loads(req.content)
         assert "*bold*" in body["text"]
         assert "<https://example.com|link>" in body["text"]
 
-    @patch("urllib.request.urlopen")
-    def test_escaped_newlines_become_real(self, mock_urlopen, tmp_path, monkeypatch):
+    def test_escaped_newlines_become_real(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": True}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        requests_made: list[httpx.Request] = []
 
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T123", "-c", "D456",
-            "line one\\nline two\\ttabbed",
-        ])
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests_made.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        mock_client = _mock_client(handler)
+        with patch.object(pooled, '_client', mock_client):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T123", "-c", "D456",
+                "line one\\nline two\\ttabbed",
+            ])
         assert result.exit_code == 0
 
-        req = mock_urlopen.call_args[0][0]
-        body = json.loads(req.data)
+        req = requests_made[0]
+        body = json.loads(req.content)
         assert body["text"] == "line one\nline two\ttabbed"
         assert "\\n" not in body["text"]
 
-    @patch("urllib.request.urlopen")
-    def test_real_newlines_preserved(self, mock_urlopen, tmp_path, monkeypatch):
+    def test_real_newlines_preserved(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": True}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        requests_made: list[httpx.Request] = []
 
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T123", "-c", "D456", "line one\nline two",
-        ])
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests_made.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        mock_client = _mock_client(handler)
+        with patch.object(pooled, '_client', mock_client):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T123", "-c", "D456", "line one\nline two",
+            ])
         assert result.exit_code == 0
 
-        req = mock_urlopen.call_args[0][0]
-        body = json.loads(req.data)
+        req = requests_made[0]
+        body = json.loads(req.content)
         assert body["text"] == "line one\nline two"
 
-    @patch("urllib.request.urlopen")
-    def test_slack_api_error(self, mock_urlopen, tmp_path, monkeypatch):
+    def test_slack_api_error(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": False, "error": "channel_not_found"}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
 
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T123", "-c", "D456", "Hello",
-        ])
+        mock_client = _mock_client(handler)
+        with patch.object(pooled, '_client', mock_client):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T123", "-c", "D456", "Hello",
+            ])
         assert result.exit_code != 0
         assert "Slack" in result.output and "error" in result.output.lower()

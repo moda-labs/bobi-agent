@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -135,15 +134,16 @@ def _resolve_channel_names(token: str, channels: list[str]) -> list[str]:
     if not names_to_resolve:
         return channels
 
+    from modastack import http as pooled
+
     # Paginate conversations.list to find matching channels.
     cursor = ""
     while True:
         url = "https://slack.com/api/conversations.list?limit=200&types=public_channel,private_channel"
         if cursor:
             url += f"&cursor={cursor}"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
+        resp = pooled.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10.0)
+        data = resp.json()
 
         if not data.get("ok"):
             log.warning(f"conversations.list failed: {data.get('error', 'unknown')}")
@@ -196,18 +196,20 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
     (``#support`` or ``support``) — names are resolved to IDs
     automatically via the Slack API.
     """
+    from modastack import http as pooled
+
     token = cfg.credential("slack", "bot_token")
     if not token:
         return []
     svc = next((s for s in cfg.services if s.name == "slack"), None)
     channels = svc.channels if svc else []
     try:
-        req = urllib.request.Request(
+        resp = pooled.get(
             "https://slack.com/api/auth.test",
             headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
+        data = resp.json()
         if data.get("ok") and data.get("team_id"):
             if channels:
                 channels = _resolve_channel_names(token, channels)
@@ -227,20 +229,19 @@ def _detect_linear(project_path: Path, cfg: "Config") -> list[str]:
     api_key = cfg.credential("linear", "api_key")
     if not api_key:
         return []
+    from modastack import http as pooled
+
     try:
-        payload = json.dumps({
-            "query": "{ teams { nodes { key } } }"
-        }).encode()
-        req = urllib.request.Request(
+        resp = pooled.post(
             "https://api.linear.app/graphql",
-            data=payload,
+            json={"query": "{ teams { nodes { key } } }"},
             headers={
                 "Authorization": api_key,
                 "Content-Type": "application/json",
             },
+            timeout=5.0,
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
+        data = resp.json()
         teams = data.get("data", {}).get("teams", {}).get("nodes", [])
         keys = [f"linear:{t['key']}" for t in teams if t.get("key")]
         if keys:

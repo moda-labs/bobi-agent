@@ -11,13 +11,14 @@ how to handle failures.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import threading
 import time
-import urllib.error
-import urllib.request
+
+import httpx
+
+from modastack import http as pooled
 
 log = logging.getLogger(__name__)
 
@@ -56,16 +57,16 @@ def _slack_api(
 
     Raises ``RuntimeError`` for non-ok responses.
     """
-    req = urllib.request.Request(
+    resp = pooled.post(
         f"https://slack.com/api/{endpoint}",
-        data=json.dumps(payload).encode(),
+        json=payload,
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         },
+        timeout=timeout,
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        result = json.loads(resp.read())
+    result = resp.json()
 
     if not result.get("ok"):
         raise RuntimeError(f"Slack API error: {result.get('error', 'unknown')}")
@@ -140,20 +141,20 @@ def set_thread_status(
         "status": status,
     }
 
-    req = urllib.request.Request(
-        "https://slack.com/api/assistant.threads.setStatus",
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            result = json.loads(resp.read())
+        resp = pooled.post(
+            "https://slack.com/api/assistant.threads.setStatus",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            timeout=timeout,
+        )
+        result = resp.json()
         if not result.get("ok"):
             log.debug("setStatus failed: %s", result.get("error", "unknown"))
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+    except (httpx.HTTPError, OSError, TimeoutError) as exc:
         log.debug("setStatus request failed: %s", exc)
 
 
@@ -176,7 +177,7 @@ def post_placeholder(
         result = post_slack_message(
             token, channel, placeholder_text, thread_ts=thread_ts,
         )
-    except (RuntimeError, urllib.error.URLError, OSError, TimeoutError) as exc:
+    except (RuntimeError, httpx.HTTPError, OSError, TimeoutError) as exc:
         log.warning("Placeholder post failed: %s", exc)
         return ""
 

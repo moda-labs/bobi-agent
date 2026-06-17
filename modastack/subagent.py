@@ -815,19 +815,17 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         # This session restarting with its own saved deployment — sync any
         # new subscription keys onto it. Never PUT to another session's
         # deployment; state is per-session by construction.
-        import json as _json, urllib.request
+        from modastack import http as pooled
         try:
-            req = urllib.request.Request(
+            pooled.put(
                 f"{es_url}/deployments/{es_deployment}/subscriptions",
-                data=_json.dumps({"add": subscribe}).encode(),
+                json={"add": subscribe},
                 headers={
                     "Authorization": f"Bearer {es_key}",
                     "Content-Type": "application/json",
-                    "User-Agent": "modastack",
                 },
-                method="PUT",
+                timeout=10.0,
             )
-            urllib.request.urlopen(req, timeout=10)
         except Exception as e:
             log.info("Subscription update failed (%s) — re-registering", e)
             es_deployment, es_key = _register_with_retry(es_url)

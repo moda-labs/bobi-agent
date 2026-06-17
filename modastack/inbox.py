@@ -14,11 +14,11 @@ import queue
 import secrets
 import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+
+import httpx
 
 log = logging.getLogger(__name__)
 
@@ -208,25 +208,27 @@ def deliver(
         "timeout": timeout,
     }).encode()
 
+    from modastack import http as pooled
+
     try:
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{entry.inbox_port}/inbox",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
         http_timeout = timeout + 10 if wait else 10
-        with urllib.request.urlopen(req, timeout=http_timeout) as resp:
-            result = json.loads(resp.read())
-            if result.get("ok"):
-                return True, result.get("response", "")
-            return False, result.get("error", "unknown error")
-    except urllib.error.HTTPError as e:
+        resp = pooled.post(
+            f"http://127.0.0.1:{entry.inbox_port}/inbox",
+            content=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=float(http_timeout),
+        )
+        result = resp.json()
+        if result.get("ok"):
+            return True, result.get("response", "")
+        return False, result.get("error", "unknown error")
+    except httpx.HTTPStatusError as e:
         try:
-            body = json.loads(e.read())
-            return False, body.get("error", f"HTTP {e.code}")
+            body = e.response.json()
+            return False, body.get("error", f"HTTP {e.response.status_code}")
         except Exception:
-            return False, f"HTTP {e.code}"
-    except urllib.error.URLError as e:
+            return False, f"HTTP {e.response.status_code}"
+    except (httpx.HTTPError, OSError) as e:
         return False, f"cannot reach session '{to}': {e}"
     except TimeoutError:
         return False, f"no response within {timeout}s"

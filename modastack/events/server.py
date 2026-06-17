@@ -49,12 +49,11 @@ def health(base_url: str, timeout: float = 2) -> dict | None:
     The single definition of "what counts as healthy" — used by ensure_running,
     `modastack stop`, `modastack event-server status`, and doctor.
     """
-    import urllib.request
+    from modastack import http as pooled
 
     try:
-        req = urllib.request.Request(f"{base_url}/health")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
+        resp = pooled.get(f"{base_url}/health", timeout=timeout)
+        data = resp.json()
         return data if data.get("status") == "ok" else None
     except Exception:
         return None
@@ -134,30 +133,28 @@ def ensure_running(port: int, webhook_secret: str = "",
 def register(base_url: str, name: str,
              subscriptions: list[str]) -> tuple[str, str]:
     """Register a deployment. Returns (deployment_id, api_key)."""
-    import urllib.request
+    from modastack import http as pooled
 
-    data = json.dumps({"name": name, "subscriptions": subscriptions}).encode()
-    req = urllib.request.Request(
+    resp = pooled.post(
         f"{base_url}/deployments",
-        data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "modastack"},
+        json={"name": name, "subscriptions": subscriptions},
+        timeout=15.0,
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        result = json.loads(resp.read())
+    result = resp.json()
     return result["deployment_id"], result["api_key"]
 
 
 def _slack_auth_info(token: str) -> tuple[str, str]:
     """Resolve (team_id, bot_id) from a bot token via auth.test."""
-    import urllib.request
+    from modastack import http as pooled
 
     try:
-        req = urllib.request.Request(
+        resp = pooled.get(
             "https://slack.com/api/auth.test",
             headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
+        data = resp.json()
         if data.get("ok"):
             return data.get("team_id", "") or "", data.get("bot_id", "") or ""
     except Exception as e:  # best-effort — never block startup
@@ -176,7 +173,7 @@ def register_slack_workspaces(base_url: str, cfg) -> list[str]:
     registration hiccup never blocks startup. Returns the workspace ids
     successfully registered.
     """
-    import urllib.request
+    from modastack import http as pooled
 
     try:
         token = cfg.credential("slack", "bot_token")
@@ -194,14 +191,11 @@ def register_slack_workspaces(base_url: str, cfg) -> list[str]:
         record: dict = {"workspace_id": team_id, "bot_token": token}
         if bot_id:
             record["bot_id"] = bot_id
-        body = json.dumps(record).encode()
-        req = urllib.request.Request(
+        pooled.post(
             f"{base_url}/slack/workspaces",
-            data=body,
-            headers={"Content-Type": "application/json", "User-Agent": "modastack"},
+            json=record,
+            timeout=10.0,
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            json.loads(resp.read())
         log.info(
             "Registered Slack workspace %s with event server "
             "(self-reply loop prevention)", team_id,

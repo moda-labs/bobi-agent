@@ -13,8 +13,10 @@ from __future__ import annotations
 import json
 import logging
 import sys
-import urllib.error
-import urllib.request
+
+import httpx
+
+from modastack import http as pooled
 
 log = logging.getLogger(__name__)
 
@@ -37,24 +39,24 @@ GOOGLE_DEFAULT_MODEL = "imagen-3.0-generate-002"
 # ---------------------------------------------------------------------------
 
 def _post_json(url: str, body: dict, headers: dict,
-               provider_label: str, timeout: int = 120) -> dict:
+               provider_label: str, timeout: float = 120.0) -> dict:
     """POST JSON to *url* and return the parsed response body.
 
     Returns ``{"error": "..."}`` on any HTTP or network failure so
     callers never need their own try/except around requests.
     """
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        headers={**headers, "Content-Type": "application/json"},
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")[:500]
-        return {"error": f"{provider_label} API error {e.code}: {err_body}"}
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        resp = pooled.post(
+            url,
+            json=body,
+            headers={**headers, "Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        return resp.json()
+    except httpx.HTTPStatusError as e:
+        err_body = e.response.text[:500]
+        return {"error": f"{provider_label} API error {e.response.status_code}: {err_body}"}
+    except (httpx.HTTPError, OSError, TimeoutError) as e:
         return {"error": f"Request failed: {e}"}
 
 
