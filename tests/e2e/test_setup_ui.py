@@ -24,9 +24,10 @@ def _seed_library_team(home, name="legacy-bot"):
 
 
 def _enter(page, url):
-    """Pass through the intro (create-new, default location) into the editor."""
+    """Welcome on-ramp → intro → start a new team from scratch → the editor."""
     page.goto(url)
-    page.click("#introstart")
+    page.click("#welcome-go")                      # "Get started" on the welcome
+    page.click("[data-newteam]")                   # "Customize my own agent team"
     expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
 
 
@@ -79,21 +80,25 @@ def test_finish_builds_to_file_browser(page, modastack_url):
     finish = page.locator("#uni-foot [data-go='build']")
     expect(finish).to_be_visible(timeout=10_000)
     finish.click()
-    # The post-build screen IS the built-in file browser: success banner + the
-    # generated files read live from disk, with Open-folder and Finish actions.
+    # The post-build screen is a read-only Preview: the generated files read
+    # live from disk, with Open-folder and Finish actions.
     expect(page.locator(".filesdone")).to_be_visible(timeout=20_000)
-    expect(page.locator(".fd-head h1")).to_contain_text("is ready")
+    expect(page.locator(".fd-head .eyebrow")).to_contain_text("Preview")
     expect(page.locator("#fd-reveal")).to_be_visible()
     expect(page.locator("#fd-finish")).to_be_visible()
     # the team's files appear in the tree and open in the viewer
     expect(page.locator("#fd-tree .tnode", has_text="agent.yaml")).to_be_visible()
     page.locator("#fd-tree .tnode", has_text="agent.yaml").click()
     expect(page.locator("#fd-code")).to_contain_text("agent:")
-    # Finish lands on a static completion screen (the local server has stopped,
-    # so no server-dependent buttons are left to strand the user).
+    # Finish lands on the completion screen with the start command and a Done
+    # button into the team hub (the server stays alive — it's re-entrant now).
     page.click("#fd-finish")
     expect(page.locator(".done-wrap")).to_be_visible(timeout=10_000)
-    expect(page.get_by_text("you can close this tab")).to_be_visible()
+    expect(page.locator(".cmd")).to_contain_text("modastack start")
+    expect(page.locator("#done-home")).to_be_visible()
+    # Done goes to the team hub, where the freshly built team is listed.
+    page.click("#done-home")
+    expect(page.locator(".home-grid")).to_be_visible(timeout=10_000)
 
 
 def test_escape_closes_connection_overlay(page, modastack_url):
@@ -196,31 +201,31 @@ def test_pasted_secret_is_redacted_in_transcript(page, modastack_url):
     expect(page.locator(".msg.you").last).not_to_contain_text("ghp_aaaa")
 
 
-def test_intro_offers_three_ways_in_and_starts_editor(page, modastack_url):
+def test_welcome_leads_to_intro_with_custom_and_starts_editor(page, modastack_url):
+    # New users land on the welcome on-ramp first.
     page.goto(modastack_url)
+    expect(page.get_by_role(
+        "heading", name="Build a team of agents that runs your work")).to_be_visible()
+    page.click("#welcome-go")
+    # The intro: a prominent "customize my own" option plus template rows.
     expect(page.get_by_role("heading", name="Build an agent team")).to_be_visible()
-    # Three ways in: create, modify existing, from a registry.
-    expect(page.locator("[data-intromode='create']")).to_be_visible()
-    expect(page.locator("[data-intromode='registry']")).to_be_visible()
-    # Modify-existing is always available — it lets you pick which folder to
-    # scan, even when the default library is empty.
-    expect(page.locator("[data-intromode='open']")).to_be_enabled()
-    # Create has no name field — the team is auto-named in the chat. Location
-    # defaults to the machine-wide ~/modastack-agents library.
+    expect(page.locator("[data-newteam]")).to_be_visible()
+    # No name field, no inline location input — location is a quiet FYI line.
     expect(page.locator("#introname")).to_have_count(0)
-    assert page.locator("#introloc").input_value().endswith("/modastack-agents/")
-    page.click("#introstart")
+    expect(page.locator("#loc-path")).to_be_visible()
+    page.click("[data-newteam]")
     expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
     expect(page.locator(".uni-panel .up-title")).to_have_text("Your team")
 
 
-def test_folder_picker_browses_and_fills_location(page, modastack_url):
+def test_change_location_picker_updates_fyi(page, modastack_url):
     page.goto(modastack_url)
-    expect(page.locator("#introloc")).to_be_visible()
-    page.click("#introbrowse")
+    page.click("#welcome-go")
+    expect(page.locator("#loc-path")).to_be_visible()
+    page.click("#loc-change")
     expect(page.locator(".picker")).to_be_visible()
     # Opens in the (empty) library; step up to home, which has real folders.
-    # Drilling into one fills the field with that folder's absolute path.
+    # Drilling into one updates the FYI line with that folder's absolute path.
     page.click(".pnode.up")
     target = page.locator(".pnode:not(.up)").first
     expect(target).to_be_visible()
@@ -228,32 +233,29 @@ def test_folder_picker_browses_and_fills_location(page, modastack_url):
     target.click()
     page.click("#pick-use")
     expect(page.locator(".picker")).to_have_count(0)
-    val = page.locator("#introloc").input_value()
-    assert val.startswith("/") and val.rstrip("/").endswith(name)
+    expect(page.locator("#loc-path")).to_contain_text(name)
 
 
 def test_escape_closes_popup(page, modastack_url):
     # Escape dismisses the topmost popup (here, the folder picker).
     page.goto(modastack_url)
-    page.click("#introbrowse")
+    page.click("#welcome-go")
+    page.click("#loc-change")
     expect(page.locator(".picker")).to_be_visible()
     page.keyboard.press("Escape")
     expect(page.locator(".picker")).to_have_count(0)
 
 
-def test_modify_scans_a_chosen_folder(page, modastack):
-    # A team sitting in the library shows up under Modify; the scan defaults
-    # there, and the team is selectable to edit in place.
+def test_homepage_lists_teams_and_opens_one(page, modastack):
+    # With a team in the library, setup boots straight to the team hub; each
+    # card shows the team's description, and clicking one opens it in the editor.
     _seed_library_team(modastack.home, "legacy-bot")
     page.goto(modastack.url)
-    page.click("[data-intromode='open']")
-    # The scan dir defaults to the library, which now holds one team.
-    assert page.locator("#introscan").input_value().endswith("/modastack-agents")
-    team = page.locator(".iteam", has_text="legacy-bot")
-    expect(team).to_be_visible()
-    team.locator("input[name=iteam]").check()
-    page.click("#introstart")
-    # Lands in the editor with the existing team's goal reverse-filled.
+    card = page.locator(".hcard", has_text="legacy-bot")
+    expect(card).to_be_visible()
+    expect(card).to_contain_text("Watch the repo")        # description from agent.md
+    card.click()
+    # Lands in the editor with the existing team reverse-filled from source.
     expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
 
 
@@ -261,7 +263,9 @@ def test_disconnect_overlay_when_server_dies(page, modastack):
     # The page is useless without its local server — if it dies, the UI must
     # say so and stop pretending to be live (heartbeat catches it within ~4s).
     page.goto(modastack.url)
-    expect(page.get_by_role("heading", name="Build an agent team")).to_be_visible()
+    # Empty library → the welcome on-ramp is the first screen.
+    expect(page.get_by_role(
+        "heading", name="Build a team of agents that runs your work")).to_be_visible()
     expect(page.locator("#disc-ov")).to_have_count(0)   # live: no overlay
     modastack.stop()                                        # server gone
     expect(page.locator("#disc-ov")).to_be_visible(timeout=8_000)
