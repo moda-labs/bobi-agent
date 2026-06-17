@@ -6,8 +6,10 @@ import signal
 from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
 
+import httpx
 import pytest
 
+from modastack import http as pooled
 from modastack.kb import embedder
 
 
@@ -37,26 +39,31 @@ def mock_project_root(tmp_path, monkeypatch):
 
 class TestCheckHealth:
     def test_returns_true_on_ok(self, state_dir):
-        response = json.dumps({"status": "ok"}).encode()
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = response
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"status": "ok"})
+        )
+        mock_client = httpx.Client(transport=transport)
 
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with patch.object(pooled, '_client', mock_client):
             assert embedder._check_health(8000) is True
 
     def test_returns_false_on_error(self, state_dir):
-        with patch("urllib.request.urlopen", side_effect=Exception("conn refused")):
+        def raise_connect_error(request):
+            raise httpx.ConnectError("conn refused")
+
+        transport = httpx.MockTransport(raise_connect_error)
+        mock_client = httpx.Client(transport=transport)
+
+        with patch.object(pooled, '_client', mock_client):
             assert embedder._check_health(8000) is False
 
     def test_returns_false_on_bad_json(self, state_dir):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b"not json"
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"not json")
+        )
+        mock_client = httpx.Client(transport=transport)
 
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with patch.object(pooled, '_client', mock_client):
             assert embedder._check_health(8000) is False
 
 
@@ -143,15 +150,14 @@ class TestEnsureRunning:
 class TestEmbed:
     def test_returns_embeddings(self, state_dir):
         fake_embeddings = [[0.1, 0.2], [0.3, 0.4]]
-        response_data = json.dumps({"embeddings": fake_embeddings}).encode()
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = response_data
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"embeddings": fake_embeddings})
+        )
+        mock_client = httpx.Client(transport=transport)
 
         with patch.object(embedder, "ensure_running", return_value=8000), \
-             patch("urllib.request.urlopen", return_value=mock_resp):
+             patch.object(pooled, '_client', mock_client):
             result = embedder.embed(["hello", "world"])
             assert result == fake_embeddings
 

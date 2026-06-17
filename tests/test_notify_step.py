@@ -6,7 +6,10 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from dataclasses import dataclass
 
+import httpx
 import pytest
+
+from modastack import http as pooled
 
 from modastack.workflow.schema import (
     Workflow, StepDef, HandoffContract, load_workflow,
@@ -112,47 +115,49 @@ class TestFormatSlackMessage:
 # ---------------------------------------------------------------------------
 
 class TestPostSlackMessage:
-    @patch("urllib.request.urlopen")
-    def test_basic_post(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": True}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+    def test_basic_post(self):
+        captured = {}
 
-        result = post_slack_message("xoxb-test", "C123", "Hello")
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            captured["headers"] = dict(request.headers)
+            return httpx.Response(200, json={"ok": True})
+
+        transport = httpx.MockTransport(handler)
+        mock_client = httpx.Client(transport=transport)
+
+        with patch.object(pooled, '_client', mock_client):
+            result = post_slack_message("xoxb-test", "C123", "Hello")
+
         assert result["ok"] is True
+        assert captured["body"]["channel"] == "C123"
+        assert captured["body"]["text"] == "Hello"
+        assert "thread_ts" not in captured["body"]
 
-        req = mock_urlopen.call_args[0][0]
-        body = json.loads(req.data)
-        assert body["channel"] == "C123"
-        assert body["text"] == "Hello"
-        assert "thread_ts" not in body
+    def test_thread_reply(self):
+        captured = {}
 
-    @patch("urllib.request.urlopen")
-    def test_thread_reply(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": True}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"ok": True})
 
-        post_slack_message("xoxb-test", "C123", "Reply", thread_ts="171.42")
+        transport = httpx.MockTransport(handler)
+        mock_client = httpx.Client(transport=transport)
 
-        req = mock_urlopen.call_args[0][0]
-        body = json.loads(req.data)
-        assert body["thread_ts"] == "171.42"
+        with patch.object(pooled, '_client', mock_client):
+            post_slack_message("xoxb-test", "C123", "Reply", thread_ts="171.42")
 
-    @patch("urllib.request.urlopen")
-    def test_api_error_raises(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": False, "error": "channel_not_found"}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        assert captured["body"]["thread_ts"] == "171.42"
 
-        with pytest.raises(RuntimeError, match="channel_not_found"):
-            post_slack_message("xoxb-test", "C123", "Hello")
+    def test_api_error_raises(self):
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
+        )
+        mock_client = httpx.Client(transport=transport)
+
+        with patch.object(pooled, '_client', mock_client):
+            with pytest.raises(RuntimeError, match="channel_not_found"):
+                post_slack_message("xoxb-test", "C123", "Hello")
 
 
 # ---------------------------------------------------------------------------

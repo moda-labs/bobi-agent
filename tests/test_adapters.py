@@ -3,6 +3,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 from modastack.config import Config, ServiceConfig
 from modastack.events.adapters import (
     is_registered,
@@ -11,6 +13,12 @@ from modastack.events.adapters import (
     _is_channel_id,
     _resolve_channel_names,
 )
+from modastack import http as pooled
+
+
+def _mock_httpx_response(json_data):
+    """Create a mock httpx.Response for testing."""
+    return httpx.Response(200, json=json_data)
 
 
 class TestAdapterRegistry:
@@ -62,20 +70,21 @@ class TestGithubDetector:
 
 class TestSlackDetector:
 
-    @patch("urllib.request.urlopen")
-    def test_detect_with_token(self, mock_urlopen, tmp_path):
-        import json
-        mock_resp = type("Resp", (), {
-            "read": lambda self: json.dumps({"ok": True, "team_id": "T123ABC"}).encode(),
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *a: False,
-        })()
-        mock_urlopen.return_value = mock_resp
+    def test_detect_with_token(self, tmp_path):
+        responses = [_mock_httpx_response({"ok": True, "team_id": "T123ABC"})]
+        call_idx = iter(range(len(responses)))
 
-        cfg = Config(services=[
-            ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
-        ])
-        keys = detect("slack", tmp_path, cfg)
+        def _handler(request):
+            return responses[next(call_idx)]
+
+        transport = httpx.MockTransport(_handler)
+        mock_client = httpx.Client(transport=transport)
+
+        with patch.object(pooled, '_client', mock_client):
+            cfg = Config(services=[
+                ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
+            ])
+            keys = detect("slack", tmp_path, cfg)
         assert keys == ["slack:T123ABC"]
 
     def test_detect_without_token(self, tmp_path):
@@ -83,55 +92,53 @@ class TestSlackDetector:
         keys = detect("slack", tmp_path, cfg)
         assert keys == []
 
-    @patch("urllib.request.urlopen")
-    def test_detect_scopes_to_configured_channels(self, mock_urlopen, tmp_path):
-        import json
-        mock_resp = type("Resp", (), {
-            "read": lambda self: json.dumps({"ok": True, "team_id": "T123ABC"}).encode(),
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *a: False,
-        })()
-        mock_urlopen.return_value = mock_resp
+    def test_detect_scopes_to_configured_channels(self, tmp_path):
+        responses = [_mock_httpx_response({"ok": True, "team_id": "T123ABC"})]
+        call_idx = iter(range(len(responses)))
 
-        cfg = Config(services=[
-            ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"},
-                          channels=["C0SUPPORT", "C0ALERTS"]),
-        ])
-        keys = detect("slack", tmp_path, cfg)
+        def _handler(request):
+            return responses[next(call_idx)]
+
+        transport = httpx.MockTransport(_handler)
+        mock_client = httpx.Client(transport=transport)
+
+        with patch.object(pooled, '_client', mock_client):
+            cfg = Config(services=[
+                ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"},
+                              channels=["C0SUPPORT", "C0ALERTS"]),
+            ])
+            keys = detect("slack", tmp_path, cfg)
         # per-channel keys, not the whole workspace
         assert keys == ["slack:T123ABC:C0SUPPORT", "slack:T123ABC:C0ALERTS"]
 
-
-    @patch("urllib.request.urlopen")
-    def test_detect_resolves_channel_names_to_ids(self, mock_urlopen, tmp_path):
+    def test_detect_resolves_channel_names_to_ids(self, tmp_path):
         """End-to-end: human-readable channel names get resolved via Slack API."""
-        import json
-
         # First call: auth.test → team_id.  Second call: conversations.list → name→ID map.
-        auth_resp = type("Resp", (), {
-            "read": lambda self: json.dumps({"ok": True, "team_id": "T123ABC"}).encode(),
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *a: False,
-        })()
-        conv_resp = type("Resp", (), {
-            "read": lambda self: json.dumps({
+        responses = [
+            _mock_httpx_response({"ok": True, "team_id": "T123ABC"}),
+            _mock_httpx_response({
                 "ok": True,
                 "channels": [
                     {"id": "C_SUPPORT", "name": "support"},
                     {"id": "C_GENERAL", "name": "general"},
                 ],
                 "response_metadata": {"next_cursor": ""},
-            }).encode(),
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *a: False,
-        })()
-        mock_urlopen.side_effect = [auth_resp, conv_resp]
+            }),
+        ]
+        call_idx = iter(range(len(responses)))
 
-        cfg = Config(services=[
-            ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"},
-                          channels=["#support", "general"]),
-        ])
-        keys = detect("slack", tmp_path, cfg)
+        def _handler(request):
+            return responses[next(call_idx)]
+
+        transport = httpx.MockTransport(_handler)
+        mock_client = httpx.Client(transport=transport)
+
+        with patch.object(pooled, '_client', mock_client):
+            cfg = Config(services=[
+                ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"},
+                              channels=["#support", "general"]),
+            ])
+            keys = detect("slack", tmp_path, cfg)
         assert keys == ["slack:T123ABC:C_SUPPORT", "slack:T123ABC:C_GENERAL"]
 
 
@@ -146,64 +153,48 @@ class TestChannelNameResolution:
         assert _is_channel_id("#support") is False
         assert _is_channel_id("") is False
 
-    @patch("urllib.request.urlopen")
-    def test_resolve_passes_ids_through(self, mock_urlopen):
-        result = _resolve_channel_names("xoxb-test", ["C0AAA", "C0BBB"])
+    def test_resolve_passes_ids_through(self):
+        # IDs pass through without any HTTP call
+        transport = httpx.MockTransport(lambda r: (_ for _ in ()).throw(AssertionError("should not be called")))
+        mock_client = httpx.Client(transport=transport)
+        with patch.object(pooled, '_client', mock_client):
+            result = _resolve_channel_names("xoxb-test", ["C0AAA", "C0BBB"])
         assert result == ["C0AAA", "C0BBB"]
-        mock_urlopen.assert_not_called()
 
-    @patch("urllib.request.urlopen")
-    def test_resolve_looks_up_names(self, mock_urlopen):
-        import json
-        mock_resp = type("Resp", (), {
-            "read": lambda self: json.dumps({
-                "ok": True,
-                "channels": [
-                    {"id": "C_SUPPORT", "name": "support"},
-                    {"id": "C_ALERTS", "name": "alerts"},
-                ],
-                "response_metadata": {"next_cursor": ""},
-            }).encode(),
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *a: False,
-        })()
-        mock_urlopen.return_value = mock_resp
-
-        result = _resolve_channel_names("xoxb-test", ["#support", "alerts"])
+    def test_resolve_looks_up_names(self):
+        transport = httpx.MockTransport(lambda r: _mock_httpx_response({
+            "ok": True,
+            "channels": [
+                {"id": "C_SUPPORT", "name": "support"},
+                {"id": "C_ALERTS", "name": "alerts"},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }))
+        mock_client = httpx.Client(transport=transport)
+        with patch.object(pooled, '_client', mock_client):
+            result = _resolve_channel_names("xoxb-test", ["#support", "alerts"])
         assert result == ["C_SUPPORT", "C_ALERTS"]
 
-    @patch("urllib.request.urlopen")
-    def test_resolve_mixed_ids_and_names(self, mock_urlopen):
-        import json
-        mock_resp = type("Resp", (), {
-            "read": lambda self: json.dumps({
-                "ok": True,
-                "channels": [{"id": "C_SUPPORT", "name": "support"}],
-                "response_metadata": {"next_cursor": ""},
-            }).encode(),
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *a: False,
-        })()
-        mock_urlopen.return_value = mock_resp
-
-        result = _resolve_channel_names("xoxb-test", ["C0AAA", "#support"])
+    def test_resolve_mixed_ids_and_names(self):
+        transport = httpx.MockTransport(lambda r: _mock_httpx_response({
+            "ok": True,
+            "channels": [{"id": "C_SUPPORT", "name": "support"}],
+            "response_metadata": {"next_cursor": ""},
+        }))
+        mock_client = httpx.Client(transport=transport)
+        with patch.object(pooled, '_client', mock_client):
+            result = _resolve_channel_names("xoxb-test", ["C0AAA", "#support"])
         assert result == ["C0AAA", "C_SUPPORT"]
 
-    @patch("urllib.request.urlopen")
-    def test_resolve_drops_unresolvable_names(self, mock_urlopen):
-        import json
-        mock_resp = type("Resp", (), {
-            "read": lambda self: json.dumps({
-                "ok": True,
-                "channels": [],
-                "response_metadata": {"next_cursor": ""},
-            }).encode(),
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *a: False,
-        })()
-        mock_urlopen.return_value = mock_resp
-
-        result = _resolve_channel_names("xoxb-test", ["#nonexistent"])
+    def test_resolve_drops_unresolvable_names(self):
+        transport = httpx.MockTransport(lambda r: _mock_httpx_response({
+            "ok": True,
+            "channels": [],
+            "response_metadata": {"next_cursor": ""},
+        }))
+        mock_client = httpx.Client(transport=transport)
+        with patch.object(pooled, '_client', mock_client):
+            result = _resolve_channel_names("xoxb-test", ["#nonexistent"])
         assert result == []
 
 
@@ -216,22 +207,17 @@ def test_slack_keys_helper():
 
 class TestLinearDetector:
 
-    @patch("urllib.request.urlopen")
-    def test_detect_with_key(self, mock_urlopen, tmp_path):
-        import json
-        mock_resp = type("Resp", (), {
-            "read": lambda self: json.dumps({
-                "data": {"teams": {"nodes": [{"key": "ENG"}, {"key": "OPS"}]}}
-            }).encode(),
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *a: False,
-        })()
-        mock_urlopen.return_value = mock_resp
+    def test_detect_with_key(self, tmp_path):
+        transport = httpx.MockTransport(lambda r: _mock_httpx_response({
+            "data": {"teams": {"nodes": [{"key": "ENG"}, {"key": "OPS"}]}}
+        }))
+        mock_client = httpx.Client(transport=transport)
 
-        cfg = Config(services=[
-            ServiceConfig(name="linear", credentials={"api_key": "lin_test"}),
-        ])
-        keys = detect("linear", tmp_path, cfg)
+        with patch.object(pooled, '_client', mock_client):
+            cfg = Config(services=[
+                ServiceConfig(name="linear", credentials={"api_key": "lin_test"}),
+            ])
+            keys = detect("linear", tmp_path, cfg)
         assert keys == ["linear:ENG", "linear:OPS"]
 
     def test_detect_without_key(self, tmp_path):

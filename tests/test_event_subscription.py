@@ -8,10 +8,12 @@ PUT fallback).
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
+import httpx
 import pytest
 
+from modastack import http as pooled
 from modastack.subagent import _start_event_subscription
 
 
@@ -37,16 +39,19 @@ def _state_file(project, session="sess"):
 
 @patch("modastack.events.drain.drain_loop")
 @patch("modastack.events.client.EventServerClient")
-@patch("urllib.request.urlopen")
 @patch("modastack.events.server.register")
-def test_fresh_state_registers_without_put(mock_register, mock_urlopen,
+def test_fresh_state_registers_without_put(mock_register,
                                            mock_client, _drain, project):
     """With no saved deployment, go straight to register — no empty-id PUT."""
     mock_register.return_value = ("dep-1", "key-1")
 
-    _start_event_subscription("sess", ["github:o/r"], project)
+    transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError(f"unexpected HTTP call: {req.method} {req.url}")))
+    mock_http = httpx.Client(transport=transport)
 
-    mock_urlopen.assert_not_called()
+    with patch.object(pooled, '_client', mock_http):
+        _start_event_subscription("sess", ["github:o/r"], project)
+
     mock_register.assert_called_once()
     saved = json.loads(_state_file(project).read_text())
     assert saved == {"deployment_id": "dep-1", "api_key": "key-1"}
@@ -90,37 +95,59 @@ def test_register_exhausted_raises_clean_error(mock_register, _client, _drain,
 
 @patch("modastack.events.drain.drain_loop")
 @patch("modastack.events.client.EventServerClient")
-@patch("urllib.request.urlopen")
 @patch("modastack.events.server.register")
-def test_saved_state_uses_put_not_register(mock_register, mock_urlopen,
+def test_saved_state_uses_put_not_register(mock_register,
                                            mock_client, _drain, project):
     """With a saved deployment, update subscriptions via PUT — no re-register."""
     state = _state_file(project)
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"deployment_id": "dep-3", "api_key": "key-3"}))
 
-    _start_event_subscription("sess", ["github:o/r"], project)
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    mock_http = httpx.Client(transport=transport)
+
+    with patch.object(pooled, '_client', mock_http):
+        _start_event_subscription("sess", ["github:o/r"], project)
 
     mock_register.assert_not_called()
-    req = mock_urlopen.call_args.args[0]
-    assert req.full_url == f"{REMOTE_URL}/deployments/dep-3/subscriptions"
+    assert len(captured) >= 1
+    put_reqs = [r for r in captured if r.method == "PUT"]
+    assert len(put_reqs) == 1
+    assert str(put_reqs[0].url) == f"{REMOTE_URL}/deployments/dep-3/subscriptions"
     assert mock_client.call_args.kwargs["deployment_id"] == "dep-3"
 
 
 @patch("modastack.events.drain.drain_loop")
 @patch("modastack.events.client.EventServerClient")
-@patch("urllib.request.urlopen")
 @patch("modastack.events.server.register")
-def test_failed_put_falls_back_to_register(mock_register, mock_urlopen,
+def test_failed_put_falls_back_to_register(mock_register,
                                            mock_client, _drain, project):
     """A dead saved deployment (PUT fails) re-registers and persists fresh creds."""
     state = _state_file(project)
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"deployment_id": "dep-old", "api_key": "key-old"}))
-    mock_urlopen.side_effect = OSError("HTTP Error 401")
     mock_register.return_value = ("dep-new", "key-new")
 
-    _start_event_subscription("sess", ["github:o/r"], project)
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            raise httpx.HTTPStatusError(
+                "401 Unauthorized",
+                request=request,
+                response=httpx.Response(401),
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    mock_http = httpx.Client(transport=transport)
+
+    with patch.object(pooled, '_client', mock_http):
+        _start_event_subscription("sess", ["github:o/r"], project)
 
     mock_register.assert_called_once()
     saved = json.loads(_state_file(project).read_text())
@@ -132,9 +159,8 @@ def test_failed_put_falls_back_to_register(mock_register, mock_urlopen,
 
 @patch("modastack.events.drain.drain_loop")
 @patch("modastack.events.client.EventServerClient")
-@patch("urllib.request.urlopen")
 @patch("modastack.events.server.register")
-def test_each_session_registers_its_own_deployment(mock_register, mock_urlopen,
+def test_each_session_registers_its_own_deployment(mock_register,
                                                    mock_client, _drain, project):
     """Two sessions from one project root must NOT share a deployment.
 
@@ -144,12 +170,16 @@ def test_each_session_registers_its_own_deployment(mock_register, mock_urlopen,
     """
     mock_register.side_effect = [("dep-director", "key-d"), ("dep-lead", "key-l")]
 
-    _start_event_subscription("director", ["slack:T1"], project)
-    _start_event_subscription("lead", ["github:o/r"], project)
+    transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError(f"unexpected HTTP call: {req.method} {req.url}")))
+    mock_http = httpx.Client(transport=transport)
+
+    with patch.object(pooled, '_client', mock_http):
+        _start_event_subscription("director", ["slack:T1"], project)
+        _start_event_subscription("lead", ["github:o/r"], project)
 
     # No cross-session PUT: the lead registers fresh, never touching the
     # director's deployment.
-    mock_urlopen.assert_not_called()
     assert mock_register.call_count == 2
     assert json.loads(_state_file(project, "director").read_text())[
         "deployment_id"] == "dep-director"
@@ -165,9 +195,8 @@ def test_each_session_registers_its_own_deployment(mock_register, mock_urlopen,
 
 @patch("modastack.events.drain.drain_loop")
 @patch("modastack.events.client.EventServerClient")
-@patch("urllib.request.urlopen")
 @patch("modastack.events.server.register")
-def test_fresh_register_resets_session_cursor(mock_register, _urlopen,
+def test_fresh_register_resets_session_cursor(mock_register,
                                               _client, _drain, project):
     """A new deployment starts a new seq space — a leftover cursor from a
     previous deployment must not survive registration."""
@@ -231,15 +260,7 @@ def test_resolve_root_raises_without_installation(tmp_path):
 
 # --- Slack workspace registration (self-reply loop prevention) ---------------
 
-def _slack_resp(payload):
-    return type("Resp", (), {
-        "read": lambda self: json.dumps(payload).encode(),
-        "__enter__": lambda self: self,
-        "__exit__": lambda self, *a: False,
-    })()
-
-
-def test_register_slack_workspaces_posts_bot_token(monkeypatch):
+def test_register_slack_workspaces_posts_bot_token():
     """Regression for the Slack self-reply loop: the agent must register its
     workspace bot with the event server, else the event server can't identify
     (and skip) the bot's own messages and the agent loops on its own replies.
@@ -247,40 +268,44 @@ def test_register_slack_workspaces_posts_bot_token(monkeypatch):
     from modastack.events.server import register_slack_workspaces
     from modastack.config import Config, ServiceConfig
 
-    captured = {}
+    captured = []
 
-    def fake_urlopen(req, timeout=None):
-        url = req.full_url
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
         if "auth.test" in url:
-            return _slack_resp({"ok": True, "team_id": "T0952", "bot_id": "BSELF"})
+            return httpx.Response(200, json={"ok": True, "team_id": "T0952", "bot_id": "BSELF"})
         if url.endswith("/slack/workspaces"):
-            captured["url"] = url
-            captured["body"] = json.loads(req.data.decode())
-            return _slack_resp({"ok": True, "workspace_id": "T0952", "bot_id": "BSELF"})
+            captured.append({"url": url, "body": json.loads(request.content.decode())})
+            return httpx.Response(200, json={"ok": True, "workspace_id": "T0952", "bot_id": "BSELF"})
         raise AssertionError(f"unexpected url {url}")
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    cfg = Config(services=[
-        ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
-    ])
-    result = register_slack_workspaces("http://localhost:8080", cfg)
+    transport = httpx.MockTransport(handler)
+    mock_http = httpx.Client(transport=transport)
+
+    with patch.object(pooled, '_client', mock_http):
+        cfg = Config(services=[
+            ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
+        ])
+        result = register_slack_workspaces("http://localhost:8080", cfg)
 
     assert result == ["T0952"]
-    assert captured["url"] == "http://localhost:8080/slack/workspaces"
+    assert len(captured) == 1
+    assert captured[0]["url"] == "http://localhost:8080/slack/workspaces"
     # bot_id travels with the registration: relying on the server's own
     # auth.test fallback left self-reply filtering silently disabled
     # whenever that second lookup failed.
-    assert captured["body"] == {"workspace_id": "T0952",
-                                "bot_token": "xoxb-test",
-                                "bot_id": "BSELF"}
+    assert captured[0]["body"] == {"workspace_id": "T0952",
+                                   "bot_token": "xoxb-test",
+                                   "bot_id": "BSELF"}
 
 
-def test_register_slack_workspaces_noop_without_token(monkeypatch):
+def test_register_slack_workspaces_noop_without_token():
     from modastack.events.server import register_slack_workspaces
     from modastack.config import Config
 
-    def fake_urlopen(*a, **k):
-        raise AssertionError("no network call without a slack bot token")
+    transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError("no network call without a slack bot token")))
+    mock_http = httpx.Client(transport=transport)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    assert register_slack_workspaces("http://localhost:8080", Config()) == []
+    with patch.object(pooled, '_client', mock_http):
+        assert register_slack_workspaces("http://localhost:8080", Config()) == []

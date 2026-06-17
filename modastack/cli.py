@@ -230,6 +230,8 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
                 pid_file.unlink(missing_ok=True)
         except OSError:
             pass
+        from modastack import http as pooled_http
+        pooled_http.close()
     atexit.register(_cleanup)
 
     log = logging.getLogger(__name__)

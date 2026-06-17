@@ -1,10 +1,13 @@
 """Tests for the built-in MCP image generation server."""
 
 import json
+from unittest.mock import patch
 
+import httpx
 import pytest
 
 from modastack.mcp.image_server import generate_image, _handle_jsonrpc
+from modastack import http as pooled
 
 
 SAMPLE_CONNECTIONS = [
@@ -64,10 +67,18 @@ class TestGenerateImageRouting:
 
     def test_explicit_connection_selected(self):
         """Named connection is used even when multiple exist."""
-        # google-images has no real key, so we get an error downstream
-        result = generate_image("google-images", "a cat", "1024x1024", SAMPLE_CONNECTIONS)
-        # It should route to google (not openai) — the error won't say "not found"
+        # Mock the HTTP call so it doesn't hit a real API
+        transport = httpx.MockTransport(
+            lambda r: httpx.Response(200, json={
+                "generatedImages": [{"image": {"imageBytes": "abc", "mimeType": "image/png"}}]
+            })
+        )
+        mock_client = httpx.Client(transport=transport)
+        with patch.object(pooled, '_client', mock_client):
+            result = generate_image("google-images", "a cat", "1024x1024", SAMPLE_CONNECTIONS)
+        # It should route to google (not openai)
         assert "not found" not in result.get("error", "")
+        assert result.get("b64_json") == "abc"
 
 
 class TestMCPProtocol:

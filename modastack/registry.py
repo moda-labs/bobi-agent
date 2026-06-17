@@ -14,16 +14,13 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-import ssl
 import tarfile
 import tempfile
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
-import certifi
+import httpx
 import yaml
 
 from modastack import paths
@@ -55,10 +52,6 @@ def _all_registries(project_path: Path) -> list[str]:
     return result
 
 
-def _ssl_context() -> ssl.SSLContext:
-    return ssl.create_default_context(cafile=certifi.where())
-
-
 def _github_token() -> str:
     """Get a GitHub token from env or gh CLI."""
     import os
@@ -76,13 +69,16 @@ def _github_token() -> str:
     return token
 
 
-def _urlopen(url: str, timeout: int = 10):
-    headers = {"User-Agent": "modastack"}
+def _urlopen(url: str, timeout: int = 10) -> httpx.Response:
+    from modastack import http as pooled
+
+    headers: dict[str, str] = {}
     token = _github_token()
     if token:
         headers["Authorization"] = f"token {token}"
-    req = urllib.request.Request(url, headers=headers)
-    return urllib.request.urlopen(req, timeout=timeout, context=_ssl_context())
+    resp = pooled.get(url, headers=headers or None, timeout=float(timeout))
+    resp.raise_for_status()
+    return resp
 
 
 def _meta_path(project_path: Path, name: str) -> Path:
@@ -112,9 +108,9 @@ def _read_remote_version(name: str, repo: str = DEFAULT_REPO) -> str | None:
     """Fetch just agent.yaml from GitHub to read the remote version."""
     url = f"{GITHUB_RAW}/{repo}/main/agents/{name}/agent.yaml"
     try:
-        with _urlopen(url, timeout=5) as resp:
-            data = yaml.safe_load(resp.read())
-            return data.get("version") if data else None
+        resp = _urlopen(url, timeout=5)
+        data = yaml.safe_load(resp.content)
+        return data.get("version") if data else None
     except Exception:
         return None
 
@@ -165,10 +161,10 @@ def fetch(project_path: Path, name: str, repo: str | None = None) -> Path:
     log.info(f"Fetching agent team '{name}' from {repo}")
 
     try:
-        with _urlopen(url, timeout=30) as resp:
-            tarball = BytesIO(resp.read())
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
+        resp = _urlopen(url, timeout=30)
+        tarball = BytesIO(resp.content)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
             raise RuntimeError(f"Agent repo '{repo}' not found on GitHub") from e
         raise RuntimeError(f"Failed to fetch from GitHub: {e}") from e
     except Exception as e:
@@ -220,8 +216,8 @@ def _list_remote_single(repo: str) -> list[dict]:
     """List agent teams from a single registry."""
     url = f"{GITHUB_RAW}/{repo}/main/agents/registry.yaml"
     try:
-        with _urlopen(url, timeout=5) as resp:
-            data = yaml.safe_load(resp.read())
+        resp = _urlopen(url, timeout=5)
+        data = yaml.safe_load(resp.content)
     except Exception:
         return []
     if not data or "agents" not in data:
