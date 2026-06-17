@@ -13,9 +13,11 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Price per million tokens (input, output) by provider:model.
-# Used as a fallback when ResultMessage.total_cost_usd is not available
-# (e.g. for connections to non-Anthropic providers).
+# Fallback price per million tokens (input, output) by provider:model.
+# Used only when the provider's API response doesn't include cost directly
+# (e.g. non-Anthropic providers via connections). These are approximate
+# list prices as of 2025-06 and should be updated periodically — the
+# authoritative source of cost is always the provider's own billing.
 PRICE_TABLE: dict[str, tuple[float, float]] = {
     # Anthropic
     "anthropic:claude-sonnet-4-20250514": (3.0, 15.0),

@@ -15,82 +15,99 @@ import logging
 import sys
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Provider routing: connection.provider → generate function
-_PROVIDERS: dict[str, object] = {}
+# ---------------------------------------------------------------------------
+# Provider base URLs — override via environment if needed
+# ---------------------------------------------------------------------------
+OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
+GOOGLE_IMAGEN_URL_TEMPLATE = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}"
+    ":generateImages"
+)
+
+# Default models when the connection config doesn't specify one
+OPENAI_DEFAULT_MODEL = "gpt-image-1"
+GOOGLE_DEFAULT_MODEL = "imagen-3.0-generate-002"
 
 
-def _openai_generate(api_key: str, model: str, prompt: str, size: str) -> dict:
-    """Generate an image using OpenAI's images/generations endpoint."""
-    url = "https://api.openai.com/v1/images/generations"
-    body = {
-        "model": model or "gpt-image-1",
-        "prompt": prompt,
-        "n": 1,
-        "size": size or "1024x1024",
-    }
+# ---------------------------------------------------------------------------
+# Shared HTTP helper
+# ---------------------------------------------------------------------------
+
+def _post_json(url: str, body: dict, headers: dict,
+               provider_label: str, timeout: int = 120) -> dict:
+    """POST JSON to *url* and return the parsed response body.
+
+    Returns ``{"error": "..."}`` on any HTTP or network failure so
+    callers never need their own try/except around requests.
+    """
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers={**headers, "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-        images = data.get("data", [])
-        if not images:
-            return {"error": "No images returned"}
-        result = images[0]
-        return {
-            "url": result.get("url", ""),
-            "revised_prompt": result.get("revised_prompt", ""),
-            "b64_json": result.get("b64_json", ""),
-        }
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")[:500]
-        return {"error": f"OpenAI API error {e.code}: {body}"}
+        err_body = e.read().decode("utf-8", errors="replace")[:500]
+        return {"error": f"{provider_label} API error {e.code}: {err_body}"}
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         return {"error": f"Request failed: {e}"}
+
+
+# ---------------------------------------------------------------------------
+# Provider implementations
+# ---------------------------------------------------------------------------
+
+def _openai_generate(api_key: str, model: str, prompt: str, size: str) -> dict:
+    """Generate an image using OpenAI's images/generations endpoint."""
+    data = _post_json(
+        url=OPENAI_IMAGES_URL,
+        body={
+            "model": model or OPENAI_DEFAULT_MODEL,
+            "prompt": prompt,
+            "n": 1,
+            "size": size or "1024x1024",
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+        provider_label="OpenAI",
+    )
+    if "error" in data and isinstance(data["error"], str):
+        return data
+    images = data.get("data", [])
+    if not images:
+        return {"error": "No images returned"}
+    result = images[0]
+    return {
+        "url": result.get("url", ""),
+        "revised_prompt": result.get("revised_prompt", ""),
+        "b64_json": result.get("b64_json", ""),
+    }
 
 
 def _google_generate(api_key: str, model: str, prompt: str, size: str) -> dict:
     """Generate an image using Google's Imagen API."""
-    model = model or "imagen-3.0-generate-002"
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
-        f":generateImages?key={api_key}"
+    model = model or GOOGLE_DEFAULT_MODEL
+    url = GOOGLE_IMAGEN_URL_TEMPLATE.format(model=model) + f"?key={api_key}"
+    data = _post_json(
+        url=url,
+        body={"prompt": prompt, "config": {"numberOfImages": 1}},
+        headers={},
+        provider_label="Google",
     )
-    body = {
-        "prompt": prompt,
-        "config": {"numberOfImages": 1},
+    if "error" in data and isinstance(data["error"], str):
+        return data
+    images = data.get("generatedImages", [])
+    if not images:
+        return {"error": "No images returned"}
+    img = images[0].get("image", {})
+    return {
+        "b64_json": img.get("imageBytes", ""),
+        "mime_type": img.get("mimeType", "image/png"),
     }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-        images = data.get("generatedImages", [])
-        if not images:
-            return {"error": "No images returned"}
-        img = images[0].get("image", {})
-        return {
-            "b64_json": img.get("imageBytes", ""),
-            "mime_type": img.get("mimeType", "image/png"),
-        }
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")[:500]
-        return {"error": f"Google API error {e.code}: {body}"}
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
-        return {"error": f"Request failed: {e}"}
 
 
 _PROVIDER_HANDLERS = {

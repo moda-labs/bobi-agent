@@ -264,9 +264,6 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
     task = build_startup_prompt(role, project_path, agent_name=agent_name,
                                 session_name=session_name)
 
-    from modastack.mcp.inject import inject_builtin_mcp_servers
-    mcp = inject_builtin_mcp_servers(cfg.mcp_servers, cfg.connections)
-
     log.info(f"Modastack running for {project_path.name}")
     spawn_adhoc(
         cwd=str(project_path),
@@ -274,7 +271,7 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
         name=session_name,
         persistent=True,
         role=role,
-        mcp_servers=mcp or None,
+        mcp_servers=cfg.mcp_servers or None,
     )
 
 
