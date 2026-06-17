@@ -10,8 +10,9 @@ import json
 from http.server import HTTPServer
 from threading import Thread
 
-import numpy as np
 import pytest
+
+import numpy as np
 
 from modastack.kb.sidecar import _make_handler, MODEL_NAME, EMBEDDING_DIM
 

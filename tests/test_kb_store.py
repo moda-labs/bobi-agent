@@ -434,3 +434,29 @@ class TestKBManagement:
         kbs = KBStore.list_kbs()
         counted = next(k for k in kbs if k["name"] == "counted")
         assert counted["entry_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Optional dependency error messages (#259)
+# ---------------------------------------------------------------------------
+
+class TestOptionalDependencyErrors:
+    """Verify graceful errors when optional [kb] deps are missing."""
+
+    def test_missing_sqlite_vec_gives_clear_error(self, kb_root):
+        """When sqlite-vec is not installed, _load_vec raises ImportError
+        with install instructions instead of a bare ModuleNotFoundError."""
+        import builtins
+        real_import = builtins.__import__
+
+        def _block_sqlite_vec(name, *args, **kwargs):
+            if name == "sqlite_vec":
+                raise ImportError("No module named 'sqlite_vec'")
+            return real_import(name, *args, **kwargs)
+
+        import apsw
+        conn = apsw.Connection(":memory:")
+        with patch("builtins.__import__", side_effect=_block_sqlite_vec):
+            with pytest.raises(ImportError, match="pip install 'modastack\\[kb\\]'"):
+                KBStore._load_vec(conn)
+        conn.close()

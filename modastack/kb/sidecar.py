@@ -105,7 +105,14 @@ def main():
     port_file = state_dir / "embedding-sidecar.port"
 
     log.info("Loading model %s ...", MODEL_NAME)
-    from sentence_transformers import SentenceTransformer
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        log.error(
+            "Knowledge base requires sentence-transformers. "
+            "Install with: pip install 'modastack[kb]'"
+        )
+        sys.exit(1)
     model = SentenceTransformer(MODEL_NAME)
     log.info("Model loaded (dim=%d)", EMBEDDING_DIM)
 
