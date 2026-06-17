@@ -337,3 +337,52 @@ class TestEventsCommand:
         assert result.exit_code == 0, result.output
         assert "legacy_push" not in result.output
         assert "new_pr" in result.output
+
+
+# --- Discovery commands work without installation root ---------------------
+
+
+class TestDiscoveryCommandsNoRoot:
+    """Commands that should work on a fresh install (no .modastack/agent.yaml)."""
+
+    def _no_root(self):
+        """Patch that makes root detection fail, simulating a fresh install."""
+        from click import UsageError
+        return patch(
+            "modastack.cli._detect_project_root",
+            side_effect=UsageError("No modastack installation found"),
+        )
+
+    def test_agents_browse_without_root(self):
+        runner = CliRunner()
+        fake_remote = [{"name": "eng-team", "version": "1.0", "description": "test"}]
+        with self._no_root(), \
+             patch("modastack.registry.list_remote", return_value=fake_remote):
+            result = runner.invoke(main, ["agents", "browse"])
+        assert result.exit_code == 0, result.output
+        assert "eng-team" in result.output
+
+    def test_workflows_list_without_root(self):
+        runner = CliRunner()
+        with self._no_root():
+            result = runner.invoke(main, ["workflows", "list"])
+        assert result.exit_code == 0, result.output
+
+    def test_workflows_validate_without_root(self, tmp_path):
+        wf_file = tmp_path / "test.yaml"
+        wf_file.write_text(
+            "name: test-wf\ntrigger: manual\nsteps:\n"
+            "  - name: s1\n    type: prompt\n    prompt: hello\n"
+        )
+        runner = CliRunner()
+        with self._no_root():
+            result = runner.invoke(main, ["workflows", "validate", str(wf_file)])
+        assert result.exit_code == 0, result.output
+        assert "Valid" in result.output
+
+    def test_agents_list_requires_root(self):
+        """Non-discovery commands should still fail without a root."""
+        runner = CliRunner()
+        with self._no_root():
+            result = runner.invoke(main, ["agents", "list"])
+        assert result.exit_code != 0
