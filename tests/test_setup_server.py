@@ -82,6 +82,16 @@ class TestSecurity:
         r = c.get("/", headers={"host": "evil.example.com"})
         assert r.status_code == 403
 
+    def test_ping_is_alive_and_nonce_guarded(self, project):
+        # The heartbeat's liveness endpoint: 200 {ok:true} with the nonce,
+        # 403 without it (it rides the same /api guard as everything else).
+        app = server.build_app(SetupState(), project, nonce=NONCE)
+        c = _testclient(app)
+        assert c.get("/api/ping").status_code == 403   # no nonce
+        c.headers.update({server.NONCE_HEADER: NONCE})
+        r = c.get("/api/ping")
+        assert r.status_code == 200 and r.json() == {"ok": True}
+
 
 # --- serialize_state -----------------------------------------------------
 
@@ -385,6 +395,27 @@ def _seed_library_team(home, name="legacy-bot"):
     return _seed_team(home / "modastack-agents", name, parent=".")
 
 
+class TestListTeamsIn:
+    def test_missing_directory_is_empty(self, tmp_path):
+        from modastack.setup import open_mode
+        assert open_mode.list_teams_in(tmp_path / "nope") == []
+
+    def test_a_path_thats_a_file_is_empty(self, tmp_path):
+        from modastack.setup import open_mode
+        f = tmp_path / "f.txt"
+        f.write_text("x")
+        assert open_mode.list_teams_in(f) == []
+
+    def test_scans_dir_itself_and_children(self, tmp_path):
+        from modastack.setup import open_mode
+        # the dir itself is a team AND it contains a child team
+        (tmp_path / "agent.yaml").write_text("agent: root-team\n")
+        (tmp_path / "child").mkdir()
+        (tmp_path / "child" / "agent.yaml").write_text("agent: child-team\n")
+        names = {t["name"] for t in open_mode.list_teams_in(tmp_path)}
+        assert names == {"root-team", "child-team"}
+
+
 class TestIntro:
     def test_intro_scans_the_library_by_default(self, project, home):
         # The default scan + create location is the machine-wide library
@@ -428,6 +459,22 @@ class TestIntro:
         c = _client(SetupState(), project, home_root=home)
         r = c.get("/api/teams", params={"dir": "/etc"})
         assert r.status_code == 400
+
+    def test_teams_defaults_to_library(self, project, home):
+        # No dir → scans the library (same as intro's default scan).
+        _seed_library_team(home, "legacy-bot")
+        c = _client(SetupState(), project, home_root=home)
+        d = c.get("/api/teams").json()
+        assert d["dir"] == str((home / "modastack-agents").resolve())
+        assert "legacy-bot" in {t["name"] for t in d["teams"]}
+
+    def test_teams_accepts_relative_path_under_home(self, project, home):
+        # A relative dir re-bases under home (not the process cwd).
+        _seed_team(home / "work", "triage-bot", parent="agents")
+        c = _client(SetupState(), project, home_root=home)
+        d = c.get("/api/teams", params={"dir": "work/agents"}).json()
+        assert d["dir"] == str((home / "work" / "agents").resolve())
+        assert "triage-bot" in {t["name"] for t in d["teams"]}
 
     def test_start_open_rejects_fork_inside_source(self, project, home):
         src = home / "modastack-agents" / "pa"
@@ -549,6 +596,22 @@ class TestIntro:
         d = c.get("/api/browse", params={"path": "/etc"}).json()
         assert d["path"] == str(home.resolve())
         assert d["parent"] is None
+
+    def test_browse_404_on_a_file(self, project, home):
+        (home / "notes.txt").write_text("x")
+        c = _client(SetupState(), project, home_root=home)
+        r = c.get("/api/browse", params={"path": str(home / "notes.txt")})
+        assert r.status_code == 404
+
+    def test_browse_survives_library_taken_by_a_file(self, project, home):
+        # If ~/modastack-agents already exists as a FILE, the lazy mkdir must
+        # not 500 the GET — it falls back to listing home.
+        (home / "modastack-agents").write_text("not a dir")
+        (home / "work").mkdir()
+        c = _client(SetupState(), project, home_root=home)
+        d = c.get("/api/browse").json()
+        assert d["path"] == str(home.resolve())   # fell back to home
+        assert "work" in d["dirs"]
 
     def test_rename_sets_team_name(self, project):
         st = SetupState(stage=Stage.DESIGN, team_name="auto-name")

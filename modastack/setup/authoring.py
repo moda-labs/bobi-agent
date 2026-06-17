@@ -449,10 +449,23 @@ async def author_pack(state: SetupState, project: Path, *,
     events. In **create** mode every file is written from scratch; in
     **open/modify** mode existing files are merged/edited in place so nothing
     the user already wrote is lost. Side effect: writes files, persists state."""
-    from modastack.setup import services
-    from modastack.setup.actions import team_source_dir
+    from modastack.setup import open_mode, services
+    from modastack.setup.actions import ActionError, team_source_dir
     state.team_name = derive_team_name(state)
     pack = team_source_dir(project, state)
+    # Create-mode collision guard: a fresh team auto-named from the goal lands in
+    # the shared `~/modastack-agents/` library, where slugs collide (two "support
+    # bot" sessions both → support-bot). Refuse to author over a DIFFERENT team
+    # we haven't claimed this session, so the second create can't silently
+    # overwrite the first one's source. Once claimed (source_dir already points
+    # at this concrete folder) or in open/modify mode (edit-in-place by design),
+    # re-authoring is fine.
+    claimed = bool(state.source_dir) and Path(state.source_dir).name == state.team_name
+    if state.mode == "create" and not claimed and open_mode.is_team(pack):
+        raise ActionError(
+            f"a team named '{state.team_name}' already exists at {pack} — "
+            f"rename this team (the ✎ pencil by its name) or pick another "
+            f"location, so you don't overwrite it.")
     # Persist the concrete location (create resolved <base>/<name>) so the Done
     # screen, /api/files, install, and list_teams_in all agree on it. A source
     # in the home library lives outside the project, so it stays absolute.

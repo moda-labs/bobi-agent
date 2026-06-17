@@ -22,10 +22,6 @@ def is_team(d: Path) -> bool:
     return d.is_dir() and (d / "agent.yaml").is_file()
 
 
-# Internal alias kept for the module's existing call sites.
-_is_team = is_team
-
-
 def _team_display_name(d: Path) -> str:
     """The team's declared name (agent.yaml `agent:`), falling back to the
     folder name — so a team in `modastack/` shows its real name, not 'modastack'."""
@@ -54,7 +50,7 @@ def list_teams_in(scan_dir: Path) -> list[dict]:
             key = str(d.resolve())
         except OSError:
             return
-        if not _is_team(d) or key in seen:
+        if not is_team(d) or key in seen:
             return
         seen.add(key)
         teams.append({"name": _team_display_name(d), "path": key})

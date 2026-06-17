@@ -96,6 +96,18 @@ def test_finish_builds_to_file_browser(page, modastack_url):
     expect(page.get_by_text("you can close this tab")).to_be_visible()
 
 
+def test_escape_closes_connection_overlay(page, modastack_url):
+    # Escape closes the connection-setup popup too (not just the folder picker).
+    _enter(page, modastack_url)
+    page.fill("#chinput", GOAL_MSG)
+    page.click("#chsend")
+    expect(page.locator(".uconn")).to_contain_text("GitHub", timeout=10_000)
+    page.locator(".uconn", has_text="GitHub").locator("[data-secretopen]").click()
+    expect(page.locator("#secret-ov")).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(page.locator("#secret-ov")).to_have_count(0)
+
+
 def test_native_secret_popup_captures_token(page, modastack_url):
     _enter(page, modastack_url)
     page.fill("#chinput", GOAL_MSG)

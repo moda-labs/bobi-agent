@@ -3,6 +3,7 @@ manifest, and a full pour that produces a pack passing validation."""
 
 import asyncio
 
+import pytest
 import yaml
 
 from modastack.setup import actions, authoring
@@ -192,6 +193,32 @@ class TestAuthorPour:
         assert s.source_dir == "modastack/triage-bot"
         s.team_name = "triage-bot"
         assert actions.team_source_dir(tmp_path, s) == tmp_path / "modastack" / "triage-bot"
+
+    def test_create_refuses_to_overwrite_an_existing_library_team(self, tmp_path):
+        # Two creates auto-named the same slug must not clobber each other —
+        # the second blocks instead of silently overwriting the first's source.
+        existing = tmp_path / "modastack" / "triage-bot"
+        existing.mkdir(parents=True)
+        (existing / "agent.yaml").write_text("agent: the-original\n")
+        s = _spec_state()                 # team_name="triage-bot", mode=create
+        s.source_dir = "modastack"        # the base — not yet claimed
+        with pytest.raises(actions.ActionError, match="already exists"):
+            _run(_collect(authoring.author_pack(
+                s, tmp_path, stream_fn=self._fake_stream())))
+        # the original team's source is untouched
+        assert (existing / "agent.yaml").read_text() == "agent: the-original\n"
+
+    def test_create_reauthors_its_own_claimed_folder(self, tmp_path):
+        # Re-running build once the team is claimed (source_dir already points at
+        # <base>/<slug>) is fine — not a collision with a different team.
+        existing = tmp_path / "modastack" / "triage-bot"
+        existing.mkdir(parents=True)
+        (existing / "agent.yaml").write_text("agent: triage-bot\n")
+        s = _spec_state()
+        s.source_dir = "modastack/triage-bot"   # already ours
+        _run(_collect(authoring.author_pack(
+            s, tmp_path, stream_fn=self._fake_stream())))
+        assert (existing / "agent.yaml").is_file()   # re-authored, no error
 
     def test_pour_strips_wrapping_code_fence(self, tmp_path):
         async def fenced(*, system_prompt, user_prompt, model, cwd):

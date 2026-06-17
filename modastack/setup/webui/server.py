@@ -94,6 +94,20 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     home = (home_root or Path.home()).resolve()
     library = home / "modastack-agents"
 
+    def _within_home(raw: str, default: Path) -> tuple[Path, bool]:
+        """Resolve a user-supplied path and confine it to the home tree — the
+        single source of truth for the folder-picker / scan security boundary.
+        Relative paths re-base under home (consistent across endpoints). Returns
+        (path, ok); ok is False when the resolved path escaped home, so each
+        caller picks its own policy (reject vs. fall back)."""
+        if not raw:
+            return default, True
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            p = home / p
+        p = p.resolve()
+        return p, (p == home or home in p.parents)
+
     # --- security middleware: Host guard + nonce on /api ---------------
     @app.middleware("http")
     async def _guard(request: Request, call_next):
@@ -156,12 +170,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # "which folder holds your teams?"). Accepts an absolute path or one
         # relative to home; confined to the home tree, like the picker.
         from modastack.setup import open_mode
-        raw = (request.query_params.get("dir") or "").strip()
-        target = Path(raw).expanduser() if raw else library
-        if not target.is_absolute():
-            target = home / target
-        target = target.resolve()
-        if target != home and home not in target.parents:
+        target, ok = _within_home(request.query_params.get("dir") or "", library)
+        if not ok:
             return JSONResponse(
                 {"error": "pick a folder inside your home directory"},
                 status_code=400)
@@ -183,10 +193,16 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # repos live there); confined to it so the localhost page can't list
         # the whole filesystem. Paths are absolute. Anything outside home can
         # still be typed into the location field directly.
-        library.mkdir(parents=True, exist_ok=True)  # so it's navigable on day one
-        raw = (request.query_params.get("path") or "").strip()
-        here = Path(raw).expanduser().resolve() if raw else library
-        if here != home and home not in here.parents:
+        # Best-effort create so the library is navigable on day one; never let
+        # a read-only home or a file already named `modastack-agents` turn a GET
+        # into a 500 — just fall back to listing home.
+        try:
+            library.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        default = library if library.is_dir() else home
+        here, ok = _within_home(request.query_params.get("path") or "", default)
+        if not ok:
             here = home
         if not here.is_dir():
             return JSONResponse({"error": "not a directory"}, status_code=404)
