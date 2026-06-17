@@ -1,0 +1,148 @@
+"""Integration tests for inter-agent messaging over the event server.
+
+[comms-v1 / #268] These start a real local event server and drive the full
+transport — ``deliver()`` publishes an ``inbox/<target>`` event, the server
+fans it to the target's WebSocket subscription, and the drain loop pushes it
+into the target's in-process inbox queue. No Claude session is needed: the
+Session run loop's ``recv()``/``respond()`` is simulated, so these exercise the
+transport itself (the part #268 changed) without the cost of real LLM turns.
+
+Requires Node (the local event server). Skips cleanly if it can't start.
+"""
+
+import json
+import os
+import signal
+import socket
+import threading
+import time
+import urllib.request
+
+import pytest
+import yaml
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def inbox_event_server(modastack_env):
+    """Start a local event server on a free port and point config at it."""
+    from modastack.events.server import ensure_running
+    from modastack.events import publish as _pub
+
+    port = _free_port()
+    url = f"http://localhost:{port}"
+
+    agent_yaml = modastack_env.project_path / ".modastack" / "agent.yaml"
+    original = agent_yaml.read_text()
+    data = yaml.safe_load(original)
+    data["event_server_url"] = url
+    agent_yaml.write_text(yaml.dump(data))
+    _pub._es_url_cache.clear()  # resolved URL is cached per project root
+
+    ensure_running(port, project_path=modastack_env.project_path)
+
+    deadline = time.monotonic() + 15
+    healthy = False
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"{url}/health", timeout=2) as r:
+                if json.loads(r.read()).get("status") == "ok":
+                    healthy = True
+                    break
+        except Exception:
+            time.sleep(0.3)
+    if not healthy:
+        pytest.skip("local event server (Node) unavailable")
+
+    yield url
+
+    pid_file = modastack_env.state_dir / "event-server.pid"
+    if pid_file.exists():
+        try:
+            os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
+        except (ProcessLookupError, ValueError, OSError):
+            pass
+    agent_yaml.write_text(original)
+    _pub._es_url_cache.clear()
+
+
+def _make_addressable(name, root):
+    """Register a session + start its inbox subscription, as Session.start does."""
+    from modastack.inbox import Inbox
+    from modastack.subagent import _start_event_subscription
+    from modastack.sdk import get_registry, SessionEntry
+
+    inbox = Inbox(name)
+    inbox.start()
+    get_registry().register(SessionEntry(name=name, cwd=str(root), pid=os.getpid()))
+    _start_event_subscription(name, [f"inbox/{name}"], root)
+    return inbox
+
+
+def test_inbox_message_round_trips_over_event_server(inbox_event_server, modastack_env):
+    """A non-wait deliver() reaches the target's inbox via the event server."""
+    from modastack.inbox import deliver, get_local_inbox
+
+    root = modastack_env.project_path
+    sender_inbox = _make_addressable("agent-x", root)
+    target_inbox = _make_addressable("agent-y", root)
+
+    time.sleep(2)  # let the WebSocket subscriptions connect
+
+    try:
+        ok, _ = deliver("agent-y", "hello from x", sender="agent-x", wait=False)
+        assert ok
+
+        inbox_y = get_local_inbox("agent-y")
+        deadline = time.monotonic() + 15
+        msg = None
+        while time.monotonic() < deadline and msg is None:
+            msg = inbox_y.recv(timeout=1)
+
+        assert msg is not None, "message did not round-trip over the event server"
+        assert "hello from x" in msg.text
+        assert msg.sender == "agent-x"
+    finally:
+        sender_inbox.close()
+        target_inbox.close()
+
+
+def test_blocking_ask_round_trips_over_event_server(inbox_event_server, modastack_env):
+    """A wait=True deliver() gets the target's reply (transitional rendezvous)."""
+    from modastack.inbox import deliver, get_local_inbox
+
+    root = modastack_env.project_path
+    sender_inbox = _make_addressable("ask-x", root)
+    target_inbox = _make_addressable("ask-y", root)
+
+    time.sleep(2)
+
+    stop = threading.Event()
+
+    def responder():
+        # Stand in for the target session's run loop: drain the inbox and
+        # respond to wait-mode messages.
+        inbox_y = get_local_inbox("ask-y")
+        while not stop.is_set():
+            m = inbox_y.recv(timeout=0.5)
+            if m is None:
+                continue
+            if m.wait:
+                inbox_y.respond(m.id, f"echo:{m.text}")
+
+    t = threading.Thread(target=responder, daemon=True)
+    t.start()
+    try:
+        ok, response = deliver("ask-y", "ping", sender="ask-x", wait=True, timeout=20)
+        assert ok, response
+        assert response == "echo:ping"
+    finally:
+        stop.set()
+        t.join(timeout=2)
+        sender_inbox.close()
+        target_inbox.close()

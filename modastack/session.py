@@ -1,9 +1,10 @@
 """Unified session — Claude Code client with an inbox.
 
 Every session is identical: a ClaudeSDKClient connected to an inbox
-drain loop. Messages arrive via the inbox HTTP server and are
-injected into the Claude session in order. The only difference
-between a "manager" and an "agent" is what feeds the inbox.
+drain loop. Each session subscribes to its own ``inbox/<self>`` topic on the
+event server and injects arriving messages into the Claude session in order.
+The only difference between a "manager" and an "agent" is what extra topics it
+subscribes to (the manager also subscribes to external resource topics).
 """
 
 from __future__ import annotations
@@ -42,10 +43,14 @@ class Session:
         on_response=None,
         extra_options: dict | None = None,
         role: str = "engineer",
+        subscribe: list[str] | None = None,
     ) -> None:
         self.name = name
         self.cwd = cwd
         self.role = role
+        # Extra event topics beyond this session's own inbox/<self> (e.g. the
+        # manager's external resource topics). inbox/<self> is always added.
+        self._subscribe = list(subscribe or [])
         self.inbox = Inbox(name)
         self._system_prompt = system_prompt or {
             "type": "preset",
@@ -57,6 +62,7 @@ class Session:
         self._extra_options = opts
 
         self._client = None
+        self._subscription = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -74,10 +80,6 @@ class Session:
         self._rotation_count = 0
         self._flush_snapshot_mtime = 0.0
         self._flush_snapshot_hash = ""
-
-    @property
-    def port(self) -> int:
-        return self.inbox.port
 
     def detect_state(self) -> str:
         return self._state
@@ -139,8 +141,9 @@ class Session:
     async def _rotate(self) -> None:
         """Lightweight client cycle — keep inbox alive, only swap the SDK client.
 
-        Step 1: Does NOT call stop()/start() which would tear down the inbox
-        HTTP server and event subscription. Only cycles self._client.
+        Does NOT call stop()/start() which would tear down the inbox and the
+        event subscription (WS client + drain thread). Only cycles self._client,
+        so the session stays addressable across a rotation.
         """
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
@@ -453,7 +456,7 @@ class Session:
             registry.update(self.name, status="idle")
 
         self._ready.set()
-        log.info(f"Session '{self.name}' ready (port={self.inbox.port})")
+        log.info(f"Session '{self.name}' ready")
 
         inbox_task = asyncio.create_task(self._inbox_loop())
 
@@ -487,17 +490,54 @@ class Session:
             self._loop.close()
             self._loop = None
 
+    def _start_subscription(self) -> None:
+        """Subscribe this session to its own inbox topic (+ any extras).
+
+        Every session is addressable: it registers one event-server deployment
+        carrying ``inbox/<self>`` plus any extra topics (the manager's external
+        resource topics). The drain feeds arriving messages into this session's
+        in-process inbox queue.
+
+        Failure handling depends on what the session needs the subscription for.
+        A **coordinator** (subscribes to external resource topics — the manager)
+        is useless without it: a deaf manager that still reports ``idle`` would
+        silently swallow every Slack/GitHub/inbox event, so its failure is fatal
+        and surfaces at start. An **ephemeral inbox-only worker** stays
+        best-effort — a transient event-server blip shouldn't abort real work;
+        it just can't be messaged until it next subscribes.
+        """
+        keys = [f"inbox/{self.name}"]
+        for key in self._subscribe:
+            if key not in keys:
+                keys.append(key)
+        has_external = any(not k.startswith("inbox/") for k in keys)
+        try:
+            from modastack.paths import modastack_root
+            from modastack.subagent import _start_event_subscription
+            self._subscription = _start_event_subscription(
+                self.name, keys, modastack_root())
+        except Exception:
+            if has_external:
+                # Don't let a coordinator advertise itself as alive while deaf.
+                raise
+            log.warning(
+                "Event subscription failed for '%s' — session will run but "
+                "will not receive messages", self.name, exc_info=True,
+            )
+
     def start(self, startup_prompt: str | None = None, timeout: int = 120) -> bool:
         """Start the session in a daemon thread.
 
-        Starts the inbox HTTP server immediately so the session is
-        addressable before the Claude client finishes connecting.
-        Returns True when the session is ready for messages.
+        Registers the in-process inbox and starts the session's event
+        subscription immediately so it is addressable (via ``inbox/<self>``)
+        before the Claude client finishes connecting. Returns True when the
+        session is ready for messages.
         """
         if self._thread and self._thread.is_alive():
             return True
 
         self.inbox.start()
+        self._start_subscription()
 
         from modastack.sdk import compute_manifest_hash
         registry = get_registry()
@@ -508,7 +548,6 @@ class Session:
                 role=self.role,
                 cwd=self.cwd,
                 status="starting",
-                inbox_port=self.inbox.port,
                 pid=os.getpid(),
                 image_hash=compute_manifest_hash(),
             )
@@ -536,6 +575,12 @@ class Session:
             self._keep_alive.set()
         if self._thread:
             self._thread.join(timeout=15)
+        # Tear down the event subscription (WS client + drain thread) BEFORE
+        # unregistering the inbox, so the drain can't push into — or warn about —
+        # a closed inbox on its way out.
+        if self._subscription is not None:
+            self._subscription.stop()
+            self._subscription = None
         self.inbox.close()
 
     def is_alive(self) -> bool:

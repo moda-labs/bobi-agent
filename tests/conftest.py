@@ -25,6 +25,28 @@ def _reset_paths_root():
     yield
     paths._root = before
 
+
+@pytest.fixture(autouse=True)
+def _no_event_server_io(request, monkeypatch):
+    """Unit tests never touch a real event server (conftest invariant).
+
+    ``Session.start()`` now starts an ``inbox/<self>`` subscription, which
+    would register a deployment and even spawn a local Node server. Stub the
+    subscription so unit tests stay hermetic. ``Session`` imports the helper
+    lazily, so patching the module attribute reaches it; ``test_event_subscription``
+    imports it eagerly and tests it directly, so it is unaffected. Integration
+    and e2e tests drive the real transport and opt out.
+    """
+    p = str(request.fspath)
+    if "/integration/" in p or "/e2e/" in p:
+        yield
+        return
+    monkeypatch.setattr(
+        "modastack.subagent._start_event_subscription",
+        lambda *a, **k: None,
+    )
+    yield
+
 import yaml
 
 TEST_AGENT_NAME = "test-agent"

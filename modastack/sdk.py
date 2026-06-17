@@ -19,7 +19,7 @@ import logging
 import os
 import shutil
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from pathlib import Path
 from typing import Any
 
@@ -164,7 +164,6 @@ class SessionEntry:
     cwd: str = ""
     status: str = "starting"
     pid: int = 0
-    inbox_port: int = 0
     image_hash: str = ""
     model: str = ""
     provider: str = ""
@@ -174,6 +173,18 @@ class SessionEntry:
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     requested_by: dict = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SessionEntry":
+        """Build from a persisted dict, ignoring fields no longer in the schema.
+
+        State files written by older code may carry retired keys (e.g.
+        ``inbox_port`` before the inbox HTTP transport was removed). Filtering
+        unknown keys keeps stale sessions readable across upgrades instead of
+        raising and silently dropping them.
+        """
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 class SessionRegistry:
@@ -253,7 +264,7 @@ class SessionRegistry:
             return None
         try:
             data = json.loads(path.read_text())
-            return SessionEntry(**data)
+            return SessionEntry.from_dict(data)
         except (json.JSONDecodeError, TypeError):
             return None
 
@@ -268,7 +279,7 @@ class SessionRegistry:
                 continue
             try:
                 data = json.loads(state.read_text())
-                entry = SessionEntry(**data)
+                entry = SessionEntry.from_dict(data)
             except (json.JSONDecodeError, TypeError):
                 continue
             if entry.status not in ("starting", "running", "idle"):
@@ -289,7 +300,7 @@ class SessionRegistry:
             if not state.exists():
                 continue
             try:
-                result.append(SessionEntry(**json.loads(state.read_text())))
+                result.append(SessionEntry.from_dict(json.loads(state.read_text())))
             except (json.JSONDecodeError, TypeError):
                 pass
         return result

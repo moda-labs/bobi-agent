@@ -371,7 +371,6 @@ class TestMessageRoutingCrossProject:
             phase="implement",
             status="running",
             pid=os.getpid(),
-            inbox_port=12345,
         )
         from dataclasses import asdict
         (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
@@ -387,4 +386,4 @@ class TestMessageRoutingCrossProject:
         registry = get_registry()
         found = registry.get("agent-42-implement")
         assert found is not None
-        assert found.inbox_port == 12345
+        assert found.session_id == "sess-abc"

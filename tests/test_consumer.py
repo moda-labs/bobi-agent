@@ -6,6 +6,25 @@ from unittest.mock import patch, call
 from queue import SimpleQueue
 
 from modastack.events.client import format_event_for_manager
+from modastack.inbox import register_local_inbox, unregister_local_inbox
+
+
+class _CaptureInbox:
+    """Stand-in inbox: captures pushed Messages; optionally stops the loop.
+
+    The drain pushes directly into its session's in-process inbox (no HTTP).
+    Raising SystemExit from push() after N messages breaks the otherwise
+    blocking drain loop deterministically.
+    """
+
+    def __init__(self, stop_after=None):
+        self.messages = []
+        self.stop_after = stop_after
+
+    def push(self, msg):
+        self.messages.append(msg)
+        if self.stop_after and len(self.messages) >= self.stop_after:
+            raise SystemExit()
 
 
 class TestDrainLoop:
@@ -18,35 +37,78 @@ class TestDrainLoop:
         return {"type": etype, "source": source, "delivery": delivery,
                 "data": data}
 
-    @patch("modastack.inbox.deliver", return_value=(True, ""))
-    def test_single_event_delivered(self, mock_deliver):
+    def test_single_event_delivered(self):
         from modastack.events.client import event_queue
         from modastack.events.drain import drain_loop as _drain_loop
 
         while not event_queue.empty():
             event_queue.get_nowait()
 
-        event = self._make_event()
-        event_queue.put(event)
+        event_queue.put(self._make_event())
 
-        def stop_after_deliver(*args, **kwargs):
-            raise SystemExit()
-        mock_deliver.side_effect = stop_after_deliver
-
+        inbox = _CaptureInbox(stop_after=1)
+        register_local_inbox("moda-mgr-test", inbox)
         try:
             _drain_loop("moda-mgr-test")
         except SystemExit:
             pass
+        finally:
+            unregister_local_inbox("moda-mgr-test")
 
-        mock_deliver.assert_called_once()
-        delivered_to = mock_deliver.call_args[0][0]
-        delivered_text = mock_deliver.call_args[0][1]
-        assert delivered_to == "moda-mgr-test"
-        assert "Event: github/task.opened" in delivered_text
+        assert len(inbox.messages) == 1
+        assert "Event: github/task.opened" in inbox.messages[0].text
 
-    @patch("modastack.inbox.deliver", return_value=(True, ""))
+    def test_drain_stops_on_poison_pill(self):
+        """Subscription.stop() poison-pills the drain so its thread exits."""
+        from modastack.events.drain import drain_loop as _drain_loop, _DRAIN_STOP
+
+        q = SimpleQueue()
+        register_local_inbox("stoppable", _CaptureInbox())
+        t = threading.Thread(target=_drain_loop, args=("stoppable", q), daemon=True)
+        t.start()
+        try:
+            q.put(_DRAIN_STOP)
+            t.join(timeout=3)
+            assert not t.is_alive()
+        finally:
+            unregister_local_inbox("stoppable")
+
     @patch("modastack.events.drain.DRAIN_INTERVAL", 0.1)
-    def test_multiple_events_batched(self, mock_deliver):
+    def test_inbox_event_pushed_raw_and_skips_reactor(self):
+        """inbox/* events are delivered raw (no formatting) and skip dispatch."""
+        from modastack.events.drain import drain_loop as _drain_loop
+
+        q = SimpleQueue()
+        q.put({
+            "source": "inbox",
+            "type": "inbox/agent-x",
+            "delivery": "bulk",
+            "payload": {"id": "m1", "sender": "manager", "text": "ping you",
+                        "wait": True},
+        })
+
+        reactor_calls = []
+        reactor = type("R", (), {"process": staticmethod(
+            lambda e: reactor_calls.append(e) or False)})()
+
+        inbox = _CaptureInbox(stop_after=1)
+        register_local_inbox("agent-x", inbox)
+        try:
+            _drain_loop("agent-x", queue=q, reactor=reactor)
+        except SystemExit:
+            pass
+        finally:
+            unregister_local_inbox("agent-x")
+
+        assert len(inbox.messages) == 1
+        msg = inbox.messages[0]
+        assert msg.text == "ping you"          # raw, not "Event: inbox/..."
+        assert msg.sender == "manager"
+        assert msg.id == "m1" and msg.wait is True
+        assert reactor_calls == []             # auto-dispatch skipped
+
+    @patch("modastack.events.drain.DRAIN_INTERVAL", 0.1)
+    def test_multiple_events_batched(self):
         from modastack.events.client import event_queue
         from modastack.events.drain import drain_loop as _drain_loop
 
@@ -59,23 +121,19 @@ class TestDrainLoop:
                                           delivery="chat",
                                           text="hello", channel="D123", workspace="T123"))
 
-        call_count = 0
-        def stop_after_slack(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 2:
-                raise SystemExit()
-            return True, ""
-        mock_deliver.side_effect = stop_after_slack
-
+        # Bulk group is pushed first, then the chat group — two pushes.
+        inbox = _CaptureInbox(stop_after=2)
+        register_local_inbox("moda-mgr-test", inbox)
         try:
             _drain_loop("moda-mgr-test")
         except SystemExit:
             pass
+        finally:
+            unregister_local_inbox("moda-mgr-test")
 
-        assert mock_deliver.call_count == 2
-        github_text = mock_deliver.call_args_list[0][0][1]
-        slack_text = mock_deliver.call_args_list[1][0][1]
+        assert len(inbox.messages) == 2
+        github_text = inbox.messages[0].text
+        slack_text = inbox.messages[1].text
         assert "task.opened" in github_text
         assert "task.assigned" in github_text
         assert "slack.dm" not in github_text
@@ -119,74 +177,48 @@ class TestDrainLoopWithReactor:
             },
         }
 
-    @patch("modastack.inbox.deliver", return_value=(True, ""))
-    def test_reactor_called_on_each_event(self, mock_deliver):
+    def _run_drain(self, event, reactor):
         from modastack.events.drain import drain_loop
         q = SimpleQueue()
-        reactor = type("MockReactor", (), {"process": lambda self, e: False})()
-
-        event = self._make_review_event()
         q.put(event)
-
-        call_log = []
-        orig_process = reactor.process
-        def tracking_process(e):
-            call_log.append(e)
-            return False
-        reactor.process = tracking_process
-
-        mock_deliver.side_effect = lambda *a, **kw: (_ for _ in ()).throw(SystemExit())
-
+        inbox = _CaptureInbox(stop_after=1)
+        register_local_inbox("test-session", inbox)
         try:
             drain_loop("test-session", queue=q, reactor=reactor)
         except SystemExit:
             pass
+        finally:
+            unregister_local_inbox("test-session")
+        return inbox
+
+    def test_reactor_called_on_each_event(self):
+        call_log = []
+
+        def tracking_process(e):
+            call_log.append(e)
+            return False
+        reactor = type("MockReactor", (), {"process": staticmethod(tracking_process)})()
+
+        self._run_drain(self._make_review_event(), reactor)
 
         assert len(call_log) == 1
         assert call_log[0]["type"] == "github.pull_request_review"
 
-    @patch("modastack.inbox.deliver", return_value=(True, ""))
-    def test_auto_dispatched_event_annotated(self, mock_deliver):
-        """Events auto-dispatched by reactor get an annotation in the formatted text."""
-        from modastack.events.drain import drain_loop
-        q = SimpleQueue()
-        # Reactor that claims it dispatched
+    def test_auto_dispatched_event_annotated(self):
+        """Events auto-dispatched by reactor get an annotation in the pushed text."""
         reactor = type("MockReactor", (), {"process": lambda self, e: True})()
+        inbox = self._run_drain(self._make_review_event(), reactor)
+        text = inbox.messages[0].text
+        assert "[auto-dispatched: pr-feedback workflow launched]" in text.lower() or \
+               "[AUTO-DISPATCH" in text
 
-        event = self._make_review_event()
-        q.put(event)
-
-        mock_deliver.side_effect = lambda *a, **kw: (_ for _ in ()).throw(SystemExit())
-
-        try:
-            drain_loop("test-session", queue=q, reactor=reactor)
-        except SystemExit:
-            pass
-
-        delivered_text = mock_deliver.call_args[0][1]
-        assert "[auto-dispatched: pr-feedback workflow launched]" in delivered_text.lower() or \
-               "[AUTO-DISPATCH" in delivered_text
-
-    @patch("modastack.inbox.deliver", return_value=(True, ""))
-    def test_non_matching_event_not_annotated(self, mock_deliver):
+    def test_non_matching_event_not_annotated(self):
         """Events that don't match any rule pass through without annotation."""
-        from modastack.events.drain import drain_loop
-        q = SimpleQueue()
         reactor = type("MockReactor", (), {"process": lambda self, e: False})()
-
         event = {"type": "github.issues", "source": "github", "delivery": "bulk",
                  "fields": {"action": "opened"}}
-        q.put(event)
-
-        mock_deliver.side_effect = lambda *a, **kw: (_ for _ in ()).throw(SystemExit())
-
-        try:
-            drain_loop("test-session", queue=q, reactor=reactor)
-        except SystemExit:
-            pass
-
-        delivered_text = mock_deliver.call_args[0][1]
-        assert "AUTO-DISPATCH" not in delivered_text
+        inbox = self._run_drain(event, reactor)
+        assert "AUTO-DISPATCH" not in inbox.messages[0].text
 
 
 class TestFormatBatching:

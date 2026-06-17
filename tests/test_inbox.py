@@ -1,15 +1,26 @@
 """Unit tests for the inbox module — no Claude sessions needed.
 
-Tests the in-memory queue, HTTP server, deliver() function, and
-blocking/non-blocking message modes.
+Tests the in-memory queue, the process-local inbox registry, and the
+``deliver()`` publish path + transitional reply rendezvous. The inbox no
+longer runs an HTTP server: messages arrive as ``inbox/<session>`` events on
+the event server and are pushed into the queue by the drain loop.
 """
 
-import threading
+import os
 import time
+from unittest.mock import patch
 
 import pytest
 
-from modastack.inbox import Inbox, Message, deliver, _msg_id
+from modastack.inbox import (
+    Inbox,
+    Message,
+    deliver,
+    get_local_inbox,
+    _msg_id,
+    _reply_path,
+    _write_reply,
+)
 
 
 class TestMessageId:
@@ -24,223 +35,166 @@ class TestMessageId:
         assert a < b
 
 
-class TestInboxDirect:
-    """Test the Inbox queue directly (no HTTP)."""
+class TestInboxQueue:
+    """The inbox is a plain in-process queue its run loop drains."""
 
     def test_recv_returns_none_on_timeout(self):
         inbox = Inbox("test-empty")
-        msg = inbox.recv(timeout=0.1)
-        assert msg is None
+        assert inbox.recv(timeout=0.1) is None
         inbox.close()
 
-    def test_put_and_recv(self):
-        inbox = Inbox("test-put")
-        inbox._queue.put(Message(id="1", sender="s", text="hello"))
+    def test_push_and_recv(self):
+        inbox = Inbox("test-push")
+        inbox.push(Message(id="1", sender="s", text="hello"))
         msg = inbox.recv(timeout=1)
-        assert msg is not None
-        assert msg.text == "hello"
+        assert msg is not None and msg.text == "hello"
         inbox.close()
 
-    def test_close_unblocks_pending_asks(self, modastack_install):
-        inbox = Inbox("test-close")
+    def test_multiple_messages_in_order(self):
+        inbox = Inbox("test-order")
+        for i in range(5):
+            inbox.push(Message(id=str(i), sender="s", text=f"msg-{i}"))
+        received = []
+        while (m := inbox.recv(timeout=0.2)) is not None:
+            received.append(m.text)
+        assert received == [f"msg-{i}" for i in range(5)]
+        inbox.close()
+
+
+class TestLocalInboxRegistry:
+    """start()/close() make a session addressable in-process for its drain."""
+
+    def test_start_registers_and_close_unregisters(self):
+        inbox = Inbox("test-reg")
         inbox.start()
-
-        from modastack.sdk import get_registry, SessionEntry
-        registry = get_registry()
-        registry.register(SessionEntry(
-            name="test-close", inbox_port=inbox.port, cwd="/tmp",
-        ))
-
-        results = []
-
-        def sender():
-            ok, resp = deliver("test-close", "question?", wait=True, timeout=10)
-            results.append((ok, resp))
-
-        t = threading.Thread(target=sender)
-        t.start()
-
-        time.sleep(0.3)
+        assert get_local_inbox("test-reg") is inbox
         inbox.close()
-        t.join(timeout=5)
+        assert get_local_inbox("test-reg") is None
 
-        assert len(results) == 1
-        ok, resp = results[0]
-        assert not ok
-        assert "closed" in resp or "cannot reach" in resp
+    def test_get_unknown_returns_none(self):
+        assert get_local_inbox("never-registered") is None
 
 
-class TestInboxHTTP:
-    """Test delivery via the HTTP server."""
+class TestReplyRendezvous:
+    """respond() writes a reply file the waiting sender polls (transitional)."""
 
-    def test_start_assigns_port(self):
-        inbox = Inbox("test-port")
-        port = inbox.start()
-        assert port > 0
-        assert inbox.port == port
-        inbox.close()
+    def test_respond_writes_reply_file(self, modastack_install):
+        import json
+        inbox = Inbox("test-resp")
+        cid = _msg_id()
+        inbox.respond(cid, "the answer")
+        path = _reply_path(cid)
+        assert path.exists()
+        assert json.loads(path.read_text())["response"] == "the answer"
 
-    def test_nonblocking_deliver(self, modastack_install):
-        inbox = Inbox("test-nb")
-        inbox.start()
+    def test_write_reply_is_atomic_overwrite(self, modastack_install):
+        import json
+        _write_reply("ab-cd", "first")
+        _write_reply("ab-cd", "second")
+        assert json.loads(_reply_path("ab-cd").read_text())["response"] == "second"
 
-        from modastack.sdk import get_registry, SessionEntry
-        registry = get_registry()
-        registry.register(SessionEntry(
-            name="test-nb", inbox_port=inbox.port, cwd="/tmp",
-        ))
+    def test_reply_path_rejects_traversal_ids(self, modastack_install):
+        # corr_id is reconstructed from the wire payload — it must never be
+        # usable to escape the replies dir.
+        for bad in ["../../etc/cron", "..", "a/b", "x.json", "WHATEVER", ""]:
+            with pytest.raises(ValueError):
+                _reply_path(bad)
 
-        ok, resp = deliver("test-nb", "hello", wait=False)
-        assert ok
-        assert resp == ""
+    def test_respond_swallows_unsafe_id_without_writing(self, modastack_install):
+        # A malicious inbound id must not cause a write anywhere; respond()
+        # logs and no-ops instead of traversing.
+        from modastack import paths
+        inbox = Inbox("test-evil")
+        inbox.respond("../../../pwned", "secret response")
+        assert not (paths.state_dir() / "replies" / "..").exists()
+        # A real msg id still round-trips.
+        mid = _msg_id()
+        inbox.respond(mid, "ok")
+        assert _reply_path(mid).exists()
 
-        msg = inbox.recv(timeout=2)
-        assert msg is not None
-        assert msg.text == "hello"
 
-        inbox.close()
+def _register_live_session(name):
+    from modastack.sdk import get_registry, SessionEntry
+    get_registry().register(SessionEntry(name=name, cwd="/tmp", pid=os.getpid()))
 
-    def test_blocking_deliver(self, modastack_install):
-        inbox = Inbox("test-block")
-        inbox.start()
 
-        from modastack.sdk import get_registry, SessionEntry
-        registry = get_registry()
-        registry.register(SessionEntry(
-            name="test-block", inbox_port=inbox.port, cwd="/tmp",
-        ))
-
-        results = []
-
-        def sender():
-            ok, resp = deliver("test-block", "question?", wait=True, timeout=10)
-            results.append((ok, resp))
-
-        t = threading.Thread(target=sender)
-        t.start()
-
-        msg = inbox.recv(timeout=5)
-        assert msg is not None
-        assert msg.wait is True
-        assert msg.text == "question?"
-
-        inbox.respond(msg.id, "answer!")
-        t.join(timeout=5)
-
-        assert len(results) == 1
-        ok, resp = results[0]
-        assert ok
-        assert resp == "answer!"
-
-        inbox.close()
-
-    def test_blocking_deliver_timeout(self, modastack_install):
-        inbox = Inbox("test-timeout")
-        inbox.start()
-
-        from modastack.sdk import get_registry, SessionEntry
-        registry = get_registry()
-        registry.register(SessionEntry(
-            name="test-timeout", inbox_port=inbox.port, cwd="/tmp",
-        ))
-
-        ok, resp = deliver("test-timeout", "question?", wait=True, timeout=1)
-        assert not ok
-        assert "no response" in resp
-
-        inbox.close()
+class TestDeliver:
+    """deliver() publishes inbox/<to> and preserves not-found/dead semantics."""
 
     def test_deliver_to_nonexistent_session(self, modastack_install):
         ok, resp = deliver("no-such-session", "hello")
         assert not ok
         assert "not found" in resp
 
-    def test_deliver_to_session_without_inbox(self, modastack_install):
+    def test_deliver_to_dead_session(self, modastack_install):
         from modastack.sdk import get_registry, SessionEntry
-        registry = get_registry()
-        registry.register(SessionEntry(
-            name="test-no-inbox", cwd="/tmp", inbox_port=0,
-        ))
-
-        ok, resp = deliver("test-no-inbox", "hello")
+        # A pid that is not alive.
+        get_registry().register(SessionEntry(name="dead", cwd="/tmp", pid=2_000_000_000))
+        ok, resp = deliver("dead", "hello")
         assert not ok
-        assert "no inbox" in resp
+        assert "dead" in resp
 
-    def test_multiple_messages_in_order(self, modastack_install):
-        inbox = Inbox("test-order")
-        inbox.start()
-
+    def test_deliver_rejects_terminal_status(self, modastack_install):
+        # A live pid but a stopped session has torn down its inbox/subscription;
+        # don't pretend it's reachable.
         from modastack.sdk import get_registry, SessionEntry
-        registry = get_registry()
-        registry.register(SessionEntry(
-            name="test-order", inbox_port=inbox.port, cwd="/tmp",
-        ))
+        get_registry().register(SessionEntry(
+            name="gone", cwd="/tmp", pid=os.getpid(), status="stopped"))
+        ok, resp = deliver("gone", "hello")
+        assert not ok
+        assert "stopped" in resp
 
-        for i in range(5):
-            ok, _ = deliver("test-order", f"msg-{i}", wait=False)
-            assert ok
+    def test_nonblocking_deliver_publishes(self, modastack_install):
+        _register_live_session("test-nb")
+        with patch("modastack.events.publish.publish_inbox", return_value=True) as pub:
+            ok, resp = deliver("test-nb", "hello", sender="cli", wait=False)
+        assert ok and resp == ""
+        pub.assert_called_once()
+        to, payload = pub.call_args[0][0], pub.call_args[0][1]
+        assert to == "test-nb"
+        assert payload["text"] == "hello"
+        assert payload["sender"] == "cli"
+        assert payload["wait"] is False
 
-        time.sleep(0.2)
+    def test_deliver_reports_publish_failure(self, modastack_install):
+        _register_live_session("test-fail")
+        with patch("modastack.events.publish.publish_inbox", return_value=False):
+            ok, resp = deliver("test-fail", "hello")
+        assert not ok
+        assert "could not publish" in resp
 
-        received = []
-        while True:
-            msg = inbox.recv(timeout=0.5)
-            if msg is None:
-                break
-            received.append(msg.text)
+    def test_blocking_deliver_round_trips_via_reply_file(self, modastack_install):
+        _register_live_session("test-block")
 
-        assert received == [f"msg-{i}" for i in range(5)]
-        inbox.close()
+        # Simulate the target: as soon as the message is published, the target
+        # session would process it and call inbox.respond(id, ...). Here we just
+        # write the reply file for the published correlation id.
+        def fake_publish(to, payload, project_path=None):
+            _write_reply(payload["id"], "the answer")
+            return True
 
-    def test_health_endpoint(self):
-        import json
-        import urllib.request
+        with patch("modastack.events.publish.publish_inbox", side_effect=fake_publish):
+            ok, resp = deliver("test-block", "question?", wait=True, timeout=10)
+        assert ok
+        assert resp == "the answer"
 
-        inbox = Inbox("test-health")
-        inbox.start()
+    def test_blocking_deliver_times_out(self, modastack_install):
+        _register_live_session("test-timeout")
+        # publish succeeds but no reply ever lands.
+        with patch("modastack.events.publish.publish_inbox", return_value=True):
+            ok, resp = deliver("test-timeout", "question?", wait=True, timeout=1)
+        assert not ok
+        assert "no response" in resp
 
-        resp = urllib.request.urlopen(
-            f"http://127.0.0.1:{inbox.port}/health", timeout=5
-        )
-        data = json.loads(resp.read())
-        assert data["ok"] is True
-        assert data["session"] == "test-health"
+    def test_blocking_deliver_cleans_up_reply_file(self, modastack_install):
+        _register_live_session("test-cleanup")
+        captured = {}
 
-        inbox.close()
+        def fake_publish(to, payload, project_path=None):
+            captured["id"] = payload["id"]
+            _write_reply(payload["id"], "done")
+            return True
 
-    def test_concurrent_blocking_delivers(self, modastack_install):
-        inbox = Inbox("test-concurrent")
-        inbox.start()
-
-        from modastack.sdk import get_registry, SessionEntry
-        registry = get_registry()
-        registry.register(SessionEntry(
-            name="test-concurrent", inbox_port=inbox.port, cwd="/tmp",
-        ))
-
-        results = {}
-
-        def sender(label):
-            ok, resp = deliver("test-concurrent", f"q-{label}", wait=True, timeout=10)
-            results[label] = (ok, resp)
-
-        threads = [threading.Thread(target=sender, args=(f"t{i}",)) for i in range(3)]
-        for t in threads:
-            t.start()
-
-        time.sleep(0.3)
-
-        for _ in range(3):
-            msg = inbox.recv(timeout=5)
-            assert msg is not None
-            inbox.respond(msg.id, f"a-{msg.text}")
-
-        for t in threads:
-            t.join(timeout=5)
-
-        assert len(results) == 3
-        for label, (ok, resp) in results.items():
-            assert ok
-            assert resp == f"a-q-{label}"
-
-        inbox.close()
+        with patch("modastack.events.publish.publish_inbox", side_effect=fake_publish):
+            deliver("test-cleanup", "q", wait=True, timeout=10)
+        assert not _reply_path(captured["id"]).exists()
