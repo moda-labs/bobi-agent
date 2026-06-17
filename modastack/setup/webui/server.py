@@ -79,10 +79,10 @@ def _sse(event: str, data) -> str:
 
 def build_app(state: SetupState, project: Path, *, nonce: str,
               model: str | None = None, stream_fn=None,
-              on_finish=None, home_root: Path | None = None):
+              home_root: Path | None = None):
     """Construct the FastAPI app. `stream_fn` overrides the LLM source
-    (tests inject a fake); `on_finish` is called when setup completes.
-    `home_root` is the user's home (defaults to `Path.home()`) — it roots the
+    (tests inject a fake). `home_root` is the user's home (defaults to
+    `Path.home()`) — it roots the
     `~/modastack-agents` team-source library and the folder picker; tests point it
     at a tmpdir."""
     app = FastAPI()
@@ -178,12 +178,17 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         return JSONResponse({"dir": str(target),
                              "teams": open_mode.list_teams_in(target)})
 
+    # Internal/test packs that shouldn't surface as user-facing templates.
+    _HIDDEN_TEMPLATES = {"dogfood-content-review"}
+
     @app.get("/api/registry")
     def registry_teams() -> dict:
-        # Network-backed and lazy — only fetched when the user opens the
-        # "from a registry" tab, so the intro screen never blocks on it.
+        # Network-backed and lazy — only fetched to populate the intro's
+        # template list, so the intro screen never blocks on it.
         from modastack.setup import open_mode
-        return {"teams": open_mode.list_registry_teams(project)}
+        teams = [t for t in open_mode.list_registry_teams(project)
+                 if t.get("name") not in _HIDDEN_TEMPLATES]
+        return {"teams": teams}
 
     @app.get("/api/browse")
     def browse(request: Request) -> JSONResponse:
@@ -268,6 +273,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             return JSONResponse({"error": "pick a location outside .modastack/"},
                                 status_code=400)
         state.source_dir = location
+        state.finished = False   # starting/opening a team begins a fresh session
         # Both modify-local and from-registry land in the same non-lossy
         # edit-in-place authoring path; only create authors from scratch.
         state.mode = "create" if mode == "create" else "open"
@@ -527,14 +533,40 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         result = actions.run_preflight(project)
         return {"ok": result.ok, "report": result.format()}
 
-    # --- finish --------------------------------------------------------
+    # --- finish / homepage ---------------------------------------------
     @app.post("/api/finish")
     def finish() -> dict:
+        # Mark the current setup complete but keep the server alive: after
+        # Finish the page goes to the homepage (a re-entrant hub) where the
+        # user can open and edit any team. The process ends when they stop it.
         state.finished = True
         state.save(project)
-        if on_finish:
-            on_finish()
         return serialize_state(state)
+
+    @app.get("/api/home")
+    def home_teams() -> dict:
+        # The homepage's team list — every editable team source in the library.
+        # NB: don't name this `home` — that shadows the `home` Path in this
+        # scope and breaks every endpoint that closes over it (e.g. browse).
+        from modastack.setup import open_mode
+        return {"teams": open_mode.list_teams_in(library),
+                "library": str(library)}
+
+    @app.post("/api/run-start")
+    def run_start() -> JSONResponse:
+        # "Start it for me" — launch the installed agent in the background, the
+        # same as running `modastack start` in a terminal. Loopback + nonce
+        # guarded; runs on the same machine, in this project's install root.
+        import subprocess
+        import sys
+        try:
+            subprocess.Popen([sys.executable, "-m", "modastack", "start"],
+                             cwd=str(project),
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"ok": True})
 
     return app
 
@@ -570,18 +602,12 @@ def serve(project: Path, *, model: str | None = None,
     port = sock.getsockname()[1]
     url = f"http://127.0.0.1:{port}/?n={nonce}"
 
-    server_holder: dict = {}
-
-    def _on_finish() -> None:
-        srv = server_holder.get("server")
-        if srv is not None:
-            srv.should_exit = True
-
-    app = build_app(state, project, nonce=nonce, model=model,
-                    on_finish=_on_finish)
+    # The server stays alive after Finish (the page transitions to the team
+    # hub, a re-entrant editor), so there's no finish-triggered shutdown — it
+    # runs until the user interrupts it.
+    app = build_app(state, project, nonce=nonce, model=model)
     config = uvicorn.Config(app, log_level="warning")
     server = uvicorn.Server(config)
-    server_holder["server"] = server
 
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

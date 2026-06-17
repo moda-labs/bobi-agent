@@ -15,6 +15,8 @@
   const slugify = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 
   const GENERATING = new Set(["build", "review", "install"]);
+  // TBD: real cloud-deploy docs URL.
+  const DOCS_CLOUD_URL = "https://docs.modastack.ai/cloud";
   const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4"><path d="M5 12l5 5L19 7"/></svg>';
   const STATUS_LABEL = { connected: "connected", missing: "connect", unknown: "needs check" };
   // Day-to-day channels for the Chat card.
@@ -114,11 +116,36 @@
   }
 
   // --- navigation --------------------------------------------------------
+  // The homepage (team hub) isn't a setup stage — it's a client view shown at
+  // stage `start` for returning users, and after Finish via the Done button.
+  let atHome = false;
   async function refresh() { S = await getJSON("/api/state"); render(); }
+  async function boot() {
+    S = await getJSON("/api/state");
+    // A finished session returns to the hub; so do returning users who already
+    // have teams and aren't mid-setup. New users get the welcome on-ramp.
+    if (S.finished) {
+      atHome = true;
+    } else if (S.stage === "start") {
+      try { const h = await getJSON("/api/home"); if ((h.teams || []).length) atHome = true; }
+      catch { /* no hub — fall through to the welcome on-ramp */ }
+    }
+    render();
+  }
   async function go(stage) {
     const r = await postJSON("/api/advance", { to: stage });
     if (!r.ok) { toast(r.data.error || "can't go there yet"); return; }
     S = r.data; render();
+  }
+  // Step one stage backward. The wizard is a re-entrant editor, so backward
+  // moves are always allowed (the spec/conversation persist). From the build,
+  // this cancels the in-flight build (buildGen bump) and returns to editing.
+  const BACK_TO = { design: "start", build: "design", review: "design", install: "design", done: "design" };
+  async function goBack() {
+    const target = BACK_TO[S.stage];
+    if (!target) return;
+    building = false; buildGen++;   // supersede any in-flight build
+    await go(target);
   }
   function toast(msg) {
     const t = document.createElement("div");
@@ -129,141 +156,137 @@
   }
   function setPanes(cols) { $("#panes").style.gridTemplateColumns = cols; }
 
-  // --- intro: create / modify existing / from a registry ----------------
-  // Three ways in, all landing in the same chat+cards editor. Create authors
-  // from scratch (auto-named in the chat); modify and registry reverse-fill an
-  // existing team and edit it non-lossily.
-  let introTeams = [], introRegistry = null, introBase = "modastack",
-      introScanDir = "", introMode = "create";
+  // --- welcome: the on-ramp before the intro ----------------------------
+  // A calm first screen — what modastack is, how setup goes, what you'll need —
+  // shown once per page load on the `start` stage. "Get started" reveals the
+  // intro. Purely presentational: no server state, skipped on resume (resume
+  // lands on a later stage, never `start`).
+  let welcomed = false;
+  // Vertical recast of the event-driven flow diagram from buildmoda.ai/bobi:
+  // event → team → workflow → gate → outcome. Geometric inline-SVG glyphs
+  // (offline; no images), accent reserved for the final checkmark.
+  const FLOW_NODES = [
+    { label: "Event", eg: "a ticket lands",
+      svg: '<path d="M12 3.5l8.5 8.5-8.5 8.5-8.5-8.5z"/>' },
+    { label: "Team", eg: "manager + agents",
+      svg: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/>' },
+    { label: "Workflow", eg: "a YAML workflow",
+      svg: '<path d="M5 7h14M5 12h14M5 17h9"/>' },
+    { label: "Gate", eg: "human approval",
+      svg: '<circle cx="12" cy="12" r="8.5"/><path d="M8.4 12.2l2.4 2.4 4.6-5"/>' },
+    { label: "Outcome", eg: "shipped", accent: true,
+      svg: '<path d="M4.5 12.5l4.5 4.5L19.5 6.5"/>' },
+  ];
+  function flowDiagramHTML() {
+    // --i drives both the staggered fade-in and the looping flow pulse (CSS).
+    const nodes = FLOW_NODES.map((n, i) =>
+      `<li class="wfnode" style="--i:${i}">
+        <span class="wfglyph${n.accent ? " wfg-accent" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${n.svg}</svg></span>
+        <span class="wftext"><span class="wflabel">${esc(n.label)}</span><span class="wfeg">${esc(n.eg)}</span></span>
+      </li>`).join("");
+    return `<aside class="wflow-side">
+      <div class="wflow-head">How it runs</div>
+      <ol class="wflow">${nodes}</ol>
+      <p class="wflow-cap">Events in. Agents act. Guardrails hold. Work ships.</p>
+    </aside>`;
+  }
+  function renderWelcome() {
+    setPanes("1fr");
+    $("#main").innerHTML = `<div class="node welcome-screen"><div class="welcome-wrap">
+      <main class="welcome">
+        <div class="eyebrow">Welcome to modastack</div>
+        <h1>Build a team of agents that runs your work</h1>
+        <p class="lede">A realtime agent team on your events — reachable from Slack and other chat apps, scheduled to act on their own, or reacting the moment something happens. Not one chatbot waiting for a prompt.</p>
+
+        <div class="wsec-label">How setup works</div>
+        <ol class="wsteps">
+          <li class="wstep"><span class="wstep-n">1</span><div><b>Describe it.</b> Tell modastack what you want the team to do, in plain words — rough is fine.</div></li>
+          <li class="wstep"><span class="wstep-n">2</span><div><b>Watch it take shape.</b> As you talk, modastack designs the roles, automations, and connections, filling them in live.</div></li>
+          <li class="wstep"><span class="wstep-n">3</span><div><b>Connect services.</b> Hook up Slack, GitHub, or anything else it needs — deferrable until the end.</div></li>
+          <li class="wstep"><span class="wstep-n">4</span><div><b>Build &amp; install.</b> modastack writes the team and installs it, then you start it with one command.</div></li>
+        </ol>
+
+        <div class="wmeta">
+          <div class="wmeta-row"><span class="wmeta-k">Takes</span><span class="wmeta-v">about 10–20 minutes</span></div>
+          <div class="wmeta-row"><span class="wmeta-k">You'll need</span><span class="wmeta-v">the Claude Code CLI (already running this), plus logins for any services you want to connect — added as you go.</span></div>
+        </div>
+
+        <div class="actions"><button class="btn primary" id="welcome-go">Get started →</button></div>
+      </main>
+      ${flowDiagramHTML()}
+    </div></div>`;
+    $("#welcome-go").addEventListener("click", () => { welcomed = true; renderIntro(); });
+  }
+
+  // --- intro: pick a template team or design a new one ------------------
+  // Two ways in: start from a registry "template" (download + reverse-fill,
+  // non-lossy edit) or design a new team from scratch (auto-named in chat).
+  // Modify-an-existing-team will return later in a different shape.
+  let introRegistry = null, introBase = "modastack", introLoc = "";
   async function renderIntro() {
     setPanes("1fr");
     const data = await getJSON("/api/intro");
-    introTeams = data.teams || [];
     introBase = data.default_location || introBase;
-    introScanDir = data.scan_dir || introBase;
+    introLoc = introBase;
     drawIntro();
+    loadTemplates();
   }
   function drawIntro() {
     $("#main").innerHTML = `<main class="node narrow intro">
       <div class="eyebrow">Setup</div>
       <h1>Build an agent team</h1>
-      <p class="lede">Start fresh, modify a team you already have, or pull one from a registry. modastack keeps the source in a folder you choose, then installs it into <code>.modastack/</code> when you're done.</p>
-      <div class="introtabs">
-        <button class="itab ${introMode === "create" ? "on" : ""}" data-intromode="create">Create new</button>
-        <button class="itab ${introMode === "open" ? "on" : ""}" data-intromode="open">Modify existing</button>
-        <button class="itab ${introMode === "registry" ? "on" : ""}" data-intromode="registry">From a registry</button>
-      </div>
-      <div id="introbody"></div>
-      <div class="actions"><button class="btn primary" id="introstart">Start →</button></div>
+      <p class="lede">modastack manages entire teams of agents that collaborate to solve problems and automate your work. Some of our favorites are engineering, support, and marketing teams.</p>
+      <p class="intro-lead">Customize your own from scratch, or start from a template.</p>
+      <div class="tmpl-list" id="tmpl-list">${templatesHTML()}</div>
+      ${locFyiHTML()}
     </main>`;
-    drawIntroBody();
-    $("#introstart").addEventListener("click", introStart);
+    wireIntro();
   }
-  // A location field with a Browse button that opens the folder picker.
-  function locFieldHTML(label, value) {
-    return `<label class="ifield"><span>${esc(label)}</span>
-      <div class="locrow"><input id="introloc" autocomplete="off" value="${esc(value)}">
-        <button type="button" class="btn ghost xs" id="introbrowse">Browse…</button></div></label>`;
+  // Templates come from the configured registries (lazy / network-backed), so
+  // the intro paints immediately and fills the list in when they arrive.
+  function templatesHTML() {
+    // The "customize my own" entry is always the prominent top option — part of
+    // the (scrollable) list, not a separate button, and sticky so it keeps
+    // popping even when many templates push it past the fold.
+    const custom = `<button class="tmpl tmpl-custom" data-newteam>
+      <span class="tmpl-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>
+      <span class="tmpl-text"><b>Customize my own agent team</b><span>Start from scratch — describe it and modastack designs it with you.</span></span>
+      <span class="tmpl-go">New →</span>
+    </button>`;
+    let rest = "";
+    if (introRegistry === null) rest = `<p class="ihint tmpl-note">Loading templates…</p>`;
+    else if (!introRegistry.length) rest = `<p class="ihint tmpl-note">No templates available yet.</p>`;
+    else rest = introRegistry.map(t =>
+      `<button class="tmpl" data-template="${esc(t.name)}">
+        <span class="tmpl-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/></svg></span>
+        <span class="tmpl-text"><b>${esc(t.name)}</b><span>${esc(t.description || t.registry || "Agent team template")}</span></span>
+        <span class="tmpl-go">Use →</span>
+      </button>`).join("");
+    return custom + rest;
   }
-  function wireBrowse() {
-    const b = $("#introbrowse");
-    if (b) b.addEventListener("click", () => openFolderPicker(p => {
-      const loc = $("#introloc"); loc.value = p; loc.dataset.touched = "1";
-    }));
+  function locFyiHTML() {
+    return `<p class="loc-fyi">Your team will be managed in <code id="loc-path">${esc(introLoc)}</code> — <button type="button" class="linkbtn" id="loc-change">change location</button> if you'd like.</p>`;
   }
-  // Modify's "which folder holds your teams?" — a scan dir, defaulting to the
-  // library, that the user can point anywhere under home.
-  function scanFieldHTML(value) {
-    return `<label class="ifield"><span>Folder to scan for teams</span>
-      <div class="locrow"><input id="introscan" autocomplete="off" value="${esc(value)}">
-        <button type="button" class="btn ghost xs" id="introscanbrowse">Browse…</button></div></label>`;
-  }
-  function teamListHTML(teams) {
-    if (!teams.length)
-      return `<p class="ihint" id="iteams-empty">No teams in that folder. Point the scan at one that has them, or create a new team.</p>`;
-    return teams.map((t, i) =>
-      `<label class="iteam"><input type="radio" name="iteam" value="${esc(t.name)}" data-path="${esc(t.path)}" ${i === 0 ? "checked" : ""}>
-        <b>${esc(t.name)}</b><span>${esc(t.path)}</span></label>`).join("");
-  }
-  async function rescan(dir) {
-    const d = await getJSON("/api/teams?dir=" + encodeURIComponent(dir || ""));
-    if (d.error) { toast(d.error); return; }
-    introScanDir = d.dir || dir;
-    introTeams = d.teams || [];
-    drawOpenBody();
-  }
-  function drawOpenBody() {
-    const el = $("#introbody");
-    el.innerHTML = `
-      ${scanFieldHTML(introScanDir)}
-      <div class="iteams" id="iteams">${teamListHTML(introTeams)}</div>
-      ${locFieldHTML("Edit this team in place (or point somewhere else to fork it)", (introTeams[0] || {}).path || "")}`;
-    const loc = $("#introloc");
-    const sync = () => { if (!loc.dataset.touched) { const r = document.querySelector("input[name=iteam]:checked"); loc.value = (r && r.dataset.path) || ""; } };
-    el.querySelectorAll("input[name=iteam]").forEach(r => r.addEventListener("change", sync));
-    loc.addEventListener("input", () => loc.dataset.touched = "1");
-    // Rescan when the scan dir changes (Enter or blur), or via its own Browse.
-    const scan = $("#introscan");
-    const doScan = () => { const v = scan.value.trim(); if (v && v !== introScanDir) rescan(v); };
-    scan.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); doScan(); } });
-    scan.addEventListener("blur", doScan);
-    $("#introscanbrowse").addEventListener("click", () =>
-      openFolderPicker(p => { scan.value = p; rescan(p); }));
-    wireBrowse();
-  }
-  function drawIntroBody() {
-    const el = $("#introbody");
-    if (introMode === "create") {
-      el.innerHTML = `<p class="ihint">modastack names the team for you as you describe what it should do — you can rename it any time. The team gets its own folder under here.</p>
-        ${locFieldHTML("Where teams go (a folder you own — not .modastack/)", introBase + "/")}`;
-      $("#introloc").focus();
-      wireBrowse();
-    } else if (introMode === "open") {
-      drawOpenBody();
-    } else {  // registry
-      if (introRegistry === null) {
-        el.innerHTML = `<p class="ihint">Looking for teams in your registries…</p>`;
-        loadRegistry();
-        return;
-      }
-      if (!introRegistry.length) {
-        el.innerHTML = `<p class="ihint">No registry teams found. Add one with <code>modastack agents add-registry &lt;repo&gt;</code>, or create a team from scratch.</p>`;
-        return;
-      }
-      el.innerHTML = `
-        <div class="iteams">${introRegistry.map((t, i) =>
-          `<label class="iteam"><input type="radio" name="rteam" value="${esc(t.name)}" ${i === 0 ? "checked" : ""}>
-            <b>${esc(t.name)}</b><span>${esc(t.description || t.registry || "")}</span></label>`).join("")}</div>
-        ${locFieldHTML("Download a copy to", `${introBase}/${introRegistry[0].name}`)}`;
-      const loc = $("#introloc");
-      const sync = () => { if (!loc.dataset.touched) { const r = document.querySelector("input[name=rteam]:checked"); loc.value = `${introBase}/${(r && r.value) || "team"}`; } };
-      el.querySelectorAll("input[name=rteam]").forEach(r => r.addEventListener("change", sync));
-      loc.addEventListener("input", () => loc.dataset.touched = "1");
-      wireBrowse();
-    }
-  }
-  async function loadRegistry() {
+  async function loadTemplates() {
     const data = await getJSON("/api/registry");
     introRegistry = data.teams || [];
-    if (introMode === "registry") drawIntroBody();
+    const el = $("#tmpl-list");
+    if (el) el.innerHTML = templatesHTML();
   }
-  async function introStart() {
-    const loc = (($("#introloc") || {}).value || "").trim();
-    if (!loc) { toast("choose a location"); return; }
-    const body = { mode: introMode, location: loc };
-    if (introMode === "open") {
-      const sel = document.querySelector("input[name=iteam]:checked");
-      if (!sel) { toast("pick a team to modify (or scan a folder that has one)"); return; }
-      body.team_path = sel.dataset.path || "";
-    } else if (introMode === "registry") {
-      body.team = (document.querySelector("input[name=rteam]:checked") || {}).value || "";
-    }
-    const start = $("#introstart");
-    if (start) { start.disabled = true; start.textContent = introMode === "registry" ? "Downloading…" : "Starting…"; }
+  function wireIntro() {
+    const lc = $("#loc-change");
+    if (lc) lc.addEventListener("click", () => openFolderPicker(p => {
+      introLoc = p; const lp = $("#loc-path"); if (lp) lp.textContent = p;
+    }));
+  }
+  // Shared start path: disables the clicked control, posts, advances on success.
+  async function startTeam(body, btn, busy) {
+    const label = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = busy; }
     const r = await postJSON("/api/start", body);
     if (!r.ok) {
       toast(r.data.error || "couldn't start");
-      if (start) { start.disabled = false; start.textContent = "Start →"; }
+      if (btn) { btn.disabled = false; btn.textContent = label; }
       return;
     }
     S = r.data; render();
@@ -309,7 +332,7 @@
     // Two grid items (the wrapper #main is display:contents): chat | panel.
     $("#main").innerHTML = `
       <section class="chat sketch uni-chat">
-        <div class="sketch-top"><span class="sketch-eyebrow">modastack · build your team</span></div>
+        <div class="sketch-top"><span class="st-group"><button class="backbtn" data-back>← Back</button><span class="sketch-eyebrow">modastack · build your team</span></span></div>
         <div class="ch-body" id="chbody"></div>
         <div class="cue" id="cue"></div>
         <div class="chips" id="chips"></div>
@@ -752,7 +775,9 @@
   }
 
   // --- generating (Build + validate + install, collapsed) ----------------
-  let building = false;
+  // buildGen tags each build run; goBack() bumps it so a cancelled (or hung)
+  // build can never resume and jump the user forward to the preview.
+  let building = false, buildGen = 0;
   function renderGenerating() {
     setPanes("1fr");
     $("#main").innerHTML = `<main class="node narrow">
@@ -762,6 +787,7 @@
       <div class="genbar"><div class="genbar-fill" id="genfill"></div></div>
       <ul class="genfiles" id="genfiles"></ul>
       <div id="generr"></div>
+      <div class="actions"><button class="backbtn" data-back>← Back to editing</button></div>
     </main>`;
     if (!building) runBuildFlow();
   }
@@ -777,28 +803,34 @@
   }
   async function runBuildFlow() {
     building = true;
-    const fill = () => { const el = $("#genfill"); if (el) el.style.width = Math.min(95, +(el.dataset.p || 0) + 12) + "%", el.dataset.p = Math.min(95, +(el.dataset.p || 0) + 12); };
+    const myGen = ++buildGen;
+    const live = () => myGen === buildGen;   // false once cancelled via Back
+    const set = (id, fn) => { const el = $("#" + id); if (el) fn(el); };
+    const fill = () => set("genfill", el => { const p = Math.min(95, +(el.dataset.p || 0) + 12); el.style.width = p + "%"; el.dataset.p = p; });
     try {
       await sse("/api/build", {}, {
-        file_start: (e) => { genAddFile(e.path, false); $("#genmsg").innerHTML = `writing <b>${esc(e.path)}</b>…`; },
-        file_end: (e) => { genAddFile(e.path, true); fill(); },
+        file_start: (e) => { if (!live()) return; genAddFile(e.path, false); set("genmsg", el => el.innerHTML = `writing <b>${esc(e.path)}</b>…`); },
+        file_end: (e) => { if (!live()) return; genAddFile(e.path, true); fill(); },
         delta: () => {},
         error: (e) => { throw new Error(e.message || "build failed"); },
         state: (st) => { S = st; },
       });
-      $("#genmsg").textContent = "Checking it over…";
+      if (!live()) return;   // user backed out mid-build
+      set("genmsg", el => el.textContent = "Checking it over…");
       const v = await postJSON("/api/validate", {});
+      if (!live()) return;
       S = v.data.state || S;
       if (!v.data.passed) return buildFailed("Validation found problems.", v.data.report);
-      $("#genmsg").textContent = "Installing…";
+      set("genmsg", el => el.textContent = "Installing…");
       const r = await postJSON("/api/install", {});
+      if (!live()) return;
       S = r.data.state || S;
       if (!r.ok) return buildFailed(r.data.error || "Install failed.");
-      if ($("#genfill")) $("#genfill").style.width = "100%";
+      set("genfill", el => el.style.width = "100%");
       building = false;
       await go("done");
     } catch (err) {
-      buildFailed(String(err.message || err));
+      if (live()) buildFailed(String(err.message || err));
     }
   }
   function buildFailed(msg, report) {
@@ -816,9 +848,38 @@
     if (S.chat === "telegram") return `<p class="lede">Talk to it in Telegram.</p>`;
     return `<p class="lede">Talk to it from the terminal: <code>modastack ask "what's the status?"</code></p>`;
   }
-  // The post-build screen IS a built-in file browser: a success banner, the
-  // generated team's files (tree + contents) read live from disk, a button to
-  // open the real folder on your machine, and Finish.
+  // Group flat relative paths (agent.yaml, roles/director/ROLE.md, …) into a
+  // nested folder tree so the preview reads like the on-disk structure. Each
+  // folder carries its full path so it can be collapsed independently.
+  function buildFileTree(paths) {
+    const root = { dirs: {}, files: [] };
+    for (const p of paths) {
+      const parts = p.split("/");
+      let node = root, prefix = "";
+      for (let i = 0; i < parts.length - 1; i++) {
+        prefix = prefix ? prefix + "/" + parts[i] : parts[i];
+        node.dirs[parts[i]] = node.dirs[parts[i]] || { dirs: {}, files: [], path: prefix };
+        node = node.dirs[parts[i]];
+      }
+      node.files.push({ name: parts[parts.length - 1], path: p });
+    }
+    return root;
+  }
+  function renderTree(node, cur, depth, collapsed) {
+    let html = "";
+    for (const d of Object.keys(node.dirs).sort()) {
+      const dir = node.dirs[d];
+      const shut = collapsed.has(dir.path);
+      html += `<div class="tnode dir" data-dir="${esc(dir.path)}" style="--d:${depth}"><span class="tdi">${shut ? "▸" : "▾"}</span>${esc(d)}</div>`;
+      if (!shut) html += renderTree(dir, cur, depth + 1, collapsed);
+    }
+    for (const f of node.files.sort((a, b) => a.name.localeCompare(b.name)))
+      html += `<div class="tnode file ${f.path === cur ? "sel" : ""}" data-ifile="${esc(f.path)}" style="--d:${depth}"><span class="ok">✓</span>${esc(f.name)}</div>`;
+    return html;
+  }
+  // The post-build screen is a PREVIEW (not a finish line): the generated team's
+  // files (collapsible folder tree + read-only contents) read live from disk.
+  // The real "done" screen comes after Finish (renderFinished).
   async function renderDone() {
     setPanes("1fr");
     const spec = S.spec;
@@ -826,19 +887,18 @@
     const counts = `${spec.roles.length || 1} role(s) · ${spec.autonomous.length} automation(s) · ${spec.services.length} service(s)`;
     $("#main").innerHTML = `<main class="filesdone">
       <header class="fd-head">
-        <div class="fd-seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
         <div class="fd-title">
-          <div class="eyebrow">Done · here's what modastack built</div>
-          <h1>${esc(S.team_name || "your team")} is ready</h1>
-          <p class="fd-meta">${counts} · source at <code>${esc(where)}</code> · installed into <code>.modastack/</code></p>
+          <div class="eyebrow">Preview · here's what modastack built</div>
+          <h1>${esc(S.team_name || "your team")}</h1>
+          <p class="fd-meta">${counts} · source at <code>${esc(where)}</code></p>
         </div>
         <div class="fd-actions">
+          <button class="btn ghost" data-back>← Keep editing</button>
           <button class="btn ghost" id="fd-reveal">Open folder</button>
-          <button class="btn primary" id="fd-finish">Finish</button>
+          <button class="btn primary" id="fd-finish">Looks good — finish</button>
         </div>
       </header>
       <div class="fd-body" id="fd-body"></div>
-      <div class="fd-foot"><span class="fd-run"><span class="pr">$</span> modastack start</span> ${talkHint()}</div>
     </main>`;
 
     $("#fd-reveal").addEventListener("click", async () => {
@@ -846,9 +906,8 @@
       toast(r.ok ? "Opened the team folder." : (r.data.error || "couldn't open the folder"));
     });
     $("#fd-finish").addEventListener("click", async () => {
-      $("#fd-finish").disabled = true;
-      _finished = true;   // the server is about to stop on purpose — not a disconnect
-      try { await postJSON("/api/finish", {}); } catch { /* server stopped mid-response */ }
+      const b = $("#fd-finish"); b.disabled = true; b.textContent = "Finishing…";
+      try { await postJSON("/api/finish", {}); } catch { /* ignore */ }
       renderFinished();
     });
 
@@ -859,25 +918,34 @@
       body.innerHTML = `<div class="fd-empty">
         <p>No files found at <code>${esc(where)}</code>.</p>
         <p class="fd-sub">The build may not have finished writing — go back and try again.</p>
-        <button class="btn ghost" data-go="design">Back to editing</button></div>`;
+        <button class="btn ghost" data-back>Back to editing</button></div>`;
       return;
     }
-    body.innerHTML = `<nav class="tree" id="fd-tree"></nav>
-      <section class="slab"><div class="slabbar"><span class="s" id="fd-name"></span></div>
-        <div class="code" id="fd-code"></div></section>`;
+    body.innerHTML = `<nav class="tree" id="fd-tree-col">
+        <div class="th">Your files</div><div id="fd-tree"></div></nav>
+      <section class="slab">
+        <div class="slabbar"><span class="th slab-th">Preview</span><span class="s" id="fd-name"></span></div>
+        <div class="code" id="fd-code"></div>
+      </section>`;
+
     let cur = files[0];
-    const drawTree = () => { $("#fd-tree").innerHTML = files.map(p =>
-      `<div class="tnode file ${p === cur ? "sel" : ""}" data-ifile="${esc(p)}"><span class="ok">✓</span>${esc(p)}</div>`).join(""); };
+    const tree = buildFileTree(files);
+    const collapsed = new Set();   // folder paths the user has folded shut
+    const drawTree = () => { $("#fd-tree").innerHTML = renderTree(tree, cur, 0, collapsed); };
     const openF = async (p) => { cur = p; drawTree(); $("#fd-name").innerHTML = `<b>${esc(p)}</b>`;
       const d = await getJSON("/api/file?path=" + encodeURIComponent(p)); $("#fd-code").textContent = d.content || ""; };
     drawTree(); await openF(cur);
-    $("#fd-tree").addEventListener("click", (e) => {
+
+    body.addEventListener("click", (e) => {
+      const dir = e.target.closest("[data-dir]");
+      if (dir) { const p = dir.dataset.dir; collapsed.has(p) ? collapsed.delete(p) : collapsed.add(p); drawTree(); return; }
       const f = e.target.closest("[data-ifile]"); if (f) openF(f.dataset.ifile);
     });
   }
 
-  // Final screen after Finish. The local setup server has stopped, so this is
-  // intentionally static — no buttons that would need the (now-gone) server.
+  // Final screen after Finish. The server now stays alive (the homepage is a
+  // re-entrant hub), so its buttons can talk to it: copy/run the start command,
+  // link to cloud docs, and head to the homepage.
   function renderFinished() {
     setPanes("1fr");
     $("#main").innerHTML = `<main class="done-wrap">
@@ -885,27 +953,104 @@
       <div class="eyebrow">All set</div>
       <h1>${esc(S.team_name || "your team")} is ready</h1>
       <p class="lede">Installed into <code>.modastack/</code>. We are legion.</p>
-      ${talkHint()}
-      <p class="lede" style="margin-top:18px">Start it whenever you're ready:</p>
-      <div class="cmd"><span class="pr">$</span> modastack start</div>
-      <p class="lede" style="font-size:13px;color:var(--faint)">Setup is complete and this local server has stopped — you can close this tab.</p>
+
+      <p class="done-h">Start it whenever you're ready</p>
+      <p class="lede">Open a fresh terminal and run this — it turns your agent team on.</p>
+      <div class="cmd"><span class="pr">$</span> <span class="cmd-text">modastack start</span>
+        <button class="cmd-copy" id="copy-start" title="Copy">Copy</button></div>
+      <div class="actions" style="margin-top:8px"><button class="btn ghost" id="run-start">Start it for me →</button></div>
+
+      <p class="done-h">Next steps</p>
+      <p class="lede">Want to run modastack in the cloud? <a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">Follow these instructions →</a></p>
+
+      <div class="actions" style="margin-top:26px"><button class="btn primary" id="done-home">Done →</button></div>
     </main>`;
+    $("#copy-start").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText("modastack start"); toast("Copied."); }
+      catch { toast("Copy failed — select the command manually."); }
+    });
+    $("#run-start").addEventListener("click", async () => {
+      const b = $("#run-start"); b.disabled = true; b.textContent = "Starting…";
+      const r = await postJSON("/api/run-start", {});
+      if (r.ok) { toast("Starting your agent team…"); b.textContent = "Started ✓"; }
+      else { toast(r.data.error || "couldn't start it"); b.disabled = false; b.textContent = "Start it for me →"; }
+    });
+    $("#done-home").addEventListener("click", () => { atHome = true; renderHome(); });
+  }
+
+  // --- homepage (the re-entrant team hub) --------------------------------
+  // A grid of team cards (boxy, to read distinctly from the template *rows* on
+  // the intro). Click a team to open it in the editor (the chat + cards screen,
+  // reverse-filled from source); click the "add" card to start a fresh setup.
+  async function renderHome() {
+    setPanes("1fr");
+    $("#main").innerHTML = `<main class="node home">
+      <div class="eyebrow">modastack</div>
+      <h1>Your agent teams</h1>
+      <p class="lede">Pick a team to view or update it, or add a new one. modastack keeps each team's source and re-installs your changes when you finish editing.</p>
+      <div class="home-grid" id="home-list"><p class="ihint">Loading…</p></div>
+    </main>`;
+    const data = await getJSON("/api/home");
+    const teams = data.teams || [];
+    const teamGlyph = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/></svg>';
+    const cards = teams.map(t =>
+      `<button class="hcard" data-openteam="${esc(t.path)}" title="${esc(t.path)}">
+        <span class="hcard-glyph">${teamGlyph}</span>
+        <b>${esc(t.name)}</b>
+        <span class="hcard-desc">${esc(t.description || "Agent team")}</span>
+        <span class="hcard-foot">Open →</span>
+      </button>`).join("");
+    const add = `<button class="hcard hcard-add" data-addteam>
+      <span class="hcard-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>
+      <b>Add an agent team</b>
+      <span class="hcard-foot">New setup →</span>
+    </button>`;
+    $("#home-list").innerHTML = cards + add;
   }
 
   // --- top-level render + events ----------------------------------------
   function render() {
+    if (atHome) { renderHome(); return; }   // the team hub overlays any stage
     const st = S.stage;
-    if (st === "start") { renderIntro(); return; }
+    if (st === "start") { welcomed ? renderIntro() : renderWelcome(); return; }
     if (GENERATING.has(st)) { renderGenerating(); return; }
     if (st === "done") { renderDone(); return; }
     renderUnified();            // design + editing (the one screen)
   }
 
   document.addEventListener("click", (e) => {
+    if (e.target.closest("[data-back]")) { goBack(); return; }
     const go_ = e.target.closest("[data-go]");
     if (go_) { go(go_.dataset.go); return; }
-    const im = e.target.closest("[data-intromode]");
-    if (im) { if (!im.disabled) { introMode = im.dataset.intromode; drawIntro(); } return; }
+    if (e.target.closest("[data-addteam]")) {
+      // Leave the hub and start a fresh setup flow (template chooser + custom).
+      atHome = false; welcomed = true; renderIntro();
+      return;
+    }
+    const openteam = e.target.closest("[data-openteam]");
+    if (openteam) {
+      if (!openteam.disabled) {
+        const path = openteam.dataset.openteam;
+        atHome = false;   // entering the editor
+        startTeam({ mode: "open", location: path, team_path: path }, openteam, "Opening…");
+      }
+      return;
+    }
+    const newteam = e.target.closest("[data-newteam]");
+    if (newteam) {
+      if (!newteam.disabled)
+        startTeam({ mode: "create", location: introLoc }, newteam, "Starting…");
+      return;
+    }
+    const tmpl = e.target.closest("[data-template]");
+    if (tmpl) {
+      if (!tmpl.disabled) {
+        const name = tmpl.dataset.template;
+        startTeam({ mode: "registry", team: name,
+          location: introLoc.replace(/\/+$/, "") + "/" + name }, tmpl, "Downloading…");
+      }
+      return;
+    }
     const chip = e.target.closest("[data-chip]");
     if (chip) { sendMessage(chip.dataset.chip); return; }
     const cs = e.target.closest("[data-chatset]");
@@ -952,5 +1097,5 @@
   }
   setInterval(heartbeat, 4000);
 
-  refresh();
+  boot();
 })();

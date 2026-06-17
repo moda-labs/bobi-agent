@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.20.0 — 2026-06-17
+
+A reworked `modastack setup` web UI: a welcome on-ramp, a streamlined
+template chooser, a read-only build preview, a launch-ready final screen,
+and a re-entrant team hub you return to.
+
+### Added
+- Welcome on-ramp (`renderWelcome`): core value prop, a "how setup works"
+  walkthrough, and a vertical event-driven flow diagram with a light
+  entrance animation and a subtle looping "live" pulse (reduced-motion safe)
+- Team hub homepage (`GET /api/home`): a grid of team cards, each with a
+  description read from the team's `agent.md`, plus an "add a team" card
+  that starts a fresh setup. The server now stays alive past Finish so the
+  hub is a re-entrant editor; a finished session boots back into it
+- Final screen: a copyable `modastack start` plus "Start it for me"
+  (`POST /api/run-start` launches the installed agent), a cloud-deploy next
+  step, and a Done button into the hub
+- Back navigation across the flow (chat, build, preview); an in-flight build
+  is guarded by a generation token so a cancelled build can't jump forward
+
+### Changed
+- Streamlined the "Build an agent team" intro: registry templates as rows
+  with a prominent sticky "Customize my own" card; the source-folder
+  location demoted to an FYI line
+- Reframed the post-build screen as a read-only Preview with a collapsible
+  folder tree (per-file editing removed)
+- Filtered internal/test packs (`dogfood-content-review`) out of the
+  template list; `list_teams_in` now returns a per-team description
+
 ## 0.19.0 — 2026-06-12
 
 Single `.modastack/` per installation, and event delivery scoped to what
