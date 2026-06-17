@@ -21,6 +21,7 @@ pip install -e ".[dev]"
 ## Commands
 
 ```bash
+modastack setup                   # interactive onboarding: design, build, and install a team
 modastack install <path>          # install an agent team from a local path or registry
 modastack start                   # start the installed agent
 modastack stop                    # stop the running instance
@@ -234,6 +235,16 @@ Integration tests drive real Claude Code sessions. Run before pushing.
 is found in CI or a deployed system, STOP and write an integration test
 that reproduces the failure BEFORE writing the fix. The test must fail
 first, then the fix makes it pass. No exceptions.
+
+## Design System (modastack setup web UI)
+
+Before any visual or UX decision on the `modastack setup` web UI, read `DESIGN.md`
+at the repo root. It defines the design direction (warm light chrome + single
+dark CRT slab, mono-accented identity, system-fonts-only, static space-retro),
+the mode-aware stage machine, the policy/customization model, and the
+digestion-prompt architecture. Live mockups in `docs/design/`. Do not deviate
+without explicit approval. `DESIGN.md` supersedes the visual/UX assumptions in
+`~/.claude/plans/sleepy-crunching-pnueli.md`.
 
 ## Releasing
 

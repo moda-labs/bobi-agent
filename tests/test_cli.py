@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from modastack.__version__ import __version__
@@ -337,6 +338,88 @@ class TestEventsCommand:
         assert result.exit_code == 0, result.output
         assert "legacy_push" not in result.output
         assert "new_pr" in result.output
+
+
+class TestSetupCommand:
+    """The setup command launches the local web UI."""
+
+    @pytest.fixture(autouse=True)
+    def _claude_present(self, monkeypatch):
+        # The command preflights the Claude CLI; unit tests must pass on
+        # machines without it.
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+
+    def test_missing_claude_cli_fails_with_hint(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("modastack.sdk.get_cli_path",
+                            lambda: "/nonexistent/claude")
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(main, ["setup"])
+        assert result.exit_code != 0
+        assert "Claude Code CLI" in result.output
+
+    def test_interrupted_setup_requires_confirmation(self, tmp_path, monkeypatch):
+        from modastack.setup.state import SetupState, Stage
+
+        called = {}
+        monkeypatch.setattr("modastack.setup.run_setup",
+                            lambda *a, **k: called.setdefault("ran", True) and 0)
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            SetupState(stage=Stage.DESIGN, team_name="t").save(Path(fs))
+            declined = runner.invoke(main, ["setup"], input="n\n")
+            assert declined.exit_code != 0
+            assert "--resume" in declined.output
+            assert "ran" not in called
+
+    def test_help(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["setup", "--help"])
+        assert result.exit_code == 0
+        assert "--resume" in result.output
+
+    def test_runs_setup_against_literal_cwd(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake_run_setup(project_path, model=None, resume=False):
+            seen.update(project=project_path, model=model, resume=resume)
+            return 0
+
+        monkeypatch.setattr("modastack.setup.run_setup", fake_run_setup)
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            result = runner.invoke(main, ["setup", "--model", "sonnet"])
+        assert result.exit_code == 0, result.output
+        assert seen["project"] == Path(fs).resolve()
+        assert seen["model"] == "sonnet"
+        assert seen["resume"] is False
+
+    def test_existing_install_requires_confirmation(self, tmp_path, monkeypatch):
+        called = {}
+        monkeypatch.setattr("modastack.setup.run_setup",
+                            lambda *a, **k: called.setdefault("ran", True) and 0)
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            dot = Path(".modastack")
+            dot.mkdir()
+            (dot / "agent.yaml").write_text("agent: eng-team\n")
+            declined = runner.invoke(main, ["setup"], input="n\n")
+            assert declined.exit_code != 0
+            assert "ran" not in called
+            accepted = runner.invoke(main, ["setup"], input="y\n")
+            assert accepted.exit_code == 0, accepted.output
+            assert called.get("ran") is True
+
+    def test_resume_skips_confirmation(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.setup.run_setup", lambda *a, **k: 0)
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            dot = Path(".modastack")
+            dot.mkdir()
+            (dot / "agent.yaml").write_text("agent: eng-team\n")
+            result = runner.invoke(main, ["setup", "--resume"])
+        assert result.exit_code == 0, result.output
 
 
 # --- Discovery commands work without installation root ---------------------

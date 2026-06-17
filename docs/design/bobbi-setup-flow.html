@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en" data-accent="amber" data-retro="on">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bobbi setup — flow prototype</title>
+<style>
+  :root {
+    --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, "Cascadia Mono", "Segoe UI Mono", Consolas, "Liberation Mono", monospace;
+    --bg:#F4F1EA; --surface:#FBFAF6; --raised:#FFFDF9; --text:#1F1B16; --muted:#7A7062; --faint:#A89E90;
+    --border:#E2DCD0; --border-strong:#D6CCBD;
+    --slab-bg:#181410; --slab-surface:#1E1A15; --slab-text:#E8E2D6; --slab-muted:#948A7B; --slab-border:#2A241D;
+    --syn-key:#AFC0D2; --syn-str:#CBBA8B; --syn-punc:#7E776B; --syn-com:#6E6354;
+    --radius:12px; --radius-sm:7px;
+  }
+  html[data-accent="amber"]{ --accent:#C8612B; --accent-2:#D86E33; --slab-accent:#E0843F; --accent-soft:rgba(200,97,43,.11); --accent-ring:rgba(200,97,43,.30); }
+  html[data-accent="green"]{ --accent:#177B52; --accent-2:#1E8E60; --slab-accent:#29A36A; --accent-soft:rgba(23,123,82,.10); --accent-ring:rgba(23,123,82,.28); }
+  *{box-sizing:border-box;} html,body{height:100%;}
+  body{ margin:0; background:radial-gradient(1200px 600px at 80% -10%, #FAF7F0 0%, var(--bg) 55%); color:var(--text); font-family:var(--font-sans); -webkit-font-smoothing:antialiased; font-size:15px; line-height:1.5; }
+  html[data-retro="on"] body{ background:radial-gradient(1200px 600px at 80% -10%, #FAF7F0 0%, var(--bg) 55%), repeating-linear-gradient(90deg, rgba(120,100,70,.045) 0 1px, transparent 1px 24px), repeating-linear-gradient(0deg, rgba(120,100,70,.045) 0 1px, transparent 1px 24px); }
+
+  .app{ width:min(1240px,96vw); height:min(760px,92vh); margin:3.2vh auto; background:var(--surface); border:1px solid var(--border-strong); border-radius:14px; box-shadow:0 1px 0 #fff inset, 0 18px 50px -24px rgba(40,30,16,.35); display:flex; flex-direction:column; overflow:hidden; }
+  .titlebar{ height:42px; flex:0 0 42px; display:flex; align-items:center; gap:12px; padding:0 14px; background:linear-gradient(var(--raised),var(--surface)); border-bottom:1px solid var(--border); }
+  .tdots{display:flex;gap:7px;} .tdots i{width:11px;height:11px;border-radius:50%;display:block;background:#D9CFC0;} .tdots i:nth-child(1){background:#E0A89A;} .tdots i:nth-child(2){background:#E6CE9C;} .tdots i:nth-child(3){background:#B9D6AE;}
+  .addr{ font-family:var(--font-mono); font-size:12px; color:var(--muted); display:flex; align-items:center; gap:7px; }
+  .addr .lock{width:11px;height:11px;color:var(--accent);}
+  .spacer{flex:1;}
+  .accent-switch{display:flex;gap:6px;align-items:center;} .accent-switch span{font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);}
+  .sw{width:19px;height:19px;border-radius:50%;border:2px solid transparent;cursor:pointer;box-shadow:0 0 0 1px rgba(0,0,0,.06) inset;}
+  .sw.amber{background:#C8612B;} .sw.green{background:#177B52;} .sw.sel{border-color:var(--text);}
+  .retro-toggle{font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);border:1px solid var(--border-strong);background:var(--raised);padding:4px 9px;border-radius:999px;cursor:pointer;margin-left:14px;display:flex;align-items:center;gap:6px;}
+  .retro-toggle .led{width:7px;height:7px;border-radius:50%;background:var(--border-strong);}
+  html[data-retro="on"] .retro-toggle{color:var(--text);border-color:var(--accent);} html[data-retro="on"] .retro-toggle .led{background:var(--accent);box-shadow:0 0 6px var(--accent);}
+
+  .panes{ flex:1; display:grid; min-height:0; grid-template-columns:216px 1fr; }
+
+  /* RAIL */
+  .rail{ background:linear-gradient(var(--surface),#F1ECE3); border-right:1px solid var(--border); padding:20px 14px; display:flex; flex-direction:column; }
+  .brand{display:flex;align-items:center;gap:9px;padding:2px 6px 18px;}
+  .brand .mk{width:22px;height:22px;border-radius:6px;background:var(--accent);display:grid;place-items:center;}
+  .brand .mk svg{width:15px;height:15px;}
+  .brand b{font-size:14px;} .brand b span{color:var(--muted);font-weight:500;}
+  .counter{font-family:var(--font-mono);font-size:11px;letter-spacing:.14em;color:var(--faint);padding:0 6px 12px;font-variant-numeric:tabular-nums;}
+  html[data-retro="on"] .counter::before{content:"// ";}
+  .step{display:flex;align-items:center;gap:11px;height:38px;padding:0 8px;border-radius:var(--radius-sm);font-family:var(--font-mono);font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);cursor:pointer;}
+  .step .dot{width:15px;height:15px;border-radius:50%;flex:0 0 15px;border:1.5px solid var(--border-strong);display:grid;place-items:center;background:var(--raised);}
+  .step.done{color:var(--text);} .step.done .dot{background:var(--accent);border-color:var(--accent);} .step.done .dot svg{width:9px;height:9px;color:#fff;}
+  .step.current{color:var(--text);background:var(--accent-soft);} .step.current .dot{border-color:var(--accent);box-shadow:0 0 0 4px var(--accent-ring);} .step.current .dot i{width:6px;height:6px;border-radius:50%;background:var(--accent);display:block;}
+  .step.todo{color:var(--faint);}
+  .step:hover:not(.current){background:rgba(0,0,0,.025);}
+  .rail .grow{flex:1;}
+  html[data-retro="on"] .rail .grow{ background-image:radial-gradient(1px 1px at 22% 24%,rgba(120,108,86,.5) 50%,transparent),radial-gradient(1px 1px at 64% 52%,rgba(120,108,86,.4) 50%,transparent),radial-gradient(1px 1px at 38% 76%,rgba(120,108,86,.45) 50%,transparent),radial-gradient(1px 1px at 82% 18%,rgba(120,108,86,.35) 50%,transparent),radial-gradient(1px 1px at 88% 66%,rgba(120,108,86,.5) 50%,transparent),radial-gradient(2px 2px at 50% 40%,rgba(120,108,86,.3) 50%,transparent); }
+  .hint{font-size:11.5px;color:var(--faint);line-height:1.5;padding:12px 8px 2px;border-top:1px solid var(--border);}
+  .hint kbd{font-family:var(--font-mono);font-size:10.5px;background:var(--raised);border:1px solid var(--border-strong);border-bottom-width:2px;border-radius:4px;padding:1px 5px;color:var(--muted);}
+
+  /* generic light node */
+  .node{padding:34px 40px;overflow-y:auto;}
+  .node.narrow{max-width:680px;}
+  .eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);font-weight:600;}
+  .node h1{font-size:27px;line-height:1.16;letter-spacing:-.02em;margin:9px 0 8px;font-weight:680;}
+  .node .lede{color:var(--muted);max-width:54ch;margin:0 0 22px;font-size:14.5px;}
+  textarea.answer, input.answer{ width:100%; font-family:var(--font-sans); font-size:15px; color:var(--text); background:var(--raised); border:1px solid var(--border-strong); border-radius:10px; padding:13px 15px; resize:none; line-height:1.55; }
+  textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin:13px 0 0;}
+  .chip{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);background:var(--raised);border:1px solid var(--border);border-radius:999px;padding:5px 11px;cursor:pointer;}
+  .chip:hover{border-color:var(--border-strong);color:var(--text);}
+  .actions{display:flex;align-items:center;gap:12px;margin-top:26px;}
+  .btn{font-family:var(--font-sans);font-size:14px;font-weight:560;padding:10px 18px;border-radius:9px;border:1px solid transparent;cursor:pointer;}
+  .btn.primary{background:var(--accent);color:#fff;box-shadow:0 2px 8px -3px var(--accent);} .btn.primary:hover{background:var(--accent-2);}
+  .btn.ghost{background:transparent;color:var(--muted);border-color:var(--border-strong);} .btn.ghost:hover{color:var(--text);background:var(--raised);}
+  .actions .note{margin-left:auto;font-size:12px;color:var(--faint);font-family:var(--font-mono);}
+
+  /* choose / start cards */
+  .cardgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:6px;}
+  .pcard{border:1px solid var(--border);background:var(--raised);border-radius:var(--radius);padding:16px;cursor:pointer;}
+  .pcard:hover{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+  .pcard.sel{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+  .pcard .pt{font-weight:620;font-size:15px;margin-bottom:3px;}
+  .pcard .pd{font-size:12.5px;color:var(--muted);line-height:1.45;}
+  .pcard .roles{margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;}
+  .pcard .roles b{font-family:var(--font-mono);font-size:10.5px;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:2px 6px;font-weight:500;}
+  .pcard.blank{display:flex;flex-direction:column;justify-content:center;align-items:flex-start;border-style:dashed;}
+  .pcard.blank .plus{font-family:var(--font-mono);font-size:18px;color:var(--accent);margin-bottom:4px;}
+
+  /* chat drawer (Describe) */
+  .chat{ background:linear-gradient(var(--surface),#F1ECE3); border-left:1px solid var(--border); display:flex; flex-direction:column; min-width:0; }
+  .chat .ch-head{padding:14px 16px;border-bottom:1px solid var(--border);font-family:var(--font-mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:8px;}
+  .chat .ch-head .star{color:var(--accent);}
+  .chat .ch-body{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;}
+  .msg{font-size:13px;line-height:1.5;max-width:90%;padding:9px 12px;border-radius:12px;}
+  .msg.you{align-self:flex-end;background:var(--accent-soft);border:1px solid var(--accent-ring);color:var(--text);}
+  .msg.bob{align-self:flex-start;background:var(--raised);border:1px solid var(--border);color:var(--text);}
+  .msg.bob .use{margin-top:9px;display:inline-block;font-family:var(--font-sans);font-size:12px;font-weight:560;color:#fff;background:var(--accent);border:0;border-radius:7px;padding:6px 11px;cursor:pointer;}
+  .chat .ch-input{border-top:1px solid var(--border);padding:11px;display:flex;gap:8px;}
+  .chat .ch-input input{flex:1;font-family:var(--font-sans);font-size:13px;border:1px solid var(--border-strong);border-radius:8px;padding:9px 11px;background:var(--raised);}
+  .chat .ch-input input:focus{outline:none;border-color:var(--accent);}
+
+  /* Design step — single centered conversation (no separate answer box); .sketch class kept internal */
+  .chat.sketch{width:min(760px,100%);margin:0 auto;border-left:0;background:transparent;}
+  .chat.sketch .sketch-top{display:flex;align-items:center;justify-content:space-between;padding:16px 28px 0;}
+  .chat.sketch .sketch-eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);}
+  .chat.sketch .sketch-next{padding:6px 12px;font-size:13px;}
+  .chat.sketch .ch-body{padding:26px 28px 8px;gap:14px;}
+  .chat.sketch .msg{font-size:14px;max-width:82%;padding:10px 13px;}
+  .chat.sketch .chips{padding:2px 28px 8px;margin:0;}
+  .chat.sketch .ch-input{border-top:0;padding:6px 28px 22px;}
+  .chat.sketch .ch-input input{font-size:14.5px;padding:13px 15px;border-radius:10px;}
+
+  /* dark slab (Build / Review) */
+  .slab{background:var(--slab-bg);display:flex;flex-direction:column;position:relative;min-width:0;overflow:hidden;}
+  .slab::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--slab-accent) 18%,var(--slab-accent) 82%,transparent);opacity:.9;}
+  html[data-retro="on"] .slab{box-shadow:inset 0 0 150px rgba(0,0,0,.74);}
+  html[data-retro="on"] .slab::before{box-shadow:0 0 16px 1px var(--slab-accent);}
+  html[data-retro="on"] .slab::after{content:"";position:absolute;inset:0;z-index:4;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(0,0,0,.16) 0 1px,transparent 1px 3px);opacity:.42;}
+  .corners{display:none;} html[data-retro="on"] .corners{display:block;position:absolute;inset:9px;z-index:5;pointer-events:none;}
+  html[data-retro="on"] .corners i{position:absolute;width:13px;height:13px;border:1.5px solid var(--slab-accent);opacity:.85;filter:drop-shadow(0 0 3px var(--slab-accent));}
+  html[data-retro="on"] .corners i:nth-child(1){top:0;left:0;border-right:0;border-bottom:0;} html[data-retro="on"] .corners i:nth-child(2){top:0;right:0;border-left:0;border-bottom:0;}
+  html[data-retro="on"] .corners i:nth-child(3){bottom:0;left:0;border-right:0;border-top:0;} html[data-retro="on"] .corners i:nth-child(4){bottom:0;right:0;border-left:0;border-top:0;}
+  .slabbar{padding:11px 16px;border-bottom:1px solid var(--slab-border);background:var(--slab-surface);}
+  .slabbar .t{font-family:var(--font-sans);font-size:13.5px;color:var(--slab-text);font-weight:580;}
+  .slabbar .s{font-family:var(--font-mono);font-size:11px;color:var(--slab-muted);margin-top:2px;}
+  .slabbar .s b{color:var(--slab-accent);font-weight:400;}
+  .tabs{display:flex;align-items:stretch;height:34px;border-bottom:1px solid var(--slab-border);padding:0 8px;background:var(--slab-surface);overflow:hidden;}
+  .tab{display:flex;align-items:center;gap:6px;padding:0 11px;font-family:var(--font-mono);font-size:11.5px;color:var(--slab-muted);border-bottom:2px solid transparent;white-space:nowrap;}
+  .tab.active{color:var(--slab-text);border-bottom-color:var(--slab-accent);} .tab .d{width:6px;height:6px;border-radius:50%;background:var(--slab-accent);} .tab.idle .d{background:var(--slab-border);} .tab.ok .d{background:var(--slab-accent);opacity:.6;}
+  .tab .more{color:var(--slab-muted);}
+  .code{flex:1;overflow-y:auto;padding:14px 0 18px;font-family:var(--font-mono);font-size:12.5px;line-height:1.62;color:var(--slab-text);}
+  html[data-retro="on"] .code{color:color-mix(in srgb,var(--slab-accent) 30%,var(--slab-text));text-shadow:0 0 6px color-mix(in srgb,var(--slab-accent) 45%,transparent);}
+  .ln{display:grid;grid-template-columns:38px 1fr;} .ln>.n{color:#4A4337;text-align:right;padding-right:14px;user-select:none;} .ln>.c{white-space:pre-wrap;}
+  html[data-retro="on"] .ln>.n{color:color-mix(in srgb,var(--slab-accent) 34%,#4A4337);}
+  .k{color:var(--syn-key);} .s{color:var(--syn-str);} .p{color:var(--syn-punc);} .cm{color:var(--syn-com);font-style:italic;}
+  html[data-retro="on"] .k{color:color-mix(in srgb,var(--slab-accent) 58%,var(--slab-text));} html[data-retro="on"] .s{color:color-mix(in srgb,var(--slab-accent) 42%,var(--syn-str));} html[data-retro="on"] .cm{color:color-mix(in srgb,var(--slab-accent) 38%,var(--syn-com));}
+  .caret{display:inline-block;width:8px;height:1.05em;vertical-align:-2px;background:var(--slab-accent);margin-left:1px;border-radius:1px;animation:blink 1.05s steps(1) infinite;}
+  .slabfoot{border-top:1px solid var(--slab-border);padding:7px 16px;font-family:var(--font-mono);font-size:11px;color:var(--slab-muted);display:flex;align-items:center;gap:14px;}
+  .slabfoot .live{color:var(--slab-accent);display:flex;align-items:center;gap:6px;} .slabfoot .live i{width:7px;height:7px;border-radius:50%;background:var(--slab-accent);animation:pulse 1.4s ease-in-out infinite;}
+  @keyframes blink{50%{opacity:0;}} @keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+  @media (prefers-reduced-motion:reduce){ .caret,.slabfoot .live i{animation:none;} .caret{opacity:.9;} }
+
+  /* review file tree */
+  .tree{background:var(--surface);border-right:1px solid var(--border);padding:16px 10px;overflow-y:auto;}
+  .tree .th{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);padding:0 8px 10px;}
+  .tnode{font-family:var(--font-mono);font-size:12px;color:var(--muted);padding:5px 8px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:7px;}
+  .tnode.dir{color:var(--text);font-weight:600;}
+  .tnode.file:hover{background:rgba(0,0,0,.03);color:var(--text);}
+  .tnode.sel{background:var(--accent-soft);color:var(--text);}
+  .tnode.indent{padding-left:22px;}
+
+  /* big success */
+  .done-wrap{padding:48px 44px;max-width:640px;}
+  .seal{width:46px;height:46px;border-radius:12px;background:var(--accent);display:grid;place-items:center;margin-bottom:18px;}
+  .seal svg{width:26px;height:26px;color:#fff;}
+  .cmd{font-family:var(--font-mono);font-size:13px;background:var(--slab-bg);color:var(--slab-text);border-radius:9px;padding:13px 15px;margin:18px 0;display:flex;align-items:center;gap:10px;}
+  html[data-retro="on"] .cmd{color:color-mix(in srgb,var(--slab-accent) 35%,var(--slab-text));text-shadow:0 0 6px color-mix(in srgb,var(--slab-accent) 40%,transparent);}
+  .cmd .pr{color:var(--slab-accent);}
+  .legend{width:min(1240px,96vw);margin:0 auto 40px;padding:0 4px;font-family:var(--font-mono);font-size:11px;color:var(--faint);display:flex;gap:18px;flex-wrap:wrap;}
+</style>
+</head>
+<body>
+  <div class="app">
+    <div class="titlebar">
+      <div class="tdots"><i></i><i></i><i></i></div>
+      <div class="addr"><svg class="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>127.0.0.1:8765 / setup</div>
+      <div class="spacer"></div>
+      <div class="accent-switch"><span>accent</span><button class="sw amber sel" data-set="amber"></button><button class="sw green" data-set="green"></button></div>
+      <button class="retro-toggle" id="retro"><span class="led"></span>retro</button>
+    </div>
+    <div class="panes" id="panes">
+      <aside class="rail">
+        <div class="brand"><span class="mk"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="10" y="9.5" width="4.6" height="5" rx="1"/><path d="M10 12H5.4M5.4 10v4M7.6 8.7v6.6"/><path d="M14.6 12H19m0-2v4m-2.2-5.3v6.6"/><path d="M12.3 9.5 13.2 5l2.5-1.5"/></svg></span><b>bobbi <span>setup</span></b></div>
+        <div class="counter" id="counter">02 / 06</div>
+        <div id="steps"></div>
+        <div class="grow"></div>
+        <div class="hint">Building <b style="color:var(--muted)">eng-team</b> locally. Nothing leaves this machine. <kbd>↵</kbd> to continue.</div>
+      </aside>
+      <div id="main" style="display:contents"></div>
+    </div>
+  </div>
+  <div class="legend"><span>click the rail steps → layout adapts per stage</span><span>files only at BUILD + REVIEW</span><span>amber/green · retro toggles top-right</span></div>
+
+<script>
+  const STEPS = [
+    {id:'start',     label:'Start'},
+    {id:'describe',  label:'Design'},
+    {id:'automate', label:'Automate'},
+    {id:'connect',   label:'Connect'},
+    {id:'build',     label:'Build'},
+    {id:'review',    label:'Review'},
+    {id:'install',   label:'Install'},
+    {id:'done',      label:'Done'},
+  ];
+  let current = 'describe';
+
+  const check = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4"><path d="M5 12l5 5L19 7"/></svg>';
+
+  function renderRail(){
+    const i = STEPS.findIndex(s=>s.id===current);
+    document.getElementById('counter').textContent = String(i+1).padStart(2,'0')+' / '+String(STEPS.length).padStart(2,'0');
+    document.getElementById('steps').innerHTML = STEPS.map((s,idx)=>{
+      const cls = idx<i?'done':idx===i?'current':'todo';
+      const dot = idx<i?'<span class="dot">'+check+'</span>':idx===i?'<span class="dot"><i></i></span>':'<span class="dot"></span>';
+      return `<div class="step ${cls}" data-go="${s.id}">${dot}${s.label}</div>`;
+    }).join('');
+  }
+
+  const VIEWS = {
+    start: ()=>`<main class="node narrow">
+      <div class="eyebrow">Start</div>
+      <h1>Spin up a team</h1>
+      <p class="lede">Begin from a ready-made team and tweak it, or start from a blank slate and describe your own.</p>
+      <div class="cardgrid">
+        <div class="pcard sel"><div class="pt">eng-team</div><div class="pd">Triage issues, route to engineers, ship PRs.</div><div class="roles"><b>director</b><b>project_lead</b><b>engineer</b></div></div>
+        <div class="pcard"><div class="pt">support-team</div><div class="pd">Watch a shared inbox, draft replies, escalate.</div><div class="roles"><b>lead</b><b>agent</b></div></div>
+        <div class="pcard"><div class="pt">research-team</div><div class="pd">Fan out web research, verify, synthesize.</div><div class="roles"><b>planner</b><b>scout</b></div></div>
+        <div class="pcard blank"><div class="plus">+</div><div class="pt">Start from scratch</div><div class="pd">Describe a team and bobbi builds it.</div></div>
+      </div>
+      <div class="actions"><button class="btn ghost" disabled>Back</button><button class="btn primary" data-go="describe">Next: Describe →</button></div>
+    </main>`,
+
+    describe: ()=>{ document.getElementById('panes').style.gridTemplateColumns='216px 1fr'; return `<main class="node" style="padding:0;overflow:hidden;display:flex;">
+      <section class="chat sketch">
+        <div class="sketch-top"><span class="sketch-eyebrow">Design · talk it through</span><button class="btn ghost sketch-next" data-go="automate">Next: Automate →</button></div>
+        <div class="ch-body">
+          <div class="msg bob">Hi — I'm bobbi. Tell me what you want this team to do, in your own words. Rough is fine; we'll sharpen it together.</div>
+          <div class="msg you">watch our github and figure out who should handle each issue</div>
+          <div class="msg bob">Got it — a team that <b>triages incoming GitHub issues and routes each to the right engineer</b>. Who picks up the work: a couple of engineers, or one generalist?</div>
+          <div class="msg you">a couple engineers, and keep everyone posted in slack</div>
+          <div class="msg bob">Nice — I'll have it post status to Slack too. Tell me more, or I can show you a few things it could handle on its own next.</div>
+        </div>
+        <div class="chips"><span class="chip">+ also handle PR reviews</span><span class="chip">+ post a daily summary</span><span class="chip">+ escalate blockers</span></div>
+        <div class="ch-input"><input placeholder="Tell bobbi what you want to build…"><button class="btn primary" style="padding:9px 14px">↑</button></div>
+      </section>
+    </main>`; },
+
+    connect: ()=>`<main class="node narrow">
+      <div class="eyebrow">Connect</div>
+      <h1>Give the team its tools</h1>
+      <p class="lede">From what you sketched (and your automate picks), bobbi needs these. Connect what you want — skip any and add them later.</p>
+      <div class="cardgrid" style="grid-template-columns:1fr;">
+        <div class="pcard sel"><div class="pt">GitHub <span style="color:var(--accent);font-size:12px;font-family:var(--font-mono)">· connected</span></div><div class="pd">Read issues and PRs, comment, manage labels.</div></div>
+        <div class="pcard"><div class="pt">Slack</div><div class="pd">Post updates and take messages in a channel.</div></div>
+      </div>
+      <div class="actions"><button class="btn ghost" data-go="automate">Back</button><button class="btn primary" data-go="build">Next: Build →</button></div>
+    </main>`,
+
+    automate: ()=>`<main class="node narrow">
+      <div class="eyebrow">Automate · bobbi's ideas</div>
+      <h1>Anything you want bobbi to do on its own?</h1>
+      <p class="lede">Without you asking. From what you sketched, bobbi came up with a few — switch on what's useful, set how much leash each one gets, or skip the lot. You're always in control of what's on.</p>
+      <div class="cardgrid" style="grid-template-columns:1fr;">
+        <div class="pcard sel"><div class="pt" style="display:flex;justify-content:space-between;align-items:center">Flag stale PRs <span style="font-family:var(--font-mono);font-size:11px;color:var(--accent)">daily 8am · notify</span></div><div class="pd">Find open PRs idle 48h and post them to Slack. <b style="color:var(--muted);font-weight:500">bobbi tells you — you act.</b></div></div>
+        <div class="pcard sel"><div class="pt" style="display:flex;justify-content:space-between;align-items:center">Daily summary <span style="font-family:var(--font-mono);font-size:11px;color:var(--accent)">9am · act</span></div><div class="pd">Post what shipped and what's blocked. <b style="color:var(--muted);font-weight:500">bobbi just does it.</b></div></div>
+        <div class="pcard"><div class="pt" style="display:flex;justify-content:space-between;align-items:center">Nudge on unassigned issues <span style="font-family:var(--font-mono);font-size:11px;color:var(--muted)">idle 2h · ask first</span></div><div class="pd">Propose an owner for issues sitting unassigned. <b style="color:var(--muted);font-weight:500">bobbi asks before acting.</b></div></div>
+      </div>
+      <div class="chips"><span class="chip">+ watch a channel</span><span class="chip">+ remind me about something</span><span class="chip">+ check an outside source</span></div>
+      <div class="actions"><button class="btn ghost" data-go="describe">Back</button><button class="btn primary" data-go="connect">Next: Connect →</button><span class="note">nothing? just skip →</span></div>
+    </main>`,
+
+    build: ()=>`<section class="slab">
+      <div class="corners"><i></i><i></i><i></i><i></i></div>
+      <div class="slabbar"><div class="t">Building your team</div><div class="s">bobbi is writing the pack — sit back. <b>4 of 6 files</b></div></div>
+      <div class="tabs">
+        <div class="tab ok"><span class="d"></span>agent.yaml</div>
+        <div class="tab ok"><span class="d"></span>agent.md</div>
+        <div class="tab active"><span class="d"></span>director/ROLE.md</div>
+        <div class="tab idle"><span class="d"></span><span class="more">+3 queued</span></div>
+      </div>
+      <div class="code">
+        <div class="ln"><span class="n">1</span><span class="c"><span class="k"># Director</span></span></div>
+        <div class="ln"><span class="n">2</span><span class="c"></span></div>
+        <div class="ln"><span class="n">3</span><span class="c">You lead the <span class="s">eng-team</span>. You triage incoming issues,</span></div>
+        <div class="ln"><span class="n">4</span><span class="c">decide which engineer owns each one, and keep the</span></div>
+        <div class="ln"><span class="n">5</span><span class="c">team posted in Slack without micromanaging.</span></div>
+        <div class="ln"><span class="n">6</span><span class="c"></span></div>
+        <div class="ln"><span class="n">7</span><span class="c"><span class="k">## Responsibilities</span></span></div>
+        <div class="ln"><span class="n">8</span><span class="c"></span></div>
+        <div class="ln"><span class="n">9</span><span class="c"><span class="p">-</span> Route every new issue to exactly one engineer.</span></div>
+        <div class="ln"><span class="n">10</span><span class="c"><span class="p">-</span> Escalate blockers; never let an issue sit.</span></div>
+        <div class="ln"><span class="n">11</span><span class="c"><span class="p">-</span> Post a plain-language status when asked.<span class="caret"></span></span></div>
+      </div>
+      <div class="slabfoot"><span class="live"><i></i>writing director/ROLE.md</span><span>284 tokens</span><span style="margin-left:auto">next: install →</span></div>
+    </section>`,
+
+    review: ()=>{ document.getElementById('panes').style.gridTemplateColumns='216px 232px 1fr'; return `<nav class="tree">
+      <div class="th">agents/eng-team/</div>
+      <div class="tnode file ok"><span style="color:var(--accent)">✓</span>agent.yaml</div>
+      <div class="tnode file"><span style="color:var(--accent)">✓</span>agent.md</div>
+      <div class="tnode dir">roles/</div>
+      <div class="tnode file indent sel"><span style="color:var(--accent)">✓</span>director/ROLE.md</div>
+      <div class="tnode file indent"><span style="color:var(--accent)">✓</span>engineer/ROLE.md</div>
+      <div class="tnode dir">workflows/</div>
+      <div class="tnode file indent"><span style="color:var(--accent)">✓</span>adhoc.yaml</div>
+      <div class="tnode dir">monitors/</div>
+      <div class="tnode file indent"><span style="color:var(--accent)">✓</span>defaults.yaml</div>
+    </nav>
+    <section class="slab">
+      <div class="corners"><i></i><i></i><i></i><i></i></div>
+      <div class="slabbar"><div class="t">Review before install</div><div class="s">Edit anything here — bobbi re-checks it before installing. <b>roles/director/ROLE.md</b></div></div>
+      <div class="code">
+        <div class="ln"><span class="n">1</span><span class="c"><span class="k"># Director</span></span></div>
+        <div class="ln"><span class="n">2</span><span class="c"></span></div>
+        <div class="ln"><span class="n">3</span><span class="c">You lead the <span class="s">eng-team</span>. You triage incoming issues,</span></div>
+        <div class="ln"><span class="n">4</span><span class="c">decide which engineer owns each one, and keep the</span></div>
+        <div class="ln"><span class="n">5</span><span class="c">team posted in Slack without micromanaging.</span></div>
+        <div class="ln"><span class="n">6</span><span class="c"></span></div>
+        <div class="ln"><span class="n">7</span><span class="c"><span class="k">## Responsibilities</span></span></div>
+        <div class="ln"><span class="n">9</span><span class="c"><span class="p">-</span> Route every new issue to exactly one engineer.</span></div>
+        <div class="ln"><span class="n">10</span><span class="c"><span class="p">-</span> Escalate blockers; never let an issue sit.</span></div>
+        <div class="ln"><span class="n">11</span><span class="c"><span class="p">-</span> Post a plain-language status when asked.</span></div>
+      </div>
+      <div class="slabfoot"><span>7 files · validated ✓</span><span style="margin-left:auto;color:var(--slab-accent)">Install →</span></div>
+    </section>`; },
+
+    install: ()=>`<main class="node narrow">
+      <div class="eyebrow">Install</div>
+      <h1>Activate eng-team</h1>
+      <p class="lede">Freezing the pack into <code style="font-family:var(--font-mono);font-size:13px">.bobbi/</code> and writing your secrets to a gitignored <code style="font-family:var(--font-mono);font-size:13px">.env</code>.</p>
+      <div class="cardgrid" style="grid-template-columns:1fr;">
+        <div class="pcard"><div class="pt" style="display:flex;gap:8px;align-items:center"><span style="color:var(--accent)">✓</span> Pack frozen to .bobbi/</div></div>
+        <div class="pcard"><div class="pt" style="display:flex;gap:8px;align-items:center"><span style="color:var(--accent)">✓</span> Credentials saved to .env</div></div>
+        <div class="pcard"><div class="pt" style="display:flex;gap:8px;align-items:center"><span style="color:var(--muted)">●</span> Writing config…</div></div>
+      </div>
+      <div class="actions"><button class="btn primary" data-go="done">Finish →</button></div>
+    </main>`,
+
+    done: ()=>`<main class="done-wrap">
+      <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
+      <div class="eyebrow">Done</div>
+      <h1>team bobbi is ready</h1>
+      <p class="lede">eng-team is installed. We are legion. Start it whenever you're ready:</p>
+      <div class="cmd"><span class="pr">$</span> bobbi start</div>
+      <p class="lede" style="font-size:13px">3 roles · 1 workflow · GitHub + Slack connected · 7 files written to <code style="font-family:var(--font-mono)">.bobbi/</code></p>
+      <div class="actions"><button class="btn ghost" data-go="review">Review files</button><button class="btn primary" data-go="start">Build another</button></div>
+    </main>`,
+  };
+
+  function render(){
+    document.getElementById('panes').style.gridTemplateColumns='216px 1fr';
+    document.getElementById('main').innerHTML = (VIEWS[current]||VIEWS.describe)();
+    renderRail();
+  }
+  document.addEventListener('click', e=>{
+    const go = e.target.closest('[data-go]');
+    if(go){ current = go.dataset.go; render(); return; }
+    const sw = e.target.closest('.sw');
+    if(sw){ document.documentElement.dataset.accent=sw.dataset.set; document.querySelectorAll('.sw').forEach(x=>x.classList.remove('sel')); sw.classList.add('sel'); return; }
+    if(e.target.closest('#retro')){ const h=document.documentElement; h.dataset.retro = h.dataset.retro==='on'?'off':'on'; }
+  });
+  render();
+</script>
+</body>
+</html>

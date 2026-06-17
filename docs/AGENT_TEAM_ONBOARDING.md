@@ -252,26 +252,40 @@ way, `.modastack/agent.yaml` (the manifest — which team, its config,
 
 The `modastack setup` command starts by offering existing teams from the
 registry — most users should start from a working team rather than a blank
-page. Three branches:
+page. Two branches (implemented):
 
 - **Use as-is** — drops straight into the install flow: credentials, then
   start.
-- **Customize** — loads the existing team's shape as the starting answers
-  to the five questions, walks through each one for review (roles to add or
-  drop, services to change, event sources to toggle), then continues to
-  service connection. Customizing materializes the team into
-  `agents/<name>/` in the project (the eject step) and installs from there
-  — the user now owns the source, and `.modastack/` stays a frozen build
-  artifact. This is the only sanctioned way to modify a team you didn't
-  author.
-- **Build your own** — walks through the five questions from scratch.
+- **Build your own** — walks through the seven questions from scratch.
+
+Setup is one interactive Claude session guiding the user through a staged
+state machine (choose → interview → services → discovery → generate →
+install → done). Stages are enforced by in-process tools the session
+calls — each refuses out-of-order use — so the conversation stays as
+exploratory as the user wants while the machine still advances.
+Credentials are collected by a tool that prompts the user directly on the
+terminal and writes `.modastack/.env`; secret values never enter the
+session transcript. An interrupted setup resumes with
+`modastack setup --resume`.
+
+A third branch is deferred:
+
+- **Customize** *(deferred — not yet implemented)* — loads the existing
+  team's shape as the starting answers to the questions, walks through
+  each one for review (roles to add or drop, services to change, event
+  sources to toggle), then continues to service connection. Customizing
+  materializes the team into `agents/<name>/` in the project (the eject
+  step) and installs from there — the user owns the source, and
+  `.modastack/` stays a frozen build artifact. Until it exists,
+  customizing a team means editing its source directly (e.g. in a
+  separate Claude Code session) and reinstalling.
 
 Every branch starts the same way:
 
 ```
 $ modastack setup
 
-Use an existing agent team, customize one, or build your own?
+Use an existing agent team or build your own?
 
   Available teams:
     eng-team          Engineering team — a director triages issues and
@@ -283,10 +297,11 @@ Use an existing agent team, customize one, or build your own?
                       GitHub issues and email requests.
 ```
 
-### Customizing an existing team
+### Customizing an existing team (deferred)
 
-Setup shows the team's current shape and walks through each of the five
-questions with the team's answers pre-filled — keep or change each one:
+When the customize branch lands, setup will show the team's current shape
+and walk through each question with the team's answers pre-filled — keep
+or change each one:
 
 ```
 > customize dogfood-content-review
@@ -362,12 +377,14 @@ Setup ends with the agent installed. The answers produce a team source at
 `agents/<name>/` and setup runs install internally — so the result is a
 normal local-source team, and `.modastack/` stays a regenerable artifact.
 
-Because install is idempotent (frozen image, no merge), setup is safe to
-re-run at any time: to revisit the five questions, add a service, or reset
-a hand-edited image back to its source. If the user has edited
-`.modastack/` directly, `modastack doctor` flags the drift against the
-install manifest, and setup offers to migrate those edits into the team
-source before regenerating.
+Because install is idempotent (frozen image, no merge), reinstalling is
+safe at any time — editing the team source at `agents/<name>/` and
+re-running `modastack install` resets a hand-edited image back to its
+source, and `modastack doctor` flags drift against the install manifest.
+Re-running `modastack setup` over an existing installation asks before
+replacing it; revisiting the seven questions for an existing team is part
+of the deferred customize branch (today: edit the team source directly and
+reinstall).
 
 ### Preflight validation
 

@@ -38,6 +38,16 @@ def parse_env_file(path: Path) -> dict[str, str]:
     return result
 
 
+def write_env_file(path: Path, values: dict[str, str]) -> None:
+    """Write a .env file in the one format parse_env_file reads.
+
+    The single serializer for .env — install and setup both write
+    through here so the round-trip rules can never diverge.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(f"{k}={v}" for k, v in sorted(values.items())) + "\n")
+
+
 def load_dotenv(project_path: Path) -> None:
     """Load .modastack/.env into os.environ (existing vars take precedence)."""
     from modastack import paths

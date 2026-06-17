@@ -17,8 +17,22 @@ log = logging.getLogger(__name__)
 VENN_API_BASE = "https://app.venn.ai/api/tooliq"
 
 
+def _api_base() -> str:
+    """API base URL, overridable via MODASTACK_VENN_API_BASE (tests)."""
+    import os
+    return os.environ.get("MODASTACK_VENN_API_BASE", VENN_API_BASE)
+
+
 def _ssl_context() -> ssl.SSLContext:
-    return ssl.create_default_context(cafile=certifi.where())
+    # Prefer the OS system trust store (truststore) so TLS verification works
+    # behind corporate inspecting proxies (Zscaler, Netskope, etc.) whose root
+    # lives in the OS keychain but not certifi. Fall back to certifi when
+    # truststore is unavailable, so ordinary setups are unaffected.
+    try:
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception:
+        return ssl.create_default_context(cafile=certifi.where())
 
 SERVICE_ALIASES: dict[str, list[str]] = {
     "email": ["gmail", "outlook"],
@@ -52,7 +66,7 @@ def list_servers(api_key: str) -> list[VennServer]:
     import json
 
     req = urllib.request.Request(
-        f"{VENN_API_BASE}/tools/help",
+        f"{_api_base()}/tools/help",
         data=json.dumps({"action": "list_servers"}).encode(),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -78,6 +92,13 @@ def list_servers(api_key: str) -> list[VennServer]:
         )
         for s in servers
     ]
+
+
+def list_available_services(api_key: str) -> set[str]:
+    """Every service Venn supports for this account — connected or not — as
+    lowercased server names. This is the *real* catalog (what Venn can reach),
+    as opposed to the curated buckets in SERVICE_ALIASES. Empty on any error."""
+    return {s.server_name.lower() for s in list_servers(api_key) if s.server_name}
 
 
 def check_services(api_key: str, required: list[str]) -> ServiceCheck:

@@ -46,6 +46,9 @@ See [scripts/install.sh](scripts/install.sh) for what the installer does.
 ## Quick Start
 
 ```bash
+# Go from an idea to a runnable agent team, interactively
+modastack setup
+
 # Start a pre-built agent
 modastack start eng-team 
 

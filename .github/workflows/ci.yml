@@ -27,7 +27,39 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run unit tests
-        run: pytest tests/ --ignore=tests/integration/ --timeout=30 -q
+        run: pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q
+
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        # The setup UI is driven against the real FastAPI app booted in-process
+        # with a fake LLM source — deterministic, no Claude, no network.
+        run: >-
+          pytest tests/e2e --timeout=120 -q
+          --tracing=retain-on-failure --screenshot=only-on-failure
+          --output=test-results
+
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: test-results/
+          retention-days: 7
 
   integration-fast:
     name: Integration tests (no Claude)
@@ -75,6 +107,9 @@ jobs:
 
       - name: Manager lifecycle
         run: .venv/bin/pytest tests/integration/test_manager_lifecycle.py --timeout=180 -v
+
+      - name: Manager SDK (direct ClaudeSDKClient)
+        run: .venv/bin/pytest tests/integration/test_manager_sdk.py --timeout=180 -v
 
       - name: End-to-end event flow
         run: .venv/bin/pytest tests/integration/test_e2e_event_flow.py --timeout=180 -v
