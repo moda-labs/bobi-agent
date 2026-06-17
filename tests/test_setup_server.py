@@ -184,6 +184,15 @@ class TestConnect:
         assert keys == {"github", "crm"}
         assert any(card["key"] == "slack" for card in data["catalog"])
 
+    def test_reports_venn_configured(self, project, monkeypatch):
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+        c = _client(SetupState(), project)
+        assert c.get("/api/connect").json()["venn_configured"] is False
+        c.post("/api/credential", json={"var_name": "VENN_API_KEY",
+                                        "value": "venn_key_123"})
+        assert c.get("/api/connect").json()["venn_configured"] is True
+
     def test_credential_saved_to_env(self, project, monkeypatch):
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         c = _client(SetupState(), project)
@@ -299,6 +308,91 @@ class TestChat:
     def test_rejects_unknown_channel(self, project):
         c = _client(SetupState(), project)
         assert c.post("/api/chat", json={"channel": "smoke"}).status_code == 400
+
+
+# --- panel edits: role / automation / connection -------------------------
+
+class TestPanelEdits:
+    def _with_role(self):
+        s = SetupState()
+        s.spec.roles = [{"name": "lead", "responsibility": "classify"}]
+        return s
+
+    def test_role_update_patches_fields_and_marks_complete(self, project):
+        s = self._with_role()
+        c = _client(s, project)
+        r = c.post("/api/role/update", json={"index": 0, "fields": {
+            "responsibility": "triage issues",
+            "good_looks_like": "fast accurate triage",
+            "systems": "github, slack", "triggers": "on new issue"}})
+        assert r.status_code == 200
+        role = s.spec.roles[0]
+        assert role["systems"] == ["github", "slack"]
+        assert role["status"] == "complete"          # all four dimensions filled
+        assert r.json()["spec"]["readiness"]["roles"] == "enough"
+        assert s.validated is False
+
+    def test_role_update_partial_stays_in_progress(self, project):
+        s = self._with_role()
+        c = _client(s, project)
+        c.post("/api/role/update", json={"index": 0,
+                                         "fields": {"good_looks_like": "x"}})
+        assert s.spec.roles[0]["status"] == "in_progress"
+
+    def test_role_update_bad_index_400(self, project):
+        c = _client(self._with_role(), project)
+        assert c.post("/api/role/update",
+                      json={"index": 9, "fields": {}}).status_code == 400
+
+    def test_automation_update_patches_role_and_command(self, project):
+        s = SetupState()
+        s.spec.autonomous = [{"description": "digest", "leash": "notify"}]
+        c = _client(s, project)
+        r = c.post("/api/automation/update", json={"index": 0, "fields": {
+            "role": "lead", "command": "summarize", "cadence": "1d",
+            "leash": "act"}})
+        assert r.status_code == 200
+        item = s.spec.autonomous[0]
+        assert item["role"] == "lead" and item["command"] == "summarize"
+        assert item["leash"] == "act" and item["cadence"] == "1d"
+        assert s.spec.autonomous_confirmed is True
+
+    def test_service_remove_drops_by_key(self, project, monkeypatch):
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        s = SetupState()
+        s.spec.services = [{"name": "github"}, {"name": "linear"}]
+        c = _client(s, project)
+        r = c.post("/api/service/remove", json={"service_key": "github"})
+        assert r.status_code == 200
+        names = [x["name"] for x in s.spec.services]
+        assert names == ["linear"]
+        assert s.validated is False
+
+    def test_service_remove_requires_key(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/service/remove", json={}).status_code == 400
+
+    def test_build_integration_is_a_queued_placeholder(self, project, monkeypatch):
+        monkeypatch.delenv("POSTHOG_API_KEY", raising=False)
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/build-integration", json={
+            "service_name": "PostHog", "api_key": "ph_secret_123"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "queued"
+        assert "background job" in body["message"]
+        assert body["credential_saved"] is True
+        # the service is registered as a (custom) connection in the meantime
+        assert any(x["name"] == "PostHog" for x in s.spec.services)
+        # the key landed in .env, never in the response
+        assert "ph_secret_123" not in r.text
+        env = (project / ".modastack" / ".env").read_text()
+        assert "POSTHOG_API_KEY=ph_secret_123" in env
+
+    def test_build_integration_requires_name(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/build-integration", json={}).status_code == 400
 
 
 # --- review file endpoints -----------------------------------------------

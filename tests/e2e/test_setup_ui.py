@@ -42,29 +42,38 @@ def test_shows_chat_and_team_panel(page, modastack_url):
     expect(page.locator("#uni-foot [data-go='build']")).to_have_count(0)
 
 
-def test_cards_materialize_and_chips_are_contextual(page, modastack_url):
+def test_cards_materialize_after_goal(page, modastack_url):
     _enter(page, modastack_url)
     page.fill("#chinput", GOAL_MSG)
     page.click("#chsend")
     goal = page.locator(".ucard").first
     expect(goal).to_contain_text("Triage", timeout=10_000)
     expect(goal.locator(".udot.ok")).to_be_visible()
-    # Suggestions from the brain become quick-add chips.
-    expect(page.locator(".chip")).to_contain_text(["Also post a daily digest"])
     # github connection materialized in the Connections card.
     expect(page.locator(".uconn")).to_contain_text("GitHub")
 
 
 def test_finish_appears_only_when_everything_gathered(page, modastack_url):
     _enter(page, modastack_url)
-    page.fill("#chinput", GOAL_MSG)               # goal + roles + services
+    page.fill("#chinput", GOAL_MSG)               # goal + roles (services need connection)
     page.click("#chsend")
-    expect(page.locator("#uni-meter")).to_have_text("3/5 gathered", timeout=10_000)
+    expect(page.locator("#uni-meter")).to_have_text("2/5 gathered", timeout=10_000)
     expect(page.locator("#uni-foot [data-go='build']")).to_have_count(0)
 
     page.fill("#chinput", "yes, automatically flag stale PRs")   # automations
     page.click("#chsend")
-    expect(page.locator("#uni-meter")).to_have_text("4/5 gathered", timeout=10_000)
+    expect(page.locator("#uni-meter")).to_have_text("3/5 gathered", timeout=10_000)
+    expect(page.locator("#uni-foot [data-go='build']")).to_have_count(0)
+
+    # Connect the implied GitHub service so connections count as gathered.
+    github_row = page.locator(".uconn", has_text="GitHub")
+    expect(github_row).to_be_visible(timeout=5_000)
+    github_row.locator("[data-secretopen]").click()
+    ov = page.locator("#secret-ov")
+    ov.locator("input[data-secret='GITHUB_TOKEN']").fill("ghp_" + "t" * 36)
+    ov.get_by_role("button", name="Connect").click()
+    expect(ov).to_have_count(0, timeout=10_000)
+    expect(page.locator("#uni-meter")).to_have_text("4/5 gathered", timeout=5_000)
     expect(page.locator("#uni-foot [data-go='build']")).to_have_count(0)
 
     page.fill("#chinput", "I'll just use the command line")      # chat
@@ -77,6 +86,15 @@ def test_finish_builds_to_file_browser(page, modastack_url):
     _enter(page, modastack_url)
     page.fill("#chinput", GOAL_MSG + ", automatically flag stale PRs, via the command line")
     page.click("#chsend")
+    # Wait for brain to process, then connect the implied GitHub service so the
+    # Connections slot counts as gathered (connections require actual connection).
+    github_row = page.locator(".uconn", has_text="GitHub")
+    expect(github_row).to_be_visible(timeout=10_000)
+    github_row.locator("[data-secretopen]").click()
+    ov = page.locator("#secret-ov")
+    ov.locator("input[data-secret='GITHUB_TOKEN']").fill("ghp_" + "t" * 36)
+    ov.get_by_role("button", name="Connect").click()
+    expect(ov).to_have_count(0, timeout=10_000)
     finish = page.locator("#uni-foot [data-go='build']")
     expect(finish).to_be_visible(timeout=10_000)
     finish.click()

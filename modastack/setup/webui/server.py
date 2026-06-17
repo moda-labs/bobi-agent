@@ -51,6 +51,7 @@ def serialize_state(state: SetupState) -> dict:
         "team_name": state.team_name,
         "source_dir": state.source_dir,
         "chat": state.chat,
+        "phase": state.phase,
         "spec": {
             "goal": spec.goal,
             "roles": spec.roles,
@@ -62,7 +63,6 @@ def serialize_state(state: SetupState) -> dict:
         },
         "summary": state.summary,
         "messages": state.messages,
-        "suggestions": state.suggestions,
         "credentials_saved": state.credentials_saved,
         "advance_blocker": state.advance_blocker(),
         "validated": state.validated,
@@ -369,7 +369,11 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # as connected.
         catalog = services.cards_for(list(services.CATALOG.keys()), project,
                                      connected=connected, catalog=venn_catalog)
-        return {"cards": cards, "catalog": catalog}
+        # Whether a VENN_API_KEY is present — drives the panel's Venn upsell
+        # (when absent, offer to set Venn up to manage many connections at once).
+        from modastack.setup import actions
+        return {"cards": cards, "catalog": catalog,
+                "venn_configured": bool(actions.venn_key(project))}
 
     # --- automate (suggester + commit) ---------------------------------
     @app.post("/api/automate/suggest")
@@ -390,6 +394,118 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         state.spec.readiness["autonomous"] = "enough"
         state.save(project)
         return serialize_state(state)
+
+    # --- panel edits: role / automation / connection (deterministic) ----
+    def _role_status(role: dict) -> str:
+        """A role is 'complete' only once all four interview dimensions are
+        filled; otherwise it's still in progress. Mirrors the digestion bar."""
+        has_systems = bool(role.get("systems"))
+        return "complete" if (role.get("responsibility")
+                              and role.get("good_looks_like")
+                              and has_systems and role.get("triggers")) else "in_progress"
+
+    @app.post("/api/role/update")
+    def role_update(payload: dict) -> JSONResponse:
+        idx, fields = payload.get("index"), payload.get("fields")
+        roles = state.spec.roles
+        if (not isinstance(idx, int) or not (0 <= idx < len(roles))
+                or not isinstance(fields, dict)):
+            return JSONResponse({"error": "bad index or fields"}, status_code=400)
+        role = dict(roles[idx]) if isinstance(roles[idx], dict) else {}
+        for k in ("name", "responsibility", "good_looks_like", "triggers"):
+            if isinstance(fields.get(k), str):
+                role[k] = fields[k].strip()
+        if "systems" in fields:
+            sysv = fields["systems"]
+            if isinstance(sysv, list):
+                role["systems"] = [str(s).strip() for s in sysv if str(s).strip()]
+            elif isinstance(sysv, str):
+                role["systems"] = [t.strip() for t in sysv.split(",") if t.strip()]
+        role["status"] = _role_status(role)
+        roles[idx] = role
+        # If every role is now complete, the slot reads "enough"; else step back.
+        all_complete = bool(roles) and all(
+            (r.get("status") if isinstance(r, dict) else "") == "complete"
+            for r in roles)
+        state.spec.readiness["roles"] = "enough" if all_complete else "thin"
+        state.validated = False
+        state.save(project)
+        return JSONResponse(serialize_state(state))
+
+    @app.post("/api/automation/update")
+    def automation_update(payload: dict) -> JSONResponse:
+        idx, fields = payload.get("index"), payload.get("fields")
+        items = state.spec.autonomous
+        if (not isinstance(idx, int) or not (0 <= idx < len(items))
+                or not isinstance(fields, dict)):
+            return JSONResponse({"error": "bad index or fields"}, status_code=400)
+        item = dict(items[idx]) if isinstance(items[idx], dict) else {}
+        for k in ("description", "cadence", "role", "command"):
+            if isinstance(fields.get(k), str):
+                item[k] = fields[k].strip()
+        if fields.get("leash") in ("notify", "ask", "act"):
+            item["leash"] = fields["leash"]
+        items[idx] = item
+        state.spec.autonomous_confirmed = True
+        state.validated = False
+        state.save(project)
+        return JSONResponse(serialize_state(state))
+
+    @app.post("/api/service/remove")
+    def service_remove(payload: dict) -> JSONResponse:
+        from modastack.setup import services
+        key = (payload.get("service_key") or "").strip().lower()
+        if not key:
+            return JSONResponse({"error": "service_key required"}, status_code=400)
+        kept = []
+        for s in state.spec.services:
+            name = (s.get("name") if isinstance(s, dict) else str(s)) or ""
+            rk = services.resolve(name).key if name.strip() else ""
+            if name.strip().lower() == key or rk == key:
+                continue
+            kept.append(s)
+        state.spec.services = kept
+        state.validated = False
+        state.save(project)
+        return JSONResponse(serialize_state(state))
+
+    @app.post("/api/build-integration")
+    def build_integration(payload: dict) -> JSONResponse:
+        # PLACEHOLDER (deliberate). Building an MCP/CLI on the fly from an MCP
+        # server link or a raw API key is a rabbit hole of its own — a future
+        # async background job. For now we register the service as a custom
+        # connection so it persists, optionally stash the API key in .env (never
+        # the LLM), and return a friendly "queued / coming soon" status the panel
+        # renders as a placeholder sequence.
+        from modastack.setup import actions, authoring
+        name = (payload.get("service_name") or "").strip()
+        if not name:
+            return JSONResponse({"error": "service_name required"}, status_code=400)
+        have = {((s.get("name") if isinstance(s, dict) else str(s)) or "").strip().lower()
+                for s in state.spec.services}
+        if name.lower() not in have:
+            state.spec.services = list(state.spec.services) + [{"name": name}]
+        saved = False
+        api_key = payload.get("api_key", "")
+        if api_key:
+            var = authoring._env_var_fallback(name)
+            try:
+                actions.save_credential(state, project, var, name, "",
+                                        prompt_fn=lambda *_: api_key)
+                saved = True
+            except actions.ActionError:
+                saved = False
+        state.validated = False
+        state.save(project)
+        return JSONResponse({
+            "status": "queued",
+            "message": (f"Building a custom integration for {name} is a "
+                        "background job we'll wire up soon — you can come back to "
+                        "it. It's saved to your team as a custom connection for "
+                        "now."),
+            "credential_saved": saved,
+            "state": serialize_state(state),
+        })
 
     # --- chat (how you talk to the team) -------------------------------
     @app.post("/api/chat")

@@ -59,12 +59,22 @@ def normalized_roles(state: SetupState) -> list[dict]:
         name = (r.get("name") if isinstance(r, dict) else str(r)) or ""
         if not name.strip():
             continue
+        d = r if isinstance(r, dict) else {}
+        systems = d.get("systems")
+        # Coerce every dimension to a safe type — the brain can emit nulls or
+        # non-string systems entries; the downstream ", ".join must never crash.
+        systems = ([str(s).strip() for s in systems
+                    if s is not None and str(s).strip()]
+                   if isinstance(systems, list) else [])
         out.append({"name": name.strip(),
-                    "responsibility": (r.get("responsibility", "")
-                                       if isinstance(r, dict) else "")})
+                    "responsibility": str(d.get("responsibility") or ""),
+                    "good_looks_like": str(d.get("good_looks_like") or ""),
+                    "systems": systems,
+                    "triggers": str(d.get("triggers") or "")})
     if not out:
         out.append({"name": "assistant",
-                    "responsibility": state.spec.goal or "Carry out the team's work."})
+                    "responsibility": state.spec.goal or "Carry out the team's work.",
+                    "good_looks_like": "", "systems": [], "triggers": ""})
     return out
 
 
@@ -195,16 +205,24 @@ def build_monitors_yaml(state: SetupState) -> str:
     install time (no venn CLI dependency); the agent interprets them."""
     mons: list[dict] = []
     for i, b in enumerate(state.spec.autonomous):
-        desc = (b.get("description") if isinstance(b, dict) else str(b)) or ""
+        d = b if isinstance(b, dict) else {}
+        desc = (d.get("description") if isinstance(b, dict) else str(b)) or ""
         if not desc.strip():
             continue
+        # Fold the responsible role and the command into the description so the
+        # description-only monitor tells the agent which role acts and how.
+        full = desc.strip()
+        if d.get("role"):
+            full += f" Run by the {d['role']} role."
+        if d.get("command"):
+            full += f" Do: {d['command'].strip()}"
         rec = {
             "name": slug(desc)[:40] or f"behavior-{i + 1}",
-            "description": desc.strip(),
+            "description": full,
             "interval": cadence_to_interval(
-                b.get("cadence", "") if isinstance(b, dict) else ""),
+                d.get("cadence", "") if isinstance(b, dict) else ""),
         }
-        leash = b.get("leash") if isinstance(b, dict) else ""
+        leash = d.get("leash") if isinstance(b, dict) else ""
         if leash == "notify":
             rec["notify"] = True
         mons.append(rec)
@@ -281,10 +299,23 @@ def edit_prompt(state: SetupState, what: str, current: str) -> str:
             "If it already matches, return it unchanged.")
 
 
+def _role_brief(r: dict) -> str:
+    """One role rendered for the spec brief, including any of the four
+    interview dimensions that are filled in."""
+    head = f"{r['name']}: {r['responsibility'] or 'support the team goal'}"
+    extra = []
+    if r.get("good_looks_like"):
+        extra.append(f"good job = {r['good_looks_like']}")
+    if r.get("systems"):
+        extra.append("systems = " + ", ".join(r["systems"]))
+    if r.get("triggers"):
+        extra.append(f"runs when {r['triggers']}")
+    return f"{head} [{'; '.join(extra)}]" if extra else head
+
+
 def _spec_brief(state: SetupState) -> str:
     spec = state.spec
-    roles = "; ".join(f"{r['name']}: {r['responsibility']}"
-                      for r in normalized_roles(state))
+    roles = "; ".join(_role_brief(r) for r in normalized_roles(state))
     svcs = ", ".join((s.get("name") if isinstance(s, dict) else str(s))
                      for s in spec.services) or "none"
     auto = "; ".join((b.get("description") if isinstance(b, dict) else str(b))
@@ -359,15 +390,27 @@ def custom_services(state: SetupState, catalog=None) -> list:
 
 
 def role_md_prompt(state: SetupState, role: dict) -> str:
+    dims = []
+    if role.get("good_looks_like"):
+        dims.append(f"What a good job looks like: {role['good_looks_like']}.")
+    if role.get("systems"):
+        dims.append("Systems it accesses: " + ", ".join(role["systems"]) + ".")
+    if role.get("triggers"):
+        dims.append(f"What triggers it: {role['triggers']}.")
+    dims_block = ("\n" + "\n".join(dims) + "\n") if dims else ""
     return (f"{_spec_brief(state)}\n\n"
             f"Write roles/{slug(role['name'])}/ROLE.md for the "
             f"'{role['name']}' role. Responsibility: "
             f"{role['responsibility'] or 'support the team goal'}.\n"
+            f"{dims_block}"
             "- Open with identity: \"You are the <role> ... You <do what>.\"\n"
             "- Define scope: what this role does and does NOT do; what it "
             "delegates.\n"
             "- Be operational: concrete steps, decision tables, the exact "
             "service/CLI actions it takes, and how it hands off.\n"
+            "- Bake in the success bar above as the standard the role holds "
+            "itself to, the systems above as the tools it uses, and the "
+            "triggers above as what makes it act.\n"
             "- Show what good output looks like.\n"
             "Length follows complexity: keep a simple role under ~100 lines; "
             "go longer only if the job genuinely needs it. Every line should be "
