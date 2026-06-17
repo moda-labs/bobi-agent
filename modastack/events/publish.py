@@ -92,3 +92,18 @@ def publish_inbox(session: str, payload: dict,
     event-server/test/core.spec.ts.
     """
     return _post_topic(f"inbox/{session}", "inbox", payload, project_path)
+
+
+def publish_reply(reply_to: str, corr_id: str, response: str,
+                  project_path: Path | None = None) -> bool:
+    """Publish a correlated reply for a blocking ``deliver(wait=True)`` caller.
+
+    The blocking sender subscribed to a transient ``reply/<uuid>`` topic and
+    passed it as ``reply_to`` on the request. Posting to ``/events/<reply_to>``
+    makes the server emit exactly that topic as the routing key (the URL path
+    is the subscription key — same trick as ``publish_inbox``), so the reply
+    reaches the waiting sender, which matches it on ``corr_id``. See
+    ``inbox.Inbox.respond`` (target side) and ``inbox._await_reply`` (sender).
+    """
+    return _post_topic(reply_to, "reply",
+                       {"corr_id": corr_id, "response": response}, project_path)

@@ -327,13 +327,13 @@ class Session:
 
         if self._state in ("stopped", "error"):
             if msg.wait:
-                self.inbox.respond(msg.id, f"session {self._state}")
+                self.inbox.respond(msg, f"session {self._state}")
             return
 
         if self._state != "waiting_input":
             log.warning(f"Session '{self.name}' never became ready for inbox message")
             if msg.wait:
-                self.inbox.respond(msg.id, "session not ready")
+                self.inbox.respond(msg, "session not ready")
             return
 
         try:
@@ -345,11 +345,11 @@ class Session:
             await self._client.query(msg.text)
             response = await self._drain_turn()
             if msg.wait:
-                self.inbox.respond(msg.id, response)
+                self.inbox.respond(msg, response)
         except Exception as e:
             log.error(f"Inbox processing failed for '{self.name}': {e}")
             if msg.wait:
-                self.inbox.respond(msg.id, f"error: {e}")
+                self.inbox.respond(msg, f"error: {e}")
             self._set_state("error")
 
     async def _inbox_loop(self) -> None:

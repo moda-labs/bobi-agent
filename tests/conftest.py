@@ -5,8 +5,34 @@ installation in a temp directory so tests never touch production
 config, Slack channels, event servers, or session state.
 """
 
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+# --- Worktree safety (must run before any `import modastack`) --------------
+# Pin BOTH this test process and every modastack subprocess it spawns to the
+# checkout these tests live in. The editable install's .pth points at the
+# primary checkout, and `python -m pytest` puts the launch cwd on sys.path —
+# so from a git worktree, `import modastack` (or a spawned
+# `python -m modastack.cli`) can silently resolve to the WRONG checkout. That
+# tests the wrong code, or pairs a worktree manager with a primary-checkout
+# CLI over the event server. Anchored on this file's own location so it always
+# matches the tests actually being run, in a worktree or the primary checkout.
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path[:1]:
+    sys.path.insert(0, _REPO_ROOT)
+_existing_pythonpath = os.environ.get("PYTHONPATH", "")
+if _REPO_ROOT not in _existing_pythonpath.split(os.pathsep):
+    os.environ["PYTHONPATH"] = (
+        _REPO_ROOT + (os.pathsep + _existing_pythonpath if _existing_pythonpath else "")
+    )
+# Stop a spawned `python -m modastack.cli` / `python -c` from prepending its
+# cwd to sys.path ahead of PYTHONPATH (Python 3.11+). The harness runs
+# subprocesses from the temp project dir — harmless there — but if cwd ever is
+# a modastack checkout, cwd would shadow our pinned PYTHONPATH and resolve the
+# wrong code. This makes worktree pinning hold regardless of subprocess cwd.
+os.environ["PYTHONSAFEPATH"] = "1"
 
 import pytest
 

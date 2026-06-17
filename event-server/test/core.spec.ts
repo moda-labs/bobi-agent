@@ -505,6 +505,22 @@ describe("createTopicEvent", () => {
 		});
 	});
 
+	it("routes async-ask replies on exactly reply/<uuid> (comms-v1 #269 seam)", () => {
+		// publish_reply() POSTs to /events/reply/<uuid> with source "reply".
+		// The blocking sender subscribed to (reply/<uuid>); the routing key
+		// MUST match it byte-for-byte. Because the topic already starts with
+		// "reply/", the source-qualified form is suppressed (no reply/reply/…).
+		const event = createTopicEvent("reply/8f3a2b1c9d0e4f5a", {
+			source: "reply",
+			payload: { corr_id: "0192abc-deadbeef", response: "the answer" },
+		});
+		const keys = subscriptionKeysForEvent(event);
+		expect(keys).toEqual(["reply/8f3a2b1c9d0e4f5a"]);
+		expect(event.payload).toEqual({
+			corr_id: "0192abc-deadbeef", response: "the answer",
+		});
+	});
+
 	it("omits the qualified topic when no source is given", () => {
 		const event = createTopicEvent("support.email", { payload: {} });
 		expect(event.topics).toEqual(["support.email"]);

@@ -1,11 +1,13 @@
 """Integration tests for inter-agent messaging over the event server.
 
-[comms-v1 / #268] These start a real local event server and drive the full
-transport — ``deliver()`` publishes an ``inbox/<target>`` event, the server
-fans it to the target's WebSocket subscription, and the drain loop pushes it
-into the target's in-process inbox queue. No Claude session is needed: the
-Session run loop's ``recv()``/``respond()`` is simulated, so these exercise the
-transport itself (the part #268 changed) without the cost of real LLM turns.
+[comms-v1 / #268, #269] These start a real local event server and drive the
+full transport — ``deliver()`` publishes an ``inbox/<target>`` event, the
+server fans it to the target's WebSocket subscription, and the drain loop
+pushes it into the target's in-process inbox queue. For ``wait=True`` (#269),
+``deliver()`` opens a transient ``reply/<uuid>`` subscription and matches the
+target's reply on its correlation id. No Claude session is needed: the Session
+run loop's ``recv()``/``respond()`` is simulated, so these exercise the
+transport itself without the cost of real LLM turns.
 
 Requires Node (the local event server). Skips cleanly if it can't start.
 """
@@ -112,35 +114,93 @@ def test_inbox_message_round_trips_over_event_server(inbox_event_server, modasta
         target_inbox.close()
 
 
+def _echo_responder(target_name, stop):
+    """Stand in for the target session's run loop.
+
+    Drains the target's inbox and replies to wait-mode messages by publishing
+    to the message's reply_to topic (``Inbox.respond``) — the real target-side
+    path exercised by ``Session._process_message``.
+    """
+    from modastack.inbox import get_local_inbox
+
+    def run():
+        inbox = get_local_inbox(target_name)
+        while not stop.is_set():
+            m = inbox.recv(timeout=0.5)
+            if m is None:
+                continue
+            if m.wait:
+                inbox.respond(m, f"echo:{m.text}")
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
+
+
 def test_blocking_ask_round_trips_over_event_server(inbox_event_server, modastack_env):
-    """A wait=True deliver() gets the target's reply (transitional rendezvous)."""
-    from modastack.inbox import deliver, get_local_inbox
+    """A wait=True deliver() round-trips via a transient reply/<uuid> topic.
+
+    The sender (deliver) opens its own throwaway reply subscription, publishes
+    the request carrying it as reply_to, and matches the reply on corr_id — the
+    full #269 request/reply path over the live event server, no files.
+    """
+    from modastack.inbox import deliver
 
     root = modastack_env.project_path
     sender_inbox = _make_addressable("ask-x", root)
     target_inbox = _make_addressable("ask-y", root)
 
+    time.sleep(2)  # let the target's subscription connect
+
+    stop = threading.Event()
+    t = _echo_responder("ask-y", stop)
+    try:
+        ok, response = deliver("ask-y", "ping", sender="ask-x", wait=True, timeout=30)
+        assert ok, response
+        assert response == "echo:ping"
+    finally:
+        stop.set()
+        t.join(timeout=2)
+        sender_inbox.close()
+        target_inbox.close()
+
+
+def test_concurrent_asks_do_not_cross_replies(inbox_event_server, modastack_env):
+    """Multiple in-flight wait=True asks each get their OWN reply (corr_id).
+
+    Each deliver() opens a distinct reply/<uuid> topic, so even with several
+    asks to the same target outstanding at once, no reply lands on the wrong
+    sender. Guards the correlation contract (epic #267 acceptance).
+    """
+    from modastack.inbox import deliver
+
+    root = modastack_env.project_path
+    sender_inbox = _make_addressable("c-x", root)
+    target_inbox = _make_addressable("c-y", root)
+
     time.sleep(2)
 
     stop = threading.Event()
+    t = _echo_responder("c-y", stop)
 
-    def responder():
-        # Stand in for the target session's run loop: drain the inbox and
-        # respond to wait-mode messages.
-        inbox_y = get_local_inbox("ask-y")
-        while not stop.is_set():
-            m = inbox_y.recv(timeout=0.5)
-            if m is None:
-                continue
-            if m.wait:
-                inbox_y.respond(m.id, f"echo:{m.text}")
+    results: dict[str, tuple[bool, str]] = {}
 
-    t = threading.Thread(target=responder, daemon=True)
-    t.start()
+    def ask(tag):
+        results[tag] = deliver("c-y", tag, sender="c-x", wait=True, timeout=30)
+
     try:
-        ok, response = deliver("ask-y", "ping", sender="ask-x", wait=True, timeout=20)
-        assert ok, response
-        assert response == "echo:ping"
+        tags = [f"q{i}" for i in range(3)]
+        askers = [threading.Thread(target=ask, args=(tag,)) for tag in tags]
+        for th in askers:
+            th.start()
+        for th in askers:
+            th.join(timeout=35)
+
+        for tag in tags:
+            assert tag in results, f"ask {tag} never returned"
+            ok, resp = results[tag]
+            assert ok, resp
+            assert resp == f"echo:{tag}", f"crossed reply for {tag}: {resp!r}"
     finally:
         stop.set()
         t.join(timeout=2)
