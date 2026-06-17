@@ -34,6 +34,15 @@ def _team_display_name(d: Path) -> str:
     return d.name
 
 
+def _team_description(d: Path) -> str:
+    """A one-line description for a team card — the first prose paragraph of the
+    team's agent.md (the same text reverse_fill seeds the goal from)."""
+    try:
+        return _first_paragraph((d / "agent.md").read_text())[:160]
+    except Exception:
+        return ""
+
+
 def list_teams_in(scan_dir: Path) -> list[dict]:
     """Editable team sources found in `scan_dir` — every folder with an
     agent.yaml. The directory itself may be a team (the create default writes
@@ -53,7 +62,8 @@ def list_teams_in(scan_dir: Path) -> list[dict]:
         if not is_team(d) or key in seen:
             return
         seen.add(key)
-        teams.append({"name": _team_display_name(d), "path": key})
+        teams.append({"name": _team_display_name(d), "path": key,
+                      "description": _team_description(d)})
 
     if not scan_dir.is_dir():
         return teams

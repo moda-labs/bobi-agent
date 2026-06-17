@@ -363,17 +363,58 @@ class TestReviewFiles:
 # --- finish --------------------------------------------------------------
 
 class TestFinish:
-    def test_finish_sets_flag_and_calls_hook(self, project):
-        called = {}
+    def test_finish_sets_flag_and_keeps_server_alive(self, project):
+        # Finish marks the session complete but does NOT stop the server — the
+        # page transitions to the team hub, a re-entrant editor.
         s = SetupState(stage=Stage.DONE)
-        app = server.build_app(s, project, nonce=NONCE,
-                               on_finish=lambda: called.setdefault("done", True))
-        c = _testclient(app)
-        c.headers.update({server.NONCE_HEADER: NONCE})
+        c = _client(s, project)
         r = c.post("/api/finish")
         assert r.json()["finished"] is True
-        assert called.get("done") is True
         assert s.finished is True
+
+
+class TestHome:
+    def test_lists_library_teams_with_descriptions(self, project, home):
+        _seed_library_team(home, "legacy-bot")
+        c = _client(SetupState(), project, home_root=home)
+        r = c.get("/api/home")
+        assert r.status_code == 200
+        teams = r.json()["teams"]
+        assert any(t["name"] == "legacy-bot" for t in teams)
+        bot = next(t for t in teams if t["name"] == "legacy-bot")
+        # description comes from the team's agent.md first paragraph
+        assert "triage issues" in bot["description"].lower()
+
+    def test_empty_library_lists_nothing(self, project, home):
+        c = _client(SetupState(), project, home_root=home)
+        assert c.get("/api/home").json()["teams"] == []
+
+
+class TestRunStart:
+    def test_spawns_modastack_start_in_project(self, project, monkeypatch):
+        calls = {}
+
+        def fake_popen(args, **kw):
+            calls["args"] = args
+            calls["cwd"] = kw.get("cwd")
+            return object()
+
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+        c = _client(SetupState(stage=Stage.DONE), project)
+        r = c.post("/api/run-start")
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert calls["args"][1:] == ["-m", "modastack", "start"]
+        assert calls["cwd"] == str(project)
+
+    def test_reports_error_when_spawn_fails(self, project, monkeypatch):
+        def boom(*a, **k):
+            raise OSError("no exec")
+
+        monkeypatch.setattr("subprocess.Popen", boom)
+        c = _client(SetupState(stage=Stage.DONE), project)
+        r = c.post("/api/run-start")
+        assert r.status_code == 500
+        assert "no exec" in r.json()["error"]
 
 
 # --- intro: create / open + location -------------------------------------
@@ -441,8 +482,8 @@ class TestIntro:
         (src / "roles" / "aide" / "ROLE.md").write_text("# Aide\n\nHelp.\n")
         c = _client(SetupState(), project, home_root=home)
         teams = c.get("/api/intro").json()["teams"]
-        assert {"name": "personal-assistant",
-                "path": str(src.resolve())} in teams
+        assert any(t["name"] == "personal-assistant"
+                   and t["path"] == str(src.resolve()) for t in teams)
 
     def test_teams_scans_a_chosen_directory(self, project, home):
         # Modify asks which folder to scan — point it anywhere under home.
