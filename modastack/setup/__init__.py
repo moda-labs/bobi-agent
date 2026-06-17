@@ -1,4 +1,4 @@
-"""Interactive agent-guided onboarding (`bobbi setup`).
+"""Interactive agent-guided onboarding (`modastack setup`).
 
 A local web UI (FastAPI on 127.0.0.1, foreground) drives a mode-aware
 stage machine; the wizard owns navigation and every deterministic action

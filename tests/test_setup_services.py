@@ -26,7 +26,7 @@ class TestResolve:
 
     def test_unknown_not_in_catalog_becomes_custom(self):
         # Neither native, a curated bucket, nor in Venn's catalog → custom:
-        # bobbi captures an API key and authors a tools guide for it.
+        # modastack captures an API key and authors a tools guide for it.
         conn = services.resolve("posthog", venn_catalog=set())
         assert conn.kind == "custom"
         assert conn.key == "posthog"

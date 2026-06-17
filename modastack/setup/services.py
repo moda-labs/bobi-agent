@@ -234,7 +234,7 @@ for _c in CATALOG.values():
 # BEYOND the curated buckets above. Seeded from a live `list_servers` dump and
 # refreshed live when a key is present (see `live_venn_catalog`). A requested
 # service that is neither native, a curated bucket, nor in this set is treated
-# as a **custom** service: bobbi captures an API key and authors a tools guide.
+# as a **custom** service: modastack captures an API key and authors a tools guide.
 #
 # NOTE: this is the static seed for design-time (pre-key) classification. Keep
 # it in sync with Venn's connector list; `live_venn_catalog` unions the user's
@@ -254,18 +254,18 @@ def _env_var_for(name: str) -> str:
 
 
 def _custom_connector(name: str) -> Connector:
-    """A service Venn doesn't cover: reached via its own API. bobbi captures an
+    """A service Venn doesn't cover: reached via its own API. modastack captures an
     API key and writes it a `tools/<service>.md` usage guide at Build."""
     clean = (name or "").strip()
     var = _env_var_for(clean)
     method = AuthMethod(
         key="token", label="API key",
         summary=f"{clean or 'This service'} isn't built-in or on Venn — paste an "
-                "API key and bobbi writes it a usage guide.",
+                "API key and modastack writes it a usage guide.",
         steps=(
             f"Create an API key in {clean or 'the service'} (usually under "
             "Settings → API).",
-            "Paste it below. bobbi writes a tools/<service>.md guide so the "
+            "Paste it below. modastack writes a tools/<service>.md guide so the "
             "agent knows how to call its API.",
         ),
         secrets=(Secret(var, f"{clean or 'Service'} API key", "",
@@ -274,7 +274,7 @@ def _custom_connector(name: str) -> Connector:
     return Connector(
         key=clean.lower(), name=clean or "service", kind="custom",
         summary="A custom service — reached via its own API, with a usage "
-                "guide bobbi writes.",
+                "guide modastack writes.",
         scopes=("as its API allows",),
         methods=(method,),
     )

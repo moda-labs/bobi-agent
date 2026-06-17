@@ -1,4 +1,4 @@
-"""Integration test for `bobbi setup` — a real Claude-backed create flow
+"""Integration test for `modastack setup` — a real Claude-backed create flow
 driven through the HTTP API against an isolated tmp project.
 
 The web server's `build_app` is exercised with Starlette's TestClient and

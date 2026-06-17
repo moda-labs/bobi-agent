@@ -1,6 +1,6 @@
-"""End-to-end browser tests for the bobbi setup web UI (Playwright).
+"""End-to-end browser tests for the modastack setup web UI (Playwright).
 
-Like jobtack's e2e suite, but adapted to bobbi's stack: instead of a Vercel
+Like jobtack's e2e suite, but adapted to modastack's stack: instead of a Vercel
 preview, each test boots the real FastAPI app in-process on a loopback port
 with a **fake LLM source** (no Claude, no network), so the whole create flow
 — Design conversation, Automate, Connect, Chat, the collapsed build, Done,
@@ -42,7 +42,7 @@ def _fake_llm():
     "enough" on later turns. This lets e2e drive the five-slot Finish gate.
     """
     async def fn(*, system_prompt, user_prompt, model, cwd):
-        if "BOBBI-SPEC" in system_prompt:                       # digestion
+        if "MODASTACK-SPEC" in system_prompt:                       # digestion
             ctx = (user_prompt or "").lower()
             deltas = {
                 "goal": "Triage incoming GitHub issues and route each to an owner.",
@@ -73,7 +73,7 @@ def _fake_llm():
                 deltas["chat"] = "cli"
             reply = ("Got it — a GitHub issue-triage team that routes each issue "
                      "to the right owner.")
-            yield reply + "\n===BOBBI-SPEC===\n" + json.dumps(payload)
+            yield reply + "\n===MODASTACK-SPEC===\n" + json.dumps(payload)
         elif "proactive behaviors" in system_prompt:            # automate suggester
             yield json.dumps([{"description": "Flag stale PRs idle 48h",
                                "leash": "notify", "cadence": "1d",
@@ -100,7 +100,7 @@ def _isolate_env():
     os.environ.update(snap)
 
 
-class _Bobbi:
+class _Modastack:
     """A booted setup server: the page URL, its home/project dirs, and a stop()
     the test can call to simulate the server dying mid-session."""
     def __init__(self, url, home, project, srv, thread):
@@ -116,19 +116,19 @@ class _Bobbi:
 
 
 @pytest.fixture
-def bobbi(tmp_path):
+def modastack(tmp_path):
     """Boot the setup server with a fake LLM on a free loopback port; yield a
-    _Bobbi handle. Torn down after the test."""
+    _Modastack handle. Torn down after the test."""
     project = tmp_path / "project"
     project.mkdir()
     (project / "workspace").mkdir()
     subprocess.run(["git", "init"], cwd=project, capture_output=True)
 
-    # A stand-in home so the ~/bobbi-agents library and the folder picker stay
+    # A stand-in home so the ~/modastack-agents library and the folder picker stay
     # off the real filesystem. A couple of real subfolders give the picker
     # (now rooted at home) something to browse — dotfiles are hidden.
     home = tmp_path / "home"
-    (home / "bobbi-agents").mkdir(parents=True)
+    (home / "modastack-agents").mkdir(parents=True)
     (home / "projects").mkdir()
 
     app = server.build_app(SetupState(), project, nonce=NONCE,
@@ -154,12 +154,12 @@ def bobbi(tmp_path):
         except Exception:
             time.sleep(0.05)
 
-    handle = _Bobbi(f"{base}/?n={NONCE}", home, project, srv, thread)
+    handle = _Modastack(f"{base}/?n={NONCE}", home, project, srv, thread)
     yield handle
     handle.stop()
 
 
 @pytest.fixture
-def bobbi_url(bobbi):
+def modastack_url(modastack):
     """The page URL alone — what most tests need."""
-    return bobbi.url
+    return modastack.url

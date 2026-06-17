@@ -1,4 +1,4 @@
-"""The `bobbi setup` web server — FastAPI on 127.0.0.1, foreground.
+"""The `modastack setup` web server — FastAPI on 127.0.0.1, foreground.
 
 Design (from the implementation handoff):
 - **Deterministic routes are sync `def`** — FastAPI runs them in a thread
@@ -34,7 +34,7 @@ from fastapi.responses import (FileResponse, JSONResponse, Response,
 from modastack.setup.state import STAGE_ORDER, SetupState, Stage
 
 STATIC_DIR = Path(__file__).parent / "static"
-NONCE_HEADER = "x-bobbi-nonce"
+NONCE_HEADER = "x-modastack-nonce"
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
 
@@ -83,7 +83,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     """Construct the FastAPI app. `stream_fn` overrides the LLM source
     (tests inject a fake); `on_finish` is called when setup completes.
     `home_root` is the user's home (defaults to `Path.home()`) — it roots the
-    `~/bobbi-agents` team-source library and the folder picker; tests point it
+    `~/modastack-agents` team-source library and the folder picker; tests point it
     at a tmpdir."""
     app = FastAPI()
     app.state.stream_fn = stream_fn
@@ -92,7 +92,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     # the cwd it's installed into, so its source defaults here rather than
     # littering whatever directory setup runs in.
     home = (home_root or Path.home()).resolve()
-    library = home / "bobbi-agents"
+    library = home / "modastack-agents"
 
     # --- security middleware: Host guard + nonce on /api ---------------
     @app.middleware("http")
@@ -144,7 +144,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # Create defaults the team source into the library; Modify defaults to
         # scanning the same library, but the user can point the scan elsewhere
         # (a project repo, a thumb drive, wherever) via /api/teams. Install
-        # still targets the project's .bobbi/ unchanged — a source outside the
+        # still targets the project's .modastack/ unchanged — a source outside the
         # project copies in like a registry team (see actions.install_team).
         return {"teams": open_mode.list_teams_in(library),
                 "default_location": str(library),
@@ -209,7 +209,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         old = state.team_name
         # When the working source folder is named after the team (modify and
         # registry default to <location>/<team-name>), rename the folder on disk
-        # to match so it reflects the new name. Create's "bobbi/" folder isn't
+        # to match so it reflects the new name. Create's "modastack/" folder isn't
         # team-named, so it's left as the user chose it.
         if old and state.source_dir and Path(state.source_dir).name == old:
             src = team_source_dir(project, state)
@@ -249,7 +249,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         abs_loc = (loc if loc.is_absolute() else project / loc).resolve()
         dot = paths.modastack_dir(project).resolve()
         if abs_loc == dot or dot in abs_loc.parents:
-            return JSONResponse({"error": "pick a location outside .bobbi/"},
+            return JSONResponse({"error": "pick a location outside .modastack/"},
                                 status_code=400)
         state.source_dir = location
         # Both modify-local and from-registry land in the same non-lossy
@@ -539,7 +539,7 @@ def serve(project: Path, *, model: str | None = None,
     if resume:
         state = SetupState.load(project)
         if state is None or state.finished:
-            print("No setup in progress to resume — run `bobbi setup`.")
+            print("No setup in progress to resume — run `modastack setup`.")
             return 1
     if state is None:
         SetupState.clear(project)
@@ -569,7 +569,7 @@ def serve(project: Path, *, model: str | None = None,
 
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-    print(f"\n  bobbi setup is running at {url}\n  (Ctrl-C to stop)\n")
+    print(f"\n  modastack setup is running at {url}\n  (Ctrl-C to stop)\n")
 
     try:
         server.run(sockets=[sock])

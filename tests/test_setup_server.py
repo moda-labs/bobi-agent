@@ -1,4 +1,4 @@
-"""Tests for the bobbi setup web server — security, serialization, and the
+"""Tests for the modastack setup web server — security, serialization, and the
 deterministic + streaming endpoints. Driven by Starlette's TestClient with
 an injected fake LLM source: no network, no CLI."""
 
@@ -16,7 +16,7 @@ NONCE = "test-nonce-123"
 
 
 def _fake_digest(reply, **payload):
-    sentinel = "===BOBBI-SPEC==="
+    sentinel = "===MODASTACK-SPEC==="
 
     async def fn(*, system_prompt, user_prompt, model, cwd):
         yield reply + "\n" + sentinel + "\n" + json.dumps(payload)
@@ -49,7 +49,7 @@ def project(tmp_path):
 
 @pytest.fixture
 def home(tmp_path):
-    """A stand-in for the user's home, so the ~/bobbi-agents library and the
+    """A stand-in for the user's home, so the ~/modastack-agents library and the
     folder picker stay off the real filesystem. Pass home_root=home to _client."""
     h = tmp_path / "home"
     h.mkdir()
@@ -381,20 +381,20 @@ def _seed_team(project, name="legacy-bot", *, parent="agents"):
 
 
 def _seed_library_team(home, name="legacy-bot"):
-    """Write a minimal valid team source into the ~/bobbi-agents library."""
-    return _seed_team(home / "bobbi-agents", name, parent=".")
+    """Write a minimal valid team source into the ~/modastack-agents library."""
+    return _seed_team(home / "modastack-agents", name, parent=".")
 
 
 class TestIntro:
     def test_intro_scans_the_library_by_default(self, project, home):
         # The default scan + create location is the machine-wide library
-        # (~/bobbi-agents), not the cwd — a team isn't tied to where it installs.
+        # (~/modastack-agents), not the cwd — a team isn't tied to where it installs.
         _seed_library_team(home, "legacy-bot")
         c = _client(SetupState(), project, home_root=home)
         data = c.get("/api/intro").json()
         names = {t["name"] for t in data["teams"]}
         assert "legacy-bot" in names
-        library = str((home / "bobbi-agents").resolve())
+        library = str((home / "modastack-agents").resolve())
         assert data["default_location"] == library
         assert data["scan_dir"] == library
 
@@ -402,7 +402,7 @@ class TestIntro:
         # The library folder itself may be a team (create writes straight into
         # its named subfolder, but a flat layout is fine too) — show the
         # agent.yaml name, not the folder name.
-        src = home / "bobbi-agents"
+        src = home / "modastack-agents"
         (src / "roles" / "aide").mkdir(parents=True)
         (src / "agent.yaml").write_text(
             "agent: personal-assistant\nversion: 0.1.0\nentry_point: aide\n")
@@ -430,7 +430,7 @@ class TestIntro:
         assert r.status_code == 400
 
     def test_start_open_rejects_fork_inside_source(self, project, home):
-        src = home / "bobbi-agents" / "pa"
+        src = home / "modastack-agents" / "pa"
         src.mkdir(parents=True)
         (src / "agent.yaml").write_text("agent: pa\n")
         c = _client(SetupState(), project, home_root=home)
@@ -494,7 +494,7 @@ class TestIntro:
     def test_start_open_unknown_team_400(self, project, home):
         c = _client(SetupState(), project, home_root=home)
         r = c.post("/api/start", json={
-            "mode": "open", "team_path": str(home / "bobbi-agents" / "ghost"),
+            "mode": "open", "team_path": str(home / "modastack-agents" / "ghost"),
             "location": "agent-teams/ghost"})
         assert r.status_code == 400  # not a team (no agent.yaml)
 
@@ -510,19 +510,19 @@ class TestIntro:
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         c = _client(SetupState(), project)
         r = c.post("/api/start", json={"mode": "registry", "team": "eng-team",
-                                       "location": "bobbi/eng-team"})
+                                       "location": "modastack/eng-team"})
         assert r.status_code == 200
         d = r.json()
         assert d["stage"] == "design"
         # Registry-derived teams use the non-lossy edit path (mode "open").
         assert d["mode"] == "open"
         assert d["spec"]["goal"]
-        assert (project / "bobbi" / "eng-team" / "agent.yaml").is_file()
+        assert (project / "modastack" / "eng-team" / "agent.yaml").is_file()
 
     def test_start_registry_without_team_400(self, project):
         c = _client(SetupState(), project)
         r = c.post("/api/start", json={"mode": "registry",
-                                       "location": "bobbi/x"})
+                                       "location": "modastack/x"})
         assert r.status_code == 400
 
     def test_browse_lists_home_dirs(self, project, home):
@@ -540,8 +540,8 @@ class TestIntro:
     def test_browse_defaults_to_library(self, project, home):
         c = _client(SetupState(), project, home_root=home)
         d = c.get("/api/browse").json()  # no path → the library, created on demand
-        assert d["path"] == str((home / "bobbi-agents").resolve())
-        assert (home / "bobbi-agents").is_dir()
+        assert d["path"] == str((home / "modastack-agents").resolve())
+        assert (home / "modastack-agents").is_dir()
 
     def test_browse_confined_to_home(self, project, home):
         c = _client(SetupState(), project, home_root=home)
@@ -565,32 +565,32 @@ class TestIntro:
         # modify/registry put the source at <location>/<team-name>; renaming
         # must move that folder and repoint source_dir so the folder on disk
         # matches the new name.
-        src = project / "bobbi" / "a-personal-assistant-team"
+        src = project / "modastack" / "a-personal-assistant-team"
         src.mkdir(parents=True)
         (src / "agent.yaml").write_text("agent: a-personal-assistant-team\n")
         st = SetupState(stage=Stage.DESIGN, team_name="a-personal-assistant-team",
-                        source_dir="bobbi/a-personal-assistant-team")
+                        source_dir="modastack/a-personal-assistant-team")
         c = _client(st, project)
         d = c.post("/api/rename", json={"name": "personal-assistant"}).json()
         assert d["team_name"] == "personal-assistant"
-        assert d["source_dir"] == "bobbi/personal-assistant"
-        assert (project / "bobbi" / "personal-assistant" / "agent.yaml").is_file()
-        assert not (project / "bobbi" / "a-personal-assistant-team").exists()
+        assert d["source_dir"] == "modastack/personal-assistant"
+        assert (project / "modastack" / "personal-assistant" / "agent.yaml").is_file()
+        assert not (project / "modastack" / "a-personal-assistant-team").exists()
 
     def test_rename_leaves_non_team_named_folder_alone(self, project):
-        # create's folder is "bobbi", not named after the team — left as chosen.
-        (project / "bobbi").mkdir()
-        st = SetupState(stage=Stage.DESIGN, team_name="triage", source_dir="bobbi")
+        # create's folder is "modastack", not named after the team — left as chosen.
+        (project / "modastack").mkdir()
+        st = SetupState(stage=Stage.DESIGN, team_name="triage", source_dir="modastack")
         c = _client(st, project)
         d = c.post("/api/rename", json={"name": "triage-bot"}).json()
         assert d["team_name"] == "triage-bot"
-        assert d["source_dir"] == "bobbi"
+        assert d["source_dir"] == "modastack"
 
     def test_rename_conflict_when_target_folder_exists(self, project):
-        (project / "bobbi" / "old").mkdir(parents=True)
-        (project / "bobbi" / "taken").mkdir(parents=True)
-        st = SetupState(stage=Stage.DESIGN, team_name="old", source_dir="bobbi/old")
+        (project / "modastack" / "old").mkdir(parents=True)
+        (project / "modastack" / "taken").mkdir(parents=True)
+        st = SetupState(stage=Stage.DESIGN, team_name="old", source_dir="modastack/old")
         c = _client(st, project)
         r = c.post("/api/rename", json={"name": "taken"})
         assert r.status_code == 409
-        assert (project / "bobbi" / "old").exists()  # original untouched
+        assert (project / "modastack" / "old").exists()  # original untouched

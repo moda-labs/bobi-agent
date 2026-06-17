@@ -28,7 +28,7 @@ _is_team = is_team
 
 def _team_display_name(d: Path) -> str:
     """The team's declared name (agent.yaml `agent:`), falling back to the
-    folder name — so a team in `bobbi/` shows its real name, not 'bobbi'."""
+    folder name — so a team in `modastack/` shows its real name, not 'modastack'."""
     try:
         cfg = yaml.safe_load((d / "agent.yaml").read_text()) or {}
         if isinstance(cfg, dict) and cfg.get("agent"):
@@ -43,7 +43,7 @@ def list_teams_in(scan_dir: Path) -> list[dict]:
     agent.yaml. The directory itself may be a team (the create default writes
     the team straight into its own folder) or a container of team folders, so
     both are checked. Paths are returned absolute, since a team source can live
-    anywhere the user points the scan at (the `~/bobbi-agents` library by
+    anywhere the user points the scan at (the `~/modastack-agents` library by
     default, a project repo, wherever). Best-effort — a missing or unreadable
     directory simply yields nothing."""
     teams: list[dict] = []

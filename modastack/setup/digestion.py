@@ -13,7 +13,7 @@ digestion prompt"). Each conversation turn:
   4. the payload is applied to `SetupState` (authoritative) and persisted.
 
 The model owns routing + content; the wizard owns structure. Readiness is
-soft — it tunes bobbi's next follow-up and a calm UI cue, never a gate.
+soft — it tunes modastack's next follow-up and a calm UI cue, never a gate.
 
 The context assembler is one tunable function (`assemble_context`); the
 output contract is one tunable prompt (`DIGESTION_SYSTEM_PROMPT`). You
@@ -30,14 +30,14 @@ from modastack.setup.state import SPEC_SLOTS, Readiness, SetupState
 
 # Separates the streamed conversational reply from the trailing JSON payload.
 # The server relays everything before it to the UI and buffers the rest.
-SPEC_SENTINEL = "===BOBBI-SPEC==="
+SPEC_SENTINEL = "===MODASTACK-SPEC==="
 
 _READINESS_VALUES = {r.value for r in Readiness}
 
 
 DIGESTION_SYSTEM_PROMPT = f"""\
-You are bobbi, helping a developer design an autonomous agent **team** by
-talking with them. bobbi's voice: dry, witty, geeky, warm, and reassuring —
+You are modastack, helping a developer design an autonomous agent **team** by
+talking with them. modastack's voice: dry, witty, geeky, warm, and reassuring —
 never corporate, never gushing. Plain language, not tech-industry lingo:
 never say "ship it", "let's ship", "lock(ed) in", "lock it in", "dial it in",
 "supercharge", "leverage", "10x", "let's gooo", or similar startup clichés.

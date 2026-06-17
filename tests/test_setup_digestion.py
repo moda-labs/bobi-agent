@@ -134,7 +134,7 @@ class TestReplySplitter:
 
     def test_holds_back_split_sentinel(self):
         sp = _ReplySplitter(SPEC_SENTINEL)
-        chunks = ["reply text", "\n===BOB", "BI-SPEC===\n", '{"summary":"s"}']
+        chunks = ["reply text", "\n===MODA", "STACK-SPEC===\n", '{"summary":"s"}']
         emitted = "".join(sp.feed(c) for c in chunks) + sp.flush()
         assert emitted == "reply text\n"
         assert sp.text.endswith('{"summary":"s"}')

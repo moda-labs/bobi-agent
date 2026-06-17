@@ -1,11 +1,11 @@
-/* bobbi setup — the front-end. Vanilla, no build, offline.
+/* modastack setup — the front-end. Vanilla, no build, offline.
    ONE screen: an objective-guided conversation (left) while the team
    materializes as cards (right). The LLM serves the conversation (SSE) and the
    Build pour (SSE). Secrets are captured in dedicated on-demand components,
    never in the chat. Build/Done reuse the generating + done views. */
 (() => {
-  const NONCE = document.querySelector('meta[name="bobbi-nonce"]').content;
-  const H = { "x-bobbi-nonce": NONCE };
+  const NONCE = document.querySelector('meta[name="modastack-nonce"]').content;
+  const H = { "x-modastack-nonce": NONCE };
   const $ = (sel, el = document) => el.querySelector(sel);
   const esc = (s) => (s || "").replace(/[&<>]/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -32,7 +32,7 @@
   // (Ctrl-C, closed terminal, crash) the UI must say so and stop pretending to
   // be live — every action would silently fail otherwise. A heartbeat plus
   // fetch-failure detection flips a blocking overlay; it clears itself if the
-  // server comes back (e.g. `bobbi setup --resume`).
+  // server comes back (e.g. `modastack setup --resume`).
   let _finished = false;        // set when the user intentionally finishes
   let _disconnected = false;
   function markDisconnected() {
@@ -45,8 +45,8 @@
     ov.innerHTML = `<div class="disc-panel">
       <div class="disc-dot"></div>
       <h2>Setup server disconnected</h2>
-      <p>The local <code>bobbi setup</code> server stopped — closed, interrupted, or crashed. Nothing here works until it's back.</p>
-      <div class="disc-cmd"><span class="pr">$</span> bobbi setup --resume</div>
+      <p>The local <code>modastack setup</code> server stopped — closed, interrupted, or crashed. Nothing here works until it's back.</p>
+      <div class="disc-cmd"><span class="pr">$</span> modastack setup --resume</div>
       <p class="disc-sub">Run that in your terminal — this page reconnects on its own. Your progress is saved.</p></div>`;
     document.body.appendChild(ov);
   }
@@ -133,7 +133,7 @@
   // Three ways in, all landing in the same chat+cards editor. Create authors
   // from scratch (auto-named in the chat); modify and registry reverse-fill an
   // existing team and edit it non-lossily.
-  let introTeams = [], introRegistry = null, introBase = "bobbi",
+  let introTeams = [], introRegistry = null, introBase = "modastack",
       introScanDir = "", introMode = "create";
   async function renderIntro() {
     setPanes("1fr");
@@ -147,7 +147,7 @@
     $("#main").innerHTML = `<main class="node narrow intro">
       <div class="eyebrow">Setup</div>
       <h1>Build an agent team</h1>
-      <p class="lede">Start fresh, modify a team you already have, or pull one from a registry. bobbi keeps the source in a folder you choose, then installs it into <code>.bobbi/</code> when you're done.</p>
+      <p class="lede">Start fresh, modify a team you already have, or pull one from a registry. modastack keeps the source in a folder you choose, then installs it into <code>.modastack/</code> when you're done.</p>
       <div class="introtabs">
         <button class="itab ${introMode === "create" ? "on" : ""}" data-intromode="create">Create new</button>
         <button class="itab ${introMode === "open" ? "on" : ""}" data-intromode="open">Modify existing</button>
@@ -214,8 +214,8 @@
   function drawIntroBody() {
     const el = $("#introbody");
     if (introMode === "create") {
-      el.innerHTML = `<p class="ihint">bobbi names the team for you as you describe what it should do — you can rename it any time. The team gets its own folder under here.</p>
-        ${locFieldHTML("Where teams go (a folder you own — not .bobbi/)", introBase + "/")}`;
+      el.innerHTML = `<p class="ihint">modastack names the team for you as you describe what it should do — you can rename it any time. The team gets its own folder under here.</p>
+        ${locFieldHTML("Where teams go (a folder you own — not .modastack/)", introBase + "/")}`;
       $("#introloc").focus();
       wireBrowse();
     } else if (introMode === "open") {
@@ -227,7 +227,7 @@
         return;
       }
       if (!introRegistry.length) {
-        el.innerHTML = `<p class="ihint">No registry teams found. Add one with <code>bobbi agents add-registry &lt;repo&gt;</code>, or create a team from scratch.</p>`;
+        el.innerHTML = `<p class="ihint">No registry teams found. Add one with <code>modastack agents add-registry &lt;repo&gt;</code>, or create a team from scratch.</p>`;
         return;
       }
       el.innerHTML = `
@@ -309,11 +309,11 @@
     // Two grid items (the wrapper #main is display:contents): chat | panel.
     $("#main").innerHTML = `
       <section class="chat sketch uni-chat">
-        <div class="sketch-top"><span class="sketch-eyebrow">bobbi · build your team</span></div>
+        <div class="sketch-top"><span class="sketch-eyebrow">modastack · build your team</span></div>
         <div class="ch-body" id="chbody"></div>
         <div class="cue" id="cue"></div>
         <div class="chips" id="chips"></div>
-        <div class="ch-input"><textarea id="chinput" rows="1" placeholder="Tell bobbi what you want to build…" autocomplete="off"></textarea><button class="btn primary" id="chsend" style="padding:9px 14px">↑</button></div>
+        <div class="ch-input"><textarea id="chinput" rows="1" placeholder="Tell modastack what you want to build…" autocomplete="off"></textarea><button class="btn primary" id="chsend" style="padding:9px 14px">↑</button></div>
       </section>
       <aside class="uni-panel">
         <div class="uni-head"><span class="up-title" id="up-title" title="click to rename"></span><span class="up-meter" id="uni-meter"></span></div>
@@ -337,9 +337,9 @@
     $("#chsend").addEventListener("click", () => sendMessage());
   }
 
-  // The five things bobbi gathers, each a card that fills in + checks off
+  // The five things modastack gathers, each a card that fills in + checks off
   // live: goal, roles, automations, connections, chat.
-  // The team's name shows in the panel header as bobbi auto-derives it; click
+  // The team's name shows in the panel header as modastack auto-derives it; click
   // to rename. (Empty until the goal firms up enough to name the team.)
   function setTeamTitle() {
     const el = $("#up-title"); if (!el) return;
@@ -380,7 +380,7 @@
     const foot = $("#uni-foot");
     if (foot) foot.innerHTML = ready
       ? `<button class="btn primary" data-go="build">Finish →</button>`
-      : `<span class="uni-note">bobbi is gathering goal, roles, automations, connections, and chat</span>`;
+      : `<span class="uni-note">modastack is gathering goal, roles, automations, connections, and chat</span>`;
   }
   function slotDot(ok) {
     return `<span class="udot ${ok ? "ok" : "empty"}">${ok ? CHECK : ""}</span>`;
@@ -395,7 +395,7 @@
     const roles = sp.roles || [];
     const body = roles.length
       ? roles.map(r => `<div class="urole"><b>${esc(r.name || "role")}</b>${r.responsibility ? `<span>${esc(r.responsibility)}</span>` : ""}</div>`).join("")
-      : `<span class="ph">bobbi will shape the roles as you talk</span>`;
+      : `<span class="ph">modastack will shape the roles as you talk</span>`;
     return `<div class="ucard ${roles.length ? "filled" : "empty"}">
       <div class="ut">Roles ${slotDot(sp.readiness.roles === "enough")}</div>
       <div class="ud">${body}</div></div>`;
@@ -405,8 +405,8 @@
     const body = items.length
       ? items.map(a => `<div class="urole"><b>${esc(a.description || "behavior")}</b><span>${esc(a.leash || "")}${a.cadence ? " · " + esc(a.cadence) : ""}</span></div>`).join("")
       : (sp.autonomous_confirmed
-          ? `<span class="ph">nothing proactive — bobbi acts only when asked</span>`
-          : `<span class="ph">anything bobbi should do on its own?</span>`);
+          ? `<span class="ph">nothing proactive — modastack acts only when asked</span>`
+          : `<span class="ph">anything modastack should do on its own?</span>`);
     return `<div class="ucard ${items.length || sp.autonomous_confirmed ? "filled" : "empty"}">
       <div class="ut">Automations ${slotDot(sp.readiness.autonomous === "enough")}</div>
       <div class="ud">${body}</div></div>`;
@@ -445,7 +445,7 @@
       : `<button class="btn ghost xs" data-secretopen="${esc(c.key)}">Connect</button>`;
     // Custom services (not native, not on Venn) get an authored API guide.
     const tag = c.kind === "custom"
-      ? `<span class="ctag">custom · bobbi writes a guide</span>` : "";
+      ? `<span class="ctag">custom · modastack writes a guide</span>` : "";
     return `<div class="uconn"><span>${esc(c.name)}${tag}</span><span class="cright">${right}</span></div>`;
   }
   function vennGroup(venn) {
@@ -514,7 +514,7 @@
     if (!body) return;
     let html = "";
     if (!S.messages.length && !extra) {
-      html = `<div class="msg bob">Hi — I'm bobbi. Tell me what you want this team to do, in your own words. Rough is fine; we'll sharpen it together.</div>`;
+      html = `<div class="msg bob">Hi — I'm modastack. Tell me what you want this team to do, in your own words. Rough is fine; we'll sharpen it together.</div>`;
     }
     for (const m of S.messages) {
       html += `<div class="msg ${m.role === "user" ? "you" : "bob"}">${esc(m.content)}</div>`;
@@ -550,7 +550,7 @@
     const input = $("#chinput");
     const msg = (typeof text === "string" ? text : (input ? input.value : "")).trim();
     if (!msg) return;
-    // You can keep typing (and queue another message) while bobbi is replying.
+    // You can keep typing (and queue another message) while modastack is replying.
     if (streaming) { pendingSend = msg; if (input && typeof text !== "string") { input.value = ""; autoGrow(input); } return; }
     if (input && typeof text !== "string") { input.value = ""; autoGrow(input); }
     streaming = true;
@@ -720,7 +720,7 @@
           <input type="password" id="venn-key" placeholder="venn_…" autocomplete="off">
           <span class="shelp">One key unlocks every Venn service below.</span></label>`;
     body.innerHTML = `
-      <p class="pd" style="margin-bottom:10px">One Venn key covers all of these. Connect each service in Venn, then paste the key once — bobbi verifies which are live.</p>
+      <p class="pd" style="margin-bottom:10px">One Venn key covers all of these. Connect each service in Venn, then paste the key once — modastack verifies which are live.</p>
       <ol class="steps">
         <li>Sign in at app.venn.ai and create an API key (Settings → API).</li>
         <li>In Venn, connect each service below (one-click OAuth).</li>
@@ -814,7 +814,7 @@
   function talkHint() {
     if (S.chat === "slack") return `<p class="lede">Talk to it in Slack — message the bot in your channel.</p>`;
     if (S.chat === "telegram") return `<p class="lede">Talk to it in Telegram.</p>`;
-    return `<p class="lede">Talk to it from the terminal: <code>bobbi ask "what's the status?"</code></p>`;
+    return `<p class="lede">Talk to it from the terminal: <code>modastack ask "what's the status?"</code></p>`;
   }
   // The post-build screen IS a built-in file browser: a success banner, the
   // generated team's files (tree + contents) read live from disk, a button to
@@ -828,9 +828,9 @@
       <header class="fd-head">
         <div class="fd-seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
         <div class="fd-title">
-          <div class="eyebrow">Done · here's what bobbi built</div>
+          <div class="eyebrow">Done · here's what modastack built</div>
           <h1>${esc(S.team_name || "your team")} is ready</h1>
-          <p class="fd-meta">${counts} · source at <code>${esc(where)}</code> · installed into <code>.bobbi/</code></p>
+          <p class="fd-meta">${counts} · source at <code>${esc(where)}</code> · installed into <code>.modastack/</code></p>
         </div>
         <div class="fd-actions">
           <button class="btn ghost" id="fd-reveal">Open folder</button>
@@ -838,7 +838,7 @@
         </div>
       </header>
       <div class="fd-body" id="fd-body"></div>
-      <div class="fd-foot"><span class="fd-run"><span class="pr">$</span> bobbi start</span> ${talkHint()}</div>
+      <div class="fd-foot"><span class="fd-run"><span class="pr">$</span> modastack start</span> ${talkHint()}</div>
     </main>`;
 
     $("#fd-reveal").addEventListener("click", async () => {
@@ -884,10 +884,10 @@
       <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
       <div class="eyebrow">All set</div>
       <h1>${esc(S.team_name || "your team")} is ready</h1>
-      <p class="lede">Installed into <code>.bobbi/</code>. We are legion.</p>
+      <p class="lede">Installed into <code>.modastack/</code>. We are legion.</p>
       ${talkHint()}
       <p class="lede" style="margin-top:18px">Start it whenever you're ready:</p>
-      <div class="cmd"><span class="pr">$</span> bobbi start</div>
+      <div class="cmd"><span class="pr">$</span> modastack start</div>
       <p class="lede" style="font-size:13px;color:var(--faint)">Setup is complete and this local server has stopped — you can close this tab.</p>
     </main>`;
   }

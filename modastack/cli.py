@@ -595,7 +595,7 @@ def setup(model, resume):
     """Interactively design, build, and install an agent team.
 
     Opens a local web UI (on 127.0.0.1) that goes from an idea to a
-    runnable agent team: describe what you want, let bobbi suggest what
+    runnable agent team: describe what you want, let modastack suggest what
     it can do on its own, connect services, watch it build the pack, then
     review and install. Interrupt anytime — `--resume` picks up where you
     left off.

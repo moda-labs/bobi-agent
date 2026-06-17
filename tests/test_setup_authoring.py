@@ -184,14 +184,14 @@ class TestAuthorPour:
         # Create's location is a BASE; the team lands at <base>/<name> so every
         # team gets its own folder (no collision between two creates).
         s = _spec_state()                 # team_name="triage-bot", mode=create
-        s.source_dir = "bobbi"            # the base the user chose
+        s.source_dir = "modastack"            # the base the user chose
         _run(_collect(authoring.author_pack(
             s, tmp_path, stream_fn=self._fake_stream())))
-        assert (tmp_path / "bobbi" / "triage-bot" / "agent.yaml").is_file()
+        assert (tmp_path / "modastack" / "triage-bot" / "agent.yaml").is_file()
         # the concrete path is persisted (idempotent — not re-appended)
-        assert s.source_dir == "bobbi/triage-bot"
+        assert s.source_dir == "modastack/triage-bot"
         s.team_name = "triage-bot"
-        assert actions.team_source_dir(tmp_path, s) == tmp_path / "bobbi" / "triage-bot"
+        assert actions.team_source_dir(tmp_path, s) == tmp_path / "modastack" / "triage-bot"
 
     def test_pour_strips_wrapping_code_fence(self, tmp_path):
         async def fenced(*, system_prompt, user_prompt, model, cwd):
@@ -310,7 +310,7 @@ class TestAuthorOpenModeNonLossy:
     manifest never models and never blank an existing prose file."""
 
     def _existing_team(self, root, name="legacy"):
-        src = root / "bobbi" / name
+        src = root / "modastack" / name
         (src / "roles" / "lead").mkdir(parents=True)
         (src / "agent.yaml").write_text(
             f"agent: {name}\nversion: 0.1.0\nentry_point: lead\n")
@@ -322,7 +322,7 @@ class TestAuthorOpenModeNonLossy:
         return src
 
     def _open_state(self, name="legacy"):
-        s = SetupState(team_name=name, mode="open", source_dir=f"bobbi/{name}")
+        s = SetupState(team_name=name, mode="open", source_dir=f"modastack/{name}")
         s.spec.goal = "Watch the repo."
         s.spec.roles = [{"name": "lead", "responsibility": "classify"}]
         return s
@@ -337,7 +337,7 @@ class TestAuthorOpenModeNonLossy:
             yield "EDITED.\n"
 
         _run(_collect(authoring.author_pack(s, tmp_path, stream_fn=fake)))
-        pack = tmp_path / "bobbi" / "legacy"
+        pack = tmp_path / "modastack" / "legacy"
         # a file outside the manifest is never touched
         assert (pack / "tools" / "github.md").read_text() == "custom tool guide\n"
         # prose files went through the EDIT path (editing prompt + original shown)
@@ -353,6 +353,6 @@ class TestAuthorOpenModeNonLossy:
             yield  # pragma: no cover
 
         _run(_collect(authoring.author_pack(s, tmp_path, stream_fn=blank)))
-        role = (tmp_path / "bobbi" / "legacy"
+        role = (tmp_path / "modastack" / "legacy"
                 / "roles" / "lead" / "ROLE.md").read_text()
         assert "specifics A, B, C" in role  # original survived an empty edit

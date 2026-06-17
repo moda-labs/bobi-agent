@@ -1,6 +1,6 @@
-# Design System — bobbi setup
+# Design System — modastack setup
 
-> Source of truth for the `bobbi setup` web UI. Read this before any visual or
+> Source of truth for the `modastack setup` web UI. Read this before any visual or
 > UX decision.
 >
 > **Status (2026-06-16):** shipped and iterating. The original 8-stage rail
@@ -13,18 +13,22 @@
 > supersedes any "stage rail" description elsewhere.
 
 ## Product context
-- **What:** a local web wizard a developer runs (`bobbi setup`, served on
+- **What:** a local web wizard a developer runs (`modastack setup`, served on
   `127.0.0.1`) to design, build, install, and later edit a portable
-  **agent-team package**. The team source lives in a folder the user chooses
-  (default `bobbi/`); **Finish** authors the source there and installs a frozen
-  image into `.bobbi/` (`.modastack/`).
+  **agent-team package**. The editable team source lives in a machine-wide
+  library the user can change (default `~/modastack-agents/<team>/`), so a team
+  isn't tied to the cwd it installs into; **Finish** authors the source there
+  and installs a frozen image into the project's `.modastack/`.
 - **Who:** developers/engineers comfortable in IDEs and terminals. v1 of this
   product was a terminal REPL.
 - **Hard constraints:** fully **offline** — system fonts only, no CDN, no web
   fonts; vanilla HTML/CSS/JS, no build step; inline SVG only.
-- **Brand:** rebrand from `modastack` to **bobbi** ("team bobbi", "we are
-  legion"), after the Bobiverse novels — one engineer's mind forking into a
-  legion of autonomous copies, which is the product's pitch. See
+- **Brand:** ships as **modastack** for now. A rebrand to **bobbi** ("team
+  bobbi", "we are legion") — after the Bobiverse novels, one engineer's mind
+  forking into a legion of autonomous copies, which is the product's pitch — is
+  the intended direction but **deferred** until the whole-codebase rename lands.
+  Until then, all user-facing copy, commands, and paths say `modastack`. The
+  retro-futurist *aesthetic* below already nods to that lineage. See
   `memory/project_bobbi_rebrand.md`.
 
 ## North star
@@ -35,8 +39,8 @@ artifact / workbench" framing — which is why files are *not* a persistent hero
 surface during design (they become the hero at the very end, see UX
 architecture).
 
-The brand voice (Bob: dry, witty, geeky, reassuring even when things break)
-serves the copy layer, not the chrome.
+The setup assistant's voice (dry, witty, geeky, reassuring even when things
+break) serves the copy layer, not the chrome.
 
 ## Experience principles (pacing & feel) — the governing metric
 **Shortest time-to-magic wins.** New-tool attention is short; the flow must feel
@@ -44,10 +48,10 @@ fun from screen one and reach a delightful, visible result fast. Everything else
 is subordinate to this.
 - **The intro is a short on-ramp, not a heavy chooser.** Three ways in (create /
   modify / registry — see below) on one calm screen, then you're talking to
-  bobbi within seconds. Create needs no name and no decisions up front — bobbi
+  modastack within seconds. Create needs no name and no decisions up front — modastack
   names the team for you as you describe it.
 - **Three escalating magic beats — front-load the first:** (1) **Design
-  reflection** — type a rough line, bobbi instantly reflects back a smart, alive
+  reflection** — type a rough line, modastack instantly reflects back a smart, alive
   understanding *and the cards on the right start filling in* (~seconds, the
   early hook); (2) **Automate suggestions** — "it thought of things I didn't";
   (3) **the Build pour** — the payoff. Don't make the user climb to (3) to feel
@@ -61,7 +65,7 @@ is subordinate to this.
 **The team is alive and evolving, not set-once** (the openclaw/hermes feeling).
 The product is a living workshop you return to, built on the re-entrant editor
 (open/edit any team = same screen).
-- **Done is a launchpad, not a finish line** — "bobbi's live, change it anytime."
+- **Done is a launchpad, not a finish line** — "modastack's live, change it anytime."
 - **A fast evolve loop for small changes** — open your team, say "also post a
   Friday recap," it adapts; modify mode is **non-lossy** so you never lose the
   team's existing depth (below).
@@ -177,7 +181,7 @@ and artifacts on screen, buttons that look like tools.
 ## UX architecture — one screen
 
 There is **one screen**, not a stage rail. *Conversation proposes, the panel
-disposes:* you talk to bobbi on the left; the team materializes as cards on the
+disposes:* you talk to modastack on the left; the team materializes as cards on the
 right. Special, deliberate steps (credential capture, Venn, Slack-as-chat) open
 as **popup overlays** so they never derail the conversation. Three render routes
 bracket the one screen: **intro** (before), the **build pour** (the automated
@@ -191,24 +195,30 @@ middle), and the **file browser** (after).
 ### The intro — three ways in
 One calm screen, three tabs, each landing in the same chat+cards editor:
 
-- **Create new** — author from scratch. No name field (bobbi auto-names the team
+- **Create new** — author from scratch. No name field (modastack auto-names the team
   from the goal as you talk; rename anytime). One field: the **location**,
-  defaulting to `bobbi/`, with a **Browse…** button.
-- **Modify existing** — pick a local team (any `agents/` or `agent-teams/` folder
-  with an `agent.yaml`). Copies it into the working location and **reverse-fills**
-  the cards so they show what's already there.
+  defaulting to the `~/modastack-agents/` library, with a **Browse…** button.
+- **Modify existing** — always available. A **scan-directory field** (default the
+  `~/modastack-agents/` library, changeable + Browse) asks which folder holds your
+  teams; modastack lists every `agent.yaml`-bearing folder it finds there (the
+  folder itself or its children). Pick one to copy into the working location and
+  **reverse-fill** the cards from it. Stays enabled even when the default library
+  is empty, so you can point the scan elsewhere.
 - **From a registry** — lazily lists teams from configured registries, downloads
   the chosen one into the working location, then reverse-fills like modify.
 
 **Location & the folder picker.** A localhost page can't open a native OS folder
-dialog, so **Browse…** opens a small **server-side directory lister** (`/api/browse`,
-project-scoped) to navigate and pick. Default location is `bobbi/` everywhere —
-create lands at `bobbi/`, modify and registry at `bobbi/<team-name>`. Source dirs
-are confined out of `.bobbi/`.
+dialog, so **Browse…** opens a small **server-side directory lister** (`/api/browse`),
+**rooted at the user's home** (the library and most dev repos live there; confined
+to home so the page can't list the whole filesystem) and returning absolute paths.
+Default source location is the `~/modastack-agents/` library; install still targets
+the project's `.modastack/` unchanged (a source outside the project copies in like
+a registry team). Anything outside home can still be typed into the location field.
+Source dirs are confined out of `.modastack/`.
 
 ### The one screen — chat + the team as cards
 - **Left: the conversation.** A single centered chat. You say what you want in
-  your own words; bobbi reflects it back (typed out) and asks at most one good
+  your own words; modastack reflects it back (typed out) and asks at most one good
   follow-up. **Contextual quick-add chips** (emitted by the digestion brain, not
   hardcoded) sit by the input as one-tap conversational adds.
 - **Right: the team panel.** Five cards fill in and check off live:
@@ -234,10 +244,10 @@ accordingly:
   Venn-backed services are grouped under a single **"Set up Venn"** popup with a
   per-service live verification badge. Whether a service *is* venn-backed is
   decided against Venn's **real catalog** (see below), not a guess.
-- **custom** — a service that's neither native nor on Venn (e.g. PostHog). bobbi
+- **custom** — a service that's neither native nor on Venn (e.g. PostHog). modastack
   captures a service-specific API key (`<SVC>_API_KEY`) **and authors a
   `tools/<svc>.md` usage guide** at build, so the agent knows how to call that
-  service's API. Tagged "custom · bobbi writes a guide" in the card.
+  service's API. Tagged "custom · modastack writes a guide" in the card.
 
 **The real Venn catalog (not guessing).** Classification uses the live list of
 services Venn supports, sourced **CLI-first**: `modastack/setup/venn_cli.py`
@@ -258,13 +268,13 @@ connected.
 with time (Automate = when it acts on its own); keep internal structure (roles,
 workflows) invisible.* Automate is its own card because **granting initiative is
 a trust decision** — proactive behavior should be consciously opted into. Human
-framing, not "monitors": *"anything bobbi should do on its own?"* Maps to
+framing, not "monitors": *"anything modastack should do on its own?"* Maps to
 `monitors/` (description-only checks) + scheduled/triggered workflows.
 - **Per-behavior leash:** each item carries **notify** (tells you) / **ask
   first** (proposes, waits) / **act** (does it, reports). (Named **Automate**
   2026-06-14 over "Autopilot", which read as unsupervised; the leash plus the
   plain verb keep "you're in control".)
-- **bobbi suggests, doesn't just collect.** A dedicated suggestion prompt
+- **modastack suggests, doesn't just collect.** A dedicated suggestion prompt
   ideates concrete, non-spammy proactive behaviors from the team's intent — a
   "did more than I expected" beat. The user toggles, edits, adds, or skips;
   committing is explicit even when the answer is "nothing".
@@ -284,7 +294,7 @@ framing, not "monitors": *"anything bobbi should do on its own?"* Maps to
 - **Finish ends cleanly.** `/api/finish` marks the state complete and **stops the
   local setup server**, then the page transitions to a **static completion
   screen** (no server-dependent buttons left to strand the user) with the
-  `bobbi start` command. Open-folder/file-browsing happen *before* Finish, while
+  `modastack start` command. Open-folder/file-browsing happen *before* Finish, while
   the server is alive.
 
 ### Modify mode is non-lossy
@@ -392,11 +402,11 @@ inspecting proxies (Zscaler, etc.) whose root is in the keychain but not certifi
 2. ~~Stage names / is the rail right~~ — **RESOLVED: no rail** (2026-06-15). The
    8-stage rail collapsed into one screen; the stage enum survives only as the
    build/install pipeline.
-3. **Command name.** `bobbi setup` reads one-shot but the UI is also the
+3. **Command name.** `modastack setup` reads one-shot but the UI is also the
    re-entrant editor — may want a broader command later.
-4. **`bobbi/` vs `.bobbi/` proximity.** Source in `bobbi/`, installed image in
-   `.bobbi/` — one dotfile apart. Kept deliberately (user call, 2026-06-16) for
-   symmetry; watch for confusion.
+4. ~~`modastack/` vs `.modastack/` proximity~~ — **SUPERSEDED (2026-06-16):** the
+   editable source moved to a machine-wide `~/modastack-agents/` library, so it no
+   longer sits one dotfile away from the project's `.modastack/` install target.
 
 ## Decisions log
 | date | decision | rationale |
@@ -418,5 +428,9 @@ inspecting proxies (Zscaler, etc.) whose root is in the keychain but not certifi
 | 2026-06-16 | **Real Venn catalog via the `venn` CLI** (CLI-first, REST fallback); non-Venn services → custom + authored `tools/*.md` | stop guessing what Venn supports; give custom services a real usage guide |
 | 2026-06-16 | **Auto-name from goal; rename moves the folder + updates `agent:`** | the name has to actually stick on disk |
 | 2026-06-16 | **OS system trust store (truststore) for Venn TLS** | works behind Zscaler-style inspecting proxies; certifi alone fails |
-| 2026-06-16 | Default team folder `bobbi/` everywhere; keep `.bobbi/` install target | one consistent, obvious location |
+| 2026-06-16 | Default team folder `modastack/` everywhere; keep `.modastack/` install target | one consistent, obvious location |
+| 2026-06-16 | **Editable source → machine-wide `~/modastack-agents/` library** (was cwd `modastack/`); install into project `.modastack/` unchanged | a team isn't tied to where it installs; stop littering the cwd |
+| 2026-06-16 | **Modify asks which folder to scan** (`/api/teams`); tab always enabled; folder picker re-rooted at `$HOME`, absolute paths | teams can live anywhere; pick the scan dir even when the library is empty |
+| 2026-06-16 | **Server-disconnect overlay** (ping heartbeat + fetch/SSE failure) + **Escape closes popups** | the page must stop pretending to be live when the local server dies |
+| 2026-06-16 | **Branding reverted to `modastack`** in the shipping UI; `bobbi` rebrand deferred to the whole-codebase rename | don't ship `bobbi` ahead of the rename; also fixed wrong commands/paths (`.bobbi/`→`.modastack/`, `bobbi <cmd>`→`modastack <cmd>`) |
 ```

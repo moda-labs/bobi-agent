@@ -8,7 +8,7 @@ the LLM owns routing and content, the wizard owns structure (it computes
 the file manifest at Build).
 
 Readiness is **soft**: each slot self-scores empty/thin/enough to guide
-bobbi's follow-up and a calm UI cue, but it never gates. The only hard
+modastack's follow-up and a calm UI cue, but it never gates. The only hard
 floors are structural — goal must be non-empty to author anything at
 Build, a fresh validation to Install, an install to finish.
 
@@ -138,7 +138,7 @@ class SetupState:
         """Structural gates — the only things that actually block. Readiness
         is soft and never appears here."""
         if to == Stage.BUILD and not self.spec.goal.strip():
-            return "tell bobbi what the team should do — the goal is still empty"
+            return "tell modastack what the team should do — the goal is still empty"
         if to == Stage.INSTALL and not self.validated:
             return "the team source hasn't passed validation yet"
         if to == Stage.DONE and not self.installed:

@@ -236,9 +236,9 @@ is found in CI or a deployed system, STOP and write an integration test
 that reproduces the failure BEFORE writing the fix. The test must fail
 first, then the fix makes it pass. No exceptions.
 
-## Design System (bobbi setup web UI)
+## Design System (modastack setup web UI)
 
-Before any visual or UX decision on the `bobbi setup` web UI, read `DESIGN.md`
+Before any visual or UX decision on the `modastack setup` web UI, read `DESIGN.md`
 at the repo root. It defines the design direction (warm light chrome + single
 dark CRT slab, mono-accented identity, system-fonts-only, static space-retro),
 the mode-aware stage machine, the policy/customization model, and the
