@@ -107,9 +107,27 @@ class Session:
                 elif isinstance(msg, ResultMessage):
                     save_session_id(self.name, msg.session_id)
                     self._last_is_error = msg.is_error
-                    self._total_cost_usd += msg.total_cost_usd or 0.0
+                    cost = msg.total_cost_usd or 0.0
+                    self._total_cost_usd += cost
                     self._total_duration_ms += msg.duration_ms
                     self._total_turns += msg.num_turns
+                    # Record cost with model_usage breakdown
+                    model_usage = getattr(msg, "model_usage", None)
+                    if cost > 0 or model_usage:
+                        model = ""
+                        input_tokens = 0
+                        output_tokens = 0
+                        if model_usage:
+                            for m in (model_usage if isinstance(model_usage, list) else [model_usage]):
+                                model = getattr(m, "model", "") or model
+                                input_tokens += getattr(m, "input_tokens", 0) or 0
+                                output_tokens += getattr(m, "output_tokens", 0) or 0
+                        registry.record_cost(
+                            self.name, cost, model=model,
+                            provider="anthropic",
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                        )
                     if msg.is_error:
                         self._set_state("error")
                         log.error(f"Session '{self.name}' error: {self._last_response[:200]}")

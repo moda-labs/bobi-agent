@@ -874,6 +874,12 @@ def _run_agent_entry(args: dict) -> None:
         _start_event_subscription(run_key, subscribe, project_root)
 
     if persistent:
+        # Inject built-in MCP servers (e.g. image generation) based on config
+        from modastack.config import Config
+        from modastack.mcp.inject import inject_builtin_mcp_servers
+        cfg = Config.load(project_root)
+        mcp = inject_builtin_mcp_servers(cfg.mcp_servers, cfg.connections)
+
         spawn_adhoc(
             cwd=cwd,
             task=task,
@@ -882,6 +888,7 @@ def _run_agent_entry(args: dict) -> None:
             requested_by=requested_by,
             persistent=True,
             role=role,
+            mcp_servers=mcp or None,
         )
         return
 

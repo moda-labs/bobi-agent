@@ -60,6 +60,11 @@ modastack kb list                 # list all knowledge bases
 modastack kb info <name>          # show KB statistics
 modastack kb remove <name>        # delete a knowledge base
 
+modastack costs                   # show cost attribution by provider
+modastack costs --by model        # group by model
+modastack costs --by role         # group by agent role
+modastack costs --by session      # group by session
+
 modastack skill                   # print the modastack usage guide
 modastack skill <name>            # print a specific skill guide
 
