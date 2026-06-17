@@ -12,7 +12,7 @@ from threading import Thread
 
 import pytest
 
-np = pytest.importorskip("numpy", reason="KB extra not installed")
+import numpy as np
 
 from modastack.kb.sidecar import _make_handler, MODEL_NAME, EMBEDDING_DIM
 
