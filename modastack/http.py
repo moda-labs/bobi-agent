@@ -95,6 +95,17 @@ def put(url: str, *, json: dict | None = None, content: bytes | None = None,
     return client().put(url, **kwargs)
 
 
+def delete(url: str, *, headers: dict | None = None,
+           timeout: float | None = None) -> httpx.Response:
+    """DELETE with connection pooling and bounded concurrency."""
+    kwargs: dict = {}
+    if headers:
+        kwargs["headers"] = headers
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return client().delete(url, **kwargs)
+
+
 def request(method: str, url: str, *, json: dict | None = None,
             content: bytes | None = None, headers: dict | None = None,
             timeout: float | None = None) -> httpx.Response:

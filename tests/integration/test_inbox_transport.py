@@ -165,6 +165,49 @@ def test_blocking_ask_round_trips_over_event_server(inbox_event_server, modastac
         target_inbox.close()
 
 
+def _deployment_count(es_url: str) -> int:
+    """Read the deployment count from the event server's /health endpoint."""
+    with urllib.request.urlopen(f"{es_url}/health", timeout=2) as r:
+        return json.loads(r.read()).get("deployments", -1)
+
+
+def test_ask_teardown_leaves_zero_residual_reply_deployments(inbox_event_server, modastack_env):
+    """A completed ask round-trip deregisters its transient reply deployment.
+
+    After deliver(wait=True) completes, the reply/<uuid> deployment must be
+    gone from the event server — no leak (#277).
+    """
+    from modastack.inbox import deliver
+
+    root = modastack_env.project_path
+    sender_inbox = _make_addressable("leak-x", root)
+    target_inbox = _make_addressable("leak-y", root)
+
+    time.sleep(2)
+
+    # Baseline: only the two standing deployments (sender + target).
+    baseline = _deployment_count(inbox_event_server)
+
+    stop = threading.Event()
+    t = _echo_responder("leak-y", stop)
+    try:
+        ok, response = deliver("leak-y", "ping", sender="leak-x", wait=True, timeout=30)
+        assert ok, response
+        assert response == "echo:ping"
+
+        # After the ask completes, the transient reply deployment should be gone.
+        after = _deployment_count(inbox_event_server)
+        assert after == baseline, (
+            f"residual reply deployments: {after - baseline} "
+            f"(baseline={baseline}, after={after})"
+        )
+    finally:
+        stop.set()
+        t.join(timeout=2)
+        sender_inbox.close()
+        target_inbox.close()
+
+
 def test_concurrent_asks_do_not_cross_replies(inbox_event_server, modastack_env):
     """Multiple in-flight wait=True asks each get their OWN reply (corr_id).
 

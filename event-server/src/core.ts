@@ -38,7 +38,9 @@ export interface SlackWorkspaceRecord {
 export interface StorageAdapter {
 	getDeploymentByApiKey(apiKey: string): Promise<DeploymentRecord | null>;
 	putDeployment(deployment: DeploymentRecord): Promise<void>;
+	removeDeployment(deployment: DeploymentRecord): Promise<void>;
 	addSubscription(key: string, deploymentId: string): Promise<void>;
+	removeSubscription(key: string, deploymentId: string): Promise<void>;
 	deliver(event: NormalizedEvent): Promise<number>;
 	getSlackWorkspace(workspaceId: string): Promise<SlackWorkspaceRecord | null>;
 	putSlackWorkspace(workspaceId: string, record: SlackWorkspaceRecord): Promise<void>;
@@ -307,6 +309,24 @@ export async function handleUpdateSubscriptions(
 	await storage.putDeployment(deployment);
 
 	return { status: 200, body: { subscriptions: deployment.subscriptions, added } };
+}
+
+export async function handleDeregisterDeployment(
+	storage: StorageAdapter,
+	deploymentId: string,
+	apiKey: string,
+): Promise<HandlerResult> {
+	const deployment = await authenticateDeployment(storage, apiKey, deploymentId);
+	if (!deployment) {
+		return { status: 403, body: { error: "unauthorized" } };
+	}
+
+	for (const sub of deployment.subscriptions) {
+		await storage.removeSubscription(sub, deploymentId);
+	}
+	await storage.removeDeployment(deployment);
+
+	return { status: 200, body: { ok: true } };
 }
 
 export async function handleTopicEvent(

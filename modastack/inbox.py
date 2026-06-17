@@ -159,6 +159,16 @@ class _ReplyChannel:
             self.client.stop()  # type: ignore[attr-defined]
         except Exception:
             log.debug("Reply channel client stop failed", exc_info=True)
+        # Deregister the throwaway deployment server-side so it doesn't leak.
+        try:
+            from modastack.events.server import deregister
+            deregister(
+                self.client.server_url,  # type: ignore[attr-defined]
+                self.client.deployment_id,  # type: ignore[attr-defined]
+                self.client.api_key,  # type: ignore[attr-defined]
+            )
+        except Exception:
+            log.debug("Reply channel deregister failed", exc_info=True)
         self.cursor_path.unlink(missing_ok=True)
         # The shared EventServerClient also writes a per-deployment events log
         # (events/client.py _log_event). For a throwaway reply channel that's
@@ -183,9 +193,8 @@ def _open_reply_channel(project_path: Path) -> "_ReplyChannel | None":
     """Subscribe to a fresh ``reply/<uuid>`` topic and return its channel.
 
     Returns None if the event server can't be reached — the caller treats that
-    as a publish/transport failure. The transient deployment is not torn down
-    server-side (there is no deregister endpoint); it ages out with its tiny
-    per-deployment buffer. Server-side TTL/dedup of subscriptions is #270.
+    as a publish/transport failure. The transient deployment is deregistered
+    server-side by ``_ReplyChannel.close()`` (#277).
     """
     from modastack import paths
     from modastack.events.client import EventServerClient
