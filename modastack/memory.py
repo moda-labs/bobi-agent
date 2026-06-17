@@ -13,8 +13,10 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Hard cap on injected memory to avoid prompt bloat.
-MAX_MEMORY_CHARS = 8000
+# Cap on injected memory. Raised from 8KB to 32KB for context rotation:
+# the decision log is the primary continuity spine when sessions rotate,
+# so it needs room for accumulated operational state.
+MAX_MEMORY_CHARS = 32_000
 
 
 def memory_dir_for_session(state_dir: Path, session_name: str) -> Path:
@@ -58,6 +60,15 @@ def load_memory(state_dir: Path, session_name: str) -> str:
     combined = "\n\n".join(parts)
     if len(combined) > MAX_MEMORY_CHARS:
         combined = combined[:MAX_MEMORY_CHARS] + "\n\n[memory truncated]"
+    # Warn when the log is large relative to the cap — entering a rotation
+    # loop is likely if memory grows much further.
+    if len(combined) > MAX_MEMORY_CHARS // 2:
+        log.warning(
+            "Decision log for %s is %d chars (%.0f%% of %d cap) — "
+            "consider pruning to avoid prompt bloat",
+            session_name, len(combined),
+            100 * len(combined) / MAX_MEMORY_CHARS, MAX_MEMORY_CHARS,
+        )
     return combined
 
 

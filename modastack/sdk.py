@@ -170,6 +170,7 @@ class SessionEntry:
     provider: str = ""
     total_cost_usd: float = 0.0
     model_usage: dict = field(default_factory=dict)
+    rotation_count: int = 0
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     requested_by: dict = field(default_factory=dict)
