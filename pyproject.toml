@@ -31,8 +31,6 @@ dependencies = [
     "jinja2>=3.1",
     "claude-agent-sdk>=0.2.87",
     "apsw>=3.40",
-    "sentence-transformers>=3.0",
-    "sqlite-vec>=0.1.6",
 ]
 
 [project.urls]
@@ -41,6 +39,10 @@ Repository = "https://github.com/moda-labs/modastack"
 Issues = "https://github.com/moda-labs/modastack/issues"
 
 [project.optional-dependencies]
+kb = [
+    "sentence-transformers>=3.0",
+    "sqlite-vec>=0.1.6",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

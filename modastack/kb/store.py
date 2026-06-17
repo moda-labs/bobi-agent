@@ -197,7 +197,13 @@ class KBStore:
 
     @staticmethod
     def _load_vec(conn: apsw.Connection) -> None:
-        import sqlite_vec
+        try:
+            import sqlite_vec
+        except ImportError:
+            raise ImportError(
+                "Knowledge base requires sqlite-vec. "
+                "Install with: pip install 'modastack[kb]'"
+            ) from None
         conn.enableloadextension(True)
         conn.loadextension(sqlite_vec.loadable_path())
         conn.enableloadextension(False)
