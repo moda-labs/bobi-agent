@@ -721,6 +721,16 @@
     if (sb) {
       if (finalText) { sb.textContent = finalText; sb.removeAttribute("id"); }
       else sb.remove();
+      // Reconcile user bubbles with authoritative server state (handles redaction).
+      const chbody = $("#chbody");
+      const youEls = chbody ? chbody.querySelectorAll(".msg.you") : [];
+      let yi = 0;
+      for (const m of S.messages) {
+        if (m.role === "user") {
+          if (youEls[yi] && youEls[yi].textContent !== m.content) youEls[yi].textContent = m.content;
+          yi++;
+        }
+      }
     } else {
       renderMessages();
     }
@@ -1299,6 +1309,34 @@
     if (e.target.closest("[data-back]")) { goBack(); return; }
     const go_ = e.target.closest("[data-go]");
     if (go_) { go(go_.dataset.go); return; }
+    if (e.target.closest("[data-addteam]")) {
+      atHome = false; welcomed = true; renderIntro();
+      return;
+    }
+    const openteam = e.target.closest("[data-openteam]");
+    if (openteam) {
+      if (!openteam.disabled) {
+        const path = openteam.dataset.openteam;
+        atHome = false;
+        startTeam({ mode: "open", location: path, team_path: path }, openteam, "Opening…");
+      }
+      return;
+    }
+    const newteam = e.target.closest("[data-newteam]");
+    if (newteam) {
+      if (!newteam.disabled)
+        startTeam({ mode: "create", location: introLoc }, newteam, "Starting…");
+      return;
+    }
+    const tmpl = e.target.closest("[data-template]");
+    if (tmpl) {
+      if (!tmpl.disabled) {
+        const name = tmpl.dataset.template;
+        startTeam({ mode: "registry", team: name,
+          location: introLoc.replace(/\/+$/, "") + "/" + name }, tmpl, "Downloading…");
+      }
+      return;
+    }
     const im = e.target.closest("[data-intromode]");
     if (im) { if (!im.disabled) { introMode = im.dataset.intromode; drawIntro(); } return; }
     const ro = e.target.closest("[data-roleopen]");
