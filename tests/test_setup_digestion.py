@@ -72,6 +72,10 @@ class TestParseDigestion:
         r = parse_digestion("hi\n" + SPEC_SENTINEL + '\n{"summary": "s"}\nbye')
         assert r.summary == "s"
 
+    def test_parses_phase(self):
+        text = "ok\n" + _payload(phase="role:lead", summary="s")
+        assert parse_digestion(text).phase == "role:lead"
+
 
 class TestApplyDeltas:
     def test_routes_each_slot_as_full_replacement(self):
@@ -122,6 +126,26 @@ class TestApplyDeltas:
         s = SetupState(mode="open", team_name="legacy-bot")
         apply_deltas(s, DigestionResult(reply="", deltas={"name": "New Name"}))
         assert s.team_name == "legacy-bot"     # existing team keeps its name
+
+    def test_phase_is_routed_into_state(self):
+        s = SetupState()
+        apply_deltas(s, DigestionResult(reply="", phase="role:lead"))
+        assert s.phase == "role:lead"
+
+    def test_empty_phase_does_not_clobber(self):
+        s = SetupState(phase="automations")
+        apply_deltas(s, DigestionResult(reply="", phase=""))
+        assert s.phase == "automations"
+
+    def test_role_dimensions_and_status_round_trip(self):
+        s = SetupState()
+        role = {"name": "lead", "responsibility": "classify",
+                "good_looks_like": "fast, accurate triage",
+                "systems": ["github"], "triggers": "on new issue",
+                "status": "complete"}
+        apply_deltas(s, DigestionResult(reply="", deltas={"roles": [role]}))
+        assert s.spec.roles[0]["status"] == "complete"
+        assert s.spec.roles[0]["systems"] == ["github"]
 
 
 class TestReplySplitter:

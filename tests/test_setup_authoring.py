@@ -383,3 +383,61 @@ class TestAuthorOpenModeNonLossy:
         role = (tmp_path / "modastack" / "legacy"
                 / "roles" / "lead" / "ROLE.md").read_text()
         assert "specifics A, B, C" in role  # original survived an empty edit
+
+
+class TestRoleDimensionsAndAutomations:
+    """The four per-role interview dimensions and the role/command on
+    automations thread through authoring into ROLE.md prompts and monitors."""
+
+    def test_normalized_roles_carries_four_dimensions(self):
+        s = SetupState(team_name="t")
+        s.spec.goal = "Do the thing."
+        s.spec.roles = [{"name": "Triage Lead", "responsibility": "classify",
+                         "good_looks_like": "fast accurate triage",
+                         "systems": ["github", "slack"],
+                         "triggers": "on new issue"}]
+        r = authoring.normalized_roles(s)[0]
+        assert r["good_looks_like"] == "fast accurate triage"
+        assert r["systems"] == ["github", "slack"]
+        assert r["triggers"] == "on new issue"
+
+    def test_normalized_roles_coerces_non_string_systems(self):
+        # The brain can emit non-string / null systems entries; the downstream
+        # ", ".join must never crash the build pour.
+        s = SetupState(team_name="t")
+        s.spec.goal = "g"
+        s.spec.roles = [{"name": "lead", "responsibility": "x",
+                         "systems": [1, "github", None, ""]}]
+        r = authoring.normalized_roles(s)[0]
+        assert r["systems"] == ["1", "github"]
+        assert "github" in authoring._spec_brief(s)   # renders, no TypeError
+
+    def test_normalized_roles_defaults_for_goal_only_team(self):
+        s = SetupState(team_name="t")
+        s.spec.goal = "Carry the load."
+        r = authoring.normalized_roles(s)[0]           # synthesized assistant
+        assert r["name"] == "assistant"
+        assert r["systems"] == [] and r["good_looks_like"] == ""
+        assert r["triggers"] == ""
+
+    def test_role_md_prompt_includes_the_dimensions(self):
+        s = SetupState(team_name="t")
+        s.spec.goal = "g"
+        role = {"name": "lead", "responsibility": "classify",
+                "good_looks_like": "fast triage", "systems": ["github"],
+                "triggers": "on new issue"}
+        p = authoring.role_md_prompt(s, role)
+        assert "What a good job looks like: fast triage" in p
+        assert "Systems it accesses: github" in p
+        assert "What triggers it: on new issue" in p
+
+    def test_build_monitors_yaml_folds_role_and_command(self):
+        s = SetupState(team_name="t")
+        s.spec.goal = "g"
+        s.spec.autonomous = [{"description": "daily digest", "leash": "notify",
+                              "cadence": "1d", "role": "lead",
+                              "command": "summarize new issues"}]
+        mon = yaml.safe_load(build_monitors_yaml(s))["monitors"][0]
+        assert "Run by the lead role." in mon["description"]
+        assert "Do: summarize new issues" in mon["description"]
+        assert mon["notify"] is True

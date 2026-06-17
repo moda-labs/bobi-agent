@@ -2,32 +2,41 @@
 
 ## 0.20.0 — 2026-06-17
 
-A reworked `modastack setup` web UI: a welcome on-ramp, a streamlined
-template chooser, a read-only build preview, a launch-ready final screen,
-and a re-entrant team hub you return to.
+The `modastack setup` web UI's team panel becomes a methodical interview and an
+editable workspace: modastack walks each role one at a time, and every card opens
+for inspection and editing.
 
 ### Added
-- Welcome on-ramp (`renderWelcome`): core value prop, a "how setup works"
-  walkthrough, and a vertical event-driven flow diagram with a light
-  entrance animation and a subtle looping "live" pulse (reduced-motion safe)
-- Team hub homepage (`GET /api/home`): a grid of team cards, each with a
-  description read from the team's `agent.md`, plus an "add a team" card
-  that starts a fresh setup. The server now stays alive past Finish so the
-  hub is a re-entrant editor; a finished session boots back into it
-- Final screen: a copyable `modastack start` plus "Start it for me"
-  (`POST /api/run-start` launches the installed agent), a cloud-deploy next
-  step, and a Done button into the hub
-- Back navigation across the flow (chat, build, preview); an in-flight build
-  is guarded by a generation token so a cancelled build can't jump forward
+- Methodical, one-agent-at-a-time interview: the digestion brain interviews each
+  role in turn, announces phase transitions, and gathers four dimensions per role
+  (what it does, what good looks like, systems it accesses, what triggers it). A
+  phase banner in the panel shows where the interview is; each role tracks
+  in-progress vs complete.
+- Editable team panel: click a role or automation to open a modal and edit it;
+  add roles, automations, and connections by describing them or via a button.
+  New routes `/api/role/update`, `/api/automation/update`, `/api/service/remove`,
+  and `/api/build-integration` (a placeholder for building an MCP/CLI integration
+  on the fly).
+- Connections: a Venn upsell when no key is set (`venn_configured` on
+  `/api/connect`), per-connection trash, and an unmistakable connected state
+  (filled green pill; the Venn modal shows a success seal instead of a "Re-check"
+  CTA once everything is connected).
+- A celebratory pulse when each of the five slots completes, plus gentler
+  state-change motion (per-card reconcile, phase ease-in, meter tick).
 
 ### Changed
-- Streamlined the "Build an agent team" intro: registry templates as rows
-  with a prominent sticky "Customize my own" card; the source-folder
-  location demoted to an FYI line
-- Reframed the post-build screen as a read-only Preview with a collapsible
-  folder tree (per-file editing removed)
-- Filtered internal/test packs (`dogfood-content-review`) out of the
-  template list; `list_teams_in` now returns a per-team description
+- The Connections slot counts as gathered only once every implied service is
+  actually connected, not merely named.
+- The assistant directs the user to the Connections card to set up services, then
+  returns to chat once they are connected.
+
+### Fixed
+- The streaming chat reply no longer flashes a trailing blank line while the
+  hidden spec block loads.
+- The chat column no longer leaves a dead gap before the team panel.
+
+### Removed
+- The quick-add suggestion chips (they disrupted the conversation flow).
 
 ## 0.19.0 — 2026-06-12
 

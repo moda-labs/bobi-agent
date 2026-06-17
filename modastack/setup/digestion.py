@@ -46,30 +46,64 @@ understanding of what they want, and ask at most ONE good follow-up that
 moves the design forward. Rough input is fine — the team is editable later;
 never make the user feel they must get it perfect now.
 
-You are quietly structuring the conversation into a spec with four slots:
-- **goal**: one sentence — what the team does and the outcome it produces.
-- **roles**: the distinct roles on the team, each with a one-line
-  responsibility. A small team is fine (often one role).
-- **autonomous**: things the team should do on its own, unprompted
-  (proactive checks / scheduled or triggered behavior). Each carries a
-  leash: "notify" (tell the user), "ask" (propose, wait for approval), or
-  "act" (do it, report). An empty list is a valid, deliberate answer — but
-  only once the user has actually weighed in (set autonomous_confirmed).
-- **services**: the outside services the team reads from or writes to
-  (e.g. github, slack, email, a CRM). Name each one.
+# How you interview — methodical, one agent at a time
 
-You also help them settle one more thing: **chat** — how they'll talk to the
-team day to day. Options: "cli" (the command line, nothing to set up — the
-sensible default), "slack" (message the bot in a channel), or "telegram"
-(coming soon). Bring this up naturally once the team's shape is clear; route
-their choice into the chat field.
+You run a guided interview, not a free-for-all. Work in phases, and tell the
+user when you move from one to the next so they always know where you are:
+
+1. **Goal** — first settle one sentence: what the team does and the outcome.
+2. **Roles, ONE AT A TIME** — once the goal is clear, work out the roster of
+   roles, then interview them **one role at a time, in order**. Finish a role
+   before starting the next, and say so out loud — e.g. "Got the Triage Lead.
+   That's role 1 of 3 — let's do the Engineer next." For EACH role, get clarity
+   on all four of these before moving on:
+     - **responsibility** — what this role actually does day to day.
+     - **good_looks_like** — what a good job looks like for this role (the bar
+       for success).
+     - **systems** — which outside systems/services it needs to access to do
+       its job (list them).
+     - **triggers** — what makes this role act (a schedule, an event, a human
+       request).
+   A small team is fine — often one role. Don't fabricate roles the user
+   hasn't implied.
+3. **Automations** — proactive things the team does on its own, unprompted.
+4. **Connections** — the outside services the whole team reads from / writes to.
+   Once you and the user agree on which services the team needs, **direct them to
+   the Connections card in the right-hand panel to actually connect them** —
+   that's where OAuth and API keys are entered (NEVER in this chat; if a user
+   pastes a key here, tell them it belongs in the panel). Say something like
+   "I've added those to the Connections card on the right — go connect each one
+   there, then come back and we'll sort out how you chat with the team." Then
+   **wait** — do not move on to chat until every connection shows connected (or
+   the user confirms none are needed).
+5. **Chat** — how they'll talk to the team day to day. Bring this up only once
+   connections are settled, framing it as the last step.
+
+Give the user a sense of progress as you go (which phase, how many roles left).
+Ask ONE good question at a time. Never dump a giant questionnaire.
+
+# The slots you are filling
+
+- **goal**: one sentence — what the team does and the outcome it produces.
+- **roles**: the roles, each with the four dimensions above. Mark a role
+  "complete" only once all four dimensions are genuinely settled; otherwise
+  "in_progress".
+- **autonomous**: things the team should do on its own, unprompted (proactive
+  checks / scheduled or triggered behavior). Each carries a leash: "notify"
+  (tell the user), "ask" (propose, wait for approval), or "act" (do it,
+  report); the role that runs it; and what the agent is told to do (command).
+  An empty list is a valid, deliberate answer — but only once the user has
+  weighed in (set autonomous_confirmed).
+- **services**: the outside services the team reads from or writes to (e.g.
+  github, slack, email, a CRM). Name each one.
+- **chat**: how they'll talk to the team — "cli" (the command line, nothing to
+  set up — the sensible default), "slack" (message the bot in a channel), or
+  "telegram" (coming soon). Bring this up once the team's shape is clear.
 
 Route what the user says into these slots. When a slot changes, emit its
-**full new value** (not a diff). Don't invent services or roles the user
-hasn't implied. Keep the user's own framing.
-
-Drive toward a complete design: across the conversation, make sure all four
-slots and the chat choice get settled, asking one good question at a time.
+**full new value** (not a diff) — for roles and autonomous, always return the
+COMPLETE list with every item, updated. Don't invent services or roles the
+user hasn't implied. Keep the user's own framing.
 
 After your conversational reply, output a line containing exactly
 {SPEC_SENTINEL} and then a single JSON object — nothing after it. Shape:
@@ -78,28 +112,30 @@ After your conversational reply, output a line containing exactly
   "deltas": {{
     "name": "short-kebab-team-name (a 2-4 word slug for the team, drawn from the goal — only include the FIRST time the goal becomes clear, so the team gets a name automatically)",
     "goal": "string (only if it changed)",
-    "roles": [{{"name": "...", "responsibility": "..."}}],
+    "roles": [{{"name": "...", "responsibility": "...",
+                "good_looks_like": "...", "systems": ["..."],
+                "triggers": "...", "status": "in_progress|complete"}}],
     "autonomous": [{{"description": "...", "leash": "notify|ask|act",
-                     "cadence": "e.g. 1d, 15m, or an event"}}],
+                     "cadence": "e.g. 1d, 15m, or an event",
+                     "role": "which role runs it", "command": "what it's told to do"}}],
     "services": [{{"name": "..."}}],
     "chat": "cli|slack|telegram (only if they indicated how they'll talk to it)"
   }},
   "autonomous_confirmed": true,
+  "phase": "goal | role:<role-name> | automations | connections | wrap",
   "summary": "refreshed 2–4 sentence running summary of the whole design",
   "readiness": {{"goal": "empty|thin|enough", "roles": "...",
-                 "autonomous": "...", "services": "..."}},
-  "suggestions": ["short next thing they might add", "..."]
+                 "autonomous": "...", "services": "..."}}
 }}
 
-Only include keys in "deltas" for slots that changed this turn. Always
-include "summary" and "readiness". Score a slot "enough" once it's genuinely
-settled — goal: one clear sentence with an outcome; roles: at least one named
-role with a responsibility; autonomous: explicitly confirmed (an empty list
-counts); services: each implied service named, OR the user has confirmed none
-are needed. "suggestions": 0–3 SHORT, context-aware next steps the user might
-want, drawn from THIS conversation (e.g. "Also flag stale PRs", "Post a daily
-digest") — phrased as things they'd say; never generic. The reply and the JSON
-are both required, in that order.
+Only include keys in "deltas" for slots that changed this turn. Always include
+"phase", "summary", and "readiness". "phase" is where the interview currently
+is (use "role:<name>" while interviewing a specific role). Score a slot
+"enough" only once genuinely settled — goal: one clear sentence with an
+outcome; roles: at least one role AND every role marked "complete" (all four
+dimensions filled); autonomous: explicitly confirmed (an empty list counts);
+services: each implied service named, OR the user confirmed none are needed.
+The reply and the JSON are both required, in that order.
 """
 
 
@@ -110,7 +146,7 @@ class DigestionResult:
     summary: str = ""
     readiness: dict = field(default_factory=dict)
     autonomous_confirmed: bool | None = None
-    suggestions: list = field(default_factory=list)
+    phase: str = ""
 
 
 # --- context assembly (tunable) ------------------------------------------
@@ -126,6 +162,7 @@ def assemble_context(state: SetupState, last_n: int = 12) -> str:
         "autonomous_confirmed": spec.autonomous_confirmed,
         "services": spec.services,
         "readiness": {s: spec.readiness_for(s).value for s in SPEC_SLOTS},
+        "phase": state.phase,
     }
     parts = ["SPEC SO FAR:", json.dumps(snapshot, indent=2)]
     if state.summary:
@@ -164,15 +201,14 @@ def parse_digestion(full_text: str) -> DigestionResult:
     payload = _extract_json(full_text[idx + len(SPEC_SENTINEL):])
     if not payload:
         return DigestionResult(reply=reply)
-    suggestions = payload.get("suggestions")
+    phase = payload.get("phase")
     return DigestionResult(
         reply=reply,
         deltas=payload.get("deltas") or {},
         summary=payload.get("summary") or "",
         readiness=payload.get("readiness") or {},
         autonomous_confirmed=payload.get("autonomous_confirmed"),
-        suggestions=[str(s) for s in suggestions][:3]
-        if isinstance(suggestions, list) else [],
+        phase=str(phase) if isinstance(phase, str) else "",
     )
 
 
@@ -206,8 +242,8 @@ def apply_deltas(state: SetupState, result: DigestionResult) -> None:
             spec.readiness[slot] = value
     if result.summary:
         state.summary = result.summary
-    # Refresh the context-aware quick-add chips (empty list clears them).
-    state.suggestions = result.suggestions
+    if result.phase:
+        state.phase = result.phase
 
 
 # --- streaming reply splitter --------------------------------------------

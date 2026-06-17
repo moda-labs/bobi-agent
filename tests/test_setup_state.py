@@ -183,6 +183,28 @@ class TestPersistence:
         assert loaded.session_id == "abc-123"
         assert loaded.credentials_saved == ["SLACK_BOT_TOKEN"]
 
+    def test_round_trip_phase_and_role_dimensions(self, tmp_path):
+        # The interview phase and the four per-role dimensions persist verbatim.
+        s = _goaled(phase="role:researcher")
+        s.spec.roles = [{"name": "researcher", "responsibility": "find leads",
+                         "good_looks_like": "qualified leads daily",
+                         "systems": ["salesforce", "email"],
+                         "triggers": "every weekday morning",
+                         "status": "complete"}]
+        s.spec.autonomous = [{"description": "morning digest", "leash": "notify",
+                              "cadence": "1d", "role": "researcher",
+                              "command": "summarize new leads"}]
+        s.save(tmp_path)
+        loaded = SetupState.load(tmp_path)
+        assert loaded.phase == "role:researcher"
+        role = loaded.spec.roles[0]
+        assert role["good_looks_like"] == "qualified leads daily"
+        assert role["systems"] == ["salesforce", "email"]
+        assert role["triggers"] == "every weekday morning"
+        assert role["status"] == "complete"
+        assert loaded.spec.autonomous[0]["role"] == "researcher"
+        assert loaded.spec.autonomous[0]["command"] == "summarize new leads"
+
     def test_load_missing_returns_none(self, tmp_path):
         assert SetupState.load(tmp_path) is None
 

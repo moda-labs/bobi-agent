@@ -7,8 +7,11 @@
   const NONCE = document.querySelector('meta[name="modastack-nonce"]').content;
   const H = { "x-modastack-nonce": NONCE };
   const $ = (sel, el = document) => el.querySelector(sel);
-  const esc = (s) => (s || "").replace(/[&<>]/g, c =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  // Escapes for both element text AND double/single-quoted attribute contexts
+  // (role/service names are user- and LLM-authored and flow into value="…" /
+  // data-*="…" sinks — a stray quote would break out of the attribute).
+  const esc = (s) => (s || "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   // Grow a textarea to fit its content (wraps long text instead of scrolling
   // sideways), capped by max-height in CSS which then scrolls vertically.
   const autoGrow = (el) => { if (!el) return; el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; };
@@ -18,6 +21,7 @@
   // TBD: real cloud-deploy docs URL.
   const DOCS_CLOUD_URL = "https://docs.modastack.ai/cloud";
   const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4"><path d="M5 12l5 5L19 7"/></svg>';
+  const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"/></svg>';
   const STATUS_LABEL = { connected: "connected", missing: "connect", unknown: "needs check" };
   // Day-to-day channels for the Chat card.
   const CHANNELS = [
@@ -28,6 +32,10 @@
 
   let S = null;            // latest serialized state
   let _connData = null;    // last /api/connect payload (drives connect cards)
+  let _prevDone = null;    // per-slot completion last render — drives the celebrate pulse
+  let _prevSig = null;     // per-card HTML signatures — diff to re-render only what changed
+  let _prevPhase;          // last interview phase — drives the phase-banner ease-in
+  let _prevGathered = null; // last N/5 — drives the meter tick-up
 
   // --- connection state --------------------------------------------------
   // The page is useless without its local setup server. If that server dies
@@ -335,17 +343,16 @@
         <div class="sketch-top"><span class="st-group"><button class="backbtn" data-back>← Back</button><span class="sketch-eyebrow">modastack · build your team</span></span></div>
         <div class="ch-body" id="chbody"></div>
         <div class="cue" id="cue"></div>
-        <div class="chips" id="chips"></div>
         <div class="ch-input"><textarea id="chinput" rows="1" placeholder="Tell modastack what you want to build…" autocomplete="off"></textarea><button class="btn primary" id="chsend" style="padding:9px 14px">↑</button></div>
       </section>
       <aside class="uni-panel">
         <div class="uni-head"><span class="up-title" id="up-title" title="click to rename"></span><span class="up-meter" id="uni-meter"></span></div>
+        <div class="uni-phase" id="uni-phase"></div>
         <div class="uni-cards" id="uni-cards"></div>
         <div class="uni-foot" id="uni-foot"></div>
       </aside>`;
     renderMessages();
     updateCue();
-    renderChips();
     renderUniCards();
     $("#up-title").addEventListener("click", beginRename);
     if ((S.spec.services || []).length) refreshUniConnections();
@@ -391,22 +398,109 @@
     const host = $("#uni-cards");
     if (!host) return;
     setTeamTitle();
+    renderPhase();
     const sp = S.spec;
-    host.innerHTML = [goalCard(sp), rolesCard(sp), automationsCard(sp),
-                      connectionsCard(sp), chatCard()].join("");
-    // meter + Finish gate: Finish appears only once all five are gathered.
-    const slotsEnough = ["goal", "roles", "autonomous", "services"]
-      .filter(s => sp.readiness[s] === "enough").length;
+    // The Connections slot counts only when every implied service is truly
+    // connected (not merely "named") — the brain's readiness can't see live auth.
+    const connOk = servicesSettled(sp);
+    const cards = [goalCard(sp), rolesCard(sp), automationsCard(sp),
+                   connectionsCard(sp), chatCard()];
+    const keys = ["goal", "roles", "autonomous", "services", "chat"];
+    const doneNow = {
+      goal: sp.readiness.goal === "enough", roles: sp.readiness.roles === "enough",
+      autonomous: sp.readiness.autonomous === "enough", services: connOk, chat: !!S.chat,
+    };
+    // Reconcile per card: only re-create the cards whose markup actually changed,
+    // so unchanged cards keep their DOM (and any in-flight animation) instead of
+    // the whole panel snapping on every render.
+    const fresh = !_prevSig || host.children.length !== cards.length;
+    if (fresh) {
+      host.innerHTML = cards.join("");
+    } else {
+      cards.forEach((html, i) => {
+        if (html === _prevSig[i]) return;
+        const tpl = document.createElement("template");
+        tpl.innerHTML = html;
+        host.replaceChild(tpl.content.firstElementChild, host.children[i]);
+      });
+    }
+    // Animate only what changed (never on the first paint): a slot completing gets
+    // the celebration; any lesser change gets a gentle settle.
+    if (_prevSig) {
+      keys.forEach((k, i) => {
+        const el = host.children[i];
+        if (!el) return;
+        if (_prevDone && doneNow[k] && _prevDone[k] === false) {
+          el.classList.add("celebrate");
+          setTimeout(() => el.classList.remove("celebrate"), 1100);
+        } else if (_prevSig[i] !== cards[i]) {
+          el.classList.add("bump");
+          setTimeout(() => el.classList.remove("bump"), 380);
+        }
+      });
+    }
+    _prevSig = cards;
+    _prevDone = doneNow;
+
+    const slotsEnough = ["goal", "roles", "autonomous"]
+      .filter(s => sp.readiness[s] === "enough").length + (connOk ? 1 : 0);
     const gathered = slotsEnough + (S.chat ? 1 : 0);
-    $("#uni-meter").textContent = `${gathered}/5 gathered`;
+    const meter = $("#uni-meter");
+    if (meter) {
+      meter.textContent = `${gathered}/5 gathered`;
+      if (_prevGathered != null && gathered > _prevGathered) {
+        meter.classList.remove("bump"); void meter.offsetWidth; meter.classList.add("bump");
+        setTimeout(() => meter.classList.remove("bump"), 600);
+      }
+    }
+    _prevGathered = gathered;
     const ready = gathered === 5;
     const foot = $("#uni-foot");
     if (foot) foot.innerHTML = ready
       ? `<button class="btn primary" data-go="build">Finish →</button>`
       : `<span class="uni-note">modastack is gathering goal, roles, automations, connections, and chat</span>`;
   }
+  // The current interview phase, shown so the user always knows where modastack is
+  // and that it's moving methodically. S.phase is "goal" | "role:<name>" |
+  // "automations" | "connections" | "wrap" (or empty early on).
+  function renderPhase() {
+    const el = $("#uni-phase"); if (!el) return;
+    const p = S.phase || "";
+    if (!p) { el.innerHTML = ""; _prevPhase = ""; return; }
+    let label = p, sub = "";
+    if (p.startsWith("role:")) {
+      const roles = S.spec.roles || [];
+      const name = p.slice(5);
+      const idx = roles.findIndex(r => (r.name || "") === name);
+      label = "interviewing · " + name;
+      if (roles.length) sub = `role ${(idx < 0 ? roles.length : idx + 1)} of ${roles.length}`;
+    } else {
+      label = ({ goal: "setting the goal", automations: "automations",
+                 connections: "connections", wrap: "wrapping up" }[p]) || p;
+    }
+    el.innerHTML = `<span class="ph-dot"></span><span class="ph-lab">${esc(label)}</span>${sub ? `<span class="ph-sub">${esc(sub)}</span>` : ""}`;
+    // Ease the banner in when the interview actually moves to a new phase.
+    if (_prevPhase !== undefined && _prevPhase !== p) {
+      el.classList.remove("phasein"); void el.offsetWidth; el.classList.add("phasein");
+    }
+    _prevPhase = p;
+  }
+  // Connections are "settled" only when there's nothing to connect (and the
+  // brain confirmed none are needed) OR every live connection card is connected.
+  function servicesSettled(sp) {
+    const svcs = sp.services || [];
+    if (!svcs.length) return sp.readiness.services === "enough";
+    const cards = (_connData && _connData.cards) || null;
+    if (!cards || !cards.length) return false;
+    return cards.every(c => c.status === "connected");
+  }
   function slotDot(ok) {
     return `<span class="udot ${ok ? "ok" : "empty"}">${ok ? CHECK : ""}</span>`;
+  }
+  // A small per-role progress dot: filled+check when complete, hollow otherwise.
+  function roleStatusDot(r) {
+    const done = (r && r.status) === "complete";
+    return `<span class="rdot ${done ? "done" : "wip"}" title="${done ? "complete" : "in progress"}">${done ? CHECK : ""}</span>`;
   }
   function goalCard(sp) {
     const filled = (sp.goal || "").trim();
@@ -417,34 +511,41 @@
   function rolesCard(sp) {
     const roles = sp.roles || [];
     const body = roles.length
-      ? roles.map(r => `<div class="urole"><b>${esc(r.name || "role")}</b>${r.responsibility ? `<span>${esc(r.responsibility)}</span>` : ""}</div>`).join("")
+      ? roles.map((r, i) => `<div class="urole click" data-roleopen="${i}">
+          <div class="urow"><b>${esc(r.name || "role")}</b>${roleStatusDot(r)}</div>
+          ${r.responsibility ? `<span>${esc(r.responsibility)}</span>` : `<span class="ph">click to fill in the details</span>`}</div>`).join("")
       : `<span class="ph">modastack will shape the roles as you talk</span>`;
     return `<div class="ucard ${roles.length ? "filled" : "empty"}">
       <div class="ut">Roles ${slotDot(sp.readiness.roles === "enough")}</div>
-      <div class="ud">${body}</div></div>`;
+      <div class="ud">${body}</div>
+      <div class="uadd"><button class="lnk add" data-addrole>+ add a role</button></div></div>`;
   }
   function automationsCard(sp) {
     const items = sp.autonomous || [];
     const body = items.length
-      ? items.map(a => `<div class="urole"><b>${esc(a.description || "behavior")}</b><span>${esc(a.leash || "")}${a.cadence ? " · " + esc(a.cadence) : ""}</span></div>`).join("")
+      ? items.map((a, i) => `<div class="urole click" data-autoopen="${i}">
+          <div class="urow"><b>${esc(a.description || "behavior")}</b></div>
+          <span>${esc(a.leash || "")}${a.cadence ? " · " + esc(a.cadence) : ""}${a.role ? " · " + esc(a.role) : ""}</span></div>`).join("")
       : (sp.autonomous_confirmed
           ? `<span class="ph">nothing proactive — modastack acts only when asked</span>`
           : `<span class="ph">anything modastack should do on its own?</span>`);
     return `<div class="ucard ${items.length || sp.autonomous_confirmed ? "filled" : "empty"}">
       <div class="ut">Automations ${slotDot(sp.readiness.autonomous === "enough")}</div>
-      <div class="ud">${body}</div></div>`;
+      <div class="ud">${body}</div>
+      <div class="uadd"><button class="lnk add" data-addauto>+ add an automation</button></div></div>`;
   }
   // Connections: native services capture a token each; Venn-backed services
   // share ONE key, so they're grouped under a single Venn setup with per-service
   // verification status. Reads live status from the cached /api/connect payload.
   function connectionsCard(sp) {
     const cards = (_connData && _connData.cards) || null;
-    const ok = sp.readiness.services === "enough";
+    const ok = servicesSettled(sp);
+    const vennConfigured = !!(_connData && _connData.venn_configured);
     let body;
     if (!cards) {
       const names = (sp.services || []).map(s => (s && s.name) || String(s));
       body = names.length
-        ? names.map(n => `<div class="uconn"><span>${esc(n)}</span></div>`).join("")
+        ? names.map(n => `<div class="uconn"><span>${esc(n)}</span><span class="cright">${trashBtn(n)}</span></div>`).join("")
         : `<span class="ph">what should the team connect to?</span>`;
     } else if (!cards.length) {
       body = `<span class="ph">no outside services — runs self-contained</span>`;
@@ -453,12 +554,26 @@
       const venn = cards.filter(c => c.kind === "venn");
       body = native.map(connRow).join("") + vennGroup(venn);
     }
+    const upsell = vennConfigured ? "" : vennUpsell();
     return `<div class="ucard ${(sp.services || []).length ? "filled" : "empty"}">
       <div class="ut">Connections ${slotDot(ok)}</div>
-      <div class="ud">${body}</div></div>`;
+      <div class="ud">${body}${upsell}</div>
+      <div class="uadd"><button class="lnk add" data-addconn>+ add a connection</button></div></div>`;
+  }
+  // Surfaced when no Venn key is set: one account connects many services at once.
+  function vennUpsell() {
+    return `<div class="venn-upsell">
+      <span class="vu-lab">Connect lots of services at once with <b>Venn</b> — one key, many integrations.</span>
+      <span class="vu-row">
+        <a class="lnk" href="https://app.venn.ai" target="_blank" rel="noopener">Create a Venn account ↗</a>
+        <button class="lnk" data-vennsetup>Sync it here</button>
+      </span></div>`;
+  }
+  function trashBtn(key) {
+    return `<button class="lnk trash" data-conntrash="${esc(key)}" title="I don't need this">${TRASH}</button>`;
   }
   function statusBadge(status) {
-    if (status === "connected") return `<span class="cbadge ok">✓ connected</span>`;
+    if (status === "connected") return `<span class="cbadge connected">${CHECK} connected</span>`;
     if (status === "unknown") return `<span class="cbadge">needs check</span>`;
     return `<span class="cbadge">pending</span>`;
   }
@@ -469,17 +584,25 @@
     // Custom services (not native, not on Venn) get an authored API guide.
     const tag = c.kind === "custom"
       ? `<span class="ctag">custom · modastack writes a guide</span>` : "";
-    return `<div class="uconn"><span>${esc(c.name)}${tag}</span><span class="cright">${right}</span></div>`;
+    return `<div class="uconn"><span>${esc(c.name)}${tag}</span><span class="cright">${right}${trashBtn(c.key)}</span></div>`;
   }
   function vennGroup(venn) {
     if (!venn.length) return "";
     const keyIn = venn.some(c => (c.methods[0].secrets || []).some(s => s.present));
     const rows = venn.map(c =>
-      `<div class="uconn sub"><span>${esc(c.name)}</span>${statusBadge(c.status)}</div>`).join("");
+      `<div class="uconn sub"><span>${esc(c.name)}</span><span class="cright">${statusBadge(c.status)}${trashBtn(c.key)}</span></div>`).join("");
     return `<div class="uvenn">
       <div class="uvhead"><span><b>Venn</b> · one key, every service</span>
         <button class="btn ghost xs" data-vennsetup>${keyIn ? "Manage" : "Set up Venn"}</button></div>
       ${rows}</div>`;
+  }
+  async function trashConnection(key) {
+    const r = await postJSON("/api/service/remove", { service_key: key });
+    if (!r.ok) { toast(r.data.error || "couldn't remove"); return; }
+    S = r.data;
+    _connData = await getJSON("/api/connect");
+    renderUniCards();
+    toast("removed");
   }
   function chatCard() {
     const chosen = S.chat || "cli";
@@ -526,12 +649,6 @@
     const el = $("#cue"); if (!el) return;
     const c = cueText(); el.textContent = c.text; el.className = "cue " + c.cls;
   }
-  function renderChips() {
-    const el = $("#chips"); if (!el) return;
-    const chips = (S.suggestions || []).slice(0, 3);
-    el.innerHTML = chips.map(c =>
-      `<span class="chip" data-chip="${esc(c)}">+ ${esc(c)}</span>`).join("");
-  }
   function renderMessages(extra) {
     const body = $("#chbody");
     if (!body) return;
@@ -552,17 +669,23 @@
     const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
     let buf = "", shown = 0, done = false, timer = null;
     const caret = '<span class="caret"></span>';
-    const paint = () => { el.innerHTML = esc(buf.slice(0, shown)) + (shown < buf.length || !done ? caret : ""); $("#chbody").scrollTop = 1e9; };
+    // Trim trailing whitespace from what we render: the model streams the reply,
+    // then a newline + the hidden JSON spec block. With white-space:pre-wrap that
+    // trailing "\n" would paint as a blank line with the caret on it — flashing
+    // while the JSON streams behind the scenes. Trimming keeps the caret pinned
+    // to the last real character.
+    const vis = (s) => esc(s.replace(/\s+$/, ""));
+    const paint = () => { el.innerHTML = vis(buf.slice(0, shown)) + (shown < buf.length || !done ? caret : ""); $("#chbody").scrollTop = 1e9; };
     const tick = () => {
       if (shown < buf.length) { shown = Math.min(buf.length, shown + 2); paint(); }
-      if (done && shown >= buf.length) { clearInterval(timer); timer = null; el.innerHTML = esc(buf); }
+      if (done && shown >= buf.length) { clearInterval(timer); timer = null; el.innerHTML = vis(buf); }
     };
     if (!reduce) timer = setInterval(tick, 16);
     return {
       push(t) { buf += t; if (reduce) { shown = buf.length; paint(); } },
       finish() {
         done = true;
-        if (reduce || !timer) { el.innerHTML = esc(buf); return Promise.resolve(); }
+        if (reduce || !timer) { el.innerHTML = vis(buf); return Promise.resolve(); }
         return new Promise(res => { const iv = setInterval(() => { if (!timer) { clearInterval(iv); res(); } }, 20); });
       },
     };
@@ -588,10 +711,20 @@
     });
     await tw.finish();
     streaming = false;
-    // Refresh WITHOUT rebuilding the input (preserve anything typed mid-stream).
-    renderMessages();
+    // Finalize the streaming bubble IN PLACE from the authoritative reply, rather
+    // than tearing the whole list down with renderMessages(). That rebuild was
+    // what flashed: the typed text briefly kept a trailing blank line, then the
+    // list re-rendered to the stripped version — the "line that disappears".
+    const sb = $("#streambob");
+    const last = S.messages[S.messages.length - 1];
+    const finalText = last && last.role !== "user" ? last.content : "";
+    if (sb) {
+      if (finalText) { sb.textContent = finalText; sb.removeAttribute("id"); }
+      else sb.remove();
+    } else {
+      renderMessages();
+    }
     updateCue();
-    renderChips();
     renderUniCards();
     if ((S.spec.services || []).length) refreshUniConnections();
     if (pendingSend) { const m = pendingSend; pendingSend = null; sendMessage(m); }
@@ -732,8 +865,24 @@
     const body = $("#venn-body"); if (!body) return;
     const venn = vennCards();
     const keyIn = venn.some(c => (c.methods[0].secrets || []).some(s => s.present));
+    const allConnected = venn.length > 0 && venn.every(c => c.status === "connected");
     const svcs = venn.map(c =>
       `<div class="uconn sub"><span>${esc(c.name)}</span>${statusBadge(c.status)}</div>`).join("");
+    // Already fully connected: no "Re-check" busywork. Make it obviously done and
+    // let the user simply close.
+    if (allConnected) {
+      body.innerHTML = `
+        <div class="venn-done">
+          <div class="vd-seal">${CHECK}</div>
+          <div class="vd-copy"><b>All Venn services connected</b>
+            <span>You're set — these are live and ready to use.</span></div>
+        </div>
+        <div class="venn-svcs">${svcs}</div>
+        <div class="connect-row" style="justify-content:flex-end">
+          <button class="btn primary sm" data-vennclose>Done</button>
+        </div>`;
+      return;
+    }
     const editing = editSecrets.has("VENN_API_KEY");
     const keyField = (keyIn && !editing)
       ? `<div class="secret-saved">✓ Venn key saved
@@ -1008,6 +1157,134 @@
     $("#home-list").innerHTML = cards + add;
   }
 
+  // --- panel modals: inspect/edit a role or automation, add new items ----
+  // All reuse the .secret-ov shell so Escape-to-close already works.
+  function openRoleModal(i) {
+    const r = (S.spec.roles || [])[i]; if (!r) return;
+    const sysVal = Array.isArray(r.systems) ? r.systems.join(", ") : (r.systems || "");
+    const ov = document.createElement("div");
+    ov.className = "secret-ov"; ov.id = "role-ov";
+    ov.innerHTML = `<div class="secret-panel">
+      <div class="sp-head"><b>${esc(r.name || "Role")}</b><button class="btn ghost sm" id="role-close">Close</button></div>
+      <div class="sp-body">
+        <label class="fld"><span class="flab">Role name</span>
+          <input id="r-name" value="${esc(r.name || "")}" autocomplete="off"></label>
+        <label class="fld"><span class="flab">What it does</span>
+          <textarea id="r-resp" rows="2">${esc(r.responsibility || "")}</textarea></label>
+        <label class="fld"><span class="flab">What a good job looks like</span>
+          <textarea id="r-good" rows="2">${esc(r.good_looks_like || "")}</textarea></label>
+        <label class="fld"><span class="flab">Systems it accesses</span>
+          <input id="r-sys" value="${esc(sysVal)}" placeholder="comma-separated — e.g. github, slack" autocomplete="off">
+          <span class="fhelp">Comma-separated.</span></label>
+        <label class="fld"><span class="flab">What triggers it to run</span>
+          <textarea id="r-trig" rows="2">${esc(r.triggers || "")}</textarea></label>
+        <div class="sp-actions"><button class="btn primary sm" id="r-save">Save role</button></div>
+      </div></div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("click", e => { if (e.target.id === "role-close" || e.target === ov) ov.remove(); });
+    $("#r-save").addEventListener("click", async () => {
+      const fields = {
+        name: $("#r-name").value, responsibility: $("#r-resp").value,
+        good_looks_like: $("#r-good").value, systems: $("#r-sys").value,
+        triggers: $("#r-trig").value,
+      };
+      const res = await postJSON("/api/role/update", { index: i, fields });
+      if (!res.ok) { toast(res.data.error || "couldn't save"); return; }
+      S = res.data; ov.remove(); renderUniCards(); toast("role saved");
+    });
+  }
+  function openAutoModal(i) {
+    const a = (S.spec.autonomous || [])[i]; if (!a) return;
+    const roles = S.spec.roles || [];
+    const roleOpts = ['<option value="">(any role)</option>'].concat(
+      roles.map(r => `<option value="${esc(r.name)}" ${a.role === r.name ? "selected" : ""}>${esc(r.name)}</option>`)).join("");
+    const leashOpts = [["notify", "notify · just tells you"], ["ask", "ask first · waits for approval"], ["act", "act · does it, reports"]]
+      .map(([v, l]) => `<option value="${v}" ${a.leash === v ? "selected" : ""}>${esc(l)}</option>`).join("");
+    const ov = document.createElement("div");
+    ov.className = "secret-ov"; ov.id = "auto-ov";
+    ov.innerHTML = `<div class="secret-panel">
+      <div class="sp-head"><b>Automation</b><button class="btn ghost sm" id="auto-close">Close</button></div>
+      <div class="sp-body yamlish">
+        <label class="fld"><span class="flab">description</span>
+          <textarea id="a-desc" rows="2">${esc(a.description || "")}</textarea></label>
+        <label class="fld"><span class="flab">role <span class="fhelp inline">which agent runs it</span></span>
+          <select id="a-role">${roleOpts}</select></label>
+        <label class="fld"><span class="flab">when <span class="fhelp inline">a schedule (1d, 15m) or an event</span></span>
+          <input id="a-when" value="${esc(a.cadence || "")}" placeholder="e.g. 1d, 9am daily, when a PR opens" autocomplete="off"></label>
+        <label class="fld"><span class="flab">leash</span>
+          <select id="a-leash">${leashOpts}</select></label>
+        <label class="fld"><span class="flab">command <span class="fhelp inline">what the agent is told to do</span></span>
+          <textarea id="a-cmd" rows="2">${esc(a.command || "")}</textarea></label>
+        <div class="sp-actions"><button class="btn primary sm" id="a-save">Save automation</button></div>
+      </div></div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("click", e => { if (e.target.id === "auto-close" || e.target === ov) ov.remove(); });
+    $("#a-save").addEventListener("click", async () => {
+      const fields = {
+        description: $("#a-desc").value, role: $("#a-role").value,
+        cadence: $("#a-when").value, leash: $("#a-leash").value,
+        command: $("#a-cmd").value,
+      };
+      const res = await postJSON("/api/automation/update", { index: i, fields });
+      if (!res.ok) { toast(res.data.error || "couldn't save"); return; }
+      S = res.data; ov.remove(); renderUniCards(); toast("automation saved");
+    });
+  }
+  // Add a role / automation / connection by describing it — the description is
+  // routed into the conversation so the brain ingests it. Connections also offer
+  // the custom "build an integration on the fly" placeholder.
+  function openDescribeModal(kind) {
+    const meta = {
+      role: { title: "Add a role", ph: "Describe the role — what it does, what a good job looks like, what it needs to access.", lead: "Tell modastack about the role and it'll add it to the team." },
+      auto: { title: "Add an automation", ph: "Describe something the team should do on its own — e.g. 'post a daily digest at 9am'.", lead: "Describe the proactive behavior; modastack wires it up." },
+      conn: { title: "Add a connection", ph: "What should the team connect to? e.g. 'our Notion workspace'.", lead: "Name a service and modastack will work out how to connect it." },
+    }[kind];
+    const custom = kind === "conn" ? `
+      <div class="custom-build">
+        <div class="cb-head">Not on Venn? Build a custom integration</div>
+        <p class="fhelp">Paste an official MCP server link or an API key and modastack will try to build an MCP/CLI for it. This runs as a background job you can come back to — it's a rabbit hole of its own, so it's coming soon.</p>
+        <label class="fld"><span class="flab">Service name</span><input id="cb-name" placeholder="e.g. PostHog" autocomplete="off"></label>
+        <label class="fld"><span class="flab">MCP server link <span class="fhelp inline">optional</span></span><input id="cb-mcp" placeholder="https://…" autocomplete="off"></label>
+        <label class="fld"><span class="flab">API key <span class="fhelp inline">optional</span></span><input id="cb-key" type="password" placeholder="stored in .env, never sent to the model" autocomplete="off"></label>
+        <div class="sp-actions"><button class="btn ghost sm" id="cb-build">Build integration</button></div>
+        <div class="cb-status" id="cb-status"></div>
+      </div>` : "";
+    const ov = document.createElement("div");
+    ov.className = "secret-ov"; ov.id = "describe-ov";
+    ov.innerHTML = `<div class="secret-panel">
+      <div class="sp-head"><b>${meta.title}</b><button class="btn ghost sm" id="d-close">Close</button></div>
+      <div class="sp-body">
+        <p class="fhelp">${meta.lead}</p>
+        <label class="fld"><textarea id="d-text" rows="3" placeholder="${esc(meta.ph)}"></textarea></label>
+        <div class="sp-actions"><button class="btn primary sm" id="d-send">Add</button></div>
+        ${custom}
+      </div></div>`;
+    document.body.appendChild(ov);
+    $("#d-text").focus();
+    ov.addEventListener("click", e => { if (e.target.id === "d-close" || e.target === ov) ov.remove(); });
+    $("#d-send").addEventListener("click", () => {
+      const t = $("#d-text").value.trim();
+      if (!t) { toast("say a little about it"); return; }
+      ov.remove(); sendMessage(t);
+    });
+    if (kind === "conn") {
+      $("#cb-build").addEventListener("click", async () => {
+        const name = $("#cb-name").value.trim();
+        if (!name) { toast("name the service first"); return; }
+        const res = await postJSON("/api/build-integration", {
+          service_name: name, mcp_url: $("#cb-mcp").value.trim(),
+          api_key: $("#cb-key").value.trim(),
+        });
+        if (!res.ok) { toast(res.data.error || "couldn't queue"); return; }
+        if (res.data.state) S = res.data.state;
+        const st = $("#cb-status");
+        if (st) st.innerHTML = `<div class="cb-queued">⏳ ${esc(res.data.message || "queued — coming soon")}</div>`;
+        renderUniCards();
+        if ((S.spec.services || []).length) refreshUniConnections();
+      });
+    }
+  }
+
   // --- top-level render + events ----------------------------------------
   function render() {
     if (atHome) { renderHome(); return; }   // the team hub overlays any stage
@@ -1022,37 +1299,17 @@
     if (e.target.closest("[data-back]")) { goBack(); return; }
     const go_ = e.target.closest("[data-go]");
     if (go_) { go(go_.dataset.go); return; }
-    if (e.target.closest("[data-addteam]")) {
-      // Leave the hub and start a fresh setup flow (template chooser + custom).
-      atHome = false; welcomed = true; renderIntro();
-      return;
-    }
-    const openteam = e.target.closest("[data-openteam]");
-    if (openteam) {
-      if (!openteam.disabled) {
-        const path = openteam.dataset.openteam;
-        atHome = false;   // entering the editor
-        startTeam({ mode: "open", location: path, team_path: path }, openteam, "Opening…");
-      }
-      return;
-    }
-    const newteam = e.target.closest("[data-newteam]");
-    if (newteam) {
-      if (!newteam.disabled)
-        startTeam({ mode: "create", location: introLoc }, newteam, "Starting…");
-      return;
-    }
-    const tmpl = e.target.closest("[data-template]");
-    if (tmpl) {
-      if (!tmpl.disabled) {
-        const name = tmpl.dataset.template;
-        startTeam({ mode: "registry", team: name,
-          location: introLoc.replace(/\/+$/, "") + "/" + name }, tmpl, "Downloading…");
-      }
-      return;
-    }
-    const chip = e.target.closest("[data-chip]");
-    if (chip) { sendMessage(chip.dataset.chip); return; }
+    const im = e.target.closest("[data-intromode]");
+    if (im) { if (!im.disabled) { introMode = im.dataset.intromode; drawIntro(); } return; }
+    const ro = e.target.closest("[data-roleopen]");
+    if (ro) { openRoleModal(+ro.dataset.roleopen); return; }
+    const ao = e.target.closest("[data-autoopen]");
+    if (ao) { openAutoModal(+ao.dataset.autoopen); return; }
+    if (e.target.closest("[data-addrole]")) { openDescribeModal("role"); return; }
+    if (e.target.closest("[data-addauto]")) { openDescribeModal("auto"); return; }
+    if (e.target.closest("[data-addconn]")) { openDescribeModal("conn"); return; }
+    const ct = e.target.closest("[data-conntrash]");
+    if (ct) { trashConnection(ct.dataset.conntrash); return; }
     const cs = e.target.closest("[data-chatset]");
     if (cs) { setChat(cs.dataset.chatset); return; }
     const cm = e.target.closest("[data-connmethod]");
@@ -1074,6 +1331,7 @@
     if (vs) { openVennSetup(); return; }
     const vsv = e.target.closest("[data-vennsave]");
     if (vsv) { vennSave(); return; }
+    if (e.target.closest("[data-vennclose]")) { const o = $("#venn-ov"); if (o) o.remove(); return; }
   });
 
   // Escape closes the topmost dismissible popup — the folder picker or a

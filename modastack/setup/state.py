@@ -65,8 +65,13 @@ class Spec:
     without reshaping persistence; the wizard reads them at Build."""
 
     goal: str = ""                              # one sentence: what it does + outcome
-    roles: list = field(default_factory=list)   # [{"name", "responsibility"}]
-    autonomous: list = field(default_factory=list)  # [{"description","leash","cadence"}]
+    # Each role carries the four interview dimensions plus a completeness
+    # self-score: {"name", "responsibility" (what it does), "good_looks_like",
+    # "systems" (list of systems it accesses), "triggers" (what makes it run),
+    # "status": "in_progress"|"complete"}.
+    roles: list = field(default_factory=list)
+    # [{"description","leash","cadence","role" (which agent runs it),"command"}]
+    autonomous: list = field(default_factory=list)
     services: list = field(default_factory=list)    # [{"name","status"}]
 
     # Autonomous is "enough" only once explicitly confirmed — even when the
@@ -105,15 +110,15 @@ class SetupState:
     chat: str = ""                   # how you talk to the team: "cli"|"slack"|"telegram"
     spec: Spec = field(default_factory=Spec)
 
+    # The brain's current interview focus, so the panel can show where we are:
+    # "goal" | "role:<slug>" | "automations" | "connections" | "wrap" (or "").
+    phase: str = ""
+
     # Stateless-one-shot brain memory: a rolling summary refreshed each
     # digestion turn, plus the raw transcript (the context assembler takes
     # the last N for the next call).
     summary: str = ""
     messages: list = field(default_factory=list)
-
-    # Context-aware quick-add chips for the next turn, refreshed by the brain.
-    # Transient UI hint, not part of the spec.
-    suggestions: list = field(default_factory=list)
 
     credentials_saved: list = field(default_factory=list)
     validated: bool = False
