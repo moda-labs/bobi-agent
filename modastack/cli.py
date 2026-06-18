@@ -187,8 +187,16 @@ def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
 
 
 
-def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[str] | None = None) -> None:
-    """Start an agent from a Config object."""
+def _run_from_config(project_path: Path, cfg: "Config",
+                     extra_subscribe: list[str] | None = None,
+                     foreground: bool = False) -> None:
+    """Start an agent from a Config object.
+
+    When *foreground* is True the process is running as PID 1 in a
+    container: logs go to stdout/stderr, the health endpoint is started,
+    and SIGTERM triggers a graceful shutdown within the container's grace
+    period.
+    """
     import atexit
     import signal
     import threading
@@ -230,6 +238,8 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
                 pid_file.unlink(missing_ok=True)
         except OSError:
             pass
+        from modastack import manager_health
+        manager_health.stop()
         from modastack import http as pooled_http
         pooled_http.close()
     atexit.register(_cleanup)
@@ -237,10 +247,16 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
     log = logging.getLogger(__name__)
 
     def _handle_term(signum, frame):
-        log.info("Received SIGTERM — shutting down")
+        log.info("Received SIGTERM — shutting down gracefully")
         _cleanup()
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, _handle_term)
+
+    # --- Health endpoint (always started; essential in foreground/container
+    # mode for liveness probes, useful in daemon mode for doctor checks) ---
+    from modastack import manager_health
+    health_port = manager_health.start(state_dir, project_path.name)
+    log.info("Manager health endpoint on port %d", health_port)
 
     log.info(f"Modastack starting for {project_path.name} (role={role})")
 
@@ -319,7 +335,10 @@ def start(foreground, fresh, subscribe):
     pid_path = paths.manager_pid_path(project_path)
     pid_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if pid_path.exists():
+    # In foreground/PID-1 mode (containers), skip the "already running"
+    # check — stale PID files from a previous container run are expected
+    # and the new process IS the only manager.
+    if not foreground and pid_path.exists():
         try:
             pid = int(pid_path.read_text().strip())
             os.kill(pid, 0)
@@ -353,10 +372,13 @@ def start(foreground, fresh, subscribe):
             click.echo("Installed image changed — rotating session.")
 
     if foreground:
+        # In foreground/container mode, log to stdout/stderr only —
+        # drop file handlers and keep stream handlers.
         root = logging.getLogger()
         root.handlers = [h for h in root.handlers
-                         if isinstance(h, logging.FileHandler)]
-        _run_from_config(project_path, cfg, extra_subscribe=extra_subscribe)
+                         if not isinstance(h, logging.FileHandler)]
+        _run_from_config(project_path, cfg, extra_subscribe=extra_subscribe,
+                         foreground=True)
     else:
         log_file = _project_state_dir(project_path) / "manager.log"
         env = os.environ.copy()
