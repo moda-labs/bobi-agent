@@ -141,6 +141,21 @@ def test_unknown_auth_mode_rejected(image: str):
 
 @requires_docker
 @pytest.mark.timeout(120)
+def test_home_survives_privilege_drop(image: str):
+    """Regression: gosu resets HOME to the passwd home (/home/modastack), which
+    would send the agent's ~/.claude (subscription creds + transcripts) off the
+    volume. The entrypoint re-asserts the volume HOME inside the privilege drop
+    via `env HOME=...` — verify that mechanism yields the volume path in-image."""
+    proc = _run(
+        "docker", "run", "--rm", "--entrypoint", "sh", image, "-c",
+        'export HOME=/data/home; gosu modastack env HOME="$HOME" '
+        'sh -c \'printf %s "$HOME"\'',
+    )
+    assert proc.stdout.strip() == "/data/home", proc.stdout + proc.stderr
+
+
+@requires_docker
+@pytest.mark.timeout(120)
 def test_empty_volume_without_team_fails_clearly(image: str, tmp_path: Path):
     """An empty volume with no MODASTACK_TEAM should fail with a clear message,
     not a confusing crash deep in the manager."""

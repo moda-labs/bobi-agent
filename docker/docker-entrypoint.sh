@@ -56,12 +56,17 @@ fi
 
 cd "${PROJECT_DIR}"
 
+# gosu resets HOME to the target user's passwd home (/home/modastack), which
+# would send the agent's ~/.claude (subscription creds + transcripts) off the
+# volume. Re-assert the volume HOME inside every privilege drop with `env`.
+as_app() { gosu "${APP_USER}" env "HOME=${HOME}" "$@"; }
+
 # --- 3. First boot: install a team if the volume has no agent (C9 hardens) ---
 if [ ! -f "${PROJECT_DIR}/.modastack/agent.yaml" ]; then
   [ -n "${MODASTACK_TEAM:-}" ] \
     || fatal "empty volume and MODASTACK_TEAM is unset — nothing to install."
   log "First boot: installing team '${MODASTACK_TEAM}' (non-interactive)"
-  gosu "${APP_USER}" modastack install "${MODASTACK_TEAM}" --non-interactive
+  as_app modastack install "${MODASTACK_TEAM}" --non-interactive
 fi
 
 # --- 4. Subscription auth: bootstrap login over Slack if no creds yet (C23) --
@@ -69,9 +74,9 @@ fi
 if [ "${MODASTACK_AUTH:-api_key}" = "subscription" ] \
    && [ ! -f "${HOME}/.claude/.credentials.json" ]; then
   log "Subscription mode, no credentials on volume — running login bootstrap"
-  gosu "${APP_USER}" modastack login-bootstrap
+  as_app modastack login-bootstrap
 fi
 
 # --- 5. Hand off to the manager as the non-root user ------------------------
 log "Starting manager (user=${APP_USER}, project=${PROJECT_DIR}, home=${HOME})"
-exec gosu "${APP_USER}" modastack start --foreground "$@"
+exec gosu "${APP_USER}" env "HOME=${HOME}" modastack start --foreground "$@"
