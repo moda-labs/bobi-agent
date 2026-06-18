@@ -251,14 +251,21 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
             time.sleep(5)
         assert status == "healthy", f"never became healthy (last={status!r})"
 
+        # Run as the modastack user: the entrypoint chowns the volume to that
+        # uid, and resolve_root (#249) skips a .modastack/ not owned by the
+        # current uid — so a root `docker exec` would not find the install.
         ask = _run(
-            "docker", "exec", name,
+            "docker", "exec", "-u", "modastack", "-w", "/data/project", name,
             "modastack", "ask", "Reply with the single word: pong",
             timeout=180,
         )
-        assert ask.returncode == 0, ask.stderr
-        assert "pong" in ask.stdout.lower(), ask.stdout
+        if ask.returncode != 0 or "pong" not in ask.stdout.lower():
+            logs = _run("docker", "logs", name)
+            pytest.fail(
+                f"ask failed (rc={ask.returncode})\n"
+                f"STDOUT: {ask.stdout}\nSTDERR: {ask.stderr}\n"
+                f"--- container logs ---\n{logs.stdout}\n{logs.stderr}"
+            )
     finally:
-        _run("docker", "logs", name)
         _run("docker", "rm", "-f", name)
         stop_wrangler()
