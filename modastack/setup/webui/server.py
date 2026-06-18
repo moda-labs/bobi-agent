@@ -485,10 +485,11 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     @app.post("/api/mcp/add")
     def mcp_add(payload: dict) -> JSONResponse:
         """Add a custom MCP connection by name + remote URL (the Claude-style
-        connector form). Auth is one of: none, api_key (Bearer header), or oauth
-        (client id + secret). Any secrets go straight to .env as `${VAR}` refs.
-        Persists to spec.mcp_servers and as a team service so it shows as a row;
-        authored into agent.yaml mcp_servers: at build."""
+        connector form). Auth is api_key (Bearer header) or none (public). Any
+        key goes straight to .env as a `${VAR}` ref. Persists to
+        spec.mcp_servers and as a team service so it shows as a row; authored
+        into agent.yaml mcp_servers: at build. (OAuth-authed MCPs aren't
+        supported yet — a follow-up.)"""
         import re
         from modastack.setup import actions
         name = (payload.get("name") or "").strip()
@@ -500,30 +501,22 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             return JSONResponse(
                 {"error": "a remote server URL (https://…) is required"},
                 status_code=400)
-        # Default to OAuth: most remote MCPs authenticate that way, and you sign
-        # in to authorize. API key is the alternative; "none" only for public.
-        auth = payload.get("auth") or "oauth"
-        if auth not in ("none", "api_key", "oauth"):
-            return JSONResponse({"error": "auth must be none, api_key, or oauth"},
+        # API key is the only supported auth; no key means a public server.
+        auth = payload.get("auth") or "api_key"
+        if auth not in ("none", "api_key"):
+            return JSONResponse({"error": "auth must be none or api_key"},
                                 status_code=400)
         key = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "mcp"
         prefix = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_") or "MCP"
         entry: dict = {"url": url, "type": "http", "auth": auth, "label": name}
-
-        def _save(var: str, val: str) -> None:
-            if val:
-                actions.save_credential(state, project, var, name, "",
-                                        prompt_fn=lambda *_: val)
         try:
             if auth == "api_key":
                 var = f"{prefix}_API_KEY"
                 entry["secret_var"] = var
-                _save(var, payload.get("api_key", ""))
-            elif auth == "oauth":
-                cid, cs = f"{prefix}_OAUTH_CLIENT_ID", f"{prefix}_OAUTH_CLIENT_SECRET"
-                entry["client_id_var"], entry["client_secret_var"] = cid, cs
-                _save(cid, payload.get("client_id", ""))
-                _save(cs, payload.get("client_secret", ""))
+                api_key = payload.get("api_key", "")
+                if api_key:
+                    actions.save_credential(state, project, var, name, "",
+                                            prompt_fn=lambda *_: api_key)
         except actions.ActionError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -536,11 +529,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             state.spec.services = list(state.spec.services) + [{"name": key}]
         state.validated = False
         state.save(project)
-        # OAuth authorizes when the agent first connects (the runtime performs
-        # the handshake with the stored client credentials); flag it so the UI
-        # can say so rather than implying it's already live.
-        return JSONResponse({"ok": True, "oauth_pending": auth == "oauth",
-                             "state": serialize_state(state)})
+        return JSONResponse({"ok": True, "state": serialize_state(state)})
 
     # --- Venn: verify key, list the account's MCPs, reconcile team picks --
     def _venn_servers_payload(key: str) -> dict:

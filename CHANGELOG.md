@@ -40,21 +40,17 @@ team instead of dropping to a hand-authored guide (MOD-203).
   consistent across the picker, the panel rows, and the authored `agent.yaml`.
 
 - **Add-a-connection is a Claude-style custom-MCP form.** Just a name + remote
-  server URL, with Advanced auth (an API key *or* OAuth client id/secret). On
-  add, the connection is authored into `agent.yaml` `mcp_servers:` (API-key
-  servers send a `${VAR}` Bearer header; OAuth servers carry url only and
-  authorize when the agent first connects) and shows as its own row. When the
-  assistant guesses a service needs a connector (a custom service like PostHog),
-  its row's **Connect** opens the form pre-filled with the name — you supply the
-  URL. New `POST /api/mcp/add`; `Spec.mcp_servers` persists user connections.
-  (Replaces the old "name a service" textarea + "not on Venn?" build placeholder.)
+  server URL + an optional API key. On add, the connection is authored into
+  `agent.yaml` `mcp_servers:` (with a `${VAR}` Bearer header when a key is given,
+  url-only otherwise) and shows as its own row. When the assistant guesses a
+  service needs a connector (a custom service like PostHog), its row's
+  **Connect** opens the form pre-filled with the name — you supply the URL. New
+  `POST /api/mcp/add`; `Spec.mcp_servers` persists user connections. (Replaces
+  the old "name a service" textarea + "not on Venn?" build placeholder.)
   A user-added MCP is **never shown as "connected"** in setup — nothing is
-  verified/authorized here. **OAuth is the default** auth method (most remote
-  MCPs use it; you sign in to authorize), with API key as the alternative and
-  the OAuth client id/secret as optional handshake aids. An OAuth connection
-  reads "OAuth · sign in to authorize"; an API-key one without a key reads
-  "needs an API key". (The interactive OAuth sign-in flow itself is not built
-  yet — see the connections design notes.)
+  verified here. With a key it reads "API key set · connects when you run";
+  without one, "needs an API key". OAuth-authed MCPs aren't supported yet (a
+  follow-up) — API key is the only auth for a custom connection for now.
 
 ### Changed
 - Venn is presented as one **account-level connection**, not a per-service one.

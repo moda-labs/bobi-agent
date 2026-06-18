@@ -506,19 +506,12 @@ class TestPanelEdits:
         assert "ph_secret_123" not in r.text
         assert "POSTHOG_API_KEY=ph_secret_123" in (project / ".modastack" / ".env").read_text()
 
-    def test_mcp_add_oauth_flags_pending(self, project, monkeypatch):
-        monkeypatch.delenv("ACME_OAUTH_CLIENT_SECRET", raising=False)
-        s = SetupState()
-        c = _client(s, project)
-        r = c.post("/api/mcp/add", json={
-            "name": "Acme", "url": "https://mcp.acme.com/mcp", "auth": "oauth",
-            "client_id": "cid_1", "client_secret": "csecret_1"}).json()
-        assert r["ok"] is True and r["oauth_pending"] is True
-        entry = s.spec.mcp_servers["acme"]
-        assert entry["client_id_var"] == "ACME_OAUTH_CLIENT_ID"
-        env = (project / ".modastack" / ".env").read_text()
-        assert "ACME_OAUTH_CLIENT_ID=cid_1" in env
-        assert "ACME_OAUTH_CLIENT_SECRET=csecret_1" in env
+    def test_mcp_add_rejects_oauth(self, project):
+        # OAuth-authed MCPs aren't supported yet — only api_key / none.
+        c = _client(SetupState(), project)
+        assert c.post("/api/mcp/add", json={
+            "name": "Acme", "url": "https://mcp.acme.com/mcp",
+            "auth": "oauth"}).status_code == 400
 
     def test_mcp_add_requires_name_and_url(self, project):
         c = _client(SetupState(), project)
@@ -542,18 +535,27 @@ class TestPanelEdits:
         assert ph["via"] == "hosted MCP" and ph["status"] == "added"
         assert ph["user_mcp"] is True
 
-    def test_add_defaults_to_oauth_and_flags_signin(self, project, monkeypatch):
-        # No auth specified → defaults to OAuth (the common case for remote
-        # MCPs). It needs an interactive sign-in, so the row says so — never
-        # "connected".
+    def test_add_without_key_flags_needs_auth(self, project, monkeypatch):
+        # No key given → defaults to api_key with no secret yet → flagged
+        # "needs an API key", never "connected".
         monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
         s = SetupState()
         c = _client(s, project)
         c.post("/api/mcp/add", json={"name": "Acme", "url": "https://mcp.acme.com/mcp"})
-        assert s.spec.mcp_servers["acme"]["auth"] == "oauth"
+        assert s.spec.mcp_servers["acme"]["auth"] == "api_key"
         ph = next(x for x in c.get("/api/connect").json()["cards"] if x["key"] == "acme")
         assert ph["status"] == "needs_auth"
-        assert "oauth" in ph["note"].lower() and "sign" in ph["note"].lower()
+        assert "api key" in ph["note"].lower()
+
+    def test_add_public_server_no_auth(self, project, monkeypatch):
+        # Explicit auth=none → a public server, added without a key.
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "DeepWiki", "url": "https://mcp.deepwiki.com/mcp", "auth": "none"})
+        ph = next(x for x in c.get("/api/connect").json()["cards"] if x["key"] == "deepwiki")
+        assert ph["status"] == "added" and "public" in ph["note"].lower()
 
 
 # --- review file endpoints -----------------------------------------------

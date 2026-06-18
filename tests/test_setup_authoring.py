@@ -409,9 +409,9 @@ class TestUserMcpServers:
         assert ph["url"] == "https://mcp.posthog.com/mcp"
         assert ph["headers"] == {"Authorization": "Bearer ${POSTHOG_API_KEY}"}
 
-    def test_oauth_mcp_emits_url_only(self):
+    def test_public_user_mcp_emits_url_only(self):
         s = self._state(acme={"url": "https://mcp.acme.com/mcp", "type": "http",
-                              "auth": "oauth", "client_id_var": "ACME_OAUTH_CLIENT_ID"})
+                              "auth": "none"})
         cfg = yaml.safe_load(authoring.build_agent_yaml(s, catalog=set()))
         assert "headers" not in cfg["mcp_servers"]["acme"]
         assert cfg["mcp_servers"]["acme"]["url"] == "https://mcp.acme.com/mcp"

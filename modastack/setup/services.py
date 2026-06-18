@@ -469,9 +469,9 @@ def catalog_cards() -> list[dict]:
 def user_mcp_card(key: str, cfg: dict, project: Path) -> dict:
     """A Connect card for a user-defined custom MCP connection (added by name +
     remote URL). We do NOT verify the connection here — the agent actually
-    connects (and runs any OAuth) at `modastack start`, where mcp_servers are
-    probed. So this never claims "connected"; it reports what auth was set and
-    flags when the server still needs credentials."""
+    connects at `modastack start`, where mcp_servers are probed. So this never
+    claims "connected"; it reports what auth was set and flags when the server
+    still needs a key."""
     from modastack.setup.actions import read_env
     auth = cfg.get("auth", "none")
     label = cfg.get("label") or _display_name(key)
@@ -482,10 +482,6 @@ def user_mcp_card(key: str, cfg: dict, project: Path) -> dict:
         status = "added" if present else "needs_auth"
         note = ("API key set · connects when you run" if present
                 else "needs an API key")
-    elif auth == "oauth":
-        # OAuth needs an interactive sign-in to authorize. That flow isn't built
-        # yet (a follow-up), so flag it honestly rather than imply it's live.
-        status, note = "needs_auth", "OAuth · sign-in coming soon"
     else:
         status, note = "added", "no auth (public server)"
     return {

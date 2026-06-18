@@ -415,17 +415,7 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .yamlish .flab{color:var(--accent);}
 .sp-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:4px;}
 
-/* Add-a-connection form: auth method picker + advanced fields. */
-.mcp-auth-sec{margin-bottom:12px;}
-.mcp-auth-sec > .flab{display:block;margin-bottom:6px;}
-.mcp-adv{margin:2px 0 12px;border-top:1px solid var(--border);padding-top:10px;}
-.mcp-adv summary{font-family:var(--font-mono);font-size:11px;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);cursor:pointer;list-style:none;}
-.mcp-adv summary::-webkit-details-marker{display:none;}
-.mcp-adv summary::before{content:"▸ ";color:var(--faint);}
-.mcp-adv[open] summary::before{content:"▾ ";}
-.mcp-auth{display:flex;gap:14px;margin:10px 0;}
-.uopt-radio{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;color:var(--text);cursor:pointer;}
-.uopt-radio input{accent-color:var(--accent);}
+/* Add-a-connection form status/error. */
 .mcp-status:empty{display:none;}
 .mcp-err{margin-top:10px;font-size:12.5px;color:var(--err);background:rgba(181,70,43,.08);border:1px solid rgba(181,70,43,.3);border-radius:8px;padding:9px 12px;}
 

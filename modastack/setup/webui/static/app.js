@@ -1368,65 +1368,39 @@
     });
   }
   // Add a connection = point modastack at a remote MCP server (the Claude-style
-  // connector form): name + URL, with optional API-key / OAuth auth. When the
-  // assistant guesses a connection is needed (a custom service like PostHog),
-  // the row's Connect opens this prefilled with the name — you supply the URL.
+  // connector form): name + URL + an API key. When the assistant guesses a
+  // connection is needed (a custom service like PostHog), the row's Connect
+  // opens this prefilled with the name — you supply the URL. (OAuth-authed MCPs
+  // aren't supported yet — that's a follow-up; API key is the only auth here.)
   function openMcpModal(prefill) {
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "mcp-ov";
     ov.innerHTML = `<div class="secret-panel">
       <div class="sp-head"><b>Add a connection</b><button class="btn ghost sm" id="mcp-close">Close</button></div>
       <div class="sp-body">
-        <p class="fhelp">Connect a remote MCP server — name it and paste its URL. Add auth under Advanced if it needs it.</p>
+        <p class="fhelp">Connect a remote MCP server — name it, paste its URL, and add an API key if it needs one.</p>
         <label class="fld"><span class="flab">Name</span>
           <input id="mcp-name" placeholder="e.g. PostHog" autocomplete="off" value="${esc(prefill || "")}"></label>
         <label class="fld"><span class="flab">Remote server URL</span>
           <input id="mcp-url" placeholder="https://mcp.example.com/mcp" autocomplete="off"></label>
-        <div class="mcp-auth-sec">
-          <span class="flab">Authentication</span>
-          <div class="mcp-auth">
-            <label class="uopt-radio"><input type="radio" name="mcpauth" value="oauth" checked> OAuth</label>
-            <label class="uopt-radio"><input type="radio" name="mcpauth" value="api_key"> API key</label>
-          </div>
-          <div id="mcp-auth-fields"></div>
-        </div>
+        <label class="fld"><span class="flab">API key <span class="fhelp inline">optional — only if the server needs one</span></span>
+          <input id="mcp-key" type="password" placeholder="stored in .env, never sent to the model" autocomplete="off"></label>
         <div class="sp-actions"><button class="btn primary sm" id="mcp-add">Add</button></div>
         <div class="mcp-status" id="mcp-status"></div>
       </div></div>`;
     document.body.appendChild(ov);
     (prefill ? $("#mcp-url") : $("#mcp-name")).focus();
     ov.addEventListener("click", e => { if (e.target.id === "mcp-close" || e.target === ov) ov.remove(); });
-    const renderAuth = () => {
-      const v = (ov.querySelector("input[name=mcpauth]:checked") || {}).value || "oauth";
-      const f = $("#mcp-auth-fields");
-      if (v === "api_key")
-        f.innerHTML = `<label class="fld"><span class="flab">API key</span>
-          <input id="mcp-key" type="password" placeholder="stored in .env, never sent to the model" autocomplete="off"></label>`;
-      else
-        f.innerHTML = `<p class="fhelp">Most remote MCPs use OAuth — you sign in to authorize access. Client ID/secret are optional (only if the server needs a pre-registered app).</p>
-          <details class="mcp-adv"><summary>OAuth client (optional)</summary>
-            <label class="fld"><span class="flab">OAuth client ID</span>
-              <input id="mcp-cid" autocomplete="off"></label>
-            <label class="fld"><span class="flab">OAuth client secret</span>
-              <input id="mcp-cs" type="password" placeholder="stored in .env" autocomplete="off"></label>
-          </details>`;
-    };
-    ov.querySelectorAll("input[name=mcpauth]").forEach(r => r.addEventListener("change", renderAuth));
-    renderAuth();   // OAuth is the default — show its helper up front
     $("#mcp-add").addEventListener("click", () => mcpAdd(ov));
   }
   async function mcpAdd(ov) {
-    const auth = (ov.querySelector("input[name=mcpauth]:checked") || {}).value || "none";
+    const key = (($("#mcp-key") || {}).value || "").trim();
     const payload = {
       name: ($("#mcp-name").value || "").trim(),
       url: ($("#mcp-url").value || "").trim(),
-      auth,
+      auth: key ? "api_key" : "none",
+      api_key: key,
     };
-    if (auth === "api_key") payload.api_key = (($("#mcp-key") || {}).value || "").trim();
-    if (auth === "oauth") {
-      payload.client_id = (($("#mcp-cid") || {}).value || "").trim();
-      payload.client_secret = (($("#mcp-cs") || {}).value || "").trim();
-    }
     const r = await postJSON("/api/mcp/add", payload);
     if (!r.ok) {
       const st = $("#mcp-status");
@@ -1437,8 +1411,7 @@
     _connData = await getJSON("/api/connect");
     ov.remove();
     renderUniCards();
-    // Honest: nothing is verified/authorized here yet — the row says what's
-    // still needed (OAuth sign-in, or an API key).
+    // Honest: nothing is verified here yet — the row says what's still needed.
     toast("Connection added");
   }
 
