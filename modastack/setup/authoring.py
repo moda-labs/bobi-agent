@@ -613,15 +613,17 @@ async def author_pack(state: SetupState, project: Path, *,
                     user += ("\n\nThe team already has this shared base prompt "
                              "(agent.md) — align with it, do not contradict or "
                              "repeat it:\n\n" + base_md)
+            # Stream into a buffer, not straight onto disk: if the pour fails
+            # mid-file (e.g. the model stalls and llm.stream raises), the target
+            # must NOT be left truncated. In open/modify mode `target` still
+            # holds the user's original prose, which a half-written `open("w")`
+            # would destroy. We write once, at the end, after normalizing.
             parts: list[str] = []
-            with target.open("w") as f:
-                async for chunk in llm.stream(system, user,
-                                              model=model, cwd=str(project),
-                                              stream_fn=stream_fn):
-                    f.write(chunk)
-                    f.flush()
-                    parts.append(chunk)
-                    yield {"type": "delta", "path": spec.path, "text": chunk}
+            async for chunk in llm.stream(system, user,
+                                          model=model, cwd=str(project),
+                                          stream_fn=stream_fn):
+                parts.append(chunk)
+                yield {"type": "delta", "path": spec.path, "text": chunk}
             # Normalize once: strip an accidental wrapping code fence; a
             # model that produced nothing usable keeps the prior file (open) or
             # gets a stub (create), never a blank.

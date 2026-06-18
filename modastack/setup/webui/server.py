@@ -294,6 +294,15 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             if not open_mode.is_team(src):
                 return JSONResponse({"error": "that folder isn't a team "
                                      "(no agent.yaml)"}, status_code=400)
+            # Forking/importing into a NEW location must not clobber a DIFFERENT
+            # team already living there — copy_into merges (copytree
+            # dirs_exist_ok) and would corrupt it. Opening a team in place sends
+            # location == team_path (src == abs_loc), which is allowed.
+            if abs_loc != src and abs_loc.exists():
+                return JSONResponse(
+                    {"error": f"a team already exists at {abs_loc} — rename or "
+                     "remove it first, or choose another location."},
+                    status_code=409)
             try:
                 open_mode.copy_into(src, abs_loc)
             except ValueError as e:
@@ -304,6 +313,14 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             if not team:
                 return JSONResponse({"error": "pick a team to download"},
                                     status_code=400)
+            # Don't merge a template over a team that already lives at the target
+            # (fetch_into → copy_into uses copytree dirs_exist_ok). Open it from
+            # the hub or remove it first to start fresh.
+            if abs_loc.exists():
+                return JSONResponse(
+                    {"error": f"a team already exists at {abs_loc} — open it from "
+                     "the hub, or remove it first to start from this template."},
+                    status_code=409)
             try:
                 open_mode.fetch_into(project, team, abs_loc)
             except Exception as e:

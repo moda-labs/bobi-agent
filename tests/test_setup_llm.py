@@ -64,6 +64,37 @@ class TestComplete:
             _run(llm.complete("sys", "u", stream_fn=boom))
 
 
+class TestIdleTimeout:
+    # Regression: the build pour hung forever when the SDK authoring call
+    # stalled (no tokens), leaving the UI spinning with no error. An idle
+    # timeout must turn a stall into an LLMError so the build surfaces
+    # "Back to editing / Try again" instead of hanging.
+    def test_stall_raises_llmerror(self):
+        async def stalling(*, system_prompt, user_prompt, model, cwd):
+            yield "partial"
+            await asyncio.sleep(3600)   # never yields again
+            yield "never"               # pragma: no cover
+
+        async def go():
+            return [c async for c in
+                    llm.stream("s", "u", stream_fn=stalling, idle_timeout=0.2)]
+
+        with pytest.raises(LLMError):
+            _run(go())
+
+    def test_steady_stream_under_idle_window_completes(self):
+        # Chunks that keep arriving within the idle window are fine, even if the
+        # total runtime exceeds it — only a *gap* longer than the window stalls.
+        async def steady(*, system_prompt, user_prompt, model, cwd):
+            for c in ["a", "b", "c"]:
+                await asyncio.sleep(0.05)
+                yield c
+
+        out = _run(_collect(llm.stream("s", "u", stream_fn=steady,
+                                       idle_timeout=0.3)))
+        assert out == ["a", "b", "c"]
+
+
 class TestDeltaExtraction:
     def test_pulls_text_from_content_block_delta(self):
         ev = {"type": "content_block_delta",

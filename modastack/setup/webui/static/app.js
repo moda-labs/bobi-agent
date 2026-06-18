@@ -128,6 +128,7 @@
   // The homepage (team hub) isn't a setup stage — it's a client view shown at
   // stage `start` for returning users, and after Finish via the Done button.
   let atHome = false;
+  let homeLibrary = "";   // the ~/modastack-agents library; cached from /api/home for import
   async function refresh() { S = await getJSON("/api/state"); render(); }
   async function boot() {
     S = await getJSON("/api/state");
@@ -156,6 +157,13 @@
     building = false; buildGen++;   // supersede any in-flight build
     await go(target);
   }
+  // The intro lives at the client-only `start` stage (no server `BACK_TO`
+  // entry), so its Back routes by where it was entered from: back to the team
+  // hub, or to the welcome on-ramp on first run.
+  function introBack() {
+    if (introFrom === "hub") { atHome = true; render(); }
+    else { welcomed = false; render(); }
+  }
   function toast(msg) {
     const t = document.createElement("div");
     t.textContent = msg;
@@ -171,6 +179,10 @@
   // intro. Purely presentational: no server state, skipped on resume (resume
   // lands on a later stage, never `start`).
   let welcomed = false;
+  // Where the intro was entered from, so its Back button knows where to return:
+  // "hub" (came from the team grid via "Add an agent team") or "welcome" (the
+  // first-run on-ramp).
+  let introFrom = "welcome";
   // Vertical recast of the event-driven flow diagram from buildmoda.ai/bobi:
   // event → team → workflow → gate → outcome. Geometric inline-SVG glyphs
   // (offline; no images), accent reserved for the final checkmark.
@@ -224,7 +236,7 @@
       </main>
       ${flowDiagramHTML()}
     </div></div>`;
-    $("#welcome-go").addEventListener("click", () => { welcomed = true; renderIntro(); });
+    $("#welcome-go").addEventListener("click", () => { welcomed = true; introFrom = "welcome"; renderIntro(); });
   }
 
   // --- intro: pick a template team or design a new one ------------------
@@ -240,14 +252,36 @@
     drawIntro();
     loadTemplates();
   }
+  // A consistent header for the full-screen pages: an optional Back button sits
+  // to the LEFT of the eyebrow, title below — so back navigation is always in
+  // the same place. `back` is {attr, label} or null, where `attr` is the bare
+  // data-* the click delegation listens for ("data-back" / "data-introback").
+  // `title` is trusted HTML (the caller escapes any interpolated value).
+  function pageHead(eyebrow, title, back) {
+    const top = back
+      ? `<div class="phead-top"><button class="backbtn" ${back.attr}>← ${esc(back.label || "Back")}</button><span class="eyebrow">${esc(eyebrow)}</span></div>`
+      : `<div class="eyebrow">${esc(eyebrow)}</div>`;
+    return `<div class="phead">${top}<h1>${title}</h1></div>`;
+  }
   function drawIntro() {
     $("#main").innerHTML = `<main class="node narrow intro">
-      <div class="eyebrow">Setup</div>
-      <h1>Build an agent team</h1>
+      ${pageHead("Setup", "Build an agent team", { attr: "data-introback", label: "Back" })}
       <p class="lede">modastack manages entire teams of agents that collaborate to solve problems and automate your work. Some of our favorites are engineering, support, and marketing teams.</p>
-      <p class="intro-lead">Customize your own from scratch, or start from a template.</p>
-      <div class="tmpl-list" id="tmpl-list">${templatesHTML()}</div>
-      ${locFyiHTML()}
+
+      <section class="isec">
+        <div class="isec-head"><span class="isec-num">1</span><h2 class="isec-title">Where to set it up</h2></div>
+        <p class="isec-lede">modastack keeps your team's editable source here, then installs it into this project's <code>.modastack/</code> when you finish.</p>
+        <div class="locbox">
+          <span class="locbox-path" id="loc-path" title="${esc(introLoc)}">${esc(introLoc)}</span>
+          <button type="button" class="btn ghost xs" id="loc-change">Change…</button>
+        </div>
+      </section>
+
+      <section class="isec">
+        <div class="isec-head"><span class="isec-num">2</span><h2 class="isec-title">Choose a starting point</h2></div>
+        <p class="isec-lede">Customize your own from scratch, or start from one of our templates.</p>
+        <div class="tmpl-list" id="tmpl-list">${templatesHTML()}</div>
+      </section>
     </main>`;
     wireIntro();
   }
@@ -262,19 +296,28 @@
       <span class="tmpl-text"><b>Customize my own agent team</b><span>Start from scratch — describe it and modastack designs it with you.</span></span>
       <span class="tmpl-go">New →</span>
     </button>`;
+    // A template row; official teams (shipped from the canonical modastack
+    // registry) carry a badge so they read as trusted, not third-party.
+    const row = (t) =>
+      `<button class="tmpl" data-template="${esc(t.name)}">
+        <span class="tmpl-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/></svg></span>
+        <span class="tmpl-text"><b>${esc(t.name)}${t.official ? `<span class="tmpl-badge">official</span>` : ""}</b><span>${esc(t.description || t.registry || "Agent team template")}</span></span>
+        <span class="tmpl-go">Use →</span>
+      </button>`;
     let rest = "";
     if (introRegistry === null) rest = `<p class="ihint tmpl-note">Loading templates…</p>`;
     else if (!introRegistry.length) rest = `<p class="ihint tmpl-note">No templates available yet.</p>`;
-    else rest = introRegistry.map(t =>
-      `<button class="tmpl" data-template="${esc(t.name)}">
-        <span class="tmpl-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/></svg></span>
-        <span class="tmpl-text"><b>${esc(t.name)}</b><span>${esc(t.description || t.registry || "Agent team template")}</span></span>
-        <span class="tmpl-go">Use →</span>
-      </button>`).join("");
+    else {
+      // Group official templates under their own header; anything from a
+      // user-added registry follows under a neutral "Community" header.
+      const official = introRegistry.filter(t => t.official);
+      const other = introRegistry.filter(t => !t.official);
+      if (official.length)
+        rest += `<div class="tmpl-head">Official templates</div>` + official.map(row).join("");
+      if (other.length)
+        rest += `<div class="tmpl-head">Community templates</div>` + other.map(row).join("");
+    }
     return custom + rest;
-  }
-  function locFyiHTML() {
-    return `<p class="loc-fyi">Your team will be managed in <code id="loc-path">${esc(introLoc)}</code> — <button type="button" class="linkbtn" id="loc-change">change location</button> if you'd like.</p>`;
   }
   async function loadTemplates() {
     const data = await getJSON("/api/registry");
@@ -285,7 +328,7 @@
   function wireIntro() {
     const lc = $("#loc-change");
     if (lc) lc.addEventListener("click", () => openFolderPicker(p => {
-      introLoc = p; const lp = $("#loc-path"); if (lp) lp.textContent = p;
+      introLoc = p; const lp = $("#loc-path"); if (lp) { lp.textContent = p; lp.title = p; }
     }));
   }
   // Shared start path: disables the clicked control, posts, advances on success.
@@ -299,6 +342,17 @@
       return;
     }
     S = r.data; render();
+  }
+  // Import an existing team from anywhere on disk: pick its folder, then copy it
+  // into the library and open it (mode "open" — the server validates it's a real
+  // team and surfaces a clear error if not). No new endpoint; reuses /api/start.
+  function importTeam() {
+    openFolderPicker(picked => {
+      const name = (picked || "").replace(/\/+$/, "").split("/").pop() || "team";
+      const lib = (homeLibrary || introBase).replace(/\/+$/, "");
+      atHome = false;
+      startTeam({ mode: "open", location: lib + "/" + name, team_path: picked }, null, "Importing…");
+    });
   }
   // Server-side folder picker (a localhost page can't open a native OS dialog).
   async function openFolderPicker(onPick) {
@@ -347,7 +401,10 @@
         <div class="ch-input"><textarea id="chinput" rows="1" placeholder="Tell modastack what you want to build…" autocomplete="off"></textarea><button class="btn primary" id="chsend" style="padding:9px 14px">↑</button></div>
       </section>
       <aside class="uni-panel">
-        <div class="uni-head"><span class="up-title" id="up-title" title="click to rename"></span><span class="up-meter" id="uni-meter"></span></div>
+        <div class="uni-head">
+          <div class="up-headrow"><span class="up-title" id="up-title" title="click to rename"></span><span class="up-meter" id="uni-meter"></span></div>
+          <span class="up-loc" id="up-loc"></span>
+        </div>
         <div class="uni-phase" id="uni-phase"></div>
         <div class="uni-cards" id="uni-cards"></div>
         <div class="uni-foot" id="uni-foot"></div>
@@ -376,6 +433,9 @@
     const el = $("#up-title"); if (!el) return;
     el.textContent = S.team_name || "Your team";
     el.classList.toggle("named", !!S.team_name);
+    // Key detail at the top of the panel: where the team's source lives.
+    const loc = $("#up-loc");
+    if (loc) { loc.textContent = S.source_dir || ""; loc.title = S.source_dir || ""; }
   }
   function beginRename() {
     const el = $("#up-title");
@@ -1041,13 +1101,11 @@
   function renderGenerating() {
     setPanes("1fr");
     $("#main").innerHTML = `<main class="node narrow">
-      <div class="eyebrow">Building</div>
-      <h1>Building ${esc(S.team_name || "your team")}</h1>
+      ${pageHead("Building", `Building ${esc(S.team_name || "your team")}`, { attr: "data-back", label: "Back to editing" })}
       <p class="lede" id="genmsg">Writing the pack, checking it, and installing — sit back.</p>
       <div class="genbar"><div class="genbar-fill" id="genfill"></div></div>
       <ul class="genfiles" id="genfiles"></ul>
       <div id="generr"></div>
-      <div class="actions"><button class="backbtn" data-back>← Back to editing</button></div>
     </main>`;
     if (!building) runBuildFlow();
   }
@@ -1147,13 +1205,13 @@
     const counts = `${spec.roles.length || 1} role(s) · ${spec.autonomous.length} automation(s) · ${spec.services.length} service(s)`;
     $("#main").innerHTML = `<main class="filesdone">
       <header class="fd-head">
+        <button class="backbtn" data-back>← Keep editing</button>
         <div class="fd-title">
           <div class="eyebrow">Preview · here's what modastack built</div>
           <h1>${esc(S.team_name || "your team")}</h1>
           <p class="fd-meta">${counts} · source at <code>${esc(where)}</code></p>
         </div>
         <div class="fd-actions">
-          <button class="btn ghost" data-back>← Keep editing</button>
           <button class="btn ghost" id="fd-reveal">Open folder</button>
           <button class="btn primary" id="fd-finish">Looks good — finish</button>
         </div>
@@ -1249,15 +1307,18 @@
       <h1>Your agent teams</h1>
       <p class="lede">Pick a team to view or update it, or add a new one. modastack keeps each team's source and re-installs your changes when you finish editing.</p>
       <div class="home-grid" id="home-list"><p class="ihint">Loading…</p></div>
+      <p class="home-import">Already have a team elsewhere? <button type="button" class="linkbtn" data-importteam>Import a team from your computer</button>.</p>
     </main>`;
     const data = await getJSON("/api/home");
     const teams = data.teams || [];
+    homeLibrary = data.library || homeLibrary;   // cached for import (below)
     const teamGlyph = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/></svg>';
     const cards = teams.map(t =>
       `<button class="hcard" data-openteam="${esc(t.path)}" title="${esc(t.path)}">
         <span class="hcard-glyph">${teamGlyph}</span>
         <b>${esc(t.name)}</b>
         <span class="hcard-desc">${esc(t.description || "Agent team")}</span>
+        <span class="hcard-path">${esc(t.path)}</span>
         <span class="hcard-foot">Open →</span>
       </button>`).join("");
     const add = `<button class="hcard hcard-add" data-addteam>
@@ -1430,9 +1491,11 @@
     const go_ = e.target.closest("[data-go]");
     if (go_) { go(go_.dataset.go); return; }
     if (e.target.closest("[data-addteam]")) {
-      atHome = false; welcomed = true; renderIntro();
+      atHome = false; welcomed = true; introFrom = "hub"; renderIntro();
       return;
     }
+    if (e.target.closest("[data-introback]")) { introBack(); return; }
+    if (e.target.closest("[data-importteam]")) { importTeam(); return; }
     const openteam = e.target.closest("[data-openteam]");
     if (openteam) {
       if (!openteam.disabled) {

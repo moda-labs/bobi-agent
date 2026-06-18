@@ -220,6 +220,36 @@ class TestAuthorPour:
             s, tmp_path, stream_fn=self._fake_stream())))
         assert (existing / "agent.yaml").is_file()   # re-authored, no error
 
+    def test_pour_failure_preserves_original_file_in_open_mode(self, tmp_path):
+        # Regression (review F3): a mid-pour failure (llm.stream raises — e.g. the
+        # model stalls past the idle timeout) must NOT truncate the user's
+        # existing file. In open/modify mode the original agent.md/ROLE.md must
+        # survive an authoring failure intact, never be left half-written.
+        from modastack.setup import open_mode
+        from modastack.setup.llm import LLMError
+
+        src = tmp_path / "modastack-agents" / "myteam"
+        (src / "roles" / "lead").mkdir(parents=True)
+        (src / "agent.yaml").write_text("agent: myteam\nentry_point: lead\n")
+        original_md = "# myteam\n\nORIGINAL BASE PROMPT — do not lose me.\n"
+        (src / "agent.md").write_text(original_md)
+        (src / "roles" / "lead" / "ROLE.md").write_text("# Lead\n\nORIGINAL ROLE.\n")
+
+        s = SetupState()
+        s.mode = "open"
+        s.source_dir = str(src)
+        open_mode.reverse_fill(s, src)
+
+        async def stalling(*, system_prompt, user_prompt, model, cwd):
+            yield "# partial"          # one chunk lands on the wire...
+            raise LLMError("stalled")  # ...then the call dies mid-pour
+
+        with pytest.raises(LLMError):
+            _run(_collect(authoring.author_pack(s, tmp_path, stream_fn=stalling)))
+
+        # The original prose file is intact — not truncated to "# partial".
+        assert (src / "agent.md").read_text() == original_md
+
     def test_pour_strips_wrapping_code_fence(self, tmp_path):
         async def fenced(*, system_prompt, user_prompt, model, cwd):
             yield "```markdown\n# Title\n\nBody text.\n```"

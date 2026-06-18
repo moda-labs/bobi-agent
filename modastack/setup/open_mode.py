@@ -78,19 +78,68 @@ def list_teams_in(scan_dir: Path) -> list[dict]:
     return teams
 
 
+def _bundled_templates_dir() -> Path | None:
+    """Where the starter templates that ship with modastack live. In a wheel
+    install they're packaged under `modastack/templates/`; in a source checkout
+    they're the repo's `agents/` directory beside the package. Returns the first
+    that actually holds team folders, or None."""
+    import modastack
+    pkg = Path(modastack.__file__).resolve().parent
+    for cand in (pkg / "templates", pkg.parent / "agents"):
+        try:
+            if cand.is_dir() and any((c / "agent.yaml").is_file()
+                                     for c in cand.iterdir() if c.is_dir()):
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def list_bundled_templates() -> list[dict]:
+    """Starter teams shipped with modastack — always available and offline, so
+    the setup intro offers a few options even when no registry is reachable.
+    Each is tagged official + bundled and carries a local `path`, so selecting
+    it copies from disk instead of hitting the network."""
+    d = _bundled_templates_dir()
+    if d is None:
+        return []
+    out: list[dict] = []
+    try:
+        children = sorted(d.iterdir())
+    except OSError:
+        return []
+    for sub in children:
+        if not sub.is_dir() or not is_team(sub):
+            continue
+        out.append({"name": sub.name,
+                    "description": _team_description(sub),
+                    "path": str(sub.resolve()),
+                    "official": True,
+                    "bundled": True})
+    return out
+
+
 def list_registry_teams(project: Path) -> list[dict]:
-    """Agent teams available to download from configured registries, plus any
-    already in the project cache. Network-backed and best-effort — a registry
-    that's unreachable simply contributes nothing, never an error."""
+    """Agent teams available to start from: the starter templates bundled with
+    modastack (always, offline), plus any from configured registries and the
+    project cache. Network-backed sources are best-effort — an unreachable
+    registry simply contributes nothing, never an error."""
     from modastack import registry
     teams: dict[str, dict] = {}
+    # Bundled starter templates first, so the intro always has a few options.
+    for t in list_bundled_templates():
+        teams[t["name"]] = t
     try:
         for p in registry.list_remote(project):
             name = p.get("name")
-            if name:
+            if name and name not in teams:
+                repo = p.get("registry", "")
                 teams[name] = {"name": name,
                                "description": p.get("description", ""),
-                               "registry": p.get("registry", "")}
+                               "registry": repo,
+                               # "Official" = shipped from the canonical modastack
+                               # registry, as opposed to a user-added one.
+                               "official": repo == registry.DEFAULT_REPO}
     except Exception:
         pass
     try:
@@ -99,15 +148,21 @@ def list_registry_teams(project: Path) -> list[dict]:
             if name and name not in teams:
                 teams[name] = {"name": name,
                                "description": p.get("description", ""),
-                               "registry": "cached"}
+                               "registry": "cached",
+                               "official": False}
     except Exception:
         pass
     return [teams[k] for k in sorted(teams)]
 
 
 def fetch_into(project: Path, name: str, dest: Path) -> None:
-    """Download a registry team into `dest` (a user-chosen working location).
-    Raises RuntimeError if the team can't be found/fetched."""
+    """Materialize a template into `dest` (a user-chosen working location).
+    Bundled starter templates copy from local disk (offline); anything else
+    downloads from a configured registry. Raises if it can't be found/fetched."""
+    for t in list_bundled_templates():
+        if t["name"] == name:
+            copy_into(Path(t["path"]), dest)
+            return
     from modastack import registry
     cached = registry.fetch(project, name)
     copy_into(cached, dest)

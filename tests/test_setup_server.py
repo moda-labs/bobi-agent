@@ -881,6 +881,25 @@ class TestIntro:
             "location": "agent-teams/ghost"})
         assert r.status_code == 400  # not a team (no agent.yaml)
 
+    def test_start_open_refuses_to_clobber_a_different_team(self, project, home):
+        # Review F4: importing/forking a team into a location already occupied by
+        # a DIFFERENT team must be refused — copy_into uses copytree(dirs_exist_ok)
+        # and would otherwise merge the two into a corrupted hybrid. The existing
+        # team must be left untouched.
+        existing = _seed_library_team(home, "myteam")
+        keep = "# myteam\n\nORIGINAL LIBRARY TEAM — keep me.\n"
+        (existing / "agent.md").write_text(keep)
+        # A different team on disk that happens to share the basename "myteam".
+        import_src = _seed_team(home, "myteam", parent="elsewhere")
+        (import_src / "agent.md").write_text("# myteam\n\nIMPORTED COPY.\n")
+
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={
+            "mode": "open", "team_path": str(import_src), "location": str(existing)})
+        assert r.status_code == 409
+        # the existing team's source is untouched (not merged/overwritten)
+        assert (existing / "agent.md").read_text() == keep
+
     def test_start_registry_fetches_and_reverse_fills(self, project, monkeypatch):
         # The registry fetch is stubbed: it materializes a team at `dest`,
         # mirroring registry.fetch + copy_into without hitting the network.
@@ -901,6 +920,19 @@ class TestIntro:
         assert d["mode"] == "open"
         assert d["spec"]["goal"]
         assert (project / "modastack" / "eng-team" / "agent.yaml").is_file()
+
+    def test_start_registry_refuses_to_clobber_an_existing_team(self, project, home):
+        # Selecting a (bundled/registry) template into a location already holding
+        # a team must not overwrite it — same data-loss class as the open-mode
+        # guard. Found by /qa: bundled templates made this path reachable.
+        existing = _seed_library_team(home, "market-research")
+        keep = "# market-research\n\nMY CUSTOMIZED TEAM — keep me.\n"
+        (existing / "agent.md").write_text(keep)
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={
+            "mode": "registry", "team": "market-research", "location": str(existing)})
+        assert r.status_code == 409
+        assert (existing / "agent.md").read_text() == keep
 
     def test_start_registry_without_team_400(self, project):
         c = _client(SetupState(), project)
