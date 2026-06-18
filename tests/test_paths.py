@@ -45,6 +45,20 @@ class TestBindRoot:
         paths.bind_root(None)
         assert paths.bound_root() is None
 
+    def test_bind_sets_env_var(self, tmp_path, monkeypatch):
+        """bind_root propagates MODASTACK_ROOT into os.environ so child
+        processes inherit the pinned root without re-walking (#249)."""
+        monkeypatch.delenv("MODASTACK_ROOT", raising=False)
+        paths.bind_root(tmp_path)
+        assert os.environ["MODASTACK_ROOT"] == str(tmp_path.resolve())
+
+    def test_unbind_clears_env_var(self, tmp_path, monkeypatch):
+        """Unbinding removes MODASTACK_ROOT from the environment."""
+        paths.bind_root(tmp_path)
+        assert "MODASTACK_ROOT" in os.environ
+        paths.bind_root(None)
+        assert "MODASTACK_ROOT" not in os.environ
+
 
 class TestResolveRoot:
     def test_nearest_install_wins(self, tmp_path):
@@ -130,6 +144,45 @@ class TestResolveRoot:
         with pytest.raises(RuntimeError, match="MODASTACK_ROOT"):
             paths.resolve_root(deep)
 
+    def test_skips_foreign_owned_marker(self, tmp_path, monkeypatch):
+        """A .modastack/ owned by a different uid must be skipped —
+        prevents a second party on a shared host from capturing
+        identity by planting a marker in a writable ancestor (#249)."""
+        # Set up two installations: a foreign-owned inner one and a
+        # same-uid outer one.  The walk should skip the inner.
+        outer = tmp_path / "outer"
+        _install(outer)
+
+        inner = outer / "inner"
+        _install(inner)
+
+        deep = inner / "src"
+        deep.mkdir()
+
+        # Patch _is_owned_by_current_user to reject the inner marker
+        original = paths._is_owned_by_current_user
+
+        def _mock_ownership(marker_dir):
+            if marker_dir == inner / ".modastack":
+                return False
+            return original(marker_dir)
+
+        monkeypatch.setattr(paths, "_is_owned_by_current_user", _mock_ownership)
+
+        # Should skip inner and resolve to outer
+        assert paths.resolve_root(deep) == outer
+
+    def test_no_valid_root_when_all_foreign(self, tmp_path, monkeypatch):
+        """When every candidate is foreign-owned, resolve_root raises
+        rather than binding a foreign root."""
+        foreign = tmp_path / "foreign"
+        _install(foreign)
+
+        monkeypatch.setattr(paths, "_is_owned_by_current_user", lambda _: False)
+
+        with pytest.raises(RuntimeError, match="no Modastack installation found"):
+            paths.resolve_root(foreign)
+
 
 class TestIsLinkedWorktree:
     def test_linked_worktree_detected(self, tmp_path):
@@ -150,6 +203,25 @@ class TestIsLinkedWorktree:
         """A .git file that doesn't start with 'gitdir:' is not a worktree."""
         (tmp_path / ".git").write_text("something else\n")
         assert paths._is_linked_worktree(tmp_path) is False
+
+
+class TestIsOwnedByCurrentUser:
+    def test_own_directory_passes(self, tmp_path):
+        """A directory owned by the current user passes the check."""
+        marker = tmp_path / ".modastack"
+        marker.mkdir()
+        assert paths._is_owned_by_current_user(marker) is True
+
+    def test_nonexistent_directory_fails(self, tmp_path):
+        """A nonexistent path fails the check (OSError on stat)."""
+        assert paths._is_owned_by_current_user(tmp_path / "nope") is False
+
+    def test_non_unix_always_passes(self, tmp_path, monkeypatch):
+        """On platforms without os.getuid, the check is skipped."""
+        monkeypatch.delattr(os, "getuid", raising=False)
+        # Even a nonexistent path should pass when getuid is absent —
+        # the function returns True before attempting stat().
+        assert paths._is_owned_by_current_user(tmp_path / "nope") is True
 
 
 class TestNoSideEffects:
