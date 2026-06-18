@@ -214,43 +214,41 @@ class TestCheckCodexAuth:
         with patch("shutil.which", return_value="/usr/local/bin/codex"), \
              patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test123"}), \
              patch("subprocess.run") as mock_run:
-            # --version succeeds, exec succeeds
-            mock_run.side_effect = [
-                subprocess.CompletedProcess([], 0, stdout="1.0.0\n", stderr=""),
-                subprocess.CompletedProcess([], 0, stdout="hello\n", stderr=""),
-            ]
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout="1.0.0\n", stderr="")
             from modastack.doctor import _check_codex_auth
             r = _check_codex_auth()
         assert r.ok
-        assert "API key" in r.detail
+        assert "OPENAI_API_KEY" in r.detail
 
-    def test_authenticated_with_subscription(self):
+    def test_authenticated_with_subscription(self, tmp_path):
         import subprocess
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "auth.json").write_text("{}")
         with patch("shutil.which", return_value="/usr/local/bin/codex"), \
              patch.dict("os.environ", {}, clear=True), \
-             patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                subprocess.CompletedProcess([], 0, stdout="1.0.0\n", stderr=""),
-                subprocess.CompletedProcess([], 0, stdout="hello\n", stderr=""),
-            ]
+             patch("subprocess.run") as mock_run, \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout="1.0.0\n", stderr="")
             from modastack.doctor import _check_codex_auth
             r = _check_codex_auth()
         assert r.ok
         assert "subscription" in r.detail
 
-    def test_auth_failure(self):
+    def test_no_credentials(self, tmp_path):
         import subprocess
         with patch("shutil.which", return_value="/usr/local/bin/codex"), \
              patch.dict("os.environ", {}, clear=True), \
-             patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                subprocess.CompletedProcess([], 0, stdout="1.0.0\n", stderr=""),
-                subprocess.CompletedProcess([], 1, stdout="", stderr="Error: auth required, please login"),
-            ]
+             patch("subprocess.run") as mock_run, \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout="1.0.0\n", stderr="")
             from modastack.doctor import _check_codex_auth
             r = _check_codex_auth()
         assert not r.ok
-        assert "authentication failed" in r.detail
+        assert "no credentials" in r.detail
         assert "OPENAI_API_KEY" in r.hint
         assert "codex auth login" in r.hint
 
