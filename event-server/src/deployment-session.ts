@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import type { NormalizedEvent } from "./core";
+import { type NormalizedEvent, namespaceSubKey } from "./core";
 
 interface Env {
 	EVENTS: KVNamespace;
@@ -180,12 +180,11 @@ export class DeploymentSession extends DurableObject<Env> {
 			subscriptions: string[];
 		};
 
-		// Remove subscription-index entries
+		// Remove subscription-index entries — use namespaceSubKey from
+		// core.ts so the namespace logic stays in one place.
 		await Promise.all(
 			dep.subscriptions.map(async (sub) => {
-				const isGlobal = sub.startsWith("github:") || sub.startsWith("linear:") || sub.startsWith("slack:");
-				const nsKey = isGlobal ? sub : `${dep.bubble_id}:${sub}`;
-				const kvKey = `subscriptions:${nsKey}`;
+				const kvKey = `subscriptions:${namespaceSubKey(dep.bubble_id, sub)}`;
 				const existing = await this.env.EVENTS.get(kvKey);
 				if (!existing) return;
 				const ids: string[] = JSON.parse(existing);
