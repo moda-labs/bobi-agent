@@ -188,6 +188,23 @@ class EventServerClient:
         """Block until the WS subscription is live. Returns False on timeout."""
         return self._connected.wait(timeout)
 
+    def ack_through(self, seq: int) -> None:
+        """Save cursor and ACK a seq number after delivery.
+
+        Called by the drain loop AFTER an event batch has been delivered
+        to the session inbox, so a crash before delivery never loses the
+        event — the server will replay it on reconnect (#278 bug 2).
+        """
+        if seq <= 0:
+            return
+        _save_cursor(seq, self.cursor_path)
+        ws = self._ws
+        if ws:
+            try:
+                ws.send(json.dumps({"type": "ack", "seq": seq}))
+            except Exception:
+                pass  # next reconnect replays from saved cursor
+
     def stop(self) -> None:
         self._stop.set()
         if self._ws:
@@ -234,7 +251,6 @@ class EventServerClient:
 
             if msg_type in ("event", "replay"):
                 data = msg.get("data", {})
-                seq = data.get("seq", 0)
 
                 _log_event(data, session_id=self.deployment_id)
                 self._queue.put(data)
@@ -242,10 +258,6 @@ class EventServerClient:
 
                 if self.on_event:
                     self.on_event(data)
-
-                if seq > 0:
-                    _save_cursor(seq, self.cursor_path)
-                    ws.send(json.dumps({"type": "ack", "seq": seq}))
 
         def on_error(ws, error):
             log.warning(f"Event client WebSocket error: {error}")

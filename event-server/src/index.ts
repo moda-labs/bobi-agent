@@ -20,7 +20,15 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	getAuthRejectionCounters,
 } from "./core";
+import {
+	isExemptFromBreaker,
+	recordDelivery,
+	drainPaused,
+	conversationKey,
+	buildLoopDetectedEvent,
+} from "./circuit-breaker";
 
 interface Env {
 	EVENTS: KVNamespace;
@@ -40,10 +48,16 @@ function createKVStorage(env: Env): StorageAdapter {
 			return data ? JSON.parse(data) : null;
 		},
 
+		async getDeploymentByName(name: string, bubbleId: string): Promise<DeploymentRecord | null> {
+			const data = await env.EVENTS.get(`deployment_name:${bubbleId}:${name}`);
+			return data ? JSON.parse(data) : null;
+		},
+
 		async putDeployment(deployment: DeploymentRecord): Promise<void> {
 			const json = JSON.stringify(deployment);
 			await env.EVENTS.put(`deployments:${deployment.api_key}`, json);
 			await env.EVENTS.put(`deployment_id:${deployment.id}`, json);
+			await env.EVENTS.put(`deployment_name:${deployment.bubble_id}:${deployment.name}`, json);
 		},
 
 		async getBubble(bubbleId: string): Promise<BubbleRecord | null> {
@@ -58,6 +72,7 @@ function createKVStorage(env: Env): StorageAdapter {
 		async removeDeployment(deployment: DeploymentRecord): Promise<void> {
 			await env.EVENTS.delete(`deployments:${deployment.api_key}`);
 			await env.EVENTS.delete(`deployment_id:${deployment.id}`);
+			await env.EVENTS.delete(`deployment_name:${deployment.bubble_id}:${deployment.name}`);
 		},
 
 		async addSubscription(key: string, deploymentId: string): Promise<void> {
@@ -94,8 +109,45 @@ function createKVStorage(env: Env): StorageAdapter {
 					for (const id of JSON.parse(data)) ids.add(id);
 				}
 			}
+
+			const exempt = isExemptFromBreaker(event);
+			const allowedIds: string[] = [];
+
+			for (const depId of ids) {
+				if (!exempt) {
+					const verdict = recordDelivery(depId, event);
+					if (verdict.justTripped) {
+						const convKey = conversationKey(event)!;
+						const loopEvent = buildLoopDetectedEvent(depId, convKey, event);
+						const loopDoId = env.DEPLOYMENT_SESSION.idFromName(depId);
+						const loopStub = env.DEPLOYMENT_SESSION.get(loopDoId);
+						loopStub.fetch(
+							new Request("https://internal/event", {
+								method: "POST",
+								body: JSON.stringify(loopEvent),
+							}),
+						);
+					}
+					if (!verdict.allow) continue;
+
+					// Human event may have unpaused — drain buffered events
+					const drained = drainPaused(depId, event);
+					for (const paused of drained) {
+						const pDoId = env.DEPLOYMENT_SESSION.idFromName(depId);
+						const pStub = env.DEPLOYMENT_SESSION.get(pDoId);
+						pStub.fetch(
+							new Request("https://internal/event", {
+								method: "POST",
+								body: JSON.stringify(paused),
+							}),
+						);
+					}
+				}
+				allowedIds.push(depId);
+			}
+
 			await Promise.all(
-				[...ids].map((depId) => {
+				allowedIds.map((depId) => {
 					const doId = env.DEPLOYMENT_SESSION.idFromName(depId);
 					const stub = env.DEPLOYMENT_SESSION.get(doId);
 					return stub.fetch(
@@ -106,7 +158,7 @@ function createKVStorage(env: Env): StorageAdapter {
 					);
 				}),
 			);
-			return ids.size;
+			return allowedIds.length;
 		},
 
 		async getSlackWorkspace(workspaceId: string): Promise<SlackWorkspaceRecord | null> {
@@ -159,7 +211,11 @@ export default {
 		const storage = createKVStorage(env);
 
 		if (method === "GET" && path === "/health") {
-			return Response.json({ status: "ok" });
+			return Response.json({
+				status: "ok",
+				auth: "hmac",
+				rejections: getAuthRejectionCounters(),
+			});
 		}
 
 		if (method === "POST" && path === "/webhooks/github") {

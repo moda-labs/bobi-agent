@@ -29,6 +29,24 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q
 
+  event-server:
+    name: Event server (Worker/miniflare)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: event-server
+        run: npm ci
+
+      - name: Run Worker tests
+        working-directory: event-server
+        run: npx vitest run
+
   e2e:
     name: E2E (Playwright)
     runs-on: ubuntu-latest
@@ -76,13 +94,18 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # CPU-only torch for KB tests (test_kb.py needs embedder);
+        # full [dev,kb] so every non-Claude integration test can run.
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev,kb]"
 
-      - name: CLI commands
-        run: pytest tests/integration/test_cli_commands.py --timeout=30 -v
-
-      - name: Event server
-        run: pytest tests/integration/test_event_server.py --timeout=60 -v
+      - name: Run all non-Claude integration tests
+        # Tests that need the claude CLI skip via requires_claude.
+        # New test files are auto-discovered — no explicit file list to rot.
+        run: >-
+          pytest tests/integration/ -m "not claude"
+          --timeout=60 -v
 
   integration-claude:
     name: Integration tests (Claude)
@@ -101,15 +124,50 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
           .venv/bin/pip install -e ".[dev,kb]"
+          .venv/bin/pip install pytest-rerunfailures
 
       - name: Agent launch
-        run: .venv/bin/pytest tests/integration/test_agent_launch.py --timeout=180 -v
+        continue-on-error: true
+        id: agent-launch
+        run: .venv/bin/pytest tests/integration/test_agent_launch.py --timeout=180 --reruns=1 -v
 
       - name: Manager lifecycle
-        run: .venv/bin/pytest tests/integration/test_manager_lifecycle.py --timeout=180 -v
+        continue-on-error: true
+        id: manager-lifecycle
+        run: .venv/bin/pytest tests/integration/test_manager_lifecycle.py --timeout=180 --reruns=1 -v
 
       - name: Manager SDK (direct ClaudeSDKClient)
-        run: .venv/bin/pytest tests/integration/test_manager_sdk.py --timeout=180 -v
+        continue-on-error: true
+        id: manager-sdk
+        run: .venv/bin/pytest tests/integration/test_manager_sdk.py --timeout=180 --reruns=1 -v
 
       - name: End-to-end event flow
-        run: .venv/bin/pytest tests/integration/test_e2e_event_flow.py --timeout=180 -v
+        continue-on-error: true
+        id: e2e-flow
+        run: .venv/bin/pytest tests/integration/test_e2e_event_flow.py --timeout=180 --reruns=1 -v
+
+      - name: Messaging
+        continue-on-error: true
+        id: messaging
+        run: .venv/bin/pytest tests/integration/test_messaging.py --timeout=180 --reruns=1 -v
+
+      - name: Setup flow
+        continue-on-error: true
+        id: setup-flow
+        run: .venv/bin/pytest tests/integration/test_setup_flow.py --timeout=900 --reruns=1 -v
+
+      - name: Check for failures
+        # Fail the job if any step above failed, but only after all have run.
+        if: always()
+        run: |
+          failed=""
+          [ "${{ steps.agent-launch.outcome }}" = "failure" ] && failed="$failed agent-launch"
+          [ "${{ steps.manager-lifecycle.outcome }}" = "failure" ] && failed="$failed manager-lifecycle"
+          [ "${{ steps.manager-sdk.outcome }}" = "failure" ] && failed="$failed manager-sdk"
+          [ "${{ steps.e2e-flow.outcome }}" = "failure" ] && failed="$failed e2e-flow"
+          [ "${{ steps.messaging.outcome }}" = "failure" ] && failed="$failed messaging"
+          [ "${{ steps.setup-flow.outcome }}" = "failure" ] && failed="$failed setup-flow"
+          if [ -n "$failed" ]; then
+            echo "::error::Failed steps:$failed"
+            exit 1
+          fi

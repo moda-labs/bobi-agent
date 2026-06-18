@@ -156,6 +156,50 @@ when started with `MODASTACK_ES_WEBHOOK_SECRET` / `MODASTACK_ES_SLACK_SIGNING_SE
 in its environment. Default dogfood runs have no secrets, so unsigned
 payloads are accepted. (The production Cloudflare worker config differs.)
 
+### Section 3b: Cloudflare Worker parity (wrangler dev)
+
+Section 3 covers the local Node server (`local.ts`). This section runs the SAME
+bubble/comms smoke against the **real Cloudflare Worker** (`index.ts` + the
+`DeploymentSession` Durable Object + KV) on the `workerd` runtime via
+`wrangler dev`. It is the faithful end-to-end Worker check: real runtime, real
+HTTP/WS over the wire, exercised by the REAL Python client (`httpx` +
+`websocket-client` + `modastack.events.signing`) — so it catches Python↔Worker
+HMAC-canonicalization drift and real WS-via-DO issues that the miniflare unit
+suite (`event-server/test/index.spec.ts`, in CI per #307/#308) cannot.
+
+`wrangler dev` defaults to **local mode** (no Cloudflare login): real workerd +
+simulated KV (local SQLite) + local DO. Skip this section if `wrangler` isn't
+installed (`event-server/node_modules/.bin/wrangler`).
+
+Boot: `cd event-server && ./node_modules/.bin/wrangler dev --port 8787` in the
+background; wait for `GET http://localhost:8787/health` → `{"status":"ok"}`.
+Then, against `http://localhost:8787` (ws `ws://localhost:8787`):
+
+```
+TEST 3b.1: POST /deployments (unsigned) → 201 with deployment_id + api_key +
+           bubble_id (bub_*) + bubble_key (bkey_*)   [MINT, via KV]
+TEST 3b.2: signed POST /events/inbox/<name> → 200 delivered_to>=1
+           (sign canonical `timestamp\nnonce\nPOST\n/events/inbox/<name>\nbody`
+           with the bubble key; x-moda-bubble/algo/timestamp/nonce/signature)
+TEST 3b.3: unsigned POST /events/<topic> → 403   (namespacing is not auth)
+TEST 3b.4: wrong-key signed publish → 403
+TEST 3b.5: WS /deployments/<id>/subscribe?last_seen=0 (Authorization: Bearer
+           <api_key>) → "connected"; then a signed publish → live
+           {"type":"event",...} frame   [exercises Worker→DO socket path]
+TEST 3b.6: POST /webhooks/github (repo matching subscription) → delivered_to>=1
+           (global topic, unsigned ok)
+TEST 3b.7: DELETE /deployments/<id> (Bearer <api_key>) → 200   [KV delete, #277]
+TEST 3b.8: DELETE with wrong key → 403
+```
+
+Teardown: `pkill -f "wrangler dev"; pkill -f workerd`; verify :8787 free.
+`event-server/.wrangler/` (local KV/DO state) is gitignored.
+
+Limitations: local-sim KV/DO — does NOT cover real-CF KV eventual consistency,
+real DO eviction/hibernation, or the deferred security items S1 (direct-to-DO
+auth) / S2 (KV CAS race); see `docs/SECURITY-FINDINGS.md`. For real-deploy
+coverage: `wrangler deploy` to staging + run this smoke against the URL.
+
 ### Section 4: Workflow System
 
 ```

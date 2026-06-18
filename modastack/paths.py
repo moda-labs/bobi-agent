@@ -20,6 +20,18 @@ error; walking from cwd there would mask it.
 The one sanctioned exception is `modastack install`, which targets its
 literal cwd because it CREATES the root; walking up there would nest new
 projects into enclosing ones.
+
+Trust model (#249):
+- Ownership: on Unix, resolve_root() refuses candidates whose
+  .modastack/ directory is not owned by the current process uid.  This
+  prevents a second party on a shared host from planting a marker in a
+  writable ancestor and capturing identity, credentials, and code
+  execution.
+- Environment pin: bind_root() propagates MODASTACK_ROOT into
+  os.environ so every subprocess (monitors, CLI children) inherits the
+  bound root without re-walking the filesystem.  Combined with the
+  explicit pin in subagent.py, this removes the walk from all managed
+  child contexts.
 """
 
 from __future__ import annotations
@@ -41,10 +53,15 @@ def bind_root(path: Path | None) -> None:
     a bug (it would silently re-identify a running process — registry,
     state, and log writes would split across two roots), so it raises.
     Rebinding to the same resolved path is a no-op.
+
+    On successful bind, MODASTACK_ROOT is set in os.environ so every
+    child process (monitors, CLI sub-invocations) inherits the pinned
+    root without re-walking the filesystem (#249).
     """
     global _root
     if path is None:
         _root = None
+        os.environ.pop("MODASTACK_ROOT", None)
         return
     resolved = path.resolve()
     if _root is not None and resolved != _root:
@@ -53,6 +70,7 @@ def bind_root(path: Path | None) -> None:
             f"to {resolved}. A process binds its identity exactly once."
         )
     _root = resolved
+    os.environ["MODASTACK_ROOT"] = str(resolved)
 
 
 def bound_root() -> Path | None:
@@ -73,6 +91,20 @@ def modastack_root() -> Path:
             "passed by its spawner (child agents)."
         )
     return _root
+
+
+def _is_owned_by_current_user(marker_dir: Path) -> bool:
+    """True when the .modastack/ directory is owned by the running process's uid.
+
+    On non-Unix platforms (no os.getuid), returns True unconditionally —
+    the ownership check is a Unix defense layer and is not the sole guard.
+    """
+    if not hasattr(os, "getuid"):
+        return True  # non-Unix: skip ownership check
+    try:
+        return marker_dir.stat().st_uid == os.getuid()
+    except OSError:
+        return False
 
 
 def _is_linked_worktree(path: Path) -> bool:
@@ -104,9 +136,12 @@ def resolve_root(start: Path) -> Path:
     silently walking from cwd would risk binding a different root —
     the same identity-fork failure mode as #245.
 
-    Linked git worktrees (where .git is a file, not a directory) are
-    skipped even when they carry a checked-in agent.yaml, preventing
-    the worktree from capturing root resolution (#247).
+    Trust guards applied during the walk (#249):
+    - Linked git worktrees (where .git is a file, not a directory) are
+      skipped even when they carry a checked-in agent.yaml (#247).
+    - On Unix, candidates whose .modastack/ directory is not owned by
+      the current uid are skipped — a second party on a shared host
+      planting a marker in a writable ancestor cannot capture identity.
     """
     env_root = os.environ.get("MODASTACK_ROOT")
     if env_root:
@@ -122,8 +157,11 @@ def resolve_root(start: Path) -> Path:
 
     origin = start.resolve()
     for candidate in (origin, *origin.parents):
-        if (candidate / ".modastack" / ROOT_MARKER).is_file():
+        marker_dir = candidate / ".modastack"
+        if (marker_dir / ROOT_MARKER).is_file():
             if _is_linked_worktree(candidate):
+                continue
+            if not _is_owned_by_current_user(marker_dir):
                 continue
             return candidate
     raise RuntimeError(

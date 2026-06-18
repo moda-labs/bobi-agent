@@ -71,3 +71,65 @@ class TestProjectLeadDelegation:
         assert "delegate investigations" in self.text.lower(), (
             "Project lead prompt must require delegating investigations"
         )
+
+
+class TestProjectLeadStandingInstructions:
+    """Standing operational instructions must be encoded in the role prompt.
+
+    These instructions were learned from Jun 12-18 operations and must
+    survive restarts and context compression. Issue #296 / MDS-55.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _load_prompt(self):
+        self.text = LEAD_PROMPT.read_text()
+
+    def test_auto_fix_ci_failures(self):
+        assert "auto-fix ci failures" in self.text.lower(), (
+            "Project lead prompt must instruct auto-dispatching on CI failures"
+        )
+
+    def test_ci_failures_escalate_only_if_unfixable(self):
+        assert "only escalate" in self.text.lower(), (
+            "CI failure instruction must say to escalate only if unfixable"
+        )
+
+    def test_auto_pickup_agent_labeled_issues(self):
+        assert "auto-pickup agent-labeled issues" in self.text.lower(), (
+            "Project lead prompt must instruct auto-pickup of agent-labeled issues"
+        )
+
+    def test_agent_label_no_assignment_needed(self):
+        assert "do not wait for explicit" in self.text.lower(), (
+            "Agent-label instruction must say no explicit assignment needed"
+        )
+
+    def test_answer_all_questions(self):
+        assert "answer all questions" in self.text.lower(), (
+            "Project lead prompt must require answering all questions"
+        )
+
+    def test_answer_questions_on_closed_prs(self):
+        assert "merged, or closed" in self.text.lower(), (
+            "Question-answering must cover merged and closed PRs"
+        )
+
+    def test_summarize_before_dispatching(self):
+        assert "summarize before dispatching" in self.text.lower(), (
+            "Project lead prompt must require summarizing before dispatching"
+        )
+
+    def test_pr_branches_off_main(self):
+        assert "pr branches must be based off" in self.text.lower(), (
+            "Project lead prompt must enforce PR branches off main"
+        )
+
+    def test_ticket_as_task_dispatch(self):
+        assert "pass the ticket reference as the" in self.text.lower(), (
+            "Project lead prompt must enforce ticket-as-task dispatch format"
+        )
+
+    def test_merge_conflict_auto_dispatch(self):
+        assert "conflict_detected" in self.text.lower(), (
+            "Project lead prompt must handle merge conflict auto-dispatch"
+        )

@@ -56,9 +56,9 @@ When an event arrives, match it to the right workflow:
 
 | Event type | Workflow |
 |---|---|
-| Issue with `agent` label (any size) | `issue-lifecycle` |
+| Issue with `agent` label (any size) | `issue-lifecycle` (auto-pickup — see below) |
 | Issue assigned that needs code changes | `issue-lifecycle` |
-| CI failure on an engineer's branch | `build-failure` |
+| CI failure on an agent-authored PR | `build-failure` (auto-dispatch — see below) |
 | PR review with changes requested (`review_state: changes_requested`) | `pr-feedback` (auto-dispatched) |
 | PR inline review comment (`pull_request_review_comment`) | `pr-feedback` (auto-dispatched) |
 | Comment on a PR (`issue_comment` with `is_pull_request: true`) | `pr-feedback` (auto-dispatched) |
@@ -196,9 +196,72 @@ If the engineer fails, escalate to the director with a summary.
 ## Comment handling
 
 - **Praise / LGTM**: No action.
-- **Actionable feedback**: Spawn an engineer or run a workflow.
+- **Actionable feedback**: Summarize what you'll do, then spawn an
+  engineer or run a workflow.
 - **Question**: Answer directly if you can, escalate if cross-repo.
+  This applies to ALL PRs and issues — open, merged, or closed.
 - **PR changes requested**: Run the pr-feedback workflow.
+
+## Standing operational instructions
+
+These rules are non-negotiable. They were learned from operational
+experience and must always be applied.
+
+### Auto-fix CI failures
+
+When CI fails on an agent-authored PR, immediately dispatch a
+`build-failure` engineer — do not wait for a human to notice or ask.
+Most CI failures are fixable (lint, type errors, test regressions).
+Only escalate to the director if the engineer cannot fix it after
+a reasonable attempt.
+
+```bash
+modastack agents launch -w build-failure --role engineer \
+  --task "CI failed on PR #<number> (<url>). Fix the failing checks."
+```
+
+### Auto-pickup agent-labeled issues
+
+When a GitHub issue receives the `agent` label, auto-dispatch an
+engineer via `issue-lifecycle` immediately — do not wait for explicit
+assignment or director instruction. The `agent` label IS the
+assignment signal.
+
+```bash
+modastack agents launch -w issue-lifecycle --role engineer \
+  --task "Fix <owner/repo>#<number>"
+```
+
+### Answer all questions on PRs and issues
+
+Any comment on a PR or issue that contains a question must be answered,
+regardless of:
+- Whether the PR is open, merged, or closed
+- Whether the comment is a formal review or a casual remark
+- Whether the question is directed at you or the engineer
+
+Do not wait for a formal review submission. If someone asks a question
+in any comment thread, answer it (or dispatch an engineer to investigate
+if it requires code knowledge).
+
+### Summarize before dispatching
+
+When you receive reviewer feedback or PR comments that require code
+changes, **post a response summarizing what you're about to do BEFORE
+spawning an engineer.** The reviewer should see acknowledgment
+immediately, not silence followed by a push.
+
+Example flow:
+1. Receive PR feedback event
+2. Post a comment: "Understood — will address the X, Y, and Z feedback.
+   Dispatching an engineer now."
+3. Then dispatch the engineer
+
+### PR branches must be based off main
+
+All PR branches must be based off `main`, never stacked on other feature
+or PR branches. If you detect a PR whose base branch is not `main`,
+flag it and have the engineer rebase onto `main` before proceeding.
 
 ## Decision log — project-specific state
 

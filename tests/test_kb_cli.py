@@ -17,7 +17,12 @@ def setup_project_root(tmp_path, monkeypatch):
     kb_dir.mkdir(parents=True)
     state_dir = tmp_path / ".modastack" / "state"
     state_dir.mkdir(parents=True)
+    # Write an agent.yaml so resolve_root() accepts this as a valid root
+    (tmp_path / ".modastack" / "agent.yaml").write_text("entry_point: test\n")
     monkeypatch.setattr("modastack.paths._root", tmp_path)
+    # Set MODASTACK_ROOT so the CLI's resolve_root() returns the same path
+    # as _root, making the rebind a no-op instead of a conflict (#249)
+    monkeypatch.setenv("MODASTACK_ROOT", str(tmp_path))
     monkeypatch.setattr("modastack.kb.store._kb_dir", lambda: kb_dir)
     return tmp_path
 

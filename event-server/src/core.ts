@@ -56,6 +56,7 @@ export interface SlackWorkspaceRecord {
 
 export interface StorageAdapter {
 	getDeploymentByApiKey(apiKey: string): Promise<DeploymentRecord | null>;
+	getDeploymentByName(name: string, bubbleId: string): Promise<DeploymentRecord | null>;
 	putDeployment(deployment: DeploymentRecord): Promise<void>;
 	removeDeployment(deployment: DeploymentRecord): Promise<void>;
 	addSubscription(key: string, deploymentId: string): Promise<void>;
@@ -347,15 +348,49 @@ export function hasPartialBubbleSignature(ctx: BubbleAuthContext): boolean {
 // — an attacker cannot enumerate valid bubble_ids by timing.
 const DUMMY_BUBBLE_KEY = "bkey_0000000000000000000000000000000000000000000000000000000000000000";
 
+// ---------------------------------------------------------------------------
+// Auth rejection counters — in-memory, reset on restart. Surfaced via /health
+// so a misconfigured or out-of-date client is visible without grepping logs.
+// ---------------------------------------------------------------------------
+
+export interface AuthRejectionCounters {
+	bad_signature: number;
+	stale_timestamp: number;
+	unknown_bubble: number;
+}
+
+const _rejectionCounters: AuthRejectionCounters = {
+	bad_signature: 0,
+	stale_timestamp: 0,
+	unknown_bubble: 0,
+};
+
+export function getAuthRejectionCounters(): AuthRejectionCounters {
+	return { ..._rejectionCounters };
+}
+
+export function resetAuthRejectionCounters(): void {
+	_rejectionCounters.bad_signature = 0;
+	_rejectionCounters.stale_timestamp = 0;
+	_rejectionCounters.unknown_bubble = 0;
+}
+
 // Resolve and verify the bubble that signed a request. Returns the bubble on a
 // valid signature, else null (callers respond with an opaque 403). Always
-// performs an HMAC even on bubble-miss to keep timing uniform.
+// performs an HMAC even on bubble-miss to keep timing uniform. Increments
+// rejection counters on failure so /health can surface misconfigured clients.
 export async function authenticateBubble(
 	storage: StorageAdapter,
 	ctx: BubbleAuthContext,
 ): Promise<BubbleRecord | null> {
 	const bubble = ctx.bubbleId ? await storage.getBubble(ctx.bubbleId) : null;
 	const secret = bubble?.key ?? DUMMY_BUBBLE_KEY;
+
+	// Check for stale timestamp before HMAC — the verifier rejects it anyway,
+	// but we want to classify the rejection reason for observability.
+	const ts = parseInt(ctx.timestamp, 10);
+	const isStale = Number.isFinite(ts) && Math.abs(Date.now() / 1000 - ts) > 300;
+
 	const ok = await verifyBubbleSignature({
 		secret,
 		algo: ctx.algo,
@@ -366,7 +401,18 @@ export async function authenticateBubble(
 		body: ctx.rawBody,
 		signature: ctx.signature,
 	});
-	if (!ok || !bubble) return null;
+
+	if (!ok || !bubble) {
+		// Classify the rejection for the counter.
+		if (isStale) {
+			_rejectionCounters.stale_timestamp++;
+		} else if (!bubble && ctx.bubbleId) {
+			_rejectionCounters.unknown_bubble++;
+		} else {
+			_rejectionCounters.bad_signature++;
+		}
+		return null;
+	}
 	return bubble;
 }
 
@@ -501,6 +547,18 @@ export async function handleRegisterDeployment(
 		const authed = await authenticateBubble(storage, ctx);
 		if (!authed) return { status: 403, body: { error: "forbidden" } };
 		bubble = authed;
+	}
+
+	// Supersede any prior deployment with the same name in this bubble — a
+	// re-register (e.g. after losing deployment_state.json or a --fresh start)
+	// must not leave a stale deployment in the subscription index, otherwise
+	// directed events (inbox/<name>) get delivered twice (#278 bug 1).
+	const prior = await storage.getDeploymentByName(name, bubble.id);
+	if (prior) {
+		for (const sub of prior.subscriptions) {
+			await storage.removeSubscription(namespaceSubKey(bubble.id, sub), prior.id);
+		}
+		await storage.removeDeployment(prior);
 	}
 
 	const deploymentId = crypto.randomUUID();

@@ -14,6 +14,8 @@ import pytest
 from modastack.sdk import _sessions_dir
 from .conftest import requires_claude
 
+pytestmark = pytest.mark.claude
+
 
 @requires_claude
 @pytest.mark.timeout(120)
