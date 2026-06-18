@@ -24,9 +24,10 @@ team instead of dropping to a hand-authored guide (MOD-203).
 ### Changed
 - Venn is presented as one **account-level connection**, not a per-service one.
   Venn-backed services now appear as their own rows ("Gmail · via Venn —
-  ✓ connected via Venn"), and a single dedicated **Venn row** shows overall
-  connection status with a hover explanation and one "Set up Venn" / "Manage
-  Venn" link (was an inline upsell with two separate links).
+  ✓ connected via Venn"), and a single dedicated **Venn row pinned to the top**
+  shows overall connection status, a `?` hover explainer ("Connect lots of
+  services at once with Venn — one key, many integrations"), and one "Set up
+  Venn" / "Manage Venn" link (was an inline upsell with two separate links).
 
 ### Notes
 - The full MOD-203 cascade has two further rungs deferred to follow-ups: a live

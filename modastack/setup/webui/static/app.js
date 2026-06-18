@@ -22,7 +22,7 @@
   const DOCS_CLOUD_URL = "https://docs.modastack.ai/cloud";
   const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4"><path d="M5 12l5 5L19 7"/></svg>';
   const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"/></svg>';
-  const INFO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.6" r="0.6" fill="currentColor" stroke="none"/></svg>';
+  const HELP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.5-2.7 2.5"/><circle cx="12" cy="16.7" r="0.6" fill="currentColor" stroke="none"/></svg>';
   const STATUS_LABEL = { connected: "connected", missing: "connect", unknown: "needs check" };
   // Day-to-day channels for the Chat card.
   const CHANNELS = [
@@ -556,27 +556,26 @@
       // reached through the single account-level Venn connection (the row below).
       body = cards.map(connRow).join("");
     }
-    // Venn is ONE account-level connection many services share — its own row,
-    // shown whenever we have connection data so it can be set up / managed here.
+    // Venn is ONE account-level connection many services share — pinned as the
+    // top row (shown whenever we have connection data) so it can be set up /
+    // managed first; the per-service rows follow.
     const venn = cards ? vennAccountRow(vennConfigured) : "";
     return `<div class="ucard ${(sp.services || []).length ? "filled" : "empty"}">
       <div class="ut">Connections ${slotDot(ok)}</div>
-      <div class="ud">${body}${venn}</div>
+      <div class="ud">${venn}${body}</div>
       <div class="uadd"><button class="lnk add" data-addconn>+ add a connection</button></div></div>`;
   }
   // Account-level Venn: one connection the user manages globally; any number of
   // Venn-backed services (Gmail, Slack, Salesforce…) are reached through it. One
   // link to set up or manage; hover the ⓘ for what Venn is.
   function vennAccountRow(configured) {
-    const info = "Venn is a gateway you connect once with a single account. Any "
-      + "Venn-backed service this team uses (Gmail, Slack, Salesforce…) is then "
-      + "reached through it — no separate key per service.";
+    const help = "Connect lots of services at once with Venn — one key, many integrations";
     const badge = configured
       ? `<span class="cbadge connected">${CHECK} connected</span>`
       : `<span class="cbadge">not connected</span>`;
     return `<div class="uconn venn-acct">
-      <span class="venn-lab"><b>Venn</b><span class="info" tabindex="0" role="img"
-        aria-label="${esc(info)}" title="${esc(info)}">${INFO}</span></span>
+      <span class="venn-lab"><b>Venn</b><span class="help" tabindex="0" role="img"
+        aria-label="${esc(help)}" title="${esc(help)}">${HELP}</span></span>
       <span class="cright">${badge}
         <button class="lnk" data-vennsetup>${configured ? "Manage Venn" : "Set up Venn"}</button></span></div>`;
   }
