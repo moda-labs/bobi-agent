@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.21.0 — 2026-06-18
+
+The `modastack setup` Connections step gains a hosted-MCP rung. A service Venn
+doesn't cover but that ships a public hosted MCP is now wired straight into the
+team instead of dropping to a hand-authored guide (MOD-203).
+
+### Added
+- Connections cascade `native → venn → mcp → custom`. The new `mcp` kind covers
+  services that ship a public hosted MCP server, sourced from a curated registry
+  (`modastack/setup/mcp_registry.py`, seeded with Stripe, Hugging Face, Sentry,
+  Context7, DeepWiki). Venn still wins ahead of the registry — it's the 1-click
+  path.
+- Hosted MCPs are authored into `agent.yaml` `mcp_servers:` so the agent connects
+  to them at runtime. A static-key server captures one `<SVC>_API_KEY` and sends
+  it as a `${VAR}` auth header; an OAuth/public server captures nothing and reads
+  as "✓ wired" (authorized at first connect). `merge_agent_yaml` unions
+  `mcp_servers` non-lossily on open/modify.
+- Connections card renders the `mcp` kind: a "hosted MCP · 1-click" tag, secret
+  capture through the existing credential overlay, and a "wired" state for
+  keyless servers.
+
+### Notes
+- The full MOD-203 cascade has two further rungs deferred to follow-ups: a live
+  web search for a hosted MCP, then a CLI fallback. A registry miss currently
+  falls straight through to `custom`.
+
 ## 0.20.0 — 2026-06-17
 
 The `modastack setup` web UI's team panel becomes a methodical interview and an
