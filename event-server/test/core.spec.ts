@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
 	type StorageAdapter,
 	type DeploymentRecord,
@@ -17,6 +17,9 @@ import {
 	buildBubbleSignature,
 	verifyBubbleSignature,
 	authenticateDeployment,
+	authenticateBubble,
+	getAuthRejectionCounters,
+	resetAuthRejectionCounters,
 	handleGitHubWebhook,
 	handleLinearWebhook,
 	handleSlackWebhook,
@@ -1283,5 +1286,72 @@ describe("handleSlackWorkspaceRegister", () => {
 		expect(body.bot_id).toBe("B_EXPLICIT");
 		const ws = store.slackWorkspaces.get("T_EXPLICIT");
 		expect(ws?.bot_id).toBe("B_EXPLICIT");
+	});
+});
+
+describe("auth rejection counters", () => {
+	beforeEach(() => {
+		resetAuthRejectionCounters();
+	});
+
+	it("starts at zero", () => {
+		const c = getAuthRejectionCounters();
+		expect(c.bad_signature).toBe(0);
+		expect(c.stale_timestamp).toBe(0);
+		expect(c.unknown_bubble).toBe(0);
+	});
+
+	it("increments bad_signature on wrong key", async () => {
+		const store = createMockStorage();
+		seedBubble(store, "bub_test", "bkey_real");
+		const body = '{"text":"hi"}';
+		const ctx = await signCtx({ id: "bub_test", key: "bkey_wrong" }, "POST", "/events/x", body);
+		await authenticateBubble(store, ctx);
+		const c = getAuthRejectionCounters();
+		expect(c.bad_signature).toBe(1);
+		expect(c.stale_timestamp).toBe(0);
+		expect(c.unknown_bubble).toBe(0);
+	});
+
+	it("increments stale_timestamp on expired signature", async () => {
+		const store = createMockStorage();
+		const bubble = seedBubble(store);
+		const staleTs = String(Math.floor(Date.now() / 1000) - 600);
+		const signature = await buildBubbleSignature(bubble.key, staleTs, "n1", "POST", "/events/x", "{}");
+		const ctx: BubbleAuthContext = {
+			bubbleId: bubble.id, algo: "hmac-sha256", timestamp: staleTs,
+			nonce: "n1", signature, method: "POST", path: "/events/x", rawBody: "{}",
+		};
+		await authenticateBubble(store, ctx);
+		const c = getAuthRejectionCounters();
+		expect(c.stale_timestamp).toBe(1);
+		expect(c.bad_signature).toBe(0);
+	});
+
+	it("increments unknown_bubble when bubble_id not found", async () => {
+		const store = createMockStorage();
+		const ctx = await signCtx({ id: "bub_nonexistent", key: "bkey_x" }, "POST", "/events/x", "{}");
+		await authenticateBubble(store, ctx);
+		const c = getAuthRejectionCounters();
+		expect(c.unknown_bubble).toBe(1);
+		expect(c.bad_signature).toBe(0);
+	});
+
+	it("does not increment on successful authentication", async () => {
+		const store = createMockStorage();
+		const bubble = seedBubble(store);
+		const ctx = await signCtx(bubble, "POST", "/events/x", "{}");
+		const result = await authenticateBubble(store, ctx);
+		expect(result).not.toBeNull();
+		const c = getAuthRejectionCounters();
+		expect(c.bad_signature).toBe(0);
+		expect(c.stale_timestamp).toBe(0);
+		expect(c.unknown_bubble).toBe(0);
+	});
+
+	it("returns a copy, not the internal state", () => {
+		const c = getAuthRejectionCounters();
+		c.bad_signature = 999;
+		expect(getAuthRejectionCounters().bad_signature).toBe(0);
 	});
 });
