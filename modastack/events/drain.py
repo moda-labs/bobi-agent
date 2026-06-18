@@ -106,7 +106,8 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
 
 def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                formatter: Callable | None = None,
-               reactor: "EventReactor | None" = None) -> None:
+               reactor: "EventReactor | None" = None,
+               cursor_ack: "Callable[[int], None] | None" = None) -> None:
     """Drain events from a queue and deliver to a session's inbox.
 
     Args:
@@ -118,6 +119,10 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             When set, each event is checked against auto-dispatch rules
             before delivery. Matched events are still delivered but
             annotated so the LLM knows a workflow was already launched.
+        cursor_ack: Optional callback invoked with the highest seq number
+            in each batch AFTER delivery to the inbox. Used to advance the
+            cursor and ACK to the event server only once the event is
+            durably delivered (#278).
     """
     if queue is None:
         from modastack.events.client import event_queue
@@ -224,6 +229,14 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
 
             log.info(f"Delivering {len(group)} event(s) to {session_name}")
             inbox.push(Message(id=_msg_id(), sender="event-bus", text=text))
+
+        # Advance cursor and ACK only AFTER all events in this batch have
+        # been delivered to the inbox — a crash before here means the
+        # server replays the events on reconnect (#278 bug 2).
+        if cursor_ack:
+            max_seq = max((e.get("seq", 0) for e in batch), default=0)
+            if max_seq > 0:
+                cursor_ack(max_seq)
 
         if stop_after:
             return

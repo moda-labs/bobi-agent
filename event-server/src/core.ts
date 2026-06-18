@@ -56,6 +56,7 @@ export interface SlackWorkspaceRecord {
 
 export interface StorageAdapter {
 	getDeploymentByApiKey(apiKey: string): Promise<DeploymentRecord | null>;
+	getDeploymentByName(name: string, bubbleId: string): Promise<DeploymentRecord | null>;
 	putDeployment(deployment: DeploymentRecord): Promise<void>;
 	removeDeployment(deployment: DeploymentRecord): Promise<void>;
 	addSubscription(key: string, deploymentId: string): Promise<void>;
@@ -546,6 +547,18 @@ export async function handleRegisterDeployment(
 		const authed = await authenticateBubble(storage, ctx);
 		if (!authed) return { status: 403, body: { error: "forbidden" } };
 		bubble = authed;
+	}
+
+	// Supersede any prior deployment with the same name in this bubble — a
+	// re-register (e.g. after losing deployment_state.json or a --fresh start)
+	// must not leave a stale deployment in the subscription index, otherwise
+	// directed events (inbox/<name>) get delivered twice (#278 bug 1).
+	const prior = await storage.getDeploymentByName(name, bubble.id);
+	if (prior) {
+		for (const sub of prior.subscriptions) {
+			await storage.removeSubscription(namespaceSubKey(bubble.id, sub), prior.id);
+		}
+		await storage.removeDeployment(prior);
 	}
 
 	const deploymentId = crypto.randomUUID();

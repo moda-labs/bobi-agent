@@ -68,6 +68,21 @@ const storage: StorageAdapter = {
 		};
 	},
 
+	async getDeploymentByName(name: string, bubbleId: string): Promise<DeploymentRecord | null> {
+		for (const dep of deployments.values()) {
+			if (dep.name === name && dep.bubbleId === bubbleId) {
+				return {
+					id: dep.id,
+					name: dep.name,
+					api_key: dep.apiKey,
+					bubble_id: dep.bubbleId,
+					subscriptions: [...dep.subscriptions],
+				};
+			}
+		}
+		return null;
+	},
+
 	async putDeployment(record: DeploymentRecord): Promise<void> {
 		const existing = deployments.get(record.id);
 		if (existing) {

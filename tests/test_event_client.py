@@ -282,6 +282,51 @@ class TestLogEvent:
         assert entry_b["type"] == "pr"
 
 
+class TestAckThrough:
+    """EventServerClient.ack_through saves cursor and sends ACK (#278)."""
+
+    def test_ack_through_saves_cursor(self, tmp_path):
+        from modastack.events.client import EventServerClient, _load_cursor
+        cursor_path = tmp_path / "cursor.json"
+        client = EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=cursor_path,
+        )
+        # No WS connected — ack_through should still save cursor.
+        client.ack_through(42)
+        assert _load_cursor(cursor_path) == 42
+
+    def test_ack_through_sends_ws_ack(self, tmp_path):
+        from modastack.events.client import EventServerClient
+        cursor_path = tmp_path / "cursor.json"
+        client = EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=cursor_path,
+        )
+        sent = []
+        client._ws = MagicMock()
+        client._ws.send = lambda msg: sent.append(json.loads(msg))
+        client.ack_through(10)
+        assert len(sent) == 1
+        assert sent[0] == {"type": "ack", "seq": 10}
+
+    def test_ack_through_ignores_zero_seq(self, tmp_path):
+        from modastack.events.client import EventServerClient, _load_cursor
+        cursor_path = tmp_path / "cursor.json"
+        client = EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=cursor_path,
+        )
+        client.ack_through(0)
+        assert _load_cursor(cursor_path) == 0  # unchanged
+
+
 class TestEventQueue:
 
     def test_queue_starts_empty(self):
