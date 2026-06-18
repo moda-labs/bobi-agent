@@ -27,15 +27,22 @@ CODEX_EXEC_TIMEOUT = 300
 # Subprocess runner
 # ---------------------------------------------------------------------------
 
-def _run_codex_exec(prompt: str, timeout: float = CODEX_EXEC_TIMEOUT) -> dict:
+def _run_codex_exec(prompt: str, model: str = "",
+                    timeout: float = CODEX_EXEC_TIMEOUT) -> dict:
     """Run ``codex exec`` as a subprocess, passing the prompt via stdin.
 
-    Returns ``{"output": "..."}`` on success or ``{"error": "..."}`` on
-    failure.  Never raises — all errors are returned as dicts.
+    When ``model`` is set, it is passed through as ``codex exec -m <model>``;
+    otherwise the Codex CLI's own default model is used. Returns
+    ``{"output": "..."}`` on success or ``{"error": "..."}`` on failure.
+    Never raises — all errors are returned as dicts.
     """
+    cmd = ["codex", "exec"]
+    if model:
+        cmd += ["-m", model]
+    cmd.append("-")
     try:
         result = subprocess.run(
-            ["codex", "exec", "-"],
+            cmd,
             input=prompt,
             capture_output=True,
             text=True,
@@ -85,7 +92,7 @@ def codex_exec(connection_name: str, prompt: str,
         return {"error": f"Connection '{conn['name']}' is kind={conn.get('kind')}, "
                 f"not 'codex'"}
 
-    return _run_codex_exec(prompt)
+    return _run_codex_exec(prompt, model=conn.get("model", ""))
 
 
 # ---------------------------------------------------------------------------

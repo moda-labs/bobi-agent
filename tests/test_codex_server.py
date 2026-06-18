@@ -70,6 +70,15 @@ class TestCodexExecRouting:
         call_args = mock_run.call_args
         assert call_args[0][0] == "Review this code for security issues"
 
+    def test_connection_model_threaded_to_runner(self):
+        """The selected connection's model is passed to _run_codex_exec."""
+        conns = [{"name": "my-codex", "kind": "codex", "provider": "openai-codex",
+                  "api_key": "sk-test", "model": "gpt-5.5"}]
+        with patch("modastack.mcp.codex_server._run_codex_exec") as mock_run:
+            mock_run.return_value = {"output": "done"}
+            codex_exec("my-codex", "review this", conns)
+        assert mock_run.call_args.kwargs.get("model") == "gpt-5.5"
+
     def test_codex_exec_subprocess_failure(self):
         """Subprocess errors are returned as error dicts."""
         with patch("modastack.mcp.codex_server._run_codex_exec") as mock_run:
@@ -93,6 +102,31 @@ class TestRunCodexExec:
         assert cmd[1] == "exec"
         # Prompt should be passed via stdin (as '-')
         assert "-" in cmd
+
+    def test_model_passed_as_flag(self):
+        """A configured model is forwarded as `codex exec -m <model> -`."""
+        from modastack.mcp.codex_server import _run_codex_exec
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "ok"
+        mock_result.stderr = ""
+        with patch("subprocess.run", return_value=mock_result) as mock_subprocess:
+            _run_codex_exec("Review this code", model="gpt-5.5")
+        cmd = mock_subprocess.call_args[0][0]
+        assert cmd == ["codex", "exec", "-m", "gpt-5.5", "-"]
+
+    def test_no_model_omits_flag(self):
+        """With no model, no -m flag is added (Codex CLI default is used)."""
+        from modastack.mcp.codex_server import _run_codex_exec
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "ok"
+        mock_result.stderr = ""
+        with patch("subprocess.run", return_value=mock_result) as mock_subprocess:
+            _run_codex_exec("Review this code")
+        cmd = mock_subprocess.call_args[0][0]
+        assert cmd == ["codex", "exec", "-"]
+        assert "-m" not in cmd
 
     def test_nonzero_exit_code(self):
         from modastack.mcp.codex_server import _run_codex_exec
