@@ -87,18 +87,26 @@ bookkeeping and **no LLM**.
 reusability across teams and to keep the Venn-pull logic in one tested
 place rather than in generated shell strings.)*
 
-1. **`venn_poll` native check runner** — a framework-level Python check
-   (registered in `CHECKS`, invoked via the existing `monitor.check` path,
-   `scheduler.py:373-384`) that runs the Venn CLI pull for a configured
-   service + tool (e.g. `tools execute -s work-gmail -t list_messages`),
-   normalizes the result to a list of `{id, ...}` items, and returns them
-   as conditions. Pure subprocess — **$0 LLM per poll**. Dedup/new-item
-   semantics come for free from `_reconcile`. Params (service, tool, query,
-   id field) come from the monitor record's `check_args`. The published
-   event wakes the **live manager session** (cheap inbox delivery) to do
-   the real work.
+1. **`tool_poll` + `venn_poll` native check runners** — general-purpose
+   framework-level Python checks (registered in `CHECKS`, invoked via the
+   existing `monitor.check` path, `scheduler.py:373-384`).
+   - **`tool_poll`** runs *any* CLI command that outputs JSON (shell string
+     in `monitor.extra['command']`), normalizes the result to `{id, ...}`
+     conditions, and returns them for `_reconcile`. Works with any MCP CLI
+     wrapper, custom scripts, or direct API calls.
+   - **`venn_poll`** is a convenience wrapper that builds the Venn CLI
+     command from `service`/`tool`/`query` params, then delegates to the
+     shared execution path.
+   - **Script caching**: on first successful poll the resolved command is
+     saved as a shell script (`.modastack/state/scripts/<name>.sh`).
+     Subsequent runs try the cached script first — self-healing when the
+     script fails by falling back to direct execution and regenerating
+     the cache. This is the foundation for future agent-generated scripts.
+   - Pure subprocess — **$0 LLM per poll**. Dedup/new-item semantics come
+     for free from `_reconcile`. The published event wakes the **live
+     manager session** (cheap inbox delivery) to do the real work.
 2. **Two-tier semantic gate** (for "about X" needs that genuinely need an
-   LLM to judge relevance): `venn_poll` still does the cheap mechanical
+   LLM to judge relevance): `tool_poll` still does the cheap mechanical
    pull; when a semantic filter is required, the recurring *gate* runs on
    the cheap model (Part A) with a small `max_turns` cap and returns only a
    verdict; the expensive reasoning/action runs in the persistent manager
@@ -109,8 +117,16 @@ place rather than in generated shell strings.)*
    from `run_check_blocking`, `subagent.py:1188`) so a single poll can't
    balloon into a 200-turn run.
 
-Step 1 (`venn_poll`) is fully independent of Part A and ships first; step 2
-depends on Part A's cheap model.
+Step 1 (`tool_poll`/`venn_poll`) is fully independent of Part A and ships
+first; step 2 depends on Part A's cheap model.
+
+**Future: agent-generated scripts.** The script cache lays groundwork for
+a fully self-learning system where description-only monitors auto-generate
+their own fast-path scripts on first run — the agent discovers the right
+MCP/CLI tools, writes a script, and subsequent polls use it at $0. If the
+script breaks (API change, new auth), the system falls back to agent
+runtime to fix and regenerate. This is a separate follow-up (see step 2
+and the semantic gate).
 
 ---
 
