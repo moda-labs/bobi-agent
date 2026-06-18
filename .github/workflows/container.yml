@@ -17,6 +17,9 @@ on:
       - ".github/workflows/container.yml"
   pull_request:
     branches: [main]
+    # `labeled`/`unlabeled` so adding the `ci:live` label triggers a run that
+    # includes the gated live round-trip (default types don't fire on labels).
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths: *image_paths
   schedule:
     - cron: "0 6 * * *"  # nightly at 6am UTC — external-rot canary
@@ -55,21 +58,22 @@ jobs:
       # via wrangler dev) so CI never touches a production deployment. It needs
       # node + the event-server deps on the runner.
       - name: Set up Node (ephemeral wrangler event server)
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:live')
         uses: actions/setup-node@v5
         with:
           node-version: "20"
 
       - name: Install event-server deps
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:live')
         working-directory: event-server
         run: npm ci --no-audit --no-fund
 
       - name: Live ask round-trip
         # Real Claude API call against an ephemeral wrangler event server. Gated
         # off PRs to bound API cost (and fork PRs have no secret anyway); runs on
-        # nightly, push to main, and manual dispatch. Skips if the secret is unset.
-        if: github.event_name != 'pull_request'
+        # nightly, push to main, and manual dispatch — or on a PR labelled
+        # `ci:live` for on-demand verification. Skips if the secret is unset.
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:live')
         env:
           MODASTACK_TEST_IMAGE: modastack:ci
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
