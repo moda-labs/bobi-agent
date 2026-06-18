@@ -83,6 +83,8 @@ include = ["modastack", "event-server", "agents", "README.md", "CHANGELOG.md"]
 exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "claude: test requires a real Claude CLI session (deselected in integration-fast)",
     "local_only: test only runs against the local Node.js event server backend",
