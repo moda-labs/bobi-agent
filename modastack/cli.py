@@ -1356,8 +1356,17 @@ def events(tail, decisions_only):
                         continue
                     seen_events.add(key)
 
-                data = entry.get("data", {})
-                detail = data.get("text", "") or data.get("title", "") or data.get("run_key", "")
+                data = entry.get("payload", entry.get("data", {}))
+                detail = ""
+                if entry.get("source") == "inbox" and isinstance(data, dict):
+                    sender = data.get("sender", data.get("from", ""))
+                    text = data.get("text", "")
+                    if sender and text:
+                        detail = f"{sender} → {text}"
+                    elif text:
+                        detail = text
+                if not detail:
+                    detail = data.get("text", "") or data.get("title", "") or data.get("run_key", "") if isinstance(data, dict) else ""
                 if len(detail) > 80:
                     detail = detail[:80] + "..."
                 entries.append((
