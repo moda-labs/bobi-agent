@@ -23,9 +23,22 @@ import {
 	handleSlackWorkspaceRegister,
 	getAuthRejectionCounters,
 } from "./core";
+import {
+	isExemptFromBreaker,
+	recordDelivery,
+	drainPaused,
+	conversationKey,
+	buildLoopDetectedEvent,
+} from "./circuit-breaker";
 
 const MAX_BUFFER = 10_000;
 
+// Eviction backstop (#279): a deployment with zero WebSocket connections
+// for longer than this threshold is considered leaked (client SIGKILLed
+// before calling DELETE) and will be removed.  Keyed on WS-disconnect,
+// NOT activity — a live manager session can idle for hours with zero
+// events but its WS stays connected, so activity-based TTL would break
+// inbox delivery.
 const EVICTION_STALE_MS = parseInt(process.env.MODASTACK_ES_EVICTION_STALE_MS || "60000", 10);
 const EVICTION_SWEEP_MS = parseInt(process.env.MODASTACK_ES_EVICTION_SWEEP_MS || "30000", 10);
 
@@ -42,6 +55,9 @@ interface LocalDeployment {
 	nextSeq: number;
 	eventBuffer: Array<NormalizedEvent & { seq: number }>;
 	websockets: Set<WebSocket>;
+	// Timestamp (ms) when the last WebSocket disconnected, or null if at
+	// least one WS is still connected.  Used by the eviction sweep to
+	// remove deployments leaked by a crashed client (SIGKILL before DELETE).
 	disconnectedAt: number | null;
 }
 
@@ -151,16 +167,59 @@ const storage: StorageAdapter = {
 			}
 		}
 
+		const exempt = isExemptFromBreaker(event);
+
 		let delivered = 0;
 		for (const depId of depIds) {
 			const dep = deployments.get(depId);
 			if (!dep) continue;
 
+			// Circuit breaker: check before delivering (exempt events bypass)
+			if (!exempt) {
+				const verdict = recordDelivery(depId, event);
+				if (verdict.justTripped) {
+					// Emit system.loop_detected — deliver to all subscribers
+					const convKey = conversationKey(event)!;
+					const loopEvent = buildLoopDetectedEvent(depId, convKey, event);
+					const loopKeys = subscriptionKeysForEvent(loopEvent);
+					for (const lk of loopKeys) {
+						for (const lid of subscriptionIndex.get(lk) || []) {
+							const ldep = deployments.get(lid);
+							if (!ldep) continue;
+							const lseq = ldep.nextSeq++;
+							const lseqEvent = { ...loopEvent, seq: lseq };
+							ldep.eventBuffer.push(lseqEvent);
+							if (ldep.eventBuffer.length >= 2 * MAX_BUFFER) {
+								ldep.eventBuffer = ldep.eventBuffer.slice(-MAX_BUFFER);
+							}
+							const lmsg = JSON.stringify({ type: "event", data: lseqEvent });
+							for (const ws of ldep.websockets) {
+								try { ws.send(lmsg); } catch { ldep.websockets.delete(ws); }
+							}
+						}
+					}
+				}
+				if (!verdict.allow) continue;
+
+				// Human event may have unpaused — drain buffered events
+				const drained = drainPaused(depId, event);
+				for (const paused of drained) {
+					const pseq = dep.nextSeq++;
+					const pseqEvent = { ...paused, seq: pseq };
+					dep.eventBuffer.push(pseqEvent);
+					if (dep.eventBuffer.length >= 2 * MAX_BUFFER) {
+						dep.eventBuffer = dep.eventBuffer.slice(-MAX_BUFFER);
+					}
+					const pmsg = JSON.stringify({ type: "event", data: pseqEvent });
+					for (const ws of dep.websockets) {
+						try { ws.send(pmsg); } catch { dep.websockets.delete(ws); }
+					}
+				}
+			}
+
 			const seq = dep.nextSeq++;
 			const seqEvent = { ...event, seq };
 			dep.eventBuffer.push(seqEvent);
-			// Amortized O(1) eviction — shift() on a full 10k buffer copies the
-			// whole array on every event.
 			if (dep.eventBuffer.length >= 2 * MAX_BUFFER) {
 				dep.eventBuffer = dep.eventBuffer.slice(-MAX_BUFFER);
 			}
@@ -419,7 +478,7 @@ function handleUpgrade(req: http.IncomingMessage, socket: import("node:net").Soc
 		);
 
 		dep.websockets.add(ws);
-		dep.disconnectedAt = null;
+		dep.disconnectedAt = null; // at least one WS connected
 
 		ws.on("message", (raw) => {
 			try {
@@ -452,6 +511,7 @@ function evictStaleDeployments() {
 	const now = Date.now();
 	for (const [id, dep] of deployments) {
 		if (dep.disconnectedAt !== null && now - dep.disconnectedAt >= EVICTION_STALE_MS) {
+			// Remove subscription-index entries
 			for (const sub of dep.subscriptions) {
 				const nsKey = namespaceSubKey(dep.bubbleId, sub);
 				const set = subscriptionIndex.get(nsKey);
@@ -462,6 +522,7 @@ function evictStaleDeployments() {
 			}
 			deployments.delete(id);
 			apiKeyIndex.delete(dep.apiKey);
+			console.log(`evicted stale deployment ${id} (${dep.name}) — disconnected ${Math.round((now - dep.disconnectedAt) / 1000)}s ago`);
 		}
 	}
 }
@@ -488,6 +549,7 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", (req, socket, head) => handleUpgrade(req, socket, head, wss));
 
+// Start eviction sweep — unref() so it does not keep the process alive
 const evictionTimer = setInterval(evictStaleDeployments, EVICTION_SWEEP_MS);
 evictionTimer.unref();
 

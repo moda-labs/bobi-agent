@@ -22,6 +22,13 @@ import {
 	handleSlackWorkspaceRegister,
 	getAuthRejectionCounters,
 } from "./core";
+import {
+	isExemptFromBreaker,
+	recordDelivery,
+	drainPaused,
+	conversationKey,
+	buildLoopDetectedEvent,
+} from "./circuit-breaker";
 
 interface Env {
 	EVENTS: KVNamespace;
@@ -102,8 +109,45 @@ function createKVStorage(env: Env): StorageAdapter {
 					for (const id of JSON.parse(data)) ids.add(id);
 				}
 			}
+
+			const exempt = isExemptFromBreaker(event);
+			const allowedIds: string[] = [];
+
+			for (const depId of ids) {
+				if (!exempt) {
+					const verdict = recordDelivery(depId, event);
+					if (verdict.justTripped) {
+						const convKey = conversationKey(event)!;
+						const loopEvent = buildLoopDetectedEvent(depId, convKey, event);
+						const loopDoId = env.DEPLOYMENT_SESSION.idFromName(depId);
+						const loopStub = env.DEPLOYMENT_SESSION.get(loopDoId);
+						loopStub.fetch(
+							new Request("https://internal/event", {
+								method: "POST",
+								body: JSON.stringify(loopEvent),
+							}),
+						);
+					}
+					if (!verdict.allow) continue;
+
+					// Human event may have unpaused — drain buffered events
+					const drained = drainPaused(depId, event);
+					for (const paused of drained) {
+						const pDoId = env.DEPLOYMENT_SESSION.idFromName(depId);
+						const pStub = env.DEPLOYMENT_SESSION.get(pDoId);
+						pStub.fetch(
+							new Request("https://internal/event", {
+								method: "POST",
+								body: JSON.stringify(paused),
+							}),
+						);
+					}
+				}
+				allowedIds.push(depId);
+			}
+
 			await Promise.all(
-				[...ids].map((depId) => {
+				allowedIds.map((depId) => {
 					const doId = env.DEPLOYMENT_SESSION.idFromName(depId);
 					const stub = env.DEPLOYMENT_SESSION.get(doId);
 					return stub.fetch(
@@ -114,7 +158,7 @@ function createKVStorage(env: Env): StorageAdapter {
 					);
 				}),
 			);
-			return ids.size;
+			return allowedIds.length;
 		},
 
 		async getSlackWorkspace(workspaceId: string): Promise<SlackWorkspaceRecord | null> {
