@@ -112,6 +112,36 @@ class TestDrainAutoDispatch:
         assert "AUTO-DISPATCHED" not in delivered[0]
         mock_launch.assert_not_called()
 
+    @patch("modastack.subagent.launch_agent")
+    def test_suppressed_event_gets_suppressed_annotation(self, mock_launch):
+        """Suppressed events get a SUPPRESSED annotation, not AUTO-DISPATCHED."""
+        rules = [
+            AutoDispatchRule(
+                event="github.pull_request",
+                workflow="",
+                match={"action": "review_requested"},
+                suppress=True,
+                cooldown=0,
+            ),
+        ]
+        reactor = EventReactor(rules=rules, cwd="/tmp/proj")
+
+        events = [{
+            "type": "github.pull_request",
+            "text": "[org/repo] review_requested PR #99",
+            "delivery": "bulk",
+            "topics": ["github:org/repo"],
+            "fields": {"action": "review_requested", "number": 99},
+        }]
+
+        delivered = self._run_drain_one_batch(events, reactor=reactor)
+
+        assert len(delivered) == 1
+        assert "SUPPRESSED" in delivered[0]
+        assert "no action needed" in delivered[0]
+        assert "AUTO-DISPATCHED" not in delivered[0]
+        mock_launch.assert_not_called()
+
     def test_no_dispatch_when_reactor_is_none(self):
         """When reactor is None, auto-dispatch is disabled entirely."""
         events = [{

@@ -23,6 +23,8 @@ from modastack.setup.state import SetupState
 from modastack.setup.webui import server
 from .conftest import requires_claude
 
+pytestmark = pytest.mark.claude
+
 NONCE = "integration-nonce"
 
 

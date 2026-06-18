@@ -45,11 +45,20 @@ def _reset_paths_root():
     different path (a process has one identity) — without this reset,
     any test that binds via a real code path (CLI invoke, _run_agent_entry)
     poisons every later test that binds a different tmp root.
+
+    Must also clear MODASTACK_ROOT from os.environ since bind_root() now
+    propagates it (#249) — a stale env var causes resolve_root() to
+    short-circuit to a prior test's root instead of walking from cwd.
     """
     from modastack import paths
     before = paths._root
+    env_before = os.environ.get("MODASTACK_ROOT")
     yield
     paths._root = before
+    if env_before is None:
+        os.environ.pop("MODASTACK_ROOT", None)
+    else:
+        os.environ["MODASTACK_ROOT"] = env_before
 
 
 @pytest.fixture(autouse=True)

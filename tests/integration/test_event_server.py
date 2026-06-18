@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -36,6 +37,21 @@ def _post_json(url: str, data: dict, headers: dict | None = None) -> dict:
 
 def _get_json(url: str) -> dict:
     req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read())
+
+
+def _post_event_signed(base_url: str, topic: str, body_dict: dict,
+                       bubble_id: str, bubble_key: str) -> dict:
+    """Publish to /events/{topic} signed with a bubble key (generic publishes
+    now require a bubble signature — namespacing is not authentication)."""
+    from modastack.events.signing import serialize_body, sign_headers
+
+    body = serialize_body(body_dict)
+    path = f"/events/{topic}"
+    headers = {"Content-Type": "application/json"}
+    headers.update(sign_headers(bubble_id, bubble_key, "POST", path, body))
+    req = urllib.request.Request(base_url + path, data=body.encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read())
 
@@ -323,13 +339,16 @@ class TestMonitorEventDelivery:
             "subscriptions": subs,
         })
         dep_id, api_key = dep["deployment_id"], dep["api_key"]
+        bub_id, bub_key = dep["bubble_id"], dep["bubble_key"]
 
         # The scheduler's publish path: post_event("monitor/support.email",
-        # data) POSTs to /events/support.email with {"source": "monitor"}.
-        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
-            f"{base_url}/events/support.email",
+        # data) POSTs to /events/support.email with {"source": "monitor"},
+        # signed with the instance's bubble key.
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_event_signed(
+            base_url, "support.email",
             {"source": "monitor",
              "payload": {"summary": "new real-customer support email"}},
+            bub_id, bub_key,
         ))
 
         monitor_events = [e for e in events if e.get("source") == "monitor"]
@@ -355,10 +374,12 @@ class TestMonitorEventDelivery:
             "subscriptions": ["monitor/support.email"],
         })
         dep_id, api_key = dep["deployment_id"], dep["api_key"]
+        bub_id, bub_key = dep["bubble_id"], dep["bubble_key"]
 
-        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
-            f"{base_url}/events/support.email",
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_event_signed(
+            base_url, "support.email",
             {"source": "monitor", "payload": {"summary": "x"}},
+            bub_id, bub_key,
         ))
 
         monitor_events = [e for e in events if e.get("source") == "monitor"]
@@ -382,10 +403,12 @@ class TestMonitorEventDelivery:
             "subscriptions": subs,
         })
         dep_id, api_key = dep["deployment_id"], dep["api_key"]
+        bub_id, bub_key = dep["bubble_id"], dep["bubble_key"]
 
-        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
-            f"{base_url}/events/support.email",
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_event_signed(
+            base_url, "support.email",
             {"source": "monitor", "payload": {"summary": "once"}},
+            bub_id, bub_key,
         ))
 
         monitor_events = [e for e in events if e.get("source") == "monitor"]
@@ -565,6 +588,168 @@ def _drain_ws(base_url: str, dep_id: str, api_key: str,
     return events
 
 
+def _register(base_url: str, name: str, subs: list[str],
+              bubble_id: str = "", bubble_key: str = "") -> dict:
+    """Register a deployment. MINT (unsigned) when no bubble_key; JOIN (signed)
+    otherwise. Returns the full server response."""
+    from modastack.events.signing import serialize_body, sign_headers
+
+    body = serialize_body({"name": name, "subscriptions": subs})
+    headers = {"Content-Type": "application/json"}
+    if bubble_key:
+        headers.update(sign_headers(bubble_id, bubble_key, "POST", "/deployments", body))
+    req = urllib.request.Request(f"{base_url}/deployments", data=body.encode(), headers=headers)
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read())
+
+
+def _live_subscriber(base_url: str, dep_id: str, api_key: str, timeout: float = 4):
+    """Open a live WS subscriber. Returns (events, ready_event, thread); events
+    fills as the deployment receives them. Connect several before publishing to
+    observe which bubbles a single publish reaches."""
+    ws_url = base_url.replace("http://", "ws://")
+    url = f"{ws_url}/deployments/{dep_id}/subscribe?last_seen=0"
+    events: list[dict] = []
+    ready = threading.Event()
+
+    def _thread():
+        try:
+            ws = websocket.create_connection(
+                url, header=[f"Authorization: Bearer {api_key}"], timeout=timeout)
+        except Exception:
+            return
+        try:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                ws.settimeout(max(0.1, deadline - time.monotonic()))
+                try:
+                    msg = json.loads(ws.recv())
+                    if msg.get("type") == "connected":
+                        ready.set()
+                    elif msg.get("type") in ("event", "replay"):
+                        events.append(msg["data"])
+                except websocket.WebSocketTimeoutException:
+                    break
+                except Exception:
+                    break
+        finally:
+            ws.close()
+
+    t = threading.Thread(target=_thread, daemon=True)
+    t.start()
+    return events, ready, t
+
+
+class TestBubbleIsolation:
+    """Bubbles minted per `modastack start` must NOT overlap on a shared event
+    server — whether many VMs hit one server or several local instances from
+    different dirs do. Exercised end to end against the real local.ts server.
+    """
+
+    def test_mint_returns_bubble_key_once(self, event_server):
+        base_url, _ = event_server
+        dep = _register(base_url, "m", ["inbox/m"])
+        assert dep["bubble_id"].startswith("bub_")
+        assert dep["bubble_key"].startswith("bkey_")
+
+    def test_same_session_name_no_cross_delivery(self, event_server):
+        """Two instances (two bubbles), same session name + same topic: a publish
+        in bubble A reaches A's subscriber and NEVER bubble B's. This is the
+        #270 Part A acceptance: no cross-delivery in a shared event server."""
+        base_url, _ = event_server
+        a = _register(base_url, "manager", ["inbox/manager"])
+        b = _register(base_url, "manager", ["inbox/manager"])
+        assert a["bubble_id"] != b["bubble_id"]
+
+        evA, readyA, tA = _live_subscriber(base_url, a["deployment_id"], a["api_key"])
+        evB, readyB, tB = _live_subscriber(base_url, b["deployment_id"], b["api_key"])
+        assert readyA.wait(5) and readyB.wait(5)
+        time.sleep(0.1)
+
+        _post_event_signed(base_url, "inbox/manager",
+                           {"source": "inbox", "payload": {"text": "for A only"}},
+                           a["bubble_id"], a["bubble_key"])
+        tA.join(timeout=5)
+        tB.join(timeout=5)
+
+        a_texts = [e["payload"].get("text") for e in evA if e.get("source") == "inbox"]
+        assert "for A only" in a_texts, f"bubble A did not receive its own message: {evA}"
+        b_inbox = [e for e in evB if e.get("source") == "inbox"]
+        assert b_inbox == [], f"bubble B received bubble A's message — isolation broken: {b_inbox}"
+
+    def test_join_shares_bubble_and_delivers(self, event_server):
+        """A second session JOINing a bubble (signed) shares it and receives its
+        events — the within-instance round trip every agent relies on."""
+        base_url, _ = event_server
+        a = _register(base_url, "worker1", ["inbox/worker1"])
+        b = _register(base_url, "worker2", ["inbox/worker2"], a["bubble_id"], a["bubble_key"])
+        assert b["bubble_id"] == a["bubble_id"]
+        assert "bubble_key" not in b  # never returned on join
+
+        evB, readyB, tB = _live_subscriber(base_url, b["deployment_id"], b["api_key"])
+        assert readyB.wait(5)
+        time.sleep(0.1)
+        _post_event_signed(base_url, "inbox/worker2",
+                           {"source": "inbox", "payload": {"text": "hi w2"}},
+                           a["bubble_id"], a["bubble_key"])
+        tB.join(timeout=5)
+        texts = [e["payload"].get("text") for e in evB if e.get("source") == "inbox"]
+        assert "hi w2" in texts
+
+    def test_unsigned_publish_rejected(self, event_server):
+        base_url, _ = event_server
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _post_json(f"{base_url}/events/inbox/x",
+                       {"source": "inbox", "payload": {"text": "nope"}})
+        assert ei.value.code == 403
+
+    def test_publish_with_wrong_bubble_key_rejected(self, event_server):
+        base_url, _ = event_server
+        a = _register(base_url, "m", ["inbox/m"])
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _post_event_signed(base_url, "inbox/m",
+                               {"source": "inbox", "payload": {"text": "x"}},
+                               a["bubble_id"], "bkey_wrong")
+        assert ei.value.code == 403
+
+    def test_join_with_wrong_key_rejected(self, event_server):
+        base_url, _ = event_server
+        a = _register(base_url, "m", ["inbox/m"])
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _register(base_url, "intruder", ["inbox/x"], a["bubble_id"], "bkey_wrong")
+        assert ei.value.code == 403
+
+    def test_webhook_fans_out_across_bubbles(self, event_server):
+        """ACCEPTED v1 behavior (#239): inbound webhooks are GLOBAL — they reach
+        subscribers in ANY bubble. This is the documented cross-tenant hole that
+        keeps Slack/GitHub working pre-#239. Locked as a test so a future change
+        that closes it is a conscious decision, not a silent break."""
+        base_url, _ = event_server
+        a = _register(base_url, "a", ["github:shared/repo"])
+        b = _register(base_url, "b", ["github:shared/repo"])
+        assert a["bubble_id"] != b["bubble_id"]
+
+        evA, rA, tA = _live_subscriber(base_url, a["deployment_id"], a["api_key"])
+        evB, rB, tB = _live_subscriber(base_url, b["deployment_id"], b["api_key"])
+        assert rA.wait(5) and rB.wait(5)
+        time.sleep(0.1)
+
+        _post_json(f"{base_url}/webhooks/github",
+                   {"action": "opened",
+                    "issue": {"number": 1, "title": "x", "state": "open",
+                              "user": {"login": "u"}},
+                    "repository": {"full_name": "shared/repo"}},
+                   headers={"x-github-event": "issues", "x-github-delivery": "iso-1"})
+        tA.join(timeout=5)
+        tB.join(timeout=5)
+
+        assert any(e.get("source") == "github" for e in evA)
+        assert any(e.get("source") == "github" for e in evB), (
+            "webhook did not fan out to the second bubble — the v1 global "
+            "behavior changed; update #239 expectations deliberately"
+        )
+
+
 class TestSchedulerEndToEnd:
     """The unified monitor path, end to end with a REAL scheduler and a REAL
     event server: a native check's condition is published by the scheduler
@@ -577,6 +762,7 @@ class TestSchedulerEndToEnd:
     def test_native_check_finding_delivered_to_subscriber(
             self, event_server, modastack_env):
         from modastack.events import publish as publish_mod
+        from modastack.events.server import ensure_bubble
         from modastack.events.subscriptions import monitor_subscription_keys
         from modastack.monitors.schema import Condition, Monitor
         from modastack.monitors.scheduler import MonitorScheduler
@@ -610,11 +796,13 @@ class TestSchedulerEndToEnd:
                 Condition(key="repo#7", data={"pr_number": 7, "repo": "org/repo"})
             ]
 
+            # Mint the project's bubble; the subscriber JOINs it and the
+            # scheduler's post_event signs with the same bubble.json — both must
+            # share a bubble for the finding to be delivered.
+            bubble = ensure_bubble(base_url, modastack_env.project_path)
             subs = monitor_subscription_keys(["monitor/pr.conflict_detected"])
-            dep = _post_json(f"{base_url}/deployments", {
-                "name": "scheduler-e2e-test",
-                "subscriptions": subs,
-            })
+            dep = _register(base_url, "scheduler-e2e-test", subs,
+                            bubble["bubble_id"], bubble["bubble_key"])
             dep_id, api_key = dep["deployment_id"], dep["api_key"]
 
             events = _send_and_drain(base_url, dep_id, api_key, sched.tick)
@@ -634,3 +822,103 @@ class TestSchedulerEndToEnd:
         finally:
             agent_yaml.write_text(original)
             publish_mod._es_url_cache.clear()
+
+
+class TestBindAddress:
+    """The event server must default to loopback (127.0.0.1) and only widen
+    the listen address when MODASTACK_ES_BIND is set explicitly.  Bind
+    address must be independent of any auth setting (#241)."""
+
+    @staticmethod
+    def _start_server(modastack_env, port: int, extra_env: dict | None = None):
+        """Start an event server with explicit env control, return (proc, log_path)."""
+        from modastack.events.server import _find_event_server_dir, _needs_build, _run_npm
+
+        es_dir = _find_event_server_dir()
+        if not (es_dir / "node_modules").exists():
+            _run_npm(["npm", "install", "--no-audit", "--no-fund"], es_dir)
+        if _needs_build(es_dir):
+            _run_npm(["npm", "run", "build:local"], es_dir)
+
+        log_path = modastack_env.state_dir / f"event-server-bind-{port}.log"
+
+        # Start from a clean env without any inherited MODASTACK_ES_BIND
+        env = {k: v for k, v in os.environ.items() if k != "MODASTACK_ES_BIND"}
+        env["MODASTACK_ES_PORT"] = str(port)
+        if extra_env:
+            env.update(extra_env)
+
+        lf = open(log_path, "w")
+        proc = subprocess.Popen(
+            ["node", str(es_dir / "dist" / "local.js")],
+            stdout=lf, stderr=lf,
+            env=env, start_new_session=True,
+        )
+        return proc, log_path, lf
+
+    @staticmethod
+    def _wait_healthy(url: str, timeout: float = 10) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                data = _get_json(f"{url}/health")
+                if data.get("status") == "ok":
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.3)
+        return False
+
+    @staticmethod
+    def _stop(proc, lf):
+        try:
+            os.kill(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            proc.kill()
+        lf.close()
+
+    def test_default_binds_loopback(self, modastack_env):
+        """Without MODASTACK_ES_BIND, the server binds 127.0.0.1 and logs the
+        loopback-only advisory message."""
+        port = _free_port()
+        proc, log_path, lf = self._start_server(modastack_env, port)
+        try:
+            assert self._wait_healthy(f"http://127.0.0.1:{port}")
+
+            log_text = log_path.read_text()
+            assert f"127.0.0.1:{port}" in log_text
+            assert "loopback-only" in log_text
+            assert "MODASTACK_ES_BIND" in log_text
+        finally:
+            self._stop(proc, lf)
+
+    def test_explicit_bind_all_interfaces(self, modastack_env):
+        """MODASTACK_ES_BIND=0.0.0.0 widens the listener; the log omits the
+        loopback advisory."""
+        port = _free_port()
+        proc, log_path, lf = self._start_server(
+            modastack_env, port, {"MODASTACK_ES_BIND": "0.0.0.0"})
+        try:
+            assert self._wait_healthy(f"http://127.0.0.1:{port}")
+
+            log_text = log_path.read_text()
+            assert f"0.0.0.0:{port}" in log_text
+            assert "loopback-only" not in log_text
+        finally:
+            self._stop(proc, lf)
+
+    def test_bind_decoupled_from_webhook_secret(self, modastack_env):
+        """Setting MODASTACK_ES_WEBHOOK_SECRET must not change the bind address.
+        Regression guard: an earlier draft coupled auth and bind."""
+        port = _free_port()
+        proc, log_path, lf = self._start_server(
+            modastack_env, port, {"MODASTACK_ES_WEBHOOK_SECRET": "s3cret"})
+        try:
+            assert self._wait_healthy(f"http://127.0.0.1:{port}")
+
+            log_text = log_path.read_text()
+            assert f"127.0.0.1:{port}" in log_text
+            assert "loopback-only" in log_text
+        finally:
+            self._stop(proc, lf)

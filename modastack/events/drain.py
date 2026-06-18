@@ -106,7 +106,8 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
 
 def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                formatter: Callable | None = None,
-               reactor: "EventReactor | None" = None) -> None:
+               reactor: "EventReactor | None" = None,
+               cursor_ack: "Callable[[int], None] | None" = None) -> None:
     """Drain events from a queue and deliver to a session's inbox.
 
     Args:
@@ -118,6 +119,10 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             When set, each event is checked against auto-dispatch rules
             before delivery. Matched events are still delivered but
             annotated so the LLM knows a workflow was already launched.
+        cursor_ack: Optional callback invoked with the highest seq number
+            in each batch AFTER delivery to the inbox. Used to advance the
+            cursor and ACK to the event server only once the event is
+            durably delivered (#278).
     """
     if queue is None:
         from modastack.events.client import event_queue
@@ -189,15 +194,15 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             # A reactor failure on one event must not kill the drain
             # thread — that would silently stop ALL event delivery while
             # the queue grows unbounded.
-            was_dispatched = False
+            reactor_result = None
             if reactor:
                 try:
-                    was_dispatched = reactor.process(e)
+                    reactor_result = reactor.process(e)
                 except Exception:
                     log.exception("Reactor failed processing event %s — "
                                   "delivering it un-dispatched", e.get("type"))
             target = chat_events if e.get("delivery") == "chat" else bulk_events
-            target.append((was_dispatched, e))
+            target.append((reactor_result, e))
 
         # Run input channel handlers on chat events (placeholder, typing, etc.).
         if chat_events:
@@ -213,15 +218,25 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 continue
 
             lines = []
-            for was_dispatched, e in group:
+            for reactor_result, e in group:
                 formatted = formatter(e)
-                if was_dispatched:
+                if reactor_result == "dispatched":
                     formatted += "\n  [AUTO-DISPATCHED: workflow launched — no action needed]"
+                elif reactor_result == "suppressed":
+                    formatted += "\n  [SUPPRESSED: informational event — no action needed]"
                 lines.append(formatted)
             text = "\n\n".join(lines)
 
             log.info(f"Delivering {len(group)} event(s) to {session_name}")
             inbox.push(Message(id=_msg_id(), sender="event-bus", text=text))
+
+        # Advance cursor and ACK only AFTER all events in this batch have
+        # been delivered to the inbox — a crash before here means the
+        # server replays the events on reconnect (#278 bug 2).
+        if cursor_ack:
+            max_seq = max((e.get("seq", 0) for e in batch), default=0)
+            if max_seq > 0:
+                cursor_ack(max_seq)
 
         if stop_after:
             return

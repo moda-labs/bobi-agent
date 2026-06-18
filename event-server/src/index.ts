@@ -2,6 +2,7 @@ export { DeploymentSession } from "./deployment-session";
 import {
 	type StorageAdapter,
 	type DeploymentRecord,
+	type BubbleRecord,
 	type SlackWorkspaceRecord,
 	type NormalizedEvent,
 	type HandlerResult,
@@ -9,6 +10,7 @@ import {
 	subscriptionKeysForEvent,
 	verifyGitHubSignature,
 	verifySlackSignature,
+	readBubbleAuthHeaders,
 	handleGitHubWebhook,
 	handleLinearWebhook,
 	handleSlackWebhook,
@@ -18,6 +20,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	getAuthRejectionCounters,
 } from "./core";
 
 interface Env {
@@ -38,15 +41,31 @@ function createKVStorage(env: Env): StorageAdapter {
 			return data ? JSON.parse(data) : null;
 		},
 
+		async getDeploymentByName(name: string, bubbleId: string): Promise<DeploymentRecord | null> {
+			const data = await env.EVENTS.get(`deployment_name:${bubbleId}:${name}`);
+			return data ? JSON.parse(data) : null;
+		},
+
 		async putDeployment(deployment: DeploymentRecord): Promise<void> {
 			const json = JSON.stringify(deployment);
 			await env.EVENTS.put(`deployments:${deployment.api_key}`, json);
 			await env.EVENTS.put(`deployment_id:${deployment.id}`, json);
+			await env.EVENTS.put(`deployment_name:${deployment.bubble_id}:${deployment.name}`, json);
+		},
+
+		async getBubble(bubbleId: string): Promise<BubbleRecord | null> {
+			const data = await env.EVENTS.get(`bubble:${bubbleId}`);
+			return data ? JSON.parse(data) : null;
+		},
+
+		async putBubble(bubble: BubbleRecord): Promise<void> {
+			await env.EVENTS.put(`bubble:${bubble.id}`, JSON.stringify(bubble));
 		},
 
 		async removeDeployment(deployment: DeploymentRecord): Promise<void> {
 			await env.EVENTS.delete(`deployments:${deployment.api_key}`);
 			await env.EVENTS.delete(`deployment_id:${deployment.id}`);
+			await env.EVENTS.delete(`deployment_name:${deployment.bubble_id}:${deployment.name}`);
 		},
 
 		async addSubscription(key: string, deploymentId: string): Promise<void> {
@@ -148,7 +167,11 @@ export default {
 		const storage = createKVStorage(env);
 
 		if (method === "GET" && path === "/health") {
-			return Response.json({ status: "ok" });
+			return Response.json({
+				status: "ok",
+				auth: "hmac",
+				rejections: getAuthRejectionCounters(),
+			});
 		}
 
 		if (method === "POST" && path === "/webhooks/github") {
@@ -212,9 +235,22 @@ export default {
 		}
 
 		if (method === "POST" && path === "/deployments") {
-			const body = await readJson(request);
-			if (!body) return Response.json({ error: "invalid JSON" }, { status: 400 });
-			return respond(await handleRegisterDeployment(storage, body));
+			// Raw text (not readJson) so the join signature verifies over the
+			// exact transmitted bytes.
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			return respond(await handleRegisterDeployment(storage, data, ctx));
 		}
 
 		// WebSocket subscribe — transport-specific (Durable Object proxy)
@@ -272,9 +308,21 @@ export default {
 		// Generic topic: POST /events/{topic}
 		const topicMatch = method === "POST" && path.match(/^\/events\/(.+)$/);
 		if (topicMatch) {
-			const body = await readJson(request);
-			if (!body) return Response.json({ error: "invalid JSON" }, { status: 400 });
-			return respond(await handleTopicEvent(storage, topicMatch[1], body));
+			// Raw text so the publish signature verifies over the exact bytes.
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			return respond(await handleTopicEvent(storage, topicMatch[1], data, ctx));
 		}
 
 		if (method === "POST" && path === "/slack/send") {

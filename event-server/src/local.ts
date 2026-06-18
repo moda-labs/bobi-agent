@@ -4,11 +4,13 @@ import {
 	type NormalizedEvent,
 	type StorageAdapter,
 	type DeploymentRecord,
+	type BubbleRecord,
 	type SlackWorkspaceRecord,
 	type HandlerResult,
 	subscriptionKeysForEvent,
 	verifyGitHubSignature,
 	verifySlackSignature,
+	readBubbleAuthHeaders,
 	handleGitHubWebhook,
 	handleLinearWebhook,
 	handleSlackWebhook,
@@ -18,6 +20,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	getAuthRejectionCounters,
 } from "./core";
 
 const MAX_BUFFER = 10_000;
@@ -30,6 +33,7 @@ interface LocalDeployment {
 	id: string;
 	name: string;
 	apiKey: string;
+	bubbleId: string;
 	subscriptions: string[];
 	nextSeq: number;
 	eventBuffer: Array<NormalizedEvent & { seq: number }>;
@@ -39,6 +43,7 @@ interface LocalDeployment {
 const deployments = new Map<string, LocalDeployment>();
 const apiKeyIndex = new Map<string, string>();
 const subscriptionIndex = new Map<string, Set<string>>();
+const bubbles = new Map<string, BubbleRecord>();
 const slackWorkspaces = new Map<string, SlackWorkspaceRecord>();
 
 const webhookSecret = process.env.MODASTACK_ES_WEBHOOK_SECRET || "";
@@ -58,20 +63,38 @@ const storage: StorageAdapter = {
 			id: dep.id,
 			name: dep.name,
 			api_key: dep.apiKey,
+			bubble_id: dep.bubbleId,
 			subscriptions: [...dep.subscriptions],
 		};
+	},
+
+	async getDeploymentByName(name: string, bubbleId: string): Promise<DeploymentRecord | null> {
+		for (const dep of deployments.values()) {
+			if (dep.name === name && dep.bubbleId === bubbleId) {
+				return {
+					id: dep.id,
+					name: dep.name,
+					api_key: dep.apiKey,
+					bubble_id: dep.bubbleId,
+					subscriptions: [...dep.subscriptions],
+				};
+			}
+		}
+		return null;
 	},
 
 	async putDeployment(record: DeploymentRecord): Promise<void> {
 		const existing = deployments.get(record.id);
 		if (existing) {
 			existing.name = record.name;
+			existing.bubbleId = record.bubble_id;
 			existing.subscriptions = [...record.subscriptions];
 		} else {
 			deployments.set(record.id, {
 				id: record.id,
 				name: record.name,
 				apiKey: record.api_key,
+				bubbleId: record.bubble_id,
 				subscriptions: [...record.subscriptions],
 				nextSeq: 1,
 				eventBuffer: [],
@@ -79,6 +102,14 @@ const storage: StorageAdapter = {
 			});
 			apiKeyIndex.set(record.api_key, record.id);
 		}
+	},
+
+	async getBubble(bubbleId: string): Promise<BubbleRecord | null> {
+		return bubbles.get(bubbleId) || null;
+	},
+
+	async putBubble(bubble: BubbleRecord): Promise<void> {
+		bubbles.set(bubble.id, bubble);
 	},
 
 	async removeDeployment(record: DeploymentRecord): Promise<void> {
@@ -195,7 +226,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	const method = req.method || "GET";
 
 	if (method === "GET" && path === "/health") {
-		return json(res, { status: "ok", mode: "local", deployments: deployments.size });
+		return json(res, {
+			status: "ok",
+			mode: "local",
+			deployments: deployments.size,
+			auth: "hmac",
+			bubbles: bubbles.size,
+			rejections: getAuthRejectionCounters(),
+		});
 	}
 
 	if (method === "POST" && path === "/webhooks/github") {
@@ -252,7 +290,13 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		const body = await readBody(req);
 		const data = parseJson(body);
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
-		return respond(res, await handleRegisterDeployment(storage, data));
+		const ctx = readBubbleAuthHeaders(
+			(n) => req.headers[n] as string | undefined,
+			method,
+			url.pathname + url.search,
+			body,
+		);
+		return respond(res, await handleRegisterDeployment(storage, data, ctx));
 	}
 
 	const subsMatch = path.match(/^\/deployments\/([^/]+)\/subscriptions$/);
@@ -282,7 +326,13 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		const body = await readBody(req);
 		const data = parseJson(body);
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
-		return respond(res, await handleTopicEvent(storage, topicMatch[1], data));
+		const ctx = readBubbleAuthHeaders(
+			(n) => req.headers[n] as string | undefined,
+			method,
+			url.pathname + url.search,
+			body,
+		);
+		return respond(res, await handleTopicEvent(storage, topicMatch[1], data, ctx));
 	}
 
 	if (method === "POST" && path === "/slack/workspaces") {
@@ -316,8 +366,12 @@ function handleUpgrade(req: http.IncomingMessage, socket: import("node:net").Soc
 	}
 
 	const deploymentId = match[1];
+	// Header-only — the `?token=` query fallback was a credential-in-URL leak
+	// (logged in access logs). The deployment's subscriptions are already
+	// bubble-namespaced at registration, so authenticating the socket as this
+	// deployment is sufficient for read isolation.
 	const auth = req.headers.authorization || "";
-	let token = auth.startsWith("Bearer ") ? auth.slice(7) : url.searchParams.get("token") || "";
+	const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
 
 	if (!token) {
 		socket.destroy();
@@ -381,6 +435,7 @@ function handleUpgrade(req: http.IncomingMessage, socket: import("node:net").Soc
 // ---------------------------------------------------------------------------
 
 const port = parseInt(process.env.MODASTACK_ES_PORT || "8080", 10);
+const bind = process.env.MODASTACK_ES_BIND || "127.0.0.1";
 
 const server = http.createServer(async (req, res) => {
 	try {
@@ -397,6 +452,13 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", (req, socket, head) => handleUpgrade(req, socket, head, wss));
 
-server.listen(port, () => {
-	console.log(`modastack event server (local) listening on port ${port}`);
+server.listen(port, bind, () => {
+	if (bind === "127.0.0.1" || bind === "::1") {
+		console.log(
+			`modastack event server (local) listening on ${bind}:${port} ` +
+				`(loopback-only; set MODASTACK_ES_BIND to serve remotely)`,
+		);
+	} else {
+		console.log(`modastack event server (local) listening on ${bind}:${port}`);
+	}
 });

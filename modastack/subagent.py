@@ -812,7 +812,8 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from modastack.events.client import EventServerClient
     from modastack.events.drain import drain_loop
     from modastack.events.server import (
-        ensure_running, register, register_slack_workspaces,
+        ensure_running, ensure_bubble, register, register_slack_workspaces,
+        BubbleRejected,
     )
 
     cfg = Config.load(project_path)
@@ -826,7 +827,22 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         last_err: Exception | None = None
         for attempt in range(attempts):
             try:
-                dep, key = register(url, session_name, subscribe)
+                # Every session JOINs the instance's one bubble (minted once,
+                # lock-protected, by whichever register fires first). If the
+                # server forgot the bubble (restart), re-mint and re-join.
+                bubble = ensure_bubble(url, project_path)
+                try:
+                    dep, key = register(
+                        url, session_name, subscribe,
+                        bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+                    )
+                except BubbleRejected:
+                    bubble = ensure_bubble(url, project_path,
+                                           force_remint_of=bubble["bubble_id"])
+                    dep, key = register(
+                        url, session_name, subscribe,
+                        bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+                    )
                 save_deployment_state(project_path, session_name, dep, key)
                 # A fresh deployment starts a fresh seq space — a leftover
                 # cursor would skip or mis-replay events on first connect.
@@ -914,7 +930,8 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
 
     drain_thread = threading.Thread(
         target=drain_loop, args=(session_name,),
-        kwargs={"reactor": reactor, "queue": session_queue},
+        kwargs={"reactor": reactor, "queue": session_queue,
+                "cursor_ack": client.ack_through},
         daemon=True, name="agent-drain",
     )
     drain_thread.start()

@@ -181,21 +181,33 @@ class TestSlackReply:
 
 
 class TestOutsideProject:
-    """CLI commands run from a directory with no .modastack/."""
+    """CLI commands run from a directory with no .modastack/.
+
+    These tests must strip MODASTACK_ROOT from the subprocess env —
+    bind_root() now propagates it (#249), and a stale value from a prior
+    test would make resolve_root() short-circuit to the wrong root.
+    """
+
+    @staticmethod
+    def _clean_env():
+        """Env dict without MODASTACK_ROOT so the subprocess walks from cwd."""
+        env = {**os.environ}
+        env.pop("MODASTACK_ROOT", None)
+        return env
 
     def _run_outside(self, *args, tmp_path_factory=None, tmp_dir=None):
         cwd = str(tmp_dir)
         return subprocess.run(
             [sys.executable, "-m", "modastack.cli", *args],
             capture_output=True, text=True, timeout=10,
-            cwd=cwd, env={**os.environ},
+            cwd=cwd, env=self._clean_env(),
         )
 
     def test_status_outside_project(self, tmp_path):
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "status"],
             capture_output=True, text=True, timeout=10,
-            cwd=str(tmp_path), env={**os.environ},
+            cwd=str(tmp_path), env=self._clean_env(),
         )
         # No installation → clean usage error, never an invented root.
         assert result.returncode != 0
@@ -205,7 +217,7 @@ class TestOutsideProject:
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "agents", "list"],
             capture_output=True, text=True, timeout=10,
-            cwd=str(tmp_path), env={**os.environ},
+            cwd=str(tmp_path), env=self._clean_env(),
         )
         combined = result.stdout + result.stderr
         assert result.returncode != 0
@@ -215,7 +227,7 @@ class TestOutsideProject:
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "doctor"],
             capture_output=True, text=True, timeout=10,
-            cwd=str(tmp_path), env={**os.environ},
+            cwd=str(tmp_path), env=self._clean_env(),
         )
         # doctor is advisory: it runs anywhere and reports the missing
         # installation per-check instead of refusing to start.
@@ -228,7 +240,7 @@ class TestOutsideProject:
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "transcript", "sessions"],
             capture_output=True, text=True, timeout=10,
-            cwd=str(tmp_path), env={**os.environ},
+            cwd=str(tmp_path), env=self._clean_env(),
         )
         combined = result.stdout + result.stderr
         assert result.returncode != 0
@@ -239,7 +251,7 @@ class TestOutsideProject:
         result = subprocess.run(
             [sys.executable, "-m", "modastack.cli", "workflows", "status"],
             capture_output=True, text=True, timeout=10,
-            cwd=str(tmp_path), env={**os.environ},
+            cwd=str(tmp_path), env=self._clean_env(),
         )
         combined = result.stdout + result.stderr
         assert result.returncode != 0
