@@ -735,6 +735,19 @@ class TestIntro:
         assert d["spec"]["goal"]
         assert (project / "modastack" / "eng-team" / "agent.yaml").is_file()
 
+    def test_start_registry_refuses_to_clobber_an_existing_team(self, project, home):
+        # Selecting a (bundled/registry) template into a location already holding
+        # a team must not overwrite it — same data-loss class as the open-mode
+        # guard. Found by /qa: bundled templates made this path reachable.
+        existing = _seed_library_team(home, "market-research")
+        keep = "# market-research\n\nMY CUSTOMIZED TEAM — keep me.\n"
+        (existing / "agent.md").write_text(keep)
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={
+            "mode": "registry", "team": "market-research", "location": str(existing)})
+        assert r.status_code == 409
+        assert (existing / "agent.md").read_text() == keep
+
     def test_start_registry_without_team_400(self, project):
         c = _client(SetupState(), project)
         r = c.post("/api/start", json={"mode": "registry",
