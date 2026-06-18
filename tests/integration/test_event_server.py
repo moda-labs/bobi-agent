@@ -1,8 +1,13 @@
-"""Integration tests for the local event server.
+"""Integration tests for the event server.
 
-Starts the event server via ensure_running, sends webhook payloads, and
-verifies events are delivered via the WebSocket subscription API.
-All state is isolated to the modastack_env temp install.
+Parametrized over TWO backends:
+1. **local** — the Node.js local.ts server started via ``ensure_running``
+2. **wrangler** — the Cloudflare Worker via ``wrangler dev`` (local mode,
+   no CF credentials needed)
+
+Starts the event server, sends webhook payloads, and verifies events are
+delivered via the WebSocket subscription API.  All state is isolated to
+the modastack_env temp install.
 """
 
 import json
@@ -14,9 +19,12 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 import websocket
+
+PACKAGE_ROOT = Path(__file__).parent.parent.parent
 
 
 def _free_port() -> int:
@@ -56,9 +64,36 @@ def _post_event_signed(base_url: str, topic: str, body_dict: dict,
         return json.loads(resp.read())
 
 
-@pytest.fixture(scope="module")
-def event_server(modastack_env):
-    """Start the event server on a free port, yield the base URL, then stop it."""
+def _has_wrangler() -> bool:
+    """Check whether wrangler is available (npm ci'd in event-server/)."""
+    wrangler = PACKAGE_ROOT / "event-server" / "node_modules" / ".bin" / "wrangler"
+    return wrangler.exists()
+
+
+def _event_server_backends():
+    """Return the list of backend IDs to parametrize over."""
+    backends = ["local"]
+    # wrangler backend is opt-in via the MODASTACK_TEST_WRANGLER env var or
+    # when wrangler is already installed in event-server/node_modules.
+    if os.environ.get("MODASTACK_TEST_WRANGLER") == "1" or _has_wrangler():
+        backends.append("wrangler")
+    return backends
+
+
+def _wait_healthy(base_url: str, timeout: float = 15) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            data = _get_json(f"{base_url}/health")
+            if data.get("status") == "ok":
+                return True
+        except Exception:
+            time.sleep(0.3)
+    return False
+
+
+def _start_local_server(modastack_env):
+    """Start the local Node.js event server, return (base_url, port, cleanup)."""
     from modastack.events.server import ensure_running
 
     for attempt in range(3):
@@ -66,18 +101,7 @@ def event_server(modastack_env):
         base_url = f"http://localhost:{port}"
         ensure_running(port, project_path=modastack_env.project_path)
 
-        deadline = time.monotonic() + 10
-        started = False
-        while time.monotonic() < deadline:
-            try:
-                data = _get_json(f"{base_url}/health")
-                if data.get("status") == "ok":
-                    started = True
-                    break
-            except Exception:
-                time.sleep(0.3)
-
-        if started:
+        if _wait_healthy(base_url, timeout=10):
             break
 
         pid_file = modastack_env.state_dir / "event-server.pid"
@@ -88,23 +112,101 @@ def event_server(modastack_env):
                 pass
             pid_file.unlink(missing_ok=True)
     else:
-        raise RuntimeError("Event server failed to start after 3 attempts")
+        raise RuntimeError("Local event server failed to start after 3 attempts")
 
-    yield base_url, port
+    def _cleanup():
+        pid_file = modastack_env.state_dir / "event-server.pid"
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
+            except (ProcessLookupError, ValueError):
+                pass
+            pid_file.unlink(missing_ok=True)
 
-    pid_file = modastack_env.state_dir / "event-server.pid"
-    if pid_file.exists():
+    return base_url, port, _cleanup
+
+
+def _start_wrangler_server():
+    """Start wrangler dev on a free port, return (base_url, port, cleanup)."""
+    es_dir = PACKAGE_ROOT / "event-server"
+
+    # Ensure node_modules exist
+    if not (es_dir / "node_modules").exists():
+        subprocess.run(
+            ["npm", "ci", "--no-audit", "--no-fund"],
+            cwd=str(es_dir), check=True, capture_output=True, timeout=120,
+        )
+
+    port = _free_port()
+    base_url = f"http://localhost:{port}"
+
+    log_path = es_dir / f".wrangler-test-{port}.log"
+    log_file = open(log_path, "w")
+
+    proc = subprocess.Popen(
+        [
+            str(es_dir / "node_modules" / ".bin" / "wrangler"),
+            "dev",
+            f"--port={port}",
+        ],
+        cwd=str(es_dir),
+        stdout=log_file,
+        stderr=log_file,
+        start_new_session=True,
+    )
+
+    if not _wait_healthy(base_url, timeout=30):
+        log_file.close()
         try:
-            os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
-        except (ProcessLookupError, ValueError):
-            pass
-        pid_file.unlink(missing_ok=True)
+            log_text = log_path.read_text()
+        except Exception:
+            log_text = "(unreadable)"
+        proc.kill()
+        proc.wait()
+        raise RuntimeError(
+            f"wrangler dev failed to start on port {port}.\nLog:\n{log_text}"
+        )
+
+    def _cleanup():
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            proc.wait(timeout=10)
+        except (ProcessLookupError, subprocess.TimeoutExpired, OSError):
+            proc.kill()
+            proc.wait()
+        log_file.close()
+        log_path.unlink(missing_ok=True)
+
+    return base_url, port, _cleanup
+
+
+@pytest.fixture(scope="module", params=_event_server_backends())
+def event_server(request, modastack_env):
+    """Start the event server on a free port, yield (base_url, port, backend), then stop it."""
+    backend = request.param
+
+    if backend == "local":
+        base_url, port, cleanup = _start_local_server(modastack_env)
+    else:
+        base_url, port, cleanup = _start_wrangler_server()
+
+    yield base_url, port, backend
+
+    cleanup()
+
+
+@pytest.fixture(autouse=True)
+def _skip_local_only_on_wrangler(request, event_server):
+    """Skip tests marked ``local_only`` when running against the wrangler backend."""
+    _base, _port, backend = event_server
+    if backend != "local" and request.node.get_closest_marker("local_only"):
+        pytest.skip(f"local-only test (backend={backend})")
 
 
 @pytest.fixture
 def deployment(event_server):
     """Register a deployment and return (base_url, deployment_id, api_key)."""
-    base_url, _ = event_server
+    base_url, _port, _backend = event_server
     result = _post_json(f"{base_url}/deployments", {
         "name": "test-deploy",
         "subscriptions": ["github:test-org/test-repo", "linear:TEST", "slack:T_TEST"],
@@ -115,13 +217,14 @@ def deployment(event_server):
 class TestEventServerLifecycle:
 
     def test_health_check(self, event_server):
-        base_url, _ = event_server
+        base_url, _port, backend = event_server
         data = _get_json(f"{base_url}/health")
         assert data["status"] == "ok"
-        assert data["mode"] == "local"
+        if backend == "local":
+            assert data["mode"] == "local"
 
     def test_register_deployment(self, event_server):
-        base_url, _ = event_server
+        base_url, *_ = event_server
         result = _post_json(f"{base_url}/deployments", {
             "name": "lifecycle-test",
             "subscriptions": ["github:test-org/test-repo"],
@@ -130,8 +233,9 @@ class TestEventServerLifecycle:
         assert "api_key" in result
         assert result["api_key"].startswith("moda_")
 
+    @pytest.mark.local_only
     def test_health_shows_deployment_count(self, event_server):
-        base_url, _ = event_server
+        base_url, *_ = event_server
         _post_json(f"{base_url}/deployments", {
             "name": "count-test",
             "subscriptions": ["github:some-org/some-repo"],
@@ -195,7 +299,7 @@ class TestLinearWebhook:
 class TestSlackWebhook:
 
     def test_slack_url_verification(self, event_server):
-        base_url, _ = event_server
+        base_url, *_ = event_server
         payload = json.dumps({
             "type": "url_verification",
             "challenge": "test-challenge-token",
@@ -253,7 +357,7 @@ class TestSlackSelfReplyLoop:
     @pytest.fixture
     def deployment_with_workspace(self, event_server):
         """Register a deployment + workspace with a known bot_id."""
-        base_url, _ = event_server
+        base_url, *_ = event_server
         dep = _post_json(f"{base_url}/deployments", {
             "name": "self-loop-test",
             "subscriptions": ["slack:T_SELF"],
@@ -332,7 +436,7 @@ class TestMonitorEventDelivery:
     def test_monitor_finding_reaches_subscriber(self, event_server):
         from modastack.events.subscriptions import monitor_subscription_keys
 
-        base_url, _ = event_server
+        base_url, *_ = event_server
         subs = monitor_subscription_keys(["monitor/support.email"])
         dep = _post_json(f"{base_url}/deployments", {
             "name": "monitor-delivery-test",
@@ -368,7 +472,7 @@ class TestMonitorEventDelivery:
         field says — matches, because the server routes path-topic events onto
         the source-qualified topic too. (Before this contract, #235, it
         silently never matched.)"""
-        base_url, _ = event_server
+        base_url, *_ = event_server
         dep = _post_json(f"{base_url}/deployments", {
             "name": "raw-event-sub-test",
             "subscriptions": ["monitor/support.email"],
@@ -395,7 +499,7 @@ class TestMonitorEventDelivery:
         dedupes deployments across matched topics."""
         from modastack.events.subscriptions import monitor_subscription_keys
 
-        base_url, _ = event_server
+        base_url, *_ = event_server
         subs = monitor_subscription_keys(["monitor/support.email"])
         assert len(subs) == 2  # both forms — the premise of this test
         dep = _post_json(f"{base_url}/deployments", {
@@ -464,10 +568,11 @@ class TestWebSocketDrain:
             assert len(replayed) >= 1
 
 
+@pytest.mark.local_only
 class TestEventServerCLI:
 
     def test_status_shows_running(self, event_server, cli_run):
-        _, port = event_server
+        _, port, _backend = event_server
         base_url = f"http://localhost:{port}"
         data = _get_json(f"{base_url}/health")
         assert data["status"] == "ok"
@@ -647,7 +752,7 @@ class TestBubbleIsolation:
     """
 
     def test_mint_returns_bubble_key_once(self, event_server):
-        base_url, _ = event_server
+        base_url, *_ = event_server
         dep = _register(base_url, "m", ["inbox/m"])
         assert dep["bubble_id"].startswith("bub_")
         assert dep["bubble_key"].startswith("bkey_")
@@ -656,7 +761,7 @@ class TestBubbleIsolation:
         """Two instances (two bubbles), same session name + same topic: a publish
         in bubble A reaches A's subscriber and NEVER bubble B's. This is the
         #270 Part A acceptance: no cross-delivery in a shared event server."""
-        base_url, _ = event_server
+        base_url, *_ = event_server
         a = _register(base_url, "manager", ["inbox/manager"])
         b = _register(base_url, "manager", ["inbox/manager"])
         assert a["bubble_id"] != b["bubble_id"]
@@ -680,7 +785,7 @@ class TestBubbleIsolation:
     def test_join_shares_bubble_and_delivers(self, event_server):
         """A second session JOINing a bubble (signed) shares it and receives its
         events — the within-instance round trip every agent relies on."""
-        base_url, _ = event_server
+        base_url, *_ = event_server
         a = _register(base_url, "worker1", ["inbox/worker1"])
         b = _register(base_url, "worker2", ["inbox/worker2"], a["bubble_id"], a["bubble_key"])
         assert b["bubble_id"] == a["bubble_id"]
@@ -697,14 +802,14 @@ class TestBubbleIsolation:
         assert "hi w2" in texts
 
     def test_unsigned_publish_rejected(self, event_server):
-        base_url, _ = event_server
+        base_url, *_ = event_server
         with pytest.raises(urllib.error.HTTPError) as ei:
             _post_json(f"{base_url}/events/inbox/x",
                        {"source": "inbox", "payload": {"text": "nope"}})
         assert ei.value.code == 403
 
     def test_publish_with_wrong_bubble_key_rejected(self, event_server):
-        base_url, _ = event_server
+        base_url, *_ = event_server
         a = _register(base_url, "m", ["inbox/m"])
         with pytest.raises(urllib.error.HTTPError) as ei:
             _post_event_signed(base_url, "inbox/m",
@@ -713,7 +818,7 @@ class TestBubbleIsolation:
         assert ei.value.code == 403
 
     def test_join_with_wrong_key_rejected(self, event_server):
-        base_url, _ = event_server
+        base_url, *_ = event_server
         a = _register(base_url, "m", ["inbox/m"])
         with pytest.raises(urllib.error.HTTPError) as ei:
             _register(base_url, "intruder", ["inbox/x"], a["bubble_id"], "bkey_wrong")
@@ -724,7 +829,7 @@ class TestBubbleIsolation:
         subscribers in ANY bubble. This is the documented cross-tenant hole that
         keeps Slack/GitHub working pre-#239. Locked as a test so a future change
         that closes it is a conscious decision, not a silent break."""
-        base_url, _ = event_server
+        base_url, *_ = event_server
         a = _register(base_url, "a", ["github:shared/repo"])
         b = _register(base_url, "b", ["github:shared/repo"])
         assert a["bubble_id"] != b["bubble_id"]
@@ -750,6 +855,7 @@ class TestBubbleIsolation:
         )
 
 
+@pytest.mark.local_only
 class TestSchedulerEndToEnd:
     """The unified monitor path, end to end with a REAL scheduler and a REAL
     event server: a native check's condition is published by the scheduler
@@ -767,7 +873,7 @@ class TestSchedulerEndToEnd:
         from modastack.monitors.schema import Condition, Monitor
         from modastack.monitors.scheduler import MonitorScheduler
 
-        base_url, _ = event_server
+        base_url, *_ = event_server
 
         # Point the (session-scoped) project at this test server; restore
         # after, and drop publish's per-project URL cache both ways.
@@ -824,6 +930,7 @@ class TestSchedulerEndToEnd:
             publish_mod._es_url_cache.clear()
 
 
+@pytest.mark.local_only
 class TestBindAddress:
     """The event server must default to loopback (127.0.0.1) and only widen
     the listen address when MODASTACK_ES_BIND is set explicitly.  Bind
