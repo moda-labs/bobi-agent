@@ -456,6 +456,17 @@ function handleUpgrade(req: http.IncomingMessage, socket: import("node:net").Soc
 	}
 
 	wss.handleUpgrade(req, socket, head, (ws) => {
+		// Close stale WebSockets before accepting the new one (#322).
+		// WebSocket reconnections are routine (Cloudflare cycling, process
+		// restarts, session rotation) — not just network blips. The old
+		// socket lingers in dep.websockets until TCP detects the failure;
+		// during that window deliver() sends every event to BOTH sockets,
+		// producing duplicate "Evaluating…" placeholders in Slack.
+		for (const old of dep.websockets) {
+			try { old.close(1000, "replaced"); } catch { /* already closed */ }
+		}
+		dep.websockets.clear();
+
 		const lastSeen = parseInt(url.searchParams.get("last_seen") || "0", 10);
 		if (lastSeen > 0) {
 			for (const stored of dep.eventBuffer) {
