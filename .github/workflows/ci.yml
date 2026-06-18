@@ -29,6 +29,24 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q
 
+  event-server:
+    name: Event server (Worker/miniflare)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: event-server
+        run: npm ci
+
+      - name: Run Worker tests
+        working-directory: event-server
+        run: npx vitest run
+
   e2e:
     name: E2E (Playwright)
     runs-on: ubuntu-latest
