@@ -575,7 +575,7 @@
       : `<span class="cbadge">not connected</span>`;
     return `<div class="uconn venn-acct">
       <span class="venn-lab">Venn<span class="help" tabindex="0" role="img"
-        aria-label="${esc(help)}" title="${esc(help)}">${HELP}</span></span>
+        aria-label="${esc(help)}" data-tip="${esc(help)}">${HELP}</span></span>
       <span class="cright">${badge}
         <button class="lnk" data-vennsetup>${configured ? "Manage Venn" : "Set up Venn"}</button></span></div>`;
   }

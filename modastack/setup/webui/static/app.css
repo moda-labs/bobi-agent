@@ -308,9 +308,20 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 /* Account-level Venn: pinned as the first connection row, but styled like any
    other option in the list (not a section header). */
 .venn-lab{display:inline-flex;align-items:center;gap:6px;}
-.help{display:inline-flex;width:13px;height:13px;color:var(--faint);cursor:help;}
+.help{position:relative;display:inline-flex;width:13px;height:13px;color:var(--faint);cursor:help;}
 .help:hover,.help:focus{color:var(--muted);outline:none;}
 .help svg{width:13px;height:13px;}
+/* Immediate, styled hover tooltip (the native title attr is delayed + easy to
+   miss). Shows on hover/focus; sits above the icon. */
+.help[data-tip]:hover::after,.help[data-tip]:focus::after{
+  content:attr(data-tip); position:absolute; left:0; bottom:calc(100% + 8px);
+  width:max-content; max-width:230px; white-space:normal;
+  background:var(--slab-bg); color:var(--slab-text);
+  font-family:var(--font-sans); font-size:11.5px; font-weight:400; line-height:1.4;
+  letter-spacing:0; text-transform:none; text-align:left;
+  padding:7px 10px; border-radius:8px; border:1px solid var(--slab-border);
+  box-shadow:0 10px 28px -12px rgba(40,30,16,.55); z-index:140; pointer-events:none;
+}
 /* Venn setup flow: connected banner, MCP picker list, error + loading states. */
 .venn-ok{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:11px;}
 .venn-ok .pd{margin:0;}
