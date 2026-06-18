@@ -31,6 +31,15 @@ def project(tmp_path):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _stub_bubble():
+    """Every registration JOINs the instance bubble via ensure_bubble; stub it
+    so these unit tests don't make a real mint HTTP call."""
+    with patch("modastack.events.server.ensure_bubble",
+               return_value={"bubble_id": "bub_test", "bubble_key": "bkey_test"}):
+        yield
+
+
 def _state_file(project, session="sess"):
     # Deployment state is per-session — sharing one deployment across
     # sessions is the bug that broadcast the user's DMs to every agent.

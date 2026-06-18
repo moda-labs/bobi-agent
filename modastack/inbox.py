@@ -159,6 +159,17 @@ class _ReplyChannel:
             self.client.stop()  # type: ignore[attr-defined]
         except Exception:
             log.debug("Reply channel client stop failed", exc_info=True)
+        # Deregister the throwaway deployment server-side so it doesn't leak.
+        try:
+            from modastack.events.server import deregister
+            deregister(
+                self.client.server_url,  # type: ignore[attr-defined]
+                self.client.deployment_id,  # type: ignore[attr-defined]
+                self.client.api_key,  # type: ignore[attr-defined]
+            )
+        except Exception:
+            log.warning("Reply channel deregister failed — server-side "
+                        "deployment may leak", exc_info=True)
         self.cursor_path.unlink(missing_ok=True)
         # The shared EventServerClient also writes a per-deployment events log
         # (events/client.py _log_event). For a throwaway reply channel that's
@@ -183,19 +194,33 @@ def _open_reply_channel(project_path: Path) -> "_ReplyChannel | None":
     """Subscribe to a fresh ``reply/<uuid>`` topic and return its channel.
 
     Returns None if the event server can't be reached — the caller treats that
-    as a publish/transport failure. The transient deployment is not torn down
-    server-side (there is no deregister endpoint); it ages out with its tiny
-    per-deployment buffer. Server-side TTL/dedup of subscriptions is #270.
+    as a publish/transport failure. The transient deployment is deregistered
+    server-side by ``_ReplyChannel.close()`` (#277).
     """
     from modastack import paths
     from modastack.events.client import EventServerClient
-    from modastack.events.server import register
+    from modastack.events.server import BubbleRejected, ensure_bubble, register
 
     token = secrets.token_hex(8)
     topic = f"reply/{token}"
     es_url = _event_server_url(project_path)
     try:
-        deployment_id, api_key = register(es_url, f"reply-{token}", [topic])
+        # The reply channel MUST join the instance's bubble — otherwise its
+        # reply/<uuid> subscription lands in a different bubble than the
+        # responder publishes into, and the blocking ask hangs to timeout.
+        bubble = ensure_bubble(es_url, project_path)
+        try:
+            deployment_id, api_key = register(
+                es_url, f"reply-{token}", [topic],
+                bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+            )
+        except BubbleRejected:
+            bubble = ensure_bubble(es_url, project_path,
+                                   force_remint_of=bubble["bubble_id"])
+            deployment_id, api_key = register(
+                es_url, f"reply-{token}", [topic],
+                bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+            )
     except Exception as e:
         log.warning("Could not open reply channel on %s: %s", es_url, e)
         return None

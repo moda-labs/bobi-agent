@@ -661,9 +661,21 @@ def _manager_session_name(project_path: Path, role: str | None = None) -> str:
 
 
 def _clear_manager_session(project_path: Path) -> None:
-    """Wipe saved session ID so the manager starts a fresh conversation."""
+    """Wipe saved session ID so the manager starts a fresh conversation.
+
+    Also drops the bubble credential and per-session deployment/cursor state:
+    a fresh start mints a NEW bubble, and keeping stale deployment_state (whose
+    api_key points at a now-orphaned deployment in the old bubble) would split
+    the restarted sessions across bubbles.
+    """
+    import shutil
+    from modastack import paths
+    from modastack.config import clear_bubble_state
     from modastack.sdk import save_session_id
     save_session_id(_manager_session_name(project_path), "")
+    clear_bubble_state(project_path)
+    for sub in ("deployments", "cursors"):
+        shutil.rmtree(paths.state_path(project_path) / sub, ignore_errors=True)
     click.echo("Cleared manager session — starting fresh.")
 
 

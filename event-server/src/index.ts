@@ -2,6 +2,7 @@ export { DeploymentSession } from "./deployment-session";
 import {
 	type StorageAdapter,
 	type DeploymentRecord,
+	type BubbleRecord,
 	type SlackWorkspaceRecord,
 	type NormalizedEvent,
 	type HandlerResult,
@@ -9,11 +10,13 @@ import {
 	subscriptionKeysForEvent,
 	verifyGitHubSignature,
 	verifySlackSignature,
+	readBubbleAuthHeaders,
 	handleGitHubWebhook,
 	handleLinearWebhook,
 	handleSlackWebhook,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
+	handleDeregisterDeployment,
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
@@ -43,6 +46,20 @@ function createKVStorage(env: Env): StorageAdapter {
 			await env.EVENTS.put(`deployment_id:${deployment.id}`, json);
 		},
 
+		async getBubble(bubbleId: string): Promise<BubbleRecord | null> {
+			const data = await env.EVENTS.get(`bubble:${bubbleId}`);
+			return data ? JSON.parse(data) : null;
+		},
+
+		async putBubble(bubble: BubbleRecord): Promise<void> {
+			await env.EVENTS.put(`bubble:${bubble.id}`, JSON.stringify(bubble));
+		},
+
+		async removeDeployment(deployment: DeploymentRecord): Promise<void> {
+			await env.EVENTS.delete(`deployments:${deployment.api_key}`);
+			await env.EVENTS.delete(`deployment_id:${deployment.id}`);
+		},
+
 		async addSubscription(key: string, deploymentId: string): Promise<void> {
 			const kvKey = `subscriptions:${key}`;
 			const existing = await env.EVENTS.get(kvKey);
@@ -50,6 +67,19 @@ function createKVStorage(env: Env): StorageAdapter {
 			if (!ids.includes(deploymentId)) {
 				ids.push(deploymentId);
 				await env.EVENTS.put(kvKey, JSON.stringify(ids));
+			}
+		},
+
+		async removeSubscription(key: string, deploymentId: string): Promise<void> {
+			const kvKey = `subscriptions:${key}`;
+			const existing = await env.EVENTS.get(kvKey);
+			if (!existing) return;
+			const ids: string[] = JSON.parse(existing);
+			const filtered = ids.filter((id) => id !== deploymentId);
+			if (filtered.length === 0) {
+				await env.EVENTS.delete(kvKey);
+			} else {
+				await env.EVENTS.put(kvKey, JSON.stringify(filtered));
 			}
 		},
 
@@ -193,9 +223,22 @@ export default {
 		}
 
 		if (method === "POST" && path === "/deployments") {
-			const body = await readJson(request);
-			if (!body) return Response.json({ error: "invalid JSON" }, { status: 400 });
-			return respond(await handleRegisterDeployment(storage, body));
+			// Raw text (not readJson) so the join signature verifies over the
+			// exact transmitted bytes.
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			return respond(await handleRegisterDeployment(storage, data, ctx));
 		}
 
 		// WebSocket subscribe — transport-specific (Durable Object proxy)
@@ -236,12 +279,38 @@ export default {
 			return respond(await handleUpdateSubscriptions(storage, deploymentId, apiKey, body));
 		}
 
+		if (method === "DELETE" && path.startsWith("/deployments/")) {
+			const match = path.match(/^\/deployments\/([^/]+)$/);
+			if (!match) return Response.json({ error: "invalid path" }, { status: 400 });
+			const deploymentId = match[1];
+
+			const authHeader = request.headers.get("authorization");
+			if (!authHeader?.startsWith("Bearer ")) {
+				return Response.json({ error: "unauthorized" }, { status: 403 });
+			}
+			const apiKey = authHeader.slice(7);
+
+			return respond(await handleDeregisterDeployment(storage, deploymentId, apiKey));
+		}
+
 		// Generic topic: POST /events/{topic}
 		const topicMatch = method === "POST" && path.match(/^\/events\/(.+)$/);
 		if (topicMatch) {
-			const body = await readJson(request);
-			if (!body) return Response.json({ error: "invalid JSON" }, { status: 400 });
-			return respond(await handleTopicEvent(storage, topicMatch[1], body));
+			// Raw text so the publish signature verifies over the exact bytes.
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			return respond(await handleTopicEvent(storage, topicMatch[1], data, ctx));
 		}
 
 		if (method === "POST" && path === "/slack/send") {
