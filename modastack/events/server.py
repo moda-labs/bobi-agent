@@ -59,6 +59,19 @@ def health(base_url: str, timeout: float = 2) -> dict | None:
         return None
 
 
+def _is_local_url(url: str) -> bool:
+    """Whether *url* points at the local machine (localhost / loopback).
+
+    An empty string is treated as local (no URL configured → local default).
+    """
+    if not url:
+        return True
+    from urllib.parse import urlsplit
+
+    host = urlsplit(url).hostname or ""
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
 def _run_npm(args: list[str], es_dir: Path) -> None:
     """Run an npm command, surfacing its output on failure.
 
@@ -95,6 +108,22 @@ def ensure_running(port: int, webhook_secret: str = "",
     ``extra_env`` passes additional environment variables to the child
     process (e.g. eviction thresholds for testing).
     """
+    # ── Remote-URL guard (containerized-6) ────────────────────────────
+    # When the project configures a remote event_server_url, the local
+    # Node server must never start — the container may not even have Node.
+    if project_path is not None:
+        try:
+            from modastack.config import Config
+            configured_url = Config.load(project_path).event_server_url
+        except Exception:
+            configured_url = ""
+        if configured_url and not _is_local_url(configured_url):
+            log.info(
+                "Remote event_server_url configured (%s) — skipping local server",
+                configured_url,
+            )
+            return "skipped"
+
     if health(f"http://localhost:{port}"):
         log.info(f"Event server already running on port {port}")
         return "connected"
