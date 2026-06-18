@@ -196,7 +196,7 @@ class TestConnect:
         c = _client(s, project)
         data = c.get("/api/connect").json()
         keys = {card["key"] for card in data["cards"]}
-        assert keys == {"github", "crm"}
+        assert keys == {"github", "salesforce"}   # concrete name, not "crm"
         assert any(card["key"] == "slack" for card in data["catalog"])
 
     def test_reports_venn_configured(self, project, monkeypatch):

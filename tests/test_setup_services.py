@@ -9,10 +9,26 @@ class TestResolve:
         assert services.resolve("github").kind == "native"
         assert services.resolve("slack").credential_var == "SLACK_BOT_TOKEN"
 
-    def test_alias_resolves_to_canonical(self):
-        # "gmail" is an alias of the coarse "email" venn bucket.
-        assert services.resolve("gmail").key == "email"
-        assert services.resolve("salesforce").key == "crm"
+    def test_concrete_venn_name_keeps_its_identity(self):
+        # A concrete service keeps its own name/key (not collapsed to a bucket),
+        # so two Gmail connections stay distinct and read as "Gmail" not "Email".
+        gm = services.resolve("gmail")
+        assert gm.kind == "venn" and gm.key == "gmail" and gm.name == "Gmail"
+        sf = services.resolve("salesforce")
+        assert sf.kind == "venn" and sf.key == "salesforce"
+        assert sf.name == "Salesforce"
+
+    def test_generic_bucket_term_resolves_to_the_bucket(self):
+        # The literal generic term still maps to the broad bucket card.
+        assert services.resolve("email").key == "email"
+        assert services.resolve("crm").key == "crm"
+
+    def test_titleizes_a_slug_name(self):
+        assert services.resolve("google_calendar",
+                                venn_catalog={"google_calendar"}).name == "Google Calendar"
+        # a name Venn already cased is kept verbatim
+        assert services.resolve("Work Gmail",
+                                venn_catalog={"work gmail"}).name == "Work Gmail"
 
     def test_case_and_whitespace_insensitive(self):
         assert services.resolve("  GitHub ").key == "github"
@@ -159,11 +175,22 @@ class TestCatalogCards:
 
 
 class TestCardsForSpec:
-    def test_dedupes_aliased_services(self, tmp_path):
-        # "gmail" and "email" both resolve to the email connector → one card.
+    def test_dedupes_identical_names(self, tmp_path):
+        # The same connection named twice collapses to one card.
         cards = services.cards_for(
-            [{"name": "gmail"}, {"name": "email"}], tmp_path)
-        assert [c["key"] for c in cards] == ["email"]
+            [{"name": "gmail"}, {"name": "Gmail"}], tmp_path)
+        assert [c["key"] for c in cards] == ["gmail"]
+        assert cards[0]["name"] == "Gmail"
+
+    def test_distinct_venn_names_are_distinct_rows(self, tmp_path):
+        # Two Venn connections with different names each get their own row and
+        # keep their own label (not merged into one "Email" bucket card).
+        cat = {"gmail", "personal gmail"}
+        cards = services.cards_for(
+            [{"name": "gmail"}, {"name": "Personal Gmail"}], tmp_path, catalog=cat)
+        assert [c["key"] for c in cards] == ["gmail", "personal gmail"]
+        assert [c["name"] for c in cards] == ["Gmail", "Personal Gmail"]
+        assert all(c["kind"] == "venn" for c in cards)
 
     def test_native_status_reads_env(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)

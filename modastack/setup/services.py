@@ -317,31 +317,66 @@ def _mcp_connector(spec) -> Connector:
     )
 
 
+# The generic Venn bucket terms (the SERVICE_ALIASES keys). Said literally
+# ("email", "crm"), these resolve to the broad bucket card; a *concrete* service
+# name (gmail, salesforce, or a custom Venn connection name) keeps its own
+# identity instead of collapsing into the bucket.
+_BUCKET_KEYS: frozenset[str] = frozenset(spec[0] for spec in _VENN_SPECS)
+
+
+def _display_name(name: str) -> str:
+    """A presentable label for a concrete service. Keeps a name Venn already
+    cased ("Work Gmail"); title-cases a bare slug ("gmail" → "Gmail",
+    "google_calendar" → "Google Calendar")."""
+    import re
+    n = (name or "").strip()
+    if not n:
+        return "service"
+    if any(ch.isupper() for ch in n):
+        return n
+    return re.sub(r"[_\-]+", " ", n).title()
+
+
+def _venn_named(name: str) -> Connector:
+    """A Venn connector that keeps its CONCRETE name — so each Venn connection
+    (even two Gmails with different names) is its own row, shown as "Gmail",
+    not the bucket label "Email"."""
+    clean = name.strip()
+    return Connector(
+        key=clean.lower(), name=_display_name(clean), kind="venn",
+        summary="Reached through the Venn gateway.",
+        scopes=("as granted in Venn",),
+        methods=(_venn_method(_display_name(clean)),),
+    )
+
+
 def resolve(name: str, venn_catalog: frozenset | set | None = None) -> Connector:
     """Resolve a (possibly messy) service name to a Connector, via the cascade
     native → venn → mcp → custom.
 
-    Native and curated-bucket names resolve to their rich cards. Otherwise the
-    name is checked against Venn's catalog (`venn_catalog`, defaulting to the
-    static seed) — a hit becomes a generic Venn connector ("one key, every
-    service" wins first). A miss is checked against the **hosted-MCP registry**;
-    a hit is wired into `mcp_servers:`. A miss there becomes a **custom**
-    connector (own API key + an authored tools guide).
+    Native names resolve to their rich cards. A generic bucket term ("email",
+    "crm") resolves to the broad Venn bucket card. A concrete Venn name — a
+    known alias (gmail, salesforce) or anything in Venn's catalog (`venn_catalog`,
+    defaulting to the static seed) — resolves to a Venn connector that KEEPS its
+    own name, so two Gmail connections are two distinct, correctly-labelled rows.
+    A non-Venn miss is checked against the **hosted-MCP registry** (wired into
+    `mcp_servers:`); a miss there becomes a **custom** connector.
     """
     from modastack.setup import mcp_registry
 
-    key = _BY_NAME.get(name.strip().lower())
-    if key:
-        return CATALOG[key]
     clean = name.strip()
+    low = clean.lower()
+    key = _BY_NAME.get(low)
+    if key:
+        conn = CATALOG[key]
+        if conn.kind == "native":
+            return conn               # github / slack / linear win outright
+        if low in _BUCKET_KEYS:
+            return conn               # a literal bucket term → the bucket card
+        return _venn_named(clean)     # a concrete venn alias → keep its name
     catalog = venn_catalog if venn_catalog is not None else VENN_CATALOG
-    if clean.lower() in catalog:
-        return Connector(
-            key=clean.lower(), name=clean or "service", kind="venn",
-            summary="Reached through the Venn gateway.",
-            scopes=("as granted in Venn",),
-            methods=(_venn_method(clean or "this service"),),
-        )
+    if low in catalog:
+        return _venn_named(clean)
     spec = mcp_registry.lookup(clean)
     if spec:
         return _mcp_connector(spec)

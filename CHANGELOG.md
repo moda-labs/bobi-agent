@@ -32,6 +32,12 @@ team instead of dropping to a hand-authored guide (MOD-203).
 - `modastack.venn.list_servers_verified` raises `VennError` on a bad key /
   non-2xx / error body, distinguishing "valid key, zero services" from a
   failure — `list_servers` still masks errors as `[]` for resilient startup.
+- **Concrete Venn connector names are preserved** instead of collapsing into a
+  coarse bucket: a service named `gmail` (or any custom Venn connection name)
+  resolves to its own row labelled **"Gmail"**, not the bucket "Email", and two
+  Gmail connections with different names stay distinct. Literal generic terms
+  ("email", "crm") still resolve to the broad bucket card. The concrete name is
+  consistent across the picker, the panel rows, and the authored `agent.yaml`.
 
 ### Changed
 - Venn is presented as one **account-level connection**, not a per-service one.
