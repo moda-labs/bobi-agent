@@ -48,8 +48,13 @@ def _reset_paths_root():
     """
     from modastack import paths
     before = paths._root
+    env_before = os.environ.get("MODASTACK_ROOT")
     yield
     paths._root = before
+    if env_before is None:
+        os.environ.pop("MODASTACK_ROOT", None)
+    else:
+        os.environ["MODASTACK_ROOT"] = env_before
 
 
 @pytest.fixture(autouse=True)
