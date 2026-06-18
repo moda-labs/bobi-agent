@@ -197,6 +197,89 @@ class TestPostEventMigration:
         assert '"source":"monitor"' in body or '"source": "monitor"' in body
 
 
+class TestPostEventSigning:
+    """Verify post_event attaches bubble signing headers (#313).
+
+    The release smoke broke because the CI workflow used unsigned curl
+    instead of post_event. This test ensures post_event actually sends
+    x-moda-* headers when a bubble credential exists, so the event
+    server accepts the publish (v0.21.0+ rejects unsigned POSTs with 403).
+    """
+
+    def test_signing_headers_present_when_bubble_exists(self):
+        from modastack.events.publish import post_event
+
+        captured = []
+
+        def _capture(request):
+            captured.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        transport = httpx.MockTransport(_capture)
+        mock_client = httpx.Client(transport=transport)
+        fake_bubble = {"bubble_id": "bub_smoke", "bubble_key": "bkey_test"}
+
+        with patch.object(pooled, '_client', mock_client), \
+             patch('modastack.events.publish._event_server_url',
+                   return_value='http://localhost:8080'), \
+             patch('modastack.config.load_bubble_state',
+                   return_value=fake_bubble):
+            result = post_event("release-pipeline/smoke.ping",
+                                {"version": "0.21.0"},
+                                project_path="/tmp/fake")
+
+        assert result is True
+        assert len(captured) == 1
+        req = captured[0]
+        # Must have all five signing headers
+        assert req.headers["x-moda-bubble"] == "bub_smoke"
+        assert req.headers["x-moda-algo"] == "hmac-sha256"
+        assert req.headers["x-moda-timestamp"].isdigit()
+        assert len(req.headers["x-moda-nonce"]) >= 8
+        assert len(req.headers["x-moda-signature"]) == 64  # sha256 hex
+
+    def test_no_signing_headers_without_bubble(self):
+        from modastack.events.publish import post_event
+
+        captured = []
+
+        def _capture(request):
+            captured.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        transport = httpx.MockTransport(_capture)
+        mock_client = httpx.Client(transport=transport)
+
+        with patch.object(pooled, '_client', mock_client), \
+             patch('modastack.events.publish._event_server_url',
+                   return_value='http://localhost:8080'), \
+             patch('modastack.config.load_bubble_state',
+                   return_value={}):
+            post_event("monitor/test", {"k": "v"}, project_path="/tmp/fake")
+
+        assert len(captured) == 1
+        assert "x-moda-bubble" not in captured[0].headers
+
+    def test_403_from_unsigned_returns_false(self):
+        """Simulates what happens when an unsigned publish hits v0.21.0+."""
+        from modastack.events.publish import post_event
+
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(403, json={"error": "missing signature"})
+        )
+        mock_client = httpx.Client(transport=transport)
+
+        with patch.object(pooled, '_client', mock_client), \
+             patch('modastack.events.publish._event_server_url',
+                   return_value='http://localhost:8080'), \
+             patch('modastack.config.load_bubble_state',
+                   return_value={}):
+            result = post_event("monitor/test", {"k": "v"},
+                                project_path="/tmp/fake")
+
+        assert result is False
+
+
 class TestNoUrllibRemains:
     """Ensure urllib.request is no longer imported in converted modules."""
 
