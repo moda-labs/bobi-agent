@@ -254,6 +254,66 @@ class TestConnect:
         assert c.get("/api/credential/value?var=NOPE_TOKEN").status_code == 404
 
 
+# --- Venn setup flow: discover account MCPs, apply picks -----------------
+
+class TestVennSetup:
+    def _servers(self, monkeypatch, items):
+        import modastack.venn as venn_mod
+
+        class _S:
+            def __init__(self, name, connected):
+                self.server_id, self.server_name, self.connected = name, name, connected
+        monkeypatch.setattr(venn_mod, "list_servers",
+                            lambda key: [_S(n, c) for n, c in items])
+
+    def test_servers_needs_a_key(self, project, monkeypatch):
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+        c = _client(SetupState(), project)
+        data = c.get("/api/venn/servers").json()
+        assert data["ok"] is False and "key" in data["error"].lower()
+
+    def test_servers_lists_account_mcps(self, project, monkeypatch):
+        monkeypatch.setenv("VENN_API_KEY", "k")
+        self._servers(monkeypatch, [("gmail", True), ("salesforce", False)])
+        c = _client(SetupState(), project)
+        data = c.get("/api/venn/servers").json()
+        assert data["ok"] is True
+        assert {s["name"] for s in data["servers"]} == {"gmail", "salesforce"}
+        gmail = next(s for s in data["servers"] if s["name"] == "gmail")
+        assert gmail["connected"] is True
+
+    def test_servers_bad_key_is_an_error_state(self, project, monkeypatch):
+        monkeypatch.setenv("VENN_API_KEY", "bad")
+        import modastack.venn as venn_mod
+        def boom(key): raise RuntimeError("401 Unauthorized")
+        monkeypatch.setattr(venn_mod, "list_servers", boom)
+        c = _client(SetupState(), project)
+        data = c.get("/api/venn/servers").json()
+        assert data["ok"] is False and "Venn" in data["error"]
+
+    def test_apply_adds_picked_servers_to_the_team(self, project):
+        s = SetupState()
+        s.spec.services = [{"name": "github"}]
+        c = _client(s, project)
+        r = c.post("/api/venn/apply", json={"servers": ["gmail", "salesforce"]})
+        assert r.status_code == 200
+        assert set(r.json()["added"]) == {"gmail", "salesforce"}
+        names = [x["name"] for x in s.spec.services]
+        assert names == ["github", "gmail", "salesforce"]
+
+    def test_apply_dedupes_existing(self, project):
+        s = SetupState()
+        s.spec.services = [{"name": "gmail"}]
+        c = _client(s, project)
+        r = c.post("/api/venn/apply", json={"servers": ["gmail", "slack"]})
+        assert r.json()["added"] == ["slack"]            # gmail already there
+        assert [x["name"] for x in s.spec.services] == ["gmail", "slack"]
+
+    def test_apply_requires_a_list(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/venn/apply", json={"servers": "gmail"}).status_code == 400
+
+
 # --- build + validate + install ------------------------------------------
 
 class TestBuildInstall:

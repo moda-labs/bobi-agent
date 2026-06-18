@@ -21,6 +21,13 @@ team instead of dropping to a hand-authored guide (MOD-203).
   capture through the existing credential overlay, and a "wired" state for
   keyless servers.
 
+- **Venn setup is a discover-and-pick flow.** Paste a key → modastack pulls the
+  MCPs in your Venn account (`GET /api/venn/servers`, 0..N) → you tick which to
+  add to **this team** → confirm. Picks are added as venn-backed services
+  (`POST /api/venn/apply`) and appear as their own rows. The modal has a proper
+  **error state** when the key doesn't verify, a loading state, and a persistent
+  "Open Venn ↗" link across every step.
+
 ### Changed
 - Venn is presented as one **account-level connection**, not a per-service one.
   Venn-backed services now appear as their own rows ("Gmail · via Venn —

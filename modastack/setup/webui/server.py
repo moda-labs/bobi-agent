@@ -512,6 +512,52 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             "state": serialize_state(state),
         })
 
+    # --- Venn: discover the account's MCPs, then apply picks to the team --
+    @app.get("/api/venn/servers")
+    def venn_servers() -> JSONResponse:
+        """List the MCP servers in the user's Venn account using their saved
+        key. Doubles as key verification: a bad/unreachable key returns
+        ok:false with an error the modal renders as its error state. A good key
+        returns every server with its live `connected` flag (0..N)."""
+        from modastack.setup.actions import venn_key
+        from modastack.venn import list_servers
+        key = venn_key(project)
+        if not key:
+            return JSONResponse({"ok": False,
+                                 "error": "No Venn API key saved yet."})
+        try:
+            servers = list_servers(key)
+        except Exception as e:
+            return JSONResponse({"ok": False,
+                                 "error": f"Couldn't reach Venn with that key "
+                                          f"({e}). Double-check it and retry."})
+        return JSONResponse({"ok": True, "servers": [
+            {"name": s.server_name, "connected": s.connected}
+            for s in servers if s.server_name]})
+
+    @app.post("/api/venn/apply")
+    def venn_apply(payload: dict) -> JSONResponse:
+        """Add the Venn MCPs the user picked to this team's services. Each
+        becomes a venn-backed service (classified live against the account
+        catalog) and shows up as its own row in the panel. Deduped by name."""
+        names = payload.get("servers")
+        if not isinstance(names, list):
+            return JSONResponse({"error": "servers must be a list"},
+                                status_code=400)
+        have = {((s.get("name") if isinstance(s, dict) else str(s)) or "")
+                .strip().lower() for s in state.spec.services}
+        added = []
+        for raw in names:
+            name = (str(raw) or "").strip()
+            if name and name.lower() not in have:
+                state.spec.services = list(state.spec.services) + [{"name": name}]
+                have.add(name.lower())
+                added.append(name)
+        if added:
+            state.validated = False
+            state.save(project)
+        return JSONResponse({"added": added, "state": serialize_state(state)})
+
     # --- chat (how you talk to the team) -------------------------------
     @app.post("/api/chat")
     def set_chat(payload: dict) -> JSONResponse:

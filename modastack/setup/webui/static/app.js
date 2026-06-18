@@ -872,84 +872,152 @@
     });
   }
 
-  // --- on-demand secret capture: unified Venn setup ----------------------
-  // Every Venn-backed service shares one key, so setup is ONE place: paste the
-  // key once, and each service shows its verification status.
+  // --- Venn setup: a small flow (key → loading → pick / error → done) ----
+  // Venn is ONE account-level connection. Paste the key, modastack pulls the
+  // MCPs in your Venn account, you pick which to add to THIS team, confirm, and
+  // they appear as their own rows. "Open Venn" stays available the whole time.
+  let vennStep = "key";          // key | loading | error | pick | done
+  let vennServers = [];          // [{name, connected}] from the account
+  let vennSel = new Set();        // server names the user has ticked
+  let vennErr = "";              // error-state message
+  let vennAddedMsg = "";         // done-state summary
+  const OPEN_VENN = '<a class="doclink" href="https://app.venn.ai" target="_blank" rel="noopener">Open Venn ↗</a>';
+
   async function openVennSetup() {
     _connData = await getJSON("/api/connect");
+    vennErr = ""; vennAddedMsg = "";
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "venn-ov";
     ov.innerHTML = `<div class="secret-panel">
       <div class="sp-head"><b>Connect via Venn</b><button class="btn ghost sm" id="venn-close">Close</button></div>
       <div class="sp-body" id="venn-body"></div></div>`;
     document.body.appendChild(ov);
-    drawVenn();
     ov.addEventListener("click", e => {
-      if (e.target.id === "venn-close" || e.target === ov) ov.remove();
+      if (e.target.id === "venn-close" || e.target === ov) closeVenn();
     });
+    // Already connected? Skip the key step and go straight to discovery.
+    if (_connData && _connData.venn_configured) { vennLoadServers(); }
+    else { vennStep = "key"; drawVenn(); }
   }
-  function vennCards() {
-    return ((_connData && _connData.cards) || []).filter(c => c.kind === "venn");
+  function closeVenn() { const o = $("#venn-ov"); if (o) o.remove(); renderUniCards(); }
+
+  async function vennLoadServers() {
+    vennStep = "loading"; drawVenn();
+    const r = await getJSON("/api/venn/servers");
+    if (!r || !r.ok) {
+      vennErr = (r && r.error) || "Couldn't reach Venn with that key.";
+      vennStep = "error"; drawVenn(); return;
+    }
+    vennServers = r.servers || [];
+    // Pre-tick the servers already on the team so the picker reflects reality.
+    const have = new Set((S.spec.services || [])
+      .map(s => ((s && s.name) || String(s) || "").toLowerCase()));
+    vennSel = new Set(vennServers
+      .filter(s => have.has((s.name || "").toLowerCase())).map(s => s.name));
+    vennStep = "pick"; drawVenn();
   }
+
   function drawVenn() {
     const body = $("#venn-body"); if (!body) return;
-    const venn = vennCards();
-    const keyIn = venn.some(c => (c.methods[0].secrets || []).some(s => s.present));
-    const allConnected = venn.length > 0 && venn.every(c => c.status === "connected");
-    const svcs = venn.map(c =>
-      `<div class="uconn sub"><span>${esc(c.name)}</span>${statusBadge(c.status)}</div>`).join("");
-    // Already fully connected: no "Re-check" busywork. Make it obviously done and
-    // let the user simply close.
-    if (allConnected) {
-      body.innerHTML = `
-        <div class="venn-done">
-          <div class="vd-seal">${CHECK}</div>
-          <div class="vd-copy"><b>All Venn services connected</b>
-            <span>You're set — these are live and ready to use.</span></div>
-        </div>
-        <div class="venn-svcs">${svcs}</div>
-        <div class="connect-row" style="justify-content:flex-end">
-          <button class="btn primary sm" data-vennclose>Done</button>
-        </div>`;
-      return;
-    }
-    const editing = editSecrets.has("VENN_API_KEY");
-    const keyField = (keyIn && !editing)
-      ? `<div class="secret-saved">✓ Venn key saved
-          <button class="lnk" data-secretedit="VENN_API_KEY">Edit</button>
-          <button class="lnk" data-secretcopy="VENN_API_KEY">Copy</button></div>`
-      : `<label class="secret"><span class="slabel">Venn API key${keyIn ? " · re-enter to replace" : ""}</span>
+    let html;
+    if (vennStep === "key") {
+      html = `
+        <p class="pd">Paste your Venn API key. modastack pulls in the services
+        you've connected in Venn — pick which ones this team should use.</p>
+        <ol class="steps">
+          <li>Sign in at app.venn.ai and create an API key (Settings → API).</li>
+          <li>Connect the services you want in Venn (one-click OAuth).</li>
+          <li>Paste the key below.</li>
+        </ol>
+        <label class="secret"><span class="slabel">Venn API key</span>
           <input type="password" id="venn-key" placeholder="venn_…" autocomplete="off">
-          <span class="shelp">One key unlocks every Venn service below.</span></label>`;
-    body.innerHTML = `
-      <p class="pd" style="margin-bottom:10px">One Venn key covers all of these. Connect each service in Venn, then paste the key once — modastack verifies which are live.</p>
-      <ol class="steps">
-        <li>Sign in at app.venn.ai and create an API key (Settings → API).</li>
-        <li>In Venn, connect each service below (one-click OAuth).</li>
-        <li>Paste the key here — it covers them all.</li>
-      </ol>
-      <div class="venn-svcs">${svcs}</div>
-      ${keyField}
-      <div class="connect-row">
-        <a class="doclink" href="https://app.venn.ai" target="_blank" rel="noopener">Open Venn ↗</a>
-        <button class="btn primary sm" data-vennsave>${keyIn ? "Re-check" : "Save & verify"}</button>
-      </div>`;
-  }
-  async function vennSave() {
-    const input = $("#venn-key");
-    if (input && input.value.trim()) {
-      const r = await postJSON("/api/credential", {
-        var_name: "VENN_API_KEY", service: "venn", value: input.value.trim(),
-      });
-      if (!r.ok) { toast(r.data.error || "couldn't save"); return; }
-      editSecrets.delete("VENN_API_KEY");
-      if (!(S.credentials_saved || []).includes("VENN_API_KEY")) (S.credentials_saved ||= []).push("VENN_API_KEY");
-      toast("Venn key saved");
-    } else {
-      toast("checking…");
+          <span class="shelp">Stored in .env on this machine; never sent to the model.</span></label>
+        <div class="connect-row">${OPEN_VENN}
+          <button class="btn primary sm" data-vennconnect>Connect Venn</button></div>`;
+    } else if (vennStep === "loading") {
+      html = `<div class="venn-loading"><span class="spinner"></span>
+          Checking your Venn account…</div>
+        <div class="connect-row">${OPEN_VENN}</div>`;
+    } else if (vennStep === "error") {
+      html = `
+        <div class="venn-err">
+          <div class="ve-seal">!</div>
+          <div class="vd-copy"><b>Couldn't connect to Venn</b>
+            <span>${esc(vennErr)}</span></div>
+        </div>
+        <div class="connect-row">${OPEN_VENN}
+          <button class="btn primary sm" data-vennretry>Try another key</button></div>`;
+    } else if (vennStep === "pick") {
+      const rows = vennServers.length
+        ? vennServers.map(s => {
+            const on = vennSel.has(s.name);
+            const badge = s.connected
+              ? `<span class="cbadge connected">${CHECK} live</span>`
+              : `<span class="cbadge">in Venn</span>`;
+            return `<label class="venn-pick ${on ? "on" : ""}">
+              <input type="checkbox" data-vennpick="${esc(s.name)}" ${on ? "checked" : ""}>
+              <span class="vp-name">${esc(s.name)}</span>${badge}</label>`;
+          }).join("")
+        : `<p class="pd">No MCPs found in your Venn account yet — connect some
+            services in Venn, then come back and re-check.</p>`;
+      const n = vennSel.size;
+      html = `
+        <div class="venn-ok"><span class="cbadge connected">${CHECK} Venn connected</span>
+          <span class="pd">Pick the services to add to <b>this team</b>${
+            vennServers.length ? ` — ${vennServers.length} found` : ""}.</span></div>
+        <div class="venn-list">${rows}</div>
+        <div class="connect-row">${OPEN_VENN}
+          <button class="btn primary sm" data-vennapply ${n ? "" : "disabled"}>${
+            n ? `Add ${n} to team` : "Pick at least one"}</button></div>`;
+    } else if (vennStep === "done") {
+      html = `
+        <div class="venn-done"><div class="vd-seal">${CHECK}</div>
+          <div class="vd-copy"><b>${esc(vennAddedMsg)}</b>
+            <span>They're on your team — manage them anytime from the Connections panel.</span></div></div>
+        <div class="connect-row">${OPEN_VENN}
+          <button class="btn primary sm" data-vennclose>Close</button></div>`;
     }
+    body.innerHTML = html;
+  }
+
+  async function vennConnect() {
+    const input = $("#venn-key");
+    const val = input ? input.value.trim() : "";
+    if (!val) { toast("paste your Venn key first"); return; }
+    const r = await postJSON("/api/credential", {
+      var_name: "VENN_API_KEY", service: "venn", value: val });
+    if (!r.ok) {
+      vennErr = (r.data && r.data.error) || "Couldn't save the key.";
+      vennStep = "error"; drawVenn(); return;
+    }
+    if (!(S.credentials_saved || []).includes("VENN_API_KEY"))
+      (S.credentials_saved ||= []).push("VENN_API_KEY");
+    await vennLoadServers();
+  }
+  // Sync a server's pick to the checkbox state without redrawing (keeps scroll
+  // position); only the apply button's count needs refreshing.
+  function vennToggle(name, checked, label) {
+    if (checked) vennSel.add(name); else vennSel.delete(name);
+    if (label) label.classList.toggle("on", checked);
+    const btn = document.querySelector("[data-vennapply]");
+    if (btn) {
+      const n = vennSel.size;
+      btn.disabled = !n;
+      btn.textContent = n ? `Add ${n} to team` : "Pick at least one";
+    }
+  }
+  async function vennApply() {
+    const picks = [...vennSel];
+    if (!picks.length) return;
+    const r = await postJSON("/api/venn/apply", { servers: picks });
+    if (!r.ok) { toast(r.data.error || "couldn't add"); return; }
+    const added = (r.data.added || []).length;
+    if (r.data.state) S = r.data.state;
     _connData = await getJSON("/api/connect");
-    drawVenn();
+    vennAddedMsg = added
+      ? `Added ${added} Venn service${added === 1 ? "" : "s"} to your team`
+      : "Your Venn picks are already on the team";
+    vennStep = "done"; drawVenn();
     renderUniCards();
   }
 
@@ -1387,9 +1455,15 @@
     if (sco) { copySecret(sco.dataset.secretcopy); return; }
     const vs = e.target.closest("[data-vennsetup]");
     if (vs) { openVennSetup(); return; }
-    const vsv = e.target.closest("[data-vennsave]");
-    if (vsv) { vennSave(); return; }
-    if (e.target.closest("[data-vennclose]")) { const o = $("#venn-ov"); if (o) o.remove(); return; }
+    if (e.target.closest("[data-vennconnect]")) { vennConnect(); return; }
+    if (e.target.closest("[data-vennretry]")) { vennStep = "key"; drawVenn(); return; }
+    if (e.target.closest("[data-vennapply]")) { vennApply(); return; }
+    if (e.target.closest("[data-vennclose]")) { closeVenn(); return; }
+  });
+  // Picker checkboxes (Venn MCP selection) sync to the selected set on toggle.
+  document.addEventListener("change", (e) => {
+    const vp = e.target.closest("[data-vennpick]");
+    if (vp) vennToggle(vp.dataset.vennpick, vp.checked, vp.closest(".venn-pick"));
   });
 
   // Escape closes the topmost dismissible popup — the folder picker or a

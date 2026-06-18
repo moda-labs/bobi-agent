@@ -314,6 +314,21 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .help:hover,.help:focus{color:var(--muted);outline:none;}
 .help svg{width:13px;height:13px;}
 .venn-svcs{display:flex;flex-direction:column;gap:4px;margin:4px 0 8px;}
+/* Venn setup flow: connected banner, MCP picker list, error + loading states. */
+.venn-ok{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:11px;}
+.venn-ok .pd{margin:0;}
+.venn-list{display:flex;flex-direction:column;gap:5px;max-height:46vh;overflow-y:auto;margin-bottom:4px;}
+.venn-pick{display:flex;align-items:center;gap:9px;padding:8px 11px;border:1px solid var(--border);border-radius:9px;background:var(--raised);cursor:pointer;font-size:12.5px;}
+.venn-pick:hover{border-color:var(--border-strong);}
+.venn-pick.on{border-color:var(--accent);background:rgba(200,97,43,.06);}
+.venn-pick input{accent-color:var(--accent);width:15px;height:15px;flex:0 0 auto;}
+.venn-pick .vp-name{flex:1;text-transform:capitalize;}
+.venn-err{display:flex;align-items:center;gap:12px;background:rgba(181,70,43,.08);border:1px solid rgba(181,70,43,.32);border-radius:10px;padding:13px 15px;margin-bottom:12px;}
+.venn-err .ve-seal{flex:0 0 auto;width:30px;height:30px;border-radius:50%;background:var(--err);color:#fff;display:grid;place-items:center;font-weight:700;font-size:18px;}
+.venn-loading{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px;padding:18px 2px;}
+.spinner{width:15px;height:15px;border:2px solid var(--border-strong);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;flex:0 0 auto;}
+@keyframes spin{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion:reduce){.spinner{animation:none;}}
 .uopts{display:flex;gap:6px;flex-wrap:wrap;}
 .uopt{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:5px 11px;cursor:pointer;}
 .uopt.sel{color:#fff;background:var(--accent);border-color:var(--accent);}
