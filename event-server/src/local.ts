@@ -412,6 +412,7 @@ function handleUpgrade(req: http.IncomingMessage, socket: import("node:net").Soc
 // ---------------------------------------------------------------------------
 
 const port = parseInt(process.env.MODASTACK_ES_PORT || "8080", 10);
+const bind = process.env.MODASTACK_ES_BIND || "127.0.0.1";
 
 const server = http.createServer(async (req, res) => {
 	try {
@@ -428,6 +429,13 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", (req, socket, head) => handleUpgrade(req, socket, head, wss));
 
-server.listen(port, () => {
-	console.log(`modastack event server (local) listening on port ${port}`);
+server.listen(port, bind, () => {
+	if (bind === "127.0.0.1" || bind === "::1") {
+		console.log(
+			`modastack event server (local) listening on ${bind}:${port} ` +
+				`(loopback-only; set MODASTACK_ES_BIND to serve remotely)`,
+		);
+	} else {
+		console.log(`modastack event server (local) listening on ${bind}:${port}`);
+	}
 });
