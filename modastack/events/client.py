@@ -188,6 +188,8 @@ class EventServerClient:
         self._last_ws_error: object = None
         # Highest seq number seen — used to drop duplicate events when a
         # stale WebSocket overlaps with a fresh one on the server (#322).
+        # This happens routinely (Cloudflare WS cycling, process restarts),
+        # not just on network blips.
         self._highest_seq = 0
 
     # A connection that stayed up at least this long before ending is treated
@@ -310,10 +312,11 @@ class EventServerClient:
         if msg_type in ("event", "replay"):
             data = msg.get("data", {})
 
-            # Deduplicate: if a stale WebSocket and a fresh one both
-            # sit in the server's connection set, the same seq arrives
-            # twice. Drop the duplicate before it reaches the queue so
-            # only one placeholder is ever posted (#322).
+            # Deduplicate: routine reconnections (CF cycling, restarts)
+            # leave a stale + fresh WebSocket in the server's connection
+            # set, causing the same seq to arrive twice. Drop the
+            # duplicate before it reaches the queue so only one
+            # placeholder is ever posted (#322).
             seq = data.get("seq", 0)
             if seq > 0 and seq <= self._highest_seq:
                 log.debug("Dropping duplicate seq %d (highest seen: %d)",

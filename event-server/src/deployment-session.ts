@@ -87,9 +87,12 @@ export class DeploymentSession extends DurableObject<Env> {
 
 	private async handleWebSocketUpgrade(request: Request): Promise<Response> {
 		// Close stale WebSockets before accepting the new one (#322).
-		// A reconnecting client creates a new WS while the old one may
-		// still be in ctx.getWebSockets() — without this, handleIncomingEvent
-		// sends every event to BOTH sockets, producing duplicates.
+		// Reconnections are routine — Cloudflare cycles WS connections
+		// regularly, and process restarts/session rotation do the same.
+		// The old WS lingers in ctx.getWebSockets() until the runtime
+		// detects the disconnect; during that window handleIncomingEvent
+		// sends every event to BOTH sockets, producing duplicate
+		// "Evaluating…" placeholders in Slack.
 		for (const old of this.ctx.getWebSockets()) {
 			try { old.close(1000, "replaced"); } catch { /* already closed */ }
 		}
