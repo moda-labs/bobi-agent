@@ -12,12 +12,20 @@ connector offers one or more **auth methods**; a method bundles human setup
 `.env`, never sent to the model), and an optional **action** (Venn verify, an
 external install link).
 
-Two kinds of connector:
+A service classifies into one of four kinds, in a deliberate cascade
+(`resolve`): native → venn → mcp → custom.
   - **native** — the framework ships an ingestion adapter (github / slack /
     linear). Reached with a direct token in `.env`; events arrive by webhook.
-  - **venn** — everything else. Reached through the Venn gateway with the
-    shared `VENN_API_KEY`; the user authorizes the underlying service via
+  - **venn** — reached through the Venn gateway with the shared `VENN_API_KEY`
+    ("one key, every service"); the user authorizes the underlying service via
     Venn's OAuth, and connection is verified against Venn's connected servers.
+  - **mcp** — a service Venn doesn't cover but that ships a **hosted MCP
+    server** (`modastack/setup/mcp_registry.py`). Wired straight into the team's
+    `agent.yaml` `mcp_servers:` block; a static-key server captures one secret,
+    an OAuth server authorizes at first connect.
+  - **custom** — none of the above. modastack captures an `<SVC>_API_KEY` and
+    authors a `tools/<svc>.md` usage guide — the "you'll need an MCP for this"
+    terminal state.
 
 This module is the *catalog + pure status logic*. Live Venn lookups and
 `.env` reads are thin wrappers around it (the web server calls them once per
@@ -62,7 +70,7 @@ class AuthMethod:
 class Connector:
     key: str                       # canonical id (matches a spec service name)
     name: str                      # display name
-    kind: str                      # "native" | "venn"
+    kind: str                      # "native" | "venn" | "mcp" | "custom"
     summary: str                   # what the team does with it
     scopes: tuple = ()             # human-readable granted capabilities
     methods: tuple = ()            # AuthMethod options (first is the default)
@@ -280,14 +288,48 @@ def _custom_connector(name: str) -> Connector:
     )
 
 
+def _mcp_connector(spec) -> Connector:
+    """A service Venn doesn't cover but that ships a hosted MCP server: wired
+    into agent.yaml `mcp_servers:`. A static-key server captures one secret; an
+    OAuth/public server captures nothing (authorized at first connect)."""
+    secrets = ()
+    if spec.secret_var:
+        secrets = (Secret(
+            spec.secret_var, spec.secret_label or f"{spec.name} API key",
+            spec.secret_placeholder,
+            spec.secret_help
+            or f"Stored in .env; sent to {spec.name}'s hosted MCP as a header."),)
+    steps = spec.setup_steps or (
+        (spec.oauth_note,) if spec.oauth_note else ())
+    method = AuthMethod(
+        key="mcp", label="Connect the hosted MCP", action="mcp",
+        summary=(spec.summary
+                 or f"{spec.name} ships a hosted MCP — modastack wires it in."),
+        steps=tuple(s for s in steps if s),
+        secrets=secrets,
+        docs_url=spec.docs_url,
+    )
+    return Connector(
+        key=spec.key, name=spec.name, kind="mcp",
+        summary=spec.summary or "Reached through its hosted MCP server.",
+        scopes=tuple(spec.scopes), methods=(method,),
+        aliases=tuple(spec.aliases),
+    )
+
+
 def resolve(name: str, venn_catalog: frozenset | set | None = None) -> Connector:
-    """Resolve a (possibly messy) service name to a Connector.
+    """Resolve a (possibly messy) service name to a Connector, via the cascade
+    native → venn → mcp → custom.
 
     Native and curated-bucket names resolve to their rich cards. Otherwise the
     name is checked against Venn's catalog (`venn_catalog`, defaulting to the
-    static seed): a hit becomes a generic Venn connector; a miss becomes a
-    **custom** connector (own API key + an authored tools guide).
+    static seed) — a hit becomes a generic Venn connector ("one key, every
+    service" wins first). A miss is checked against the **hosted-MCP registry**;
+    a hit is wired into `mcp_servers:`. A miss there becomes a **custom**
+    connector (own API key + an authored tools guide).
     """
+    from modastack.setup import mcp_registry
+
     key = _BY_NAME.get(name.strip().lower())
     if key:
         return CATALOG[key]
@@ -300,6 +342,9 @@ def resolve(name: str, venn_catalog: frozenset | set | None = None) -> Connector
             scopes=("as granted in Venn",),
             methods=(_venn_method(clean or "this service"),),
         )
+    spec = mcp_registry.lookup(clean)
+    if spec:
+        return _mcp_connector(spec)
     return _custom_connector(clean)
 
 
@@ -315,6 +360,12 @@ def _method_satisfied(method: AuthMethod, present: set, *,
     if method.action == "venn":
         return venn_connected   # True / False / None
     required = [s for s in method.secrets if not s.optional]
+    if method.action == "mcp":
+        # A hosted MCP is wired deterministically into agent.yaml — there's
+        # nothing the user must do here beyond an API key when the server takes
+        # one. So it's satisfied once any required key is present; an OAuth/
+        # public server (no required secret) is satisfied outright.
+        return all(s.var in present for s in required)
     if not required:
         return False            # external / unverifiable from here
     return all(s.var in present for s in required)
@@ -368,7 +419,8 @@ def card(connector: Connector, *, present: set | None = None,
         "summary": connector.summary,
         "scopes": list(connector.scopes),
         "methods": methods,
-        "via": "Venn OAuth" if connector.kind == "venn" else "token",
+        "via": {"venn": "Venn OAuth", "mcp": "hosted MCP"}.get(
+            connector.kind, "token"),
         "status": status,
     }
 

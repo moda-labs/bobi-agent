@@ -208,6 +208,20 @@ class TestConnect:
                                         "value": "venn_key_123"})
         assert c.get("/api/connect").json()["venn_configured"] is True
 
+    def test_hosted_mcp_surfaces_as_an_mcp_card(self, project, monkeypatch):
+        # A service Venn doesn't cover but that ships a hosted MCP resolves to an
+        # mcp card (wired into mcp_servers), not custom.
+        monkeypatch.setattr(services, "venn_connected_names",
+                            lambda *a, **k: None)
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+        s = SetupState()
+        s.spec.services = [{"name": "stripe"}]
+        c = _client(s, project)
+        card = c.get("/api/connect").json()["cards"][0]
+        assert card["key"] == "stripe"
+        assert card["kind"] == "mcp"
+        assert card["via"] == "hosted MCP"
+
     def test_credential_saved_to_env(self, project, monkeypatch):
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         c = _client(SetupState(), project)

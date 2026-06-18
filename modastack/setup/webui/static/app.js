@@ -534,9 +534,10 @@
       <div class="ud">${body}</div>
       <div class="uadd"><button class="lnk add" data-addauto>+ add an automation</button></div></div>`;
   }
-  // Connections: native services capture a token each; Venn-backed services
-  // share ONE key, so they're grouped under a single Venn setup with per-service
-  // verification status. Reads live status from the cached /api/connect payload.
+  // Connections: native + hosted-MCP + custom services each get their own row
+  // (a token, an MCP wire-up, or a custom key); Venn-backed services share ONE
+  // key, grouped under a single Venn setup with per-service verification status.
+  // Reads live status from the cached /api/connect payload.
   function connectionsCard(sp) {
     const cards = (_connData && _connData.cards) || null;
     const ok = servicesSettled(sp);
@@ -578,11 +579,23 @@
     return `<span class="cbadge">pending</span>`;
   }
   function connRow(c) {
-    const right = c.status === "connected"
-      ? `${statusBadge("connected")} <button class="lnk" data-secretopen="${esc(c.key)}">edit</button>`
-      : `<button class="btn ghost xs" data-secretopen="${esc(c.key)}">Connect</button>`;
-    // Custom services (not native, not on Venn) get an authored API guide.
-    const tag = c.kind === "custom"
+    // A hosted-MCP server with no key to capture is wired in deterministically —
+    // nothing for the user to do here, so show "wired" rather than a Connect CTA.
+    const mcpNoSecret = c.kind === "mcp"
+      && !((c.methods && c.methods[0] && c.methods[0].secrets || []).length);
+    let right;
+    if (mcpNoSecret) {
+      right = `<span class="cbadge connected">${CHECK} wired</span>`;
+    } else if (c.status === "connected") {
+      right = `${statusBadge("connected")} <button class="lnk" data-secretopen="${esc(c.key)}">edit</button>`;
+    } else {
+      right = `<button class="btn ghost xs" data-secretopen="${esc(c.key)}">Connect</button>`;
+    }
+    // Tag the connection kind so it's clear how each service is reached:
+    // a hosted MCP wired straight in, or a custom service modastack writes a guide for.
+    const tag = c.kind === "mcp"
+      ? `<span class="ctag">hosted MCP · 1-click</span>`
+      : c.kind === "custom"
       ? `<span class="ctag">custom · modastack writes a guide</span>` : "";
     return `<div class="uconn"><span>${esc(c.name)}${tag}</span><span class="cright">${right}${trashBtn(c.key)}</span></div>`;
   }

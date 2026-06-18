@@ -97,7 +97,9 @@ def build_service_records(state: SetupState, catalog=None) -> list[dict]:
     """The agent.yaml `services:` block from the spec. The chat channel you
     talk to the team through is itself a service it must connect (Slack); CLI
     needs nothing. (Telegram: framework support pending.) Custom services
-    (neither native nor on Venn) carry their own API-key credential."""
+    (neither native nor on Venn) carry their own API-key credential. Hosted-MCP
+    services are NOT here — they're declared under `mcp_servers:` instead (see
+    `build_mcp_servers`)."""
     service_names = [(s.get("name") if isinstance(s, dict) else str(s))
                      for s in state.spec.services]
     if state.chat == "slack":
@@ -111,6 +113,8 @@ def build_service_records(state: SetupState, catalog=None) -> list[dict]:
         if conn.key in seen:
             continue
         seen.add(conn.key)
+        if conn.kind == "mcp":
+            continue   # declared under mcp_servers:, not services:
         rec: dict = {"name": conn.key}
         if conn.kind == "native":
             rec["events"] = True
@@ -121,6 +125,29 @@ def build_service_records(state: SetupState, catalog=None) -> list[dict]:
             rec["credentials"] = {"api_key": f"${{{conn.credential_var}}}"}
         svcs.append(rec)
     return svcs
+
+
+def build_mcp_servers(state: SetupState, catalog=None) -> dict:
+    """The agent.yaml `mcp_servers:` block: every spec service that resolves to
+    a hosted-MCP server (not native, not on Venn, but in the MCP registry).
+    Each entry is `{type, url, [headers]}` — a static-key server sends its key
+    as a `${VAR}` header (interpolated from .env at config load); an OAuth/
+    public server carries url only. Deduped by server key."""
+    from modastack.setup import mcp_registry
+
+    names = [(s.get("name") if isinstance(s, dict) else str(s))
+             for s in state.spec.services]
+    out: dict[str, dict] = {}
+    for name in names:
+        if not (name or "").strip():
+            continue
+        conn = services.resolve(name, venn_catalog=catalog)
+        if conn.kind != "mcp" or conn.key in out:
+            continue
+        spec = mcp_registry.lookup(conn.key) or mcp_registry.lookup(name)
+        if spec:
+            out[spec.key] = spec.server_config()
+    return out
 
 
 def has_venn_services(state: SetupState, catalog=None) -> bool:
@@ -142,6 +169,11 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
     svcs = build_service_records(state, catalog)
     if svcs:
         cfg["services"] = svcs
+    # Hosted-MCP services are wired in directly so the agent connects to them at
+    # runtime (the framework already threads mcp_servers through to the SDK).
+    mcps = build_mcp_servers(state, catalog)
+    if mcps:
+        cfg["mcp_servers"] = mcps
     # Venn-backed services authenticate with the one shared key — declare it so
     # `modastack start` resolves it from the environment / .env (else preflight
     # reports "venn — no API key" despite the key being set).
@@ -185,6 +217,16 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
             merged.append(rec)
     if merged:
         cfg["services"] = merged
+    # Union mcp_servers by key: keep every hand-written server (and any custom
+    # keys on one the pack already declares), add only servers the pack lacks.
+    managed_mcps = managed.get("mcp_servers") or {}
+    if managed_mcps:
+        existing_mcps = (cfg.get("mcp_servers")
+                         if isinstance(cfg.get("mcp_servers"), dict) else {})
+        merged_mcps = dict(existing_mcps)
+        for k, v in managed_mcps.items():
+            merged_mcps.setdefault(k, v)
+        cfg["mcp_servers"] = merged_mcps
     if state.chat and state.chat != "cli":
         cfg["chat"] = state.chat
     return yaml.dump(cfg, sort_keys=False)

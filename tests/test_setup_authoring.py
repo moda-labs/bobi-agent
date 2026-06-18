@@ -332,6 +332,64 @@ class TestCustomServiceTools:
         assert not any(p.startswith("tools/") for p in paths)
 
 
+class TestHostedMcpServers:
+    """A service Venn doesn't cover but that ships a hosted MCP is wired into
+    agent.yaml `mcp_servers:` — not the `services:` block, no authored guide."""
+
+    def _state_with_mcp(self):
+        s = _spec_state()
+        # github native; stripe = static-key MCP; deepwiki = public MCP.
+        s.spec.services = [{"name": "github"}, {"name": "stripe"},
+                           {"name": "deepwiki"}]
+        return s
+
+    def test_static_key_mcp_emits_url_and_auth_header(self):
+        cfg = yaml.safe_load(
+            authoring.build_agent_yaml(self._state_with_mcp(), catalog=set()))
+        mcp = cfg["mcp_servers"]
+        assert mcp["stripe"]["type"] == "http"
+        assert mcp["stripe"]["url"].startswith("https://")
+        # key referenced as ${VAR}, never a literal
+        assert mcp["stripe"]["headers"] == {
+            "Authorization": "Bearer ${STRIPE_API_KEY}"}
+
+    def test_public_mcp_emits_url_only(self):
+        cfg = yaml.safe_load(
+            authoring.build_agent_yaml(self._state_with_mcp(), catalog=set()))
+        assert "headers" not in cfg["mcp_servers"]["deepwiki"]
+
+    def test_mcp_services_not_in_services_block(self):
+        cfg = yaml.safe_load(
+            authoring.build_agent_yaml(self._state_with_mcp(), catalog=set()))
+        names = {s["name"] for s in cfg.get("services", [])}
+        assert "stripe" not in names and "deepwiki" not in names
+        assert "github" in names            # native still listed
+
+    def test_mcp_service_gets_no_tools_guide(self):
+        paths = [f.path for f in compute_manifest(self._state_with_mcp(),
+                                                  catalog=set())]
+        assert not any(p.startswith("tools/") for p in paths)
+
+    def test_no_mcp_block_without_hosted_services(self):
+        cfg = yaml.safe_load(build_agent_yaml(_spec_state()))  # github + slack
+        assert "mcp_servers" not in cfg
+
+    def test_merge_unions_mcp_servers_keeping_hand_written(self):
+        existing = (
+            "agent: legacy\nversion: 0.1.0\nentry_point: lead\n"
+            "mcp_servers:\n"
+            "  homemade:\n    type: stdio\n    command: ./run-mcp\n"
+            "  stripe:\n    type: http\n    url: https://custom/stripe\n")
+        s = self._state_with_mcp()
+        s.team_name = "legacy"
+        merged = yaml.safe_load(
+            authoring.merge_agent_yaml(existing, s, catalog=set()))
+        mcp = merged["mcp_servers"]
+        assert mcp["homemade"]["command"] == "./run-mcp"     # hand-written kept
+        assert mcp["stripe"]["url"] == "https://custom/stripe"  # not clobbered
+        assert "deepwiki" in mcp                              # new one added
+
+
 class TestAuthorOpenModeNonLossy:
     """author_pack in open mode edits in place — it must preserve files the
     manifest never models and never blank an existing prose file."""

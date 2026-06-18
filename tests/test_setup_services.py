@@ -25,7 +25,7 @@ class TestResolve:
         assert conn.methods and conn.methods[0].action == "venn"
 
     def test_unknown_not_in_catalog_becomes_custom(self):
-        # Neither native, a curated bucket, nor in Venn's catalog → custom:
+        # Neither native, a curated bucket, on Venn, nor a hosted MCP → custom:
         # modastack captures an API key and authors a tools guide for it.
         conn = services.resolve("posthog", venn_catalog=set())
         assert conn.kind == "custom"
@@ -35,6 +35,26 @@ class TestResolve:
         assert sec.var == "POSTHOG_API_KEY"
         assert conn.methods[0].action == ""
         assert conn.credential_var == "POSTHOG_API_KEY"
+
+    def test_hosted_mcp_resolves_to_mcp(self):
+        # In the MCP registry but not native/Venn → mcp: wired into mcp_servers.
+        conn = services.resolve("stripe", venn_catalog=set())
+        assert conn.kind == "mcp"
+        assert conn.key == "stripe"
+        m = conn.methods[0]
+        assert m.action == "mcp"
+        assert m.secrets[0].var == "STRIPE_API_KEY"   # static-key server
+
+    def test_oauth_hosted_mcp_has_no_secret(self):
+        conn = services.resolve("deepwiki", venn_catalog=set())
+        assert conn.kind == "mcp"
+        assert conn.methods[0].secrets == ()          # public/OAuth — no key
+
+    def test_venn_wins_over_mcp_registry(self):
+        # "one key, every service" comes first: if Venn covers a name, it's venn
+        # even when the MCP registry also knows it.
+        conn = services.resolve("stripe", venn_catalog={"stripe"})
+        assert conn.kind == "venn"
 
 
 class TestConnectorModel:
@@ -84,6 +104,20 @@ class TestCardStatus:
     def test_no_secret_method_is_never_auto_satisfied(self):
         m = AuthMethod(key="app", label="Install the App")  # no secrets
         assert services._method_satisfied(m, set(), venn_connected=None) is False
+
+    def test_static_key_mcp_connects_when_key_present(self):
+        stripe = services.resolve("stripe", venn_catalog=set())
+        assert services.card(stripe, present=set())["status"] == "missing"
+        c = services.card(stripe, present={"STRIPE_API_KEY"})
+        assert c["status"] == "connected"
+        assert c["kind"] == "mcp"
+        assert c["via"] == "hosted MCP"
+
+    def test_public_mcp_is_satisfied_outright(self):
+        # A public/OAuth hosted MCP has nothing to capture — it's wired in, so
+        # it reads as connected rather than stranding the user on a CTA.
+        deepwiki = services.resolve("deepwiki", venn_catalog=set())
+        assert services.card(deepwiki, present=set())["status"] == "connected"
 
     def test_venn_connected_true(self):
         c = services.card(services.CATALOG["email"], venn_connected=True)

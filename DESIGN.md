@@ -235,19 +235,34 @@ Source dirs are confined out of `.modastack/`.
 ### Connections — the deliberate exception to the magic
 Connect stays explicit because auth is an unavoidable user action and
 credential/access grants must be **visible and approved**. Each implied service
-is a card; setup classifies it into one of three kinds and handles it
-accordingly:
+is a card; setup classifies it through a **deliberate cascade** (native → venn →
+mcp → custom) and handles it accordingly:
 
 - **native** — the framework ships an ingestion adapter (github / slack /
   linear). A direct token captured into `.env`; events arrive by webhook.
-- **venn** — reached through the Venn gateway with one shared `VENN_API_KEY`.
-  Venn-backed services are grouped under a single **"Set up Venn"** popup with a
-  per-service live verification badge. Whether a service *is* venn-backed is
-  decided against Venn's **real catalog** (see below), not a guess.
-- **custom** — a service that's neither native nor on Venn (e.g. PostHog). modastack
-  captures a service-specific API key (`<SVC>_API_KEY`) **and authors a
+- **venn** — reached through the Venn gateway with one shared `VENN_API_KEY`
+  ("one key, every service"). Venn-backed services are grouped under a single
+  **"Set up Venn"** popup with a per-service live verification badge. Whether a
+  service *is* venn-backed is decided against Venn's **real catalog** (see
+  below), not a guess. Venn wins ahead of the MCP registry — it's the 1-click
+  path.
+- **mcp** — a service Venn doesn't cover but that ships a **hosted MCP server**
+  (`modastack/setup/mcp_registry.py`, a curated seed of public hosted MCPs).
+  Wired straight into the team's `agent.yaml` `mcp_servers:` block, so the agent
+  connects at runtime — no authored guide. A static-key server captures one
+  `<SVC>_API_KEY` (sent as a `${VAR}` auth header); an OAuth/public server
+  captures nothing and reads as "✓ wired" (authorized at first connect). Tagged
+  "hosted MCP · 1-click".
+- **custom** — neither native, on Venn, nor in the MCP registry (e.g. PostHog).
+  modastack captures a service-specific API key (`<SVC>_API_KEY`) **and authors a
   `tools/<svc>.md` usage guide** at build, so the agent knows how to call that
-  service's API. Tagged "custom · modastack writes a guide" in the card.
+  service's API. This is the "you'll need to build an MCP for this" terminal
+  state. Tagged "custom · modastack writes a guide".
+
+> The full ticket cascade (MOD-203) has two further rungs between mcp and
+> custom — a **live web search** for a hosted MCP, then a **CLI fallback** —
+> deferred to follow-ups. Today the registry is a static seed; a miss falls
+> straight through to custom.
 
 **The real Venn catalog (not guessing).** Classification uses the live list of
 services Venn supports, sourced **CLI-first**: `modastack/setup/venn_cli.py`
@@ -360,8 +375,10 @@ modastack/setup/
 ├── authoring.py    # build the pack from the spec. compute_manifest (structure),
 │                   #   create = author from scratch; open = non-lossy edit/merge;
 │                   #   custom services → tools/<svc>.md guides.
-├── services.py     # connector catalog + classification (native/venn/custom),
+├── services.py     # connector catalog + classification (native/venn/mcp/custom),
 │                   #   live Venn catalog, pure card-status logic.
+├── mcp_registry.py # curated seed of public hosted MCP servers (the cascade's
+│                   #   third rung) → agent.yaml mcp_servers: entries.
 ├── venn_cli.py     # canonical `venn` CLI wrapper: run_venn + list_servers.
 ├── open_mode.py    # list local + registry teams, copy_into, reverse_fill, recap.
 ├── actions.py      # deterministic ops: team_source_dir, validate, install,
@@ -433,4 +450,5 @@ inspecting proxies (Zscaler, etc.) whose root is in the keychain but not certifi
 | 2026-06-16 | **Modify asks which folder to scan** (`/api/teams`); tab always enabled; folder picker re-rooted at `$HOME`, absolute paths | teams can live anywhere; pick the scan dir even when the library is empty |
 | 2026-06-16 | **Server-disconnect overlay** (ping heartbeat + fetch/SSE failure) + **Escape closes popups** | the page must stop pretending to be live when the local server dies |
 | 2026-06-16 | **Branding reverted to `modastack`** in the shipping UI; `bobbi` rebrand deferred to the whole-codebase rename | don't ship `bobbi` ahead of the rename; also fixed wrong commands/paths (`.bobbi/`→`.modastack/`, `bobbi <cmd>`→`modastack <cmd>`) |
+| 2026-06-18 | **Connections cascade gains an `mcp` rung** (native → venn → mcp → custom); hosted MCPs from a static registry wire into `agent.yaml` `mcp_servers:` (MOD-203) | a service Venn doesn't cover often ships a hosted MCP — wire it in directly instead of dropping to a hand-authored guide; live-search + CLI rungs deferred |
 ```
