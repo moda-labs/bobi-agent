@@ -369,13 +369,21 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         venn_catalog = services.live_venn_catalog(project)
         cards = services.cards_for(state.spec.services, project,
                                    connected=connected, catalog=venn_catalog)
+        # User-defined custom MCP connections supersede their service card (a
+        # service first guessed as "custom" becomes an MCP row once a URL is
+        # given). Drop the placeholder card and render the configured MCP.
+        user_mcp = state.spec.mcp_servers or {}
+        mcp_keys = {k.strip().lower() for k in user_mcp}
+        cards = [c for c in cards if c["key"].strip().lower() not in mcp_keys]
+        for key, cfg in user_mcp.items():
+            if isinstance(cfg, dict):
+                cards.append(services.user_mcp_card(key, cfg, project))
         # The connector catalog (every known connector, for on-demand setup like
         # Slack as a chat channel) is env-aware too, so a just-saved token reads
         # as connected.
         catalog = services.cards_for(list(services.CATALOG.keys()), project,
                                      connected=connected, catalog=venn_catalog)
-        # Whether a VENN_API_KEY is present — drives the panel's Venn upsell
-        # (when absent, offer to set Venn up to manage many connections at once).
+        # Whether a VENN_API_KEY is present — drives the panel's Venn row state.
         from modastack.setup import actions
         return {"cards": cards, "catalog": catalog,
                 "venn_configured": bool(actions.venn_key(project))}
@@ -474,43 +482,63 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         state.save(project)
         return JSONResponse(serialize_state(state))
 
-    @app.post("/api/build-integration")
-    def build_integration(payload: dict) -> JSONResponse:
-        # PLACEHOLDER (deliberate). Building an MCP/CLI on the fly from an MCP
-        # server link or a raw API key is a rabbit hole of its own — a future
-        # async background job. For now we register the service as a custom
-        # connection so it persists, optionally stash the API key in .env (never
-        # the LLM), and return a friendly "queued / coming soon" status the panel
-        # renders as a placeholder sequence.
-        from modastack.setup import actions, authoring
-        name = (payload.get("service_name") or "").strip()
+    @app.post("/api/mcp/add")
+    def mcp_add(payload: dict) -> JSONResponse:
+        """Add a custom MCP connection by name + remote URL (the Claude-style
+        connector form). Auth is one of: none, api_key (Bearer header), or oauth
+        (client id + secret). Any secrets go straight to .env as `${VAR}` refs.
+        Persists to spec.mcp_servers and as a team service so it shows as a row;
+        authored into agent.yaml mcp_servers: at build."""
+        import re
+        from modastack.setup import actions
+        name = (payload.get("name") or "").strip()
+        url = (payload.get("url") or "").strip()
         if not name:
-            return JSONResponse({"error": "service_name required"}, status_code=400)
-        have = {((s.get("name") if isinstance(s, dict) else str(s)) or "").strip().lower()
-                for s in state.spec.services}
-        if name.lower() not in have:
-            state.spec.services = list(state.spec.services) + [{"name": name}]
-        saved = False
-        api_key = payload.get("api_key", "")
-        if api_key:
-            var = authoring._env_var_fallback(name)
-            try:
+            return JSONResponse({"error": "give the connection a name"},
+                                status_code=400)
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return JSONResponse(
+                {"error": "a remote server URL (https://…) is required"},
+                status_code=400)
+        auth = payload.get("auth", "none")
+        if auth not in ("none", "api_key", "oauth"):
+            return JSONResponse({"error": "auth must be none, api_key, or oauth"},
+                                status_code=400)
+        key = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "mcp"
+        prefix = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_") or "MCP"
+        entry: dict = {"url": url, "type": "http", "auth": auth, "label": name}
+
+        def _save(var: str, val: str) -> None:
+            if val:
                 actions.save_credential(state, project, var, name, "",
-                                        prompt_fn=lambda *_: api_key)
-                saved = True
-            except actions.ActionError:
-                saved = False
+                                        prompt_fn=lambda *_: val)
+        try:
+            if auth == "api_key":
+                var = f"{prefix}_API_KEY"
+                entry["secret_var"] = var
+                _save(var, payload.get("api_key", ""))
+            elif auth == "oauth":
+                cid, cs = f"{prefix}_OAUTH_CLIENT_ID", f"{prefix}_OAUTH_CLIENT_SECRET"
+                entry["client_id_var"], entry["client_secret_var"] = cid, cs
+                _save(cid, payload.get("client_id", ""))
+                _save(cs, payload.get("client_secret", ""))
+        except actions.ActionError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        mcps = dict(state.spec.mcp_servers or {})
+        mcps[key] = entry
+        state.spec.mcp_servers = mcps
+        have = {((s.get("name") if isinstance(s, dict) else str(s)) or "")
+                .strip().lower() for s in state.spec.services}
+        if key not in have and name.lower() not in have:
+            state.spec.services = list(state.spec.services) + [{"name": key}]
         state.validated = False
         state.save(project)
-        return JSONResponse({
-            "status": "queued",
-            "message": (f"Building a custom integration for {name} is a "
-                        "background job we'll wire up soon — you can come back to "
-                        "it. It's saved to your team as a custom connection for "
-                        "now."),
-            "credential_saved": saved,
-            "state": serialize_state(state),
-        })
+        # OAuth authorizes when the agent first connects (the runtime performs
+        # the handshake with the stored client credentials); flag it so the UI
+        # can say so rather than implying it's already live.
+        return JSONResponse({"ok": True, "oauth_pending": auth == "oauth",
+                             "state": serialize_state(state)})
 
     # --- Venn: verify key, list the account's MCPs, reconcile team picks --
     def _venn_servers_payload(key: str) -> dict:

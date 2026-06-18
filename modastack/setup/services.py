@@ -466,6 +466,31 @@ def catalog_cards() -> list[dict]:
     return [card(c) for c in CATALOG.values()]
 
 
+def user_mcp_card(key: str, cfg: dict, project: Path) -> dict:
+    """A Connect card for a user-defined custom MCP connection (added by name +
+    remote URL). It's configured at add time, so it reads as connected; an
+    API-key connection is connected once its key is in .env, an OAuth one
+    authorizes when the agent first connects."""
+    from modastack.setup.actions import read_env
+    auth = cfg.get("auth", "none")
+    label = cfg.get("label") or _display_name(key)
+    if auth == "api_key":
+        var = cfg.get("secret_var", "")
+        present = bool(read_env(project).get(var) or os.environ.get(var))
+        status = "connected" if present else "missing"
+        note = "custom MCP · API key"
+    elif auth == "oauth":
+        status, note = "connected", "custom MCP · OAuth · authorizes on first run"
+    else:
+        status, note = "connected", "custom MCP"
+    return {
+        "key": key.strip().lower(), "name": label, "kind": "mcp",
+        "summary": cfg.get("url", ""), "scopes": [], "methods": [],
+        "via": "hosted MCP", "status": status, "user_mcp": True,
+        "auth": auth, "url": cfg.get("url", ""), "note": note,
+    }
+
+
 def _live_service_names(key: str) -> set[str]:
     """The real Venn catalog for this account. Prefers the canonical `venn`
     CLI (the same binary monitors run); falls back to the REST client when the

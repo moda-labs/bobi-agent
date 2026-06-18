@@ -599,6 +599,9 @@
       right = c.status === "connected"
         ? `<span class="cbadge connected">${CHECK} connected via Venn</span>`
         : `<span class="cbadge">${c.status === "unknown" ? "via Venn" : "needs Venn"}</span>`;
+    } else if (c.kind === "custom") {
+      // Not native/Venn/known MCP — connect it by pointing at a remote MCP.
+      right = `<button class="btn ghost xs" data-addmcp="${esc(c.name)}">Connect</button>`;
     } else if (mcpNoSecret) {
       right = `<span class="cbadge connected">${CHECK} wired</span>`;
     } else if (c.status === "connected") {
@@ -606,14 +609,15 @@
     } else {
       right = `<button class="btn ghost xs" data-secretopen="${esc(c.key)}">Connect</button>`;
     }
-    // Tag how each service is reached: through Venn, a hosted MCP wired straight
-    // in, or a custom service modastack writes a guide for.
+    // Tag how each service is reached: through Venn, a hosted MCP (the registry
+    // one-click, or a user-added connection's own note), or a custom service
+    // that needs a connection.
     const tag = c.kind === "venn"
       ? `<span class="ctag">via Venn</span>`
       : c.kind === "mcp"
-      ? `<span class="ctag">hosted MCP · 1-click</span>`
+      ? `<span class="ctag">${esc(c.note || "hosted MCP · 1-click")}</span>`
       : c.kind === "custom"
-      ? `<span class="ctag">custom · modastack writes a guide</span>` : "";
+      ? `<span class="ctag">connect an MCP</span>` : "";
     return `<div class="uconn"><span>${esc(c.name)}${tag}</span><span class="cright">${right}${trashBtn(c.key)}</span></div>`;
   }
   async function trashConnection(key) {
@@ -1338,18 +1342,7 @@
     const meta = {
       role: { title: "Add a role", ph: "Describe the role — what it does, what a good job looks like, what it needs to access.", lead: "Tell modastack about the role and it'll add it to the team." },
       auto: { title: "Add an automation", ph: "Describe something the team should do on its own — e.g. 'post a daily digest at 9am'.", lead: "Describe the proactive behavior; modastack wires it up." },
-      conn: { title: "Add a connection", ph: "What should the team connect to? e.g. 'our Notion workspace'.", lead: "Name a service and modastack will work out how to connect it." },
     }[kind];
-    const custom = kind === "conn" ? `
-      <div class="custom-build">
-        <div class="cb-head">Not on Venn? Build a custom integration</div>
-        <p class="fhelp">Paste an official MCP server link or an API key and modastack will try to build an MCP/CLI for it. This runs as a background job you can come back to — it's a rabbit hole of its own, so it's coming soon.</p>
-        <label class="fld"><span class="flab">Service name</span><input id="cb-name" placeholder="e.g. PostHog" autocomplete="off"></label>
-        <label class="fld"><span class="flab">MCP server link <span class="fhelp inline">optional</span></span><input id="cb-mcp" placeholder="https://…" autocomplete="off"></label>
-        <label class="fld"><span class="flab">API key <span class="fhelp inline">optional</span></span><input id="cb-key" type="password" placeholder="stored in .env, never sent to the model" autocomplete="off"></label>
-        <div class="sp-actions"><button class="btn ghost sm" id="cb-build">Build integration</button></div>
-        <div class="cb-status" id="cb-status"></div>
-      </div>` : "";
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "describe-ov";
     ov.innerHTML = `<div class="secret-panel">
@@ -1358,7 +1351,6 @@
         <p class="fhelp">${meta.lead}</p>
         <label class="fld"><textarea id="d-text" rows="3" placeholder="${esc(meta.ph)}"></textarea></label>
         <div class="sp-actions"><button class="btn primary sm" id="d-send">Add</button></div>
-        ${custom}
       </div></div>`;
     document.body.appendChild(ov);
     $("#d-text").focus();
@@ -1368,22 +1360,76 @@
       if (!t) { toast("say a little about it"); return; }
       ov.remove(); sendMessage(t);
     });
-    if (kind === "conn") {
-      $("#cb-build").addEventListener("click", async () => {
-        const name = $("#cb-name").value.trim();
-        if (!name) { toast("name the service first"); return; }
-        const res = await postJSON("/api/build-integration", {
-          service_name: name, mcp_url: $("#cb-mcp").value.trim(),
-          api_key: $("#cb-key").value.trim(),
-        });
-        if (!res.ok) { toast(res.data.error || "couldn't queue"); return; }
-        if (res.data.state) S = res.data.state;
-        const st = $("#cb-status");
-        if (st) st.innerHTML = `<div class="cb-queued">⏳ ${esc(res.data.message || "queued — coming soon")}</div>`;
-        renderUniCards();
-        if ((S.spec.services || []).length) refreshUniConnections();
-      });
+  }
+  // Add a connection = point modastack at a remote MCP server (the Claude-style
+  // connector form): name + URL, with optional API-key / OAuth auth. When the
+  // assistant guesses a connection is needed (a custom service like PostHog),
+  // the row's Connect opens this prefilled with the name — you supply the URL.
+  function openMcpModal(prefill) {
+    const ov = document.createElement("div");
+    ov.className = "secret-ov"; ov.id = "mcp-ov";
+    ov.innerHTML = `<div class="secret-panel">
+      <div class="sp-head"><b>Add a connection</b><button class="btn ghost sm" id="mcp-close">Close</button></div>
+      <div class="sp-body">
+        <p class="fhelp">Connect a remote MCP server — name it and paste its URL. Add auth under Advanced if it needs it.</p>
+        <label class="fld"><span class="flab">Name</span>
+          <input id="mcp-name" placeholder="e.g. PostHog" autocomplete="off" value="${esc(prefill || "")}"></label>
+        <label class="fld"><span class="flab">Remote server URL</span>
+          <input id="mcp-url" placeholder="https://mcp.example.com/mcp" autocomplete="off"></label>
+        <details class="mcp-adv"><summary>Advanced — authentication</summary>
+          <div class="mcp-auth">
+            <label class="uopt-radio"><input type="radio" name="mcpauth" value="none" checked> None</label>
+            <label class="uopt-radio"><input type="radio" name="mcpauth" value="api_key"> API key</label>
+            <label class="uopt-radio"><input type="radio" name="mcpauth" value="oauth"> OAuth</label>
+          </div>
+          <div id="mcp-auth-fields"></div>
+        </details>
+        <div class="sp-actions"><button class="btn primary sm" id="mcp-add">Add</button></div>
+        <div class="mcp-status" id="mcp-status"></div>
+      </div></div>`;
+    document.body.appendChild(ov);
+    (prefill ? $("#mcp-url") : $("#mcp-name")).focus();
+    ov.addEventListener("click", e => { if (e.target.id === "mcp-close" || e.target === ov) ov.remove(); });
+    const renderAuth = () => {
+      const v = (ov.querySelector("input[name=mcpauth]:checked") || {}).value || "none";
+      const f = $("#mcp-auth-fields");
+      if (v === "api_key")
+        f.innerHTML = `<label class="fld"><span class="flab">API key</span>
+          <input id="mcp-key" type="password" placeholder="stored in .env, never sent to the model" autocomplete="off"></label>`;
+      else if (v === "oauth")
+        f.innerHTML = `<label class="fld"><span class="flab">OAuth client ID</span>
+            <input id="mcp-cid" autocomplete="off"></label>
+          <label class="fld"><span class="flab">OAuth client secret</span>
+            <input id="mcp-cs" type="password" placeholder="stored in .env" autocomplete="off"></label>
+          <p class="fhelp">modastack authorizes with these when the team first connects.</p>`;
+      else f.innerHTML = "";
+    };
+    ov.querySelectorAll("input[name=mcpauth]").forEach(r => r.addEventListener("change", renderAuth));
+    $("#mcp-add").addEventListener("click", () => mcpAdd(ov));
+  }
+  async function mcpAdd(ov) {
+    const auth = (ov.querySelector("input[name=mcpauth]:checked") || {}).value || "none";
+    const payload = {
+      name: ($("#mcp-name").value || "").trim(),
+      url: ($("#mcp-url").value || "").trim(),
+      auth,
+    };
+    if (auth === "api_key") payload.api_key = (($("#mcp-key") || {}).value || "").trim();
+    if (auth === "oauth") {
+      payload.client_id = (($("#mcp-cid") || {}).value || "").trim();
+      payload.client_secret = (($("#mcp-cs") || {}).value || "").trim();
     }
+    const r = await postJSON("/api/mcp/add", payload);
+    if (!r.ok) {
+      const st = $("#mcp-status");
+      if (st) st.innerHTML = `<div class="mcp-err">${esc(r.data.error || "couldn't add")}</div>`;
+      return;
+    }
+    if (r.data.state) S = r.data.state;
+    _connData = await getJSON("/api/connect");
+    ov.remove();
+    renderUniCards();
+    toast(r.data.oauth_pending ? "Added — authorizes on first run" : "Connection added");
   }
 
   // --- top-level render + events ----------------------------------------
@@ -1436,7 +1482,9 @@
     if (ao) { openAutoModal(+ao.dataset.autoopen); return; }
     if (e.target.closest("[data-addrole]")) { openDescribeModal("role"); return; }
     if (e.target.closest("[data-addauto]")) { openDescribeModal("auto"); return; }
-    if (e.target.closest("[data-addconn]")) { openDescribeModal("conn"); return; }
+    if (e.target.closest("[data-addconn]")) { openMcpModal(); return; }
+    const addmcp = e.target.closest("[data-addmcp]");
+    if (addmcp) { openMcpModal(addmcp.dataset.addmcp); return; }
     const ct = e.target.closest("[data-conntrash]");
     if (ct) { trashConnection(ct.dataset.conntrash); return; }
     const cs = e.target.closest("[data-chatset]");

@@ -39,6 +39,16 @@ team instead of dropping to a hand-authored guide (MOD-203).
   ("email", "crm") still resolve to the broad bucket card. The concrete name is
   consistent across the picker, the panel rows, and the authored `agent.yaml`.
 
+- **Add-a-connection is a Claude-style custom-MCP form.** Just a name + remote
+  server URL, with Advanced auth (an API key *or* OAuth client id/secret). On
+  add, the connection is authored into `agent.yaml` `mcp_servers:` (API-key
+  servers send a `${VAR}` Bearer header; OAuth servers carry url only and
+  authorize when the agent first connects) and shows as its own row. When the
+  assistant guesses a service needs a connector (a custom service like PostHog),
+  its row's **Connect** opens the form pre-filled with the name — you supply the
+  URL. New `POST /api/mcp/add`; `Spec.mcp_servers` persists user connections.
+  (Replaces the old "name a service" textarea + "not on Venn?" build placeholder.)
+
 ### Changed
 - Venn is presented as one **account-level connection**, not a per-service one.
   Venn-backed services now appear as their own rows ("Gmail · via Venn —

@@ -487,27 +487,58 @@ class TestPanelEdits:
         c = _client(SetupState(), project)
         assert c.post("/api/service/remove", json={}).status_code == 400
 
-    def test_build_integration_is_a_queued_placeholder(self, project, monkeypatch):
+    def test_mcp_add_api_key_connection(self, project, monkeypatch):
         monkeypatch.delenv("POSTHOG_API_KEY", raising=False)
         s = SetupState()
         c = _client(s, project)
-        r = c.post("/api/build-integration", json={
-            "service_name": "PostHog", "api_key": "ph_secret_123"})
-        assert r.status_code == 200
-        body = r.json()
-        assert body["status"] == "queued"
-        assert "background job" in body["message"]
-        assert body["credential_saved"] is True
-        # the service is registered as a (custom) connection in the meantime
-        assert any(x["name"] == "PostHog" for x in s.spec.services)
+        r = c.post("/api/mcp/add", json={
+            "name": "PostHog", "url": "https://mcp.posthog.com/mcp",
+            "auth": "api_key", "api_key": "ph_secret_123"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        # persisted as a user-defined MCP (keyed by slug, label kept)
+        entry = s.spec.mcp_servers["posthog"]
+        assert entry["url"] == "https://mcp.posthog.com/mcp"
+        assert entry["auth"] == "api_key" and entry["secret_var"] == "POSTHOG_API_KEY"
+        assert entry["label"] == "PostHog"
+        # also a team service, so it renders as a row
+        assert any((x.get("name") or "").lower() == "posthog" for x in s.spec.services)
         # the key landed in .env, never in the response
         assert "ph_secret_123" not in r.text
-        env = (project / ".modastack" / ".env").read_text()
-        assert "POSTHOG_API_KEY=ph_secret_123" in env
+        assert "POSTHOG_API_KEY=ph_secret_123" in (project / ".modastack" / ".env").read_text()
 
-    def test_build_integration_requires_name(self, project):
+    def test_mcp_add_oauth_flags_pending(self, project, monkeypatch):
+        monkeypatch.delenv("ACME_OAUTH_CLIENT_SECRET", raising=False)
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/mcp/add", json={
+            "name": "Acme", "url": "https://mcp.acme.com/mcp", "auth": "oauth",
+            "client_id": "cid_1", "client_secret": "csecret_1"}).json()
+        assert r["ok"] is True and r["oauth_pending"] is True
+        entry = s.spec.mcp_servers["acme"]
+        assert entry["client_id_var"] == "ACME_OAUTH_CLIENT_ID"
+        env = (project / ".modastack" / ".env").read_text()
+        assert "ACME_OAUTH_CLIENT_ID=cid_1" in env
+        assert "ACME_OAUTH_CLIENT_SECRET=csecret_1" in env
+
+    def test_mcp_add_requires_name_and_url(self, project):
         c = _client(SetupState(), project)
-        assert c.post("/api/build-integration", json={}).status_code == 400
+        assert c.post("/api/mcp/add", json={"url": "https://x/mcp"}).status_code == 400
+        assert c.post("/api/mcp/add", json={"name": "X"}).status_code == 400
+        # non-http URL rejected
+        assert c.post("/api/mcp/add",
+                      json={"name": "X", "url": "ftp://x"}).status_code == 400
+
+    def test_connect_surfaces_user_mcp_card(self, project, monkeypatch):
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "PostHog", "url": "https://mcp.posthog.com/mcp",
+            "auth": "api_key", "api_key": "ph_x"})
+        cards = c.get("/api/connect").json()["cards"]
+        ph = next(c for c in cards if c["key"] == "posthog")
+        assert ph["kind"] == "mcp" and ph["name"] == "PostHog"
+        assert ph["via"] == "hosted MCP" and ph["status"] == "connected"
 
 
 # --- review file endpoints -----------------------------------------------
