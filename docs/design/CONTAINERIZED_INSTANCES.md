@@ -76,7 +76,7 @@ From the codebase audit. One instance's process tree, all localhost:
 | Manager (Python) | `cli.py:248-341` | PID file `.modastack/state/manager.pid`; spawns the rest. In containers, runs as PID 1 via `--foreground` |
 | Manager's persistent Claude session | `session.py:196` via `claude-agent-sdk` → `claude` CLI subprocess | `permission_mode="bypassPermissions"` (`session.py:189`) |
 | Subagents | `subagent.py:522-591`, detached | one `claude` process each; **no concurrency cap today** (C3) |
-| Per-session inbox HTTP servers | `inbox.py:128-144` | `127.0.0.1:0` random ports, negligible footprint |
+| Per-session inboxes | `inbox.py`, `events/drain.py` | in-memory queues, **no HTTP server / no ports** — messages arrive as `inbox/<session>` events over the event-server subscription/drain path; `deliver(wait=True)` is pub/sub request-reply (#269) |
 | Embedding sidecar | `kb/embedder.py:70-101`, `kb/sidecar.py` | lazy-loads sentence-transformers/torch (~0.6–1 GB RSS); replaced by fastembed in C4 |
 | Local Node event server | `events/server.py:82-134`, port 8080 | **not run in deployed instances** — they point at the Worker via `event_server_url` (C6) |
 | Monitor scheduler | `monitors/scheduler.py:143-148` daemon thread | interval loop; gets a remote-tick mode in Phase 2 (C17) |
@@ -89,8 +89,10 @@ transcripts — **required for session resume**, `session.py:184`),
 `~/.cache/huggingface/` (embedding model). Both land on the volume by
 setting `HOME` to a volume path.
 
-Known home-dir touchpoints to audit in C1: `history.py:13`,
-`browser.py:39-42`, `sdk.py:29` (claude CLI path fallback).
+Home-dir / CLI-path touchpoints — **resolved in C1 (#332):** `history.py` and
+`browser.py` already follow `$HOME`; the only fix was `sdk.py`'s claude-CLI
+fallback (now `_resolve_cli_path()`: PATH-first, Homebrew only on macOS). HF
+cache already honors `HF_HOME`.
 
 ## 4. Architecture
 
@@ -301,6 +303,43 @@ unbounded); `doctor` disk check + retention policy in C13.
 | Egress filtering | D1, Smokescreen + proxy env vars |
 | Provisioner service | replaces the C10 script + C22 Action behind the same contract |
 
+### 9.1 Operator-agnostic — single-operator self-serve
+
+The same swappability that defers SaaS also has to keep the *operator*
+swappable: nothing built in Phases 0–1 may assume **moda-labs** is the one
+running it. The internal fleet and a lone individual standing up one instance
+on accounts they bought themselves are the **same code on different
+accounts** — the solo case is strictly *simpler* than SaaS (no multi-tenancy,
+no billing, no broker), so guarding it now costs near nothing and a hardcoded
+assumption is the only thing that can foreclose it.
+
+What the solo operator already gets for free:
+- **§2 contract** — their own Fly volume, their own env-var credentials,
+  outbound-only. Nothing reaches in.
+- **Subscription auth (§6.1 / C23)** — the *ideal* solo path: `claude /login`
+  with their own Claude Max sub, creds on their volume, no API billing to set
+  up. The §6.1 shared-pool / account-sharing caveats are *multi-instance*
+  concerns and don't apply to one person running one instance.
+
+What must stay agnostic (acceptance criteria folded into C8/C10 below):
+- **Two accounts, not one.** Besides Fly, an instance needs an event-server
+  deployment. The solo operator brings **their own** by `wrangler deploy`-ing
+  the Worker into their own Cloudflare account and pointing
+  `event_server_url` at it. The shared moda-labs Worker is just *our*
+  instance of that — never a hard dependency. C10 takes the Worker URL as a
+  parameter; C8/C10 ship a "deploy your own event server" runbook.
+- **No namespace squatting.** Fly app names are globally unique across all of
+  Fly, so `modastack-<name>` must be operator-namespaced/configurable, not a
+  fixed string that collides on a stranger's account.
+- **The solo path is C10 standalone.** C22 (GitOps over *our* agent-teams
+  repo) is a moda-labs convenience layered on top — never the only way in. A
+  person runs C10 (or its `modastack`-command wrapper) against their own
+  `flyctl` auth and is done.
+
+Not building a polished self-serve UX now — just refusing to bake in
+assumptions that would make one impossible later. No tracking issue; this is
+a standing constraint on every Phase-1 ticket.
+
 ## 10. Work breakdown (ticket this, in order)
 
 Ticket IDs below are local to this doc (C-numbers); file as GitHub issues
@@ -312,9 +351,10 @@ MVP-cut issue mapping:
 
 | C | Issue | Phase | Dispatch |
 |---|---|---|---|
-| C1 | [#332](https://github.com/moda-labs/modastack/issues/332) | 0 | in progress |
+| C1 | [#332](https://github.com/moda-labs/modastack/issues/332) | 0 | ✅ merged (PR #345) |
 | C2 | [#333](https://github.com/moda-labs/modastack/issues/333) | 0 | Modastack |
 | C3 | [#334](https://github.com/moda-labs/modastack/issues/334) | 0 | Modastack |
+| C4 | [#346](https://github.com/moda-labs/modastack/issues/346) | 0 | Modastack (promoted from deferred) |
 | C5 | [#335](https://github.com/moda-labs/modastack/issues/335) | 0 | Modastack |
 | C6 | [#336](https://github.com/moda-labs/modastack/issues/336) | 0 | Modastack |
 | C7 | [#337](https://github.com/moda-labs/modastack/issues/337) | 0 | Modastack |
@@ -342,8 +382,9 @@ team-package and modastack-version changes. Always-on; no Phase 2.
   from day one. It is blocked on #177 — the #177 → C12 chain is the only
   schedule risk; everything else is parallel.
 
-**Deferred from MVP** (fast-follows, not gates): C4, C11, C13, C14 (as
-runbook), all of Phase 2.
+**Deferred from MVP** (fast-follows, not gates): C11, C13, C14 (as
+runbook), all of Phase 2. (C4 was promoted into the active set 2026-06-18 —
+it shrinks the C8 image by dropping torch — but is still not an MVP gate.)
 
 ### Phase 0 — framework prep (no infra dependency, all in modastack/)
 
@@ -418,15 +459,24 @@ from `MODASTACK_TEAM` env, then start. Idempotent on restart.
 *Accept:* same image boots both a fresh and an existing volume correctly.
 
 **C10 — Provision script (`scripts/provision-instance.sh` or `make
-new-instance`).** Fly API: create app `modastack-<name>`, volume (10–20 GB),
-set secrets from a local env file, register a deployment with the Worker
-(capture `deployment_id`/`api_key` into secrets), launch machine
-(4 GB / shared-2x, `auto_stop: false` for now). Also `destroy-instance`.
-The volume's `agent.yaml` is the config source of truth after seeding — the
-script never re-writes it. Secrets set depend on auth mode (§6.1): skip the
-Anthropic key entirely for subscription instances.
-*Accept:* one command → working instance reachable through Slack; runbook
-in the script header.
+new-instance`).** Fly API: create app (volume 10–20 GB), set secrets from a
+local env file, register a deployment with an event-server Worker (capture
+`deployment_id`/`api_key` into secrets), launch machine (4 GB / shared-2x,
+`auto_stop: false` for now). Also `destroy-instance`. The volume's
+`agent.yaml` is the config source of truth after seeding — the script never
+re-writes it. Secrets set depend on auth mode (§6.1): skip the Anthropic key
+entirely for subscription instances.
+**Operator-agnostic (§9.1) — no moda-labs assumptions:** runs against
+whatever account `flyctl` is authed to; the **app name is operator-namespaced
+/ configurable** (Fly names are globally unique — never a fixed
+`modastack-<name>` that squats on a stranger's account); the **event-server
+URL is a parameter** pointing at the operator's own Worker, with the shared
+moda-labs Worker just a default. Ship a short **"deploy your own event
+server"** runbook (`wrangler deploy` the Worker into the operator's own
+Cloudflare account) alongside the script.
+*Accept:* one command → working instance reachable through Slack, run against
+a **fresh personal Fly account** with no moda-labs-specific config; runbook
+(including the bring-your-own-Worker steps) in the script header.
 
 **C11 — Backup script.**
 Nightly: `.modastack/` (minus `state/*.pid`, logs), `workspace/`,
