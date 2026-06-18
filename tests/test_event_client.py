@@ -375,9 +375,10 @@ class TestRecordDisconnect:
 class TestSeqDedup:
     """EventServerClient drops duplicate seq numbers (#322).
 
-    When a stale WebSocket overlaps with a fresh one on the server,
-    the same event is delivered twice.  The client must deduplicate
-    by seq number so only one copy reaches the drain queue.
+    Routine reconnections (Cloudflare cycling, process restarts, session
+    rotation) leave a stale WebSocket alongside the fresh one on the
+    server.  The same event is delivered to both, so the client must
+    deduplicate by seq number so only one copy reaches the drain queue.
     """
 
     def _client(self, tmp_path, queue=None):
