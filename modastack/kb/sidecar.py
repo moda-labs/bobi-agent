@@ -1,4 +1,4 @@
-"""Embedding sidecar — lightweight HTTP server that holds a sentence-transformers
+"""Embedding sidecar — lightweight HTTP server that holds a fastembed/ONNX
 model in memory and serves embedding requests.
 
 Run as: python -m modastack.kb.sidecar --project-root <path>
@@ -19,6 +19,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 MODEL_NAME = "all-MiniLM-L6-v2"
+_FASTEMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 
 
@@ -68,9 +69,9 @@ def _make_handler(model):
                 })
                 return
 
-            embeddings = model.encode(texts, show_progress_bar=False)
+            embeddings = [e.tolist() for e in model.embed(texts)]
             self._json_response(200, {
-                "embeddings": embeddings.tolist(),
+                "embeddings": embeddings,
                 "model": MODEL_NAME,
                 "dim": EMBEDDING_DIM,
             })
@@ -106,14 +107,14 @@ def main():
 
     log.info("Loading model %s ...", MODEL_NAME)
     try:
-        from sentence_transformers import SentenceTransformer
+        from fastembed import TextEmbedding
     except ImportError:
         log.error(
-            "Knowledge base requires sentence-transformers. "
+            "Knowledge base requires fastembed. "
             "Install with: pip install 'modastack[kb]'"
         )
         sys.exit(1)
-    model = SentenceTransformer(MODEL_NAME)
+    model = TextEmbedding(model_name=_FASTEMBED_MODEL)
     log.info("Model loaded (dim=%d)", EMBEDDING_DIM)
 
     handler_class = _make_handler(model)

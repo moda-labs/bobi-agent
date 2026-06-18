@@ -104,17 +104,15 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
-        # CPU-only torch for KB tests (test_kb.py needs embedder);
-        # full [dev,kb] so every non-Claude integration test can run.
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev,kb]"
+        # Full [dev,kb] so every non-Claude integration test can run.
+        # fastembed uses ONNX (no torch needed).
+        run: pip install -e ".[dev,kb]"
 
       - name: Pre-download embedding model
         # The KB sidecar downloads all-MiniLM-L6-v2 on first use.
         # Pre-cache it so the 30s sidecar startup timeout isn't racing
         # a model download over a variable-speed network.
-        run: python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+        run: python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2')"
 
       - name: Run all non-Claude integration tests
         # Tests that need the claude CLI skip via requires_claude.

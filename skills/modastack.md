@@ -104,7 +104,7 @@ modastack kb remove <name>                  # delete a KB
 
 Each KB is a separate SQLite database at `.modastack/kb/<name>.db` with
 FTS5 for keyword search and sqlite-vec for semantic search. An embedding
-sidecar (sentence-transformers) auto-starts on first use and stays alive
+sidecar (fastembed/ONNX) auto-starts on first use and stays alive
 between commands. `modastack stop` tears it down.
 
 Agent teams use KBs for domain-specific retrieval — index Google Docs,

@@ -40,7 +40,7 @@ Issues = "https://github.com/moda-labs/modastack/issues"
 
 [project.optional-dependencies]
 kb = [
-    "sentence-transformers>=3.0",
+    "fastembed>=0.4",
     "sqlite-vec>=0.1.6",
 ]
 dev = [

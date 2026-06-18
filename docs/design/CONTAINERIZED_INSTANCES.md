@@ -77,7 +77,7 @@ From the codebase audit. One instance's process tree, all localhost:
 | Manager's persistent Claude session | `session.py:196` via `claude-agent-sdk` → `claude` CLI subprocess | `permission_mode="bypassPermissions"` (`session.py:189`) |
 | Subagents | `subagent.py:522-591`, detached | one `claude` process each; **no concurrency cap today** (C3) |
 | Per-session inbox HTTP servers | `inbox.py:128-144` | `127.0.0.1:0` random ports, negligible footprint |
-| Embedding sidecar | `kb/embedder.py:70-101`, `kb/sidecar.py` | lazy-loads sentence-transformers/torch (~0.6–1 GB RSS); replaced by fastembed in C4 |
+| Embedding sidecar | `kb/embedder.py:70-101`, `kb/sidecar.py` | lazy-loads fastembed/ONNX (~200 MB RSS); torch dependency removed in C4 |
 | Local Node event server | `events/server.py:82-134`, port 8080 | **not run in deployed instances** — they point at the Worker via `event_server_url` (C6) |
 | Monitor scheduler | `monitors/scheduler.py:143-148` daemon thread | interval loop; gets a remote-tick mode in Phase 2 (C17) |
 
