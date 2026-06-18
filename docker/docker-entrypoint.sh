@@ -62,11 +62,19 @@ cd "${PROJECT_DIR}"
 as_app() { gosu "${APP_USER}" env "HOME=${HOME}" "$@"; }
 
 # --- 3. First boot: install a team if the volume has no agent (C9 hardens) ---
+# Team source precedence: a public MODASTACK_TEAM_URL (fetched at boot — the
+# dark instance reaches out, nothing reaches in) wins over MODASTACK_TEAM (a
+# bundled/registry name). One of the two must be set on an empty volume.
 if [ ! -f "${PROJECT_DIR}/.modastack/agent.yaml" ]; then
-  [ -n "${MODASTACK_TEAM:-}" ] \
-    || fatal "empty volume and MODASTACK_TEAM is unset — nothing to install."
-  log "First boot: installing team '${MODASTACK_TEAM}' (non-interactive)"
-  as_app modastack install "${MODASTACK_TEAM}" --non-interactive
+  if [ -n "${MODASTACK_TEAM_URL:-}" ]; then
+    log "First boot: installing team from URL ${MODASTACK_TEAM_URL} (non-interactive)"
+    as_app modastack install "${MODASTACK_TEAM_URL}" --non-interactive
+  elif [ -n "${MODASTACK_TEAM:-}" ]; then
+    log "First boot: installing team '${MODASTACK_TEAM}' (non-interactive)"
+    as_app modastack install "${MODASTACK_TEAM}" --non-interactive
+  else
+    fatal "empty volume and neither MODASTACK_TEAM_URL nor MODASTACK_TEAM is set — nothing to install."
+  fi
 fi
 
 # --- 4. Subscription auth: bootstrap login over Slack if no creds yet (C23) --

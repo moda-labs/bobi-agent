@@ -558,16 +558,18 @@ def login_bootstrap(channel, timeout):
 def install(pack, non_interactive):
     """Install an agent team into the current project.
 
-    PACK is a path to a local agent team directory, or a name to fetch
-    from a remote registry.
+    PACK is a local directory path, a public `.tar.gz` URL, or a name to
+    fetch from a remote registry.
 
     Resolution order:
-      1. Local path (absolute or relative)
-      2. Remote registry lookup
+      1. URL (http/https) → fetch a team archive directly
+      2. Local path (absolute or relative)
+      3. Remote registry lookup by name
 
     Usage:
         modastack install agents/eng-team
         modastack install /path/to/my-agent
+        modastack install https://example.com/eng-team.tar.gz   # public URL
         modastack install eng-team              # fetches from registry
         modastack install eng-team --non-interactive
     """
@@ -576,8 +578,18 @@ def install(pack, non_interactive):
     # one would silently install into the parent.
     project_path = Path.cwd().resolve()
 
-    pack_path = Path(pack).resolve()
-    if pack_path.is_dir() and (pack_path / "agent.yaml").exists():
+    pack_str = str(pack)
+    if pack_str.startswith(("http://", "https://")):
+        # Public URL → fetch a team .tar.gz directly (the container first-boot /
+        # CI injection seam). The installed copy is the source of truth.
+        from modastack.registry import fetch_from_url
+        try:
+            click.echo(f"'{pack}' is a URL, fetching team archive...")
+            pack_dir, _ = fetch_from_url(project_path, pack_str)
+        except Exception as e:
+            click.echo(f"Failed to fetch '{pack}': {e}", err=True)
+            raise SystemExit(1)
+    elif (pack_path := Path(pack).resolve()).is_dir() and (pack_path / "agent.yaml").exists():
         pack_dir = pack_path
     else:
         # Try remote registry

@@ -95,10 +95,10 @@ def _read_meta(project_path: Path, name: str) -> dict:
         return {}
 
 
-def _write_meta(project_path: Path, name: str, version: str, repo: str) -> None:
+def _write_meta(project_path: Path, name: str, version: str, source: str) -> None:
     meta = {
         "version": version,
-        "source": f"github:{repo}",
+        "source": source,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
     _meta_path(project_path, name).write_text(json.dumps(meta, indent=2))
@@ -207,9 +207,127 @@ def fetch(project_path: Path, name: str, repo: str | None = None) -> Path:
             shutil.copytree(extracted, dest, dirs_exist_ok=True)
 
     version = _read_local_version(project_path, name) or "unknown"
-    _write_meta(project_path, name, version, repo)
+    _write_meta(project_path, name, version, f"github:{repo}")
     log.info(f"Installed {name} v{version} to {dest}")
     return dest
+
+
+def _safe_members(tar: tarfile.TarFile, root: str) -> list[tarfile.TarInfo]:
+    """Members of `tar` that live under `root`, with traversal/abs-path rejected.
+
+    A team archive is arbitrary remote content (a public URL), so an attacker
+    could craft entries like `../../etc/...` or absolute paths. We keep only
+    regular files/dirs whose path stays within `root` and strip anything else.
+    """
+    prefix = f"{root}/" if root else ""
+    safe: list[tarfile.TarInfo] = []
+    for m in tar.getmembers():
+        if not (m.name == root or m.name.startswith(prefix)):
+            continue
+        # No absolute paths, no `..` segments, no symlinks/hardlinks/devices.
+        if m.name.startswith("/") or ".." in Path(m.name).parts:
+            raise RuntimeError(f"Refusing unsafe path in archive: {m.name!r}")
+        if not (m.isfile() or m.isdir()):
+            log.debug("Skipping non-regular archive member: %s", m.name)
+            continue
+        safe.append(m)
+    return safe
+
+
+def fetch_from_url(project_path: Path, url: str,
+                   name: str | None = None) -> tuple[Path, str]:
+    """Download an agent team from a public `.tar.gz` URL and install it to the
+    project cache. Returns (install_dir, team_name).
+
+    The archive must contain exactly one team: a directory holding an
+    `agent.yaml` (optionally nested under a wrapper directory, as GitHub's
+    codeload tarballs are). The shallowest `agent.yaml` wins. The team name is
+    taken from `name`, else the package's `agent:` field, else its directory
+    name.
+
+    No auth: the URL is assumed publicly fetchable (a release asset, raw blob,
+    or your own server). This is the seam the container first-boot and CI use
+    to inject a team without baking it into the image.
+    """
+    from modastack import http as pooled
+
+    log.info("Fetching agent team from %s", url)
+    try:
+        resp = pooled.get(url, timeout=30.0)
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(
+            f"Failed to fetch agent team from {url}: HTTP {e.response.status_code}"
+        ) from e
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch agent team from {url}: {e}") from e
+
+    try:
+        tar = tarfile.open(fileobj=BytesIO(resp.content), mode="r:gz")
+    except tarfile.TarError as e:
+        raise RuntimeError(
+            f"{url} is not a readable .tar.gz archive ({e}). Point --team-url at a "
+            "gzipped tarball of one team directory."
+        ) from e
+
+    with tar:
+        agent_yaml = min(
+            (m for m in tar.getmembers()
+             if m.isfile() and m.name.rsplit("/", 1)[-1] == "agent.yaml"),
+            key=lambda m: len(m.name.split("/")),
+            default=None,
+        )
+        if agent_yaml is None:
+            raise RuntimeError(
+                f"No agent.yaml found in the archive at {url} — it does not look "
+                "like an agent team package."
+            )
+        team_root = agent_yaml.name.rsplit("/", 1)[0] if "/" in agent_yaml.name else ""
+        members = _safe_members(tar, team_root)
+
+        cache = _cache_dir(project_path)
+        with tempfile.TemporaryDirectory() as tmp:
+            # `_safe_members` already rejected traversal/abs/links; the `data`
+            # filter (Python 3.12+, backported to 3.11.4) is belt-and-suspenders
+            # and the default from 3.14. Fall back cleanly on older runtimes.
+            try:
+                tar.extractall(tmp, members=members, filter="data")
+            except TypeError:
+                tar.extractall(tmp, members=members)
+            extracted = Path(tmp) / team_root if team_root else Path(tmp)
+            if not (extracted / "agent.yaml").is_file():
+                raise RuntimeError(f"Extraction failed for the team at {url}")
+
+            resolved = (
+                name
+                or _agent_name_from_yaml(extracted / "agent.yaml")
+                or (Path(team_root).name if team_root else "")
+            )
+            if not resolved:
+                raise RuntimeError(
+                    f"Could not determine a team name from {url}; pass an explicit name."
+                )
+
+            dest = cache / resolved
+            if dest.exists():
+                shutil.rmtree(dest)
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(extracted, dest, dirs_exist_ok=True)
+
+    version = _read_local_version(project_path, resolved) or "unknown"
+    _write_meta(project_path, resolved, version, f"url:{url}")
+    log.info("Installed %s v%s from %s to %s", resolved, version, url, dest)
+    return dest, resolved
+
+
+def _agent_name_from_yaml(agent_yaml: Path) -> str | None:
+    """Read the team name from a package's agent.yaml `agent:` field."""
+    try:
+        data = yaml.safe_load(agent_yaml.read_text())
+        name = (data or {}).get("agent")
+        return str(name) if name else None
+    except Exception:
+        return None
 
 
 def _list_remote_single(repo: str) -> list[dict]:

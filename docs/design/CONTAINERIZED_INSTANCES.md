@@ -466,7 +466,15 @@ from `MODASTACK_TEAM` env, then start. Idempotent on restart.
 new-instance`).** Fly API: create app (volume 10–20 GB), set secrets from a
 local env file, register a deployment with an event-server Worker (capture
 `deployment_id`/`api_key` into secrets), launch machine (4 GB / shared-2x,
-`auto_stop: false` for now). Also `destroy-instance`. The volume's
+`auto_stop: false` for now). Also `destroy-instance`.
+**Amended 2026-06-18 (implementation):** the "register a deployment / capture
+`deployment_id`/`api_key` into secrets" step is obsolete — it predates the #240
+bubble model. Instances now **self-mint a bubble and self-register every session
+at boot** (`subagent.py` → `ensure_bubble`/`register`), so the provisioner's only
+event-server job is to pass the Worker URL (`MODASTACK_EVENT_SERVER`, an
+`https://` value the client derives `wss://` from). No deployment IDs touch the
+provisioner. The instance is **dark** (no `[http_service]`/inbound), which also
+makes `auto_stop: false` the natural default until Phase 2. The volume's
 `agent.yaml` is the config source of truth after seeding — the script never
 re-writes it. Secrets set depend on auth mode (§6.1): skip the Anthropic key
 entirely for subscription instances.

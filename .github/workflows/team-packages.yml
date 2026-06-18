@@ -1,0 +1,51 @@
+name: Team packages
+
+# Builds distributable .tar.gz packages from each agent team under agents/
+# (the C10 team-injection seam — a dark instance fetches its team from a public
+# URL at first boot via MODASTACK_TEAM_URL / `modastack install <url>`).
+#
+# Path-filtered so unrelated PRs pay nothing. On a PR this validates that every
+# team still packages from source and that each archive contains an agent.yaml;
+# the artifacts are uploaded for inspection. Publishing them to a public URL
+# (release asset / our own server) is a separate step layered on top later.
+on:
+  push:
+    branches: [main]
+    paths: &pkg_paths
+      - "agents/**"
+      - "scripts/build-team-tarballs.sh"
+      - ".github/workflows/team-packages.yml"
+  pull_request:
+    branches: [main]
+    paths: *pkg_paths
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build team tarballs from source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build packages
+        run: scripts/build-team-tarballs.sh --out dist/teams
+
+      - name: Verify each archive carries an agent.yaml
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          built=(dist/teams/*.tar.gz)
+          [ "${#built[@]}" -gt 0 ] || { echo "No tarballs were built"; exit 1; }
+          for tgz in "${built[@]}"; do
+            if ! tar -tzf "$tgz" | grep -qE '(^|/)agent\.yaml$'; then
+              echo "::error::$tgz has no agent.yaml — not a valid team package"
+              exit 1
+            fi
+            echo "ok: $tgz"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: team-packages
+          path: dist/teams/*.tar.gz
+          if-no-files-found: error

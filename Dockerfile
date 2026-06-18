@@ -25,7 +25,7 @@
 #
 # Run (api_key mode):
 #   docker run --rm -v modastack-a:/data \
-#     -e MODASTACK_TEAM=eng-team -e MODASTACK_EVENT_SERVER_URL=wss://... \
+#     -e MODASTACK_TEAM=eng-team -e MODASTACK_EVENT_SERVER=https://... \
 #     -e ANTHROPIC_API_KEY=sk-ant-... -e SLACK_BOT_TOKEN=... -e GITHUB_TOKEN=... \
 #     modastack:dev
 
