@@ -670,6 +670,10 @@ def _check_concurrency_semaphore(root: Path, timeout: float = 120) -> None:
     except Exception:
         return  # can't load config — don't block
     cap = cfg.max_concurrent_agents or DEFAULT_CAP
+    if cap < 1:
+        # A misconfigured 0/negative cap would queue every launch until it
+        # times out; fall back to the default rather than wedging all dispatch.
+        cap = DEFAULT_CAP
     allowed, count = check_concurrency(cap)
     if allowed:
         return

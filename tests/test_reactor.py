@@ -8,6 +8,20 @@ import pytest
 from modastack.events.reactor import AutoDispatchRule, EventReactor
 
 
+def _wait_calls(mock, n, timeout=2.0):
+    """Wait for an async-dispatched launch to land.
+
+    _dispatch offloads launch_agent to a daemon thread (so the drain loop
+    never blocks on the concurrency semaphore), so the mock is called shortly
+    after process() returns rather than synchronously.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if mock.call_count >= n:
+            return
+        time.sleep(0.005)
+
+
 class TestAutoDispatchRule:
     """AutoDispatchRule matches events by type and optional field conditions."""
 
@@ -184,6 +198,7 @@ class TestEventReactor:
         result = reactor.process(event)
 
         assert result == "dispatched"
+        _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
         call_kwargs = mock_launch.call_args
         assert call_kwargs[1]["workflow_name"] == "pr-feedback"
@@ -218,6 +233,7 @@ class TestEventReactor:
         result = reactor.process(event)
 
         assert result == "dispatched"
+        _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
 
     @patch("modastack.subagent.launch_agent")
@@ -228,6 +244,7 @@ class TestEventReactor:
 
         assert reactor.process(event) == "dispatched"
         assert reactor.process(event) is None
+        _wait_calls(mock_launch, 1)
         assert mock_launch.call_count == 1
 
     @patch("modastack.subagent.launch_agent")
@@ -238,6 +255,7 @@ class TestEventReactor:
 
         assert reactor.process(event) == "dispatched"
         assert reactor.process(event) == "dispatched"
+        _wait_calls(mock_launch, 2)
         assert mock_launch.call_count == 2
 
     @patch("modastack.subagent.launch_agent")
@@ -249,6 +267,7 @@ class TestEventReactor:
 
         assert reactor.process(event1) == "dispatched"
         assert reactor.process(event2) == "dispatched"
+        _wait_calls(mock_launch, 2)
         assert mock_launch.call_count == 2
 
     @patch("modastack.subagent.launch_agent")
@@ -263,6 +282,33 @@ class TestEventReactor:
         assert result == "dispatched"
 
     @patch("modastack.subagent.launch_agent")
+    def test_dispatch_does_not_block_on_slow_launch(self, mock_launch):
+        """process() must return promptly even when launch_agent blocks (the
+        concurrency-semaphore wait can sleep up to ~120s). The launch runs off
+        the single drain thread so the event pipeline never stalls."""
+        import threading
+        release = threading.Event()
+        started = threading.Event()
+
+        def slow_launch(**kwargs):
+            started.set()
+            release.wait(2.0)
+            return "wf-x"
+
+        mock_launch.side_effect = slow_launch
+        reactor = self._make_reactor()
+        event = self._make_review_event()
+
+        t0 = time.time()
+        result = reactor.process(event)
+        elapsed = time.time() - t0
+
+        assert result == "dispatched"
+        assert elapsed < 0.5, f"process() blocked {elapsed:.2f}s on launch"
+        assert started.wait(1.0), "launch did not run on a background thread"
+        release.set()
+
+    @patch("modastack.subagent.launch_agent")
     def test_task_includes_pr_context(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -270,6 +316,7 @@ class TestEventReactor:
 
         reactor.process(event)
 
+        _wait_calls(mock_launch, 1)
         task = mock_launch.call_args[1]["task"]
         assert "#42" in task
         assert "moda-labs/test" in task
@@ -375,6 +422,7 @@ class TestEventReactor:
             "fields": {"action": "closed", "number": 100},
         }
         assert reactor.process(event_closed) == "dispatched"
+        _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
 
 

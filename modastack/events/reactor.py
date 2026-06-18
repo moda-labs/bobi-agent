@@ -11,6 +11,7 @@ Rules are defined in agent.yaml under ``auto_dispatch``.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -136,19 +137,31 @@ class EventReactor:
         input_fields.update(fields)
 
         log.info("Auto-dispatching %s for %s", rule.workflow, key)
-        try:
-            modastack.subagent.launch_agent(
-                task=task,
-                cwd=self.cwd,
-                workflow_name=rule.workflow,
-                role="engineer",
-                input_fields=input_fields,
-            )
-        except RuntimeError as e:
-            # Session already active — the workflow is already handling this PR
-            log.info("Auto-dispatch launch skipped (already active): %s — %s", key, e)
-        except Exception:
-            log.exception("Auto-dispatch failed for %s", key)
+
+        # launch_agent runs the concurrency-semaphore preflight, which BLOCKS
+        # (up to ~120s) when the agent cap is reached. _dispatch is called on
+        # the single drain thread, so blocking here stalls the whole event
+        # pipeline — no inbox delivery, no reply routing — until a slot frees.
+        # Run the launch off-thread so the drain loop returns immediately; the
+        # semaphore still bounds how many agents actually run at once.
+        def _launch() -> None:
+            try:
+                modastack.subagent.launch_agent(
+                    task=task,
+                    cwd=self.cwd,
+                    workflow_name=rule.workflow,
+                    role="engineer",
+                    input_fields=input_fields,
+                )
+            except RuntimeError as e:
+                # Session already active / cap timeout — the workflow is either
+                # already handling this PR or the slot never opened.
+                log.info("Auto-dispatch launch skipped: %s — %s", key, e)
+            except Exception:
+                log.exception("Auto-dispatch failed for %s", key)
+
+        threading.Thread(
+            target=_launch, name=f"dispatch-{key}", daemon=True).start()
 
     @staticmethod
     def _build_task(rule: AutoDispatchRule, event_type: str, fields: dict,

@@ -23,6 +23,24 @@ _FASTEMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 
 
+def _resolve_cache_dir() -> str | None:
+    """Where fastembed should cache the ONNX model.
+
+    fastembed honors ``FASTEMBED_CACHE_PATH`` but — unlike sentence-transformers
+    /huggingface_hub — ignores ``HF_HOME``. The container image (C8) pre-seeds a
+    model cache at build to avoid a first-embed download; honor either env so a
+    pre-baked cache is actually used. Returns None to fall back to fastembed's
+    default location.
+    """
+    explicit = os.environ.get("FASTEMBED_CACHE_PATH")
+    if explicit:
+        return explicit
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return str(Path(hf_home) / "fastembed")
+    return None
+
+
 def _make_handler(model):
 
     class EmbeddingHandler(BaseHTTPRequestHandler):
@@ -114,7 +132,8 @@ def main():
             "Install with: pip install 'modastack[kb]'"
         )
         sys.exit(1)
-    model = TextEmbedding(model_name=_FASTEMBED_MODEL)
+    model = TextEmbedding(model_name=_FASTEMBED_MODEL,
+                          cache_dir=_resolve_cache_dir())
     log.info("Model loaded (dim=%d)", EMBEDDING_DIM)
 
     handler_class = _make_handler(model)

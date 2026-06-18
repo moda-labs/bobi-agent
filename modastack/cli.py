@@ -607,10 +607,25 @@ def install(pack, non_interactive):
             for var in env_vars:
                 if var not in existing and var in os.environ:
                     existing[var] = os.environ[var]
-            if missing:
+            # A bare ${VAR} is a required secret; ${VAR:-default}/${VAR:+alt}
+            # (a ':' in the captured reference) carries its own fallback and is
+            # optional. Fail fast on missing required secrets so a container
+            # entrypoint (`install --non-interactive && start`) never marches
+            # into a broken start with empty credentials.
+            required_missing = [v for v in missing if ":" not in v]
+            optional_missing = [v for v in missing if ":" in v]
+            if required_missing:
                 click.echo(
-                    "Warning: missing env vars (set before start): "
-                    + ", ".join(missing))
+                    "Error: required secrets missing from the environment: "
+                    + ", ".join(required_missing)
+                    + ". Set them (e.g. `fly secrets set`) and re-run "
+                    "`modastack install --non-interactive`.",
+                    err=True)
+                raise SystemExit(1)
+            if optional_missing:
+                click.echo(
+                    "Warning: optional env vars unset: "
+                    + ", ".join(optional_missing), err=True)
             write_env_file(env_file, existing)
         elif missing:
             click.echo("This agent needs credentials:")

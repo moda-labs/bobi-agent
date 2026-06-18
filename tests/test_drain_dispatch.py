@@ -1,10 +1,20 @@
 """Tests for drain loop integration with auto-dispatch via EventReactor."""
 
 import queue
+import time
 from unittest.mock import patch, MagicMock
 
 from modastack.events.drain import drain_loop
 from modastack.events.reactor import AutoDispatchRule, EventReactor
+
+
+def _wait_calls(mock, n, timeout=2.0):
+    """Auto-dispatch offloads launch_agent to a daemon thread; wait for it."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if mock.call_count >= n:
+            return
+        time.sleep(0.005)
 
 
 class _OneShotQueue:
@@ -92,6 +102,7 @@ class TestDrainAutoDispatch:
         assert len(delivered) == 1
         assert "AUTO-DISPATCHED" in delivered[0]
         assert "[org/repo] submitted PR #1" in delivered[0]
+        _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
 
     @patch("modastack.subagent.launch_agent")
