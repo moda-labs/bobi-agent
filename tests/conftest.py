@@ -34,7 +34,35 @@ if _REPO_ROOT not in _existing_pythonpath.split(os.pathsep):
 # wrong code. This makes worktree pinning hold regardless of subprocess cwd.
 os.environ["PYTHONSAFEPATH"] = "1"
 
+import asyncio
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_leaked_event_loop(request):
+    """Prevent a leaked running event loop from poisoning async tests.
+
+    The polluter is pytest-playwright's session-scoped ``playwright`` fixture:
+    Playwright's sync API runs an asyncio event loop inside a greenlet on the
+    main thread.  Because greenlets share the OS thread, the C-level
+    ``_running_loop`` thread-local stays set even after control returns to the
+    main greenlet.  pytest-asyncio's ``Runner.run()`` then sees a "running"
+    loop and raises ``RuntimeError: cannot be called from a running event
+    loop``.
+
+    Clearing the thread-local before each test restores isolation.  The
+    Playwright greenlet re-sets it when it resumes, so this is safe.
+
+    Skipped for e2e tests — Playwright needs its own loop for teardown.
+    """
+    if "/e2e/" in str(request.fspath):
+        yield
+        return
+    leaked = asyncio.events._get_running_loop()
+    asyncio.events._set_running_loop(None)
+    yield
+    asyncio.events._set_running_loop(leaked)
 
 
 @pytest.fixture(autouse=True)
