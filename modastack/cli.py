@@ -517,6 +517,39 @@ def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
     gitignore.write_text("\n".join(entries) + "\n")
 
 
+@main.command("login-bootstrap")
+@click.option("--channel", default=None,
+              help="Private Slack channel ID to post the login URL into "
+                   "(default: $MODASTACK_LOGIN_CHANNEL).")
+@click.option("--timeout", default=600, type=int,
+              help="Seconds to wait for the pasted auth code (default: 600).")
+def login_bootstrap(channel, timeout):
+    """Bootstrap subscription auth over Slack + the event bus.
+
+    For MODASTACK_AUTH=subscription first boot with no credentials on the
+    volume: drive `claude auth login --claudeai` under a pty, post the OAuth
+    URL to a private Slack channel, and wait for the pasted code to arrive as
+    a Slack event over the event bus. Idempotent — a no-op if credentials
+    already exist. Fallback: `fly ssh console` then `claude auth login`.
+    """
+    from modastack import auth_bootstrap
+    project_path = _detect_project_root()
+
+    if auth_bootstrap.credentials_exist():
+        click.echo("Subscription credentials already present — nothing to do.")
+        return
+    try:
+        ok = auth_bootstrap.run_bootstrap(
+            project_path, channel=channel, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+        click.echo(f"Login bootstrap failed: {exc}", err=True)
+        raise SystemExit(1)
+    if not ok:
+        click.echo("Login bootstrap did not produce credentials.", err=True)
+        raise SystemExit(1)
+    click.echo("Subscription login complete.")
+
+
 @main.command()
 @click.argument("pack")
 @click.option("--non-interactive", is_flag=True,

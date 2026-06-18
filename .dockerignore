@@ -1,0 +1,35 @@
+# Keep the build context small and the wheel reproducible. The sdist build
+# needs: modastack/, event-server/, agents/, README.md, CHANGELOG.md
+# (see pyproject [tool.hatch.build.targets.sdist]). Everything else is noise.
+
+.git
+.github
+.venv
+venv
+.claude
+.modastack
+workspace
+
+# Python build artifacts / caches
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+dist
+build
+*.egg-info
+
+# Node build artifacts (event-server source is force-included; its deps are not)
+event-server/node_modules
+event-server/dist
+
+# Tests and docs aren't needed to build or run the image
+tests
+docs
+
+# Local scratch / handoff files
+HANDOFF-*.md
+RELEASE-CLEANUP-STATUS.md
+*.log
