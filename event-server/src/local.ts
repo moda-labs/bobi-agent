@@ -16,6 +16,7 @@ import {
 	handleSlackWebhook,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
+	handleDeregisterDeployment,
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
@@ -95,9 +96,28 @@ const storage: StorageAdapter = {
 		bubbles.set(bubble.id, bubble);
 	},
 
+	async removeDeployment(record: DeploymentRecord): Promise<void> {
+		const dep = deployments.get(record.id);
+		if (dep) {
+			for (const ws of dep.websockets) {
+				try { ws.close(); } catch { /* best-effort */ }
+			}
+		}
+		deployments.delete(record.id);
+		apiKeyIndex.delete(record.api_key);
+	},
+
 	async addSubscription(key: string, deploymentId: string): Promise<void> {
 		if (!subscriptionIndex.has(key)) subscriptionIndex.set(key, new Set());
 		subscriptionIndex.get(key)!.add(deploymentId);
+	},
+
+	async removeSubscription(key: string, deploymentId: string): Promise<void> {
+		const set = subscriptionIndex.get(key);
+		if (set) {
+			set.delete(deploymentId);
+			if (set.size === 0) subscriptionIndex.delete(key);
+		}
 	},
 
 	async deliver(event: NormalizedEvent): Promise<number> {
@@ -267,6 +287,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
 
 		return respond(res, await handleUpdateSubscriptions(storage, subsMatch[1], apiKey, data));
+	}
+
+	const deleteMatch = path.match(/^\/deployments\/([^/]+)$/);
+	if (method === "DELETE" && deleteMatch) {
+		const authHeader = req.headers.authorization || "";
+		if (!authHeader.startsWith("Bearer ")) return json(res, { error: "unauthorized" }, 403);
+		const apiKey = authHeader.slice(7);
+		return respond(res, await handleDeregisterDeployment(storage, deleteMatch[1], apiKey));
 	}
 
 	// Generic topic: POST /events/{topic}

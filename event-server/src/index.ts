@@ -16,6 +16,7 @@ import {
 	handleSlackWebhook,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
+	handleDeregisterDeployment,
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
@@ -54,6 +55,11 @@ function createKVStorage(env: Env): StorageAdapter {
 			await env.EVENTS.put(`bubble:${bubble.id}`, JSON.stringify(bubble));
 		},
 
+		async removeDeployment(deployment: DeploymentRecord): Promise<void> {
+			await env.EVENTS.delete(`deployments:${deployment.api_key}`);
+			await env.EVENTS.delete(`deployment_id:${deployment.id}`);
+		},
+
 		async addSubscription(key: string, deploymentId: string): Promise<void> {
 			const kvKey = `subscriptions:${key}`;
 			const existing = await env.EVENTS.get(kvKey);
@@ -61,6 +67,19 @@ function createKVStorage(env: Env): StorageAdapter {
 			if (!ids.includes(deploymentId)) {
 				ids.push(deploymentId);
 				await env.EVENTS.put(kvKey, JSON.stringify(ids));
+			}
+		},
+
+		async removeSubscription(key: string, deploymentId: string): Promise<void> {
+			const kvKey = `subscriptions:${key}`;
+			const existing = await env.EVENTS.get(kvKey);
+			if (!existing) return;
+			const ids: string[] = JSON.parse(existing);
+			const filtered = ids.filter((id) => id !== deploymentId);
+			if (filtered.length === 0) {
+				await env.EVENTS.delete(kvKey);
+			} else {
+				await env.EVENTS.put(kvKey, JSON.stringify(filtered));
 			}
 		},
 
@@ -258,6 +277,20 @@ export default {
 			if (!body) return Response.json({ error: "invalid JSON" }, { status: 400 });
 
 			return respond(await handleUpdateSubscriptions(storage, deploymentId, apiKey, body));
+		}
+
+		if (method === "DELETE" && path.startsWith("/deployments/")) {
+			const match = path.match(/^\/deployments\/([^/]+)$/);
+			if (!match) return Response.json({ error: "invalid path" }, { status: 400 });
+			const deploymentId = match[1];
+
+			const authHeader = request.headers.get("authorization");
+			if (!authHeader?.startsWith("Bearer ")) {
+				return Response.json({ error: "unauthorized" }, { status: 403 });
+			}
+			const apiKey = authHeader.slice(7);
+
+			return respond(await handleDeregisterDeployment(storage, deploymentId, apiKey));
 		}
 
 		// Generic topic: POST /events/{topic}

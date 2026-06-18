@@ -248,6 +248,22 @@ def ensure_bubble(base_url: str, project_path: Path,
         lock_path.unlink(missing_ok=True)
 
 
+def deregister(base_url: str, deployment_id: str, api_key: str) -> bool:
+    """Deregister a deployment. Returns True on success, False on failure."""
+    from modastack import http as pooled
+
+    try:
+        resp = pooled.delete(
+            f"{base_url}/deployments/{deployment_id}",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=5.0,
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        log.debug("Deployment deregister failed for %s: %s", deployment_id, e)
+        return False
+
+
 def _slack_auth_info(token: str) -> tuple[str, str]:
     """Resolve (team_id, bot_id) from a bot token via auth.test."""
     from modastack import http as pooled

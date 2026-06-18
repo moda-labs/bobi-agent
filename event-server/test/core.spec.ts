@@ -22,6 +22,7 @@ import {
 	handleSlackWebhook,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
+	handleDeregisterDeployment,
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
@@ -739,9 +740,20 @@ function createMockStorage(): StorageAdapter & {
 			deployments.set(dep.id, { ...dep });
 			apiKeyIndex.set(dep.api_key, dep.id);
 		},
+		async removeDeployment(dep: DeploymentRecord) {
+			deployments.delete(dep.id);
+			apiKeyIndex.delete(dep.api_key);
+		},
 		async addSubscription(key: string, deploymentId: string) {
 			if (!subscriptions.has(key)) subscriptions.set(key, new Set());
 			subscriptions.get(key)!.add(deploymentId);
+		},
+		async removeSubscription(key: string, deploymentId: string) {
+			const set = subscriptions.get(key);
+			if (set) {
+				set.delete(deploymentId);
+				if (set.size === 0) subscriptions.delete(key);
+			}
 		},
 		async deliver(event: NormalizedEvent) {
 			// Realistic fan-out: resolve subscribers via the SAME namespacing the
@@ -1109,6 +1121,71 @@ describe("handleUpdateSubscriptions", () => {
 		await handleUpdateSubscriptions(store, "d1", "key1", { add: ["slack:T1"] });
 		const saved = store.deployments.get("d1")!;
 		expect(saved.subscriptions).toContain("slack:T1");
+	});
+});
+
+describe("handleDeregisterDeployment", () => {
+	it("removes deployment and its subscription-index entries", async () => {
+		const store = createMockStorage();
+		const dep: DeploymentRecord = {
+			id: "d1", name: "test", api_key: "key1",
+			subscriptions: ["github:org/repo", "linear:PROJ"],
+		};
+		store.deployments.set("d1", dep);
+		store.apiKeyIndex.set("key1", "d1");
+		store.subscriptions.set("github:org/repo", new Set(["d1"]));
+		store.subscriptions.set("linear:PROJ", new Set(["d1"]));
+
+		const result = await handleDeregisterDeployment(store, "d1", "key1");
+		expect(result.status).toBe(200);
+		expect((result.body as Record<string, boolean>).ok).toBe(true);
+
+		expect(store.deployments.size).toBe(0);
+		expect(store.apiKeyIndex.size).toBe(0);
+		expect(store.subscriptions.has("github:org/repo")).toBe(false);
+		expect(store.subscriptions.has("linear:PROJ")).toBe(false);
+	});
+
+	it("rejects unauthorized requests (wrong api key)", async () => {
+		const store = createMockStorage();
+		const dep: DeploymentRecord = {
+			id: "d1", name: "test", api_key: "key1", subscriptions: [],
+		};
+		store.deployments.set("d1", dep);
+		store.apiKeyIndex.set("key1", "d1");
+
+		const result = await handleDeregisterDeployment(store, "d1", "wrong-key");
+		expect(result.status).toBe(403);
+		expect(store.deployments.size).toBe(1);
+	});
+
+	it("rejects unknown deployment id", async () => {
+		const store = createMockStorage();
+		const result = await handleDeregisterDeployment(store, "nonexistent", "any-key");
+		expect(result.status).toBe(403);
+	});
+
+	it("does not affect other deployments sharing a subscription key", async () => {
+		const store = createMockStorage();
+		const dep1: DeploymentRecord = {
+			id: "d1", name: "a", api_key: "key1",
+			subscriptions: ["github:org/repo"],
+		};
+		const dep2: DeploymentRecord = {
+			id: "d2", name: "b", api_key: "key2",
+			subscriptions: ["github:org/repo"],
+		};
+		store.deployments.set("d1", dep1);
+		store.deployments.set("d2", dep2);
+		store.apiKeyIndex.set("key1", "d1");
+		store.apiKeyIndex.set("key2", "d2");
+		store.subscriptions.set("github:org/repo", new Set(["d1", "d2"]));
+
+		await handleDeregisterDeployment(store, "d1", "key1");
+		expect(store.deployments.size).toBe(1);
+		expect(store.deployments.has("d2")).toBe(true);
+		expect(store.subscriptions.get("github:org/repo")?.has("d2")).toBe(true);
+		expect(store.subscriptions.get("github:org/repo")?.has("d1")).toBe(false);
 	});
 });
 

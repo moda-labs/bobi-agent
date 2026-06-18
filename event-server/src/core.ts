@@ -57,7 +57,9 @@ export interface SlackWorkspaceRecord {
 export interface StorageAdapter {
 	getDeploymentByApiKey(apiKey: string): Promise<DeploymentRecord | null>;
 	putDeployment(deployment: DeploymentRecord): Promise<void>;
+	removeDeployment(deployment: DeploymentRecord): Promise<void>;
 	addSubscription(key: string, deploymentId: string): Promise<void>;
+	removeSubscription(key: string, deploymentId: string): Promise<void>;
 	deliver(event: NormalizedEvent): Promise<number>;
 	getBubble(bubbleId: string): Promise<BubbleRecord | null>;
 	putBubble(bubble: BubbleRecord): Promise<void>;
@@ -561,6 +563,24 @@ export async function handleUpdateSubscriptions(
 	await storage.putDeployment(deployment);
 
 	return { status: 200, body: { subscriptions: deployment.subscriptions, added } };
+}
+
+export async function handleDeregisterDeployment(
+	storage: StorageAdapter,
+	deploymentId: string,
+	apiKey: string,
+): Promise<HandlerResult> {
+	const deployment = await authenticateDeployment(storage, apiKey, deploymentId);
+	if (!deployment) {
+		return { status: 403, body: { error: "unauthorized" } };
+	}
+
+	for (const sub of deployment.subscriptions) {
+		await storage.removeSubscription(namespaceSubKey(deployment.bubble_id, sub), deploymentId);
+	}
+	await storage.removeDeployment(deployment);
+
+	return { status: 200, body: { ok: true } };
 }
 
 // Publish to a generic topic. The publisher MUST sign with its bubble key —
