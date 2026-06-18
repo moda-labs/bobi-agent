@@ -5,9 +5,12 @@ name: Team packages
 # URL at first boot via MODASTACK_TEAM_URL / `modastack install <url>`).
 #
 # Path-filtered so unrelated PRs pay nothing. On a PR this validates that every
-# team still packages from source and that each archive contains an agent.yaml;
-# the artifacts are uploaded for inspection. Publishing them to a public URL
-# (release asset / our own server) is a separate step layered on top later.
+# team still packages from source and that each archive contains an agent.yaml.
+# On push to main, the `publish` job uploads the tarballs to a rolling
+# `teams-latest` GitHub Release, giving each team a stable, public, no-auth
+# download URL that --team-url / MODASTACK_TEAM_URL can point at:
+#
+#   https://github.com/<owner>/<repo>/releases/download/teams-latest/<team>.tar.gz
 on:
   push:
     branches: [main]
@@ -49,3 +52,35 @@ jobs:
           name: team-packages
           path: dist/teams/*.tar.gz
           if-no-files-found: error
+
+  publish:
+    name: Publish tarballs to a downloadable release
+    needs: build
+    # Only on push to main — never from a PR (no publishing untrusted forks /
+    # asset churn). The rolling tag keeps the download URLs stable.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: team-packages
+          path: dist/teams
+
+      - name: Upload to the rolling 'teams-latest' release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Create the release once (idempotent), then clobber its assets so the
+          # download URLs always serve the latest main build.
+          if ! gh release view teams-latest >/dev/null 2>&1; then
+            gh release create teams-latest --prerelease \
+              --title "Team packages (latest main)" \
+              --notes "Auto-published agent-team .tar.gz packages built from agents/ on each push to main. Pull one with --team-url / MODASTACK_TEAM_URL = https://github.com/${{ github.repository }}/releases/download/teams-latest/<team>.tar.gz"
+          fi
+          gh release upload teams-latest dist/teams/*.tar.gz --clobber
+          echo "Published:"; ls -1 dist/teams/*.tar.gz
