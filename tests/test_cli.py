@@ -43,7 +43,9 @@ def test_post_event_posts_to_event_server():
     mock_client = httpx.Client(transport=transport)
 
     with patch.object(pooled, '_client', mock_client), \
-         patch("modastack.config.Config.load") as mock_pc:
+         patch("modastack.config.Config.load") as mock_pc, \
+         patch("modastack.config.load_bubble_state",
+               return_value={"bubble_id": "bub_t", "bubble_key": "bkey_t"}):
         mock_pc.return_value = type("PC", (), {"event_server_url": "https://events.test"})()
         ok = publish.post_event("monitor/deploy.down", {"summary": "down"},
                                 project_path=Path("/tmp/repo"))
@@ -68,7 +70,9 @@ def test_post_event_defaults_source_when_no_slash():
     mock_client = httpx.Client(transport=transport)
 
     with patch.object(pooled, '_client', mock_client), \
-         patch("modastack.config.Config.load") as mock_pc:
+         patch("modastack.config.Config.load") as mock_pc, \
+         patch("modastack.config.load_bubble_state",
+               return_value={"bubble_id": "bub_t", "bubble_key": "bkey_t"}):
         mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
         publish.post_event("deploy_down", {}, project_path=Path("/tmp/repo"))
 
@@ -86,7 +90,9 @@ def test_post_event_returns_false_on_connection_error():
     mock_client = httpx.Client(transport=transport)
 
     with patch.object(pooled, '_client', mock_client), \
-         patch("modastack.config.Config.load") as mock_pc:
+         patch("modastack.config.Config.load") as mock_pc, \
+         patch("modastack.config.load_bubble_state",
+               return_value={"bubble_id": "bub_t", "bubble_key": "bkey_t"}):
         mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
         assert publish.post_event("monitor/x", {}, project_path=Path("/tmp/repo")) is False
 
