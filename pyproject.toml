@@ -63,6 +63,11 @@ packages = ["modastack"]
 "event-server/package.json" = "modastack/event-server/package.json"
 "event-server/package-lock.json" = "modastack/event-server/package-lock.json"
 "event-server/tsconfig.json" = "modastack/event-server/tsconfig.json"
+# Bundle a few starter teams so `modastack setup` always offers templates,
+# offline and without depending on a (possibly private) GitHub registry.
+"agents/eng-team" = "modastack/templates/eng-team"
+"agents/market-research" = "modastack/templates/market-research"
+"agents/support-manager" = "modastack/templates/support-manager"
 
 [tool.hatch.build.targets.sdist]
 include = ["modastack", "event-server", "README.md", "CHANGELOG.md"]

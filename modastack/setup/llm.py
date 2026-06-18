@@ -15,11 +15,19 @@ partial messages enabled, so the UI gets the token-by-token "pour".
 
 from __future__ import annotations
 
+import asyncio
 from typing import AsyncIterator, Callable, Optional
 
 
 class LLMError(Exception):
     """A streaming call failed before producing usable output."""
+
+
+# A stalled stream — no token for this many seconds — is treated as a failure
+# rather than hung forever. Generous enough to cover model "thinking" and slow
+# first tokens, tight enough that a dead nested-CLI subprocess surfaces as a
+# clean "build failed / try again" instead of an infinite spinner.
+STREAM_IDLE_TIMEOUT = 120.0
 
 
 # A stream source: keyword-only (system_prompt, user_prompt, model, cwd) →
@@ -104,13 +112,39 @@ async def _sdk_stream(*, system_prompt: str, user_prompt: str,
 
 async def stream(system_prompt: str, user_prompt: str, *,
                  model: Optional[str] = None, cwd: Optional[str] = None,
-                 stream_fn: Optional[StreamFn] = None) -> AsyncIterator[str]:
+                 stream_fn: Optional[StreamFn] = None,
+                 idle_timeout: Optional[float] = STREAM_IDLE_TIMEOUT
+                 ) -> AsyncIterator[str]:
     """Stream a single completion as text chunks. `stream_fn` overrides the
-    source (tests inject a scripted fake)."""
+    source (tests inject a scripted fake).
+
+    Each token must arrive within `idle_timeout` seconds of the previous one; a
+    longer gap is treated as a stalled call and raised as `LLMError` (so the
+    build pour can't hang forever on a dead subprocess). Pass `None` to wait
+    indefinitely. The underlying source is always closed on the way out, so a
+    timed-out SDK subprocess gets cancelled rather than leaked."""
     fn = stream_fn or _sdk_stream
-    async for chunk in fn(system_prompt=system_prompt, user_prompt=user_prompt,
-                          model=model, cwd=cwd):
-        yield chunk
+    agen = fn(system_prompt=system_prompt, user_prompt=user_prompt,
+              model=model, cwd=cwd)
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(agen.__anext__(),
+                                               timeout=idle_timeout)
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError as e:
+                raise LLMError(
+                    f"the model stalled — no output for "
+                    f"{idle_timeout:.0f}s") from e
+            yield chunk
+    finally:
+        aclose = getattr(agen, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
 
 
 async def complete(system_prompt: str, user_prompt: str, *,

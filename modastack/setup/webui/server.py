@@ -289,6 +289,15 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             if not open_mode.is_team(src):
                 return JSONResponse({"error": "that folder isn't a team "
                                      "(no agent.yaml)"}, status_code=400)
+            # Forking/importing into a NEW location must not clobber a DIFFERENT
+            # team already living there — copy_into merges (copytree
+            # dirs_exist_ok) and would corrupt it. Opening a team in place sends
+            # location == team_path (src == abs_loc), which is allowed.
+            if abs_loc != src and abs_loc.exists():
+                return JSONResponse(
+                    {"error": f"a team already exists at {abs_loc} — rename or "
+                     "remove it first, or choose another location."},
+                    status_code=409)
             try:
                 open_mode.copy_into(src, abs_loc)
             except ValueError as e:
