@@ -100,6 +100,12 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev,kb]"
 
+      - name: Pre-download embedding model
+        # The KB sidecar downloads all-MiniLM-L6-v2 on first use.
+        # Pre-cache it so the 30s sidecar startup timeout isn't racing
+        # a model download over a variable-speed network.
+        run: python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
       - name: Run all non-Claude integration tests
         # Tests that need the claude CLI skip via requires_claude.
         # New test files are auto-discovered — no explicit file list to rot.
