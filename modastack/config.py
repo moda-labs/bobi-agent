@@ -367,3 +367,54 @@ def save_deployment_state(project_path: Path, session: str,
     }))
 
 
+# --- bubble (trust-domain) state -------------------------------------------
+# One bubble per running instance. Minted once (lazily, lock-protected) and
+# shared by every session of the instance via the local filesystem. The bubble
+# key signs publishes + join registrations; it is a private local secret stored
+# OUTSIDE .env (which is template-expanded into agent configs). See
+# modastack/events/server.py:ensure_bubble.
+
+
+def bubble_state_path(project_path: Path) -> Path:
+    from modastack import paths
+    return paths.state_path(project_path) / "bubble.json"
+
+
+def load_bubble_state(project_path: Path) -> dict:
+    """Load the instance's bubble_id + bubble_key, or {} if not yet minted."""
+    import json
+    state_file = bubble_state_path(project_path)
+    if not state_file.exists():
+        return {}
+    try:
+        return json.loads(state_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_bubble_state(project_path: Path, bubble_id: str, bubble_key: str) -> None:
+    """Persist the bubble credential at mode 0600 (it is a signing secret)."""
+    import json
+    import os
+    state_file = bubble_state_path(project_path)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    # Create with 0600 so the key is never group/world-readable.
+    fd = os.open(str(state_file), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps({
+            "bubble_id": bubble_id,
+            "bubble_key": bubble_key,
+        }).encode())
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(state_file, 0o600)
+    except OSError:
+        pass
+
+
+def clear_bubble_state(project_path: Path) -> None:
+    """Drop the bubble credential — a subsequent start mints a fresh bubble."""
+    bubble_state_path(project_path).unlink(missing_ok=True)
+
+

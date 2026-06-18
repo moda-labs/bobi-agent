@@ -46,15 +46,45 @@ def _post_topic(topic: str, source: str, data: dict,
     if project_path is None:
         from modastack.paths import modastack_root
         project_path = modastack_root()
+    else:
+        project_path = Path(project_path)
 
     es_url = _event_server_url(project_path)
+
+    # Sign the publish with the instance's bubble key so the server routes it
+    # within the bubble. An unsigned publish is rejected (403) — namespacing is
+    # not authentication. Any in-instance process can sign (the key lives in
+    # bubble.json); a missing bubble means the instance isn't started.
+    from modastack.config import load_bubble_state
+    from modastack.events.signing import serialize_body, sign_headers
+
+    bubble = load_bubble_state(project_path)
+    body = serialize_body({"source": source, "payload": data})
+    headers = {"Content-Type": "application/json"}
+    if bubble.get("bubble_id") and bubble.get("bubble_key"):
+        headers.update(sign_headers(
+            bubble["bubble_id"], bubble["bubble_key"],
+            "POST", f"/events/{topic}", body,
+        ))
+    else:
+        log.warning("No bubble credential — publish to %s will be rejected", topic)
 
     try:
         resp = pooled.post(
             f"{es_url}/events/{topic}",
-            json={"source": source, "payload": data},
+            content=body,
+            headers=headers,
             timeout=10.0,
         )
+        # A 403 (e.g. the server forgot the bubble after a restart, or
+        # bubble.json is stale) returns a JSON error body — do NOT treat that
+        # as success and silently drop the event. The next session
+        # registration re-mints the bubble; a transient publish failure is
+        # surfaced, not swallowed.
+        if resp.status_code >= 400:
+            log.warning("Publish to %s rejected (%d): %s",
+                        topic, resp.status_code, resp.text[:200])
+            return False
         resp.json()
         return True
     except (httpx.HTTPError, OSError, TimeoutError, ValueError) as e:
