@@ -249,7 +249,8 @@ class TestPostEventSigning:
         assert len(req.headers["x-moda-nonce"]) >= 8
         assert len(req.headers["x-moda-signature"]) == 64  # sha256 hex
 
-    def test_no_signing_headers_without_bubble(self):
+    def test_no_publish_without_bubble(self):
+        """Without bubble credentials the publish is skipped (no round-trip)."""
         from modastack.events.publish import post_event
 
         captured = []
@@ -266,25 +267,27 @@ class TestPostEventSigning:
                    return_value='http://localhost:8080'), \
              patch('modastack.config.load_bubble_state',
                    return_value={}):
-            post_event("monitor/test", {"k": "v"}, project_path="/tmp/fake")
+            result = post_event("monitor/test", {"k": "v"}, project_path="/tmp/fake")
 
-        assert len(captured) == 1
-        assert "x-moda-bubble" not in captured[0].headers
+        # No bubble → early return False, no HTTP request made
+        assert result is False
+        assert len(captured) == 0
 
-    def test_403_from_unsigned_returns_false(self):
-        """Simulates what happens when an unsigned publish hits v0.21.0+."""
+    def test_403_from_stale_bubble_returns_false(self):
+        """A signed publish that gets 403 (stale bubble) returns False."""
         from modastack.events.publish import post_event
 
         transport = httpx.MockTransport(
             lambda request: httpx.Response(403, json={"error": "missing signature"})
         )
         mock_client = httpx.Client(transport=transport)
+        fake_bubble = {"bubble_id": "bub_stale", "bubble_key": "bkey_old"}
 
         with patch.object(pooled, '_client', mock_client), \
              patch('modastack.events.publish._event_server_url',
                    return_value='http://localhost:8080'), \
              patch('modastack.config.load_bubble_state',
-                   return_value={}):
+                   return_value=fake_bubble):
             result = post_event("monitor/test", {"k": "v"},
                                 project_path="/tmp/fake")
 
