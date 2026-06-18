@@ -304,12 +304,9 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .venn-done .vd-copy b{font-size:13.5px;color:var(--text);}
 .venn-done .vd-copy span{font-size:12px;color:var(--muted);}
 .ctag{display:block;font-family:var(--font-mono);font-size:10px;color:var(--faint);margin-top:1px;}
-/* Account-level Venn row: pinned to the top, set apart from the per-service
-   rows that follow it with a bottom hairline. */
-.venn-acct{border-bottom:1px solid var(--border-strong);padding-bottom:9px;margin-bottom:4px;}
-.venn-acct + .uconn{border-top:0;}
+/* Account-level Venn: pinned as the first connection row, but styled like any
+   other option in the list (not a section header). */
 .venn-lab{display:inline-flex;align-items:center;gap:6px;}
-.venn-lab b{font-weight:620;}
 .help{display:inline-flex;width:13px;height:13px;color:var(--faint);cursor:help;}
 .help:hover,.help:focus{color:var(--muted);outline:none;}
 .help svg{width:13px;height:13px;}

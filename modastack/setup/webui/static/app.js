@@ -574,7 +574,7 @@
       ? `<span class="cbadge connected">${CHECK} connected</span>`
       : `<span class="cbadge">not connected</span>`;
     return `<div class="uconn venn-acct">
-      <span class="venn-lab"><b>Venn</b><span class="help" tabindex="0" role="img"
+      <span class="venn-lab">Venn<span class="help" tabindex="0" role="img"
         aria-label="${esc(help)}" title="${esc(help)}">${HELP}</span></span>
       <span class="cright">${badge}
         <button class="lnk" data-vennsetup>${configured ? "Manage Venn" : "Set up Venn"}</button></span></div>`;
