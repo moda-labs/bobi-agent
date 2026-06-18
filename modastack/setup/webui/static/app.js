@@ -22,6 +22,7 @@
   const DOCS_CLOUD_URL = "https://docs.modastack.ai/cloud";
   const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4"><path d="M5 12l5 5L19 7"/></svg>';
   const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"/></svg>';
+  const INFO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.6" r="0.6" fill="currentColor" stroke="none"/></svg>';
   const STATUS_LABEL = { connected: "connected", missing: "connect", unknown: "needs check" };
   // Day-to-day channels for the Chat card.
   const CHANNELS = [
@@ -551,24 +552,33 @@
     } else if (!cards.length) {
       body = `<span class="ph">no outside services — runs self-contained</span>`;
     } else {
-      const native = cards.filter(c => c.kind !== "venn");
-      const venn = cards.filter(c => c.kind === "venn");
-      body = native.map(connRow).join("") + vennGroup(venn);
+      // Every service is its own row; Venn-backed ones are tagged "(Venn)" and
+      // reached through the single account-level Venn connection (the row below).
+      body = cards.map(connRow).join("");
     }
-    const upsell = vennConfigured ? "" : vennUpsell();
+    // Venn is ONE account-level connection many services share — its own row,
+    // shown whenever we have connection data so it can be set up / managed here.
+    const venn = cards ? vennAccountRow(vennConfigured) : "";
     return `<div class="ucard ${(sp.services || []).length ? "filled" : "empty"}">
       <div class="ut">Connections ${slotDot(ok)}</div>
-      <div class="ud">${body}${upsell}</div>
+      <div class="ud">${body}${venn}</div>
       <div class="uadd"><button class="lnk add" data-addconn>+ add a connection</button></div></div>`;
   }
-  // Surfaced when no Venn key is set: one account connects many services at once.
-  function vennUpsell() {
-    return `<div class="venn-upsell">
-      <span class="vu-lab">Connect lots of services at once with <b>Venn</b> — one key, many integrations.</span>
-      <span class="vu-row">
-        <a class="lnk" href="https://app.venn.ai" target="_blank" rel="noopener">Create a Venn account ↗</a>
-        <button class="lnk" data-vennsetup>Sync it here</button>
-      </span></div>`;
+  // Account-level Venn: one connection the user manages globally; any number of
+  // Venn-backed services (Gmail, Slack, Salesforce…) are reached through it. One
+  // link to set up or manage; hover the ⓘ for what Venn is.
+  function vennAccountRow(configured) {
+    const info = "Venn is a gateway you connect once with a single account. Any "
+      + "Venn-backed service this team uses (Gmail, Slack, Salesforce…) is then "
+      + "reached through it — no separate key per service.";
+    const badge = configured
+      ? `<span class="cbadge connected">${CHECK} connected</span>`
+      : `<span class="cbadge">not connected</span>`;
+    return `<div class="uconn venn-acct">
+      <span class="venn-lab"><b>Venn</b><span class="info" tabindex="0" role="img"
+        aria-label="${esc(info)}" title="${esc(info)}">${INFO}</span></span>
+      <span class="cright">${badge}
+        <button class="lnk" data-vennsetup>${configured ? "Manage Venn" : "Set up Venn"}</button></span></div>`;
   }
   function trashBtn(key) {
     return `<button class="lnk trash" data-conntrash="${esc(key)}" title="I don't need this">${TRASH}</button>`;
@@ -584,30 +594,28 @@
     const mcpNoSecret = c.kind === "mcp"
       && !((c.methods && c.methods[0] && c.methods[0].secrets || []).length);
     let right;
-    if (mcpNoSecret) {
+    if (c.kind === "venn") {
+      // Venn-backed services are reached through the account-level Venn
+      // connection (the Venn row) — no per-service key to capture here.
+      right = c.status === "connected"
+        ? `<span class="cbadge connected">${CHECK} connected via Venn</span>`
+        : `<span class="cbadge">${c.status === "unknown" ? "via Venn" : "needs Venn"}</span>`;
+    } else if (mcpNoSecret) {
       right = `<span class="cbadge connected">${CHECK} wired</span>`;
     } else if (c.status === "connected") {
       right = `${statusBadge("connected")} <button class="lnk" data-secretopen="${esc(c.key)}">edit</button>`;
     } else {
       right = `<button class="btn ghost xs" data-secretopen="${esc(c.key)}">Connect</button>`;
     }
-    // Tag the connection kind so it's clear how each service is reached:
-    // a hosted MCP wired straight in, or a custom service modastack writes a guide for.
-    const tag = c.kind === "mcp"
+    // Tag how each service is reached: through Venn, a hosted MCP wired straight
+    // in, or a custom service modastack writes a guide for.
+    const tag = c.kind === "venn"
+      ? `<span class="ctag">via Venn</span>`
+      : c.kind === "mcp"
       ? `<span class="ctag">hosted MCP · 1-click</span>`
       : c.kind === "custom"
       ? `<span class="ctag">custom · modastack writes a guide</span>` : "";
     return `<div class="uconn"><span>${esc(c.name)}${tag}</span><span class="cright">${right}${trashBtn(c.key)}</span></div>`;
-  }
-  function vennGroup(venn) {
-    if (!venn.length) return "";
-    const keyIn = venn.some(c => (c.methods[0].secrets || []).some(s => s.present));
-    const rows = venn.map(c =>
-      `<div class="uconn sub"><span>${esc(c.name)}</span><span class="cright">${statusBadge(c.status)}${trashBtn(c.key)}</span></div>`).join("");
-    return `<div class="uvenn">
-      <div class="uvhead"><span><b>Venn</b> · one key, every service</span>
-        <button class="btn ghost xs" data-vennsetup>${keyIn ? "Manage" : "Set up Venn"}</button></div>
-      ${rows}</div>`;
   }
   async function trashConnection(key) {
     const r = await postJSON("/api/service/remove", { service_key: key });

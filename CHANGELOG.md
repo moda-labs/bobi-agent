@@ -21,6 +21,13 @@ team instead of dropping to a hand-authored guide (MOD-203).
   capture through the existing credential overlay, and a "wired" state for
   keyless servers.
 
+### Changed
+- Venn is presented as one **account-level connection**, not a per-service one.
+  Venn-backed services now appear as their own rows ("Gmail · via Venn —
+  ✓ connected via Venn"), and a single dedicated **Venn row** shows overall
+  connection status with a hover explanation and one "Set up Venn" / "Manage
+  Venn" link (was an inline upsell with two separate links).
+
 ### Notes
 - The full MOD-203 cascade has two further rungs deferred to follow-ups: a live
   web search for a hosted MCP, then a CLI fallback. A registry miss currently
