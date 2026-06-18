@@ -901,6 +901,15 @@
   }
   function closeVenn() { const o = $("#venn-ov"); if (o) o.remove(); renderUniCards(); }
 
+  // Servers come back as plain names (everything the key can reach). A service
+  // is ON iff it's already on the team — that team membership IS the toggle
+  // state; there's no separate "live" concept in the picker.
+  function setVennServers(names) {
+    vennServers = (names || []).slice();
+    const have = new Set((S.spec.services || [])
+      .map(s => ((s && s.name) || String(s) || "").toLowerCase()));
+    vennSel = new Set(vennServers.filter(n => have.has((n || "").toLowerCase())));
+  }
   async function vennLoadServers() {
     vennStep = "loading"; drawVenn();
     const r = await getJSON("/api/venn/servers");
@@ -908,12 +917,7 @@
       vennErr = (r && r.error) || "Couldn't reach Venn with that key.";
       vennStep = "error"; drawVenn(); return;
     }
-    vennServers = r.servers || [];
-    // Pre-tick the servers already on the team so the picker reflects reality.
-    const have = new Set((S.spec.services || [])
-      .map(s => ((s && s.name) || String(s) || "").toLowerCase()));
-    vennSel = new Set(vennServers
-      .filter(s => have.has((s.name || "").toLowerCase())).map(s => s.name));
+    setVennServers(r.servers);
     vennStep = "pick"; drawVenn();
   }
 
@@ -949,26 +953,22 @@
           <button class="btn primary sm" data-vennretry>Try another key</button></div>`;
     } else if (vennStep === "pick") {
       const rows = vennServers.length
-        ? vennServers.map(s => {
-            const on = vennSel.has(s.name);
-            const badge = s.connected
-              ? `<span class="cbadge connected">${CHECK} live</span>`
-              : `<span class="cbadge">in Venn</span>`;
+        ? vennServers.map(n => {
+            const on = vennSel.has(n);
             return `<label class="venn-pick ${on ? "on" : ""}">
-              <input type="checkbox" data-vennpick="${esc(s.name)}" ${on ? "checked" : ""}>
-              <span class="vp-name">${esc(s.name)}</span>${badge}</label>`;
+              <input type="checkbox" data-vennpick="${esc(n)}" ${on ? "checked" : ""}>
+              <span class="vp-name">${esc(n)}</span>
+              <span class="vp-state">${on ? "on" : "off"}</span></label>`;
           }).join("")
-        : `<p class="pd">No MCPs found in your Venn account yet — connect some
-            services in Venn, then come back and re-check.</p>`;
-      const n = vennSel.size;
+        : `<p class="pd">No services are available on this Venn account yet —
+            connect some in Venn, then come back and re-check.</p>`;
       html = `
         <div class="venn-ok"><span class="cbadge connected">${CHECK} Venn connected</span>
-          <span class="pd">Pick the services to add to <b>this team</b>${
-            vennServers.length ? ` — ${vennServers.length} found` : ""}.</span></div>
+          <span class="pd">Toggle the services this team should use${
+            vennServers.length ? ` — ${vennServers.length} available` : ""}.</span></div>
         <div class="venn-list">${rows}</div>
         <div class="connect-row">${OPEN_VENN}
-          <button class="btn primary sm" data-vennapply ${n ? "" : "disabled"}>${
-            n ? `Add ${n} to team` : "Pick at least one"}</button></div>`;
+          <button class="btn primary sm" data-vennapply>Save</button></div>`;
     } else if (vennStep === "done") {
       html = `
         <div class="venn-done"><div class="vd-seal">${CHECK}</div>
@@ -984,39 +984,42 @@
     const input = $("#venn-key");
     const val = input ? input.value.trim() : "";
     if (!val) { toast("paste your Venn key first"); return; }
-    const r = await postJSON("/api/credential", {
-      var_name: "VENN_API_KEY", service: "venn", value: val });
-    if (!r.ok) {
-      vennErr = (r.data && r.data.error) || "Couldn't save the key.";
+    vennStep = "loading"; drawVenn();
+    // Verify BEFORE saving: a bad key returns ok:false and is never persisted,
+    // so it can't flip the Venn row to "connected".
+    const r = await postJSON("/api/venn/connect", { key: val });
+    if (!r.ok || !r.data.ok) {
+      vennErr = (r.data && r.data.error) || "Couldn't connect to Venn.";
       vennStep = "error"; drawVenn(); return;
     }
+    if (r.data.state) S = r.data.state;
     if (!(S.credentials_saved || []).includes("VENN_API_KEY"))
       (S.credentials_saved ||= []).push("VENN_API_KEY");
-    await vennLoadServers();
+    setVennServers(r.data.servers);
+    vennStep = "pick"; drawVenn();
   }
-  // Sync a server's pick to the checkbox state without redrawing (keeps scroll
-  // position); only the apply button's count needs refreshing.
+  // Sync a server's toggle to the team-membership set without redrawing (keeps
+  // scroll position); reflect the new state in the row.
   function vennToggle(name, checked, label) {
     if (checked) vennSel.add(name); else vennSel.delete(name);
-    if (label) label.classList.toggle("on", checked);
-    const btn = document.querySelector("[data-vennapply]");
-    if (btn) {
-      const n = vennSel.size;
-      btn.disabled = !n;
-      btn.textContent = n ? `Add ${n} to team` : "Pick at least one";
+    if (label) {
+      label.classList.toggle("on", checked);
+      const st = label.querySelector(".vp-state");
+      if (st) st.textContent = checked ? "on" : "off";
     }
   }
   async function vennApply() {
-    const picks = [...vennSel];
-    if (!picks.length) return;
-    const r = await postJSON("/api/venn/apply", { servers: picks });
-    if (!r.ok) { toast(r.data.error || "couldn't add"); return; }
-    const added = (r.data.added || []).length;
+    // Reconcile: the team's Venn services become exactly the toggled-on set
+    // (within the available universe). Turning everything off is valid.
+    const r = await postJSON("/api/venn/apply",
+                             { servers: [...vennSel], available: vennServers });
+    if (!r.ok) { toast(r.data.error || "couldn't save"); return; }
     if (r.data.state) S = r.data.state;
     _connData = await getJSON("/api/connect");
-    vennAddedMsg = added
-      ? `Added ${added} Venn service${added === 1 ? "" : "s"} to your team`
-      : "Your Venn picks are already on the team";
+    const a = (r.data.added || []).length, rm = (r.data.removed || []).length;
+    vennAddedMsg = (a || rm)
+      ? `Updated your team's Venn services${a ? ` · +${a}` : ""}${rm ? ` · −${rm}` : ""}`
+      : "No changes — your Venn services are up to date";
     vennStep = "done"; drawVenn();
     renderUniCards();
   }

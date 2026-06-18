@@ -257,14 +257,22 @@ class TestConnect:
 # --- Venn setup flow: discover account MCPs, apply picks -----------------
 
 class TestVennSetup:
-    def _servers(self, monkeypatch, items):
+    def _verified(self, monkeypatch, names):
+        """Stub list_servers_verified to return these available service names."""
         import modastack.venn as venn_mod
 
         class _S:
-            def __init__(self, name, connected):
-                self.server_id, self.server_name, self.connected = name, name, connected
-        monkeypatch.setattr(venn_mod, "list_servers",
-                            lambda key: [_S(n, c) for n, c in items])
+            def __init__(self, name):
+                self.server_id = self.server_name = name
+                self.connected = True
+        monkeypatch.setattr(venn_mod, "list_servers_verified",
+                            lambda key: [_S(n) for n in names])
+
+    def _verified_raises(self, monkeypatch):
+        import modastack.venn as venn_mod
+        def boom(key):
+            raise venn_mod.VennError("Venn rejected the API key (unauthorized).")
+        monkeypatch.setattr(venn_mod, "list_servers_verified", boom)
 
     def test_servers_needs_a_key(self, project, monkeypatch):
         monkeypatch.delenv("VENN_API_KEY", raising=False)
@@ -272,42 +280,60 @@ class TestVennSetup:
         data = c.get("/api/venn/servers").json()
         assert data["ok"] is False and "key" in data["error"].lower()
 
-    def test_servers_lists_account_mcps(self, project, monkeypatch):
+    def test_servers_lists_available_names(self, project, monkeypatch):
         monkeypatch.setenv("VENN_API_KEY", "k")
-        self._servers(monkeypatch, [("gmail", True), ("salesforce", False)])
+        self._verified(monkeypatch, ["gmail", "salesforce", "notion"])
         c = _client(SetupState(), project)
         data = c.get("/api/venn/servers").json()
         assert data["ok"] is True
-        assert {s["name"] for s in data["servers"]} == {"gmail", "salesforce"}
-        gmail = next(s for s in data["servers"] if s["name"] == "gmail")
-        assert gmail["connected"] is True
+        assert data["servers"] == ["gmail", "notion", "salesforce"]   # sorted names
 
     def test_servers_bad_key_is_an_error_state(self, project, monkeypatch):
         monkeypatch.setenv("VENN_API_KEY", "bad")
-        import modastack.venn as venn_mod
-        def boom(key): raise RuntimeError("401 Unauthorized")
-        monkeypatch.setattr(venn_mod, "list_servers", boom)
+        self._verified_raises(monkeypatch)
         c = _client(SetupState(), project)
         data = c.get("/api/venn/servers").json()
-        assert data["ok"] is False and "Venn" in data["error"]
+        assert data["ok"] is False and "unauthorized" in data["error"].lower()
 
-    def test_apply_adds_picked_servers_to_the_team(self, project):
-        s = SetupState()
-        s.spec.services = [{"name": "github"}]
-        c = _client(s, project)
-        r = c.post("/api/venn/apply", json={"servers": ["gmail", "salesforce"]})
-        assert r.status_code == 200
-        assert set(r.json()["added"]) == {"gmail", "salesforce"}
-        names = [x["name"] for x in s.spec.services]
-        assert names == ["github", "gmail", "salesforce"]
+    def test_connect_saves_only_on_success(self, project, monkeypatch):
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+        self._verified(monkeypatch, ["gmail", "slack"])
+        c = _client(SetupState(), project)
+        data = c.post("/api/venn/connect", json={"key": "venn_good"}).json()
+        assert data["ok"] is True and "gmail" in data["servers"]
+        # the verified key is now persisted
+        env = (project / ".modastack" / ".env").read_text()
+        assert "VENN_API_KEY=venn_good" in env
 
-    def test_apply_dedupes_existing(self, project):
+    def test_connect_bad_key_not_saved(self, project, monkeypatch):
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+        self._verified_raises(monkeypatch)
+        c = _client(SetupState(), project)
+        data = c.post("/api/venn/connect", json={"key": "venn_bad"}).json()
+        assert data["ok"] is False
+        envf = project / ".modastack" / ".env"
+        assert not envf.exists() or "VENN_API_KEY" not in envf.read_text()
+
+    def test_apply_reconciles_toggles(self, project):
+        # gmail toggled on (added), salesforce in the universe but off (removed),
+        # github untouched (outside the picker universe).
         s = SetupState()
-        s.spec.services = [{"name": "gmail"}]
+        s.spec.services = [{"name": "github"}, {"name": "salesforce"}]
         c = _client(s, project)
-        r = c.post("/api/venn/apply", json={"servers": ["gmail", "slack"]})
-        assert r.json()["added"] == ["slack"]            # gmail already there
-        assert [x["name"] for x in s.spec.services] == ["gmail", "slack"]
+        r = c.post("/api/venn/apply", json={
+            "servers": ["gmail"],
+            "available": ["gmail", "salesforce", "slack"]}).json()
+        assert r["added"] == ["gmail"] and r["removed"] == ["salesforce"]
+        assert [x["name"] for x in s.spec.services] == ["github", "gmail"]
+
+    def test_apply_turning_all_off_removes_them(self, project):
+        s = SetupState()
+        s.spec.services = [{"name": "gmail"}, {"name": "slack"}]
+        c = _client(s, project)
+        r = c.post("/api/venn/apply", json={
+            "servers": [], "available": ["gmail", "slack"]}).json()
+        assert set(r["removed"]) == {"gmail", "slack"}
+        assert s.spec.services == []
 
     def test_apply_requires_a_list(self, project):
         c = _client(SetupState(), project)

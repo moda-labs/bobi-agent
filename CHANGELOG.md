@@ -21,12 +21,17 @@ team instead of dropping to a hand-authored guide (MOD-203).
   capture through the existing credential overlay, and a "wired" state for
   keyless servers.
 
-- **Venn setup is a discover-and-pick flow.** Paste a key → modastack pulls the
-  MCPs in your Venn account (`GET /api/venn/servers`, 0..N) → you tick which to
-  add to **this team** → confirm. Picks are added as venn-backed services
-  (`POST /api/venn/apply`) and appear as their own rows. The modal has a proper
-  **error state** when the key doesn't verify, a loading state, and a persistent
-  "Open Venn ↗" link across every step.
+- **Venn setup is a connect-and-toggle flow.** Paste a key — it's **verified
+  before being saved** (`POST /api/venn/connect`; a bad key is rejected with an
+  error state and never persisted, so it can't flip Venn to "connected") — then
+  modastack lists **every service the key can reach** (the full account catalog).
+  Each is a **toggle = team membership**: on means it's on this team, off means
+  it isn't. Saving **reconciles** the team's Venn services to exactly the
+  toggled-on set (`POST /api/venn/apply` adds and removes). A loading state, a
+  proper error state, and a persistent "Open Venn ↗" link sit across every step.
+- `modastack.venn.list_servers_verified` raises `VennError` on a bad key /
+  non-2xx / error body, distinguishing "valid key, zero services" from a
+  failure — `list_servers` still masks errors as `[]` for resilient startup.
 
 ### Changed
 - Venn is presented as one **account-level connection**, not a per-service one.

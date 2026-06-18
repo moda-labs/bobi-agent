@@ -1,10 +1,12 @@
 """Tests for Venn.ai REST API client — startup service validation."""
 
 import httpx
+import pytest
 from unittest.mock import patch
 
 from modastack import http as pooled
-from modastack.venn import check_services, list_servers, format_service_report, VennServer
+from modastack.venn import (check_services, list_servers, list_servers_verified,
+                            format_service_report, VennServer, VennError)
 
 
 def _venn_handler(servers):
@@ -50,6 +52,43 @@ class TestListServers:
         with patch.object(pooled, '_client', client):
             servers = list_servers("bad-key")
         assert servers == []
+
+
+class TestListServersVerified:
+    """Unlike list_servers (which masks failures as []), the verified variant
+    distinguishes a valid-but-empty account from a bad key by raising."""
+
+    def test_returns_servers_on_success(self):
+        client = _mock_client([{"id": "g", "name": "gmail", "connected": True}])
+        with patch.object(pooled, "_client", client):
+            servers = list_servers_verified("good-key")
+        assert [s.server_name for s in servers] == ["gmail"]
+
+    def test_valid_but_empty_account_returns_empty_not_error(self):
+        client = _mock_client([])
+        with patch.object(pooled, "_client", client):
+            assert list_servers_verified("good-key") == []
+
+    def test_unauthorized_raises(self):
+        transport = httpx.MockTransport(
+            lambda r: httpx.Response(401, json={"error": "unauthorized"}))
+        with patch.object(pooled, "_client", httpx.Client(transport=transport)):
+            with pytest.raises(VennError):
+                list_servers_verified("bad-key")
+
+    def test_error_envelope_on_200_raises(self):
+        transport = httpx.MockTransport(
+            lambda r: httpx.Response(200, json={"error": {"message": "nope"}}))
+        with patch.object(pooled, "_client", httpx.Client(transport=transport)):
+            with pytest.raises(VennError):
+                list_servers_verified("bad-key")
+
+    def test_transport_failure_raises(self):
+        transport = httpx.MockTransport(
+            lambda r: (_ for _ in ()).throw(Exception("connection refused")))
+        with patch.object(pooled, "_client", httpx.Client(transport=transport)):
+            with pytest.raises(VennError):
+                list_servers_verified("key")
 
 
 class TestCheckServices:

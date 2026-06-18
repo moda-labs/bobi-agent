@@ -323,6 +323,8 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .venn-pick.on{border-color:var(--accent);background:rgba(200,97,43,.06);}
 .venn-pick input{accent-color:var(--accent);width:15px;height:15px;flex:0 0 auto;}
 .venn-pick .vp-name{flex:1;text-transform:capitalize;}
+.venn-pick .vp-state{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);}
+.venn-pick.on .vp-state{color:var(--accent);}
 .venn-err{display:flex;align-items:center;gap:12px;background:rgba(181,70,43,.08);border:1px solid rgba(181,70,43,.32);border-radius:10px;padding:13px 15px;margin-bottom:12px;}
 .venn-err .ve-seal{flex:0 0 auto;width:30px;height:30px;border-radius:50%;background:var(--err);color:#fff;display:grid;place-items:center;font-weight:700;font-size:18px;}
 .venn-loading{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px;padding:18px 2px;}

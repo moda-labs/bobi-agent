@@ -512,51 +512,90 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             "state": serialize_state(state),
         })
 
-    # --- Venn: discover the account's MCPs, then apply picks to the team --
+    # --- Venn: verify key, list the account's MCPs, reconcile team picks --
+    def _venn_servers_payload(key: str) -> dict:
+        """Verify the key and return the FULL set of services available to this
+        Venn account (not just connected ones) as plain names. A bad/unreachable
+        key raises VennError → caller renders the modal's error state."""
+        from modastack.venn import list_servers_verified
+        servers = list_servers_verified(key)
+        return {"ok": True, "servers": sorted(
+            {s.server_name for s in servers if s.server_name})}
+
     @app.get("/api/venn/servers")
     def venn_servers() -> JSONResponse:
-        """List the MCP servers in the user's Venn account using their saved
-        key. Doubles as key verification: a bad/unreachable key returns
-        ok:false with an error the modal renders as its error state. A good key
-        returns every server with its live `connected` flag (0..N)."""
+        """List the services available via the SAVED Venn key (re-opening an
+        already-connected modal). ok:false with a message if it won't verify."""
         from modastack.setup.actions import venn_key
-        from modastack.venn import list_servers
+        from modastack.venn import VennError
         key = venn_key(project)
         if not key:
             return JSONResponse({"ok": False,
                                  "error": "No Venn API key saved yet."})
         try:
-            servers = list_servers(key)
-        except Exception as e:
-            return JSONResponse({"ok": False,
-                                 "error": f"Couldn't reach Venn with that key "
-                                          f"({e}). Double-check it and retry."})
-        return JSONResponse({"ok": True, "servers": [
-            {"name": s.server_name, "connected": s.connected}
-            for s in servers if s.server_name]})
+            return JSONResponse(_venn_servers_payload(key))
+        except VennError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+
+    @app.post("/api/venn/connect")
+    def venn_connect(payload: dict) -> JSONResponse:
+        """Verify a PASTED key against Venn, and only persist it on success — so
+        a bad key never flips Venn to 'connected'. Returns the available
+        services on success, or ok:false + error for the modal's error state."""
+        from modastack.setup import actions
+        from modastack.venn import VennError
+        key = (payload.get("key") or "").strip()
+        if not key:
+            return JSONResponse({"ok": False, "error": "Paste your Venn key."})
+        try:
+            data = _venn_servers_payload(key)
+        except VennError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        try:
+            actions.save_credential(state, project, "VENN_API_KEY", "venn", "",
+                                    prompt_fn=lambda *_: key)
+        except actions.ActionError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        data["state"] = serialize_state(state)
+        return JSONResponse(data)
 
     @app.post("/api/venn/apply")
     def venn_apply(payload: dict) -> JSONResponse:
-        """Add the Venn MCPs the user picked to this team's services. Each
-        becomes a venn-backed service (classified live against the account
-        catalog) and shows up as its own row in the panel. Deduped by name."""
-        names = payload.get("servers")
-        if not isinstance(names, list):
+        """Reconcile the team's Venn services to exactly the toggled-on set. A
+        Venn service is on the team iff its toggle is on: `servers` are the
+        on-toggles, `available` is the full picker universe. Add on-toggles not
+        present; remove available services that are off (untouched: non-Venn
+        services and anything outside the picker universe). Idempotent."""
+        on = payload.get("servers")
+        if not isinstance(on, list):
             return JSONResponse({"error": "servers must be a list"},
                                 status_code=400)
+        desired = {(str(s) or "").strip().lower() for s in on if str(s).strip()}
+        universe = {(str(s) or "").strip().lower()
+                    for s in (payload.get("available") or []) if str(s).strip()}
+        universe |= desired   # a toggled-on name is part of the universe too
+        kept, added, removed = [], [], []
+        for s in state.spec.services:
+            name = (s.get("name") if isinstance(s, dict) else str(s)) or ""
+            nl = name.strip().lower()
+            if nl in universe and nl not in desired:
+                removed.append(name)          # a Venn service toggled OFF
+                continue
+            kept.append(s)
         have = {((s.get("name") if isinstance(s, dict) else str(s)) or "")
-                .strip().lower() for s in state.spec.services}
-        added = []
-        for raw in names:
+                .strip().lower() for s in kept}
+        for raw in on:
             name = (str(raw) or "").strip()
             if name and name.lower() not in have:
-                state.spec.services = list(state.spec.services) + [{"name": name}]
+                kept.append({"name": name})
                 have.add(name.lower())
                 added.append(name)
-        if added:
+        if added or removed:
+            state.spec.services = kept
             state.validated = False
             state.save(project)
-        return JSONResponse({"added": added, "state": serialize_state(state)})
+        return JSONResponse({"added": added, "removed": removed,
+                             "state": serialize_state(state)})
 
     # --- chat (how you talk to the team) -------------------------------
     @app.post("/api/chat")
