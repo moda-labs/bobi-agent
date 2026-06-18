@@ -175,6 +175,7 @@ export class DeploymentSession extends DurableObject<Env> {
 
 		const dep = JSON.parse(depData) as {
 			id: string;
+			name: string;
 			api_key: string;
 			bubble_id: string;
 			subscriptions: string[];
@@ -197,9 +198,11 @@ export class DeploymentSession extends DurableObject<Env> {
 			}),
 		);
 
-		// Remove deployment records from KV
+		// Remove deployment records from KV — must mirror removeDeployment
+		// in the KV storage adapter (index.ts), which deletes all three keys.
 		await this.env.EVENTS.delete(`deployments:${dep.api_key}`);
 		await this.env.EVENTS.delete(`deployment_id:${this.deploymentId}`);
+		await this.env.EVENTS.delete(`deployment_name:${dep.bubble_id}:${dep.name}`);
 
 		// Clear DO storage
 		await this.ctx.storage.deleteAll();
