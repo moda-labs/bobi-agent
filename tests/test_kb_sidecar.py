@@ -1,9 +1,9 @@
 """Unit tests for the embedding sidecar HTTP handler.
 
 Tests the handler in-process — no subprocess launched.  The real
-sentence-transformers model is replaced with a lightweight stub so
-tests don't depend on HuggingFace Hub downloads (which are rate-limited
-and can exceed the CI timeout).
+fastembed model is replaced with a lightweight stub so tests don't
+depend on HuggingFace Hub downloads (which are rate-limited and can
+exceed the CI timeout).
 """
 
 import json
@@ -18,14 +18,15 @@ from modastack.kb.sidecar import _make_handler, MODEL_NAME, EMBEDDING_DIM
 
 
 class _StubModel:
-    """Drop-in replacement for SentenceTransformer that returns deterministic
-    embeddings without downloading anything."""
+    """Drop-in replacement for fastembed TextEmbedding that returns
+    deterministic embeddings without downloading anything."""
 
-    def encode(self, texts, *, show_progress_bar=False):
-        # Return a (len(texts), EMBEDDING_DIM) float32 ndarray — same shape
-        # as the real model — seeded for reproducibility.
+    def embed(self, texts):
+        # Yield (EMBEDDING_DIM,) float32 ndarrays — same shape as the real
+        # fastembed model — seeded for reproducibility.
         rng = np.random.default_rng(42)
-        return rng.standard_normal((len(texts), EMBEDDING_DIM)).astype(np.float32)
+        for _ in texts:
+            yield rng.standard_normal(EMBEDDING_DIM).astype(np.float32)
 
 
 @pytest.fixture(scope="module")
@@ -130,3 +131,35 @@ class TestErrors:
     def test_texts_not_list(self, server):
         status, data = _post(server, "/embed", {"texts": "not a list"})
         assert status == 400
+
+
+class TestEmbeddingCompatibility:
+    """Verify the sidecar produces embeddings compatible with the KB schema."""
+
+    def test_embedding_dim_matches_store(self, server):
+        """Embeddings must be EMBEDDING_DIM (384) floats — the sqlite-vec
+        table is created with this dimension and rejects mismatches."""
+        from modastack.kb.store import EMBEDDING_DIM as STORE_DIM
+        status, data = _post(server, "/embed", {"texts": ["compatibility check"]})
+        assert status == 200
+        assert len(data["embeddings"][0]) == STORE_DIM
+
+    def test_embedding_model_matches_store(self, server):
+        """Health endpoint model name must match the constant stored in KB
+        metadata so hybrid search uses the same model for query and doc."""
+        from modastack.kb.store import EMBEDDING_MODEL as STORE_MODEL
+        _, data = _get(server, "/health")
+        assert data["model"] == STORE_MODEL
+
+    def test_embeddings_are_deterministic(self, server):
+        """Same input → same output, so re-indexing a doc produces identical
+        vectors (important for dedup and search consistency)."""
+        _, d1 = _post(server, "/embed", {"texts": ["determinism check"]})
+        _, d2 = _post(server, "/embed", {"texts": ["determinism check"]})
+        assert d1["embeddings"] == d2["embeddings"]
+
+    def test_different_texts_produce_different_vectors(self, server):
+        """Sanity check that the model is actually encoding, not returning
+        a constant vector."""
+        _, data = _post(server, "/embed", {"texts": ["cats", "quantum physics"]})
+        assert data["embeddings"][0] != data["embeddings"][1]

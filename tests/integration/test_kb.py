@@ -2,7 +2,7 @@
 
 Exercises the full KB lifecycle: create, add (text + file), search (FTS +
 hybrid), info, list, and remove. The embedding sidecar auto-starts on first
-add/search and uses the real sentence-transformers model.
+add/search and uses the real fastembed/ONNX model.
 """
 
 import os

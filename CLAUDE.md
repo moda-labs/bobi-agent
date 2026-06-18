@@ -107,7 +107,7 @@ modastack/                        # Framework (Python package)
 ├── kb/                           # Knowledge base (FTS5 + semantic search)
 │   ├── store.py                  # SQLite + FTS5 + sqlite-vec per named KB
 │   ├── embedder.py               # Sidecar client (auto-start, embed())
-│   └── sidecar.py                # HTTP server holding sentence-transformers model
+│   └── sidecar.py                # HTTP server holding fastembed/ONNX model
 └── monitors/                     # Background polling to fill webhook gaps
     ├── schema.py                 # Monitor record + interval parsing
     ├── registry.py               # Installed defaults + project overrides
