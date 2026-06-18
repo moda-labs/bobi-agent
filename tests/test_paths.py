@@ -11,6 +11,7 @@ from modastack import paths
 @pytest.fixture(autouse=True)
 def unbound(monkeypatch):
     monkeypatch.setattr(paths, "_root", None)
+    monkeypatch.delenv("MODASTACK_ROOT", raising=False)
 
 
 def _install(root):
