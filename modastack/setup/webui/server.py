@@ -126,7 +126,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         html = (STATIC_DIR / "index.html").read_text()
         # The page bootstraps the nonce from a meta tag the JS reads back.
         html = html.replace("{{NONCE}}", nonce)
-        return Response(html, media_type="text/html")
+        return Response(html, media_type="text/html",
+                        headers={"Cache-Control": "no-store, max-age=0"})
 
     # static assets (css/js) — no nonce needed, same-origin only
     @app.get("/static/{name}")
@@ -136,8 +137,12 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             return JSONResponse({"error": "not found"}, status_code=404)
         types = {".css": "text/css", ".js": "text/javascript",
                  ".svg": "image/svg+xml"}
-        return FileResponse(target,
-                            media_type=types.get(target.suffix, "text/plain"))
+        # The wizard is a short-lived local server whose assets change between
+        # runs (and during development); never let the browser serve a stale
+        # bundle from cache — always revalidate against disk.
+        return FileResponse(
+            target, media_type=types.get(target.suffix, "text/plain"),
+            headers={"Cache-Control": "no-store, max-age=0"})
 
     # --- state (deterministic) -----------------------------------------
     @app.get("/api/state")
@@ -364,13 +369,21 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         venn_catalog = services.live_venn_catalog(project)
         cards = services.cards_for(state.spec.services, project,
                                    connected=connected, catalog=venn_catalog)
+        # User-defined custom MCP connections supersede their service card (a
+        # service first guessed as "custom" becomes an MCP row once a URL is
+        # given). Drop the placeholder card and render the configured MCP.
+        user_mcp = state.spec.mcp_servers or {}
+        mcp_keys = {k.strip().lower() for k in user_mcp}
+        cards = [c for c in cards if c["key"].strip().lower() not in mcp_keys]
+        for key, cfg in user_mcp.items():
+            if isinstance(cfg, dict):
+                cards.append(services.user_mcp_card(key, cfg, project))
         # The connector catalog (every known connector, for on-demand setup like
         # Slack as a chat channel) is env-aware too, so a just-saved token reads
         # as connected.
         catalog = services.cards_for(list(services.CATALOG.keys()), project,
                                      connected=connected, catalog=venn_catalog)
-        # Whether a VENN_API_KEY is present — drives the panel's Venn upsell
-        # (when absent, offer to set Venn up to manage many connections at once).
+        # Whether a VENN_API_KEY is present — drives the panel's Venn row state.
         from modastack.setup import actions
         return {"cards": cards, "catalog": catalog,
                 "venn_configured": bool(actions.venn_key(project))}
@@ -465,47 +478,155 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 continue
             kept.append(s)
         state.spec.services = kept
+        # A user-defined MCP is also rendered from spec.mcp_servers (independent
+        # of services), so dropping only the service leaves its row behind —
+        # remove the matching mcp_servers entry too.
+        if state.spec.mcp_servers:
+            state.spec.mcp_servers = {
+                k: v for k, v in state.spec.mcp_servers.items()
+                if k.strip().lower() != key}
         state.validated = False
         state.save(project)
         return JSONResponse(serialize_state(state))
 
-    @app.post("/api/build-integration")
-    def build_integration(payload: dict) -> JSONResponse:
-        # PLACEHOLDER (deliberate). Building an MCP/CLI on the fly from an MCP
-        # server link or a raw API key is a rabbit hole of its own — a future
-        # async background job. For now we register the service as a custom
-        # connection so it persists, optionally stash the API key in .env (never
-        # the LLM), and return a friendly "queued / coming soon" status the panel
-        # renders as a placeholder sequence.
-        from modastack.setup import actions, authoring
-        name = (payload.get("service_name") or "").strip()
+    @app.post("/api/mcp/add")
+    def mcp_add(payload: dict) -> JSONResponse:
+        """Add a custom MCP connection by name + remote URL (the Claude-style
+        connector form). Auth is api_key (Bearer header) or none (public). Any
+        key goes straight to .env as a `${VAR}` ref. Persists to
+        spec.mcp_servers and as a team service so it shows as a row; authored
+        into agent.yaml mcp_servers: at build. (OAuth-authed MCPs aren't
+        supported yet — a follow-up.)"""
+        import re
+        from modastack.setup import actions
+        name = (payload.get("name") or "").strip()
+        url = (payload.get("url") or "").strip()
         if not name:
-            return JSONResponse({"error": "service_name required"}, status_code=400)
-        have = {((s.get("name") if isinstance(s, dict) else str(s)) or "").strip().lower()
-                for s in state.spec.services}
-        if name.lower() not in have:
-            state.spec.services = list(state.spec.services) + [{"name": name}]
-        saved = False
-        api_key = payload.get("api_key", "")
-        if api_key:
-            var = authoring._env_var_fallback(name)
-            try:
-                actions.save_credential(state, project, var, name, "",
-                                        prompt_fn=lambda *_: api_key)
-                saved = True
-            except actions.ActionError:
-                saved = False
+            return JSONResponse({"error": "give the connection a name"},
+                                status_code=400)
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return JSONResponse(
+                {"error": "a remote server URL (https://…) is required"},
+                status_code=400)
+        # API key is the only supported auth; no key means a public server.
+        auth = payload.get("auth") or "api_key"
+        if auth not in ("none", "api_key"):
+            return JSONResponse({"error": "auth must be none or api_key"},
+                                status_code=400)
+        key = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "mcp"
+        prefix = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_") or "MCP"
+        entry: dict = {"url": url, "type": "http", "auth": auth, "label": name}
+        try:
+            if auth == "api_key":
+                var = f"{prefix}_API_KEY"
+                entry["secret_var"] = var
+                api_key = payload.get("api_key", "")
+                if api_key:
+                    actions.save_credential(state, project, var, name, "",
+                                            prompt_fn=lambda *_: api_key)
+        except actions.ActionError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        mcps = dict(state.spec.mcp_servers or {})
+        mcps[key] = entry
+        state.spec.mcp_servers = mcps
+        have = {((s.get("name") if isinstance(s, dict) else str(s)) or "")
+                .strip().lower() for s in state.spec.services}
+        if key not in have and name.lower() not in have:
+            state.spec.services = list(state.spec.services) + [{"name": key}]
         state.validated = False
         state.save(project)
-        return JSONResponse({
-            "status": "queued",
-            "message": (f"Building a custom integration for {name} is a "
-                        "background job we'll wire up soon — you can come back to "
-                        "it. It's saved to your team as a custom connection for "
-                        "now."),
-            "credential_saved": saved,
-            "state": serialize_state(state),
-        })
+        return JSONResponse({"ok": True, "state": serialize_state(state)})
+
+    # --- Venn: verify key, list the account's MCPs, reconcile team picks --
+    def _venn_servers_payload(key: str) -> dict:
+        """Verify the key and return the FULL set of services available to this
+        Venn account (not just connected ones) as plain names. A bad/unreachable
+        key raises VennError → caller renders the modal's error state."""
+        from modastack.venn import list_servers_verified
+        servers = list_servers_verified(key)
+        return {"ok": True, "servers": sorted(
+            {s.server_name for s in servers if s.server_name})}
+
+    @app.get("/api/venn/servers")
+    def venn_servers() -> JSONResponse:
+        """List the services available via the SAVED Venn key (re-opening an
+        already-connected modal). ok:false with a message if it won't verify."""
+        from modastack.setup.actions import venn_key
+        from modastack.venn import VennError
+        key = venn_key(project)
+        if not key:
+            return JSONResponse({"ok": False,
+                                 "error": "No Venn API key saved yet."})
+        try:
+            return JSONResponse(_venn_servers_payload(key))
+        except VennError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+
+    @app.post("/api/venn/connect")
+    def venn_connect(payload: dict) -> JSONResponse:
+        """Verify a PASTED key against Venn, and only persist it on success — so
+        a bad key never flips Venn to 'connected'. Returns the available
+        services on success, or ok:false + error for the modal's error state."""
+        from modastack.setup import actions
+        from modastack.venn import VennError
+        key = (payload.get("key") or "").strip()
+        if not key:
+            return JSONResponse({"ok": False, "error": "Paste your Venn key."})
+        try:
+            data = _venn_servers_payload(key)
+        except VennError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        try:
+            actions.save_credential(state, project, "VENN_API_KEY", "venn", "",
+                                    prompt_fn=lambda *_: key)
+        except actions.ActionError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        data["state"] = serialize_state(state)
+        return JSONResponse(data)
+
+    @app.post("/api/venn/apply")
+    def venn_apply(payload: dict) -> JSONResponse:
+        """Reconcile the team's Venn services to exactly the toggled-on set. A
+        Venn service is on the team iff its toggle is on: `servers` are the
+        on-toggles, `available` is the full picker universe. Add on-toggles not
+        present; remove available services that are off (untouched: non-Venn
+        services and anything outside the picker universe). Idempotent."""
+        from modastack.setup import services
+        on = payload.get("servers")
+        if not isinstance(on, list):
+            return JSONResponse({"error": "servers must be a list"},
+                                status_code=400)
+        desired = {(str(s) or "").strip().lower() for s in on if str(s).strip()}
+        universe = {(str(s) or "").strip().lower()
+                    for s in (payload.get("available") or []) if str(s).strip()}
+        universe |= desired   # a toggled-on name is part of the universe too
+        kept, added, removed = [], [], []
+        for s in state.spec.services:
+            name = (s.get("name") if isinstance(s, dict) else str(s)) or ""
+            nl = name.strip().lower()
+            # Only reconcile VENN-backed services. Venn's catalog can include
+            # names that resolve native here (slack/github/linear) — those must
+            # never be removed by the Venn picker even if left untoggled.
+            is_venn = services.resolve(name).kind == "venn" if name.strip() else False
+            if is_venn and nl in universe and nl not in desired:
+                removed.append(name)          # a Venn service toggled OFF
+                continue
+            kept.append(s)
+        have = {((s.get("name") if isinstance(s, dict) else str(s)) or "")
+                .strip().lower() for s in kept}
+        for raw in on:
+            name = (str(raw) or "").strip()
+            if name and name.lower() not in have:
+                kept.append({"name": name})
+                have.add(name.lower())
+                added.append(name)
+        if added or removed:
+            state.spec.services = kept
+            state.validated = False
+            state.save(project)
+        return JSONResponse({"added": added, "removed": removed,
+                             "state": serialize_state(state)})
 
     # --- chat (how you talk to the team) -------------------------------
     @app.post("/api/chat")

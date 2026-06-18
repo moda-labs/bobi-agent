@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Publish skips the doomed unsigned POST during cold start.** Lifecycle emits
+  (`session.started` / `session.failed`) that fire before the bubble is minted
+  (the `--fresh` / startup window) no longer POST an unsigned event guaranteed to
+  403; `_post_topic` returns early and logs at debug. Removes the duplicate
+  `No bubble credential` + `403 Forbidden` warning pairs from the manager log and
+  a pointless round-trip.
+- **Event client stays quiet on routine reconnects.** A Cloudflare Durable Object
+  cycles hibernating WebSockets from the runtime side every few minutes; the
+  client reconnects losslessly via the `last_seen` replay cursor. Those routine
+  reconnects now log at debug. A genuine flap (5+ short-lived connections in a
+  row) still warns, naming the last error.
+
 ## 0.21.0 — 2026-06-18
 
 The inter-agent comms + event-bus security foundation: agents talk over the event

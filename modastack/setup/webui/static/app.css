@@ -295,6 +295,7 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .cbadge.ok{color:var(--ok);}
 /* connected = unmistakable filled green pill with a check */
 .cbadge.connected{display:inline-flex;align-items:center;gap:4px;color:#fff;background:var(--ok);border-radius:999px;padding:2px 9px 2px 7px;font-size:10px;letter-spacing:.02em;}
+.cbadge.warn{color:var(--err);}
 .cbadge.connected svg{width:10px;height:10px;color:#fff;}
 /* Venn modal: fully-connected success state (no Re-check CTA) */
 .venn-done{display:flex;align-items:center;gap:12px;background:rgba(23,123,82,.08);border:1px solid rgba(23,123,82,.3);border-radius:10px;padding:13px 15px;margin-bottom:12px;}
@@ -304,12 +305,40 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .venn-done .vd-copy b{font-size:13.5px;color:var(--text);}
 .venn-done .vd-copy span{font-size:12px;color:var(--muted);}
 .ctag{display:block;font-family:var(--font-mono);font-size:10px;color:var(--faint);margin-top:1px;}
-.uvenn{margin-top:8px;border-top:1px solid var(--border);padding-top:9px;}
-/* avoid stacking two hairlines when the Venn upsell follows the Venn group */
-.uvenn + .venn-upsell{border-top:0;padding-top:2px;}
-.uvhead{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12.5px;margin-bottom:5px;}
-.uvhead b{font-weight:620;}
-.venn-svcs{display:flex;flex-direction:column;gap:4px;margin:4px 0 8px;}
+/* Account-level Venn: pinned as the first connection row, but styled like any
+   other option in the list (not a section header). */
+.venn-lab{display:inline-flex;align-items:center;gap:6px;}
+.help{position:relative;display:inline-flex;width:13px;height:13px;color:var(--faint);cursor:help;}
+.help:hover,.help:focus{color:var(--muted);outline:none;}
+.help svg{width:13px;height:13px;}
+/* Immediate, styled hover tooltip (the native title attr is delayed + easy to
+   miss). Shows on hover/focus; sits above the icon. */
+.help[data-tip]:hover::after,.help[data-tip]:focus::after{
+  content:attr(data-tip); position:absolute; left:0; bottom:calc(100% + 8px);
+  width:max-content; max-width:230px; white-space:normal;
+  background:var(--slab-bg); color:var(--slab-text);
+  font-family:var(--font-sans); font-size:11.5px; font-weight:400; line-height:1.4;
+  letter-spacing:0; text-transform:none; text-align:left;
+  padding:7px 10px; border-radius:8px; border:1px solid var(--slab-border);
+  box-shadow:0 10px 28px -12px rgba(40,30,16,.55); z-index:140; pointer-events:none;
+}
+/* Venn setup flow: connected banner, MCP picker list, error + loading states. */
+.venn-ok{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:11px;}
+.venn-ok .pd{margin:0;}
+.venn-list{display:flex;flex-direction:column;gap:5px;max-height:46vh;overflow-y:auto;margin-bottom:4px;}
+.venn-pick{display:flex;align-items:center;gap:9px;padding:8px 11px;border:1px solid var(--border);border-radius:9px;background:var(--raised);cursor:pointer;font-size:12.5px;}
+.venn-pick:hover{border-color:var(--border-strong);}
+.venn-pick.on{border-color:var(--accent);background:rgba(200,97,43,.06);}
+.venn-pick input{accent-color:var(--accent);width:15px;height:15px;flex:0 0 auto;}
+.venn-pick .vp-name{flex:1;text-transform:capitalize;}
+.venn-pick .vp-state{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);}
+.venn-pick.on .vp-state{color:var(--accent);}
+.venn-err{display:flex;align-items:center;gap:12px;background:rgba(181,70,43,.08);border:1px solid rgba(181,70,43,.32);border-radius:10px;padding:13px 15px;margin-bottom:12px;}
+.venn-err .ve-seal{flex:0 0 auto;width:30px;height:30px;border-radius:50%;background:var(--err);color:#fff;display:grid;place-items:center;font-weight:700;font-size:18px;}
+.venn-loading{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px;padding:18px 2px;}
+.spinner{width:15px;height:15px;border:2px solid var(--border-strong);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;flex:0 0 auto;}
+@keyframes spin{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion:reduce){.spinner{animation:none;}}
 .uopts{display:flex;gap:6px;flex-wrap:wrap;}
 .uopt{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:5px 11px;cursor:pointer;}
 .uopt.sel{color:#fff;background:var(--accent);border-color:var(--accent);}
@@ -357,11 +386,6 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .lnk.trash svg{width:14px;height:14px;}
 .lnk.trash:hover{color:var(--err);background:rgba(181,70,43,.08);}
 
-/* Venn upsell (shown when no Venn key is set) */
-.venn-upsell{margin-top:10px;border-top:1px solid var(--border);padding-top:10px;display:flex;flex-direction:column;gap:6px;}
-.venn-upsell .vu-lab{font-size:11.5px;color:var(--muted);line-height:1.45;}
-.venn-upsell .vu-row{display:flex;gap:14px;align-items:center;}
-
 /* state-change polish: a gentle settle when a card's content updates */
 @keyframes cardbump{0%{transform:translateY(4px);opacity:.55;}100%{transform:translateY(0);opacity:1;}}
 .ucard.bump{animation:cardbump .36s cubic-bezier(.22,1,.36,1);}
@@ -401,11 +425,9 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .yamlish .flab{color:var(--accent);}
 .sp-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:4px;}
 
-/* custom integration builder (placeholder) */
-.custom-build{margin-top:16px;border-top:1px solid var(--border);padding-top:14px;}
-.cb-head{font-family:var(--font-mono);font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;}
-.cb-status:empty{display:none;}
-.cb-queued{margin-top:10px;font-size:12.5px;color:var(--text);background:var(--accent-soft);border:1px solid var(--accent-ring);border-radius:8px;padding:10px 12px;line-height:1.45;}
+/* Add-a-connection form status/error. */
+.mcp-status:empty{display:none;}
+.mcp-err{margin-top:10px;font-size:12.5px;color:var(--err);background:rgba(181,70,43,.08);border:1px solid rgba(181,70,43,.3);border-radius:8px;padding:9px 12px;}
 
 /* Design — single centered conversation (no separate answer box) */
 .chat.sketch{width:min(760px,100%);margin:0 auto;display:flex;flex-direction:column;height:100%;background:transparent;}

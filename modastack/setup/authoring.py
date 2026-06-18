@@ -97,20 +97,29 @@ def build_service_records(state: SetupState, catalog=None) -> list[dict]:
     """The agent.yaml `services:` block from the spec. The chat channel you
     talk to the team through is itself a service it must connect (Slack); CLI
     needs nothing. (Telegram: framework support pending.) Custom services
-    (neither native nor on Venn) carry their own API-key credential."""
+    (neither native nor on Venn) carry their own API-key credential. Hosted-MCP
+    services are NOT here — they're declared under `mcp_servers:` instead (see
+    `build_mcp_servers`)."""
     service_names = [(s.get("name") if isinstance(s, dict) else str(s))
                      for s in state.spec.services]
     if state.chat == "slack":
         service_names.append("slack")
+    # Names the user wired up as a custom MCP connection are declared under
+    # mcp_servers:, never as a plain service (even if first guessed as custom).
+    user_mcp = {n.strip().lower() for n in (state.spec.mcp_servers or {})}
     svcs: list[dict] = []
     seen: set[str] = set()
     for name in service_names:
         if not (name or "").strip():
             continue
+        if name.strip().lower() in user_mcp:
+            continue   # a user-defined MCP — see mcp_servers:
         conn = services.resolve(name, venn_catalog=catalog)
         if conn.key in seen:
             continue
         seen.add(conn.key)
+        if conn.kind == "mcp":
+            continue   # declared under mcp_servers:, not services:
         rec: dict = {"name": conn.key}
         if conn.kind == "native":
             rec["events"] = True
@@ -121,6 +130,44 @@ def build_service_records(state: SetupState, catalog=None) -> list[dict]:
             rec["credentials"] = {"api_key": f"${{{conn.credential_var}}}"}
         svcs.append(rec)
     return svcs
+
+
+def build_mcp_servers(state: SetupState, catalog=None) -> dict:
+    """The agent.yaml `mcp_servers:` block: every spec service that resolves to
+    a hosted-MCP server (not native, not on Venn, but in the MCP registry).
+    Each entry is `{type, url, [headers]}` — a static-key server sends its key
+    as a `${VAR}` header (interpolated from .env at config load); an OAuth/
+    public server carries url only. Deduped by server key."""
+    from modastack.setup import mcp_registry
+
+    names = [(s.get("name") if isinstance(s, dict) else str(s))
+             for s in state.spec.services]
+    out: dict[str, dict] = {}
+    for name in names:
+        if not (name or "").strip():
+            continue
+        conn = services.resolve(name, venn_catalog=catalog)
+        if conn.kind != "mcp" or conn.key in out:
+            continue
+        spec = mcp_registry.lookup(conn.key) or mcp_registry.lookup(name)
+        if spec:
+            out[spec.key] = spec.server_config()
+    # User-defined custom MCP connections (added by name + remote URL).
+    for name, cfg in (state.spec.mcp_servers or {}).items():
+        if isinstance(cfg, dict) and cfg.get("url"):
+            out[name] = user_mcp_config(cfg)
+    return out
+
+
+def user_mcp_config(cfg: dict) -> dict:
+    """The agent.yaml `mcp_servers.<name>` value for a user-added connection:
+    transport + url, plus a `${VAR}` Bearer header for API-key auth. For OAuth
+    the agent performs the handshake at connect time using the client
+    credentials in .env, so the static block carries url only."""
+    rec: dict = {"type": cfg.get("type", "http"), "url": cfg.get("url", "")}
+    if cfg.get("auth") == "api_key" and cfg.get("secret_var"):
+        rec["headers"] = {"Authorization": f"Bearer ${{{cfg['secret_var']}}}"}
+    return rec
 
 
 def has_venn_services(state: SetupState, catalog=None) -> bool:
@@ -142,6 +189,11 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
     svcs = build_service_records(state, catalog)
     if svcs:
         cfg["services"] = svcs
+    # Hosted-MCP services are wired in directly so the agent connects to them at
+    # runtime (the framework already threads mcp_servers through to the SDK).
+    mcps = build_mcp_servers(state, catalog)
+    if mcps:
+        cfg["mcp_servers"] = mcps
     # Venn-backed services authenticate with the one shared key — declare it so
     # `modastack start` resolves it from the environment / .env (else preflight
     # reports "venn — no API key" despite the key being set).
@@ -185,6 +237,16 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
             merged.append(rec)
     if merged:
         cfg["services"] = merged
+    # Union mcp_servers by key: keep every hand-written server (and any custom
+    # keys on one the pack already declares), add only servers the pack lacks.
+    managed_mcps = managed.get("mcp_servers") or {}
+    if managed_mcps:
+        existing_mcps = (cfg.get("mcp_servers")
+                         if isinstance(cfg.get("mcp_servers"), dict) else {})
+        merged_mcps = dict(existing_mcps)
+        for k, v in managed_mcps.items():
+            merged_mcps.setdefault(k, v)
+        cfg["mcp_servers"] = merged_mcps
     if state.chat and state.chat != "cli":
         cfg["chat"] = state.chat
     return yaml.dump(cfg, sort_keys=False)
@@ -375,13 +437,17 @@ def _env_var_fallback(name: str) -> str:
 
 
 def custom_services(state: SetupState, catalog=None) -> list:
-    """The spec's services that are custom (not native, not on Venn) — each
-    needs an authored tools guide. Deduped by connector key."""
+    """The spec's services that are custom (not native, not on Venn, and not
+    wired up as a user-defined MCP) — each needs an authored tools guide.
+    Deduped by connector key."""
+    user_mcp = {n.strip().lower() for n in (state.spec.mcp_servers or {})}
     out, seen = [], set()
     for s in state.spec.services:
         name = s.get("name") if isinstance(s, dict) else str(s)
         if not (name or "").strip():
             continue
+        if name.strip().lower() in user_mcp:
+            continue   # reached via its MCP now, not a hand-written guide
         conn = services.resolve(name, venn_catalog=catalog)
         if conn.kind == "custom" and conn.key not in seen:
             seen.add(conn.key)

@@ -22,6 +22,7 @@
   const DOCS_CLOUD_URL = "https://docs.modastack.ai/cloud";
   const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4"><path d="M5 12l5 5L19 7"/></svg>';
   const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"/></svg>';
+  const HELP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.5-2.7 2.5"/><circle cx="12" cy="16.7" r="0.6" fill="currentColor" stroke="none"/></svg>';
   const STATUS_LABEL = { connected: "connected", missing: "connect", unknown: "needs check" };
   // Day-to-day channels for the Chat card.
   const CHANNELS = [
@@ -534,9 +535,10 @@
       <div class="ud">${body}</div>
       <div class="uadd"><button class="lnk add" data-addauto>+ add an automation</button></div></div>`;
   }
-  // Connections: native services capture a token each; Venn-backed services
-  // share ONE key, so they're grouped under a single Venn setup with per-service
-  // verification status. Reads live status from the cached /api/connect payload.
+  // Connections: native + hosted-MCP + custom services each get their own row
+  // (a token, an MCP wire-up, or a custom key); Venn-backed services share ONE
+  // key, grouped under a single Venn setup with per-service verification status.
+  // Reads live status from the cached /api/connect payload.
   function connectionsCard(sp) {
     const cards = (_connData && _connData.cards) || null;
     const ok = servicesSettled(sp);
@@ -550,24 +552,32 @@
     } else if (!cards.length) {
       body = `<span class="ph">no outside services — runs self-contained</span>`;
     } else {
-      const native = cards.filter(c => c.kind !== "venn");
-      const venn = cards.filter(c => c.kind === "venn");
-      body = native.map(connRow).join("") + vennGroup(venn);
+      // Every service is its own row; Venn-backed ones are tagged "(Venn)" and
+      // reached through the single account-level Venn connection (the row below).
+      body = cards.map(connRow).join("");
     }
-    const upsell = vennConfigured ? "" : vennUpsell();
+    // Venn is ONE account-level connection many services share — pinned as the
+    // top row (shown whenever we have connection data) so it can be set up /
+    // managed first; the per-service rows follow.
+    const venn = cards ? vennAccountRow(vennConfigured) : "";
     return `<div class="ucard ${(sp.services || []).length ? "filled" : "empty"}">
       <div class="ut">Connections ${slotDot(ok)}</div>
-      <div class="ud">${body}${upsell}</div>
+      <div class="ud">${venn}${body}</div>
       <div class="uadd"><button class="lnk add" data-addconn>+ add a connection</button></div></div>`;
   }
-  // Surfaced when no Venn key is set: one account connects many services at once.
-  function vennUpsell() {
-    return `<div class="venn-upsell">
-      <span class="vu-lab">Connect lots of services at once with <b>Venn</b> — one key, many integrations.</span>
-      <span class="vu-row">
-        <a class="lnk" href="https://app.venn.ai" target="_blank" rel="noopener">Create a Venn account ↗</a>
-        <button class="lnk" data-vennsetup>Sync it here</button>
-      </span></div>`;
+  // Account-level Venn: one connection the user manages globally; any number of
+  // Venn-backed services (Gmail, Slack, Salesforce…) are reached through it. One
+  // link to set up or manage; hover the ⓘ for what Venn is.
+  function vennAccountRow(configured) {
+    const help = "Connect lots of services at once with Venn — one key, many integrations";
+    const badge = configured
+      ? `<span class="cbadge connected">${CHECK} connected</span>`
+      : `<span class="cbadge">not connected</span>`;
+    return `<div class="uconn venn-acct">
+      <span class="venn-lab">Venn<span class="help" tabindex="0" role="img"
+        aria-label="${esc(help)}" data-tip="${esc(help)}">${HELP}</span></span>
+      <span class="cright">${badge}
+        <button class="lnk" data-vennsetup>${configured ? "Manage Venn" : "Set up Venn"}</button></span></div>`;
   }
   function trashBtn(key) {
     return `<button class="lnk trash" data-conntrash="${esc(key)}" title="I don't need this">${TRASH}</button>`;
@@ -578,23 +588,43 @@
     return `<span class="cbadge">pending</span>`;
   }
   function connRow(c) {
-    const right = c.status === "connected"
-      ? `${statusBadge("connected")} <button class="lnk" data-secretopen="${esc(c.key)}">edit</button>`
-      : `<button class="btn ghost xs" data-secretopen="${esc(c.key)}">Connect</button>`;
-    // Custom services (not native, not on Venn) get an authored API guide.
-    const tag = c.kind === "custom"
-      ? `<span class="ctag">custom · modastack writes a guide</span>` : "";
+    // A hosted-MCP server with no key to capture is wired in deterministically —
+    // nothing for the user to do here, so show "wired" rather than a Connect CTA.
+    const mcpNoSecret = c.kind === "mcp"
+      && !((c.methods && c.methods[0] && c.methods[0].secrets || []).length);
+    let right;
+    if (c.kind === "venn") {
+      // Venn-backed services are reached through the account-level Venn
+      // connection (the Venn row) — no per-service key to capture here.
+      right = c.status === "connected"
+        ? `<span class="cbadge connected">${CHECK} connected via Venn</span>`
+        : `<span class="cbadge">${c.status === "unknown" ? "via Venn" : "needs Venn"}</span>`;
+    } else if (c.kind === "custom") {
+      // Not native/Venn/known MCP — connect it by pointing at a remote MCP.
+      right = `<button class="btn ghost xs" data-addmcp="${esc(c.name)}">Connect</button>`;
+    } else if (c.user_mcp) {
+      // A user-added MCP — NOT verified here; it connects (and authorizes) when
+      // the team runs. Never claim "connected"; flag when it still needs creds.
+      right = c.status === "needs_auth"
+        ? `<span class="cbadge warn">needs auth</span> <button class="lnk" data-addmcp="${esc(c.name)}">finish</button>`
+        : `<span class="cbadge">added</span> <button class="lnk" data-addmcp="${esc(c.name)}">edit</button>`;
+    } else if (mcpNoSecret) {
+      right = `<span class="cbadge connected">${CHECK} wired</span>`;
+    } else if (c.status === "connected") {
+      right = `${statusBadge("connected")} <button class="lnk" data-secretopen="${esc(c.key)}">edit</button>`;
+    } else {
+      right = `<button class="btn ghost xs" data-secretopen="${esc(c.key)}">Connect</button>`;
+    }
+    // Tag how each service is reached: through Venn, a hosted MCP (the registry
+    // one-click, or a user-added connection's own note), or a custom service
+    // that needs a connection.
+    const tag = c.kind === "venn"
+      ? `<span class="ctag">via Venn</span>`
+      : c.kind === "mcp"
+      ? `<span class="ctag">${esc(c.note || "hosted MCP · 1-click")}</span>`
+      : c.kind === "custom"
+      ? `<span class="ctag">connect an MCP</span>` : "";
     return `<div class="uconn"><span>${esc(c.name)}${tag}</span><span class="cright">${right}${trashBtn(c.key)}</span></div>`;
-  }
-  function vennGroup(venn) {
-    if (!venn.length) return "";
-    const keyIn = venn.some(c => (c.methods[0].secrets || []).some(s => s.present));
-    const rows = venn.map(c =>
-      `<div class="uconn sub"><span>${esc(c.name)}</span><span class="cright">${statusBadge(c.status)}${trashBtn(c.key)}</span></div>`).join("");
-    return `<div class="uvenn">
-      <div class="uvhead"><span><b>Venn</b> · one key, every service</span>
-        <button class="btn ghost xs" data-vennsetup>${keyIn ? "Manage" : "Set up Venn"}</button></div>
-      ${rows}</div>`;
   }
   async function trashConnection(key) {
     const r = await postJSON("/api/service/remove", { service_key: key });
@@ -852,84 +882,155 @@
     });
   }
 
-  // --- on-demand secret capture: unified Venn setup ----------------------
-  // Every Venn-backed service shares one key, so setup is ONE place: paste the
-  // key once, and each service shows its verification status.
+  // --- Venn setup: a small flow (key → loading → pick / error → done) ----
+  // Venn is ONE account-level connection. Paste the key, modastack pulls the
+  // MCPs in your Venn account, you pick which to add to THIS team, confirm, and
+  // they appear as their own rows. "Open Venn" stays available the whole time.
+  let vennStep = "key";          // key | loading | error | pick | done
+  let vennServers = [];          // [{name, connected}] from the account
+  let vennSel = new Set();        // server names the user has ticked
+  let vennErr = "";              // error-state message
+  let vennAddedMsg = "";         // done-state summary
+  const OPEN_VENN = '<a class="doclink" href="https://app.venn.ai" target="_blank" rel="noopener">Open Venn ↗</a>';
+
   async function openVennSetup() {
     _connData = await getJSON("/api/connect");
+    vennErr = ""; vennAddedMsg = "";
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "venn-ov";
     ov.innerHTML = `<div class="secret-panel">
       <div class="sp-head"><b>Connect via Venn</b><button class="btn ghost sm" id="venn-close">Close</button></div>
       <div class="sp-body" id="venn-body"></div></div>`;
     document.body.appendChild(ov);
-    drawVenn();
     ov.addEventListener("click", e => {
-      if (e.target.id === "venn-close" || e.target === ov) ov.remove();
+      if (e.target.id === "venn-close" || e.target === ov) closeVenn();
     });
+    // Already connected? Skip the key step and go straight to discovery.
+    if (_connData && _connData.venn_configured) { vennLoadServers(); }
+    else { vennStep = "key"; drawVenn(); }
   }
-  function vennCards() {
-    return ((_connData && _connData.cards) || []).filter(c => c.kind === "venn");
+  function closeVenn() { const o = $("#venn-ov"); if (o) o.remove(); renderUniCards(); }
+
+  // Servers come back as plain names (everything the key can reach). A service
+  // is ON iff it's already on the team — that team membership IS the toggle
+  // state; there's no separate "live" concept in the picker.
+  function setVennServers(names) {
+    vennServers = (names || []).slice();
+    const have = new Set((S.spec.services || [])
+      .map(s => ((s && s.name) || String(s) || "").toLowerCase()));
+    vennSel = new Set(vennServers.filter(n => have.has((n || "").toLowerCase())));
   }
+  async function vennLoadServers() {
+    vennStep = "loading"; drawVenn();
+    const r = await getJSON("/api/venn/servers");
+    if (!r || !r.ok) {
+      vennErr = (r && r.error) || "Couldn't reach Venn with that key.";
+      vennStep = "error"; drawVenn(); return;
+    }
+    setVennServers(r.servers);
+    vennStep = "pick"; drawVenn();
+  }
+
   function drawVenn() {
     const body = $("#venn-body"); if (!body) return;
-    const venn = vennCards();
-    const keyIn = venn.some(c => (c.methods[0].secrets || []).some(s => s.present));
-    const allConnected = venn.length > 0 && venn.every(c => c.status === "connected");
-    const svcs = venn.map(c =>
-      `<div class="uconn sub"><span>${esc(c.name)}</span>${statusBadge(c.status)}</div>`).join("");
-    // Already fully connected: no "Re-check" busywork. Make it obviously done and
-    // let the user simply close.
-    if (allConnected) {
-      body.innerHTML = `
-        <div class="venn-done">
-          <div class="vd-seal">${CHECK}</div>
-          <div class="vd-copy"><b>All Venn services connected</b>
-            <span>You're set — these are live and ready to use.</span></div>
-        </div>
-        <div class="venn-svcs">${svcs}</div>
-        <div class="connect-row" style="justify-content:flex-end">
-          <button class="btn primary sm" data-vennclose>Done</button>
-        </div>`;
-      return;
-    }
-    const editing = editSecrets.has("VENN_API_KEY");
-    const keyField = (keyIn && !editing)
-      ? `<div class="secret-saved">✓ Venn key saved
-          <button class="lnk" data-secretedit="VENN_API_KEY">Edit</button>
-          <button class="lnk" data-secretcopy="VENN_API_KEY">Copy</button></div>`
-      : `<label class="secret"><span class="slabel">Venn API key${keyIn ? " · re-enter to replace" : ""}</span>
+    let html;
+    if (vennStep === "key") {
+      html = `
+        <p class="pd">Paste your Venn API key. modastack pulls in the services
+        you've connected in Venn — pick which ones this team should use.</p>
+        <ol class="steps">
+          <li>Sign in at app.venn.ai and create an API key (Settings → API).</li>
+          <li>Connect the services you want in Venn (one-click OAuth).</li>
+          <li>Paste the key below.</li>
+        </ol>
+        <label class="secret"><span class="slabel">Venn API key</span>
           <input type="password" id="venn-key" placeholder="venn_…" autocomplete="off">
-          <span class="shelp">One key unlocks every Venn service below.</span></label>`;
-    body.innerHTML = `
-      <p class="pd" style="margin-bottom:10px">One Venn key covers all of these. Connect each service in Venn, then paste the key once — modastack verifies which are live.</p>
-      <ol class="steps">
-        <li>Sign in at app.venn.ai and create an API key (Settings → API).</li>
-        <li>In Venn, connect each service below (one-click OAuth).</li>
-        <li>Paste the key here — it covers them all.</li>
-      </ol>
-      <div class="venn-svcs">${svcs}</div>
-      ${keyField}
-      <div class="connect-row">
-        <a class="doclink" href="https://app.venn.ai" target="_blank" rel="noopener">Open Venn ↗</a>
-        <button class="btn primary sm" data-vennsave>${keyIn ? "Re-check" : "Save & verify"}</button>
-      </div>`;
-  }
-  async function vennSave() {
-    const input = $("#venn-key");
-    if (input && input.value.trim()) {
-      const r = await postJSON("/api/credential", {
-        var_name: "VENN_API_KEY", service: "venn", value: input.value.trim(),
-      });
-      if (!r.ok) { toast(r.data.error || "couldn't save"); return; }
-      editSecrets.delete("VENN_API_KEY");
-      if (!(S.credentials_saved || []).includes("VENN_API_KEY")) (S.credentials_saved ||= []).push("VENN_API_KEY");
-      toast("Venn key saved");
-    } else {
-      toast("checking…");
+          <span class="shelp">Stored in .env on this machine; never sent to the model.</span></label>
+        <div class="connect-row">${OPEN_VENN}
+          <button class="btn primary sm" data-vennconnect>Connect Venn</button></div>`;
+    } else if (vennStep === "loading") {
+      html = `<div class="venn-loading"><span class="spinner"></span>
+          Checking your Venn account…</div>
+        <div class="connect-row">${OPEN_VENN}</div>`;
+    } else if (vennStep === "error") {
+      html = `
+        <div class="venn-err">
+          <div class="ve-seal">!</div>
+          <div class="vd-copy"><b>Couldn't connect to Venn</b>
+            <span>${esc(vennErr)}</span></div>
+        </div>
+        <div class="connect-row">${OPEN_VENN}
+          <button class="btn primary sm" data-vennretry>Try another key</button></div>`;
+    } else if (vennStep === "pick") {
+      const rows = vennServers.length
+        ? vennServers.map(n => {
+            const on = vennSel.has(n);
+            return `<label class="venn-pick ${on ? "on" : ""}">
+              <input type="checkbox" data-vennpick="${esc(n)}" ${on ? "checked" : ""}>
+              <span class="vp-name">${esc(n)}</span>
+              <span class="vp-state">${on ? "on" : "off"}</span></label>`;
+          }).join("")
+        : `<p class="pd">No services are available on this Venn account yet —
+            connect some in Venn, then come back and re-check.</p>`;
+      html = `
+        <div class="venn-ok"><span class="cbadge connected">${CHECK} Venn connected</span>
+          <span class="pd">Toggle the services this team should use${
+            vennServers.length ? ` — ${vennServers.length} available` : ""}.</span></div>
+        <div class="venn-list">${rows}</div>
+        <div class="connect-row">${OPEN_VENN}
+          <button class="btn primary sm" data-vennapply>Save</button></div>`;
+    } else if (vennStep === "done") {
+      html = `
+        <div class="venn-done"><div class="vd-seal">${CHECK}</div>
+          <div class="vd-copy"><b>${esc(vennAddedMsg)}</b>
+            <span>They're on your team — manage them anytime from the Connections panel.</span></div></div>
+        <div class="connect-row">${OPEN_VENN}
+          <button class="btn primary sm" data-vennclose>Close</button></div>`;
     }
+    body.innerHTML = html;
+  }
+
+  async function vennConnect() {
+    const input = $("#venn-key");
+    const val = input ? input.value.trim() : "";
+    if (!val) { toast("paste your Venn key first"); return; }
+    vennStep = "loading"; drawVenn();
+    // Verify BEFORE saving: a bad key returns ok:false and is never persisted,
+    // so it can't flip the Venn row to "connected".
+    const r = await postJSON("/api/venn/connect", { key: val });
+    if (!r.ok || !r.data.ok) {
+      vennErr = (r.data && r.data.error) || "Couldn't connect to Venn.";
+      vennStep = "error"; drawVenn(); return;
+    }
+    if (r.data.state) S = r.data.state;
+    if (!(S.credentials_saved || []).includes("VENN_API_KEY"))
+      (S.credentials_saved ||= []).push("VENN_API_KEY");
+    setVennServers(r.data.servers);
+    vennStep = "pick"; drawVenn();
+  }
+  // Sync a server's toggle to the team-membership set without redrawing (keeps
+  // scroll position); reflect the new state in the row.
+  function vennToggle(name, checked, label) {
+    if (checked) vennSel.add(name); else vennSel.delete(name);
+    if (label) {
+      label.classList.toggle("on", checked);
+      const st = label.querySelector(".vp-state");
+      if (st) st.textContent = checked ? "on" : "off";
+    }
+  }
+  async function vennApply() {
+    // Reconcile: the team's Venn services become exactly the toggled-on set
+    // (within the available universe). Turning everything off is valid.
+    const r = await postJSON("/api/venn/apply",
+                             { servers: [...vennSel], available: vennServers });
+    if (!r.ok) { toast(r.data.error || "couldn't save"); return; }
+    if (r.data.state) S = r.data.state;
     _connData = await getJSON("/api/connect");
-    drawVenn();
+    const a = (r.data.added || []).length, rm = (r.data.removed || []).length;
+    vennAddedMsg = (a || rm)
+      ? `Updated your team's Venn services${a ? ` · +${a}` : ""}${rm ? ` · −${rm}` : ""}`
+      : "No changes — your Venn services are up to date";
+    vennStep = "done"; drawVenn();
     renderUniCards();
   }
 
@@ -1247,18 +1348,7 @@
     const meta = {
       role: { title: "Add a role", ph: "Describe the role — what it does, what a good job looks like, what it needs to access.", lead: "Tell modastack about the role and it'll add it to the team." },
       auto: { title: "Add an automation", ph: "Describe something the team should do on its own — e.g. 'post a daily digest at 9am'.", lead: "Describe the proactive behavior; modastack wires it up." },
-      conn: { title: "Add a connection", ph: "What should the team connect to? e.g. 'our Notion workspace'.", lead: "Name a service and modastack will work out how to connect it." },
     }[kind];
-    const custom = kind === "conn" ? `
-      <div class="custom-build">
-        <div class="cb-head">Not on Venn? Build a custom integration</div>
-        <p class="fhelp">Paste an official MCP server link or an API key and modastack will try to build an MCP/CLI for it. This runs as a background job you can come back to — it's a rabbit hole of its own, so it's coming soon.</p>
-        <label class="fld"><span class="flab">Service name</span><input id="cb-name" placeholder="e.g. PostHog" autocomplete="off"></label>
-        <label class="fld"><span class="flab">MCP server link <span class="fhelp inline">optional</span></span><input id="cb-mcp" placeholder="https://…" autocomplete="off"></label>
-        <label class="fld"><span class="flab">API key <span class="fhelp inline">optional</span></span><input id="cb-key" type="password" placeholder="stored in .env, never sent to the model" autocomplete="off"></label>
-        <div class="sp-actions"><button class="btn ghost sm" id="cb-build">Build integration</button></div>
-        <div class="cb-status" id="cb-status"></div>
-      </div>` : "";
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "describe-ov";
     ov.innerHTML = `<div class="secret-panel">
@@ -1267,7 +1357,6 @@
         <p class="fhelp">${meta.lead}</p>
         <label class="fld"><textarea id="d-text" rows="3" placeholder="${esc(meta.ph)}"></textarea></label>
         <div class="sp-actions"><button class="btn primary sm" id="d-send">Add</button></div>
-        ${custom}
       </div></div>`;
     document.body.appendChild(ov);
     $("#d-text").focus();
@@ -1277,22 +1366,53 @@
       if (!t) { toast("say a little about it"); return; }
       ov.remove(); sendMessage(t);
     });
-    if (kind === "conn") {
-      $("#cb-build").addEventListener("click", async () => {
-        const name = $("#cb-name").value.trim();
-        if (!name) { toast("name the service first"); return; }
-        const res = await postJSON("/api/build-integration", {
-          service_name: name, mcp_url: $("#cb-mcp").value.trim(),
-          api_key: $("#cb-key").value.trim(),
-        });
-        if (!res.ok) { toast(res.data.error || "couldn't queue"); return; }
-        if (res.data.state) S = res.data.state;
-        const st = $("#cb-status");
-        if (st) st.innerHTML = `<div class="cb-queued">⏳ ${esc(res.data.message || "queued — coming soon")}</div>`;
-        renderUniCards();
-        if ((S.spec.services || []).length) refreshUniConnections();
-      });
+  }
+  // Add a connection = point modastack at a remote MCP server (the Claude-style
+  // connector form): name + URL + an API key. When the assistant guesses a
+  // connection is needed (a custom service like PostHog), the row's Connect
+  // opens this prefilled with the name — you supply the URL. (OAuth-authed MCPs
+  // aren't supported yet — that's a follow-up; API key is the only auth here.)
+  function openMcpModal(prefill) {
+    const ov = document.createElement("div");
+    ov.className = "secret-ov"; ov.id = "mcp-ov";
+    ov.innerHTML = `<div class="secret-panel">
+      <div class="sp-head"><b>Add a connection</b><button class="btn ghost sm" id="mcp-close">Close</button></div>
+      <div class="sp-body">
+        <p class="fhelp">Connect a remote MCP server — name it, paste its URL, and add an API key if it needs one.</p>
+        <label class="fld"><span class="flab">Name</span>
+          <input id="mcp-name" placeholder="e.g. PostHog" autocomplete="off" value="${esc(prefill || "")}"></label>
+        <label class="fld"><span class="flab">Remote server URL</span>
+          <input id="mcp-url" placeholder="https://mcp.example.com/mcp" autocomplete="off"></label>
+        <label class="fld"><span class="flab">API key <span class="fhelp inline">optional — only if the server needs one</span></span>
+          <input id="mcp-key" type="password" placeholder="stored in .env, never sent to the model" autocomplete="off"></label>
+        <div class="sp-actions"><button class="btn primary sm" id="mcp-add">Add</button></div>
+        <div class="mcp-status" id="mcp-status"></div>
+      </div></div>`;
+    document.body.appendChild(ov);
+    (prefill ? $("#mcp-url") : $("#mcp-name")).focus();
+    ov.addEventListener("click", e => { if (e.target.id === "mcp-close" || e.target === ov) ov.remove(); });
+    $("#mcp-add").addEventListener("click", () => mcpAdd(ov));
+  }
+  async function mcpAdd(ov) {
+    const key = (($("#mcp-key") || {}).value || "").trim();
+    const payload = {
+      name: ($("#mcp-name").value || "").trim(),
+      url: ($("#mcp-url").value || "").trim(),
+      auth: key ? "api_key" : "none",
+      api_key: key,
+    };
+    const r = await postJSON("/api/mcp/add", payload);
+    if (!r.ok) {
+      const st = $("#mcp-status");
+      if (st) st.innerHTML = `<div class="mcp-err">${esc(r.data.error || "couldn't add")}</div>`;
+      return;
     }
+    if (r.data.state) S = r.data.state;
+    _connData = await getJSON("/api/connect");
+    ov.remove();
+    renderUniCards();
+    // Honest: nothing is verified here yet — the row says what's still needed.
+    toast("Connection added");
   }
 
   // --- top-level render + events ----------------------------------------
@@ -1345,7 +1465,9 @@
     if (ao) { openAutoModal(+ao.dataset.autoopen); return; }
     if (e.target.closest("[data-addrole]")) { openDescribeModal("role"); return; }
     if (e.target.closest("[data-addauto]")) { openDescribeModal("auto"); return; }
-    if (e.target.closest("[data-addconn]")) { openDescribeModal("conn"); return; }
+    if (e.target.closest("[data-addconn]")) { openMcpModal(); return; }
+    const addmcp = e.target.closest("[data-addmcp]");
+    if (addmcp) { openMcpModal(addmcp.dataset.addmcp); return; }
     const ct = e.target.closest("[data-conntrash]");
     if (ct) { trashConnection(ct.dataset.conntrash); return; }
     const cs = e.target.closest("[data-chatset]");
@@ -1367,9 +1489,15 @@
     if (sco) { copySecret(sco.dataset.secretcopy); return; }
     const vs = e.target.closest("[data-vennsetup]");
     if (vs) { openVennSetup(); return; }
-    const vsv = e.target.closest("[data-vennsave]");
-    if (vsv) { vennSave(); return; }
-    if (e.target.closest("[data-vennclose]")) { const o = $("#venn-ov"); if (o) o.remove(); return; }
+    if (e.target.closest("[data-vennconnect]")) { vennConnect(); return; }
+    if (e.target.closest("[data-vennretry]")) { vennStep = "key"; drawVenn(); return; }
+    if (e.target.closest("[data-vennapply]")) { vennApply(); return; }
+    if (e.target.closest("[data-vennclose]")) { closeVenn(); return; }
+  });
+  // Picker checkboxes (Venn MCP selection) sync to the selected set on toggle.
+  document.addEventListener("change", (e) => {
+    const vp = e.target.closest("[data-vennpick]");
+    if (vp) vennToggle(vp.dataset.vennpick, vp.checked, vp.closest(".venn-pick"));
   });
 
   // Escape closes the topmost dismissible popup — the folder picker or a

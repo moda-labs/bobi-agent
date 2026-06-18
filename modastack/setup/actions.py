@@ -210,6 +210,11 @@ def save_credential(state: SetupState, project: Path, var_name: str,
     value = prompt_fn(var, service or "", instructions or "")
     if not value:
         return {"saved": False, "skipped": True, "var": var}
+    # A newline in the value would write extra physical lines into .env — on
+    # reparse that truncates the secret or injects a spurious VAR=…. Reject it
+    # (no legitimate token contains a newline).
+    if "\n" in value or "\r" in value:
+        raise ActionError("credential value cannot contain newlines")
 
     env = read_env(project)
     env[var] = value

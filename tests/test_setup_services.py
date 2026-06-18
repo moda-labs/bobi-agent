@@ -9,10 +9,26 @@ class TestResolve:
         assert services.resolve("github").kind == "native"
         assert services.resolve("slack").credential_var == "SLACK_BOT_TOKEN"
 
-    def test_alias_resolves_to_canonical(self):
-        # "gmail" is an alias of the coarse "email" venn bucket.
-        assert services.resolve("gmail").key == "email"
-        assert services.resolve("salesforce").key == "crm"
+    def test_concrete_venn_name_keeps_its_identity(self):
+        # A concrete service keeps its own name/key (not collapsed to a bucket),
+        # so two Gmail connections stay distinct and read as "Gmail" not "Email".
+        gm = services.resolve("gmail")
+        assert gm.kind == "venn" and gm.key == "gmail" and gm.name == "Gmail"
+        sf = services.resolve("salesforce")
+        assert sf.kind == "venn" and sf.key == "salesforce"
+        assert sf.name == "Salesforce"
+
+    def test_generic_bucket_term_resolves_to_the_bucket(self):
+        # The literal generic term still maps to the broad bucket card.
+        assert services.resolve("email").key == "email"
+        assert services.resolve("crm").key == "crm"
+
+    def test_titleizes_a_slug_name(self):
+        assert services.resolve("google_calendar",
+                                venn_catalog={"google_calendar"}).name == "Google Calendar"
+        # a name Venn already cased is kept verbatim
+        assert services.resolve("Work Gmail",
+                                venn_catalog={"work gmail"}).name == "Work Gmail"
 
     def test_case_and_whitespace_insensitive(self):
         assert services.resolve("  GitHub ").key == "github"
@@ -25,7 +41,7 @@ class TestResolve:
         assert conn.methods and conn.methods[0].action == "venn"
 
     def test_unknown_not_in_catalog_becomes_custom(self):
-        # Neither native, a curated bucket, nor in Venn's catalog → custom:
+        # Neither native, a curated bucket, on Venn, nor a hosted MCP → custom:
         # modastack captures an API key and authors a tools guide for it.
         conn = services.resolve("posthog", venn_catalog=set())
         assert conn.kind == "custom"
@@ -35,6 +51,26 @@ class TestResolve:
         assert sec.var == "POSTHOG_API_KEY"
         assert conn.methods[0].action == ""
         assert conn.credential_var == "POSTHOG_API_KEY"
+
+    def test_hosted_mcp_resolves_to_mcp(self):
+        # In the MCP registry but not native/Venn → mcp: wired into mcp_servers.
+        conn = services.resolve("stripe", venn_catalog=set())
+        assert conn.kind == "mcp"
+        assert conn.key == "stripe"
+        m = conn.methods[0]
+        assert m.action == "mcp"
+        assert m.secrets[0].var == "STRIPE_API_KEY"   # static-key server
+
+    def test_oauth_hosted_mcp_has_no_secret(self):
+        conn = services.resolve("deepwiki", venn_catalog=set())
+        assert conn.kind == "mcp"
+        assert conn.methods[0].secrets == ()          # public/OAuth — no key
+
+    def test_venn_wins_over_mcp_registry(self):
+        # "one key, every service" comes first: if Venn covers a name, it's venn
+        # even when the MCP registry also knows it.
+        conn = services.resolve("stripe", venn_catalog={"stripe"})
+        assert conn.kind == "venn"
 
 
 class TestConnectorModel:
@@ -85,6 +121,20 @@ class TestCardStatus:
         m = AuthMethod(key="app", label="Install the App")  # no secrets
         assert services._method_satisfied(m, set(), venn_connected=None) is False
 
+    def test_static_key_mcp_connects_when_key_present(self):
+        stripe = services.resolve("stripe", venn_catalog=set())
+        assert services.card(stripe, present=set())["status"] == "missing"
+        c = services.card(stripe, present={"STRIPE_API_KEY"})
+        assert c["status"] == "connected"
+        assert c["kind"] == "mcp"
+        assert c["via"] == "hosted MCP"
+
+    def test_public_mcp_is_satisfied_outright(self):
+        # A public/OAuth hosted MCP has nothing to capture — it's wired in, so
+        # it reads as connected rather than stranding the user on a CTA.
+        deepwiki = services.resolve("deepwiki", venn_catalog=set())
+        assert services.card(deepwiki, present=set())["status"] == "connected"
+
     def test_venn_connected_true(self):
         c = services.card(services.CATALOG["email"], venn_connected=True)
         assert c["status"] == "connected"
@@ -125,11 +175,22 @@ class TestCatalogCards:
 
 
 class TestCardsForSpec:
-    def test_dedupes_aliased_services(self, tmp_path):
-        # "gmail" and "email" both resolve to the email connector → one card.
+    def test_dedupes_identical_names(self, tmp_path):
+        # The same connection named twice collapses to one card.
         cards = services.cards_for(
-            [{"name": "gmail"}, {"name": "email"}], tmp_path)
-        assert [c["key"] for c in cards] == ["email"]
+            [{"name": "gmail"}, {"name": "Gmail"}], tmp_path)
+        assert [c["key"] for c in cards] == ["gmail"]
+        assert cards[0]["name"] == "Gmail"
+
+    def test_distinct_venn_names_are_distinct_rows(self, tmp_path):
+        # Two Venn connections with different names each get their own row and
+        # keep their own label (not merged into one "Email" bucket card).
+        cat = {"gmail", "personal gmail"}
+        cards = services.cards_for(
+            [{"name": "gmail"}, {"name": "Personal Gmail"}], tmp_path, catalog=cat)
+        assert [c["key"] for c in cards] == ["gmail", "personal gmail"]
+        assert [c["name"] for c in cards] == ["Gmail", "Personal Gmail"]
+        assert all(c["kind"] == "venn" for c in cards)
 
     def test_native_status_reads_env(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)

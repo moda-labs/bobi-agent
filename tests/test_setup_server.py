@@ -196,7 +196,7 @@ class TestConnect:
         c = _client(s, project)
         data = c.get("/api/connect").json()
         keys = {card["key"] for card in data["cards"]}
-        assert keys == {"github", "crm"}
+        assert keys == {"github", "salesforce"}   # concrete name, not "crm"
         assert any(card["key"] == "slack" for card in data["catalog"])
 
     def test_reports_venn_configured(self, project, monkeypatch):
@@ -207,6 +207,20 @@ class TestConnect:
         c.post("/api/credential", json={"var_name": "VENN_API_KEY",
                                         "value": "venn_key_123"})
         assert c.get("/api/connect").json()["venn_configured"] is True
+
+    def test_hosted_mcp_surfaces_as_an_mcp_card(self, project, monkeypatch):
+        # A service Venn doesn't cover but that ships a hosted MCP resolves to an
+        # mcp card (wired into mcp_servers), not custom.
+        monkeypatch.setattr(services, "venn_connected_names",
+                            lambda *a, **k: None)
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+        s = SetupState()
+        s.spec.services = [{"name": "stripe"}]
+        c = _client(s, project)
+        card = c.get("/api/connect").json()["cards"][0]
+        assert card["key"] == "stripe"
+        assert card["kind"] == "mcp"
+        assert card["via"] == "hosted MCP"
 
     def test_credential_saved_to_env(self, project, monkeypatch):
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
@@ -238,6 +252,104 @@ class TestConnect:
         assert r.status_code == 200
         assert r.json()["value"] == "lin_api_copyme"
         assert c.get("/api/credential/value?var=NOPE_TOKEN").status_code == 404
+
+
+# --- Venn setup flow: discover account MCPs, apply picks -----------------
+
+class TestVennSetup:
+    def _verified(self, monkeypatch, names):
+        """Stub list_servers_verified to return these available service names."""
+        import modastack.venn as venn_mod
+
+        class _S:
+            def __init__(self, name):
+                self.server_id = self.server_name = name
+                self.connected = True
+        monkeypatch.setattr(venn_mod, "list_servers_verified",
+                            lambda key: [_S(n) for n in names])
+
+    def _verified_raises(self, monkeypatch):
+        import modastack.venn as venn_mod
+        def boom(key):
+            raise venn_mod.VennError("Venn rejected the API key (unauthorized).")
+        monkeypatch.setattr(venn_mod, "list_servers_verified", boom)
+
+    def test_servers_needs_a_key(self, project, monkeypatch):
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+        c = _client(SetupState(), project)
+        data = c.get("/api/venn/servers").json()
+        assert data["ok"] is False and "key" in data["error"].lower()
+
+    def test_servers_lists_available_names(self, project, monkeypatch):
+        monkeypatch.setenv("VENN_API_KEY", "k")
+        self._verified(monkeypatch, ["gmail", "salesforce", "notion"])
+        c = _client(SetupState(), project)
+        data = c.get("/api/venn/servers").json()
+        assert data["ok"] is True
+        assert data["servers"] == ["gmail", "notion", "salesforce"]   # sorted names
+
+    def test_servers_bad_key_is_an_error_state(self, project, monkeypatch):
+        monkeypatch.setenv("VENN_API_KEY", "bad")
+        self._verified_raises(monkeypatch)
+        c = _client(SetupState(), project)
+        data = c.get("/api/venn/servers").json()
+        assert data["ok"] is False and "unauthorized" in data["error"].lower()
+
+    def test_connect_saves_only_on_success(self, project, monkeypatch):
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+        self._verified(monkeypatch, ["gmail", "slack"])
+        c = _client(SetupState(), project)
+        data = c.post("/api/venn/connect", json={"key": "venn_good"}).json()
+        assert data["ok"] is True and "gmail" in data["servers"]
+        # the verified key is now persisted
+        env = (project / ".modastack" / ".env").read_text()
+        assert "VENN_API_KEY=venn_good" in env
+
+    def test_connect_bad_key_not_saved(self, project, monkeypatch):
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+        self._verified_raises(monkeypatch)
+        c = _client(SetupState(), project)
+        data = c.post("/api/venn/connect", json={"key": "venn_bad"}).json()
+        assert data["ok"] is False
+        envf = project / ".modastack" / ".env"
+        assert not envf.exists() or "VENN_API_KEY" not in envf.read_text()
+
+    def test_apply_reconciles_toggles(self, project):
+        # gmail toggled on (added), salesforce in the universe but off (removed),
+        # github untouched (outside the picker universe).
+        s = SetupState()
+        s.spec.services = [{"name": "github"}, {"name": "salesforce"}]
+        c = _client(s, project)
+        r = c.post("/api/venn/apply", json={
+            "servers": ["gmail"],
+            "available": ["gmail", "salesforce", "slack"]}).json()
+        assert r["added"] == ["gmail"] and r["removed"] == ["salesforce"]
+        assert [x["name"] for x in s.spec.services] == ["github", "gmail"]
+
+    def test_apply_turning_venn_off_removes_only_venn(self, project):
+        # Two Venn services, both toggled off → both removed.
+        s = SetupState()
+        s.spec.services = [{"name": "gmail"}, {"name": "notion"}]
+        c = _client(s, project)
+        r = c.post("/api/venn/apply", json={
+            "servers": [], "available": ["gmail", "notion"]}).json()
+        assert set(r["removed"]) == {"gmail", "notion"}
+        assert s.spec.services == []
+
+    def test_apply_never_removes_a_native_service(self, project):
+        # Venn's catalog can include "slack" (a NATIVE connector here). Leaving
+        # it untoggled in the Venn picker must NOT remove the native service.
+        s = SetupState()
+        s.spec.services = [{"name": "slack"}, {"name": "gmail"}]
+        c = _client(s, project)
+        r = c.post("/api/venn/apply", json={
+            "servers": [], "available": ["slack", "gmail"]}).json()
+        assert r["removed"] == ["gmail"]                 # only the venn one
+        assert [x["name"] for x in s.spec.services] == ["slack"]   # native kept
+
+    def test_apply_requires_a_list(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/venn/apply", json={"servers": "gmail"}).status_code == 400
 
 
 # --- build + validate + install ------------------------------------------
@@ -387,27 +499,101 @@ class TestPanelEdits:
         c = _client(SetupState(), project)
         assert c.post("/api/service/remove", json={}).status_code == 400
 
-    def test_build_integration_is_a_queued_placeholder(self, project, monkeypatch):
+    def test_mcp_add_api_key_connection(self, project, monkeypatch):
         monkeypatch.delenv("POSTHOG_API_KEY", raising=False)
         s = SetupState()
         c = _client(s, project)
-        r = c.post("/api/build-integration", json={
-            "service_name": "PostHog", "api_key": "ph_secret_123"})
-        assert r.status_code == 200
-        body = r.json()
-        assert body["status"] == "queued"
-        assert "background job" in body["message"]
-        assert body["credential_saved"] is True
-        # the service is registered as a (custom) connection in the meantime
-        assert any(x["name"] == "PostHog" for x in s.spec.services)
+        r = c.post("/api/mcp/add", json={
+            "name": "PostHog", "url": "https://mcp.posthog.com/mcp",
+            "auth": "api_key", "api_key": "ph_secret_123"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        # persisted as a user-defined MCP (keyed by slug, label kept)
+        entry = s.spec.mcp_servers["posthog"]
+        assert entry["url"] == "https://mcp.posthog.com/mcp"
+        assert entry["auth"] == "api_key" and entry["secret_var"] == "POSTHOG_API_KEY"
+        assert entry["label"] == "PostHog"
+        # also a team service, so it renders as a row
+        assert any((x.get("name") or "").lower() == "posthog" for x in s.spec.services)
         # the key landed in .env, never in the response
         assert "ph_secret_123" not in r.text
-        env = (project / ".modastack" / ".env").read_text()
-        assert "POSTHOG_API_KEY=ph_secret_123" in env
+        assert "POSTHOG_API_KEY=ph_secret_123" in (project / ".modastack" / ".env").read_text()
 
-    def test_build_integration_requires_name(self, project):
+    def test_mcp_add_rejects_oauth(self, project):
+        # OAuth-authed MCPs aren't supported yet — only api_key / none.
         c = _client(SetupState(), project)
-        assert c.post("/api/build-integration", json={}).status_code == 400
+        assert c.post("/api/mcp/add", json={
+            "name": "Acme", "url": "https://mcp.acme.com/mcp",
+            "auth": "oauth"}).status_code == 400
+
+    def test_mcp_add_requires_name_and_url(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/mcp/add", json={"url": "https://x/mcp"}).status_code == 400
+        assert c.post("/api/mcp/add", json={"name": "X"}).status_code == 400
+        # non-http URL rejected
+        assert c.post("/api/mcp/add",
+                      json={"name": "X", "url": "ftp://x"}).status_code == 400
+
+    def test_connect_surfaces_user_mcp_card(self, project, monkeypatch):
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "PostHog", "url": "https://mcp.posthog.com/mcp",
+            "auth": "api_key", "api_key": "ph_x"})
+        cards = c.get("/api/connect").json()["cards"]
+        ph = next(c for c in cards if c["key"] == "posthog")
+        assert ph["kind"] == "mcp" and ph["name"] == "PostHog"
+        # NOT verified in setup, so never "connected" — "added" (key set) at most.
+        assert ph["via"] == "hosted MCP" and ph["status"] == "added"
+        assert ph["user_mcp"] is True
+
+    def test_add_without_key_flags_needs_auth(self, project, monkeypatch):
+        # No key given → defaults to api_key with no secret yet → flagged
+        # "needs an API key", never "connected".
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={"name": "Acme", "url": "https://mcp.acme.com/mcp"})
+        assert s.spec.mcp_servers["acme"]["auth"] == "api_key"
+        ph = next(x for x in c.get("/api/connect").json()["cards"] if x["key"] == "acme")
+        assert ph["status"] == "needs_auth"
+        assert "api key" in ph["note"].lower()
+
+    def test_add_public_server_no_auth(self, project, monkeypatch):
+        # Explicit auth=none → a public server, added without a key.
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "DeepWiki", "url": "https://mcp.deepwiki.com/mcp", "auth": "none"})
+        ph = next(x for x in c.get("/api/connect").json()["cards"] if x["key"] == "deepwiki")
+        assert ph["status"] == "added" and "public" in ph["note"].lower()
+
+    def test_remove_drops_the_user_mcp_entry_and_card(self, project, monkeypatch):
+        # Removing a user MCP must drop its mcp_servers entry too, or the row
+        # lingers (it's rendered from mcp_servers, not just services).
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "PostHog", "url": "https://mcp.posthog.com/mcp",
+            "auth": "api_key", "api_key": "ph_x"})
+        assert "posthog" in s.spec.mcp_servers
+        c.post("/api/service/remove", json={"service_key": "posthog"})
+        assert "posthog" not in s.spec.mcp_servers       # entry gone
+        keys = {x["key"] for x in c.get("/api/connect").json()["cards"]}
+        assert "posthog" not in keys                     # row gone
+
+    def test_mcp_add_rejects_newline_in_key(self, project, monkeypatch):
+        # A pasted key with a newline would inject an extra .env line.
+        monkeypatch.delenv("EVIL_API_KEY", raising=False)
+        c = _client(SetupState(), project)
+        r = c.post("/api/mcp/add", json={
+            "name": "Evil", "url": "https://mcp.evil.com/mcp",
+            "auth": "api_key", "api_key": "abc\nMODASTACK_X=1"})
+        assert r.status_code == 400
+        envf = project / ".modastack" / ".env"
+        assert not envf.exists() or "MODASTACK_X" not in envf.read_text()
 
 
 # --- review file endpoints -----------------------------------------------

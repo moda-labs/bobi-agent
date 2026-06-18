@@ -19,6 +19,17 @@ def _reset_client():
     pooled.close()
 
 
+@pytest.fixture(autouse=True)
+def _bubble_present():
+    """Publishing requires a bubble credential (auth-v1) — _post_topic skips the
+    doomed unsigned POST when none is loaded. These transport tests use fake
+    project paths with no bubble.json, so stand one in to exercise the real
+    signed-publish path. Harmless to non-publish tests."""
+    with patch("modastack.config.load_bubble_state",
+               return_value={"bubble_id": "bub_test", "bubble_key": "bkey_test"}):
+        yield
+
+
 class TestClient:
     def test_lazy_creation(self):
         """Client is not created until first access."""

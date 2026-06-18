@@ -102,6 +102,14 @@ def test_register_exhausted_raises_clean_error(mock_register, _client, _drain,
     assert not _state_file(project).exists()
 
 
+def _create_bubble(project):
+    """Create a bubble.json so the PUT path is taken (post-bubble state)."""
+    from modastack.config import bubble_state_path
+    bp = bubble_state_path(project)
+    bp.parent.mkdir(parents=True, exist_ok=True)
+    bp.write_text(json.dumps({"bubble_id": "bub_test", "bubble_key": "bkey_test"}))
+
+
 @patch("modastack.events.drain.drain_loop")
 @patch("modastack.events.client.EventServerClient")
 @patch("modastack.events.server.register")
@@ -111,6 +119,7 @@ def test_saved_state_uses_put_not_register(mock_register,
     state = _state_file(project)
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"deployment_id": "dep-3", "api_key": "key-3"}))
+    _create_bubble(project)
 
     captured = []
 
@@ -141,6 +150,7 @@ def test_failed_put_falls_back_to_register(mock_register,
     state = _state_file(project)
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"deployment_id": "dep-old", "api_key": "key-old"}))
+    _create_bubble(project)
     mock_register.return_value = ("dep-new", "key-new")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -161,6 +171,52 @@ def test_failed_put_falls_back_to_register(mock_register,
     mock_register.assert_called_once()
     saved = json.loads(_state_file(project).read_text())
     assert saved["deployment_id"] == "dep-new"
+
+
+# --- Pre-bubble upgrade (stale deployment_state, no bubble.json) -------------
+
+
+@patch("modastack.events.drain.drain_loop")
+@patch("modastack.events.client.EventServerClient")
+@patch("modastack.events.server.register")
+def test_pre_bubble_upgrade_reregisters(mock_register,
+                                        mock_client, _drain, project):
+    """Saved deployment_state but no bubble.json → pre-bubble upgrade.
+
+    The old api_key predates auth bubbles and can't sign publishes against
+    a v0.21+ server (403). The client must drop the stale state + cursor
+    and re-register through ensure_bubble instead of the PUT path.
+
+    Regression for #314: Cloudflare upgrade leaves client unable to publish.
+    """
+    state = _state_file(project)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-old", "api_key": "key-old"}))
+    # Intentionally NO _create_bubble(project) — simulates pre-bubble state.
+
+    # Plant a stale cursor that should be cleared on re-register.
+    from modastack.config import session_cursor_path
+    cursor = session_cursor_path(project, "sess")
+    cursor.parent.mkdir(parents=True, exist_ok=True)
+    cursor.write_text(json.dumps({"last_seen": 42}))
+
+    mock_register.return_value = ("dep-fresh", "key-fresh")
+
+    transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError(f"unexpected HTTP call: {req.method} {req.url}")))
+    mock_http = httpx.Client(transport=transport)
+
+    with patch.object(pooled, '_client', mock_http):
+        _start_event_subscription("sess", ["github:o/r"], project)
+
+    # Must re-register, NOT PUT to the stale deployment.
+    mock_register.assert_called_once()
+    saved = json.loads(_state_file(project).read_text())
+    assert saved == {"deployment_id": "dep-fresh", "api_key": "key-fresh"}
+    assert mock_client.call_args.kwargs["deployment_id"] == "dep-fresh"
+    # Stale cursor cleared (register_with_retry also clears it, but the
+    # pre-bubble guard clears it before the call for determinism).
+    assert not cursor.exists()
 
 
 # --- Per-session deployment isolation (DM broadcast incident) ----------------
