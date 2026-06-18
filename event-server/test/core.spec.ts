@@ -739,6 +739,12 @@ function createMockStorage(): StorageAdapter & {
 			if (!id) return null;
 			return deployments.get(id) || null;
 		},
+		async getDeploymentByName(name: string, bubbleId: string) {
+			for (const dep of deployments.values()) {
+				if (dep.name === name && dep.bubble_id === bubbleId) return { ...dep };
+			}
+			return null;
+		},
 		async putDeployment(dep: DeploymentRecord) {
 			deployments.set(dep.id, { ...dep });
 			apiKeyIndex.set(dep.api_key, dep.id);
@@ -1043,6 +1049,63 @@ describe("handleRegisterDeployment", () => {
 		const result = await handleRegisterDeployment(store, { name: "test", subscriptions: [] }, mintCtx("POST", "/deployments", ""));
 		expect(result.status).toBe(400);
 	});
+
+	it("supersedes a prior deployment with the same name in the same bubble (#278)", async () => {
+		const store = createMockStorage();
+		const bubble = seedBubble(store);
+
+		// First registration — joins the existing bubble.
+		const body1 = { name: "worker", subscriptions: ["inbox/worker"] };
+		const raw1 = JSON.stringify(body1);
+		const ctx1 = await signCtx(bubble, "POST", "/deployments", raw1);
+		const r1 = await handleRegisterDeployment(store, body1, ctx1);
+		expect(r1.status).toBe(201);
+		const dep1 = (r1.body as Record<string, string>).deployment_id;
+
+		// Sanity: one deployment, one subscription entry.
+		expect(store.deployments.size).toBe(1);
+		expect(store.subscriptions.get(`${bubble.id}:inbox/worker`)?.has(dep1)).toBe(true);
+
+		// Re-register with the same name (simulates --fresh restart).
+		const body2 = { name: "worker", subscriptions: ["inbox/worker", "github:org/repo"] };
+		const raw2 = JSON.stringify(body2);
+		const ctx2 = await signCtx(bubble, "POST", "/deployments", raw2, "n2");
+		const r2 = await handleRegisterDeployment(store, body2, ctx2);
+		expect(r2.status).toBe(201);
+		const dep2 = (r2.body as Record<string, string>).deployment_id;
+
+		// The old deployment must be gone — exactly one deployment remains.
+		expect(store.deployments.size).toBe(1);
+		expect(store.deployments.has(dep1)).toBe(false);
+		expect(store.deployments.has(dep2)).toBe(true);
+
+		// Old subscription entries are cleaned up.
+		expect(store.subscriptions.get(`${bubble.id}:inbox/worker`)?.has(dep1)).toBeFalsy();
+		// New subscription entries are present.
+		expect(store.subscriptions.get(`${bubble.id}:inbox/worker`)?.has(dep2)).toBe(true);
+		expect(store.subscriptions.get("github:org/repo")?.has(dep2)).toBe(true);
+	});
+
+	it("does not supersede a deployment with the same name in a different bubble", async () => {
+		const store = createMockStorage();
+		const bubbleA = seedBubble(store, "bub_a", "bkey_a");
+		const bubbleB = seedBubble(store, "bub_b", "bkey_b");
+
+		const body = { name: "worker", subscriptions: ["inbox/worker"] };
+
+		const rawA = JSON.stringify(body);
+		const ctxA = await signCtx(bubbleA, "POST", "/deployments", rawA);
+		const rA = await handleRegisterDeployment(store, body, ctxA);
+		expect(rA.status).toBe(201);
+
+		const rawB = JSON.stringify(body);
+		const ctxB = await signCtx(bubbleB, "POST", "/deployments", rawB);
+		const rB = await handleRegisterDeployment(store, body, ctxB);
+		expect(rB.status).toBe(201);
+
+		// Both deployments coexist — different bubbles.
+		expect(store.deployments.size).toBe(2);
+	});
 });
 
 describe("handleUpdateSubscriptions", () => {
@@ -1330,6 +1393,7 @@ describe("auth rejection counters", () => {
 
 	it("increments unknown_bubble when bubble_id not found", async () => {
 		const store = createMockStorage();
+		// Sign with a bubble that doesn't exist in the store
 		const ctx = await signCtx({ id: "bub_nonexistent", key: "bkey_x" }, "POST", "/events/x", "{}");
 		await authenticateBubble(store, ctx);
 		const c = getAuthRejectionCounters();

@@ -221,6 +221,80 @@ class TestDrainLoopWithReactor:
         assert "AUTO-DISPATCH" not in inbox.messages[0].text
 
 
+class TestCursorAckAfterDelivery:
+    """cursor_ack callback is called AFTER delivery, not before (#278)."""
+
+    def test_cursor_ack_called_with_max_seq(self):
+        from modastack.events.drain import drain_loop, _DRAIN_STOP
+        q = SimpleQueue()
+        q.put({"type": "push", "source": "github", "delivery": "bulk",
+               "seq": 5, "data": {"issue_id": "1"}})
+        q.put({"type": "pr", "source": "github", "delivery": "bulk",
+               "seq": 7, "data": {"issue_id": "2"}})
+        q.put(_DRAIN_STOP)
+
+        acked = []
+        inbox = _CaptureInbox()
+        register_local_inbox("test-ack", inbox)
+        try:
+            drain_loop("test-ack", queue=q,
+                       cursor_ack=lambda seq: acked.append(seq))
+        finally:
+            unregister_local_inbox("test-ack")
+
+        # Both events delivered in one batch; cursor_ack gets the max seq.
+        assert len(inbox.messages) >= 1
+        assert acked == [7]
+
+    def test_cursor_ack_not_called_for_zero_seq(self):
+        from modastack.events.drain import drain_loop, _DRAIN_STOP
+        q = SimpleQueue()
+        q.put({"type": "push", "source": "github", "delivery": "bulk",
+               "data": {"issue_id": "1"}})  # no seq field
+        q.put(_DRAIN_STOP)
+
+        acked = []
+        inbox = _CaptureInbox()
+        register_local_inbox("test-ack-zero", inbox)
+        try:
+            drain_loop("test-ack-zero", queue=q,
+                       cursor_ack=lambda seq: acked.append(seq))
+        finally:
+            unregister_local_inbox("test-ack-zero")
+
+        assert acked == []
+
+    def test_cursor_ack_called_after_inbox_push(self):
+        """Ensures cursor_ack fires AFTER inbox.push, not before."""
+        from modastack.events.drain import drain_loop, _DRAIN_STOP
+
+        order = []
+
+        class OrderTrackingInbox:
+            def __init__(self):
+                self.messages = []
+            def push(self, msg):
+                order.append("push")
+                self.messages.append(msg)
+
+        def track_ack(seq):
+            order.append("ack")
+
+        q = SimpleQueue()
+        q.put({"type": "push", "source": "github", "delivery": "bulk",
+               "seq": 3, "data": {"issue_id": "1"}})
+        q.put(_DRAIN_STOP)
+
+        inbox = OrderTrackingInbox()
+        register_local_inbox("test-ack-order", inbox)
+        try:
+            drain_loop("test-ack-order", queue=q, cursor_ack=track_ack)
+        finally:
+            unregister_local_inbox("test-ack-order")
+
+        assert order == ["push", "ack"]
+
+
 class TestFormatBatching:
 
     def test_multiple_events_joined(self):

@@ -41,10 +41,16 @@ function createKVStorage(env: Env): StorageAdapter {
 			return data ? JSON.parse(data) : null;
 		},
 
+		async getDeploymentByName(name: string, bubbleId: string): Promise<DeploymentRecord | null> {
+			const data = await env.EVENTS.get(`deployment_name:${bubbleId}:${name}`);
+			return data ? JSON.parse(data) : null;
+		},
+
 		async putDeployment(deployment: DeploymentRecord): Promise<void> {
 			const json = JSON.stringify(deployment);
 			await env.EVENTS.put(`deployments:${deployment.api_key}`, json);
 			await env.EVENTS.put(`deployment_id:${deployment.id}`, json);
+			await env.EVENTS.put(`deployment_name:${deployment.bubble_id}:${deployment.name}`, json);
 		},
 
 		async getBubble(bubbleId: string): Promise<BubbleRecord | null> {
@@ -59,6 +65,7 @@ function createKVStorage(env: Env): StorageAdapter {
 		async removeDeployment(deployment: DeploymentRecord): Promise<void> {
 			await env.EVENTS.delete(`deployments:${deployment.api_key}`);
 			await env.EVENTS.delete(`deployment_id:${deployment.id}`);
+			await env.EVENTS.delete(`deployment_name:${deployment.bubble_id}:${deployment.name}`);
 		},
 
 		async addSubscription(key: string, deploymentId: string): Promise<void> {

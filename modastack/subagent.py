@@ -929,7 +929,8 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
 
     drain_thread = threading.Thread(
         target=drain_loop, args=(session_name,),
-        kwargs={"reactor": reactor, "queue": session_queue},
+        kwargs={"reactor": reactor, "queue": session_queue,
+                "cursor_ack": client.ack_through},
         daemon=True, name="agent-drain",
     )
     drain_thread.start()
