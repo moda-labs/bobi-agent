@@ -30,8 +30,6 @@ def run_doctor() -> list[CheckResult]:
 
     results.append(_check_claude_cli())
     results.append(_check_claude_auth())
-    results.append(_check_codex_cli())
-    results.append(_check_codex_auth())
     results.append(_check_local_config())
     results.append(_check_single_root())
     results.append(_check_install_integrity())
@@ -78,75 +76,6 @@ def _check_claude_auth() -> CheckResult:
         return CheckResult("Claude auth", ok=False,
                            detail="timed out",
                            hint="Check network connectivity")
-
-
-def _check_codex_cli() -> CheckResult:
-    """Check that the Codex CLI is installed and on PATH."""
-    if shutil.which("codex"):
-        return CheckResult("Codex CLI", ok=True, detail="found")
-    return CheckResult(
-        "Codex CLI", ok=False,
-        detail="not found in PATH",
-        hint="Install Codex CLI: npm install -g @openai/codex")
-
-
-def _check_codex_auth() -> CheckResult:
-    """Verify Codex CLI can authenticate.
-
-    Codex supports two auth modes: ChatGPT subscription login (primary)
-    and OPENAI_API_KEY env var (fallback).  We check for an API key in
-    the environment and verify the CLI is functional via ``codex --version``.
-
-    We deliberately avoid ``codex exec`` here -- it runs a full inference
-    call (costs money, executes AI-generated code, and inherits the working
-    directory's project config, creating a prompt-injection surface).
-    A health check must be passive and cheap.
-    """
-    import os
-    import subprocess
-
-    if not shutil.which("codex"):
-        return CheckResult("Codex auth", ok=False, detail="codex not installed")
-
-    # Check if OPENAI_API_KEY is set (API-key fallback auth)
-    has_api_key = bool(os.environ.get("OPENAI_API_KEY"))
-
-    # Verify the CLI is functional via --version (read-only, no inference)
-    try:
-        result = subprocess.run(
-            ["codex", "--version"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            return CheckResult(
-                "Codex auth", ok=False,
-                detail=f"codex unhealthy: {stderr[:100]}",
-                hint="Reinstall: npm install -g @openai/codex")
-    except subprocess.TimeoutExpired:
-        return CheckResult("Codex auth", ok=False,
-                           detail="timed out",
-                           hint="Check network connectivity")
-    except FileNotFoundError:
-        return CheckResult("Codex auth", ok=False, detail="codex not installed")
-
-    # Check for cached subscription session (~/.codex/ auth tokens)
-    codex_config = Path.home() / ".codex"
-    has_session = (codex_config.is_dir()
-                   and any(codex_config.glob("auth*")))
-
-    if has_api_key:
-        return CheckResult("Codex auth", ok=True,
-                           detail="OPENAI_API_KEY set")
-    if has_session:
-        return CheckResult("Codex auth", ok=True,
-                           detail="subscription session found")
-
-    return CheckResult(
-        "Codex auth", ok=False,
-        detail="no credentials found",
-        hint="Set OPENAI_API_KEY or run `codex auth login` "
-             "for ChatGPT subscription auth")
 
 
 def _check_install_integrity() -> CheckResult:
