@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 import apsw
+
+log = logging.getLogger(__name__)
 
 EMBEDDING_DIM = 384
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
@@ -181,6 +184,7 @@ class KBStore:
         if self._conn is None:
             conn = apsw.Connection(str(self._db_path))
             self._load_vec(conn)
+            self._migrate_vec_metric(conn)
             self._conn = conn
         return self._conn
 
@@ -244,11 +248,59 @@ class KBStore:
                 INSERT INTO entries_fts(rowid, content)
                 VALUES (new.id, new.content);
             END""",
+            # cosine distance is magnitude-invariant: it ranks by direction
+            # only, so vectors from different embedders (fastembed normalizes
+            # to unit length; the old sentence-transformers path did not) rank
+            # consistently. vec0 defaults to L2, under which a unit-length
+            # query vector mis-ranks against raw-magnitude stored vectors —
+            # see _migrate_vec_metric for the one-time fix on existing KBs.
             f"""CREATE VIRTUAL TABLE IF NOT EXISTS entries_vec
-                USING vec0(entry_id INTEGER PRIMARY KEY, embedding FLOAT[{EMBEDDING_DIM}])""",
+                USING vec0(entry_id INTEGER PRIMARY KEY,
+                           embedding FLOAT[{EMBEDDING_DIM}] distance_metric=cosine)""",
         ]
         for sql in stmts:
             conn.execute(sql)
+
+    def _migrate_vec_metric(self, conn: apsw.Connection) -> None:
+        """Rebuild a pre-cosine vector index to cosine distance (one-time).
+
+        KBs created before the embedder swap have an L2-distance vec0 table.
+        Under L2, querying with a unit-length (fastembed) vector against the
+        old raw-magnitude stored vectors silently mis-ranks. Cosine is
+        magnitude-invariant, so re-inserting the existing vectors into a
+        cosine table fixes ranking without re-embedding. Guarded by a
+        kb_meta marker so it runs at most once per KB.
+        """
+        marker = _fetchone(
+            conn, "SELECT value FROM kb_meta WHERE key = 'vec_metric'")
+        if marker and marker.get("value") == "cosine":
+            return
+        table = _fetchone(
+            conn, "SELECT name FROM sqlite_master WHERE name = 'entries_vec'")
+        if not table:
+            return
+        try:
+            vecs = _fetchall(
+                conn,
+                "SELECT entry_id, vec_to_json(embedding) AS emb FROM entries_vec")
+            with conn:
+                conn.execute("DROP TABLE entries_vec")
+                conn.execute(
+                    f"""CREATE VIRTUAL TABLE entries_vec
+                        USING vec0(entry_id INTEGER PRIMARY KEY,
+                                   embedding FLOAT[{EMBEDDING_DIM}] distance_metric=cosine)""")
+                for v in vecs:
+                    conn.execute(
+                        "INSERT INTO entries_vec (entry_id, embedding) VALUES (?, ?)",
+                        (v["entry_id"], v["emb"]))
+                conn.execute(
+                    "INSERT OR REPLACE INTO kb_meta VALUES ('vec_metric', 'cosine')")
+            log.info("KB %s: migrated vector index to cosine distance "
+                     "(%d vectors)", self.name, len(vecs))
+        except Exception:
+            log.warning("KB %s: cosine vec-metric migration failed; vector "
+                        "search may be degraded until reindex",
+                        self.name, exc_info=True)
 
     # --- Core operations ---
 
@@ -460,6 +512,10 @@ class KBStore:
                 "INSERT OR REPLACE INTO kb_meta VALUES ('embedding_dim', ?)",
                 (str(EMBEDDING_DIM),),
             )
+            # Fresh KBs are born cosine (see _init_schema); stamp the marker so
+            # the migration on next open is a cheap no-op.
+            conn.execute(
+                "INSERT OR REPLACE INTO kb_meta VALUES ('vec_metric', 'cosine')")
         conn.close()
 
         return cls(name, db_path=path)

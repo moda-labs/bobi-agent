@@ -273,9 +273,11 @@ class TestNonInteractiveInstall:
         assert env["MODASTACK_EVENT_SERVER"] == "wss://events.example.com"
         assert env["MY_API_KEY"] == "sk-test-123"
 
-    def test_no_tty_no_prompt(self, pack_with_creds, tmp_path, monkeypatch):
-        """--non-interactive must never call click.prompt -- even when
-        vars are missing, it should not block on input."""
+    def test_missing_required_secret_fails_fast(self, pack_with_creds, tmp_path, monkeypatch):
+        """--non-interactive must never prompt, and a missing REQUIRED secret
+        (a bare ${VAR}) must fail fast with a non-zero exit and a clear message
+        — never exit 0 into a broken start. (Completing without hanging also
+        proves it never blocked on input.)"""
         project = tmp_path / "proj"
         project.mkdir()
         monkeypatch.chdir(project)
@@ -287,14 +289,39 @@ class TestNonInteractiveInstall:
             main,
             ["install", str(pack_with_creds), "--non-interactive"],
         )
-        # Should succeed but warn about missing vars.
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         assert "MY_API_KEY" in result.output
+        assert "required secrets missing" in result.output
 
-        # The present var should still be written.
+    def test_missing_optional_var_is_ok(self, tmp_path, monkeypatch):
+        """A missing ${VAR:-default} (optional, carries its own fallback) only
+        warns and still succeeds — it must not trip the fail-fast guard."""
+        pack_dir = tmp_path / "agents" / "opt-team"
+        (pack_dir / "roles" / "manager").mkdir(parents=True)
+        (pack_dir / "roles" / "manager" / "ROLE.md").write_text("# Manager\n")
+        pack_dir.joinpath("agent.yaml").write_text(
+            "version: '1.0'\n"
+            "entry_point: manager\n"
+            "event_server: ${MODASTACK_EVENT_SERVER}\n"
+            "model: ${OPTIONAL_MODEL:-sonnet}\n"
+        )
+        pack_dir.joinpath("agent.md").write_text("# opt-team\n")
+
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("MODASTACK_EVENT_SERVER", "wss://events.example.com")
+        monkeypatch.delenv("OPTIONAL_MODEL", raising=False)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["install", str(pack_dir), "--non-interactive"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
         env = parse_env_file(project / ".modastack" / ".env")
         assert env["MODASTACK_EVENT_SERVER"] == "wss://events.example.com"
-        assert "MY_API_KEY" not in env
 
     def test_existing_env_file_preserved(self, pack_with_creds, tmp_path, monkeypatch):
         """Vars already in .env are kept; env vars supplement them."""

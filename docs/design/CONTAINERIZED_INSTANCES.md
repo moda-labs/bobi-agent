@@ -85,14 +85,18 @@ State layout (everything per-project, which is why containerization is
 clean): `.modastack/` holds config, sessions, KB sqlite DBs, event cursor
 (`state/cursor.json`), monitor dedup (`state/monitor_state.json`),
 `history.db`. Outside the project dir: `~/.claude/projects/` (Claude Code
-transcripts — **required for session resume**, `session.py:184`),
-`~/.cache/huggingface/` (embedding model). Both land on the volume by
-setting `HOME` to a volume path.
+transcripts — **required for session resume**, `session.py:184`), and the
+fastembed model cache (embedding model). Both land on the volume by setting
+`HOME` to a volume path; the C8 image instead pre-seeds the model cache at
+build (see below).
 
 Home-dir / CLI-path touchpoints — **resolved in C1 (#332):** `history.py` and
 `browser.py` already follow `$HOME`; the only fix was `sdk.py`'s claude-CLI
-fallback (now `_resolve_cli_path()`: PATH-first, Homebrew only on macOS). HF
-cache already honors `HF_HOME`.
+fallback (now `_resolve_cli_path()`: PATH-first, Homebrew only on macOS).
+Embedding-cache note (post-C4): fastembed honors `FASTEMBED_CACHE_PATH` but
+**not** `HF_HOME`; the sidecar bridges this (`_resolve_cache_dir()`: prefers
+`FASTEMBED_CACHE_PATH`, else `$HF_HOME/fastembed`), so C8 can pre-seed via
+either env.
 
 ## 4. Architecture
 
@@ -441,8 +445,8 @@ now, painful retrofit later (volumes outlive images).
 
 **C8 — Container image.**
 Python 3.11+, `modastack` from source/wheel, **pinned** `claude` CLI version
-on `PATH`, fastembed model pre-downloaded (set `HF_HOME` to an image path
-seeded at build), **non-root user**, `tini` + `modastack start --foreground`
+on `PATH`, fastembed model pre-downloaded (set `FASTEMBED_CACHE_PATH`, or
+`HF_HOME` which the sidecar bridges, to an image path seeded at build), **non-root user**, `tini` + `modastack start --foreground`
 entrypoint, no Node. Verify headless SDK auth via `ANTHROPIC_API_KEY` and
 that `bypassPermissions` works as the non-root user (root would require
 `IS_SANDBOX=1` — do not run as root). Support both auth modes (§6.1) via
