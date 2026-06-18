@@ -553,7 +553,7 @@ class TestPanelEdits:
         assert s.spec.mcp_servers["acme"]["auth"] == "oauth"
         ph = next(x for x in c.get("/api/connect").json()["cards"] if x["key"] == "acme")
         assert ph["status"] == "needs_auth"
-        assert "sign in" in ph["note"].lower()
+        assert "oauth" in ph["note"].lower() and "sign" in ph["note"].lower()
 
 
 # --- review file endpoints -----------------------------------------------

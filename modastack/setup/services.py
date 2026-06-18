@@ -483,9 +483,9 @@ def user_mcp_card(key: str, cfg: dict, project: Path) -> dict:
         note = ("API key set · connects when you run" if present
                 else "needs an API key")
     elif auth == "oauth":
-        # OAuth needs an interactive sign-in to authorize; until that flow runs
-        # the connection isn't usable, so flag it rather than imply it's live.
-        status, note = "needs_auth", "OAuth · sign in to authorize"
+        # OAuth needs an interactive sign-in to authorize. That flow isn't built
+        # yet (a follow-up), so flag it honestly rather than imply it's live.
+        status, note = "needs_auth", "OAuth · sign-in coming soon"
     else:
         status, note = "added", "no auth (public server)"
     return {
