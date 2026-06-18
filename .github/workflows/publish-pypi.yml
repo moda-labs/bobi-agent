@@ -84,6 +84,13 @@ jobs:
       - name: Install agent pack and start smoke instance
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
+
+          # Kill any orphan event server left by a previous run — a stale
+          # old-version server on :8080 would be reused by ensure_running
+          # (no version check) and break the smoke with missing fields.
+          "$SMOKE/venv/bin/modastack" event-server stop 2>/dev/null || true
+          fuser -k 8080/tcp 2>/dev/null || true
+
           cd "$SMOKE/project"
           git init -q
           mkdir -p .modastack
@@ -119,12 +126,20 @@ jobs:
           test -n "$TOPIC" || { echo "No subscribed topics found"; exit 1; }
           echo "Posting smoke event to topic: $TOPIC"
 
-          RESP=$(curl -sf -X POST "http://localhost:8080/events/$TOPIC" \
-            -H "Content-Type: application/json" \
-            -d "{\"type\":\"smoke.ping\",\"source\":\"release-pipeline\",\"payload\":{\"version\":\"$VERSION\",\"text\":\"Automated release smoke ping — no action required.\"}}")
-          echo "Event server response: $RESP"
-          DELIVERED=$(echo "$RESP" | grep -oE '"delivered_to":[0-9]+' | grep -oE '[0-9]+')
-          [ "${DELIVERED:-0}" -ge 1 ] || { echo "Event was not delivered to any subscriber"; exit 1; }
+          # Post via the SDK's signed path — v0.21.0+ requires bubble auth
+          # on /events/* so raw curl gets 403. post_event signs from bubble.json.
+          "$SMOKE/venv/bin/python" -c "
+          import json, sys
+          from modastack.events.publish import post_event
+          ok = post_event('release-pipeline/$TOPIC', {
+              'version': '$VERSION',
+              'text': 'Automated release smoke ping — no action required.',
+          }, project_path='.')
+          print('post_event returned:', ok)
+          if not ok:
+              print('Event was not accepted by the server')
+              sys.exit(1)
+          "
 
           for i in $(seq 1 15); do
             "$SMOKE/venv/bin/modastack" events 2>/dev/null | grep -q "release-pipeline" && { echo "Event visible in project event log"; exit 0; }
