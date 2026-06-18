@@ -73,6 +73,12 @@ class Spec:
     # [{"description","leash","cadence","role" (which agent runs it),"command"}]
     autonomous: list = field(default_factory=list)
     services: list = field(default_factory=list)    # [{"name","status"}]
+    # User-defined custom MCP connections added by name + remote URL (the
+    # Claude-style "add a connector" form). name -> {"url", "type", "auth"
+    # ("none"|"api_key"|"oauth"), and the env-var names holding any secrets:
+    # "secret_var" / "client_id_var" / "client_secret_var"}. Authored verbatim
+    # into agent.yaml mcp_servers: and shown as their own rows.
+    mcp_servers: dict = field(default_factory=dict)
 
     # Autonomous is "enough" only once explicitly confirmed — even when the
     # answer is "nothing proactive" (an empty list is a real decision here).

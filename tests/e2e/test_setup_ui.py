@@ -49,8 +49,9 @@ def test_cards_materialize_after_goal(page, modastack_url):
     goal = page.locator(".ucard").first
     expect(goal).to_contain_text("Triage", timeout=10_000)
     expect(goal.locator(".udot.ok")).to_be_visible()
-    # github connection materialized in the Connections card.
-    expect(page.locator(".uconn")).to_contain_text("GitHub")
+    # github connection materialized in the Connections card (its own row,
+    # distinct from the account-level Venn row).
+    expect(page.locator(".uconn", has_text="GitHub")).to_be_visible()
 
 
 def test_finish_appears_only_when_everything_gathered(page, modastack_url):
@@ -124,7 +125,7 @@ def test_escape_closes_connection_overlay(page, modastack_url):
     _enter(page, modastack_url)
     page.fill("#chinput", GOAL_MSG)
     page.click("#chsend")
-    expect(page.locator(".uconn")).to_contain_text("GitHub", timeout=10_000)
+    expect(page.locator(".uconn", has_text="GitHub")).to_be_visible(timeout=10_000)
     page.locator(".uconn", has_text="GitHub").locator("[data-secretopen]").click()
     expect(page.locator("#secret-ov")).to_be_visible()
     page.keyboard.press("Escape")
@@ -135,7 +136,7 @@ def test_native_secret_popup_captures_token(page, modastack_url):
     _enter(page, modastack_url)
     page.fill("#chinput", GOAL_MSG)
     page.click("#chsend")
-    expect(page.locator(".uconn")).to_contain_text("GitHub", timeout=10_000)
+    expect(page.locator(".uconn", has_text="GitHub")).to_be_visible(timeout=10_000)
 
     # A native connection opens its own setup popup, out of the chat.
     page.locator(".uconn", has_text="GitHub").locator("[data-secretopen]").click()
@@ -151,20 +152,25 @@ def test_native_secret_popup_captures_token(page, modastack_url):
     expect(page.locator(".uconn", has_text="GitHub")).to_contain_text("connected")
 
 
-def test_venn_services_share_one_unified_setup(page, modastack_url):
+def test_venn_is_an_account_connection_with_per_service_rows(page, modastack_url):
     _enter(page, modastack_url)
     page.fill("#chinput", "read my email and calendar and triage what matters")
     page.click("#chsend")
-    # email + calendar are grouped under ONE Venn entry, not two "Connect"s.
-    expect(page.locator(".uvenn")).to_be_visible(timeout=10_000)
-    expect(page.locator(".uvenn .uconn.sub")).to_have_count(2)   # email, calendar
-    expect(page.locator(".uvenn [data-vennsetup]")).to_have_count(1)
+    # Venn-backed services are their OWN rows (tagged "via Venn"), not grouped.
+    expect(page.locator(".uconn", has_text="Email")).to_be_visible(timeout=10_000)
+    expect(page.locator(".uconn", has_text="Calendar")).to_be_visible()
+    # Venn itself is ONE account-level row, with a single set-up link.
+    venn_row = page.locator(".uconn.venn-acct")
+    expect(venn_row).to_be_visible()
+    expect(venn_row).to_contain_text("Venn")
+    expect(page.locator("[data-vennsetup]")).to_have_count(1)
 
-    page.locator(".uvenn [data-vennsetup]").click()
+    # The setup modal opens at the key-entry step: paste a key, then connect.
+    page.locator("[data-vennsetup]").click()
     ov = page.locator("#venn-ov")
     expect(ov).to_be_visible()
-    expect(ov.locator(".venn-svcs .uconn")).to_have_count(2)     # both listed
-    expect(ov.locator("#venn-key")).to_be_visible()             # one shared key
+    expect(ov.locator("#venn-key")).to_be_visible()             # paste the key
+    expect(ov.locator("[data-vennconnect]")).to_be_visible()    # connect button
     expect(ov.locator(".steps li").first).to_be_visible()
 
 
