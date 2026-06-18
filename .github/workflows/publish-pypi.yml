@@ -159,7 +159,13 @@ jobs:
         # Runs only if the smoke test passed. This is the ONLY step that
         # touches the production deployment: upgrade the uv tool and
         # restart the director at ~/dev (it relaunches project leads).
+        #
+        # Safety invariant (#347): prod must never be left stopped. All
+        # fallible prep (fetch, checkout, install-pack) runs BEFORE stop.
+        # The stop→start window is seconds, and a trap restarts the old
+        # version if anything in that window fails.
         run: |
+          set -euo pipefail
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
           VERSION="${{ steps.version.outputs.version }}"
 
@@ -172,22 +178,47 @@ jobs:
           modastack --version
 
           cd "$PROD_DIR"
-          modastack stop 2>/dev/null || true
-          sleep 2
+
+          # --- Prep phase (prod still running) ---
+          # Sync the prod checkout's agents/ to the tag so the established
+          # source-of-truth path stays valid; session rotation on image
+          # change (#173) handles freshness.
+          # --force: tolerate re-pointed tags from reruns (#347).
+          git -C modastack fetch origin --tags --force
+          git -C modastack checkout "refs/tags/v$VERSION" -- agents/
           # Regenerate prod config from the released pack (v0.15.0 cutover
           # lesson: restarting a new CLI against a stale installed config
-          # degrades silently). Sync the prod checkout's agents/ to the tag
-          # so the established source-of-truth path stays valid; session
-          # rotation on image change (#173) handles freshness.
-          git -C modastack fetch origin --tags
-          git -C modastack checkout "refs/tags/v$VERSION" -- agents/
+          # degrades silently).
           modastack install modastack/agents/eng-team < /dev/null
+
+          # --- Restart phase (minimal down-window) ---
+          # Trap: if anything between stop and successful start fails,
+          # restart the director on whatever version is installed so prod
+          # is never left down (#347).
+          restart_on_failure() {
+            echo "ERROR: promote failed after stop — restarting director to avoid prod outage"
+            modastack stop 2>/dev/null || true
+            sleep 2
+            env -u RUNNER_TRACKING_ID modastack start 2>/dev/null || true
+            sleep 5
+            if [ -f .modastack/state/manager.pid ] && kill -0 "$(cat .modastack/state/manager.pid)" 2>/dev/null; then
+              echo "Recovery succeeded — director is running"
+            else
+              echo "CRITICAL: recovery start also failed — prod requires manual intervention"
+            fi
+          }
+          trap restart_on_failure ERR
+
+          modastack stop 2>/dev/null || true
+          sleep 2
           # Strip RUNNER_TRACKING_ID or the Actions runner kills the
           # daemonized director during post-job process cleanup.
           env -u RUNNER_TRACKING_ID modastack start
           sleep 5
           test -f .modastack/state/manager.pid
           kill -0 "$(cat .modastack/state/manager.pid)"
+
+          trap - ERR
           echo "Production director restarted on v$VERSION"
 
       - name: Cleanup smoke test

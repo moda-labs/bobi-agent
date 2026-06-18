@@ -220,6 +220,9 @@ def _run_from_config(project_path: Path, cfg: "Config", extra_subscribe: list[st
 
     state_dir = paths.state_dir(project_path)
 
+    from modastack.state_version import ensure_state_version
+    ensure_state_version(project_path)
+
     pid_str = str(os.getpid())
     (state_dir / "manager.pid").write_text(pid_str)
 
@@ -1822,7 +1825,10 @@ def event_server_start(foreground, port):
     es_port = port or 8080
 
     from modastack.events.server import ensure_running
-    ensure_running(es_port, project_path=_detect_project_root())
+    result = ensure_running(es_port, project_path=_detect_project_root())
+    if result == "skipped":
+        click.echo("Remote event_server_url configured — local server not needed.", err=True)
+        return
 
     if foreground:
         click.echo(f"Event server running on port {es_port} (foreground)")
