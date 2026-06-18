@@ -653,6 +653,36 @@ def _alert_requires_failure(
                      exc_info=True)
 
 
+def _check_concurrency_semaphore(root: Path, timeout: float = 120) -> None:
+    """Block launch until a concurrency slot opens, or raise on timeout.
+
+    Loads the cap from agent.yaml (``max_concurrent_agents`` field,
+    default 2). When the cap is reached, the caller queues — polling
+    every few seconds until a slot opens or the timeout expires.
+    """
+    from modastack.config import Config
+    from modastack.concurrency_semaphore import (
+        DEFAULT_CAP, check_concurrency, wait_for_slot,
+        emit_concurrency_cap_alert,
+    )
+    try:
+        cfg = Config.load(root)
+    except Exception:
+        return  # can't load config — don't block
+    cap = cfg.max_concurrent_agents or DEFAULT_CAP
+    allowed, count = check_concurrency(cap)
+    if allowed:
+        return
+    # At capacity — emit an alert and queue (block) until a slot opens.
+    emit_concurrency_cap_alert(count, cap)
+    if not wait_for_slot(cap, timeout):
+        raise RuntimeError(
+            f"Concurrency semaphore: {count} agents running "
+            f"(cap: {cap}). Timed out waiting for a slot after "
+            f"{timeout:.0f}s. Cancel an active agent or raise the cap."
+        )
+
+
 def _check_spend_governor(root: Path) -> None:
     """Block launch if the rolling-hour invocation cap is exceeded.
 
@@ -743,6 +773,9 @@ def launch_agent(
 
     # Preflight: spend governor — cap agent invocations per rolling hour
     _check_spend_governor(root)
+
+    # Preflight: concurrency semaphore — queue if too many agents running
+    _check_concurrency_semaphore(root)
 
     args_json = json.dumps({
         "task": task,
