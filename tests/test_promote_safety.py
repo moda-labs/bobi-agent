@@ -30,9 +30,24 @@ def _promote_script() -> str:
     raise AssertionError("Promote step not found in publish-pypi.yml")
 
 
-def _line_index(script: str, pattern: str) -> int:
-    """Return the 0-based line index of the first line matching pattern."""
-    for i, line in enumerate(script.splitlines()):
+def _line_index(script: str, pattern: str, *, skip_inside_functions: bool = False) -> int:
+    """Return the 0-based line index of the first line matching pattern.
+
+    If skip_inside_functions is True, skip lines that are inside a bash
+    function body (indented lines between 'name() {' and '}').
+    """
+    lines = script.splitlines()
+    in_function = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if re.search(r'\w+\(\)\s*\{', stripped):
+            in_function = True
+            continue
+        if in_function and stripped == '}':
+            in_function = False
+            continue
+        if skip_inside_functions and in_function:
+            continue
         if re.search(pattern, line):
             return i
     raise AssertionError(f"Pattern {pattern!r} not found in promote script")
@@ -54,7 +69,7 @@ class TestPromoteSafety:
         """Bug 2: fetch must happen before stop so a fetch failure doesn't leave prod down."""
         script = _promote_script()
         fetch_idx = _line_index(script, r"git.*fetch.*--tags")
-        stop_idx = _line_index(script, r"modastack stop")
+        stop_idx = _line_index(script, r"modastack stop", skip_inside_functions=True)
         assert fetch_idx < stop_idx, (
             f"git fetch (line {fetch_idx}) must come BEFORE modastack stop (line {stop_idx})"
         )
@@ -63,7 +78,7 @@ class TestPromoteSafety:
         """Bug 2: checkout must happen before stop."""
         script = _promote_script()
         checkout_idx = _line_index(script, r"git.*checkout.*refs/tags")
-        stop_idx = _line_index(script, r"modastack stop")
+        stop_idx = _line_index(script, r"modastack stop", skip_inside_functions=True)
         assert checkout_idx < stop_idx, (
             f"git checkout (line {checkout_idx}) must come BEFORE modastack stop (line {stop_idx})"
         )
@@ -72,7 +87,7 @@ class TestPromoteSafety:
         """Bug 2: modastack install must happen before stop."""
         script = _promote_script()
         install_idx = _line_index(script, r"modastack install")
-        stop_idx = _line_index(script, r"modastack stop")
+        stop_idx = _line_index(script, r"modastack stop", skip_inside_functions=True)
         assert install_idx < stop_idx, (
             f"modastack install (line {install_idx}) must come BEFORE modastack stop (line {stop_idx})"
         )
@@ -81,7 +96,7 @@ class TestPromoteSafety:
         """Bug 2: ERR trap must be set before stop so failures after stop trigger recovery."""
         script = _promote_script()
         trap_idx = _line_index(script, r"trap\s+\S+\s+ERR")
-        stop_idx = _line_index(script, r"modastack stop")
+        stop_idx = _line_index(script, r"modastack stop", skip_inside_functions=True)
         assert trap_idx < stop_idx, (
             f"ERR trap (line {trap_idx}) must be set BEFORE modastack stop (line {stop_idx})"
         )

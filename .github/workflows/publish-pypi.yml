@@ -197,7 +197,15 @@ jobs:
           # is never left down (#347).
           restart_on_failure() {
             echo "ERROR: promote failed after stop — restarting director to avoid prod outage"
+            modastack stop 2>/dev/null || true
+            sleep 2
             env -u RUNNER_TRACKING_ID modastack start 2>/dev/null || true
+            sleep 5
+            if [ -f .modastack/state/manager.pid ] && kill -0 "$(cat .modastack/state/manager.pid)" 2>/dev/null; then
+              echo "Recovery succeeded — director is running"
+            else
+              echo "CRITICAL: recovery start also failed — prod requires manual intervention"
+            fi
           }
           trap restart_on_failure ERR
 
