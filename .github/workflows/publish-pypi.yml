@@ -85,12 +85,6 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"
 
-          # Kill any orphan event server left by a previous run — a stale
-          # old-version server on :8080 would be reused by ensure_running
-          # (no version check) and break the smoke with missing fields.
-          "$SMOKE/venv/bin/modastack" event-server stop 2>/dev/null || true
-          fuser -k 8080/tcp 2>/dev/null || true
-
           cd "$SMOKE/project"
           git init -q
           mkdir -p .modastack
@@ -204,6 +198,14 @@ jobs:
             cd "$SMOKE/project"
             "$SMOKE/venv/bin/modastack" stop --force 2>/dev/null || true
             "$SMOKE/venv/bin/modastack" event-server stop 2>/dev/null || true
+            # Kill by PID file as a fallback — ensures no orphan event
+            # server survives even if the CLI stop commands fail.
+            for pidfile in .modastack/state/event-server.pid .modastack/state/manager.pid; do
+              if [ -f "$pidfile" ]; then
+                kill "$(cat "$pidfile")" 2>/dev/null || true
+                rm -f "$pidfile"
+              fi
+            done
           fi
           rm -rf "$SMOKE"
 
