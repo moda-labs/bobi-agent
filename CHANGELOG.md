@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.21.0 — 2026-06-18
+
+UI updates to `modastack setup` (MOD-204), starter templates that work offline,
+and a build pour that can no longer hang silently.
+
+### Added
+- **Starter templates bundled with modastack.** The setup intro always offers a
+  few official teams (eng-team, market-research, support-manager) even with no
+  registry reachable — selecting one copies from local disk instead of fetching
+  over the network. `open_mode.list_bundled_templates()`; packaged into the wheel
+  via `pyproject` force-include.
+- **Import a team from your computer.** The hub gains an import option (not a
+  card) that opens the folder picker and opens the chosen team in place
+  (`mode:open`), reusing `/api/start`.
+- **"Official templates" header + badge** on canonical-registry teams, with
+  community templates grouped separately; an `official` flag flows from
+  `list_registry_teams`.
+
+### Changed
+- **Intro restructured** into two numbered sections — where to set it up (the
+  location, with Change…) and choose a starting point (custom or a template) —
+  with a standardized page header (Back to the left of the eyebrow) shared across
+  the intro, build, and preview screens via a `pageHead()` helper.
+- **Editor panel** shows the team name and source location at the top; hub cards
+  show each team's source path.
+
+### Fixed
+- **The build pour can't hang forever.** The setup LLM stream gets an idle
+  timeout, so a stalled nested-CLI authoring call surfaces as a clean "build
+  failed — try again" instead of an infinite spinner. The underlying source is
+  closed on the way out so the subprocess is cancelled, not leaked.
+- **No more half-written files on a failed pour.** Authoring buffers prose and
+  writes once at the end, so a mid-pour failure never truncates the user's
+  existing `agent.md`/`ROLE.md` in open/modify mode.
+- **Import/template collisions are rejected** (409) instead of merging a
+  different team into an existing one and corrupting it.
+
 ## 0.20.0 — 2026-06-17
 
 The `modastack setup` web UI's team panel becomes a methodical interview and an
