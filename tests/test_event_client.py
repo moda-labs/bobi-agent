@@ -282,6 +282,96 @@ class TestLogEvent:
         assert entry_b["type"] == "pr"
 
 
+class TestAckThrough:
+    """EventServerClient.ack_through saves cursor and sends ACK (#278)."""
+
+    def test_ack_through_saves_cursor(self, tmp_path):
+        from modastack.events.client import EventServerClient, _load_cursor
+        cursor_path = tmp_path / "cursor.json"
+        client = EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=cursor_path,
+        )
+        # No WS connected — ack_through should still save cursor.
+        client.ack_through(42)
+        assert _load_cursor(cursor_path) == 42
+
+    def test_ack_through_sends_ws_ack(self, tmp_path):
+        from modastack.events.client import EventServerClient
+        cursor_path = tmp_path / "cursor.json"
+        client = EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=cursor_path,
+        )
+        sent = []
+        client._ws = MagicMock()
+        client._ws.send = lambda msg: sent.append(json.loads(msg))
+        client.ack_through(10)
+        assert len(sent) == 1
+        assert sent[0] == {"type": "ack", "seq": 10}
+
+    def test_ack_through_ignores_zero_seq(self, tmp_path):
+        from modastack.events.client import EventServerClient, _load_cursor
+        cursor_path = tmp_path / "cursor.json"
+        client = EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=cursor_path,
+        )
+        client.ack_through(0)
+        assert _load_cursor(cursor_path) == 0  # unchanged
+
+
+class TestRecordDisconnect:
+    """_record_disconnect keeps routine CF-cycle reconnects quiet but flags
+    genuine flapping. A long-lived connection that CF cycles (hibernation /
+    DO eviction) reconnects losslessly via replay — that's 'routine'. A
+    connection that never stays up is 'flapping' and must surface."""
+
+    def _client(self, tmp_path):
+        from modastack.events.client import EventServerClient
+        return EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=tmp_path / "cursor.json",
+        )
+
+    def test_stable_connection_drop_is_routine(self, tmp_path):
+        c = self._client(tmp_path)
+        # Up well past the stability threshold, then dropped (CF cycled the DO).
+        assert c._record_disconnect(c._STABLE_AFTER_S + 10) == "routine"
+        assert c._short_drop_streak == 0
+
+    def test_short_drops_accumulate_then_flag_flapping(self, tmp_path):
+        c = self._client(tmp_path)
+        results = [c._record_disconnect(1.0) for _ in range(c._FLAP_WARN_STREAK)]
+        # Early short drops are quiet reconnects; the streak threshold flips it
+        # to 'flapping' so a genuinely unstable connection is not silent.
+        assert results[:-1] == ["reconnecting"] * (c._FLAP_WARN_STREAK - 1)
+        assert results[-1] == "flapping"
+
+    def test_never_connected_counts_as_short(self, tmp_path):
+        c = self._client(tmp_path)
+        # uptime None = the connect frame never arrived (server down / refused).
+        assert c._record_disconnect(None) == "reconnecting"
+        assert c._short_drop_streak == 1
+
+    def test_stable_connection_resets_flap_streak(self, tmp_path):
+        c = self._client(tmp_path)
+        for _ in range(c._FLAP_WARN_STREAK):
+            c._record_disconnect(1.0)
+        assert c._short_drop_streak == c._FLAP_WARN_STREAK
+        # One good long-lived connection clears the streak.
+        assert c._record_disconnect(c._STABLE_AFTER_S + 1) == "routine"
+        assert c._short_drop_streak == 0
+
+
 class TestEventQueue:
 
     def test_queue_starts_empty(self):

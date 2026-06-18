@@ -59,15 +59,22 @@ def _post_topic(topic: str, source: str, data: dict,
     from modastack.events.signing import serialize_body, sign_headers
 
     bubble = load_bubble_state(project_path)
+    if not (bubble.get("bubble_id") and bubble.get("bubble_key")):
+        # No bubble credential yet. An unsigned publish is rejected (403)
+        # unconditionally — namespacing is not authentication — so a POST here
+        # can only ever 403; skip the doomed round-trip. This is the normal
+        # cold-start / `--fresh` window before the bubble is minted, when
+        # best-effort lifecycle emits (session.started/failed) may fire first.
+        # Drop quietly at debug; the next session registration mints the bubble.
+        log.debug("No bubble credential yet — skipping publish to %s", topic)
+        return False
+
     body = serialize_body({"source": source, "payload": data})
     headers = {"Content-Type": "application/json"}
-    if bubble.get("bubble_id") and bubble.get("bubble_key"):
-        headers.update(sign_headers(
-            bubble["bubble_id"], bubble["bubble_key"],
-            "POST", f"/events/{topic}", body,
-        ))
-    else:
-        log.warning("No bubble credential — publish to %s will be rejected", topic)
+    headers.update(sign_headers(
+        bubble["bubble_id"], bubble["bubble_key"],
+        "POST", f"/events/{topic}", body,
+    ))
 
     try:
         resp = pooled.post(

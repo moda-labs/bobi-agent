@@ -36,6 +36,7 @@ def run_doctor() -> list[CheckResult]:
     results.extend(_check_package_requires())
     results.extend(_check_services())
     results.append(_check_workflows())
+    results.append(_check_bubble_auth())
     results.append(_check_event_server())
     results.append(_check_recent_events())
     results.append(_check_memory())
@@ -252,6 +253,65 @@ def _check_workflows() -> CheckResult:
                            detail=f"{len(names)} loaded: {', '.join(names)}")
     except Exception as e:
         return CheckResult("Workflows", ok=False, detail=str(e))
+
+
+def _check_bubble_auth() -> CheckResult:
+    """Check bubble identity and auth configuration.
+
+    Shows the instance's bubble_id (public, safe) and confirms a bubble key
+    is present. Warns on remote+cleartext event server URLs (the bubble key
+    would transit in the clear at mint time) and on a missing key when the
+    instance appears to be running.
+    """
+    root = bound_root()
+    if not root:
+        return CheckResult("Bubble auth", ok=True, detail="no project detected")
+
+    from modastack.config import Config, load_bubble_state
+
+    bubble = load_bubble_state(root)
+    bubble_id = bubble.get("bubble_id", "")
+    has_key = bool(bubble.get("bubble_key"))
+
+    try:
+        cfg = Config.load(root)
+    except Exception:
+        cfg = None
+
+    # Check for remote + non-TLS event server URL — the bubble key would
+    # transit cleartext at registration (MINT).
+    es_url = cfg.event_server_url if cfg else ""
+    if es_url:
+        from modastack.events.server import _is_loopback_or_tls
+        if not _is_loopback_or_tls(es_url):
+            return CheckResult(
+                "Bubble auth", ok=False,
+                detail=f"event server URL is remote + cleartext ({es_url})",
+                hint="The bubble key transits at mint time — use https:// "
+                     "or a loopback event server to protect it")
+
+    if not bubble_id:
+        # No bubble yet — might be fine if the instance hasn't started.
+        from modastack import paths
+        pid_file = paths.state_dir(root) / "event-server.pid"
+        if pid_file.exists():
+            return CheckResult(
+                "Bubble auth", ok=False,
+                detail="no bubble credential but event server appears running",
+                hint="The agent would mint a fresh/orphan bubble on next "
+                     "registration — run `modastack restart` to re-establish")
+        return CheckResult("Bubble auth", ok=True,
+                           detail="no bubble yet (instance not started)")
+
+    if not has_key:
+        return CheckResult(
+            "Bubble auth", ok=False,
+            detail=f"bubble_id {bubble_id} present but bubble_key missing",
+            hint="The bubble credential is incomplete — run `modastack restart` "
+                 "to re-mint")
+
+    return CheckResult("Bubble auth", ok=True,
+                       detail=f"bubble {bubble_id[:20]}… key present")
 
 
 def _check_event_server() -> CheckResult:

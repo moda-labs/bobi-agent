@@ -1,7 +1,7 @@
 """Auto-inject built-in MCP servers based on agent.yaml connections.
 
-When the config has image connections, this module adds the
-generate_image MCP server to the mcp_servers dict passed to
+When the config has image or codex connections, this module adds the
+corresponding MCP server to the mcp_servers dict passed to
 ClaudeAgentOptions.
 """
 
@@ -22,28 +22,46 @@ def inject_builtin_mcp_servers(
 
     Currently adds:
     - modastack-image: when any connection with kind=image exists
+    - modastack-codex: when any connection with kind=codex exists
     """
     result = dict(mcp_servers or {})
 
-    # Inject image server if image connections are configured
-    image_conns = [c for c in connections if getattr(c, "kind", "") == "image"
-                   or (isinstance(c, dict) and c.get("kind") == "image")]
-    if image_conns:
-        # Serialize connections for the server subprocess
-        conn_dicts = []
+    def _has_kind(kind: str) -> bool:
+        return any(
+            getattr(c, "kind", "") == kind
+            or (isinstance(c, dict) and c.get("kind") == kind)
+            for c in connections
+        )
+
+    def _conn_dicts() -> list[dict]:
+        out: list[dict] = []
         for c in connections:
             if hasattr(c, "__dataclass_fields__"):
                 from dataclasses import asdict
-                conn_dicts.append(asdict(c))
+                out.append(asdict(c))
             elif isinstance(c, dict):
-                conn_dicts.append(c)
+                out.append(c)
+        return out
 
+    # Inject image server if image connections are configured
+    if _has_kind("image"):
         result.setdefault("modastack-image", {
             "type": "stdio",
             "command": sys.executable,
             "args": [
                 "-m", "modastack.mcp.image_server",
-                json.dumps(conn_dicts),
+                json.dumps(_conn_dicts()),
+            ],
+        })
+
+    # Inject codex server if codex connections are configured
+    if _has_kind("codex"):
+        result.setdefault("modastack-codex", {
+            "type": "stdio",
+            "command": sys.executable,
+            "args": [
+                "-m", "modastack.mcp.codex_server",
+                json.dumps(_conn_dicts()),
             ],
         })
 

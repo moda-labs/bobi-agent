@@ -1,6 +1,50 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker from "../src/index";
+import { buildBubbleSignature } from "../src/core";
+
+// ---------------------------------------------------------------------------
+// Bubble-signing helpers (mirrors core.spec.ts helpers but for HTTP-level
+// tests through SELF.fetch — the canonical string covers the exact wire bytes)
+// ---------------------------------------------------------------------------
+
+interface MintedBubble {
+	deployment_id: string;
+	api_key: string;
+	bubble_id: string;
+	bubble_key: string;
+}
+
+/** Register an unsigned deployment to mint a fresh bubble. */
+async function mintBubble(subscriptions: string[] = ["test:topic"]): Promise<MintedBubble> {
+	const res = await SELF.fetch("https://example.com/deployments", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name: `mint-${Date.now()}`, subscriptions }),
+	});
+	if (res.status !== 201) throw new Error(`mintBubble failed: ${res.status}`);
+	return res.json() as Promise<MintedBubble>;
+}
+
+/** Build bubble-signing headers for a request. */
+async function bubbleHeaders(
+	bubbleId: string,
+	bubbleKey: string,
+	method: string,
+	path: string,
+	body: string,
+): Promise<Record<string, string>> {
+	const timestamp = String(Math.floor(Date.now() / 1000));
+	const nonce = `n-${Date.now()}`;
+	const signature = await buildBubbleSignature(bubbleKey, timestamp, nonce, method, path, body);
+	return {
+		"x-moda-bubble": bubbleId,
+		"x-moda-algo": "hmac-sha256",
+		"x-moda-timestamp": timestamp,
+		"x-moda-nonce": nonce,
+		"x-moda-signature": signature,
+	};
+}
 
 describe("event-server", () => {
 	it("health check returns ok", async () => {
@@ -71,7 +115,7 @@ describe("event-server", () => {
 		expect(response.status).toBe(403);
 	});
 
-	it("accepts generic topic event", async () => {
+	it("rejects unsigned generic topic event", async () => {
 		const response = await SELF.fetch("https://example.com/events/deploy.complete", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -79,6 +123,22 @@ describe("event-server", () => {
 				source: "ci",
 				payload: { status: "success", sha: "abc123" },
 			}),
+		});
+		expect(response.status).toBe(403);
+	});
+
+	it("accepts signed generic topic event", async () => {
+		const bubble = await mintBubble(["deploy.complete"]);
+		const payload = JSON.stringify({
+			source: "ci",
+			payload: { status: "success", sha: "abc123" },
+		});
+		const path = "/events/deploy.complete";
+		const headers = await bubbleHeaders(bubble.bubble_id, bubble.bubble_key, "POST", path, payload);
+		const response = await SELF.fetch(`https://example.com${path}`, {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body: payload,
 		});
 		expect(response.status).toBe(200);
 		const body = await response.json() as { delivered_to: number };
@@ -109,6 +169,91 @@ describe("event-server", () => {
 			body: JSON.stringify({ text: "hello" }),
 		});
 		expect(response.status).toBe(400);
+	});
+});
+
+
+// ---------------------------------------------------------------------------
+// Cloudflare deregistration verification (#279)
+// ---------------------------------------------------------------------------
+
+describe("cloudflare deployment deregistration", () => {
+	it("DELETE removes deployment from KV and cleans subscription-index entries", async () => {
+		const regResp = await SELF.fetch("https://example.com/deployments", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				name: "ephemeral-reply",
+				subscriptions: ["reply/test-uuid"],
+			}),
+		});
+		expect(regResp.status).toBe(201);
+		const { deployment_id, api_key } = (await regResp.json()) as {
+			deployment_id: string;
+			api_key: string;
+		};
+		expect(deployment_id).toBeTruthy();
+
+		const delResp = await SELF.fetch(
+			`https://example.com/deployments/${deployment_id}`,
+			{
+				method: "DELETE",
+				headers: { authorization: `Bearer ${api_key}` },
+			},
+		);
+		expect(delResp.status).toBe(200);
+		const delBody = (await delResp.json()) as { ok: boolean };
+		expect(delBody.ok).toBe(true);
+
+		const regResp2 = await SELF.fetch("https://example.com/deployments", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				name: "ephemeral-reply-2",
+				subscriptions: ["reply/test-uuid"],
+			}),
+		});
+		expect(regResp2.status).toBe(201);
+	});
+
+	it("DELETE rejects wrong api key (403)", async () => {
+		const regResp = await SELF.fetch("https://example.com/deployments", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				name: "guarded-deploy",
+				subscriptions: ["reply/guarded"],
+			}),
+		});
+		const { deployment_id } = (await regResp.json()) as { deployment_id: string };
+
+		const delResp = await SELF.fetch(
+			`https://example.com/deployments/${deployment_id}`,
+			{
+				method: "DELETE",
+				headers: { authorization: "Bearer wrong_key" },
+			},
+		);
+		expect(delResp.status).toBe(403);
+	});
+
+	it("DELETE rejects unknown deployment id (403)", async () => {
+		const delResp = await SELF.fetch(
+			"https://example.com/deployments/nonexistent-id",
+			{
+				method: "DELETE",
+				headers: { authorization: "Bearer any_key" },
+			},
+		);
+		expect(delResp.status).toBe(403);
+	});
+
+	it("DELETE rejects missing auth header (403)", async () => {
+		const delResp = await SELF.fetch(
+			"https://example.com/deployments/some-id",
+			{ method: "DELETE" },
+		);
+		expect(delResp.status).toBe(403);
 	});
 });
 
@@ -211,5 +356,45 @@ describe("github webhook signature verification", () => {
 			body: JSON.stringify({ action: "opened", repository: { full_name: "org/repo" } }),
 		});
 		expect(response.status).toBe(200);
+	});
+});
+
+describe("cloudflare deployment deregistration", () => {
+	it("DELETE removes deployment from KV and returns 200", async () => {
+		// Register a deployment to get credentials
+		const regRes = await SELF.fetch("https://example.com/deployments", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				name: "to-delete",
+				subscriptions: ["github:org/repo"],
+			}),
+		});
+		expect(regRes.status).toBe(201);
+		const { deployment_id, api_key } = await regRes.json() as MintedBubble;
+
+		// DELETE the deployment
+		const delRes = await SELF.fetch(`https://example.com/deployments/${deployment_id}`, {
+			method: "DELETE",
+			headers: { authorization: `Bearer ${api_key}` },
+		});
+		expect(delRes.status).toBe(200);
+		const body = await delRes.json() as { ok: boolean };
+		expect(body.ok).toBe(true);
+	});
+
+	it("DELETE rejects unauthorized request", async () => {
+		const response = await SELF.fetch("https://example.com/deployments/some-id", {
+			method: "DELETE",
+			headers: { authorization: "Bearer bad_key" },
+		});
+		expect(response.status).toBe(403);
+	});
+
+	it("DELETE rejects request without auth header", async () => {
+		const response = await SELF.fetch("https://example.com/deployments/some-id", {
+			method: "DELETE",
+		});
+		expect(response.status).toBe(403);
 	});
 });

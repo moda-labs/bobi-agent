@@ -1,9 +1,6 @@
 # Changelog
 
-## 0.21.0 — 2026-06-18
-
-UI updates to `modastack setup` (MOD-204), starter templates that work offline,
-and a build pour that can no longer hang silently.
+## Unreleased
 
 ### Added
 - **Starter templates bundled with modastack.** The setup intro always offers a
@@ -27,6 +24,17 @@ and a build pour that can no longer hang silently.
   show each team's source path.
 
 ### Fixed
+- **Publish skips the doomed unsigned POST during cold start.** Lifecycle emits
+  (`session.started` / `session.failed`) that fire before the bubble is minted
+  (the `--fresh` / startup window) no longer POST an unsigned event guaranteed to
+  403; `_post_topic` returns early and logs at debug. Removes the duplicate
+  `No bubble credential` + `403 Forbidden` warning pairs from the manager log and
+  a pointless round-trip.
+- **Event client stays quiet on routine reconnects.** A Cloudflare Durable Object
+  cycles hibernating WebSockets from the runtime side every few minutes; the
+  client reconnects losslessly via the `last_seen` replay cursor. Those routine
+  reconnects now log at debug. A genuine flap (5+ short-lived connections in a
+  row) still warns, naming the last error.
 - **The build pour can't hang forever.** The setup LLM stream gets an idle
   timeout, so a stalled nested-CLI authoring call surfaces as a clean "build
   failed — try again" instead of an infinite spinner. The underlying source is
@@ -36,6 +44,49 @@ and a build pour that can no longer hang silently.
   existing `agent.md`/`ROLE.md` in open/modify mode.
 - **Import/template collisions are rejected** (409) instead of merging a
   different team into an existing one and corrupting it.
+
+## 0.21.0 — 2026-06-18
+
+The inter-agent comms + event-bus security foundation: agents talk over the event
+server inside isolated, authenticated trust bubbles. (Also ships the previously
+unreleased 0.20.0 setup-UI work.)
+
+### Added
+- **Inter-agent comms over the event server (comms-v1).** Agents message each
+  other as `inbox/<session>` events; the per-session HTTP inbox transport is
+  retired. Blocking `modastack ask` / `message --wait` is async request/reply
+  correlated over a transient `reply/<uuid>` topic. (#268, #269)
+- **Bubble-scoped isolation + HMAC signing (auth-v1).** `modastack start` mints
+  one trust bubble; every agent joins it. Publishes and join-registrations are
+  HMAC-signed and events are scoped to a bubble, so they can't be read or injected
+  across instances sharing one event server. Local server binds loopback by
+  default. (#240, #241)
+- **Loop-safety backstops.** Delivery-path circuit breaker pauses runaway
+  agent↔agent loops in a conversation (legitimate `inbox/*` exempt); spend governor
+  caps agent invocations per rolling hour. (#299, #300)
+- **Observability.** `modastack events` surfaces `inbox/*` messages; `doctor` and
+  `/health` report bubble + auth status. (#301, #242)
+- **Auto-rotate persistent sessions at the token cap.** (#274)
+
+### Fixed
+- `resolve_root` trust model hardened: ownership check + manager-set
+  `MODASTACK_ROOT` env pin, so a planted ancestor `agent.yaml` can't capture a
+  process. (#249)
+- Transient `reply/<uuid>` deployments deregistered on `ask` teardown, plus a
+  crash-time eviction backstop. (#277, #279)
+- Same-name re-register dedup + cursor ACK-after-delivery durability. (#278)
+- `pr-feedback` no longer auto-dispatches on `review_requested`. (#255)
+
+### Internal
+- Integration test revamp (anti-rot CI, real-Claude flakiness fixes, registry
+  coverage); Cloudflare Worker/miniflare suite now runs in CI. (#261, #307)
+- Project-lead role prompt hardened with standing operational instructions. (MDS-55)
+
+### Security
+Bubble isolation is enforced in local-server mode. **Cloudflare mode is gated** on
+follow-up hardening (Durable Object internal-RPC auth, KV CAS) tracked in
+`docs/SECURITY-FINDINGS.md` — do not enable it until those land. Cross-tenant
+inbound-webhook fan-out remains accepted v1 behavior (→ #239).
 
 ## 0.20.0 — 2026-06-17
 

@@ -48,6 +48,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-timeout>=2.3",
     "pytest-playwright>=0.5",
+    "pytest-rerunfailures>=14.0",
 ]
 
 [project.scripts]
@@ -72,6 +73,11 @@ packages = ["modastack"]
 [tool.hatch.build.targets.sdist]
 include = ["modastack", "event-server", "README.md", "CHANGELOG.md"]
 exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
+
+[tool.pytest.ini_options]
+markers = [
+    "claude: test requires a real Claude CLI session (deselected in integration-fast)",
+]
 
 [build-system]
 requires = ["hatchling"]

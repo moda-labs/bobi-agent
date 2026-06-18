@@ -34,6 +34,14 @@ requires:
 # manager LLM sees the event, guaranteeing the workflow is launched
 # regardless of prompt compliance.
 auto_dispatch:
+  # Suppress reviewer assignments — they're informational, not feedback.
+  # Without this rule the event reaches the project lead un-annotated
+  # and the LLM incorrectly dispatches pr-feedback.
+  - event: github.pull_request
+    match:
+      action: review_requested
+    suppress: true
+
   - event: github.pull_request_review
     match:
       review_state: changes_requested

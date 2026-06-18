@@ -43,7 +43,9 @@ def test_post_event_posts_to_event_server():
     mock_client = httpx.Client(transport=transport)
 
     with patch.object(pooled, '_client', mock_client), \
-         patch("modastack.config.Config.load") as mock_pc:
+         patch("modastack.config.Config.load") as mock_pc, \
+         patch("modastack.config.load_bubble_state",
+               return_value={"bubble_id": "bub_t", "bubble_key": "bkey_t"}):
         mock_pc.return_value = type("PC", (), {"event_server_url": "https://events.test"})()
         ok = publish.post_event("monitor/deploy.down", {"summary": "down"},
                                 project_path=Path("/tmp/repo"))
@@ -68,7 +70,9 @@ def test_post_event_defaults_source_when_no_slash():
     mock_client = httpx.Client(transport=transport)
 
     with patch.object(pooled, '_client', mock_client), \
-         patch("modastack.config.Config.load") as mock_pc:
+         patch("modastack.config.Config.load") as mock_pc, \
+         patch("modastack.config.load_bubble_state",
+               return_value={"bubble_id": "bub_t", "bubble_key": "bkey_t"}):
         mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
         publish.post_event("deploy_down", {}, project_path=Path("/tmp/repo"))
 
@@ -86,7 +90,9 @@ def test_post_event_returns_false_on_connection_error():
     mock_client = httpx.Client(transport=transport)
 
     with patch.object(pooled, '_client', mock_client), \
-         patch("modastack.config.Config.load") as mock_pc:
+         patch("modastack.config.Config.load") as mock_pc, \
+         patch("modastack.config.load_bubble_state",
+               return_value={"bubble_id": "bub_t", "bubble_key": "bkey_t"}):
         mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
         assert publish.post_event("monitor/x", {}, project_path=Path("/tmp/repo")) is False
 
@@ -315,6 +321,42 @@ class TestEventsCommand:
         assert result.exit_code == 0, result.output
         # "push" should appear exactly once in the output
         assert result.output.count("push") == 1
+
+    def test_inbox_event_renders_payload_text(self, tmp_path):
+        """inbox/* events stored with 'payload' key surface their text."""
+        state = tmp_path / ".modastack" / "state"
+        state.mkdir(parents=True)
+        ev = {
+            "timestamp": "2026-01-01T00:00:01",
+            "source": "inbox",
+            "type": "message",
+            "payload": {"sender": "alice", "text": "hello world"},
+        }
+        (state / "events-sess-a.jsonl").write_text(json.dumps(ev) + "\n")
+        runner = CliRunner()
+        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+            result = runner.invoke(main, ["events"])
+        assert result.exit_code == 0, result.output
+        assert "inbox" in result.output
+        assert "alice" in result.output
+        assert "hello world" in result.output
+
+    def test_payload_event_renders_text_without_sender(self, tmp_path):
+        """Non-inbox events stored with 'payload' key render text detail."""
+        state = tmp_path / ".modastack" / "state"
+        state.mkdir(parents=True)
+        ev = {
+            "timestamp": "2026-01-01T00:00:01",
+            "source": "github",
+            "type": "push",
+            "payload": {"text": "pushed to main"},
+        }
+        (state / "events-sess-a.jsonl").write_text(json.dumps(ev) + "\n")
+        runner = CliRunner()
+        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+            result = runner.invoke(main, ["events"])
+        assert result.exit_code == 0, result.output
+        assert "pushed to main" in result.output
 
     def test_ignores_legacy_events_jsonl(self, tmp_path):
         """Legacy events.jsonl (without session prefix) is not read."""

@@ -80,11 +80,20 @@ def _run_npm(args: list[str], es_dir: Path) -> None:
 
 def ensure_running(port: int, webhook_secret: str = "",
                    slack_signing_secret: str = "",
-                   project_path: Path | None = None) -> str:
+                   bind: str = "",
+                   project_path: Path | None = None,
+                   extra_env: dict[str, str] | None = None) -> str:
     """Start the local event server if not already running.
 
     Returns "connected" if an existing server was found, "started" if
     a new one was launched.
+
+    ``bind`` controls the listen address (passed as ``MODASTACK_ES_BIND``).
+    When empty, the env var is forwarded from the parent process if set;
+    the Node server itself defaults to ``127.0.0.1`` (loopback-only).
+
+    ``extra_env`` passes additional environment variables to the child
+    process (e.g. eviction thresholds for testing).
     """
     if health(f"http://localhost:{port}"):
         log.info(f"Event server already running on port {port}")
@@ -111,6 +120,10 @@ def ensure_running(port: int, webhook_secret: str = "",
         env["MODASTACK_ES_WEBHOOK_SECRET"] = webhook_secret
     if slack_signing_secret:
         env["MODASTACK_ES_SLACK_SIGNING_SECRET"] = slack_signing_secret
+    if bind:
+        env["MODASTACK_ES_BIND"] = bind
+    if extra_env:
+        env.update(extra_env)
 
     with open(log_file, "a") as lf:
         proc = subprocess.Popen(

@@ -652,6 +652,32 @@ def _alert_requires_failure(
                      exc_info=True)
 
 
+def _check_spend_governor(root: Path) -> None:
+    """Block launch if the rolling-hour invocation cap is exceeded.
+
+    Loads the cap from agent.yaml (``spend_cap`` field, default 50).
+    On breach, emits a ``system/spend.cap.breached`` alert event and
+    raises RuntimeError to prevent the launch.
+    """
+    from modastack.config import Config
+    from modastack.spend_governor import (
+        DEFAULT_CAP, check_spend_cap, emit_spend_cap_alert,
+    )
+    try:
+        cfg = Config.load(root)
+    except Exception:
+        return  # can't load config — don't block
+    cap = cfg.spend_cap or DEFAULT_CAP
+    allowed, count = check_spend_cap(root, cap)
+    if not allowed:
+        emit_spend_cap_alert(root, count, cap)
+        raise RuntimeError(
+            f"Spend governor: {count} agent invocations in the last hour "
+            f"(cap: {cap}). New launches are blocked until invocations "
+            f"age out of the rolling window."
+        )
+
+
 def launch_agent(
     task: str,
     cwd: str,
@@ -714,6 +740,9 @@ def launch_agent(
             f"Run `modastack doctor` for details and fix commands."
         )
 
+    # Preflight: spend governor — cap agent invocations per rolling hour
+    _check_spend_governor(root)
+
     args_json = json.dumps({
         "task": task,
         "cwd": cwd,
@@ -754,6 +783,10 @@ def launch_agent(
     child_env = {**os.environ, "MODASTACK_ROOT": str(root)}
     pid = _launch_detached(script, [args_json], log_file, env=child_env)
     registry.update(session_name, pid=pid)
+
+    # Record the invocation for the spend governor's rolling window.
+    from modastack.spend_governor import record_invocation
+    record_invocation(root)
     return session_name
 
 
@@ -806,7 +839,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     """
     from modastack.config import (
         Config, load_deployment_state, save_deployment_state,
-        session_cursor_path,
+        session_cursor_path, bubble_state_path,
     )
     from modastack.events.client import EventServerClient
     from modastack.events.drain import drain_loop
@@ -874,6 +907,14 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         # No saved deployment for this session — register fresh rather
         # than PUT to a guaranteed-400 empty deployment URL.
         es_deployment, es_key = _register_with_retry(es_url)
+    elif not bubble_state_path(project_path).exists():
+        # Pre-bubble upgrade: saved deployment_state from a version that
+        # predates auth bubbles. The old api_key can't sign publishes
+        # against a v0.21+ server → 403. Drop the stale state and
+        # re-register through ensure_bubble to mint/join a bubble.
+        log.info("Saved deployment but no bubble.json — pre-bubble upgrade, re-registering")
+        cursor_path.unlink(missing_ok=True)
+        es_deployment, es_key = _register_with_retry(es_url)
     else:
         # This session restarting with its own saved deployment — sync any
         # new subscription keys onto it. Never PUT to another session's
@@ -929,7 +970,8 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
 
     drain_thread = threading.Thread(
         target=drain_loop, args=(session_name,),
-        kwargs={"reactor": reactor, "queue": session_queue},
+        kwargs={"reactor": reactor, "queue": session_queue,
+                "cursor_ack": client.ack_through},
         daemon=True, name="agent-drain",
     )
     drain_thread.start()

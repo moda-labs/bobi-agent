@@ -171,7 +171,7 @@ class TestReactorPrClosedDispatch:
         reactor = EventReactor(rules=rules, cwd="/tmp/project")
         event = self._make_pr_closed_event(merged=True)
 
-        assert reactor.process(event) is True
+        assert reactor.process(event) == "dispatched"
         mock_launch.assert_called_once()
         kwargs = mock_launch.call_args[1]
         assert kwargs["workflow_name"] == "pr-closed"
@@ -191,7 +191,7 @@ class TestReactorPrClosedDispatch:
         reactor = EventReactor(rules=rules, cwd="/tmp/project")
         event = self._make_pr_closed_event(merged=False, number=43)
 
-        assert reactor.process(event) is True
+        assert reactor.process(event) == "dispatched"
         kwargs = mock_launch.call_args[1]
         assert "merged=False" in kwargs["task"] or "merged" in kwargs["task"].lower()
 
@@ -212,7 +212,7 @@ class TestReactorPrClosedDispatch:
             "topics": ["github:moda-labs/test"],
         }
 
-        assert reactor.process(event) is False
+        assert reactor.process(event) is None
         mock_launch.assert_not_called()
 
     @patch("modastack.subagent.launch_agent")
