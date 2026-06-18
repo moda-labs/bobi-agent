@@ -8,6 +8,7 @@ import {
 	type SlackWorkspaceRecord,
 	type HandlerResult,
 	subscriptionKeysForEvent,
+	namespaceSubKey,
 	verifyGitHubSignature,
 	verifySlackSignature,
 	readBubbleAuthHeaders,
@@ -25,6 +26,9 @@ import {
 
 const MAX_BUFFER = 10_000;
 
+const EVICTION_STALE_MS = parseInt(process.env.MODASTACK_ES_EVICTION_STALE_MS || "60000", 10);
+const EVICTION_SWEEP_MS = parseInt(process.env.MODASTACK_ES_EVICTION_SWEEP_MS || "30000", 10);
+
 // ---------------------------------------------------------------------------
 // In-memory state — extends DeploymentRecord with runtime fields
 // ---------------------------------------------------------------------------
@@ -38,6 +42,7 @@ interface LocalDeployment {
 	nextSeq: number;
 	eventBuffer: Array<NormalizedEvent & { seq: number }>;
 	websockets: Set<WebSocket>;
+	disconnectedAt: number | null;
 }
 
 const deployments = new Map<string, LocalDeployment>();
@@ -99,6 +104,7 @@ const storage: StorageAdapter = {
 				nextSeq: 1,
 				eventBuffer: [],
 				websockets: new Set(),
+				disconnectedAt: Date.now(),
 			});
 			apiKeyIndex.set(record.api_key, record.id);
 		}
@@ -413,6 +419,7 @@ function handleUpgrade(req: http.IncomingMessage, socket: import("node:net").Soc
 		);
 
 		dep.websockets.add(ws);
+		dep.disconnectedAt = null;
 
 		ws.on("message", (raw) => {
 			try {
@@ -425,9 +432,38 @@ function handleUpgrade(req: http.IncomingMessage, socket: import("node:net").Soc
 			}
 		});
 
-		ws.on("close", () => dep.websockets.delete(ws));
-		ws.on("error", () => dep.websockets.delete(ws));
+		const onDisconnect = () => {
+			dep.websockets.delete(ws);
+			if (dep.websockets.size === 0) {
+				dep.disconnectedAt = Date.now();
+			}
+		};
+		ws.on("close", onDisconnect);
+		ws.on("error", onDisconnect);
 	});
+}
+
+
+// ---------------------------------------------------------------------------
+// Eviction backstop (#279) — periodic sweep for leaked deployments
+// ---------------------------------------------------------------------------
+
+function evictStaleDeployments() {
+	const now = Date.now();
+	for (const [id, dep] of deployments) {
+		if (dep.disconnectedAt !== null && now - dep.disconnectedAt >= EVICTION_STALE_MS) {
+			for (const sub of dep.subscriptions) {
+				const nsKey = namespaceSubKey(dep.bubbleId, sub);
+				const set = subscriptionIndex.get(nsKey);
+				if (set) {
+					set.delete(id);
+					if (set.size === 0) subscriptionIndex.delete(nsKey);
+				}
+			}
+			deployments.delete(id);
+			apiKeyIndex.delete(dep.apiKey);
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +487,9 @@ const server = http.createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", (req, socket, head) => handleUpgrade(req, socket, head, wss));
+
+const evictionTimer = setInterval(evictStaleDeployments, EVICTION_SWEEP_MS);
+evictionTimer.unref();
 
 server.listen(port, bind, () => {
 	if (bind === "127.0.0.1" || bind === "::1") {
