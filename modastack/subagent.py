@@ -839,7 +839,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     """
     from modastack.config import (
         Config, load_deployment_state, save_deployment_state,
-        session_cursor_path,
+        session_cursor_path, bubble_state_path,
     )
     from modastack.events.client import EventServerClient
     from modastack.events.drain import drain_loop
@@ -906,6 +906,14 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     elif not (es_deployment and es_key):
         # No saved deployment for this session — register fresh rather
         # than PUT to a guaranteed-400 empty deployment URL.
+        es_deployment, es_key = _register_with_retry(es_url)
+    elif not bubble_state_path(project_path).exists():
+        # Pre-bubble upgrade: saved deployment_state from a version that
+        # predates auth bubbles. The old api_key can't sign publishes
+        # against a v0.21+ server → 403. Drop the stale state and
+        # re-register through ensure_bubble to mint/join a bubble.
+        log.info("Saved deployment but no bubble.json — pre-bubble upgrade, re-registering")
+        cursor_path.unlink(missing_ok=True)
         es_deployment, es_key = _register_with_retry(es_url)
     else:
         # This session restarting with its own saved deployment — sync any
