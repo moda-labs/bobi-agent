@@ -13,6 +13,8 @@ import pytest
 
 from .conftest import requires_claude
 
+pytestmark = pytest.mark.claude
+
 
 @requires_claude
 @pytest.mark.timeout(120)

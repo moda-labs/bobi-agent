@@ -11,6 +11,8 @@ import pytest
 
 from tests.integration.conftest import requires_claude
 
+pytestmark = pytest.mark.claude
+
 
 @requires_claude
 class TestSessionMessaging:

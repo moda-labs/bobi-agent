@@ -12,15 +12,21 @@ would run these there, where real-session hangs would flake the unit suite.
 """
 
 import asyncio
-import shutil
 import time
 
 import pytest
 
-requires_claude = pytest.mark.skipif(
-    not shutil.which("claude"),
-    reason="claude CLI not installed",
-)
+from .conftest import requires_claude
+
+pytestmark = pytest.mark.claude
+
+
+async def _safe_disconnect(client):
+    """Best-effort disconnect — suppresses RuntimeError from a closed event loop."""
+    try:
+        await client.disconnect()
+    except RuntimeError:
+        pass
 
 
 @requires_claude
@@ -47,23 +53,24 @@ class TestManagerSDKDirect:
         )
 
         client = ClaudeSDKClient(options)
-        await client.connect("Reply with just: MANAGER_OK")
+        try:
+            await client.connect("Reply with just: MANAGER_OK")
 
-        got_text = False
-        got_result = False
+            got_text = False
+            got_result = False
 
-        async for msg in client.receive_messages():
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock) and "MANAGER_OK" in block.text:
-                        got_text = True
-            elif isinstance(msg, ResultMessage):
-                got_result = True
-                assert not msg.is_error
-                assert msg.session_id != ""
-                break
-
-        await client.disconnect()
+            async for msg in client.receive_messages():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock) and "MANAGER_OK" in block.text:
+                            got_text = True
+                elif isinstance(msg, ResultMessage):
+                    got_result = True
+                    assert not msg.is_error
+                    assert msg.session_id != ""
+                    break
+        finally:
+            await _safe_disconnect(client)
         assert got_text
         assert got_result
 
@@ -85,26 +92,27 @@ class TestManagerSDKDirect:
         )
 
         client = ClaudeSDKClient(options)
-        await client.connect("Remember the code word: BANANA")
+        try:
+            await client.connect("Remember the code word: BANANA")
 
-        # Wait for first response
-        async for msg in client.receive_response():
-            if isinstance(msg, ResultMessage):
-                break
+            # Wait for first response
+            async for msg in client.receive_response():
+                if isinstance(msg, ResultMessage):
+                    break
 
-        # Second turn -- ask for the code word
-        await client.query("What was the code word? Reply with just the word.")
+            # Second turn -- ask for the code word
+            await client.query("What was the code word? Reply with just the word.")
 
-        found_banana = False
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock) and "BANANA" in block.text.upper():
-                        found_banana = True
-            elif isinstance(msg, ResultMessage):
-                break
-
-        await client.disconnect()
+            found_banana = False
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock) and "BANANA" in block.text.upper():
+                            found_banana = True
+                elif isinstance(msg, ResultMessage):
+                    break
+        finally:
+            await _safe_disconnect(client)
         assert found_banana, "Manager did not remember the code word across turns"
 
     async def test_session_resume(self):
@@ -124,15 +132,16 @@ class TestManagerSDKDirect:
         )
 
         client = ClaudeSDKClient(options)
-        await client.connect("Say hello.")
+        try:
+            await client.connect("Say hello.")
 
-        session_id = ""
-        async for msg in client.receive_response():
-            if isinstance(msg, ResultMessage):
-                session_id = msg.session_id
-                break
-
-        await client.disconnect()
+            session_id = ""
+            async for msg in client.receive_response():
+                if isinstance(msg, ResultMessage):
+                    session_id = msg.session_id
+                    break
+        finally:
+            await _safe_disconnect(client)
         assert session_id != "", "No session_id returned"
         assert len(session_id) > 8
 
@@ -169,31 +178,32 @@ class TestManagerSessionModule:
         )
 
         client = ClaudeSDKClient(options)
-        await client.connect("You are online. Say: READY")
+        try:
+            await client.connect("You are online. Say: READY")
 
-        # Wait for startup
-        async for msg in client.receive_response():
-            if isinstance(msg, ResultMessage):
-                break
+            # Wait for startup
+            async for msg in client.receive_response():
+                if isinstance(msg, ResultMessage):
+                    break
 
-        # Simulate event injection (same as manager.inject() does)
-        await client.query(
-            "Event: github/task.assigned\n"
-            "  issue_id: 99\n"
-            "  title: Add rate limiting\n"
-            "  repo: moda-labs/bettertab\n"
-            "Reply with just: ACKNOWLEDGED"
-        )
+            # Simulate event injection (same as manager.inject() does)
+            await client.query(
+                "Event: github/task.assigned\n"
+                "  issue_id: 99\n"
+                "  title: Add rate limiting\n"
+                "  repo: moda-labs/bettertab\n"
+                "Reply with just: ACKNOWLEDGED"
+            )
 
-        response_text = ""
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        response_text += block.text
-            elif isinstance(msg, ResultMessage):
-                assert not msg.is_error
-                break
-
-        await client.disconnect()
+            response_text = ""
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            response_text += block.text
+                elif isinstance(msg, ResultMessage):
+                    assert not msg.is_error
+                    break
+        finally:
+            await _safe_disconnect(client)
         assert "ACKNOWLEDGED" in response_text
