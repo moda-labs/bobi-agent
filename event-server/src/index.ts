@@ -20,6 +20,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	getAuthRejectionCounters,
 } from "./core";
 
 interface Env {
@@ -159,7 +160,11 @@ export default {
 		const storage = createKVStorage(env);
 
 		if (method === "GET" && path === "/health") {
-			return Response.json({ status: "ok" });
+			return Response.json({
+				status: "ok",
+				auth: "hmac",
+				rejections: getAuthRejectionCounters(),
+			});
 		}
 
 		if (method === "POST" && path === "/webhooks/github") {

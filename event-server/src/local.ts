@@ -20,6 +20,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	getAuthRejectionCounters,
 } from "./core";
 
 const MAX_BUFFER = 10_000;
@@ -210,7 +211,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	const method = req.method || "GET";
 
 	if (method === "GET" && path === "/health") {
-		return json(res, { status: "ok", mode: "local", deployments: deployments.size });
+		return json(res, {
+			status: "ok",
+			mode: "local",
+			deployments: deployments.size,
+			auth: "hmac",
+			bubbles: bubbles.size,
+			rejections: getAuthRejectionCounters(),
+		});
 	}
 
 	if (method === "POST" && path === "/webhooks/github") {
