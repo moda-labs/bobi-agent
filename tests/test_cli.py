@@ -316,6 +316,42 @@ class TestEventsCommand:
         # "push" should appear exactly once in the output
         assert result.output.count("push") == 1
 
+    def test_inbox_event_renders_payload_text(self, tmp_path):
+        """inbox/* events stored with 'payload' key surface their text."""
+        state = tmp_path / ".modastack" / "state"
+        state.mkdir(parents=True)
+        ev = {
+            "timestamp": "2026-01-01T00:00:01",
+            "source": "inbox",
+            "type": "message",
+            "payload": {"sender": "alice", "text": "hello world"},
+        }
+        (state / "events-sess-a.jsonl").write_text(json.dumps(ev) + "\n")
+        runner = CliRunner()
+        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+            result = runner.invoke(main, ["events"])
+        assert result.exit_code == 0, result.output
+        assert "inbox" in result.output
+        assert "alice" in result.output
+        assert "hello world" in result.output
+
+    def test_payload_event_renders_text_without_sender(self, tmp_path):
+        """Non-inbox events stored with 'payload' key render text detail."""
+        state = tmp_path / ".modastack" / "state"
+        state.mkdir(parents=True)
+        ev = {
+            "timestamp": "2026-01-01T00:00:01",
+            "source": "github",
+            "type": "push",
+            "payload": {"text": "pushed to main"},
+        }
+        (state / "events-sess-a.jsonl").write_text(json.dumps(ev) + "\n")
+        runner = CliRunner()
+        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+            result = runner.invoke(main, ["events"])
+        assert result.exit_code == 0, result.output
+        assert "pushed to main" in result.output
+
     def test_ignores_legacy_events_jsonl(self, tmp_path):
         """Legacy events.jsonl (without session prefix) is not read."""
         state = tmp_path / ".modastack" / "state"
