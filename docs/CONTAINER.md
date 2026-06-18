@@ -67,23 +67,30 @@ docker run --rm -v modastack-a:/data \
   -e MODASTACK_AUTH=subscription \
   -e MODASTACK_TEAM=eng-team \
   -e MODASTACK_EVENT_SERVER_URL=wss://your-worker.example.workers.dev \
+  -e MODASTACK_LOGIN_CHANNEL=C0PRIVATE \
   -e SLACK_BOT_TOKEN=xoxb-... \
   modastack:dev
 ```
 
-Getting the credentials onto the volume the first time is the **C23** login
-bootstrap (post the `claude /login` URL to a private Slack channel, read the
-pasted code back over the event bus). Until C23 lands, the manual fallback is:
+**First-boot login is automated (C23).** When the volume has no credentials,
+the entrypoint runs `modastack login-bootstrap` before starting the manager:
+it drives `claude auth login --claudeai` under a pty, posts the OAuth URL to
+the private Slack channel `MODASTACK_LOGIN_CHANNEL`, and waits for you to paste
+the auth code back **in that channel** — the code arrives as a normal
+Slack→Worker→deployment event over the event bus. The channel **must be
+private**: the code is single-use but grants the login to whoever pastes it
+first. Refresh-token rotation makes this a once-per-machine ceremony.
+
+Manual fallback (if Slack/event-bus isn't wired yet):
 
 ```bash
 # one-time, interactive, writes /data/home/.claude/.credentials.json
 docker run --rm -it -v modastack-a:/data \
-  -e HOME=/data/home --entrypoint claude modastack:dev /login
+  -e HOME=/data/home --entrypoint claude modastack:dev auth login --claudeai
 ```
 
-Refresh-token rotation makes this a once-per-machine ceremony. Never copy a
-`.credentials.json` between machines — shared refresh chains invalidate each
-other.
+Never copy a `.credentials.json` between machines — shared refresh chains
+invalidate each other.
 
 ## Environment variables
 
@@ -92,6 +99,7 @@ other.
 | `MODASTACK_AUTH` | no (default `api_key`) | `api_key` or `subscription` |
 | `MODASTACK_TEAM` | on first boot | team to install into an empty volume |
 | `ANTHROPIC_API_KEY` | api_key mode | **must be absent** in subscription mode |
+| `MODASTACK_LOGIN_CHANNEL` | subscription mode | private Slack channel ID for the first-boot login bootstrap (C23) |
 | `MODASTACK_EVENT_SERVER_URL` | yes | the Worker WSS URL the team config references |
 | `SLACK_BOT_TOKEN`, `GITHUB_TOKEN`, `LINEAR_API_KEY`, … | per team | service tokens (`${VAR}` refs in `agent.yaml`) |
 | `DATA_DIR` / `MODASTACK_PROJECT` / `MODASTACK_HOME` | no | volume layout overrides (default `/data`, `/data/project`, `/data/home`) |

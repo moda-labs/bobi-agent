@@ -64,6 +64,14 @@ if [ ! -f "${PROJECT_DIR}/.modastack/agent.yaml" ]; then
   gosu "${APP_USER}" modastack install "${MODASTACK_TEAM}" --non-interactive
 fi
 
-# --- 4. Hand off to the manager as the non-root user ------------------------
+# --- 4. Subscription auth: bootstrap login over Slack if no creds yet (C23) --
+# Idempotent: a no-op once ~/.claude/.credentials.json exists on the volume.
+if [ "${MODASTACK_AUTH:-api_key}" = "subscription" ] \
+   && [ ! -f "${HOME}/.claude/.credentials.json" ]; then
+  log "Subscription mode, no credentials on volume — running login bootstrap"
+  gosu "${APP_USER}" modastack login-bootstrap
+fi
+
+# --- 5. Hand off to the manager as the non-root user ------------------------
 log "Starting manager (user=${APP_USER}, project=${PROJECT_DIR}, home=${HOME})"
 exec gosu "${APP_USER}" modastack start --foreground "$@"
