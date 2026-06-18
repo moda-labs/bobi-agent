@@ -251,6 +251,11 @@ Events that are NOT auto-dispatched (you must handle manually):
   if the review body contains actionable feedback, dispatch `pr-feedback`.
   If it's praise or LGTM, no action.
 
+Events that are suppressed (no action needed):
+- `pull_request` with `action: review_requested` — a reviewer was
+  assigned. This is informational, NOT feedback. Do NOT dispatch
+  `pr-feedback` for these events.
+
 ## Self-modification
 
 Never make local changes to the modastack repo. If you find issues,

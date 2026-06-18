@@ -189,15 +189,15 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             # A reactor failure on one event must not kill the drain
             # thread — that would silently stop ALL event delivery while
             # the queue grows unbounded.
-            was_dispatched = False
+            reactor_result = None
             if reactor:
                 try:
-                    was_dispatched = reactor.process(e)
+                    reactor_result = reactor.process(e)
                 except Exception:
                     log.exception("Reactor failed processing event %s — "
                                   "delivering it un-dispatched", e.get("type"))
             target = chat_events if e.get("delivery") == "chat" else bulk_events
-            target.append((was_dispatched, e))
+            target.append((reactor_result, e))
 
         # Run input channel handlers on chat events (placeholder, typing, etc.).
         if chat_events:
@@ -213,10 +213,12 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 continue
 
             lines = []
-            for was_dispatched, e in group:
+            for reactor_result, e in group:
                 formatted = formatter(e)
-                if was_dispatched:
+                if reactor_result == "dispatched":
                     formatted += "\n  [AUTO-DISPATCHED: workflow launched — no action needed]"
+                elif reactor_result == "suppressed":
+                    formatted += "\n  [SUPPRESSED: informational event — no action needed]"
                 lines.append(formatted)
             text = "\n\n".join(lines)
 
