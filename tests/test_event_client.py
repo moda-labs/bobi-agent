@@ -327,6 +327,51 @@ class TestAckThrough:
         assert _load_cursor(cursor_path) == 0  # unchanged
 
 
+class TestRecordDisconnect:
+    """_record_disconnect keeps routine CF-cycle reconnects quiet but flags
+    genuine flapping. A long-lived connection that CF cycles (hibernation /
+    DO eviction) reconnects losslessly via replay — that's 'routine'. A
+    connection that never stays up is 'flapping' and must surface."""
+
+    def _client(self, tmp_path):
+        from modastack.events.client import EventServerClient
+        return EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=tmp_path / "cursor.json",
+        )
+
+    def test_stable_connection_drop_is_routine(self, tmp_path):
+        c = self._client(tmp_path)
+        # Up well past the stability threshold, then dropped (CF cycled the DO).
+        assert c._record_disconnect(c._STABLE_AFTER_S + 10) == "routine"
+        assert c._short_drop_streak == 0
+
+    def test_short_drops_accumulate_then_flag_flapping(self, tmp_path):
+        c = self._client(tmp_path)
+        results = [c._record_disconnect(1.0) for _ in range(c._FLAP_WARN_STREAK)]
+        # Early short drops are quiet reconnects; the streak threshold flips it
+        # to 'flapping' so a genuinely unstable connection is not silent.
+        assert results[:-1] == ["reconnecting"] * (c._FLAP_WARN_STREAK - 1)
+        assert results[-1] == "flapping"
+
+    def test_never_connected_counts_as_short(self, tmp_path):
+        c = self._client(tmp_path)
+        # uptime None = the connect frame never arrived (server down / refused).
+        assert c._record_disconnect(None) == "reconnecting"
+        assert c._short_drop_streak == 1
+
+    def test_stable_connection_resets_flap_streak(self, tmp_path):
+        c = self._client(tmp_path)
+        for _ in range(c._FLAP_WARN_STREAK):
+            c._record_disconnect(1.0)
+        assert c._short_drop_streak == c._FLAP_WARN_STREAK
+        # One good long-lived connection clears the streak.
+        assert c._record_disconnect(c._STABLE_AFTER_S + 1) == "routine"
+        assert c._short_drop_streak == 0
+
+
 class TestEventQueue:
 
     def test_queue_starts_empty(self):

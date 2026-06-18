@@ -176,6 +176,39 @@ class EventServerClient:
         # buffered but never replayed to this brand-new subscriber.
         self._connected = threading.Event()
         self._reconnect_delay = 1
+        # Connection-stability tracking so routine reconnects stay quiet but
+        # genuine flapping still surfaces. A Cloudflare Durable Object cycles
+        # hibernating WebSockets from the runtime side every few minutes; the
+        # client reconnects losslessly (replay via last_seen cursor), so a
+        # long-lived connection that ends is NOT worth a warning. A connection
+        # that never stays up IS. See investigate report (CF DO cycling).
+        self._last_connected_at: float | None = None
+        self._short_drop_streak = 0
+        self._ever_connected = False
+        self._last_ws_error: object = None
+
+    # A connection that stayed up at least this long before ending is treated
+    # as a routine CF cycle, not instability.
+    _STABLE_AFTER_S = 30.0
+    # This many short-lived connections in a row flips logging to a warning.
+    _FLAP_WARN_STREAK = 5
+
+    def _record_disconnect(self, uptime: float | None) -> str:
+        """Classify a just-ended connection and update flap-streak state.
+
+        ``uptime`` is seconds the connection stayed up, or ``None`` if the
+        "connected" frame never arrived. Returns the log category:
+        ``"routine"`` (long-lived, CF cycled it), ``"flapping"`` (streak of
+        short connections crossed the threshold), or ``"reconnecting"``
+        (a short drop below the warn threshold).
+        """
+        if uptime is not None and uptime >= self._STABLE_AFTER_S:
+            self._short_drop_streak = 0
+            return "routine"
+        self._short_drop_streak += 1
+        if self._short_drop_streak >= self._FLAP_WARN_STREAK:
+            return "flapping"
+        return "reconnecting"
 
     def start(self) -> threading.Thread:
         self._thread = threading.Thread(target=self._run_loop, daemon=True,
@@ -215,13 +248,32 @@ class EventServerClient:
             try:
                 self._connect()
             except Exception as e:
-                log.warning(f"Event client error: {e}")
+                # Couldn't even establish — counts as a short connection below.
+                self._last_ws_error = e
 
             if self._stop.is_set():
                 break
 
+            uptime = None
+            if self._last_connected_at is not None:
+                uptime = time.monotonic() - self._last_connected_at
+                self._last_connected_at = None
+
+            category = self._record_disconnect(uptime)
+            if category == "flapping":
+                log.warning(
+                    "Event client unstable: %d short-lived connections in a row "
+                    "(last error: %s) — check event server / auth / network",
+                    self._short_drop_streak, self._last_ws_error,
+                )
+            else:
+                # Routine CF cycle or a single short blip — the reconnect below
+                # recovers losslessly, so keep it at debug.
+                up = f"{uptime:.0f}s" if uptime is not None else "n/a"
+                log.debug("Event client reconnecting (%s, last uptime: %s)",
+                          category, up)
+
             delay = min(self._reconnect_delay, 60)
-            log.info(f"Event client reconnecting in {delay}s")
             self._stop.wait(timeout=delay)
             self._reconnect_delay = min(self._reconnect_delay * 2, 60)
 
@@ -241,8 +293,15 @@ class EventServerClient:
             msg_type = msg.get("type")
 
             if msg_type == "connected":
-                log.info(f"Event client connected (next_seq: {msg.get('next_seq')})")
+                self._last_connected_at = time.monotonic()
                 self._reconnect_delay = 1
+                # First connect of the process is worth surfacing; routine
+                # reconnects after CF cycling are not, so they go to debug.
+                if not self._ever_connected:
+                    log.info(f"Event client connected (next_seq: {msg.get('next_seq')})")
+                else:
+                    log.debug(f"Event client reconnected (next_seq: {msg.get('next_seq')})")
+                self._ever_connected = True
                 self._connected.set()
                 return
 
@@ -260,10 +319,14 @@ class EventServerClient:
                     self.on_event(data)
 
         def on_error(ws, error):
-            log.warning(f"Event client WebSocket error: {error}")
+            # Per-error noise is demoted: the run loop owns stability-aware
+            # logging (warns only on a sustained flap streak). Stash the error
+            # so that warning can name the cause.
+            self._last_ws_error = error
+            log.debug(f"Event client WebSocket error: {error}")
 
         def on_close(ws, close_status, close_msg):
-            log.info(f"Event client disconnected: {close_status} {close_msg}")
+            log.debug(f"Event client disconnected: {close_status} {close_msg}")
 
         self._ws = websocket.WebSocketApp(
             ws_url,
