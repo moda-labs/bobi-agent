@@ -61,7 +61,7 @@ jobs:
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:live')
         uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"  # wrangler requires Node >= 22
 
       - name: Install event-server deps
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:live')
