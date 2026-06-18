@@ -2,14 +2,20 @@ import { describe, it, expect } from "vitest";
 import {
 	type StorageAdapter,
 	type DeploymentRecord,
+	type BubbleRecord,
+	type BubbleAuthContext,
 	type SlackWorkspaceRecord,
 	type NormalizedEvent,
+	namespaceSubKey,
 	createTopicEvent,
 	normalizeGitHubPayload,
 	normalizeLinearPayload,
 	normalizeSlackPayload,
 	subscriptionKeysForEvent,
 	verifyGitHubSignature,
+	constantTimeEqual,
+	buildBubbleSignature,
+	verifyBubbleSignature,
 	authenticateDeployment,
 	handleGitHubWebhook,
 	handleLinearWebhook,
@@ -390,6 +396,128 @@ describe("verifyGitHubSignature", () => {
 	});
 });
 
+describe("constantTimeEqual", () => {
+	it("returns true for equal strings", () => {
+		expect(constantTimeEqual("abc123", "abc123")).toBe(true);
+	});
+
+	it("returns false for differing strings of equal length", () => {
+		expect(constantTimeEqual("abc123", "abc124")).toBe(false);
+	});
+
+	it("returns false for differing lengths", () => {
+		expect(constantTimeEqual("abc", "abcd")).toBe(false);
+	});
+
+	it("returns true for two empty strings", () => {
+		expect(constantTimeEqual("", "")).toBe(true);
+	});
+});
+
+describe("bubble signature", () => {
+	const secret = "bkey_test_secret";
+	const algo = "hmac-sha256";
+	const nonce = "nonce-1";
+	const method = "POST";
+	const path = "/events/inbox/manager";
+	const body = '{"text":"hi"}';
+
+	function now(): string {
+		return String(Math.floor(Date.now() / 1000));
+	}
+
+	it("round-trips: a built signature verifies", async () => {
+		const timestamp = now();
+		const signature = await buildBubbleSignature(secret, timestamp, nonce, method, path, body);
+		const ok = await verifyBubbleSignature({
+			secret, algo, timestamp, nonce, method, path, body, signature,
+		});
+		expect(ok).toBe(true);
+	});
+
+	it("rejects a tampered body", async () => {
+		const timestamp = now();
+		const signature = await buildBubbleSignature(secret, timestamp, nonce, method, path, body);
+		const ok = await verifyBubbleSignature({
+			secret, algo, timestamp, nonce, method, path,
+			body: '{"text":"tampered"}', signature,
+		});
+		expect(ok).toBe(false);
+	});
+
+	it("rejects a wrong secret", async () => {
+		const timestamp = now();
+		const signature = await buildBubbleSignature(secret, timestamp, nonce, method, path, body);
+		const ok = await verifyBubbleSignature({
+			secret: "bkey_other", algo, timestamp, nonce, method, path, body, signature,
+		});
+		expect(ok).toBe(false);
+	});
+
+	it("rejects a stale timestamp (replay window)", async () => {
+		const timestamp = String(Math.floor(Date.now() / 1000) - 600);
+		const signature = await buildBubbleSignature(secret, timestamp, nonce, method, path, body);
+		const ok = await verifyBubbleSignature({
+			secret, algo, timestamp, nonce, method, path, body, signature,
+		});
+		expect(ok).toBe(false);
+	});
+
+	it("rejects an unknown algorithm", async () => {
+		const timestamp = now();
+		const signature = await buildBubbleSignature(secret, timestamp, nonce, method, path, body);
+		const ok = await verifyBubbleSignature({
+			secret, algo: "none", timestamp, nonce, method, path, body, signature,
+		});
+		expect(ok).toBe(false);
+	});
+
+	it("rejects a missing nonce", async () => {
+		const timestamp = now();
+		const signature = await buildBubbleSignature(secret, timestamp, "", method, path, body);
+		const ok = await verifyBubbleSignature({
+			secret, algo, timestamp, nonce: "", method, path, body, signature,
+		});
+		expect(ok).toBe(false);
+	});
+
+	it("binds the method (POST sig fails as GET)", async () => {
+		const timestamp = now();
+		const signature = await buildBubbleSignature(secret, timestamp, nonce, "POST", path, body);
+		const ok = await verifyBubbleSignature({
+			secret, algo, timestamp, nonce, method: "GET", path, body, signature,
+		});
+		expect(ok).toBe(false);
+	});
+
+	it("binds the path (different path fails)", async () => {
+		const timestamp = now();
+		const signature = await buildBubbleSignature(secret, timestamp, nonce, method, path, body);
+		const ok = await verifyBubbleSignature({
+			secret, algo, timestamp, nonce, method,
+			path: "/events/inbox/other", body, signature,
+		});
+		expect(ok).toBe(false);
+	});
+
+	// PARITY VECTOR — keep identical to tests/test_signing.py (GOLDEN_*).
+	// If this drifts from the Python signer, one of the two suites fails here
+	// instead of producing silent 403s only visible against a live server.
+	it("matches the cross-language golden vector", async () => {
+		const sig = await buildBubbleSignature(
+			"bkey_golden",
+			"1700000000",
+			"abc123",
+			"POST",
+			"/events/inbox/manager",
+			'{"payload":{"a":2,"text":"hi","z":1},"source":"inbox"}',
+		);
+		expect(sig).toBe(
+			"81915dcbcceb5cfa052c2a17557962413517be26f0094dd62fe355cd6d0126d7",
+		);
+	});
+});
+
 describe("subscriptionKeysForEvent", () => {
 	it("returns topics when present", () => {
 		const keys = subscriptionKeysForEvent({
@@ -578,23 +706,29 @@ function createMockStorage(): StorageAdapter & {
 	deployments: Map<string, DeploymentRecord>;
 	apiKeyIndex: Map<string, string>;
 	subscriptions: Map<string, Set<string>>;
+	bubbles: Map<string, BubbleRecord>;
 	slackWorkspaces: Map<string, SlackWorkspaceRecord>;
 	delivered: NormalizedEvent[];
+	deliveredTo: Array<{ event: NormalizedEvent; ids: string[] }>;
 	initCalls: Array<{ deploymentId: string; subscriptions: string[] }>;
 } {
 	const deployments = new Map<string, DeploymentRecord>();
 	const apiKeyIndex = new Map<string, string>();
 	const subscriptions = new Map<string, Set<string>>();
+	const bubbles = new Map<string, BubbleRecord>();
 	const slackWorkspaces = new Map<string, SlackWorkspaceRecord>();
 	const delivered: NormalizedEvent[] = [];
+	const deliveredTo: Array<{ event: NormalizedEvent; ids: string[] }> = [];
 	const initCalls: Array<{ deploymentId: string; subscriptions: string[] }> = [];
 
 	return {
 		deployments,
 		apiKeyIndex,
 		subscriptions,
+		bubbles,
 		slackWorkspaces,
 		delivered,
+		deliveredTo,
 		initCalls,
 
 		async getDeploymentByApiKey(apiKey: string) {
@@ -622,8 +756,21 @@ function createMockStorage(): StorageAdapter & {
 			}
 		},
 		async deliver(event: NormalizedEvent) {
+			// Realistic fan-out: resolve subscribers via the SAME namespacing the
+			// server uses, so bubble isolation is testable at the handler layer.
 			delivered.push(event);
-			return 1;
+			const ids = new Set<string>();
+			for (const key of subscriptionKeysForEvent(event)) {
+				for (const id of subscriptions.get(key) || []) ids.add(id);
+			}
+			deliveredTo.push({ event, ids: [...ids] });
+			return ids.size;
+		},
+		async getBubble(bubbleId: string) {
+			return bubbles.get(bubbleId) || null;
+		},
+		async putBubble(bubble: BubbleRecord) {
+			bubbles.set(bubble.id, bubble);
 		},
 		async getSlackWorkspace(workspaceId: string) {
 			return slackWorkspaces.get(workspaceId) || null;
@@ -637,6 +784,42 @@ function createMockStorage(): StorageAdapter & {
 	};
 }
 
+// --- bubble-signing test helpers -------------------------------------------
+
+// Put a bubble in the store and return it (the "minted" bubble for a test).
+function seedBubble(store: ReturnType<typeof createMockStorage>, id = "bub_test", key = "bkey_test"): BubbleRecord {
+	const bubble: BubbleRecord = { id, key };
+	store.bubbles.set(id, bubble);
+	return bubble;
+}
+
+// Build a valid signed BubbleAuthContext for a request.
+async function signCtx(
+	bubble: BubbleRecord,
+	method: string,
+	path: string,
+	rawBody: string,
+	nonce = "n1",
+): Promise<BubbleAuthContext> {
+	const timestamp = String(Math.floor(Date.now() / 1000));
+	const signature = await buildBubbleSignature(bubble.key, timestamp, nonce, method, path, rawBody);
+	return {
+		bubbleId: bubble.id,
+		algo: "hmac-sha256",
+		timestamp,
+		nonce,
+		signature,
+		method,
+		path,
+		rawBody,
+	};
+}
+
+// An unsigned context — registration treats this as a MINT.
+function mintCtx(method: string, path: string, rawBody: string): BubbleAuthContext {
+	return { bubbleId: "", algo: "", timestamp: "", nonce: "", signature: "", method, path, rawBody };
+}
+
 // ---------------------------------------------------------------------------
 // Handler tests
 // ---------------------------------------------------------------------------
@@ -644,7 +827,7 @@ function createMockStorage(): StorageAdapter & {
 describe("authenticateDeployment", () => {
 	it("returns deployment when api key and id match", async () => {
 		const store = createMockStorage();
-		const dep: DeploymentRecord = { id: "d1", name: "test", api_key: "key1", subscriptions: [] };
+		const dep: DeploymentRecord = { id: "d1", name: "test", api_key: "key1", bubble_id: "bub_test", subscriptions: [] };
 		store.deployments.set("d1", dep);
 		store.apiKeyIndex.set("key1", "d1");
 
@@ -660,7 +843,7 @@ describe("authenticateDeployment", () => {
 
 	it("returns null when deployment id does not match key", async () => {
 		const store = createMockStorage();
-		const dep: DeploymentRecord = { id: "d1", name: "test", api_key: "key1", subscriptions: [] };
+		const dep: DeploymentRecord = { id: "d1", name: "test", api_key: "key1", bubble_id: "bub_test", subscriptions: [] };
 		store.deployments.set("d1", dep);
 		store.apiKeyIndex.set("key1", "d1");
 
@@ -671,6 +854,9 @@ describe("authenticateDeployment", () => {
 describe("handleGitHubWebhook", () => {
 	it("normalizes and delivers a v2 github event", async () => {
 		const store = createMockStorage();
+		// Webhook resource topics are GLOBAL — a subscriber on github:org/repo
+		// receives it regardless of bubble.
+		await store.addSubscription("github:org/repo", "sub1");
 		const result = await handleGitHubWebhook(store, "issues", "del-1", {
 			action: "opened",
 			repository: { full_name: "org/repo" },
@@ -722,9 +908,11 @@ describe("handleSlackWebhook", () => {
 			},
 		});
 		expect(result.status).toBe(200);
-		expect((result.body as Record<string, number>).delivered_to).toBe(1);
 		expect(store.delivered).toHaveLength(1);
 		expect(store.delivered[0].delivery).toBe("chat");
+		// Webhook resource topic is global; a subscriber on it would receive it.
+		await store.addSubscription(store.delivered[0].topics[0], "sub1");
+		expect(await store.deliver(store.delivered[0])).toBe(1);
 	});
 
 	it("returns ok for non-event_callback types without delivering", async () => {
@@ -767,39 +955,89 @@ describe("handleSlackWebhook", () => {
 });
 
 describe("handleRegisterDeployment", () => {
-	it("creates a deployment with subscriptions and calls initDeploymentSession", async () => {
+	it("MINTS a bubble for an unsigned registration and returns the key once", async () => {
 		const store = createMockStorage();
-		const result = await handleRegisterDeployment(store, {
-			name: "my-deploy",
-			subscriptions: ["github:org/repo", "linear:PROJ"],
-		});
+		const body = { name: "my-deploy", subscriptions: ["github:org/repo", "linear:PROJ"] };
+		const raw = JSON.stringify(body);
+		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
 		expect(result.status).toBe(201);
-		const body = result.body as { deployment_id: string; api_key: string };
-		expect(body.deployment_id).toBeTruthy();
-		expect(body.api_key).toMatch(/^moda_/);
+		const resp = result.body as { deployment_id: string; api_key: string; bubble_id: string; bubble_key: string };
+		expect(resp.deployment_id).toBeTruthy();
+		expect(resp.api_key).toMatch(/^moda_/);
+		expect(resp.bubble_id).toMatch(/^bub_/);
+		expect(resp.bubble_key).toMatch(/^bkey_/); // returned ONCE at mint
+		expect(store.bubbles.has(resp.bubble_id)).toBe(true);
 
 		expect(store.deployments.size).toBe(1);
-		expect(store.subscriptions.get("github:org/repo")?.has(body.deployment_id)).toBe(true);
-		expect(store.subscriptions.get("linear:PROJ")?.has(body.deployment_id)).toBe(true);
+		// Global webhook topics are not namespaced.
+		expect(store.subscriptions.get("github:org/repo")?.has(resp.deployment_id)).toBe(true);
+		expect(store.subscriptions.get("linear:PROJ")?.has(resp.deployment_id)).toBe(true);
 		expect(store.initCalls).toHaveLength(1);
-		expect(store.initCalls[0].deploymentId).toBe(body.deployment_id);
+		expect(store.initCalls[0].deploymentId).toBe(resp.deployment_id);
+	});
+
+	it("namespaces non-global subscriptions to the bubble", async () => {
+		const store = createMockStorage();
+		const body = { name: "d", subscriptions: ["inbox/manager", "monitor/x"] };
+		const raw = JSON.stringify(body);
+		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
+		const resp = result.body as { deployment_id: string; bubble_id: string };
+		expect(store.subscriptions.get(`${resp.bubble_id}:inbox/manager`)?.has(resp.deployment_id)).toBe(true);
+		expect(store.subscriptions.get("inbox/manager")).toBeUndefined(); // never bare
+	});
+
+	it("JOINS an existing bubble with a valid signature (no key returned)", async () => {
+		const store = createMockStorage();
+		const bubble = seedBubble(store);
+		const body = { name: "second-session", subscriptions: ["inbox/worker"] };
+		const raw = JSON.stringify(body);
+		const ctx = await signCtx(bubble, "POST", "/deployments", raw);
+		const result = await handleRegisterDeployment(store, body, ctx);
+		expect(result.status).toBe(201);
+		const resp = result.body as { bubble_id: string; bubble_key?: string };
+		expect(resp.bubble_id).toBe(bubble.id);
+		expect(resp.bubble_key).toBeUndefined(); // never on join
+		expect(store.bubbles.size).toBe(1); // no new bubble minted
+	});
+
+	it("REJECTS a registration with partial signing headers (no silent mint)", async () => {
+		const store = createMockStorage();
+		const body = { name: "x", subscriptions: ["inbox/x"] };
+		const raw = JSON.stringify(body);
+		// bubble_id present but signature/timestamp/nonce missing — malformed,
+		// must NOT fall back to minting a fresh bubble.
+		const ctx = { ...mintCtx("POST", "/deployments", raw), bubbleId: "bub_partial" };
+		const result = await handleRegisterDeployment(store, body, ctx);
+		expect(result.status).toBe(403);
+		expect(store.bubbles.size).toBe(0);
+	});
+
+	it("REJECTS a join with a bad signature", async () => {
+		const store = createMockStorage();
+		seedBubble(store, "bub_test", "bkey_real");
+		const body = { name: "x", subscriptions: ["inbox/worker"] };
+		const raw = JSON.stringify(body);
+		// Sign with the wrong key but claim the real bubble id.
+		const ctx = await signCtx({ id: "bub_test", key: "bkey_wrong" }, "POST", "/deployments", raw);
+		const result = await handleRegisterDeployment(store, body, ctx);
+		expect(result.status).toBe(403);
 	});
 
 	it("rejects missing name", async () => {
 		const store = createMockStorage();
-		const result = await handleRegisterDeployment(store, { subscriptions: ["foo"] });
+		const result = await handleRegisterDeployment(store, { subscriptions: ["foo"] }, mintCtx("POST", "/deployments", ""));
 		expect(result.status).toBe(400);
 	});
 
 	it("rejects missing subscriptions", async () => {
 		const store = createMockStorage();
-		const result = await handleRegisterDeployment(store, { name: "test" });
+		const result = await handleRegisterDeployment(store, { name: "test" }, mintCtx("POST", "/deployments", ""));
 		expect(result.status).toBe(400);
 	});
 
 	it("rejects empty subscriptions array", async () => {
 		const store = createMockStorage();
-		const result = await handleRegisterDeployment(store, { name: "test", subscriptions: [] });
+		const result = await handleRegisterDeployment(store, { name: "test", subscriptions: [] }, mintCtx("POST", "/deployments", ""));
 		expect(result.status).toBe(400);
 	});
 });
@@ -808,7 +1046,7 @@ describe("handleUpdateSubscriptions", () => {
 	it("adds new subscriptions to an existing deployment", async () => {
 		const store = createMockStorage();
 		const dep: DeploymentRecord = {
-			id: "d1", name: "test", api_key: "key1",
+			id: "d1", name: "test", api_key: "key1", bubble_id: "bub_test",
 			subscriptions: ["github:org/repo"],
 		};
 		store.deployments.set("d1", dep);
@@ -824,10 +1062,24 @@ describe("handleUpdateSubscriptions", () => {
 		expect(body.subscriptions).toContain("linear:PROJ");
 	});
 
+	it("namespaces a non-global added subscription to the deployment's bubble", async () => {
+		const store = createMockStorage();
+		const dep: DeploymentRecord = {
+			id: "d1", name: "test", api_key: "key1", bubble_id: "bub_abc",
+			subscriptions: [],
+		};
+		store.deployments.set("d1", dep);
+		store.apiKeyIndex.set("key1", "d1");
+
+		await handleUpdateSubscriptions(store, "d1", "key1", { add: ["inbox/d1"] });
+		expect(store.subscriptions.get("bub_abc:inbox/d1")?.has("d1")).toBe(true);
+		expect(store.subscriptions.get("inbox/d1")).toBeUndefined();
+	});
+
 	it("deduplicates existing subscriptions", async () => {
 		const store = createMockStorage();
 		const dep: DeploymentRecord = {
-			id: "d1", name: "test", api_key: "key1",
+			id: "d1", name: "test", api_key: "key1", bubble_id: "bub_test",
 			subscriptions: ["github:org/repo"],
 		};
 		store.deployments.set("d1", dep);
@@ -849,7 +1101,7 @@ describe("handleUpdateSubscriptions", () => {
 
 	it("rejects empty add array", async () => {
 		const store = createMockStorage();
-		const dep: DeploymentRecord = { id: "d1", name: "test", api_key: "key1", subscriptions: [] };
+		const dep: DeploymentRecord = { id: "d1", name: "test", api_key: "key1", bubble_id: "bub_test", subscriptions: [] };
 		store.deployments.set("d1", dep);
 		store.apiKeyIndex.set("key1", "d1");
 
@@ -860,7 +1112,7 @@ describe("handleUpdateSubscriptions", () => {
 	it("persists updated deployment via putDeployment", async () => {
 		const store = createMockStorage();
 		const dep: DeploymentRecord = {
-			id: "d1", name: "test", api_key: "key1",
+			id: "d1", name: "test", api_key: "key1", bubble_id: "bub_test",
 			subscriptions: ["github:org/repo"],
 		};
 		store.deployments.set("d1", dep);
@@ -938,16 +1190,43 @@ describe("handleDeregisterDeployment", () => {
 });
 
 describe("handleTopicEvent", () => {
-	it("creates and delivers a v2 topic event", async () => {
+	it("requires a valid bubble signature to publish", async () => {
 		const store = createMockStorage();
-		const result = await handleTopicEvent(store, "deploy.complete", {
-			source: "ci",
-			payload: { sha: "abc" },
-		});
+		const body = { source: "ci", payload: { sha: "abc" } };
+		const raw = JSON.stringify(body);
+		const result = await handleTopicEvent(store, "deploy.complete", body, mintCtx("POST", "/events/deploy.complete", raw));
+		expect(result.status).toBe(403); // unsigned publish rejected
+		expect(store.delivered).toHaveLength(0);
+	});
+
+	it("creates and delivers a v2 topic event stamped with the publisher's bubble", async () => {
+		const store = createMockStorage();
+		const bubble = seedBubble(store);
+		const body = { source: "ci", payload: { sha: "abc" } };
+		const raw = JSON.stringify(body);
+		const ctx = await signCtx(bubble, "POST", "/events/deploy.complete", raw);
+		const result = await handleTopicEvent(store, "deploy.complete", body, ctx);
 		expect(result.status).toBe(200);
 		expect(store.delivered).toHaveLength(1);
 		expect(store.delivered[0].type).toBe("deploy.complete");
-		expect(store.delivered[0].v).toBe(2);
+		expect(store.delivered[0].bubble_id).toBe(bubble.id);
+	});
+
+	it("isolates: a publish reaches only same-bubble subscribers of the topic", async () => {
+		const store = createMockStorage();
+		const bubbleA = seedBubble(store, "bub_A", "bkey_A");
+		seedBubble(store, "bub_B", "bkey_B");
+		// Subscriber in bubble A and subscriber in bubble B both want inbox/x.
+		await store.addSubscription(namespaceSubKey("bub_A", "inbox/x"), "depA");
+		await store.addSubscription(namespaceSubKey("bub_B", "inbox/x"), "depB");
+
+		const body = { payload: { text: "hi" } };
+		const raw = JSON.stringify(body);
+		const ctx = await signCtx(bubbleA, "POST", "/events/inbox/x", raw);
+		await handleTopicEvent(store, "inbox/x", body, ctx);
+
+		const last = store.deliveredTo[store.deliveredTo.length - 1];
+		expect(last.ids).toEqual(["depA"]); // bubble B's subscriber excluded
 	});
 });
 
