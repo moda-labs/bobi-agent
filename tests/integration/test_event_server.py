@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -821,3 +822,103 @@ class TestSchedulerEndToEnd:
         finally:
             agent_yaml.write_text(original)
             publish_mod._es_url_cache.clear()
+
+
+class TestBindAddress:
+    """The event server must default to loopback (127.0.0.1) and only widen
+    the listen address when MODASTACK_ES_BIND is set explicitly.  Bind
+    address must be independent of any auth setting (#241)."""
+
+    @staticmethod
+    def _start_server(modastack_env, port: int, extra_env: dict | None = None):
+        """Start an event server with explicit env control, return (proc, log_path)."""
+        from modastack.events.server import _find_event_server_dir, _needs_build, _run_npm
+
+        es_dir = _find_event_server_dir()
+        if not (es_dir / "node_modules").exists():
+            _run_npm(["npm", "install", "--no-audit", "--no-fund"], es_dir)
+        if _needs_build(es_dir):
+            _run_npm(["npm", "run", "build:local"], es_dir)
+
+        log_path = modastack_env.state_dir / f"event-server-bind-{port}.log"
+
+        # Start from a clean env without any inherited MODASTACK_ES_BIND
+        env = {k: v for k, v in os.environ.items() if k != "MODASTACK_ES_BIND"}
+        env["MODASTACK_ES_PORT"] = str(port)
+        if extra_env:
+            env.update(extra_env)
+
+        lf = open(log_path, "w")
+        proc = subprocess.Popen(
+            ["node", str(es_dir / "dist" / "local.js")],
+            stdout=lf, stderr=lf,
+            env=env, start_new_session=True,
+        )
+        return proc, log_path, lf
+
+    @staticmethod
+    def _wait_healthy(url: str, timeout: float = 10) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                data = _get_json(f"{url}/health")
+                if data.get("status") == "ok":
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.3)
+        return False
+
+    @staticmethod
+    def _stop(proc, lf):
+        try:
+            os.kill(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            proc.kill()
+        lf.close()
+
+    def test_default_binds_loopback(self, modastack_env):
+        """Without MODASTACK_ES_BIND, the server binds 127.0.0.1 and logs the
+        loopback-only advisory message."""
+        port = _free_port()
+        proc, log_path, lf = self._start_server(modastack_env, port)
+        try:
+            assert self._wait_healthy(f"http://127.0.0.1:{port}")
+
+            log_text = log_path.read_text()
+            assert f"127.0.0.1:{port}" in log_text
+            assert "loopback-only" in log_text
+            assert "MODASTACK_ES_BIND" in log_text
+        finally:
+            self._stop(proc, lf)
+
+    def test_explicit_bind_all_interfaces(self, modastack_env):
+        """MODASTACK_ES_BIND=0.0.0.0 widens the listener; the log omits the
+        loopback advisory."""
+        port = _free_port()
+        proc, log_path, lf = self._start_server(
+            modastack_env, port, {"MODASTACK_ES_BIND": "0.0.0.0"})
+        try:
+            assert self._wait_healthy(f"http://127.0.0.1:{port}")
+
+            log_text = log_path.read_text()
+            assert f"0.0.0.0:{port}" in log_text
+            assert "loopback-only" not in log_text
+        finally:
+            self._stop(proc, lf)
+
+    def test_bind_decoupled_from_webhook_secret(self, modastack_env):
+        """Setting MODASTACK_ES_WEBHOOK_SECRET must not change the bind address.
+        Regression guard: an earlier draft coupled auth and bind."""
+        port = _free_port()
+        proc, log_path, lf = self._start_server(
+            modastack_env, port, {"MODASTACK_ES_WEBHOOK_SECRET": "s3cret"})
+        try:
+            assert self._wait_healthy(f"http://127.0.0.1:{port}")
+
+            log_text = log_path.read_text()
+            assert f"127.0.0.1:{port}" in log_text
+            assert "loopback-only" in log_text
+        finally:
+            self._stop(proc, lf)
