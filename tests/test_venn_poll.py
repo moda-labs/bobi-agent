@@ -52,7 +52,8 @@ class TestVennPollRunner:
             {"id": "msg-2", "subject": "World", "from": "c@d.com"},
         ]
         venn_output = json.dumps({"result": items})
-        with patch("subprocess.run") as mock_run:
+        with patch("modastack.monitors.venn_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=venn_output, stderr="",
             )
@@ -67,7 +68,8 @@ class TestVennPollRunner:
         """No items from Venn = all clear (empty list, not None)."""
         runner = self._get_runner()
         venn_output = json.dumps({"result": []})
-        with patch("subprocess.run") as mock_run:
+        with patch("modastack.monitors.venn_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=venn_output, stderr="",
             )
@@ -80,7 +82,8 @@ class TestVennPollRunner:
         runner = self._get_runner()
         items = [{"message_id": "abc", "text": "hi"}]
         venn_output = json.dumps({"result": items})
-        with patch("subprocess.run") as mock_run:
+        with patch("modastack.monitors.venn_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=venn_output, stderr="",
             )
@@ -94,7 +97,8 @@ class TestVennPollRunner:
         runner = self._get_runner()
         items = [{"text": "no id here"}]
         venn_output = json.dumps({"result": items})
-        with patch("subprocess.run") as mock_run:
+        with patch("modastack.monitors.venn_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=venn_output, stderr="",
             )
@@ -107,7 +111,8 @@ class TestVennPollRunner:
     def test_venn_cli_failure_returns_none(self):
         """A failed Venn CLI call is indeterminate (None), not all-clear."""
         runner = self._get_runner()
-        with patch("subprocess.run") as mock_run:
+        with patch("modastack.monitors.venn_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=1, stdout="", stderr="connection error",
             )
@@ -118,7 +123,8 @@ class TestVennPollRunner:
     def test_venn_cli_timeout_returns_none(self):
         """A timed-out Venn CLI call is indeterminate."""
         runner = self._get_runner()
-        with patch("subprocess.run") as mock_run:
+        with patch("modastack.monitors.venn_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired("venn", 60)
             result = runner(self._monitor(), [Path("/repo")])
 
@@ -127,7 +133,8 @@ class TestVennPollRunner:
     def test_unparseable_output_returns_none(self):
         """Garbage output from Venn CLI is indeterminate."""
         runner = self._get_runner()
-        with patch("subprocess.run") as mock_run:
+        with patch("modastack.monitors.venn_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="not json at all", stderr="",
             )
@@ -138,7 +145,8 @@ class TestVennPollRunner:
     def test_builds_correct_venn_command(self):
         """venn_poll invokes `venn tools execute -s <service> -t <tool> -a <query>`."""
         runner = self._get_runner()
-        with patch("subprocess.run") as mock_run:
+        with patch("modastack.monitors.venn_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout=json.dumps({"result": []}),
@@ -161,7 +169,8 @@ class TestVennPollRunner:
     def test_injects_venn_api_key_in_env(self):
         """The VENN_API_KEY is injected into the subprocess environment."""
         runner = self._get_runner()
-        with patch("subprocess.run") as mock_run, \
+        with patch("modastack.monitors.venn_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("subprocess.run") as mock_run, \
              patch.dict("os.environ", {"VENN_API_KEY": "test-key-123"}):
             mock_run.return_value = MagicMock(
                 returncode=0,
@@ -178,7 +187,8 @@ class TestVennPollRunner:
         venn_poll handles it."""
         runner = self._get_runner()
         items = [{"id": "x1", "data": "val"}]
-        with patch("subprocess.run") as mock_run:
+        with patch("modastack.monitors.venn_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=json.dumps(items), stderr="",
             )
