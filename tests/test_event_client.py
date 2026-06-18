@@ -372,6 +372,76 @@ class TestRecordDisconnect:
         assert c._short_drop_streak == 0
 
 
+class TestSeqDedup:
+    """EventServerClient drops duplicate seq numbers (#322).
+
+    When a stale WebSocket overlaps with a fresh one on the server,
+    the same event is delivered twice.  The client must deduplicate
+    by seq number so only one copy reaches the drain queue.
+    """
+
+    def _client(self, tmp_path, queue=None):
+        from queue import SimpleQueue
+        from modastack.events.client import EventServerClient
+        q = queue or SimpleQueue()
+        return EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=tmp_path / "cursor.json",
+            queue=q,
+        ), q
+
+    @patch("modastack.events.client._log_event")
+    def test_duplicate_seq_dropped(self, _mock_log, tmp_path):
+        """Second event with the same seq is silently dropped."""
+        from queue import SimpleQueue
+        q = SimpleQueue()
+        client, _ = self._client(tmp_path, queue=q)
+
+        event_data = {"source": "slack", "type": "slack.dm", "seq": 5,
+                      "fields": {"channel": "C1"}}
+        msg = json.dumps({"type": "event", "data": event_data})
+
+        # Simulate receiving the same event twice (stale + fresh WS)
+        client._handle_message(msg)
+        client._handle_message(msg)
+
+        assert q.qsize() == 1, "Duplicate seq should be dropped"
+
+    @patch("modastack.events.client._log_event")
+    def test_higher_seq_accepted(self, _mock_log, tmp_path):
+        """Events with increasing seq numbers are all accepted."""
+        from queue import SimpleQueue
+        q = SimpleQueue()
+        client, _ = self._client(tmp_path, queue=q)
+
+        for seq in (1, 2, 3):
+            msg = json.dumps({"type": "event", "data": {
+                "source": "slack", "type": "slack.dm", "seq": seq,
+                "fields": {"channel": "C1"},
+            }})
+            client._handle_message(msg)
+
+        assert q.qsize() == 3
+
+    @patch("modastack.events.client._log_event")
+    def test_zero_seq_not_deduped(self, _mock_log, tmp_path):
+        """Events without seq (seq=0) are always accepted."""
+        from queue import SimpleQueue
+        q = SimpleQueue()
+        client, _ = self._client(tmp_path, queue=q)
+
+        for _ in range(2):
+            msg = json.dumps({"type": "event", "data": {
+                "source": "slack", "type": "slack.dm", "seq": 0,
+                "fields": {"channel": "C1"},
+            }})
+            client._handle_message(msg)
+
+        assert q.qsize() == 2
+
+
 class TestEventQueue:
 
     def test_queue_starts_empty(self):

@@ -186,6 +186,9 @@ class EventServerClient:
         self._short_drop_streak = 0
         self._ever_connected = False
         self._last_ws_error: object = None
+        # Highest seq number seen — used to drop duplicate events when a
+        # stale WebSocket overlaps with a fresh one on the server (#322).
+        self._highest_seq = 0
 
     # A connection that stayed up at least this long before ending is treated
     # as a routine CF cycle, not instability.
@@ -277,6 +280,55 @@ class EventServerClient:
             self._stop.wait(timeout=delay)
             self._reconnect_delay = min(self._reconnect_delay * 2, 60)
 
+    def _handle_message(self, message: str) -> None:
+        """Process a single WebSocket message (called from on_message callback).
+
+        Extracted as a method so tests can call it directly without standing
+        up a real WebSocket connection.
+        """
+        try:
+            msg = json.loads(message)
+        except json.JSONDecodeError:
+            return
+
+        msg_type = msg.get("type")
+
+        if msg_type == "connected":
+            self._last_connected_at = time.monotonic()
+            self._reconnect_delay = 1
+            if not self._ever_connected:
+                log.info(f"Event client connected (next_seq: {msg.get('next_seq')})")
+            else:
+                log.debug(f"Event client reconnected (next_seq: {msg.get('next_seq')})")
+            self._ever_connected = True
+            self._connected.set()
+            return
+
+        if msg_type == "pong":
+            return
+
+        if msg_type in ("event", "replay"):
+            data = msg.get("data", {})
+
+            # Deduplicate: if a stale WebSocket and a fresh one both
+            # sit in the server's connection set, the same seq arrives
+            # twice. Drop the duplicate before it reaches the queue so
+            # only one placeholder is ever posted (#322).
+            seq = data.get("seq", 0)
+            if seq > 0 and seq <= self._highest_seq:
+                log.debug("Dropping duplicate seq %d (highest seen: %d)",
+                          seq, self._highest_seq)
+                return
+            if seq > self._highest_seq:
+                self._highest_seq = seq
+
+            _log_event(data, session_id=self.deployment_id)
+            self._queue.put(data)
+            log.info(f"Event queued: {data.get('source', '?')}/{data.get('type', '?')}")
+
+            if self.on_event:
+                self.on_event(data)
+
     def _connect(self) -> None:
         last_seen = _load_cursor(self.cursor_path)
         ws_url = (
@@ -285,38 +337,7 @@ class EventServerClient:
         )
 
         def on_message(ws, message):
-            try:
-                msg = json.loads(message)
-            except json.JSONDecodeError:
-                return
-
-            msg_type = msg.get("type")
-
-            if msg_type == "connected":
-                self._last_connected_at = time.monotonic()
-                self._reconnect_delay = 1
-                # First connect of the process is worth surfacing; routine
-                # reconnects after CF cycling are not, so they go to debug.
-                if not self._ever_connected:
-                    log.info(f"Event client connected (next_seq: {msg.get('next_seq')})")
-                else:
-                    log.debug(f"Event client reconnected (next_seq: {msg.get('next_seq')})")
-                self._ever_connected = True
-                self._connected.set()
-                return
-
-            if msg_type == "pong":
-                return
-
-            if msg_type in ("event", "replay"):
-                data = msg.get("data", {})
-
-                _log_event(data, session_id=self.deployment_id)
-                self._queue.put(data)
-                log.info(f"Event queued: {data.get('source', '?')}/{data.get('type', '?')}")
-
-                if self.on_event:
-                    self.on_event(data)
+            self._handle_message(message)
 
         def on_error(ws, error):
             # Per-error noise is demoted: the run loop owns stability-aware

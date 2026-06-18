@@ -456,6 +456,15 @@ function handleUpgrade(req: http.IncomingMessage, socket: import("node:net").Soc
 	}
 
 	wss.handleUpgrade(req, socket, head, (ws) => {
+		// Close stale WebSockets before accepting the new one (#322).
+		// After a network blip the old socket may linger in dep.websockets
+		// until TCP detects the failure — during that window deliver()
+		// would send every event to BOTH sockets, producing duplicates.
+		for (const old of dep.websockets) {
+			try { old.close(1000, "replaced"); } catch { /* already closed */ }
+		}
+		dep.websockets.clear();
+
 		const lastSeen = parseInt(url.searchParams.get("last_seen") || "0", 10);
 		if (lastSeen > 0) {
 			for (const stored of dep.eventBuffer) {

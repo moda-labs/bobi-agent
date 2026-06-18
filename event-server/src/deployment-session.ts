@@ -86,6 +86,14 @@ export class DeploymentSession extends DurableObject<Env> {
 	}
 
 	private async handleWebSocketUpgrade(request: Request): Promise<Response> {
+		// Close stale WebSockets before accepting the new one (#322).
+		// A reconnecting client creates a new WS while the old one may
+		// still be in ctx.getWebSockets() — without this, handleIncomingEvent
+		// sends every event to BOTH sockets, producing duplicates.
+		for (const old of this.ctx.getWebSockets()) {
+			try { old.close(1000, "replaced"); } catch { /* already closed */ }
+		}
+
 		const pair = new WebSocketPair();
 		const [client, server] = [pair[0], pair[1]];
 
