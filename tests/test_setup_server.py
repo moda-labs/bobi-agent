@@ -326,14 +326,26 @@ class TestVennSetup:
         assert r["added"] == ["gmail"] and r["removed"] == ["salesforce"]
         assert [x["name"] for x in s.spec.services] == ["github", "gmail"]
 
-    def test_apply_turning_all_off_removes_them(self, project):
+    def test_apply_turning_venn_off_removes_only_venn(self, project):
+        # Two Venn services, both toggled off → both removed.
         s = SetupState()
-        s.spec.services = [{"name": "gmail"}, {"name": "slack"}]
+        s.spec.services = [{"name": "gmail"}, {"name": "notion"}]
         c = _client(s, project)
         r = c.post("/api/venn/apply", json={
-            "servers": [], "available": ["gmail", "slack"]}).json()
-        assert set(r["removed"]) == {"gmail", "slack"}
+            "servers": [], "available": ["gmail", "notion"]}).json()
+        assert set(r["removed"]) == {"gmail", "notion"}
         assert s.spec.services == []
+
+    def test_apply_never_removes_a_native_service(self, project):
+        # Venn's catalog can include "slack" (a NATIVE connector here). Leaving
+        # it untoggled in the Venn picker must NOT remove the native service.
+        s = SetupState()
+        s.spec.services = [{"name": "slack"}, {"name": "gmail"}]
+        c = _client(s, project)
+        r = c.post("/api/venn/apply", json={
+            "servers": [], "available": ["slack", "gmail"]}).json()
+        assert r["removed"] == ["gmail"]                 # only the venn one
+        assert [x["name"] for x in s.spec.services] == ["slack"]   # native kept
 
     def test_apply_requires_a_list(self, project):
         c = _client(SetupState(), project)
@@ -556,6 +568,32 @@ class TestPanelEdits:
             "name": "DeepWiki", "url": "https://mcp.deepwiki.com/mcp", "auth": "none"})
         ph = next(x for x in c.get("/api/connect").json()["cards"] if x["key"] == "deepwiki")
         assert ph["status"] == "added" and "public" in ph["note"].lower()
+
+    def test_remove_drops_the_user_mcp_entry_and_card(self, project, monkeypatch):
+        # Removing a user MCP must drop its mcp_servers entry too, or the row
+        # lingers (it's rendered from mcp_servers, not just services).
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "PostHog", "url": "https://mcp.posthog.com/mcp",
+            "auth": "api_key", "api_key": "ph_x"})
+        assert "posthog" in s.spec.mcp_servers
+        c.post("/api/service/remove", json={"service_key": "posthog"})
+        assert "posthog" not in s.spec.mcp_servers       # entry gone
+        keys = {x["key"] for x in c.get("/api/connect").json()["cards"]}
+        assert "posthog" not in keys                     # row gone
+
+    def test_mcp_add_rejects_newline_in_key(self, project, monkeypatch):
+        # A pasted key with a newline would inject an extra .env line.
+        monkeypatch.delenv("EVIL_API_KEY", raising=False)
+        c = _client(SetupState(), project)
+        r = c.post("/api/mcp/add", json={
+            "name": "Evil", "url": "https://mcp.evil.com/mcp",
+            "auth": "api_key", "api_key": "abc\nMODASTACK_X=1"})
+        assert r.status_code == 400
+        envf = project / ".modastack" / ".env"
+        assert not envf.exists() or "MODASTACK_X" not in envf.read_text()
 
 
 # --- review file endpoints -----------------------------------------------

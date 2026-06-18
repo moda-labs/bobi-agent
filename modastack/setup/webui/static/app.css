@@ -311,7 +311,6 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .help{display:inline-flex;width:13px;height:13px;color:var(--faint);cursor:help;}
 .help:hover,.help:focus{color:var(--muted);outline:none;}
 .help svg{width:13px;height:13px;}
-.venn-svcs{display:flex;flex-direction:column;gap:4px;margin:4px 0 8px;}
 /* Venn setup flow: connected banner, MCP picker list, error + loading states. */
 .venn-ok{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:11px;}
 .venn-ok .pd{margin:0;}

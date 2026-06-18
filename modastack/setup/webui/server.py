@@ -478,6 +478,13 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 continue
             kept.append(s)
         state.spec.services = kept
+        # A user-defined MCP is also rendered from spec.mcp_servers (independent
+        # of services), so dropping only the service leaves its row behind —
+        # remove the matching mcp_servers entry too.
+        if state.spec.mcp_servers:
+            state.spec.mcp_servers = {
+                k: v for k, v in state.spec.mcp_servers.items()
+                if k.strip().lower() != key}
         state.validated = False
         state.save(project)
         return JSONResponse(serialize_state(state))
@@ -585,6 +592,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         on-toggles, `available` is the full picker universe. Add on-toggles not
         present; remove available services that are off (untouched: non-Venn
         services and anything outside the picker universe). Idempotent."""
+        from modastack.setup import services
         on = payload.get("servers")
         if not isinstance(on, list):
             return JSONResponse({"error": "servers must be a list"},
@@ -597,7 +605,11 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         for s in state.spec.services:
             name = (s.get("name") if isinstance(s, dict) else str(s)) or ""
             nl = name.strip().lower()
-            if nl in universe and nl not in desired:
+            # Only reconcile VENN-backed services. Venn's catalog can include
+            # names that resolve native here (slack/github/linear) — those must
+            # never be removed by the Venn picker even if left untoggled.
+            is_venn = services.resolve(name).kind == "venn" if name.strip() else False
+            if is_venn and nl in universe and nl not in desired:
                 removed.append(name)          # a Venn service toggled OFF
                 continue
             kept.append(s)
