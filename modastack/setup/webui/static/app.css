@@ -295,6 +295,7 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .cbadge.ok{color:var(--ok);}
 /* connected = unmistakable filled green pill with a check */
 .cbadge.connected{display:inline-flex;align-items:center;gap:4px;color:#fff;background:var(--ok);border-radius:999px;padding:2px 9px 2px 7px;font-size:10px;letter-spacing:.02em;}
+.cbadge.warn{color:var(--err);}
 .cbadge.connected svg{width:10px;height:10px;color:#fff;}
 /* Venn modal: fully-connected success state (no Re-check CTA) */
 .venn-done{display:flex;align-items:center;gap:12px;background:rgba(23,123,82,.08);border:1px solid rgba(23,123,82,.3);border-radius:10px;padding:13px 15px;margin-bottom:12px;}

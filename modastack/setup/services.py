@@ -468,21 +468,24 @@ def catalog_cards() -> list[dict]:
 
 def user_mcp_card(key: str, cfg: dict, project: Path) -> dict:
     """A Connect card for a user-defined custom MCP connection (added by name +
-    remote URL). It's configured at add time, so it reads as connected; an
-    API-key connection is connected once its key is in .env, an OAuth one
-    authorizes when the agent first connects."""
+    remote URL). We do NOT verify the connection here — the agent actually
+    connects (and runs any OAuth) at `modastack start`, where mcp_servers are
+    probed. So this never claims "connected"; it reports what auth was set and
+    flags when the server still needs credentials."""
     from modastack.setup.actions import read_env
     auth = cfg.get("auth", "none")
     label = cfg.get("label") or _display_name(key)
     if auth == "api_key":
         var = cfg.get("secret_var", "")
         present = bool(read_env(project).get(var) or os.environ.get(var))
-        status = "connected" if present else "missing"
-        note = "custom MCP · API key"
+        # No key → genuinely incomplete; a key → set, but still unverified.
+        status = "added" if present else "needs_auth"
+        note = ("API key set · connects when you run" if present
+                else "needs an API key")
     elif auth == "oauth":
-        status, note = "connected", "custom MCP · OAuth · authorizes on first run"
+        status, note = "added", "OAuth · authorizes when you run"
     else:
-        status, note = "connected", "custom MCP"
+        status, note = "needs_auth", "no auth set — add a key or OAuth if it needs one"
     return {
         "key": key.strip().lower(), "name": label, "kind": "mcp",
         "summary": cfg.get("url", ""), "scopes": [], "methods": [],

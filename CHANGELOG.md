@@ -48,6 +48,10 @@ team instead of dropping to a hand-authored guide (MOD-203).
   its row's **Connect** opens the form pre-filled with the name — you supply the
   URL. New `POST /api/mcp/add`; `Spec.mcp_servers` persists user connections.
   (Replaces the old "name a service" textarea + "not on Venn?" build placeholder.)
+  A user-added MCP is **never shown as "connected"** in setup — it's not
+  verified here; it connects (and runs any OAuth) at `modastack start`, where
+  `mcp_servers` are probed. The row reads "added · connects when you run", or
+  "needs auth" when no credentials were given.
 
 ### Changed
 - Venn is presented as one **account-level connection**, not a per-service one.

@@ -538,7 +538,17 @@ class TestPanelEdits:
         cards = c.get("/api/connect").json()["cards"]
         ph = next(c for c in cards if c["key"] == "posthog")
         assert ph["kind"] == "mcp" and ph["name"] == "PostHog"
-        assert ph["via"] == "hosted MCP" and ph["status"] == "connected"
+        # NOT verified in setup, so never "connected" — "added" (key set) at most.
+        assert ph["via"] == "hosted MCP" and ph["status"] == "added"
+        assert ph["user_mcp"] is True
+
+    def test_connect_user_mcp_without_auth_flags_needs_auth(self, project, monkeypatch):
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={"name": "Acme", "url": "https://mcp.acme.com/mcp"})
+        ph = next(x for x in c.get("/api/connect").json()["cards"] if x["key"] == "acme")
+        assert ph["status"] == "needs_auth"   # no creds given → not "connected"
 
 
 # --- review file endpoints -----------------------------------------------

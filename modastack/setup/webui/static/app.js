@@ -602,6 +602,12 @@
     } else if (c.kind === "custom") {
       // Not native/Venn/known MCP — connect it by pointing at a remote MCP.
       right = `<button class="btn ghost xs" data-addmcp="${esc(c.name)}">Connect</button>`;
+    } else if (c.user_mcp) {
+      // A user-added MCP — NOT verified here; it connects (and authorizes) when
+      // the team runs. Never claim "connected"; flag when it still needs creds.
+      right = c.status === "needs_auth"
+        ? `<span class="cbadge warn">needs auth</span> <button class="lnk" data-addmcp="${esc(c.name)}">finish</button>`
+        : `<span class="cbadge">added</span> <button class="lnk" data-addmcp="${esc(c.name)}">edit</button>`;
     } else if (mcpNoSecret) {
       right = `<span class="cbadge connected">${CHECK} wired</span>`;
     } else if (c.status === "connected") {
@@ -1429,7 +1435,11 @@
     _connData = await getJSON("/api/connect");
     ov.remove();
     renderUniCards();
-    toast(r.data.oauth_pending ? "Added — authorizes on first run" : "Connection added");
+    // Honest: we don't verify the connection here — it connects (and authorizes)
+    // when the team runs. Don't imply it's already live.
+    toast(auth === "none"
+      ? "Added — set auth if the server needs it; it connects when the team runs"
+      : "Added — it connects when the team runs");
   }
 
   // --- top-level render + events ----------------------------------------
