@@ -60,9 +60,35 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+def _load_framework_checks() -> dict:
+    """Load check runners bundled with the framework (modastack/monitors/*_checks.py)."""
+    checks: dict = {}
+    framework_dir = Path(__file__).parent
+    for py_file in framework_dir.glob("*_checks.py"):
+        module_name = f"modastack.monitors.{py_file.stem}"
+        if module_name in sys.modules:
+            mod = sys.modules[module_name]
+        else:
+            spec = importlib.util.spec_from_file_location(module_name, py_file)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = mod
+                spec.loader.exec_module(mod)
+            else:
+                continue
+        if hasattr(mod, "CHECKS"):
+            checks.update(mod.CHECKS)
+    return checks
+
+
 def _load_checks(project_path: Path | None = None) -> dict:
-    """Load check runners from installed monitors/*_checks.py files."""
-    all_checks: dict = {}
+    """Load check runners from framework and installed monitors/*_checks.py files.
+
+    Framework-level checks (modastack/monitors/*_checks.py) load first,
+    then pack-level checks from the project's installed monitors directory
+    can override or extend them.
+    """
+    all_checks: dict = _load_framework_checks()
     if not project_path:
         from modastack.paths import bound_root as get_project_root
         project_path = get_project_root()

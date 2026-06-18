@@ -204,6 +204,7 @@ async def _run_agent_supervised(
     timeout: int,
     on_input_needed: InputHandler | None = None,
     role: str = "",
+    max_turns: int = 200,
 ) -> AgentResult:
     """Core agent loop. Blocks until the agent finishes or times out.
 
@@ -236,7 +237,7 @@ async def _run_agent_supervised(
     options = ClaudeAgentOptions(
         cwd=cwd,
         permission_mode="bypassPermissions",
-        max_turns=200,
+        max_turns=max_turns,
         cli_path=get_cli_path(),
         resume=saved_id or None,
         hooks=hooks,
@@ -1006,6 +1007,7 @@ def _run_agent_entry(args: dict) -> None:
 # ---------------------------------------------------------------------------
 
 CHECK_TIMEOUT = 600  # monitor checks are short-lived
+CHECK_MAX_TURNS = 8  # cap poll cost — a single check can't balloon into 200 turns
 
 
 @dataclass
@@ -1185,7 +1187,8 @@ def run_check_blocking(
         try:
             result = asyncio.run(
                 asyncio.wait_for(
-                    _run_agent_supervised(prompt, cwd, run_key, phase, timeout, role="monitor"),
+                    _run_agent_supervised(prompt, cwd, run_key, phase, timeout,
+                                         role="monitor", max_turns=CHECK_MAX_TURNS),
                     timeout=timeout,
                 )
             )
