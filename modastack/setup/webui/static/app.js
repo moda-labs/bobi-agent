@@ -1382,14 +1382,14 @@
           <input id="mcp-name" placeholder="e.g. PostHog" autocomplete="off" value="${esc(prefill || "")}"></label>
         <label class="fld"><span class="flab">Remote server URL</span>
           <input id="mcp-url" placeholder="https://mcp.example.com/mcp" autocomplete="off"></label>
-        <details class="mcp-adv"><summary>Advanced — authentication</summary>
+        <div class="mcp-auth-sec">
+          <span class="flab">Authentication</span>
           <div class="mcp-auth">
-            <label class="uopt-radio"><input type="radio" name="mcpauth" value="none" checked> None</label>
+            <label class="uopt-radio"><input type="radio" name="mcpauth" value="oauth" checked> OAuth</label>
             <label class="uopt-radio"><input type="radio" name="mcpauth" value="api_key"> API key</label>
-            <label class="uopt-radio"><input type="radio" name="mcpauth" value="oauth"> OAuth</label>
           </div>
           <div id="mcp-auth-fields"></div>
-        </details>
+        </div>
         <div class="sp-actions"><button class="btn primary sm" id="mcp-add">Add</button></div>
         <div class="mcp-status" id="mcp-status"></div>
       </div></div>`;
@@ -1397,20 +1397,22 @@
     (prefill ? $("#mcp-url") : $("#mcp-name")).focus();
     ov.addEventListener("click", e => { if (e.target.id === "mcp-close" || e.target === ov) ov.remove(); });
     const renderAuth = () => {
-      const v = (ov.querySelector("input[name=mcpauth]:checked") || {}).value || "none";
+      const v = (ov.querySelector("input[name=mcpauth]:checked") || {}).value || "oauth";
       const f = $("#mcp-auth-fields");
       if (v === "api_key")
         f.innerHTML = `<label class="fld"><span class="flab">API key</span>
           <input id="mcp-key" type="password" placeholder="stored in .env, never sent to the model" autocomplete="off"></label>`;
-      else if (v === "oauth")
-        f.innerHTML = `<label class="fld"><span class="flab">OAuth client ID</span>
-            <input id="mcp-cid" autocomplete="off"></label>
-          <label class="fld"><span class="flab">OAuth client secret</span>
-            <input id="mcp-cs" type="password" placeholder="stored in .env" autocomplete="off"></label>
-          <p class="fhelp">modastack authorizes with these when the team first connects.</p>`;
-      else f.innerHTML = "";
+      else
+        f.innerHTML = `<p class="fhelp">Most remote MCPs use OAuth — you sign in to authorize access. Client ID/secret are optional (only if the server needs a pre-registered app).</p>
+          <details class="mcp-adv"><summary>OAuth client (optional)</summary>
+            <label class="fld"><span class="flab">OAuth client ID</span>
+              <input id="mcp-cid" autocomplete="off"></label>
+            <label class="fld"><span class="flab">OAuth client secret</span>
+              <input id="mcp-cs" type="password" placeholder="stored in .env" autocomplete="off"></label>
+          </details>`;
     };
     ov.querySelectorAll("input[name=mcpauth]").forEach(r => r.addEventListener("change", renderAuth));
+    renderAuth();   // OAuth is the default — show its helper up front
     $("#mcp-add").addEventListener("click", () => mcpAdd(ov));
   }
   async function mcpAdd(ov) {
@@ -1435,11 +1437,9 @@
     _connData = await getJSON("/api/connect");
     ov.remove();
     renderUniCards();
-    // Honest: we don't verify the connection here — it connects (and authorizes)
-    // when the team runs. Don't imply it's already live.
-    toast(auth === "none"
-      ? "Added — set auth if the server needs it; it connects when the team runs"
-      : "Added — it connects when the team runs");
+    // Honest: nothing is verified/authorized here yet — the row says what's
+    // still needed (OAuth sign-in, or an API key).
+    toast("Connection added");
   }
 
   // --- top-level render + events ----------------------------------------

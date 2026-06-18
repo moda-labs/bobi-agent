@@ -415,7 +415,9 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .yamlish .flab{color:var(--accent);}
 .sp-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:4px;}
 
-/* Add-a-connection form: advanced auth (radios + conditional fields). */
+/* Add-a-connection form: auth method picker + advanced fields. */
+.mcp-auth-sec{margin-bottom:12px;}
+.mcp-auth-sec > .flab{display:block;margin-bottom:6px;}
 .mcp-adv{margin:2px 0 12px;border-top:1px solid var(--border);padding-top:10px;}
 .mcp-adv summary{font-family:var(--font-mono);font-size:11px;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);cursor:pointer;list-style:none;}
 .mcp-adv summary::-webkit-details-marker{display:none;}

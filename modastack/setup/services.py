@@ -483,9 +483,11 @@ def user_mcp_card(key: str, cfg: dict, project: Path) -> dict:
         note = ("API key set · connects when you run" if present
                 else "needs an API key")
     elif auth == "oauth":
-        status, note = "added", "OAuth · authorizes when you run"
+        # OAuth needs an interactive sign-in to authorize; until that flow runs
+        # the connection isn't usable, so flag it rather than imply it's live.
+        status, note = "needs_auth", "OAuth · sign in to authorize"
     else:
-        status, note = "needs_auth", "no auth set — add a key or OAuth if it needs one"
+        status, note = "added", "no auth (public server)"
     return {
         "key": key.strip().lower(), "name": label, "kind": "mcp",
         "summary": cfg.get("url", ""), "scopes": [], "methods": [],

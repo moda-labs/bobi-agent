@@ -542,13 +542,18 @@ class TestPanelEdits:
         assert ph["via"] == "hosted MCP" and ph["status"] == "added"
         assert ph["user_mcp"] is True
 
-    def test_connect_user_mcp_without_auth_flags_needs_auth(self, project, monkeypatch):
+    def test_add_defaults_to_oauth_and_flags_signin(self, project, monkeypatch):
+        # No auth specified → defaults to OAuth (the common case for remote
+        # MCPs). It needs an interactive sign-in, so the row says so — never
+        # "connected".
         monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
         s = SetupState()
         c = _client(s, project)
         c.post("/api/mcp/add", json={"name": "Acme", "url": "https://mcp.acme.com/mcp"})
+        assert s.spec.mcp_servers["acme"]["auth"] == "oauth"
         ph = next(x for x in c.get("/api/connect").json()["cards"] if x["key"] == "acme")
-        assert ph["status"] == "needs_auth"   # no creds given → not "connected"
+        assert ph["status"] == "needs_auth"
+        assert "sign in" in ph["note"].lower()
 
 
 # --- review file endpoints -----------------------------------------------

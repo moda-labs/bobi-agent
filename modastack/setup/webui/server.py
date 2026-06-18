@@ -500,7 +500,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             return JSONResponse(
                 {"error": "a remote server URL (https://…) is required"},
                 status_code=400)
-        auth = payload.get("auth", "none")
+        # Default to OAuth: most remote MCPs authenticate that way, and you sign
+        # in to authorize. API key is the alternative; "none" only for public.
+        auth = payload.get("auth") or "oauth"
         if auth not in ("none", "api_key", "oauth"):
             return JSONResponse({"error": "auth must be none, api_key, or oauth"},
                                 status_code=400)
