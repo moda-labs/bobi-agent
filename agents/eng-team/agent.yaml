@@ -29,6 +29,10 @@ requires:
     why: "QA, browse, ship, and review skills used throughout the eng lifecycle"
     check: "test -e ~/.claude/skills/browse/SKILL.md && test -x ~/.claude/skills/gstack/browse/dist/browse"
     fix: "git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && ./setup"
+  - name: codex
+    why: "Codex-as-a-tool for adversarial reviews and second-opinion analysis (MDS-42 UC3)"
+    check: "command -v codex >/dev/null 2>&1 && { test -n \"${OPENAI_API_KEY:-}\" || codex --version >/dev/null 2>&1; }"
+    fix: "npm install -g @openai/codex && (codex auth login || echo 'Set OPENAI_API_KEY in .modastack/.env')"
 
 # Deterministic event→workflow routing. These rules fire BEFORE the
 # manager LLM sees the event, guaranteeing the workflow is launched

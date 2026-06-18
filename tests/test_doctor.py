@@ -177,3 +177,99 @@ class TestCheckPackageRequires:
             from modastack.doctor import _check_package_requires
             results = _check_package_requires()
         assert results == []
+
+
+# --- Codex CLI ---
+
+
+class TestCheckCodexCLI:
+
+    def test_found(self):
+        with patch("shutil.which", return_value="/usr/local/bin/codex"):
+            from modastack.doctor import _check_codex_cli
+            r = _check_codex_cli()
+        assert r.ok
+        assert r.name == "Codex CLI"
+
+    def test_not_found(self):
+        with patch("shutil.which", return_value=None):
+            from modastack.doctor import _check_codex_cli
+            r = _check_codex_cli()
+        assert not r.ok
+        assert "not found" in r.detail
+        assert "npm install" in r.hint
+
+
+class TestCheckCodexAuth:
+
+    def test_not_installed(self):
+        with patch("shutil.which", return_value=None):
+            from modastack.doctor import _check_codex_auth
+            r = _check_codex_auth()
+        assert not r.ok
+        assert "not installed" in r.detail
+
+    def test_authenticated_with_api_key(self):
+        import subprocess
+        with patch("shutil.which", return_value="/usr/local/bin/codex"), \
+             patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test123"}), \
+             patch("subprocess.run") as mock_run:
+            # --version succeeds, exec succeeds
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="1.0.0\n", stderr=""),
+                subprocess.CompletedProcess([], 0, stdout="hello\n", stderr=""),
+            ]
+            from modastack.doctor import _check_codex_auth
+            r = _check_codex_auth()
+        assert r.ok
+        assert "API key" in r.detail
+
+    def test_authenticated_with_subscription(self):
+        import subprocess
+        with patch("shutil.which", return_value="/usr/local/bin/codex"), \
+             patch.dict("os.environ", {}, clear=True), \
+             patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="1.0.0\n", stderr=""),
+                subprocess.CompletedProcess([], 0, stdout="hello\n", stderr=""),
+            ]
+            from modastack.doctor import _check_codex_auth
+            r = _check_codex_auth()
+        assert r.ok
+        assert "subscription" in r.detail
+
+    def test_auth_failure(self):
+        import subprocess
+        with patch("shutil.which", return_value="/usr/local/bin/codex"), \
+             patch.dict("os.environ", {}, clear=True), \
+             patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="1.0.0\n", stderr=""),
+                subprocess.CompletedProcess([], 1, stdout="", stderr="Error: auth required, please login"),
+            ]
+            from modastack.doctor import _check_codex_auth
+            r = _check_codex_auth()
+        assert not r.ok
+        assert "authentication failed" in r.detail
+        assert "OPENAI_API_KEY" in r.hint
+        assert "codex auth login" in r.hint
+
+    def test_version_check_fails(self):
+        import subprocess
+        with patch("shutil.which", return_value="/usr/local/bin/codex"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                [], 1, stdout="", stderr="segfault")
+            from modastack.doctor import _check_codex_auth
+            r = _check_codex_auth()
+        assert not r.ok
+        assert "unhealthy" in r.detail
+
+    def test_timeout(self):
+        import subprocess
+        with patch("shutil.which", return_value="/usr/local/bin/codex"), \
+             patch("subprocess.run", side_effect=subprocess.TimeoutExpired("codex", 10)):
+            from modastack.doctor import _check_codex_auth
+            r = _check_codex_auth()
+        assert not r.ok
+        assert "timed out" in r.detail
