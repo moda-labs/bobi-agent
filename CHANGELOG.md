@@ -1,69 +1,19 @@
 # Changelog
 
-## 0.22.0 — 2026-06-18
+## Unreleased
 
-The `modastack setup` Connections step gains a hosted-MCP rung. A service Venn
-doesn't cover but that ships a public hosted MCP is now wired straight into the
-team instead of dropping to a hand-authored guide (MOD-203).
-
-### Added
-- Connections cascade `native → venn → mcp → custom`. The new `mcp` kind covers
-  services that ship a public hosted MCP server, sourced from a curated registry
-  (`modastack/setup/mcp_registry.py`, seeded with Stripe, Hugging Face, Sentry,
-  Context7, DeepWiki). Venn still wins ahead of the registry — it's the 1-click
-  path.
-- Hosted MCPs are authored into `agent.yaml` `mcp_servers:` so the agent connects
-  to them at runtime. A static-key server captures one `<SVC>_API_KEY` and sends
-  it as a `${VAR}` auth header; an OAuth/public server captures nothing and reads
-  as "✓ wired" (authorized at first connect). `merge_agent_yaml` unions
-  `mcp_servers` non-lossily on open/modify.
-- Connections card renders the `mcp` kind: a "hosted MCP · 1-click" tag, secret
-  capture through the existing credential overlay, and a "wired" state for
-  keyless servers.
-
-- **Venn setup is a connect-and-toggle flow.** Paste a key — it's **verified
-  before being saved** (`POST /api/venn/connect`; a bad key is rejected with an
-  error state and never persisted, so it can't flip Venn to "connected") — then
-  modastack lists **every service the key can reach** (the full account catalog).
-  Each is a **toggle = team membership**: on means it's on this team, off means
-  it isn't. Saving **reconciles** the team's Venn services to exactly the
-  toggled-on set (`POST /api/venn/apply` adds and removes). A loading state, a
-  proper error state, and a persistent "Open Venn ↗" link sit across every step.
-- `modastack.venn.list_servers_verified` raises `VennError` on a bad key /
-  non-2xx / error body, distinguishing "valid key, zero services" from a
-  failure — `list_servers` still masks errors as `[]` for resilient startup.
-- **Concrete Venn connector names are preserved** instead of collapsing into a
-  coarse bucket: a service named `gmail` (or any custom Venn connection name)
-  resolves to its own row labelled **"Gmail"**, not the bucket "Email", and two
-  Gmail connections with different names stay distinct. Literal generic terms
-  ("email", "crm") still resolve to the broad bucket card. The concrete name is
-  consistent across the picker, the panel rows, and the authored `agent.yaml`.
-
-- **Add-a-connection is a Claude-style custom-MCP form.** Just a name + remote
-  server URL + an optional API key. On add, the connection is authored into
-  `agent.yaml` `mcp_servers:` (with a `${VAR}` Bearer header when a key is given,
-  url-only otherwise) and shows as its own row. When the assistant guesses a
-  service needs a connector (a custom service like PostHog), its row's
-  **Connect** opens the form pre-filled with the name — you supply the URL. New
-  `POST /api/mcp/add`; `Spec.mcp_servers` persists user connections. (Replaces
-  the old "name a service" textarea + "not on Venn?" build placeholder.)
-  A user-added MCP is **never shown as "connected"** in setup — nothing is
-  verified here. With a key it reads "API key set · connects when you run";
-  without one, "needs an API key". OAuth-authed MCPs aren't supported yet (a
-  follow-up) — API key is the only auth for a custom connection for now.
-
-### Changed
-- Venn is presented as one **account-level connection**, not a per-service one.
-  Venn-backed services now appear as their own rows ("Gmail · via Venn —
-  ✓ connected via Venn"), and a single dedicated **Venn row pinned to the top**
-  shows overall connection status, a `?` hover explainer ("Connect lots of
-  services at once with Venn — one key, many integrations"), and one "Set up
-  Venn" / "Manage Venn" link (was an inline upsell with two separate links).
-
-### Notes
-- The full MOD-203 cascade has two further rungs deferred to follow-ups: a live
-  web search for a hosted MCP, then a CLI fallback. A registry miss currently
-  falls straight through to `custom`.
+### Fixed
+- **Publish skips the doomed unsigned POST during cold start.** Lifecycle emits
+  (`session.started` / `session.failed`) that fire before the bubble is minted
+  (the `--fresh` / startup window) no longer POST an unsigned event guaranteed to
+  403; `_post_topic` returns early and logs at debug. Removes the duplicate
+  `No bubble credential` + `403 Forbidden` warning pairs from the manager log and
+  a pointless round-trip.
+- **Event client stays quiet on routine reconnects.** A Cloudflare Durable Object
+  cycles hibernating WebSockets from the runtime side every few minutes; the
+  client reconnects losslessly via the `last_seen` replay cursor. Those routine
+  reconnects now log at debug. A genuine flap (5+ short-lived connections in a
+  row) still warns, naming the last error.
 
 ## 0.21.0 — 2026-06-18
 
