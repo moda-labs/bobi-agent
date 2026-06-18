@@ -74,27 +74,43 @@ a fresh Opus session per tick. Two combined changes:
 
 ## Part B — Cheap detector + escalate-on-hit *(first)*
 
-The architecture's own detect → reconcile → publish path already supports
-this; we lean into it.
+The architecture's own detect → reconcile → publish path already does the
+hard part for free: `_command_conditions` parses a detector's JSON into
+conditions keyed by `id`, and `_reconcile` (`scheduler.py:341-359`) fires
+an event **only for keys that weren't active last tick**. So a detector
+that emits the *current* set of items (e.g. unread message IDs) yields
+exact "new-on-arrival" semantics with no per-detector last-seen
+bookkeeping and **no LLM**.
 
-1. **Deterministic detection for pull-able MCP sources** (the email case):
-   prefer a **`command:` monitor** that runs the Venn CLI pull
-   (`tools execute -s work-gmail -t list_messages`) and emits conditions
-   for new message IDs since last-seen. Pure `subprocess` — **$0 LLM per
-   poll** (`scheduler.py:386-428`, JSON-stdout → conditions). The published
+**Decision (locked): native `check: venn_poll` runner.** *(over a raw
+`command:` shell string or a setup-generation-only change — chosen for
+reusability across teams and to keep the Venn-pull logic in one tested
+place rather than in generated shell strings.)*
+
+1. **`venn_poll` native check runner** — a framework-level Python check
+   (registered in `CHECKS`, invoked via the existing `monitor.check` path,
+   `scheduler.py:373-384`) that runs the Venn CLI pull for a configured
+   service + tool (e.g. `tools execute -s work-gmail -t list_messages`),
+   normalizes the result to a list of `{id, ...}` items, and returns them
+   as conditions. Pure subprocess — **$0 LLM per poll**. Dedup/new-item
+   semantics come for free from `_reconcile`. Params (service, tool, query,
+   id field) come from the monitor record's `check_args`. The published
    event wakes the **live manager session** (cheap inbox delivery) to do
    the real work.
 2. **Two-tier semantic gate** (for "about X" needs that genuinely need an
-   LLM): the recurring *gate* runs on the cheap model (Part A) with a small
-   `max_turns` cap and returns only a verdict; the expensive
-   reasoning/action runs in the persistent manager session when the verdict
-   fires an event. Detect cheap → act expensive, only on real hits.
+   LLM to judge relevance): `venn_poll` still does the cheap mechanical
+   pull; when a semantic filter is required, the recurring *gate* runs on
+   the cheap model (Part A) with a small `max_turns` cap and returns only a
+   verdict; the expensive reasoning/action runs in the persistent manager
+   session when the verdict fires an event. Detect cheap → act expensive,
+   only on real hits.
 3. **Cap the check budget**: lower the check path's `max_turns` from 200 →
-   ~8 so a single poll can't balloon into a 200-turn run
-   (`subagent.py` `_run_agent_supervised` / `run_check_blocking`).
+   ~8 (new param on `_run_agent_supervised`, `subagent.py:199,239`, passed
+   from `run_check_blocking`, `subagent.py:1188`) so a single poll can't
+   balloon into a 200-turn run.
 
-Depends on A only for the two-tier gate's cheap model; the `command:`
-detector path (step 1) is fully independent and ships first.
+Step 1 (`venn_poll`) is fully independent of Part A and ships first; step 2
+depends on Part A's cheap model.
 
 ---
 
@@ -127,10 +143,11 @@ detector path (step 1) is fully independent and ships first.
 
 - **Repro/integration**: assert today a monitor check spawns a session on
   the default model; the fix flips it to (a) the cheap model via Phase-1
-  cost attribution (`SessionEntry.model`), and (b) a `command:` detector
+  cost attribution (`SessionEntry.model`), and (b) a `venn_poll` detector
   that finds new items with **zero** LLM sessions.
 - **Unit**: config parses `defaults.model`/`roles.<role>.model`; resolver
-  precedence; gateway→`env` mapping; `command:` monitor condition emission.
+  precedence; gateway→`env` mapping; `venn_poll` normalizes pull output to
+  `{id}` conditions and `_reconcile` fires only on new IDs (mocked Venn CLI).
 
 ## Verification
 
