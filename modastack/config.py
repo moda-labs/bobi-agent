@@ -193,6 +193,7 @@ class Config:
     monitors: list[dict] = field(default_factory=list)
     auto_dispatch: list[dict] = field(default_factory=list)
     requires: list[RequiresEntry] = field(default_factory=list)
+    spend_cap: int = 0  # max agent invocations per rolling hour; 0 = use default
 
     def credential(self, service: str, key: str) -> str:
         """Look up a credential value for a named service."""
@@ -301,6 +302,7 @@ class Config:
             monitors=raw.get("monitors", []),
             auto_dispatch=raw.get("auto_dispatch", []),
             requires=requires,
+            spend_cap=int(raw.get("spend_cap", 0)),
         )
 
     @property
