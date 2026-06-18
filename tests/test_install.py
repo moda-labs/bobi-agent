@@ -7,11 +7,14 @@ flag hand-edits before a reinstall silently destroys them.
 """
 
 import json
+import os
 
 import pytest
 import yaml
+from click.testing import CliRunner
 
-from modastack.cli import _install_pack, _write_install_gitignore
+from modastack.cli import _install_pack, _write_install_gitignore, main
+from modastack.config import parse_env_file
 from modastack.doctor import _check_install_integrity
 
 
@@ -229,3 +232,108 @@ class TestDoctorIntegrity:
         (project / ".modastack").mkdir()
         self._set_root(project, monkeypatch)
         assert _check_install_integrity().ok
+
+
+class TestNonInteractiveInstall:
+    """--non-interactive skips prompts; secrets come from the environment."""
+
+    @pytest.fixture
+    def pack_with_creds(self, tmp_path):
+        """A pack whose agent.yaml references two env vars."""
+        pack_dir = tmp_path / "agents" / "my-team"
+        (pack_dir / "roles" / "manager").mkdir(parents=True)
+        (pack_dir / "roles" / "manager" / "ROLE.md").write_text("# Manager\n")
+        pack_dir.joinpath("agent.yaml").write_text(
+            "version: '1.0'\n"
+            "entry_point: manager\n"
+            "event_server: ${MODASTACK_EVENT_SERVER}\n"
+            "api_key: ${MY_API_KEY}\n"
+        )
+        pack_dir.joinpath("agent.md").write_text("# my-team\n")
+        return pack_dir
+
+    def test_env_vars_written_to_dotenv(self, pack_with_creds, tmp_path, monkeypatch):
+        """With --non-interactive, env vars present in os.environ are
+        written to .modastack/.env without prompting."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("MODASTACK_EVENT_SERVER", "wss://events.example.com")
+        monkeypatch.setenv("MY_API_KEY", "sk-test-123")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["install", str(pack_with_creds), "--non-interactive"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+
+        env = parse_env_file(project / ".modastack" / ".env")
+        assert env["MODASTACK_EVENT_SERVER"] == "wss://events.example.com"
+        assert env["MY_API_KEY"] == "sk-test-123"
+
+    def test_no_tty_no_prompt(self, pack_with_creds, tmp_path, monkeypatch):
+        """--non-interactive must never call click.prompt -- even when
+        vars are missing, it should not block on input."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("MODASTACK_EVENT_SERVER", "wss://events.example.com")
+        monkeypatch.delenv("MY_API_KEY", raising=False)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["install", str(pack_with_creds), "--non-interactive"],
+        )
+        # Should succeed but warn about missing vars.
+        assert result.exit_code == 0, result.output
+        assert "MY_API_KEY" in result.output
+
+        # The present var should still be written.
+        env = parse_env_file(project / ".modastack" / ".env")
+        assert env["MODASTACK_EVENT_SERVER"] == "wss://events.example.com"
+        assert "MY_API_KEY" not in env
+
+    def test_existing_env_file_preserved(self, pack_with_creds, tmp_path, monkeypatch):
+        """Vars already in .env are kept; env vars supplement them."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        dot_moda = project / ".modastack"
+        dot_moda.mkdir(parents=True)
+        (dot_moda / ".env").write_text("MY_API_KEY=existing-key\n")
+
+        monkeypatch.setenv("MODASTACK_EVENT_SERVER", "wss://events.example.com")
+        monkeypatch.delenv("MY_API_KEY", raising=False)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["install", str(pack_with_creds), "--non-interactive"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+
+        env = parse_env_file(project / ".modastack" / ".env")
+        assert env["MY_API_KEY"] == "existing-key"
+        assert env["MODASTACK_EVENT_SERVER"] == "wss://events.example.com"
+
+    def test_interactive_default_still_prompts(self, pack_with_creds, tmp_path, monkeypatch):
+        """Without --non-interactive, install still prompts (baseline)."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.delenv("MODASTACK_EVENT_SERVER", raising=False)
+        monkeypatch.delenv("MY_API_KEY", raising=False)
+
+        runner = CliRunner()
+        # Provide empty input to satisfy prompts without hanging.
+        result = runner.invoke(
+            main,
+            ["install", str(pack_with_creds)],
+            input="\n\n",
+        )
+        assert result.exit_code == 0
+        assert "credentials" in result.output.lower()
