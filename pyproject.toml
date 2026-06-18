@@ -48,6 +48,10 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-timeout>=2.3",
     "pytest-playwright>=0.5",
+    # Pinned to match the Playwright container image used by the e2e CI job
+    # (mcr.microsoft.com/playwright/python:v1.60.0-*). Bump both together so
+    # the baked-in browser binary always matches the installed client.
+    "playwright==1.60.0",
     "pytest-rerunfailures>=14.0",
 ]
 

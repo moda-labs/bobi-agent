@@ -22,6 +22,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: pip install -e ".[dev,kb]"
@@ -50,18 +52,24 @@ jobs:
   e2e:
     name: E2E (Playwright)
     runs-on: ubuntu-latest
+    # Browsers + all system deps are baked into the image, so there is no apt
+    # step and no Chromium download. Keep the tag in sync with the pinned
+    # playwright version in pyproject.toml (dev deps).
+    container: mcr.microsoft.com/playwright/python:v1.60.0-noble
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v6
+      # The image ships Python 3.12; cache the pip download dir so dev deps
+      # aren't re-fetched every run. (setup-python is skipped — we use the
+      # container's interpreter, which already has the matching browser.)
+      - name: Cache pip
+        uses: actions/cache@v4
         with:
-          python-version: "3.13"
+          path: ~/.cache/pip
+          key: pip-e2e-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
-
-      - name: Install Playwright Chromium
-        run: python -m playwright install --with-deps chromium
 
       - name: Run E2E tests
         # The setup UI is driven against the real FastAPI app booted in-process
@@ -92,6 +100,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         # CPU-only torch for KB tests (test_kb.py needs embedder);
