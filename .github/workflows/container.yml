@@ -45,8 +45,32 @@ jobs:
 
       - name: Run container contract tests
         # The image is prebuilt above; the fixture reuses it via the env var
-        # instead of rebuilding. The live ask/login round-trips stay skipped
-        # (no ANTHROPIC_API_KEY) — they belong to the deployed lane.
+        # instead of rebuilding. Contract checks only — the live round-trip is
+        # the separate step below.
         env:
           MODASTACK_TEST_IMAGE: modastack:ci
-        run: pytest tests/integration/test_container_image.py -m docker -v --timeout=400
+        run: pytest tests/integration/test_container_image.py -m "docker and not live" -v --timeout=400
+
+      # The live round-trip spins up an EPHEMERAL event server (the real Worker
+      # via wrangler dev) so CI never touches a production deployment. It needs
+      # node + the event-server deps on the runner.
+      - name: Set up Node (ephemeral wrangler event server)
+        if: github.event_name != 'pull_request'
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Install event-server deps
+        if: github.event_name != 'pull_request'
+        working-directory: event-server
+        run: npm ci --no-audit --no-fund
+
+      - name: Live ask round-trip
+        # Real Claude API call against an ephemeral wrangler event server. Gated
+        # off PRs to bound API cost (and fork PRs have no secret anyway); runs on
+        # nightly, push to main, and manual dispatch. Skips if the secret is unset.
+        if: github.event_name != 'pull_request'
+        env:
+          MODASTACK_TEST_IMAGE: modastack:ci
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: pytest tests/integration/test_container_image.py -m "docker and live" -v --timeout=500

@@ -172,15 +172,51 @@ def test_empty_volume_without_team_fails_clearly(image: str, tmp_path: Path):
     assert "MODASTACK_TEAM is unset" in (proc.stdout + proc.stderr)
 
 
+SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "smoke-team"
+
+
 @requires_docker
+@pytest.mark.live
 @pytest.mark.skipif(
     not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="needs a real ANTHROPIC_API_KEY for the live ask round-trip",
+    reason="live round-trip needs a real ANTHROPIC_API_KEY for the Claude call",
 )
 @pytest.mark.timeout(600)
 def test_image_ask_roundtrip(image: str, tmp_path: Path):
-    """C8 acceptance: docker run with an empty volume + env reaches a healthy
-    manager that completes one `modastack ask` round-trip against the real API."""
+    """C8 acceptance, live: an empty volume + api_key auth + a reachable event
+    server reaches a healthy manager that completes one `modastack ask`
+    round-trip against the real API.
+
+    Spins up an EPHEMERAL event server (the real Worker code via `wrangler dev`,
+    bound to 0.0.0.0) so CI never touches a production deployment — the
+    container reaches it via host.docker.internal and mints its own bubble.
+    Installs the dependency-free smoke-team fixture so preflight needs no
+    service secrets.
+    """
+    import time
+
+    import sys
+
+    # `--network host` only shares the real host netns on Linux; on Docker
+    # Desktop (mac/Windows) the container's 127.0.0.1 is the VM's, not the host's,
+    # so it can't reach a host-side wrangler. CI runs on Linux.
+    if sys.platform != "linux":
+        pytest.skip("live round-trip needs Linux (--network host reaches the host)")
+
+    # Reuse the wrangler-dev harness from the event-server tests; needs node
+    # deps (the helper npm-ci's them on demand). Skip cleanly if unavailable.
+    from .test_event_server import _has_wrangler, _start_wrangler_server
+
+    if not _has_wrangler():
+        pytest.skip("wrangler not installed (run `npm ci` in event-server/)")
+
+    base_url, port, stop_wrangler = _start_wrangler_server()
+    # Share the host network so the container reaches wrangler over loopback.
+    # The bubble layer refuses to mint a key over a cleartext *remote* URL
+    # (host.docker.internal counts as remote); 127.0.0.1 is loopback, so it's
+    # allowed. --network host is Linux-native (CI runs on ubuntu).
+    container_es_url = f"http://127.0.0.1:{port}"
+
     vol = tmp_path / "data"
     vol.mkdir()
     name = "modastack-c8-acceptance"
@@ -188,17 +224,18 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
     try:
         up = _run(
             "docker", "run", "-d", "--name", name,
+            "--network", "host",
             "-e", "MODASTACK_AUTH=api_key",
             "-e", f"ANTHROPIC_API_KEY={os.environ['ANTHROPIC_API_KEY']}",
-            "-e", "MODASTACK_TEAM=eng-team",
+            "-e", f"MODASTACK_EVENT_SERVER={container_es_url}",
+            "-e", "MODASTACK_TEAM=/mnt/team",
             "-v", f"{vol}:/data",
+            "-v", f"{SMOKE_TEAM}:/mnt/team:ro",
             image,
         )
         assert up.returncode == 0, up.stderr
 
         # Wait for the container to report healthy (HEALTHCHECK probes /health).
-        import json
-        import time
         deadline = time.time() + 300
         status = ""
         while time.time() < deadline:
@@ -220,7 +257,8 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
             timeout=180,
         )
         assert ask.returncode == 0, ask.stderr
-        assert "pong" in ask.stdout.lower()
+        assert "pong" in ask.stdout.lower(), ask.stdout
     finally:
         _run("docker", "logs", name)
         _run("docker", "rm", "-f", name)
+        stop_wrangler()
