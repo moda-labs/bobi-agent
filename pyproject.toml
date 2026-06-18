@@ -71,7 +71,11 @@ packages = ["modastack"]
 "agents/support-manager" = "modastack/templates/support-manager"
 
 [tool.hatch.build.targets.sdist]
-include = ["modastack", "event-server", "README.md", "CHANGELOG.md"]
+# `agents` is required: the wheel force-includes agents/{eng-team,market-research,
+# support-manager} as bundled templates, and `python -m build` builds the wheel
+# FROM the sdist — so those dirs must be in the sdist or the wheel build fails
+# with "Forced include not found".
+include = ["modastack", "event-server", "agents", "README.md", "CHANGELOG.md"]
 exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
 
 [tool.pytest.ini_options]
