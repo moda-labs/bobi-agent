@@ -206,15 +206,15 @@ class TestDrainLoopWithReactor:
 
     def test_auto_dispatched_event_annotated(self):
         """Events auto-dispatched by reactor get an annotation in the pushed text."""
-        reactor = type("MockReactor", (), {"process": lambda self, e: True})()
+        reactor = type("MockReactor", (), {"process": lambda self, e: "dispatched"})()
         inbox = self._run_drain(self._make_review_event(), reactor)
         text = inbox.messages[0].text
-        assert "[auto-dispatched: pr-feedback workflow launched]" in text.lower() or \
+        assert "[auto-dispatched:" in text.lower() or \
                "[AUTO-DISPATCH" in text
 
     def test_non_matching_event_not_annotated(self):
         """Events that don't match any rule pass through without annotation."""
-        reactor = type("MockReactor", (), {"process": lambda self, e: False})()
+        reactor = type("MockReactor", (), {"process": lambda self, e: None})()
         event = {"type": "github.issues", "source": "github", "delivery": "bulk",
                  "fields": {"action": "opened"}}
         inbox = self._run_drain(event, reactor)

@@ -30,6 +30,7 @@ class AutoDispatchRule:
     workflow: str
     match: dict[str, str | int | bool] = field(default_factory=dict)
     cooldown: int = DEFAULT_COOLDOWN
+    suppress: bool = False
 
     def matches(self, event: dict) -> bool:
         """Return True if the event matches this rule's type and field conditions."""
@@ -63,14 +64,23 @@ class EventReactor:
         for entry in config:
             rules.append(AutoDispatchRule(
                 event=entry["event"],
-                workflow=entry["workflow"],
+                workflow=entry.get("workflow", ""),
                 match=entry.get("match", {}),
                 cooldown=entry.get("cooldown", DEFAULT_COOLDOWN),
+                suppress=entry.get("suppress", False),
             ))
         return cls(rules=rules, cwd=cwd)
 
-    def process(self, event: dict) -> bool:
-        """Check event against rules. If matched, dispatch and return True."""
+    def process(self, event: dict) -> str | None:
+        """Check event against rules.
+
+        Returns:
+            ``"dispatched"`` if a workflow was launched,
+            ``"suppressed"`` if the event matched a suppress rule (no
+            workflow launched, but the event should be annotated as
+            handled so the LLM doesn't act on it),
+            or ``None`` if no rule matched.
+        """
         for rule in self.rules:
             if not rule.matches(event):
                 continue
@@ -79,14 +89,19 @@ class EventReactor:
             now = time.monotonic()
             if key in self._dispatched and now - self._dispatched[key] < rule.cooldown:
                 log.info("Auto-dispatch skipped (cooldown): %s", key)
-                return False
+                return None
 
             self._dispatched[key] = now
             self._prune_dispatched(now)
-            self._dispatch(rule, event, key)
-            return True
 
-        return False
+            if rule.suppress:
+                log.info("Auto-dispatch suppressed (no workflow): %s", key)
+                return "suppressed"
+
+            self._dispatch(rule, event, key)
+            return "dispatched"
+
+        return None
 
     def _prune_dispatched(self, now: float) -> None:
         """Remove expired entries so the dedup dict doesn't grow unbounded."""

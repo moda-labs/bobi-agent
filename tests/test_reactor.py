@@ -181,9 +181,9 @@ class TestEventReactor:
         reactor = self._make_reactor()
         event = self._make_review_event()
 
-        dispatched = reactor.process(event)
+        result = reactor.process(event)
 
-        assert dispatched is True
+        assert result == "dispatched"
         mock_launch.assert_called_once()
         call_kwargs = mock_launch.call_args
         assert call_kwargs[1]["workflow_name"] == "pr-feedback"
@@ -194,9 +194,9 @@ class TestEventReactor:
         reactor = self._make_reactor()
         event = {"type": "github.issues", "fields": {"action": "opened"}}
 
-        dispatched = reactor.process(event)
+        result = reactor.process(event)
 
-        assert dispatched is False
+        assert result is None
         mock_launch.assert_not_called()
 
     @patch("modastack.subagent.launch_agent")
@@ -204,9 +204,9 @@ class TestEventReactor:
         reactor = self._make_reactor()
         event = self._make_review_event(review_state="approved")
 
-        dispatched = reactor.process(event)
+        result = reactor.process(event)
 
-        assert dispatched is False
+        assert result is None
         mock_launch.assert_not_called()
 
     @patch("modastack.subagent.launch_agent")
@@ -215,9 +215,9 @@ class TestEventReactor:
         reactor = self._make_reactor()
         event = self._make_review_comment_event()
 
-        dispatched = reactor.process(event)
+        result = reactor.process(event)
 
-        assert dispatched is True
+        assert result == "dispatched"
         mock_launch.assert_called_once()
 
     @patch("modastack.subagent.launch_agent")
@@ -226,8 +226,8 @@ class TestEventReactor:
         reactor = self._make_reactor()
         event = self._make_review_event()
 
-        assert reactor.process(event) is True
-        assert reactor.process(event) is False
+        assert reactor.process(event) == "dispatched"
+        assert reactor.process(event) is None
         assert mock_launch.call_count == 1
 
     @patch("modastack.subagent.launch_agent")
@@ -236,8 +236,8 @@ class TestEventReactor:
         reactor = self._make_reactor(cooldown=0)  # zero cooldown
         event = self._make_review_event()
 
-        assert reactor.process(event) is True
-        assert reactor.process(event) is True
+        assert reactor.process(event) == "dispatched"
+        assert reactor.process(event) == "dispatched"
         assert mock_launch.call_count == 2
 
     @patch("modastack.subagent.launch_agent")
@@ -247,8 +247,8 @@ class TestEventReactor:
         event1 = self._make_review_event(number=42)
         event2 = self._make_review_event(number=43)
 
-        assert reactor.process(event1) is True
-        assert reactor.process(event2) is True
+        assert reactor.process(event1) == "dispatched"
+        assert reactor.process(event2) == "dispatched"
         assert mock_launch.call_count == 2
 
     @patch("modastack.subagent.launch_agent")
@@ -258,9 +258,9 @@ class TestEventReactor:
         reactor = self._make_reactor()
         event = self._make_review_event()
 
-        # Should not raise, should return True (handled)
-        dispatched = reactor.process(event)
-        assert dispatched is True
+        # Should not raise, should return "dispatched" (handled)
+        result = reactor.process(event)
+        assert result == "dispatched"
 
     @patch("modastack.subagent.launch_agent")
     def test_task_includes_pr_context(self, mock_launch):
@@ -279,8 +279,103 @@ class TestEventReactor:
         reactor = EventReactor(rules=[], cwd="/tmp")
         event = self._make_review_event()
 
-        assert reactor.process(event) is False
+        assert reactor.process(event) is None
         mock_launch.assert_not_called()
+
+    @patch("modastack.subagent.launch_agent")
+    def test_suppress_rule_returns_suppressed_without_dispatch(self, mock_launch):
+        """Suppress rules match the event but don't launch a workflow."""
+        rules = [
+            AutoDispatchRule(
+                event="github.pull_request",
+                workflow="",
+                match={"action": "review_requested"},
+                suppress=True,
+            ),
+            AutoDispatchRule(
+                event="github.pull_request_review",
+                workflow="pr-feedback",
+                match={"review_state": "changes_requested"},
+            ),
+        ]
+        reactor = EventReactor(rules=rules, cwd="/tmp")
+        event = {
+            "type": "github.pull_request",
+            "source": "github",
+            "topics": ["github:moda-labs/test"],
+            "fields": {
+                "action": "review_requested",
+                "number": 99,
+                "title": "Some PR",
+                "sender": "someuser",
+            },
+        }
+
+        result = reactor.process(event)
+
+        assert result == "suppressed"
+        mock_launch.assert_not_called()
+
+    @patch("modastack.subagent.launch_agent")
+    def test_suppress_rule_respects_cooldown(self, mock_launch):
+        """Suppress rules use cooldown to prevent re-suppressing the same event."""
+        rules = [
+            AutoDispatchRule(
+                event="github.pull_request",
+                workflow="",
+                match={"action": "review_requested"},
+                suppress=True,
+                cooldown=1800,
+            ),
+        ]
+        reactor = EventReactor(rules=rules, cwd="/tmp")
+        event = {
+            "type": "github.pull_request",
+            "source": "github",
+            "topics": ["github:moda-labs/test"],
+            "fields": {"action": "review_requested", "number": 99},
+        }
+
+        assert reactor.process(event) == "suppressed"
+        # Second call within cooldown returns None (already handled)
+        assert reactor.process(event) is None
+        mock_launch.assert_not_called()
+
+    @patch("modastack.subagent.launch_agent")
+    def test_suppress_does_not_block_other_pr_events(self, mock_launch):
+        """Suppress rule for review_requested doesn't affect other pull_request actions."""
+        mock_launch.return_value = "wf-test"
+        rules = [
+            AutoDispatchRule(
+                event="github.pull_request",
+                workflow="",
+                match={"action": "review_requested"},
+                suppress=True,
+            ),
+            AutoDispatchRule(
+                event="github.pull_request",
+                workflow="pr-closed",
+                match={"action": "closed"},
+            ),
+        ]
+        reactor = EventReactor(rules=rules, cwd="/tmp")
+
+        # review_requested → suppressed
+        event_rr = {
+            "type": "github.pull_request",
+            "topics": ["github:moda-labs/test"],
+            "fields": {"action": "review_requested", "number": 99},
+        }
+        assert reactor.process(event_rr) == "suppressed"
+
+        # closed → dispatched
+        event_closed = {
+            "type": "github.pull_request",
+            "topics": ["github:moda-labs/test"],
+            "fields": {"action": "closed", "number": 100},
+        }
+        assert reactor.process(event_closed) == "dispatched"
+        mock_launch.assert_called_once()
 
 
 class TestEventReactorFromConfig:
@@ -315,6 +410,19 @@ class TestEventReactorFromConfig:
         ]
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
         assert reactor.rules[0].cooldown == 1800  # default 30 min
+
+    def test_from_config_suppress_rule(self):
+        config = [
+            {
+                "event": "github.pull_request",
+                "match": {"action": "review_requested"},
+                "suppress": True,
+            },
+        ]
+        reactor = EventReactor.from_config(config, cwd="/tmp/project")
+        assert len(reactor.rules) == 1
+        assert reactor.rules[0].suppress is True
+        assert reactor.rules[0].workflow == ""
 
 
 class TestConfigAutoDispatch:
