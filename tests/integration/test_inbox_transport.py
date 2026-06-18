@@ -249,3 +249,85 @@ def test_concurrent_asks_do_not_cross_replies(inbox_event_server, modastack_env)
         t.join(timeout=2)
         sender_inbox.close()
         target_inbox.close()
+
+
+@pytest.fixture
+def fast_eviction_event_server(modastack_env):
+    """Start a local event server with a very short eviction threshold (2s)."""
+    from modastack.events.server import ensure_running
+    from modastack.events import publish as _pub
+
+    port = _free_port()
+    url = f"http://localhost:{port}"
+
+    agent_yaml = modastack_env.project_path / ".modastack" / "agent.yaml"
+    original = agent_yaml.read_text()
+    data = yaml.safe_load(original)
+    data["event_server_url"] = url
+    agent_yaml.write_text(yaml.dump(data))
+    _pub._es_url_cache.clear()
+
+    ensure_running(port, project_path=modastack_env.project_path, extra_env={
+        "MODASTACK_ES_EVICTION_STALE_MS": "2000",
+        "MODASTACK_ES_EVICTION_SWEEP_MS": "1000",
+    })
+
+    deadline = time.monotonic() + 15
+    healthy = False
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"{url}/health", timeout=2) as r:
+                if json.loads(r.read()).get("status") == "ok":
+                    healthy = True
+                    break
+        except Exception:
+            time.sleep(0.3)
+    if not healthy:
+        pytest.skip("local event server (Node) unavailable")
+
+    yield url
+
+    pid_file = modastack_env.state_dir / "event-server.pid"
+    if pid_file.exists():
+        try:
+            os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
+        except (ProcessLookupError, ValueError, OSError):
+            pass
+    agent_yaml.write_text(original)
+    _pub._es_url_cache.clear()
+
+
+def test_eviction_backstop_cleans_up_disconnected_deployments(
+    fast_eviction_event_server, modastack_env
+):
+    """A deployment whose WS never connects is evicted after the stale threshold (#279)."""
+    es_url = fast_eviction_event_server
+
+    req = urllib.request.Request(
+        f"{es_url}/deployments",
+        data=json.dumps({
+            "name": "crash-victim",
+            "subscriptions": ["reply/crash-test"],
+        }).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5) as r:
+        json.loads(r.read())
+
+    baseline = _deployment_count(es_url)
+    assert baseline >= 1
+
+    deadline = time.monotonic() + 10
+    evicted = False
+    while time.monotonic() < deadline:
+        time.sleep(1)
+        count = _deployment_count(es_url)
+        if count < baseline:
+            evicted = True
+            break
+
+    assert evicted, (
+        f"deployment was not evicted within 10s "
+        f"(baseline={baseline}, current={_deployment_count(es_url)})"
+    )

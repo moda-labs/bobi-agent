@@ -112,6 +112,91 @@ describe("event-server", () => {
 	});
 });
 
+
+// ---------------------------------------------------------------------------
+// Cloudflare deregistration verification (#279)
+// ---------------------------------------------------------------------------
+
+describe("cloudflare deployment deregistration", () => {
+	it("DELETE removes deployment from KV and cleans subscription-index entries", async () => {
+		const regResp = await SELF.fetch("https://example.com/deployments", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				name: "ephemeral-reply",
+				subscriptions: ["reply/test-uuid"],
+			}),
+		});
+		expect(regResp.status).toBe(201);
+		const { deployment_id, api_key } = (await regResp.json()) as {
+			deployment_id: string;
+			api_key: string;
+		};
+		expect(deployment_id).toBeTruthy();
+
+		const delResp = await SELF.fetch(
+			`https://example.com/deployments/${deployment_id}`,
+			{
+				method: "DELETE",
+				headers: { authorization: `Bearer ${api_key}` },
+			},
+		);
+		expect(delResp.status).toBe(200);
+		const delBody = (await delResp.json()) as { ok: boolean };
+		expect(delBody.ok).toBe(true);
+
+		const regResp2 = await SELF.fetch("https://example.com/deployments", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				name: "ephemeral-reply-2",
+				subscriptions: ["reply/test-uuid"],
+			}),
+		});
+		expect(regResp2.status).toBe(201);
+	});
+
+	it("DELETE rejects wrong api key (403)", async () => {
+		const regResp = await SELF.fetch("https://example.com/deployments", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				name: "guarded-deploy",
+				subscriptions: ["reply/guarded"],
+			}),
+		});
+		const { deployment_id } = (await regResp.json()) as { deployment_id: string };
+
+		const delResp = await SELF.fetch(
+			`https://example.com/deployments/${deployment_id}`,
+			{
+				method: "DELETE",
+				headers: { authorization: "Bearer wrong_key" },
+			},
+		);
+		expect(delResp.status).toBe(403);
+	});
+
+	it("DELETE rejects unknown deployment id (403)", async () => {
+		const delResp = await SELF.fetch(
+			"https://example.com/deployments/nonexistent-id",
+			{
+				method: "DELETE",
+				headers: { authorization: "Bearer any_key" },
+			},
+		);
+		expect(delResp.status).toBe(403);
+	});
+
+	it("DELETE rejects missing auth header (403)", async () => {
+		const delResp = await SELF.fetch(
+			"https://example.com/deployments/some-id",
+			{ method: "DELETE" },
+		);
+		expect(delResp.status).toBe(403);
+	});
+});
+
 describe("slack send error handling", () => {
 	it("returns 502 when slack API fetch fails", async () => {
 		// Register a workspace with a token so the handler reaches sendSlackMessage

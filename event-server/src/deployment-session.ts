@@ -9,6 +9,13 @@ type StoredEvent = NormalizedEvent & { seq: number };
 
 const EVENT_BUFFER_TTL = 48 * 60 * 60;
 
+// Eviction backstop (#279): if all WebSockets disconnect and none
+// reconnect within this window, the alarm fires and cleans up KV
+// records so the deployment does not leak server-side.  Keyed on
+// WS-disconnect, NOT activity — a live manager session can idle for
+// hours but keeps its WS open, so it is never eligible for eviction.
+const EVICTION_DELAY_MS = 60_000;
+
 export class DeploymentSession extends DurableObject<Env> {
 	private deploymentId: string = "";
 	private nextSeq: number = 1;
@@ -84,6 +91,10 @@ export class DeploymentSession extends DurableObject<Env> {
 
 		this.ctx.acceptWebSocket(server);
 
+		// A new WS connection means the deployment is alive — cancel any
+		// pending eviction alarm.
+		await this.ctx.storage.deleteAlarm();
+
 		const url = new URL(request.url);
 		const lastSeen = parseInt(url.searchParams.get("last_seen") || "0", 10);
 
@@ -133,11 +144,65 @@ export class DeploymentSession extends DurableObject<Env> {
 		}
 	}
 
+	// When the last WebSocket disconnects, schedule an eviction alarm.
+	// If a new WS connects before it fires, handleWebSocketUpgrade cancels it.
 	override async webSocketClose(): Promise<void> {
-		// Managed by hibernation API
+		await this.scheduleEvictionIfDisconnected();
 	}
 
 	override async webSocketError(): Promise<void> {
-		// Managed by hibernation API
+		await this.scheduleEvictionIfDisconnected();
+	}
+
+	private async scheduleEvictionIfDisconnected(): Promise<void> {
+		if (this.ctx.getWebSockets().length === 0) {
+			await this.ctx.storage.setAlarm(Date.now() + EVICTION_DELAY_MS);
+		}
+	}
+
+	// Alarm fires after the eviction delay.  If the deployment still has
+	// no connected WebSockets, clean up KV records so the deployment does
+	// not leak server-side.  The DO storage itself is ephemeral once the
+	// deployment record is gone — Cloudflare will garbage-collect the DO.
+	override async alarm(): Promise<void> {
+		if (this.ctx.getWebSockets().length > 0) return; // reconnected in time
+
+		if (!this.deploymentId) return;
+
+		// Read the deployment record from KV to get the api_key for cleanup
+		const depData = await this.env.EVENTS.get(`deployment_id:${this.deploymentId}`);
+		if (!depData) return; // already cleaned up
+
+		const dep = JSON.parse(depData) as {
+			id: string;
+			api_key: string;
+			bubble_id: string;
+			subscriptions: string[];
+		};
+
+		// Remove subscription-index entries
+		await Promise.all(
+			dep.subscriptions.map(async (sub) => {
+				const isGlobal = sub.startsWith("github:") || sub.startsWith("linear:") || sub.startsWith("slack:");
+				const nsKey = isGlobal ? sub : `${dep.bubble_id}:${sub}`;
+				const kvKey = `subscriptions:${nsKey}`;
+				const existing = await this.env.EVENTS.get(kvKey);
+				if (!existing) return;
+				const ids: string[] = JSON.parse(existing);
+				const filtered = ids.filter((id) => id !== this.deploymentId);
+				if (filtered.length === 0) {
+					await this.env.EVENTS.delete(kvKey);
+				} else {
+					await this.env.EVENTS.put(kvKey, JSON.stringify(filtered));
+				}
+			}),
+		);
+
+		// Remove deployment records from KV
+		await this.env.EVENTS.delete(`deployments:${dep.api_key}`);
+		await this.env.EVENTS.delete(`deployment_id:${this.deploymentId}`);
+
+		// Clear DO storage
+		await this.ctx.storage.deleteAll();
 	}
 }
