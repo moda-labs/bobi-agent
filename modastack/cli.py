@@ -494,7 +494,10 @@ def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
 
 @main.command()
 @click.argument("pack")
-def install(pack):
+@click.option("--non-interactive", is_flag=True,
+              help="Skip prompts; read secrets from the environment. "
+                   "Suitable for container entrypoints and CI.")
+def install(pack, non_interactive):
     """Install an agent team into the current project.
 
     PACK is a path to a local agent team directory, or a name to fetch
@@ -508,6 +511,7 @@ def install(pack):
         modastack install agents/eng-team
         modastack install /path/to/my-agent
         modastack install eng-team              # fetches from registry
+        modastack install eng-team --non-interactive
     """
     # install targets the current directory literally — never walk up to
     # an enclosing project, or nesting a new project inside an existing
@@ -562,7 +566,7 @@ def install(pack):
     if parts:
         click.echo("\n".join(parts))
 
-    # Prompt for any required env vars and write .modastack/.env
+    # Collect required env vars and write .modastack/.env
     from modastack.config import (find_required_env_vars, parse_env_file,
                                   write_env_file)
     env_vars = find_required_env_vars(project_path)
@@ -572,7 +576,18 @@ def install(pack):
 
         click.echo()
         missing = [v for v in env_vars if v not in existing and v not in os.environ]
-        if missing:
+
+        if non_interactive:
+            # Pull values from the environment — never prompt.
+            for var in env_vars:
+                if var not in existing and var in os.environ:
+                    existing[var] = os.environ[var]
+            if missing:
+                click.echo(
+                    "Warning: missing env vars (set before start): "
+                    + ", ".join(missing))
+            write_env_file(env_file, existing)
+        elif missing:
             click.echo("This agent needs credentials:")
             for var in missing:
                 try:
