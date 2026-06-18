@@ -1,19 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.22.0 — 2026-06-18
+
+Codex-as-a-tool, a methodical setup connections flow, and a round of comms /
+release-pipeline hardening on top of the v0.21.0 auth+comms foundation.
+
+### Added
+- **Codex as a tool.** MCP connection + inject wiring so agents can call the
+  Codex CLI; preflight that resolves Codex subscription vs API-key auth and
+  fails fast when neither is available. (#288, #320)
+- **Setup connections flow.** MCP cascade, a guided Venn connection flow, and
+  add-your-own custom MCP; plus setup UI updates, bundled team templates, and a
+  build idle-timeout. (#298, #291)
+- **Cheap detector + escalate-on-hit monitor** — a low-cost first-pass detector
+  that escalates to a full check only on a hit. (#294)
 
 ### Fixed
-- **Publish skips the doomed unsigned POST during cold start.** Lifecycle emits
-  (`session.started` / `session.failed`) that fire before the bubble is minted
-  (the `--fresh` / startup window) no longer POST an unsigned event guaranteed to
-  403; `_post_topic` returns early and logs at debug. Removes the duplicate
-  `No bubble credential` + `403 Forbidden` warning pairs from the manager log and
-  a pointless round-trip.
-- **Event client stays quiet on routine reconnects.** A Cloudflare Durable Object
-  cycles hibernating WebSockets from the runtime side every few minutes; the
-  client reconnects losslessly via the `last_seen` replay cursor. Those routine
-  reconnects now log at debug. A genuine flap (5+ short-lived connections in a
-  row) still warns, naming the last error.
+- **Release smoke repaired.** The orphaned local `:8080` server and an unsigned
+  Smoke 1 event (403) no longer fail the smoke and block auto-promote. (#315)
+- **Cloudflare upgrade restart.** On upgrade, a stale pre-bubble
+  `deployment_state` is detected and the client re-registers instead of issuing
+  a doomed stale PUT — no more manual `--fresh`. (#316)
+- **Slack event de-duplication** prevents double placeholder messages. (#324)
+- **Quieter cold-start + reconnect logs.** Lifecycle emits that fire before the
+  bubble is minted no longer POST an unsigned event guaranteed to 403; the event
+  client logs routine Cloudflare DO reconnects at debug and warns only on a real
+  flap streak. (#317)
+
+### Internal
+- Event-server integration tests now run against the real Worker via
+  `wrangler dev` in CI. (#312)
 
 ## 0.21.0 — 2026-06-18
 
