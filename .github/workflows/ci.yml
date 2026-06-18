@@ -107,6 +107,35 @@ jobs:
           pytest tests/integration/ -m "not claude"
           --timeout=60 -v
 
+  integration-wrangler:
+    name: Integration tests (wrangler dev)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Python dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Install event-server Node dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: event-server
+
+      - name: Run event-server integration tests against wrangler dev
+        env:
+          MODASTACK_TEST_WRANGLER: "1"
+        run: >-
+          pytest tests/integration/test_event_server.py
+          -k "wrangler"
+          --timeout=120 -v
+
   integration-claude:
     name: Integration tests (Claude)
     runs-on: self-hosted
