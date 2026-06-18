@@ -1393,7 +1393,6 @@ describe("auth rejection counters", () => {
 
 	it("increments unknown_bubble when bubble_id not found", async () => {
 		const store = createMockStorage();
-		// Sign with a bubble that doesn't exist in the store
 		const ctx = await signCtx({ id: "bub_nonexistent", key: "bkey_x" }, "POST", "/events/x", "{}");
 		await authenticateBubble(store, ctx);
 		const c = getAuthRejectionCounters();

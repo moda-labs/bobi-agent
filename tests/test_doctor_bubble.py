@@ -46,7 +46,6 @@ class TestCheckBubbleAuth:
         assert "not started" in result.detail
 
     def test_no_bubble_but_server_running(self, tmp_project):
-        # Create a pid file to simulate the event server running
         state_dir = tmp_project / ".modastack" / "state"
         (state_dir / "event-server.pid").write_text("12345")
         with patch("modastack.doctor.bound_root", return_value=tmp_project):
@@ -68,12 +67,10 @@ class TestCheckBubbleAuth:
         assert result.ok is True
         assert "bub_abc123def456" in result.detail
         assert "key present" in result.detail
-        # Must never leak the key
         assert "bkey_secret" not in result.detail
 
     def test_remote_cleartext_url_warns(self, tmp_project):
         _write_bubble(tmp_project, bubble_id="bub_test", bubble_key="bkey_test")
-        # Write a remote non-TLS event_server_url
         (tmp_project / ".modastack" / "agent.yaml").write_text(
             "agent: test\nevent_server_url: http://remote-host.example.com:8080\n"
         )
