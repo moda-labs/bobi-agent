@@ -1,0 +1,52 @@
+name: Container image
+
+# Builds the instance image (containerized-8) and runs its contract tests.
+# Path-filtered: only fires when image-defining files change, so unrelated PRs
+# pay nothing. The nightly run has no path filter — it catches EXTERNAL rot
+# (the claude.ai installer, the python:3.11-slim base, apt/pip indexes) even
+# when no file in the repo changed.
+on:
+  push:
+    branches: [main]
+    paths: &image_paths
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker/**"
+      - "pyproject.toml"
+      - "tests/integration/test_container_image.py"
+      - ".github/workflows/container.yml"
+  pull_request:
+    branches: [main]
+    paths: *image_paths
+  schedule:
+    - cron: "0 6 * * *"  # nightly at 6am UTC — external-rot canary
+  workflow_dispatch: {}
+
+jobs:
+  container-image:
+    name: Build + contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # conftest under tests/integration imports modastack, so the package must
+      # be importable on the runner even though the tests only shell out to docker.
+      - name: Install test runner
+        run: pip install -e ".[dev]"
+
+      - name: Build instance image
+        run: docker build -t modastack:ci .
+
+      - name: Run container contract tests
+        # The image is prebuilt above; the fixture reuses it via the env var
+        # instead of rebuilding. The live ask/login round-trips stay skipped
+        # (no ANTHROPIC_API_KEY) — they belong to the deployed lane.
+        env:
+          MODASTACK_TEST_IMAGE: modastack:ci
+        run: pytest tests/integration/test_container_image.py -m docker -v --timeout=400

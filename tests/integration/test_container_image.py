@@ -23,6 +23,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Whole module builds/runs the image — excluded from integration-fast via
+# `-m "not docker"` so it never triggers a multi-minute build on every PR.
+pytestmark = pytest.mark.docker
+
 
 def _docker_ok() -> bool:
     if not shutil.which("docker"):

@@ -86,6 +86,7 @@ exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
 markers = [
     "claude: test requires a real Claude CLI session (deselected in integration-fast)",
     "local_only: test only runs against the local Node.js event server backend",
+    "docker: test builds/runs the instance container image (needs a docker daemon; deselected in integration-fast)",
 ]
 
 [build-system]

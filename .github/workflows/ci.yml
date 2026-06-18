@@ -116,9 +116,11 @@ jobs:
 
       - name: Run all non-Claude integration tests
         # Tests that need the claude CLI skip via requires_claude.
+        # `docker`-marked tests build the container image (minutes + network) —
+        # they run in the dedicated container-image job, not here.
         # New test files are auto-discovered — no explicit file list to rot.
         run: >-
-          pytest tests/integration/ -m "not claude"
+          pytest tests/integration/ -m "not claude and not docker"
           --timeout=60 -v
 
   integration-wrangler:
