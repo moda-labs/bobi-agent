@@ -126,7 +126,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         html = (STATIC_DIR / "index.html").read_text()
         # The page bootstraps the nonce from a meta tag the JS reads back.
         html = html.replace("{{NONCE}}", nonce)
-        return Response(html, media_type="text/html")
+        return Response(html, media_type="text/html",
+                        headers={"Cache-Control": "no-store, max-age=0"})
 
     # static assets (css/js) — no nonce needed, same-origin only
     @app.get("/static/{name}")
@@ -136,8 +137,12 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             return JSONResponse({"error": "not found"}, status_code=404)
         types = {".css": "text/css", ".js": "text/javascript",
                  ".svg": "image/svg+xml"}
-        return FileResponse(target,
-                            media_type=types.get(target.suffix, "text/plain"))
+        # The wizard is a short-lived local server whose assets change between
+        # runs (and during development); never let the browser serve a stale
+        # bundle from cache — always revalidate against disk.
+        return FileResponse(
+            target, media_type=types.get(target.suffix, "text/plain"),
+            headers={"Cache-Control": "no-store, max-age=0"})
 
     # --- state (deterministic) -----------------------------------------
     @app.get("/api/state")
