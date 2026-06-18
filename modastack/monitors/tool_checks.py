@@ -65,7 +65,8 @@ def _scripts_dir() -> Path:
 
 
 def _script_path(monitor_name: str) -> Path:
-    return _scripts_dir() / f"{monitor_name}.sh"
+    safe_name = monitor_name.replace("/", "_").replace("..", "_")
+    return _scripts_dir() / f"{safe_name}.sh"
 
 
 def _cache_script(monitor_name: str, cmd_parts: list[str]) -> None:
