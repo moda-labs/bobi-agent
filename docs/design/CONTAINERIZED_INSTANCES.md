@@ -307,6 +307,24 @@ Ticket IDs below are local to this doc (C-numbers); file as GitHub issues
 and back-link them here. Phases are strict dependency layers; tickets within
 a phase are parallelizable unless noted.
 
+**Filed 2026-06-18 — epic [#344](https://github.com/moda-labs/modastack/issues/344).**
+MVP-cut issue mapping:
+
+| C | Issue | Phase | Dispatch |
+|---|---|---|---|
+| C1 | [#332](https://github.com/moda-labs/modastack/issues/332) | 0 | in progress |
+| C2 | [#333](https://github.com/moda-labs/modastack/issues/333) | 0 | Modastack |
+| C3 | [#334](https://github.com/moda-labs/modastack/issues/334) | 0 | Modastack |
+| C5 | [#335](https://github.com/moda-labs/modastack/issues/335) | 0 | Modastack |
+| C6 | [#336](https://github.com/moda-labs/modastack/issues/336) | 0 | Modastack |
+| C7 | [#337](https://github.com/moda-labs/modastack/issues/337) | 0 | Modastack |
+| C8 | [#338](https://github.com/moda-labs/modastack/issues/338) | 1 | human/infra |
+| C9 | [#339](https://github.com/moda-labs/modastack/issues/339) | 1 | human/infra |
+| C10 | [#340](https://github.com/moda-labs/modastack/issues/340) | 1 | human/infra |
+| C12 | [#341](https://github.com/moda-labs/modastack/issues/341) | 1 | human/infra |
+| C22 | [#342](https://github.com/moda-labs/modastack/issues/342) | 1 | human/infra |
+| C23 | [#343](https://github.com/moda-labs/modastack/issues/343) | 1 | human/infra |
+
 ### MVP cut — EC2 → Fly migration (decided 2026-06-12)
 
 Target state: the single EC2 director model replaced by ~3 internal
