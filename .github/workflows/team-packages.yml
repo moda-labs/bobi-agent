@@ -40,7 +40,10 @@ jobs:
           built=(dist/teams/*.tar.gz)
           [ "${#built[@]}" -gt 0 ] || { echo "No tarballs were built"; exit 1; }
           for tgz in "${built[@]}"; do
-            if ! tar -tzf "$tgz" | grep -qE '(^|/)agent\.yaml$'; then
+            # Disable pipefail for this check: grep -q exits early on match,
+            # which can SIGPIPE tar and make the pipeline return 141 even
+            # though the match was found.
+            if ! (set +o pipefail; tar -tzf "$tgz" | grep -qE '(^|/)agent\.yaml$'); then
               echo "::error::$tgz has no agent.yaml — not a valid team package"
               exit 1
             fi
