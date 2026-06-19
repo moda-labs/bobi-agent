@@ -157,8 +157,8 @@ def test_home_survives_privilege_drop(image: str):
 @requires_docker
 @pytest.mark.timeout(120)
 def test_empty_volume_without_team_fails_clearly(image: str, tmp_path: Path):
-    """An empty volume with no MODASTACK_TEAM should fail with a clear message,
-    not a confusing crash deep in the manager."""
+    """An empty volume with neither MODASTACK_TEAM nor MODASTACK_TEAM_URL should
+    fail with a clear message, not a confusing crash deep in the manager."""
     vol = tmp_path / "data"
     vol.mkdir()
     proc = _run(
@@ -169,7 +169,7 @@ def test_empty_volume_without_team_fails_clearly(image: str, tmp_path: Path):
         image,
     )
     assert proc.returncode != 0
-    assert "MODASTACK_TEAM is unset" in (proc.stdout + proc.stderr)
+    assert "nothing to install" in (proc.stdout + proc.stderr)
 
 
 SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "smoke-team"
