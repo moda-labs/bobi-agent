@@ -57,23 +57,39 @@ jobs:
       # The live round-trip spins up an EPHEMERAL event server (the real Worker
       # via wrangler dev) so CI never touches a production deployment. It needs
       # node + the event-server deps on the runner.
+      #
+      # Cadence: this job is already path-filtered to image-defining files, so
+      # the live ask runs WHENEVER the image actually changes (plus nightly /
+      # push to main / dispatch) — that's the "image rebuilt → prove it boots and
+      # answers" gate. Same-repo PRs run it for real; fork PRs (no secret) need
+      # the `ci:live` label and otherwise skip. The three steps share one
+      # condition (kept identical) so they stay in lockstep.
       - name: Set up Node (ephemeral wrangler event server)
-        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:live')
+        if: >-
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository ||
+          contains(github.event.pull_request.labels.*.name, 'ci:live')
         uses: actions/setup-node@v5
         with:
           node-version: "22"  # wrangler requires Node >= 22
 
       - name: Install event-server deps
-        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:live')
+        if: >-
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository ||
+          contains(github.event.pull_request.labels.*.name, 'ci:live')
         working-directory: event-server
         run: npm ci --no-audit --no-fund
 
       - name: Live ask round-trip
-        # Real Claude API call against an ephemeral wrangler event server. Gated
-        # off PRs to bound API cost (and fork PRs have no secret anyway); runs on
-        # nightly, push to main, and manual dispatch — or on a PR labelled
-        # `ci:live` for on-demand verification. Skips if the secret is unset.
-        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:live')
+        # Real Claude API call against an ephemeral wrangler event server: boots
+        # the actual built image, waits for the manager health endpoint, then
+        # asserts a blocking `ask` round-trips. Bounded by the image path filter,
+        # so cost is paid only when the image changed. Skips if the secret is unset.
+        if: >-
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository ||
+          contains(github.event.pull_request.labels.*.name, 'ci:live')
         env:
           MODASTACK_TEST_IMAGE: modastack:ci
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
