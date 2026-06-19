@@ -368,6 +368,11 @@ MVP-cut issue mapping:
 | C12 | [#341](https://github.com/moda-labs/modastack/issues/341) | 1 | human/infra |
 | C22 | [#342](https://github.com/moda-labs/modastack/issues/342) | 1 | human/infra |
 | C23 | [#343](https://github.com/moda-labs/modastack/issues/343) | 1 | human/infra |
+| C24 | [#368](https://github.com/moda-labs/modastack/issues/368) | 1+ | human/infra |
+
+C24 (custom agent dependencies / team-flavored images) is a follow-on capability
+beyond the original §10 list — see `docs/design/CUSTOM_AGENT_DEPS.md`. It unblocks
+real teams (e.g. `eng-team`, which `requires:` gstack+codex) on the C8/C22 base.
 
 ### MVP cut — EC2 → Fly migration (decided 2026-06-12)
 
