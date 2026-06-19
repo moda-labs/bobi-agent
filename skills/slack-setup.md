@@ -23,6 +23,8 @@ Create a Slack bot that modastack uses to scan for work requests and post status
 | `channels:history` | Read messages in public channels |
 | `channels:read` | List public channels |
 | `chat:write` | Post status updates |
+| `files:read` | Access files shared in conversations |
+| `files:write` | Upload files and images to channels |
 | `im:history` | Read DMs to the bot (work requests) |
 | `im:read` | List DM conversations |
 | `users:read` | Resolve user names in messages |

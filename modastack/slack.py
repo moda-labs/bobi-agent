@@ -159,6 +159,172 @@ def set_thread_status(
 
 
 # ---------------------------------------------------------------------------
+# File download / upload
+# ---------------------------------------------------------------------------
+
+def download_slack_file(
+    token: str,
+    url: str,
+    *,
+    timeout: float = 30,
+) -> tuple[bytes, str]:
+    """Download a file from Slack using its ``url_private`` or ``url_private_download``.
+
+    Returns ``(content_bytes, content_type)``.
+    Raises on network errors or non-2xx responses.
+    """
+    resp = pooled.get(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=timeout,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Slack file download failed: HTTP {resp.status_code}"
+        )
+    content_type = resp.headers.get("content-type", "application/octet-stream")
+    return resp.content, content_type
+
+
+def upload_slack_file(
+    token: str,
+    channel: str,
+    file_data: bytes,
+    filename: str,
+    *,
+    title: str = "",
+    thread_ts: str = "",
+    initial_comment: str = "",
+    timeout: float = 30,
+) -> dict:
+    """Upload a file to a Slack channel using the V2 upload flow.
+
+    1. ``files.getUploadURLExternal`` — get a presigned upload URL
+    2. POST file bytes to that URL
+    3. ``files.completeUploadExternal`` — share the file in the channel
+
+    Returns the ``files.completeUploadExternal`` response dict.
+    Raises ``RuntimeError`` on Slack API errors.
+    """
+    # Step 1: Get upload URL
+    step1_resp = pooled.client().get(
+        "https://slack.com/api/files.getUploadURLExternal",
+        params={"filename": filename, "length": len(file_data)},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=timeout,
+    )
+    step1 = step1_resp.json()
+    if not step1.get("ok"):
+        raise RuntimeError(
+            f"Slack getUploadURLExternal error: {step1.get('error', 'unknown')}"
+        )
+
+    upload_url = step1["upload_url"]
+    file_id = step1["file_id"]
+
+    # Step 2: Upload file bytes to the presigned URL
+    upload_resp = pooled.post(
+        upload_url,
+        content=file_data,
+        headers={"Content-Type": "application/octet-stream"},
+        timeout=timeout,
+    )
+    if upload_resp.status_code >= 400:
+        raise RuntimeError(
+            f"Slack file upload failed: HTTP {upload_resp.status_code}"
+        )
+
+    # Step 3: Complete the upload (share in channel)
+    file_entry: dict = {"id": file_id}
+    if title:
+        file_entry["title"] = title
+
+    payload: dict = {
+        "files": [file_entry],
+        "channel_id": channel,
+    }
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+    if initial_comment:
+        payload["initial_comment"] = initial_comment
+
+    return _slack_api(
+        "files.completeUploadExternal", token, payload, timeout=timeout,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Thread reading
+# ---------------------------------------------------------------------------
+
+def fetch_slack_thread(
+    token: str,
+    channel: str,
+    thread_ts: str,
+    *,
+    limit: int = 100,
+    timeout: float = 10,
+) -> list[dict]:
+    """Fetch messages in a Slack thread using ``conversations.replies``.
+
+    Returns a list of message dicts ordered oldest-first.  Each message
+    includes ``user``, ``text``, ``ts``, and optionally ``files``.
+    Raises ``RuntimeError`` on Slack API errors.
+    """
+    messages: list[dict] = []
+    cursor = ""
+
+    while True:
+        params: dict = {
+            "channel": channel,
+            "ts": thread_ts,
+            "limit": min(limit - len(messages), 200),
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        resp = pooled.client().get(
+            "https://slack.com/api/conversations.replies",
+            params=params,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+        result = resp.json()
+
+        if not result.get("ok"):
+            raise RuntimeError(
+                f"Slack API error: {result.get('error', 'unknown')}"
+            )
+
+        for msg in result.get("messages", []):
+            entry: dict = {
+                "user": msg.get("user", ""),
+                "text": msg.get("text", ""),
+                "ts": msg.get("ts", ""),
+            }
+            if msg.get("files"):
+                entry["files"] = [
+                    {
+                        "id": f.get("id", ""),
+                        "name": f.get("name", ""),
+                        "mimetype": f.get("mimetype", ""),
+                        "url_private": f.get("url_private", ""),
+                    }
+                    for f in msg["files"]
+                ]
+            messages.append(entry)
+
+        if len(messages) >= limit:
+            break
+
+        cursor = result.get("response_metadata", {}).get("next_cursor", "")
+        if not cursor:
+            break
+
+    return messages[:limit]
+
+
+# ---------------------------------------------------------------------------
 # Placeholder + refresh loop
 # ---------------------------------------------------------------------------
 
