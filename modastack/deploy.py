@@ -32,6 +32,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -227,22 +228,115 @@ def find_repo_root(start: Path | None = None) -> Path:
     for d in (cur, *cur.parents):
         if (d / "scripts" / "provision-instance.sh").exists() and (d / "Dockerfile").exists():
             return d
-    raise DeployError(
-        "could not find the modastack source root (a dir with "
-        "scripts/provision-instance.sh and Dockerfile). `modastack deploy` builds "
-        "the instance image, so run it from a modastack checkout."
+    raise DeployError("not a modastack checkout")
+
+
+@dataclass
+class DeployAssets:
+    """Where deploy finds its mechanics + how the instance image is built.
+
+    Two modes, so the binary deploys with OR without a repo:
+      * **source** — a modastack checkout: build the image from local source
+        (Dockerfile, `COPY . .`). Used in dev and the modastack repo's own CI.
+      * **binary** — no checkout: the scripts + a PyPI-install Dockerfile ship in
+        the wheel (`modastack/_deploy`), so `uv tool install modastack` is enough
+        to deploy. The image installs `modastack==<this version>` from PyPI.
+    """
+
+    mode: str
+    provision_sh: Path
+    destroy_sh: Path
+    build_context: Path | None
+    dockerfile: Path | None
+    build_args: dict
+    run_cwd: Path | None
+
+
+def _packaged_deploy_dir() -> Path | None:
+    """The bundled deploy assets (`modastack/_deploy`) in an installed wheel, or
+    None in an editable/source checkout (where source mode is used instead)."""
+    try:
+        import importlib.resources as ir
+        root = ir.files("modastack") / "_deploy"
+        if root.is_dir():
+            return Path(str(root))
+    except (ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError):
+        pass
+    return None
+
+
+def _modastack_version() -> str:
+    """The installed modastack version — pinned into the PyPI instance image so
+    the deployed instance runs the same code as the binary that deployed it."""
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return version("modastack")
+    except PackageNotFoundError as e:
+        raise DeployError(
+            "cannot determine the installed modastack version to build the "
+            "instance image. Install modastack from PyPI (`uv tool install "
+            "modastack`)."
+        ) from e
+
+
+def resolve_assets(project_path: Path, staging: Path | None = None) -> DeployAssets:
+    """Resolve deploy mechanics, preferring a source checkout, else the bundled
+    wheel assets. When `staging` is given (a deploy that builds an image), the
+    binary-mode build context is assembled there (Dockerfile.pypi + docker/)."""
+    try:
+        repo = find_repo_root(project_path)
+        return DeployAssets(
+            mode="source",
+            provision_sh=repo / "scripts" / "provision-instance.sh",
+            destroy_sh=repo / "scripts" / "destroy-instance.sh",
+            build_context=repo,
+            dockerfile=repo / "Dockerfile",
+            build_args={},
+            run_cwd=repo,
+        )
+    except DeployError:
+        pass
+
+    pkg = _packaged_deploy_dir()
+    if pkg is None:
+        raise DeployError(
+            "no deploy assets found — not in a modastack checkout, and the "
+            "installed package has no bundled deploy assets. Reinstall with "
+            "`uv tool install modastack`."
+        )
+
+    ctx = dockerfile = None
+    if staging is not None:
+        ctx = staging / "build-context"
+        ctx.mkdir(parents=True, exist_ok=True)
+        shutil.copy(pkg / "Dockerfile", ctx / "Dockerfile")
+        shutil.copytree(pkg / "docker", ctx / "docker", dirs_exist_ok=True)
+        dockerfile = ctx / "Dockerfile"
+    return DeployAssets(
+        mode="binary",
+        provision_sh=pkg / "scripts" / "provision-instance.sh",
+        destroy_sh=pkg / "scripts" / "destroy-instance.sh",
+        build_context=ctx,
+        dockerfile=dockerfile,
+        # `pypi` builder + the version to install (the source builder is the
+        # Dockerfile's default, used in a checkout).
+        build_args={"MODASTACK_BUILD": "pypi",
+                    "MODASTACK_VERSION": _modastack_version()},
+        run_cwd=None,
     )
 
 
-def local_package_dir(repo_root: Path, team: str) -> Path:
-    """Path to a local team package `agents/<team>` (the ssh-push source)."""
-    pkg = repo_root / "agents" / team
-    if not (pkg / "agent.yaml").exists():
-        raise DeployError(
-            f"local team '{team}' not found at {pkg}/agent.yaml. For ssh-push "
-            "delivery the team must live under agents/ in this repo."
-        )
-    return pkg
+def local_package_dir(base: Path, team: str) -> Path:
+    """Resolve a local team package (the ssh-push source). `team` may be a path
+    to a team dir, or a name found under `base/agents/<team>` or `base/<team>`."""
+    for cand in (Path(team), base / "agents" / team, base / team):
+        if (cand / "agent.yaml").exists():
+            return cand.resolve()
+    raise DeployError(
+        f"local team '{team}' not found — looked for agent.yaml in '{team}', "
+        f"'{base}/agents/{team}', and '{base}/{team}'. For ssh-push delivery, "
+        "point `team:` at a local package directory holding agent.yaml."
+    )
 
 
 def scan_required_vars(agent_yaml: Path) -> list[str]:
@@ -259,7 +353,7 @@ def scan_required_vars(agent_yaml: Path) -> list[str]:
 
 # --- secret resolution -------------------------------------------------------
 
-def resolve_env_file(cfg: DeployConfig, repo_root: Path,
+def resolve_env_file(cfg: DeployConfig, project_path: Path,
                      out_dir: Path) -> Path:
     """Produce the KEY=VALUE env-file provision-instance.sh consumes.
 
@@ -278,7 +372,7 @@ def resolve_env_file(cfg: DeployConfig, repo_root: Path,
         src = Path(cfg.secrets_env_file)
         if not src.is_absolute():
             # Relative to the deployments/ owner (the project), not cwd-of-script.
-            src = (repo_root / src).resolve()
+            src = (project_path / src).resolve()
         if not src.exists():
             raise DeployError(f"secrets env-file not found: {src}")
         values = parse_env_file(src)
@@ -287,7 +381,7 @@ def resolve_env_file(cfg: DeployConfig, repo_root: Path,
 
     required: list[str] = []
     if cfg.team:
-        pkg = local_package_dir(repo_root, cfg.team)
+        pkg = local_package_dir(project_path, cfg.team)
         # MODASTACK_* references are instance identity the provisioner stamps into
         # [env] from flags (event server, fleet, …) — they are NEVER secrets, so
         # don't demand them in the env-file.
@@ -344,6 +438,72 @@ def _fly_bin() -> str:
 def fly_app_exists(app: str) -> bool:
     """True if the Fly app exists (and is yours) — the provision-vs-update fork."""
     return _run([_fly_bin(), "status", "-a", app], check=False).returncode == 0
+
+
+# --- Fly onboarding preflight (guide a newcomer — or an agent — to a deployable
+#     Fly account before we spend minutes building an image) ------------------
+
+def fly_preflight() -> list[str]:
+    """Actionable problems blocking a Fly deploy (empty list = ready to deploy).
+
+    Each entry is self-contained guidance with exact commands, so a human OR an
+    agent can read it and get to a deployable Fly account. Checks, in order:
+    flyctl installed → logged in. The high-risk-unlock (new personal orgs) can't
+    be detected without attempting a create, so it's flagged as a heads-up on the
+    login step rather than a hard gate."""
+    fly = _fly_bin()
+    if shutil.which(fly) is None:
+        return [
+            "flyctl (the Fly CLI) isn't installed — `modastack deploy` drives it.\n"
+            "       Install it, then open a new shell so `fly` is on PATH:\n"
+            "         macOS/Linux:  curl -L https://fly.io/install.sh | sh\n"
+            "         Homebrew:     brew install flyctl\n"
+            "         Windows:      pwsh -c \"iwr https://fly.io/install.ps1 -useb | iex\""
+        ]
+    whoami = subprocess.run([fly, "auth", "whoami"],
+                            capture_output=True, text=True)
+    if whoami.returncode != 0:
+        return [
+            "You're not signed in to Fly. Create an account or log in:\n"
+            "         New to Fly:  fly auth signup   (sign up + add a card —\n"
+            "                      Fly requires one to run machines; the canary\n"
+            "                      tier is a few dollars a month)\n"
+            "         Have one:    fly auth login\n"
+            "       Verify with `fly auth whoami` (prints your email). A brand-new\n"
+            "       personal org may be flagged high-risk — if a later deploy can't\n"
+            "       create the app, unlock it once at https://fly.io/high-risk-unlock ."
+        ]
+    return []
+
+
+def preflight_fly_or_exit() -> None:
+    """Print Fly-onboarding guidance and exit(1) if the environment isn't ready;
+    return quietly when it is. Called at the top of `modastack deploy`/`destroy`."""
+    problems = fly_preflight()
+    if not problems:
+        return
+    print("\nBefore deploying, finish setting up Fly:\n", file=sys.stderr)
+    for i, p in enumerate(problems, 1):
+        print(f"  {i}. {p}\n", file=sys.stderr)
+    print("Then re-run the same `modastack` command.\n", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def fly_instance_running(app: str) -> bool:
+    """True if the app has a started machine. The provision-vs-update fork keys on
+    this (not mere existence): an app that exists but has no started machine is
+    HALF-PROVISIONED (a deploy that failed mid-build) and must re-provision, not
+    take the ssh update path (which errors 'no started VMs'). Caught in e2e."""
+    import json
+    proc = subprocess.run([_fly_bin(), "machine", "list", "-a", app, "--json"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        return False
+    try:
+        machines = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    return any(m.get("state") == "started" for m in machines)
 
 
 def _fly_machine_ids(app: str) -> list[str]:
@@ -465,36 +625,40 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
     Returns the resolved config (for the caller to report).
     """
     cfg = load_deploy_config(project_path, name, overrides)
-    repo = find_repo_root(project_path)
-    provision_sh = repo / "scripts" / "provision-instance.sh"
     app = cfg.app_name
 
     with tempfile.TemporaryDirectory() as tmp:
-        env_file = resolve_env_file(cfg, repo, Path(tmp))
-        exists = fly_app_exists(app)
+        assets = resolve_assets(project_path, Path(tmp))
+        env_file = resolve_env_file(cfg, project_path, Path(tmp))
+        # Provision when there's no running instance — covers a brand-new app AND a
+        # half-provisioned one (app/volume exist but the image build failed, so no
+        # started machine). Only ssh-update an instance that's actually up.
+        deployed = fly_app_exists(app) and fly_instance_running(app)
+
+        # Provision flags shared by both delivery modes, incl. the build context
+        # (source repo, or the binary-mode PyPI context) + image build args.
+        base = ["bash", str(assets.provision_sh), *_provision_args(cfg, env_file),
+                "--build-context", str(assets.build_context),
+                "--dockerfile", str(assets.dockerfile)]
+        for k, v in assets.build_args.items():
+            base += ["--build-arg", f"{k}={v}"]
 
         if cfg.delivery == "ssh-push":
-            pkg = local_package_dir(repo, cfg.team)
-            if not exists:
-                log.info("provisioning blank instance '%s' (ssh-push)...", app)
-                _run(
-                    ["bash", str(provision_sh), *_provision_args(cfg, env_file),
-                     "--blank", "--yes"],
-                    cwd=repo,
-                )
+            pkg = local_package_dir(project_path, cfg.team)
+            if not deployed:
+                log.info("provisioning blank instance '%s' (ssh-push, %s mode)...",
+                         app, assets.mode)
+                _run([*base, "--blank", "--yes"], cwd=assets.run_cwd)
                 # Entrypoint is waiting; the push releases it (no restart needed).
                 push_team(app, pkg, restart=False)
             else:
                 log.info("updating instance '%s' in place (ssh-push)...", app)
                 push_team(app, pkg, restart=True)
         else:  # team-url
-            if not exists:
-                log.info("provisioning instance '%s' (team-url)...", app)
-                _run(
-                    ["bash", str(provision_sh), *_provision_args(cfg, env_file),
-                     "--team-url", cfg.team_url, "--yes"],
-                    cwd=repo,
-                )
+            if not deployed:
+                log.info("provisioning instance '%s' (team-url, %s mode)...",
+                         app, assets.mode)
+                _run([*base, "--team-url", cfg.team_url, "--yes"], cwd=assets.run_cwd)
             else:
                 log.info("updating instance '%s' in place (team-url)...", app)
                 update_team_url(app, cfg.team_url)
@@ -510,8 +674,7 @@ def destroy(project_path: Path, name: str, overrides: dict | None = None,
     The volume is the only copy of the instance's state, so destroy-instance.sh
     keeps its typed-confirmation; --yes is for automation (a human-gated
     orchestration teardown still calls through here, never silently)."""
-    repo = find_repo_root(project_path)
-    destroy_sh = repo / "scripts" / "destroy-instance.sh"
+    assets = resolve_assets(project_path)  # no build needed → no staging
 
     # App name resolution mirrors deploy: <fleet>-<name>, or bare <name>. We use
     # the config when a file exists (to honor an explicit fleet); else derive.
@@ -522,8 +685,8 @@ def destroy(project_path: Path, name: str, overrides: dict | None = None,
         fleet = (overrides or {}).get("fleet", "")
         app = f"{fleet}-{name}" if fleet else name
 
-    args = ["bash", str(destroy_sh), "--app", app]
+    args = ["bash", str(assets.destroy_sh), "--app", app]
     if assume_yes:
         args.append("--yes")
-    _run(args, cwd=repo)
+    _run(args, cwd=assets.run_cwd)
     return app

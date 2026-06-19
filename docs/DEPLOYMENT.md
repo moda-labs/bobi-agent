@@ -311,44 +311,82 @@ swap the image. Per-app failures are isolated and reported; re-run to retry
 
 ---
 
-## 7. Operator runbook
+## 7. Playbook — stand up your own agents
 
-### Self-service (one developer, no CI)
-From a modastack checkout, with your team under `agents/<team>/`:
+Everything here is driven by the **`modastack` binary** — `uv tool install
+modastack` and you're done; no repo checkout required (for hosting too, the
+instance image installs modastack from PyPI). Pick where it runs:
+
+- **7.1 Run it on your machine** — the simplest thing. Build a team, run it. No
+  cloud, no Fly. This is the friends-and-family default. Start here.
+- **7.2 Host it on Fly** — always-on, off your machine. One command; the binary
+  walks you through Fly setup.
+
+| | event server | drive it with |
+|---|---|---|
+| **7.1 Local** | bundled, loopback (no cloud) | `modastack start` |
+| **7.2 Fly, self-service** | a Cloudflare Worker | `modastack deploy` from your laptop |
+| **7.2 Fly, CI** | a Cloudflare Worker | a release / `deploy-*` tag → GitHub Actions |
+
+(There's no "local event server + Fly" cell: a hosted instance is dark and reaches
+*out*, so it needs an internet-reachable event server — a Worker, not loopback.)
+
+### 7.1. Run it on your machine (start here)
 ```
-# 1. point a local env-file at your secrets (ANTHROPIC_API_KEY + service tokens)
-printf 'ANTHROPIC_API_KEY=sk-ant-…\nSLACK_BOT_TOKEN=xoxb-…\n' > ./my-team.env
-
-# 2. deploy — ssh-push builds your local team and ships it; no hosting needed
-modastack deploy my-team --team my-team --env-file ./my-team.env
-
-# 3. iterate: edit agents/my-team/…, redeploy (in-place, workspace-safe)
-modastack deploy my-team --team my-team --env-file ./my-team.env
-
-# 4. tear down (removes the volume!)
-modastack destroy my-team
+uv tool install modastack
+modastack setup                  # design + install a team in a browser UI…
+#   …or grab a bundled one:   modastack install eng-team
+modastack start                  # runs your agent — and a local event server
+                                 # (loopback) by default. No cloud, no accounts.
 ```
-Or commit a `deployments/my-team.yaml` (`team: my-team`, `secrets.env-file:
-./my-team.env`) and just run `modastack deploy my-team`.
+The only credential you need is your Anthropic auth (`ANTHROPIC_API_KEY`, or a
+Claude subscription) — `modastack install` prompts for whatever a team requires.
+Talk to it with `modastack ask "…"` / `modastack message`; add `monitors` for
+scheduled reactions. (Inbound webhooks from GitHub/Slack need a public URL — host
+it on Fly for that, or front the local server with a tunnel.)
 
-### 7.1. Bring your own repo (CI for your own teams)
-The two workflows are operator-agnostic — wire your repo in four steps:
-1. **Copy** `.github/workflows/gitops-teams.yml` (+ `gitops-release.yml` if you
-   want release rollouts) and `deployments/defaults.yaml` into your repo. Set
-   `fleet:` (your namespace) and `event_server:` in `defaults.yaml`.
-2. **Add a deployment**: `deployments/<team>.yaml` with `team-url: <published
-   .tar.gz>` (the CI delivery mode — `team-packages.yml` publishes these). One file
-   per instance. (`team:` ssh-push is for logged-in-dev `modastack deploy`, not CI —
-   a CI Fly token can't `fly ssh`.)
-3. **Repo secret**: `secrets.FLY_API_TOKEN` = `fly tokens create org -o <your-org>`
-   (org-scoped so CI can create apps/volumes). It's a standing production
-   credential — long-lived, rotate periodically (re-mint + re-set).
-4. **Per-deployment GitHub Environment** named `<team>`, one secret `MODASTACK_ENV`
-   = the full KEY=VALUE env-file body. **No** required-reviewer rule.
+### 7.2. Host it on Fly (always-on)
+For 24/7 operation off your machine. Still just the binary — `modastack deploy`
+builds the instance image from PyPI, so no checkout is needed. The image pins
+**the same modastack version you're running**, so run a *released* version
+(`uv tool install modastack` — the normal case): the instance image and the CLI
+that deployed it match. (Deploying from an unreleased dev checkout pins the last
+*published* version, which can lag the entrypoint and crash-loop the instance —
+release first.) A hosted instance is **dark** (reaches out over WSS), so its
+event server is a **Cloudflare Worker**:
+the built-in shared moda Worker (set nothing), your own (`cd event-server && npx
+wrangler deploy` → set `event_server:`), or any reachable `https://` server.
 
-**Cut a release** (or push a `deploy-*` tag) → `gitops-teams.yml` runs
-`modastack deploy <team>` for every active deployment. That's it; no FLEET_PREFIX
-var, no manifest, no database.
+**First time on Fly?** `modastack deploy` preflights your setup and prints exactly
+what to do — install `flyctl`, `fly auth signup`/`login`, and (for a new org)
+the one-time `fly.io/high-risk-unlock`. The guidance is step-by-step, so a human
+*or* an agent can get from zero to a deployable account.
+
+**A — Self-service (one developer).** From your laptop:
+```
+printf 'ANTHROPIC_API_KEY=sk-ant-…\n' > ./my-team.env
+modastack deploy my-team --team my-team --env-file ./my-team.env   # ssh-push
+modastack destroy my-team                                          # tear down
+```
+`--team` ssh-pushes your **local** team (no hosting to set up); edit + re-run to
+update in place. Or commit a `deployments/my-team.yaml` (`team: my-team`,
+`secrets.env-file: ./my-team.env`) and just `modastack deploy my-team`. Prefer a
+published tarball? Use `team-url:` instead.
+
+**B — CI (GitHub Actions, always-fresh).** Cut a release (or push a `deploy-*`
+tag) and the Action deploys every active deployment. Wire your repo once:
+1. Copy `.github/workflows/gitops-teams.yml` (+ `gitops-release.yml`) and
+   `deployments/defaults.yaml`; set `fleet:` + `event_server:`. The workflow
+   `pip install modastack` — your repo needs only `deployments/`, no modastack
+   source.
+2. `deployments/<team>.yaml` with `team-url: <published .tar.gz>` (CI's delivery
+   mode — a CI Fly token can't `fly ssh`, so CI uses HTTPS-fetch, not ssh-push).
+3. Repo secret `FLY_API_TOKEN` = `fly tokens create org -o <your-org>` — a standing
+   production credential (long-lived, rotate periodically).
+4. A GitHub Environment named `<team>` with one secret `MODASTACK_ENV` = the team's
+   full KEY=VALUE env-file. **No** required-reviewer rule.
+
+No `FLEET_PREFIX` var, no manifest, no database — the Fly API is the state store.
 
 ### Manual ops
 ```
@@ -407,9 +445,30 @@ The deploy refactor adds the **ssh-push** path, **verified live on Fly**
 > "a machine ID must be specified" outside a TTY. `deploy` resolves IDs via
 > `fly machine list --json` and restarts each by ID.
 
-The **team-url** path is unchanged from C22 (live-verified there) except the added
-`MODASTACK_INSTANCE` stamp; it is covered here by the engine unit tests pending a
-fresh live run. <!-- e2e-status: ssh-push verified 2026-06-19 -->
+The **team-url** path is verified live two ways:
+- **CI / GitOps:** a `deploy-canary-1` tag fired `gitops-teams.yml` from the branch
+  → `modastack deploy canary` → provisioned `moda-canary` (1 GB/1 vCPU) via team-url;
+  manager healthy, `MODASTACK_INSTANCE` stamped.
+- **Binary-only (no repo):** from a directory with no modastack checkout,
+  `modastack deploy` resolved the bundled wheel assets ("binary mode"), built the
+  image from PyPI (`MODASTACK_BUILD=pypi`, version-pinned), and provisioned
+  `bintest-bsmoke` — incl. the **re-provision-on-failure** fork (a half-built app
+  with no started machine re-provisions instead of erroring "no started VMs").
+
+> **Release gate (found in the binary e2e):** the PyPI image pins the *installed*
+> modastack version, so the instance runs **published** code while the entrypoint
+> ships with the *operator's* version. Deploying from an unreleased dev checkout
+> (entrypoint ahead of the pinned published package — e.g. an entrypoint that calls
+> `install --non-interactive` before that option was published) crash-loops the
+> instance. **Release these changes before binary-mode deploy boots cleanly**; a
+> released `uv tool install modastack` is always self-consistent.
+
+> **Lean image (found in the binary e2e):** install the kb deps the code uses
+> (fastembed) **explicitly**, not via the `[kb]` extra — some published releases
+> stale-list `sentence-transformers` there, pulling torch + ~2 GB of CUDA the dark
+> CPU instance never uses (and blowing the build). Fixed in the Dockerfile +
+> pyproject; the published `[kb]` should be re-released lean too.
+<!-- e2e-status: ssh-push + canary(team-url) + binary-mode verified 2026-06-19 -->
 
 Smoke target: `tests/fixtures/smoke-team` (zero-secret; only needs
 `MODASTACK_EVENT_SERVER` + an Anthropic key for the `ask` round-trip).

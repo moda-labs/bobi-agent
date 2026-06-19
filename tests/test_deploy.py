@@ -128,8 +128,44 @@ def test_find_repo_root_walks_up(repo):
 
 
 def test_find_repo_root_raises_without_scripts(tmp_path):
-    with pytest.raises(D.DeployError, match="modastack source root"):
+    with pytest.raises(D.DeployError, match="not a modastack checkout"):
         D.find_repo_root(tmp_path)
+
+
+def test_resolve_assets_source_mode_in_a_checkout(repo, tmp_path):
+    """In a checkout, build from source (repo Dockerfile)."""
+    a = D.resolve_assets(repo, tmp_path)
+    assert a.mode == "source"
+    assert a.build_context == repo
+    assert a.dockerfile == repo / "Dockerfile"
+    assert a.build_args == {}
+    assert a.provision_sh == repo / "scripts" / "provision-instance.sh"
+
+
+def test_resolve_assets_binary_mode_from_packaged(tmp_path, monkeypatch):
+    """With no checkout, build from the bundled wheel assets (PyPI image)."""
+    # A fake packaged _deploy dir (what the wheel ships).
+    pkg = tmp_path / "_deploy"
+    (pkg / "scripts").mkdir(parents=True)
+    (pkg / "docker").mkdir()
+    (pkg / "Dockerfile").write_text("FROM scratch\n")
+    (pkg / "docker" / "docker-entrypoint.sh").write_text("#!/bin/sh\n")
+    (pkg / "scripts" / "provision-instance.sh").write_text("#!/bin/sh\n")
+    (pkg / "scripts" / "destroy-instance.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(D, "find_repo_root",
+                        lambda p=None: (_ for _ in ()).throw(D.DeployError("x")))
+    monkeypatch.setattr(D, "_packaged_deploy_dir", lambda: pkg)
+    monkeypatch.setattr(D, "_modastack_version", lambda: "9.9.9")
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    a = D.resolve_assets(tmp_path / "elsewhere", staging)
+    assert a.mode == "binary"
+    assert a.build_args == {"MODASTACK_BUILD": "pypi", "MODASTACK_VERSION": "9.9.9"}
+    # build context assembled: Dockerfile + docker/ copied into staging
+    assert (a.build_context / "Dockerfile").exists()
+    assert (a.build_context / "docker" / "docker-entrypoint.sh").exists()
+    assert a.provision_sh == pkg / "scripts" / "provision-instance.sh"
 
 
 def test_local_package_dir_requires_agent_yaml(repo):
@@ -222,6 +258,7 @@ def test_team_url_new_app_provisions_with_url(repo, recorder, monkeypatch):
 
 def test_team_url_existing_app_updates_in_place(repo, recorder, monkeypatch):
     monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
+    monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
     monkeypatch.setattr(D, "_fly_machine_ids", lambda app: ["48ed1234"])
     (repo / "deployments" / "eng.yaml").write_text(
         "team-url: https://r/eng.tar.gz\n"
@@ -253,6 +290,7 @@ def test_ssh_push_new_app_provisions_blank_then_pushes(repo, recorder, monkeypat
 
 def test_ssh_push_existing_app_pushes_and_restarts(repo, recorder, monkeypatch):
     monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
+    monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
     monkeypatch.setattr(D, "_fly_machine_ids", lambda app: ["48ed1234"])
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
@@ -274,6 +312,87 @@ def test_restart_requires_resolved_machine_id(repo, recorder, monkeypatch):
     assert restarts and all(any(mid in c for mid in ("m1", "m2")) for c in restarts)
     # never a bare `-a` with no id
     assert not any(c.endswith("restart\n-a\nacme-eng") for c in _flat(recorder))
+
+
+def test_provision_passes_build_context_and_dockerfile(repo, recorder, monkeypatch):
+    """Every provision passes the build context + Dockerfile (source mode = repo)."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
+    (repo / "deployments" / "eng.yaml").write_text("team-url: https://r/eng.tar.gz\n")
+    D.deploy(repo, "eng")
+    prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
+    assert "--build-context" in prov and str(repo) in prov
+    assert "--dockerfile" in prov
+
+
+def test_binary_mode_pins_modastack_version_as_build_arg(repo, recorder, monkeypatch, tmp_path):
+    """Binary mode builds the PyPI image pinned to the installed version."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
+    (repo / "deployments" / "eng.yaml").write_text("team-url: https://r/eng.tar.gz\n")
+    # Force binary mode regardless of the fixture being a checkout.
+    pkg = tmp_path / "_deploy"
+    (pkg / "scripts").mkdir(parents=True); (pkg / "docker").mkdir()
+    (pkg / "Dockerfile").write_text("FROM scratch\n")
+    (pkg / "docker" / "x").write_text("")
+    (pkg / "scripts" / "provision-instance.sh").write_text("#!/bin/sh\n")
+    (pkg / "scripts" / "destroy-instance.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(D, "find_repo_root",
+                        lambda p=None: (_ for _ in ()).throw(D.DeployError("x")))
+    monkeypatch.setattr(D, "_packaged_deploy_dir", lambda: pkg)
+    monkeypatch.setattr(D, "_modastack_version", lambda: "1.2.3")
+    D.deploy(repo, "eng")
+    prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
+    assert "--build-arg" in prov and "MODASTACK_VERSION=1.2.3" in prov
+    assert "MODASTACK_BUILD=pypi" in prov
+
+
+# --- Fly onboarding preflight ------------------------------------------------
+
+def test_preflight_flags_missing_flyctl(monkeypatch):
+    monkeypatch.setattr(D.shutil, "which", lambda _: None)
+    problems = D.fly_preflight()
+    assert problems and "isn't installed" in problems[0]
+    assert "fly.io/install.sh" in problems[0]
+
+
+def test_preflight_flags_not_logged_in(monkeypatch):
+    monkeypatch.setattr(D.shutil, "which", lambda _: "/usr/local/bin/fly")
+    monkeypatch.setattr(D.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})())
+    problems = D.fly_preflight()
+    assert problems and "not signed in" in problems[0]
+    assert "fly auth signup" in problems[0] and "fly auth login" in problems[0]
+
+
+def test_preflight_passes_when_ready(monkeypatch):
+    monkeypatch.setattr(D.shutil, "which", lambda _: "/usr/local/bin/fly")
+    monkeypatch.setattr(D.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "me@x", "stderr": ""})())
+    assert D.fly_preflight() == []
+
+
+def test_local_package_dir_accepts_a_path(repo, tmp_path):
+    team = tmp_path / "somewhere" / "myteam"
+    team.mkdir(parents=True)
+    (team / "agent.yaml").write_text("agent: myteam\n")
+    assert D.local_package_dir(repo, str(team)) == team.resolve()
+
+
+def test_half_provisioned_app_reprovisions_not_ssh_updates(repo, recorder, monkeypatch):
+    """Regression: an app that exists but has no started machine (a deploy that
+    failed mid-build) must RE-PROVISION, not take the ssh update path (which
+    errors 'no started VMs'). Caught in the binary-only e2e."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: True)          # app exists…
+    monkeypatch.setattr(D, "fly_instance_running", lambda app: False)   # …but not running
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
+    (repo / "deployments" / "eng.yaml").write_text("team-url: https://r/eng.tar.gz\n")
+    D.deploy(repo, "eng")
+    joined = _flat(recorder)
+    # re-provisions (rebuilds the image) — provision-instance.sh is idempotent
+    assert any("provision-instance.sh" in c and "--team-url" in c for c in joined)
+    # does NOT try to ssh-install into a dead app
+    assert not any("modastack install \"https://r/eng.tar.gz\"" in c for c in joined)
 
 
 def test_destroy_resolves_app_and_passes_yes(repo, recorder, monkeypatch):

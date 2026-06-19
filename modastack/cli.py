@@ -743,19 +743,17 @@ def deploy(name, team, team_url, fleet, env_file, auth, event_server, region,
       team:     <name>  local package  → ssh-push (build, push over fly ssh, start)
       team-url: <url>   published tarball → HTTPS-fetch at first boot
 
-    Run from a modastack checkout (it builds the instance image). Composes with
-    orchestration on top — a GitHub Action / Terraform / a for-loop calls this
-    per instance; the looping/diffing lives there, never in this command.
+    Works from the binary alone — no checkout. In a modastack checkout the image
+    builds from source; otherwise it builds from PyPI (the bundled deploy assets).
+    Composes with orchestration on top — a GitHub Action / Terraform / a for-loop
+    calls this per instance; the looping/diffing lives there, never here.
 
     Usage:
         modastack deploy eng-team            # uses deployments/eng-team.yaml
         modastack deploy my-team --team my-team   # local package, ssh-push
     """
     from modastack import deploy as deploy_mod
-    try:
-        repo = deploy_mod.find_repo_root(Path.cwd())
-    except deploy_mod.DeployError as e:
-        raise click.UsageError(str(e))
+    project_path = Path.cwd()
 
     overrides = {
         "team": team, "team_url": team_url, "fleet": fleet, "auth": auth,
@@ -767,16 +765,19 @@ def deploy(name, team, team_url, fleet, env_file, auth, event_server, region,
         overrides["secrets_env_file"] = env_file
 
     try:
-        cfg = deploy_mod.load_deploy_config(repo, name, overrides)
+        cfg = deploy_mod.load_deploy_config(project_path, name, overrides)
     except deploy_mod.DeployError as e:
         raise click.UsageError(str(e))
+
+    # Preflight: guide the user (or an agent) through Fly setup before we build.
+    deploy_mod.preflight_fly_or_exit()
 
     click.echo(
         f"Deploying '{name}' → app {cfg.app_name} "
         f"(fleet {cfg.fleet_stamp}, {cfg.delivery} delivery)"
     )
     try:
-        deploy_mod.deploy(repo, name, overrides)
+        deploy_mod.deploy(project_path, name, overrides)
     except deploy_mod.DeployError as e:
         click.echo(f"Deploy failed: {e}", err=True)
         raise SystemExit(1)
@@ -802,14 +803,11 @@ def destroy(name, fleet, yes):
         modastack destroy eng-team --yes
     """
     from modastack import deploy as deploy_mod
-    try:
-        repo = deploy_mod.find_repo_root(Path.cwd())
-    except deploy_mod.DeployError as e:
-        raise click.UsageError(str(e))
+    deploy_mod.preflight_fly_or_exit()
 
     overrides = {"fleet": fleet} if fleet else None
     try:
-        app = deploy_mod.destroy(repo, name, overrides, assume_yes=yes)
+        app = deploy_mod.destroy(Path.cwd(), name, overrides, assume_yes=yes)
     except deploy_mod.DeployError as e:
         raise click.UsageError(str(e))
     except subprocess.CalledProcessError as e:

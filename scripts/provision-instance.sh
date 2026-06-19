@@ -122,6 +122,11 @@ APP="" TEAM="" TEAM_URL="" BLANK="0" ENV_FILE="" AUTH="api_key" FLEET="" INSTANC
 EVENT_SERVER="$DEFAULT_EVENT_SERVER"
 REGION="iad" ORG="" VOLUME_SIZE="15" MEMORY="4gb" CPUS="2"
 LOGIN_CHANNEL="" CLAUDE_VERSION="" VOLUME_NAME="data" ASSUME_YES="0"
+# Build context + Dockerfile default to the repo (source build); `modastack
+# deploy` overrides them to a packaged context (Dockerfile.pypi, PyPI install)
+# in binary mode, so deploy needs no checkout. --build-arg K=V is repeatable.
+BUILD_CONTEXT="" DOCKERFILE=""
+declare -a BUILD_ARGS=()
 
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'; }
 
@@ -144,6 +149,9 @@ while [ $# -gt 0 ]; do
     --login-channel) LOGIN_CHANNEL="$2"; shift 2;;
     --claude-version) CLAUDE_VERSION="$2"; shift 2;;
     --volume-name) VOLUME_NAME="$2"; shift 2;;
+    --build-context) BUILD_CONTEXT="$2"; shift 2;;
+    --dockerfile) DOCKERFILE="$2"; shift 2;;
+    --build-arg) BUILD_ARGS+=("$2"); shift 2;;
     --yes) ASSUME_YES="1"; shift;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown argument: $1" >&2; echo "Run with --help." >&2; exit 2;;
@@ -192,7 +200,12 @@ if [ -n "$TEAM_URL" ]; then
 fi
 [ -n "$ENV_FILE" ] || fatal "--env-file is required (KEY=VALUE service tokens)."
 [ -f "$ENV_FILE" ] || fatal "--env-file '$ENV_FILE' not found."
-[ -f "$REPO_ROOT/Dockerfile" ] || fatal "Dockerfile not found at repo root ($REPO_ROOT)."
+# Build context + Dockerfile: default to the repo (source build) unless the
+# caller passed a packaged context (binary-mode `modastack deploy`).
+[ -n "$BUILD_CONTEXT" ] || BUILD_CONTEXT="$REPO_ROOT"
+[ -n "$DOCKERFILE" ]    || DOCKERFILE="$REPO_ROOT/Dockerfile"
+[ -d "$BUILD_CONTEXT" ] || fatal "--build-context '$BUILD_CONTEXT' is not a directory."
+[ -f "$DOCKERFILE" ]    || fatal "Dockerfile not found: $DOCKERFILE"
 
 case "$AUTH" in
   api_key|subscription) ;;
@@ -328,10 +341,17 @@ trap 'rm -f "$CFG"' EXIT
   # NB: the Dockerfile is passed via `fly deploy --dockerfile`, not a
   # `[build] dockerfile = …` key — Fly resolves that key relative to THIS
   # config file's directory (a temp dir), where the Dockerfile isn't.
-  if [ -n "$CLAUDE_VERSION" ]; then
+  # Build args: CLAUDE_VERSION (pin) + any --build-arg (e.g. MODASTACK_VERSION,
+  # which the PyPI image installs). Emitted as a [build.args] TOML table.
+  if [ -n "$CLAUDE_VERSION" ] || [ "${#BUILD_ARGS[@]}" -gt 0 ]; then
     echo
     echo "[build.args]"
-    echo "  CLAUDE_VERSION = \"$CLAUDE_VERSION\""
+    [ -n "$CLAUDE_VERSION" ] && echo "  CLAUDE_VERSION = \"$CLAUDE_VERSION\""
+    if [ "${#BUILD_ARGS[@]}" -gt 0 ]; then
+      for kv in "${BUILD_ARGS[@]}"; do
+        echo "  ${kv%%=*} = \"${kv#*=}\""
+      done
+    fi
   fi
   echo
   echo "[env]"
@@ -354,9 +374,11 @@ sed 's/^/    /' "$CFG"
 
 # --- 5. deploy --------------------------------------------------------------
 # --remote-only builds the image on Fly's builders (no local Docker needed).
-# Build context AND --dockerfile are both the repo root (Dockerfile + sdist
-# sources live there); the generated config lives in a temp dir, so the
-# Dockerfile must be pointed at explicitly rather than via a relative key.
+# Build context + --dockerfile default to the repo (source build) but are
+# overridable (--build-context/--dockerfile): binary-mode `modastack deploy`
+# points them at a packaged context whose Dockerfile.pypi installs modastack from
+# PyPI, so no checkout is needed. The generated config lives in a temp dir, so
+# the Dockerfile is pointed at explicitly rather than via a relative key.
 #
 # --depot=false forces Fly's classic buildkit builder (gzip layers). The default
 # Depot builder emits zstd-compressed OCI layers (tar+zstd), which Fly's MACHINE
@@ -370,7 +392,7 @@ sed 's/^/    /' "$CFG"
 # --wait-timeout 10m: first boot installs a team (and on a cold image warms a
 #   model) past the default 5m machine-state wait.
 log "Building image on Fly and deploying... (first build bakes the model; be patient)"
-"$FLY" deploy "$REPO_ROOT" --config "$CFG" --dockerfile "$REPO_ROOT/Dockerfile" \
+"$FLY" deploy "$BUILD_CONTEXT" --config "$CFG" --dockerfile "$DOCKERFILE" \
   --depot=false --ha=false --wait-timeout 10m --remote-only
 
 echo

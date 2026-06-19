@@ -73,13 +73,26 @@ packages = ["modastack"]
 "agents/eng-team" = "modastack/templates/eng-team"
 "agents/market-research" = "modastack/templates/market-research"
 "agents/support-manager" = "modastack/templates/support-manager"
+# Bundle the Fly deploy assets so `modastack deploy` works from the binary alone
+# — no repo checkout. The one Dockerfile builds in `pypi` mode (installs modastack
+# from PyPI), so its build context is just these files; modastack/deploy.py
+# resolves them from here in "binary mode".
+"Dockerfile" = "modastack/_deploy/Dockerfile"
+"docker/docker-entrypoint.sh" = "modastack/_deploy/docker/docker-entrypoint.sh"
+"docker/healthcheck.sh" = "modastack/_deploy/docker/healthcheck.sh"
+"scripts/provision-instance.sh" = "modastack/_deploy/scripts/provision-instance.sh"
+"scripts/destroy-instance.sh" = "modastack/_deploy/scripts/destroy-instance.sh"
+"scripts/fleet.sh" = "modastack/_deploy/scripts/fleet.sh"
 
 [tool.hatch.build.targets.sdist]
 # `agents` is required: the wheel force-includes agents/{eng-team,market-research,
 # support-manager} as bundled templates, and `python -m build` builds the wheel
 # FROM the sdist — so those dirs must be in the sdist or the wheel build fails
-# with "Forced include not found".
-include = ["modastack", "event-server", "agents", "README.md", "CHANGELOG.md"]
+# with "Forced include not found". `Dockerfile.pypi`, `docker`, and `scripts`
+# are likewise force-included into the wheel (the deploy assets), so the sdist
+# must carry them too.
+include = ["modastack", "event-server", "agents", "Dockerfile", "docker",
+           "scripts", "README.md", "CHANGELOG.md"]
 exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
 
 [tool.pytest.ini_options]
