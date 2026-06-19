@@ -1,7 +1,27 @@
 """Tests for the Connect connector catalog and pure card-status logic."""
 
+import pytest
+
 from modastack.setup import services
 from modastack.setup.services import AuthMethod
+
+
+class TestCanonicalServiceKey:
+    @pytest.mark.parametrize("key,expected", [
+        ("substack", "substack"),
+        ("substack-mcp", "substack"),
+        ("substack_mcp", "substack"),
+        ("Substack-MCP", "substack"),
+        ("mcp-substack", "substack"),
+        ("substack-mcp-server", "substack"),
+        ("github", "github"),
+    ])
+    def test_collapses_mcp_qualifiers(self, key, expected):
+        assert services.canonical_service_key(key) == expected
+
+    def test_bare_qualifier_falls_back(self):
+        # Stripping must not erase a key that IS just the qualifier.
+        assert services.canonical_service_key("mcp") == "mcp"
 
 
 class TestResolve:
@@ -251,3 +271,38 @@ class TestLiveVennCatalog:
         monkeypatch.setattr(venn_mod, "list_available_services",
                             lambda key: {"from-rest"})
         assert services._live_service_names("k") == {"from-rest"}
+
+
+class TestUserMcpCardStatus:
+    """The Connect card for a user MCP reflects config + the last test verdict."""
+
+    def _card(self, tmp_path, **cfg):
+        cfg.setdefault("type", "stdio")
+        cfg.setdefault("command", "uv")
+        cfg.setdefault("label", "substack-mcp")
+        return services.user_mcp_card("substack_mcp", cfg, tmp_path)
+
+    def test_added_until_tested(self, tmp_path):
+        c = self._card(tmp_path)
+        assert c["status"] == "added"
+
+    def test_successful_tool_call_marks_connected(self, tmp_path):
+        c = self._card(tmp_path, last_test={"ok": True, "live_ok": True,
+                                            "called": "substack_get_notes_feed"})
+        assert c["status"] == "connected" and "substack_get_notes_feed" in c["note"]
+
+    def test_failed_tool_call_marks_error(self, tmp_path):
+        c = self._card(tmp_path, last_test={"ok": True, "live_ok": False,
+                                            "error": "no cookie"})
+        assert c["status"] == "error"
+
+    def test_server_wont_start_marks_error(self, tmp_path):
+        c = self._card(tmp_path, last_test={"ok": False, "error": "boom"})
+        assert c["status"] == "error"
+
+    def test_missing_env_stays_needs_auth_despite_stale_pass(self, tmp_path):
+        # A connection still missing required config must not read "connected"
+        # just because an earlier test passed.
+        c = self._card(tmp_path, env_vars=["SUBSTACK_COOKIE"],
+                       last_test={"ok": True, "live_ok": True, "called": "x"})
+        assert c["status"] == "needs_auth"

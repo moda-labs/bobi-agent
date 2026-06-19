@@ -152,19 +152,33 @@ def build_mcp_servers(state: SetupState, catalog=None) -> dict:
         spec = mcp_registry.lookup(conn.key) or mcp_registry.lookup(name)
         if spec:
             out[spec.key] = spec.server_config()
-    # User-defined custom MCP connections (added by name + remote URL).
+    # User-defined custom MCP connections: remote (name + URL) or local
+    # (name + command, stdio transport).
     for name, cfg in (state.spec.mcp_servers or {}).items():
-        if isinstance(cfg, dict) and cfg.get("url"):
+        if isinstance(cfg, dict) and (cfg.get("url") or cfg.get("command")):
             out[name] = user_mcp_config(cfg)
     return out
 
 
 def user_mcp_config(cfg: dict) -> dict:
-    """The agent.yaml `mcp_servers.<name>` value for a user-added connection:
-    transport + url, plus a `${VAR}` Bearer header for API-key auth. For OAuth
-    the agent performs the handshake at connect time using the client
-    credentials in .env, so the static block carries url only."""
-    rec: dict = {"type": cfg.get("type", "http"), "url": cfg.get("url", "")}
+    """The agent.yaml `mcp_servers.<name>` value for a user-added connection.
+
+    Two shapes, chosen by transport:
+    - **http** — transport + url, plus a `${VAR}` Bearer header for API-key auth.
+    - **stdio** — a local command-based server: `{type, command, args, env}`,
+      where each declared env var is emitted as a `${VAR}` ref (interpolated
+      from .env at config load), never an inline secret.
+    """
+    if cfg.get("type") == "stdio" or cfg.get("command"):
+        rec: dict = {"type": "stdio", "command": cfg.get("command", "")}
+        args = cfg.get("args") or []
+        if args:
+            rec["args"] = [str(a) for a in args]
+        env_vars = cfg.get("env_vars") or []
+        if env_vars:
+            rec["env"] = {v: f"${{{v}}}" for v in env_vars}
+        return rec
+    rec = {"type": cfg.get("type", "http"), "url": cfg.get("url", "")}
     if cfg.get("auth") == "api_key" and cfg.get("secret_var"):
         rec["headers"] = {"Authorization": f"Bearer ${{{cfg['secret_var']}}}"}
     return rec

@@ -546,14 +546,19 @@
     }
     _prevPhase = p;
   }
-  // Connections are "settled" only when there's nothing to connect (and the
-  // brain confirmed none are needed) OR every live connection card is connected.
+  // Connections are "settled" when the slot has been addressed — NOT when every
+  // service is live-connected. Per DESIGN.md, connect/auth is always deferrable
+  // and readiness never walls: a user MCP that's been configured ("added", since
+  // we can't verify it here — it connects at runtime) counts, as does a public
+  // server. So the slot is settled when every live card is already set up
+  // (connected or added), or when the brain has self-scored services "enough"
+  // (which covers "no connection needed" and deferred auth alike).
   function servicesSettled(sp) {
-    const svcs = sp.services || [];
-    if (!svcs.length) return sp.readiness.services === "enough";
-    const cards = (_connData && _connData.cards) || null;
-    if (!cards || !cards.length) return false;
-    return cards.every(c => c.status === "connected");
+    const cards = (_connData && _connData.cards) || [];
+    const allSet = cards.length > 0 &&
+      cards.every(c => c.status === "connected" || c.status === "added");
+    if (allSet) return true;
+    return sp.readiness.services === "enough";
   }
   function slotDot(ok) {
     return `<span class="udot ${ok ? "ok" : "empty"}">${ok ? CHECK : ""}</span>`;
@@ -663,11 +668,10 @@
       // Not native/Venn/known MCP — connect it by pointing at a remote MCP.
       right = `<button class="btn ghost xs" data-addmcp="${esc(c.name)}">Connect</button>`;
     } else if (c.user_mcp) {
-      // A user-added MCP — NOT verified here; it connects (and authorizes) when
-      // the team runs. Never claim "connected"; flag when it still needs creds.
-      right = c.status === "needs_auth"
-        ? `<span class="cbadge warn">needs auth</span> <button class="lnk" data-addmcp="${esc(c.name)}">finish</button>`
-        : `<span class="cbadge">added</span> <button class="lnk" data-addmcp="${esc(c.name)}">edit</button>`;
+      // A user-added MCP. A subtle status dot (left of the name) carries the
+      // state — connected / added / needs-config / error; the action is just
+      // finish-or-edit. Verify it from chat ("test the substack connection").
+      right = `<button class="lnk" data-editmcp="${esc(c.key)}">${c.status === "needs_auth" ? "finish" : "edit"}</button>`;
     } else if (mcpNoSecret) {
       right = `<span class="cbadge connected">${CHECK} wired</span>`;
     } else if (c.status === "connected") {
@@ -684,7 +688,20 @@
       ? `<span class="ctag">${esc(c.note || "hosted MCP · 1-click")}</span>`
       : c.kind === "custom"
       ? `<span class="ctag">connect an MCP</span>` : "";
-    return `<div class="uconn"><span>${esc(c.name)}${tag}</span><span class="cright">${right}${trashBtn(c.key)}</span></div>`;
+    const dot = c.user_mcp ? connDot(c) : "";
+    return `<div class="uconn"><span>${dot}${esc(c.name)}${tag}</span><span class="cright">${right}${trashBtn(c.key)}</span></div>`;
+  }
+  // A subtle status dot for a user MCP row: green = connected (tested OK),
+  // red = test failed, amber = needs config, grey = added but not yet tested.
+  function connDot(c) {
+    const map = {
+      connected: ["ok", "Connected — verified"],
+      error: ["err", c.note || "Test failed"],
+      needs_auth: ["warn", "Needs configuration"],
+      added: ["idle", "Added — not tested yet (try “test the connection” in chat)"],
+    };
+    const [cls, tip] = map[c.status] || ["idle", ""];
+    return `<span class="cdot ${cls}" title="${esc(tip)}"></span>`;
   }
   async function trashConnection(key) {
     const r = await postJSON("/api/service/remove", { service_key: key });
@@ -1428,40 +1445,205 @@
       ov.remove(); sendMessage(t);
     });
   }
-  // Add a connection = point modastack at a remote MCP server (the Claude-style
-  // connector form): name + URL + an API key. When the assistant guesses a
-  // connection is needed (a custom service like PostHog), the row's Connect
-  // opens this prefilled with the name — you supply the URL. (OAuth-authed MCPs
-  // aren't supported yet — that's a follow-up; API key is the only auth here.)
-  function openMcpModal(prefill) {
+  // Add a connection = point modastack at an MCP server (the Claude-style
+  // connector form). Two transports:
+  //  - Remote: name + URL + an optional API key.
+  //  - Local:  name + command (+ optional args + env var names) for a
+  //            stdio/command-based server (e.g. a locally-installed MCP).
+  // When the assistant guesses a connection is needed (a custom service like
+  // PostHog), the row's Connect opens this prefilled with the name. (OAuth-authed
+  // MCPs aren't supported yet — a follow-up; API key is the only remote auth.)
+  function openMcpModal(prefill, existing) {
+    const editing = !!(existing && existing.cfg);
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "mcp-ov";
+    ov._editKey = editing ? existing.key : null;
+    ov._editCfg = editing ? existing.cfg : null;
     ov.innerHTML = `<div class="secret-panel">
-      <div class="sp-head"><b>Add a connection</b><button class="btn ghost sm" id="mcp-close">Close</button></div>
+      <div class="sp-head"><b>${editing ? "Edit connection" : "Add a connection"}</b><button class="btn ghost sm" id="mcp-close">Close</button></div>
       <div class="sp-body">
-        <p class="fhelp">Connect a remote MCP server — name it, paste its URL, and add an API key if it needs one.</p>
+        <p class="fhelp">Connect an MCP server — a remote URL, or a local command-based server installed on this machine.</p>
+        <div class="seg" id="mcp-transport" style="margin-bottom:10px">
+          <button class="seg-btn on" data-transport="http">Remote URL</button>
+          <button class="seg-btn" data-transport="stdio">Local command</button>
+        </div>
         <label class="fld"><span class="flab">Name</span>
           <input id="mcp-name" placeholder="e.g. PostHog" autocomplete="off" value="${esc(prefill || "")}"></label>
-        <label class="fld"><span class="flab">Remote server URL</span>
-          <input id="mcp-url" placeholder="https://mcp.example.com/mcp" autocomplete="off"></label>
-        <label class="fld"><span class="flab">API key <span class="fhelp inline">optional — only if the server needs one</span></span>
-          <input id="mcp-key" type="password" placeholder="stored in .env, never sent to the model" autocomplete="off"></label>
-        <div class="sp-actions"><button class="btn primary sm" id="mcp-add">Add</button></div>
+        <div id="mcp-http-fields">
+          <label class="fld"><span class="flab">Remote server URL</span>
+            <input id="mcp-url" placeholder="https://mcp.example.com/mcp" autocomplete="off"></label>
+          <label class="fld"><span class="flab">API key <span class="fhelp inline">optional — only if the server needs one</span></span>
+            <input id="mcp-key" type="password" placeholder="stored in .env, never sent to the model" autocomplete="off"></label>
+        </div>
+        <div id="mcp-stdio-fields" hidden>
+          <label class="fld"><span class="flab">Project folder <span class="fhelp inline">point at the server's folder — we'll figure out the rest</span></span>
+            <div class="mcp-detect-row">
+              <input id="mcp-folder" placeholder="/path/to/the/mcp-server" autocomplete="off">
+              <button class="btn ghost sm" id="mcp-detect" type="button">Detect</button>
+            </div></label>
+          <div id="mcp-detect-status"></div>
+          <label class="fld"><span class="flab">Command</span>
+            <input id="mcp-command" placeholder="e.g. substack-mcp" autocomplete="off"></label>
+          <label class="fld"><span class="flab">Arguments <span class="fhelp inline">optional — space-separated</span></span>
+            <input id="mcp-args" placeholder="--stdio --port 0" autocomplete="off"></label>
+          <div id="mcp-detected-env"></div>
+          <label class="fld"><span class="flab">More environment variables <span class="fhelp inline">optional — one per line, NAME or NAME=value</span></span>
+            <textarea id="mcp-env" rows="2" placeholder="EXTRA_VAR=…" autocomplete="off"></textarea></label>
+          <p class="fhelp">Any value you enter is stored in .env as a <code>\${NAME}</code> reference, never inline. Leave a value blank to set it later.</p>
+        </div>
+        <div class="sp-actions"><button class="btn primary sm" id="mcp-add">${editing ? "Save" : "Add"}</button></div>
         <div class="mcp-status" id="mcp-status"></div>
       </div></div>`;
     document.body.appendChild(ov);
-    (prefill ? $("#mcp-url") : $("#mcp-name")).focus();
     ov.addEventListener("click", e => { if (e.target.id === "mcp-close" || e.target === ov) ov.remove(); });
+    const selectTab = name => ov.querySelectorAll("#mcp-transport .seg-btn").forEach(x => {
+      const on = x.dataset.transport === name;
+      x.classList.toggle("on", on);
+      if (x.dataset.transport === "stdio") $("#mcp-stdio-fields").hidden = !on;
+      if (x.dataset.transport === "http") $("#mcp-http-fields").hidden = (name === "stdio");
+    });
+    ov.querySelectorAll("#mcp-transport .seg-btn").forEach(b => b.addEventListener("click", () => {
+      selectTab(b.dataset.transport);
+      (b.dataset.transport === "stdio" ? $("#mcp-folder") : $("#mcp-url")).focus();
+    }));
+    $("#mcp-detect").addEventListener("click", () => mcpDetect(ov));
+    $("#mcp-folder").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); mcpDetect(ov); } });
     $("#mcp-add").addEventListener("click", () => mcpAdd(ov));
+    // Editing an existing connection: repopulate every field from the stored
+    // config (secret VALUES are never sent to the client, so creds show as
+    // "saved — leave blank to keep"; re-enter only to change them).
+    if (editing) {
+      const cfg = existing.cfg;
+      $("#mcp-name").value = cfg.label || existing.key || "";
+      const stdio = cfg.type === "stdio" || !!cfg.command;
+      selectTab(stdio ? "stdio" : "http");
+      if (stdio) {
+        $("#mcp-command").value = cfg.command || "";
+        $("#mcp-args").value = (cfg.args || []).map(shellQuote).join(" ");
+        renderEnvRows((cfg.env_vars || []).map(v => ({
+          name: v, secret: isSecretName(v), required: false,
+          saved: (S.credentials_saved || []).includes(v),
+        })), true);
+      } else {
+        $("#mcp-url").value = cfg.url || "";
+        if (cfg.secret_var && (S.credentials_saved || []).includes(cfg.secret_var))
+          $("#mcp-key").placeholder = "saved — leave blank to keep";
+      }
+      $("#mcp-name").focus();
+    } else {
+      (prefill ? $("#mcp-url") : $("#mcp-name")).focus();
+    }
+  }
+  // A loose mirror of the backend secret heuristic, for rendering edit rows
+  // (the server doesn't round-trip per-var secret flags).
+  function isSecretName(name) {
+    const up = (name || "").toUpperCase();
+    if (/(_PATH|_DIR|_FILE|_URL|_URI|_HOST|_PORT|_ENDPOINT)$/.test(up)) return false;
+    return /(COOKIE|TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE|CREDENTIAL|AUTH|ACCESS_KEY)/.test(up)
+      || /_KEY$|_PAT$/.test(up) || up === "PAT";
+  }
+  // Shell-quote one arg so the space-joined string round-trips through the
+  // server's shlex split (the detected --directory path often has spaces).
+  function shellQuote(s) {
+    return /[^A-Za-z0-9_\/.:=@%+-]/.test(s) ? "'" + s.replace(/'/g, "'\\''") + "'" : s;
+  }
+  // Scan a local folder and prefill the command / args / env-var fields.
+  async function mcpDetect(ov) {
+    // Accept a pasted path wrapped in quotes (copied from Finder/terminal) —
+    // strip one layer and reflect the cleaned value back into the field.
+    let path = ($("#mcp-folder").value || "").trim();
+    if (path.length >= 2 && path[0] === path[path.length - 1] && (path[0] === "'" || path[0] === '"')) {
+      path = path.slice(1, -1).trim();
+      $("#mcp-folder").value = path;
+    }
+    const st = $("#mcp-detect-status");
+    if (!path) { st.innerHTML = `<div class="mcp-err">enter a folder path</div>`; return; }
+    st.innerHTML = `<div class="fhelp">Scanning ${esc(path)}…</div>`;
+    const r = await postJSON("/api/mcp/detect", { path });
+    if (!r.ok) { st.innerHTML = `<div class="mcp-err">${esc((r.data && r.data.error) || "couldn't detect")}</div>`; return; }
+    const d = r.data;
+    if (!($("#mcp-name").value || "").trim() && d.name) $("#mcp-name").value = d.name;
+    $("#mcp-command").value = d.command || "";
+    $("#mcp-args").value = (d.args || []).map(shellQuote).join(" ");
+    renderEnvRows(d.env || []);
+    const bits = [`<b>${esc(d.runtime || "detected")}</b> · ${(d.env || []).length} env var(s) found`];
+    if (d.alt_scripts && d.alt_scripts.length)
+      bits.push(`other entrypoints: ${d.alt_scripts.map(esc).join(", ")}`);
+    (d.notes || []).forEach(n => bits.push("⚠ " + esc(n)));
+    st.innerHTML = `<div class="mcp-detected-note">${bits.join(" · ")}</div>`;
+  }
+  // Render env vars as labelled, value-fillable rows. Secrets get a masked
+  // input; required/optional, a "saved" flag, and any README hint show inline.
+  // `alwaysKeep` marks rows that must persist even when left blank (editing an
+  // existing connection: a blank value keeps the saved secret, but the var
+  // declaration must survive).
+  function renderEnvRows(env, alwaysKeep) {
+    const box = $("#mcp-detected-env");
+    if (!env || !env.length) { box.innerHTML = ""; return; }
+    const heading = alwaysKeep ? "environment variables" : "detected environment variables";
+    box.innerHTML = `<div class="flab" style="margin:6px 0">${heading}</div>` +
+      env.map(e => {
+        const badge = e.required ? `<span class="ebadge req">required</span>`
+                                 : `<span class="ebadge opt">optional</span>`;
+        const sec = e.secret ? `<span class="ebadge sec">secret</span>` : ``;
+        const saved = e.saved ? `<span class="ebadge ok">saved</span>` : ``;
+        const hint = e.hint ? `<span class="ehint">${esc(e.hint)}</span>` : ``;
+        const ph = e.saved ? "leave blank to keep current"
+          : (e.required ? "value (stored in .env)"
+                        : "optional — blank uses the server's default");
+        return `<div class="erow">
+          <div class="erow-head"><code>${esc(e.name)}</code> ${badge}${sec}${saved}${hint}</div>
+          <input class="erow-val" data-env="${esc(e.name)}" data-req="${e.required ? 1 : 0}"
+                 data-keep="${alwaysKeep ? 1 : 0}"
+                 type="${e.secret ? "password" : "text"}" autocomplete="off"
+                 placeholder="${ph}"></div>`;
+      }).join("");
+  }
+  // Parse the env textarea into [{name, value}] — one var per line, NAME=value
+  // or a bare NAME (value supplied later). Splits on the FIRST '=' so values
+  // that themselves contain '=' (e.g. a cookie string) survive intact.
+  function parseEnvLines(text) {
+    return (text || "").split("\n").map(l => l.trim()).filter(Boolean).map(l => {
+      const i = l.indexOf("=");
+      return i < 0 ? { name: l, value: "" }
+                   : { name: l.slice(0, i).trim(), value: l.slice(i + 1).trim() };
+    }).filter(e => e.name);
   }
   async function mcpAdd(ov) {
-    const key = (($("#mcp-key") || {}).value || "").trim();
-    const payload = {
-      name: ($("#mcp-name").value || "").trim(),
-      url: ($("#mcp-url").value || "").trim(),
-      auth: key ? "api_key" : "none",
-      api_key: key,
-    };
+    const stdio = !!ov.querySelector("#mcp-transport .seg-btn.on[data-transport='stdio']");
+    const replaces = ov._editKey || "";
+    let payload;
+    if (stdio) {
+      // Keep a row if it has a value, is required, or is an edit row (data-keep:
+      // its ${VAR} declaration must persist; a blank value keeps the saved
+      // secret). Blank optional detected rows are dropped so the server's own
+      // default isn't clobbered with an empty value.
+      const detected = [...ov.querySelectorAll("#mcp-detected-env .erow-val")]
+        .map(i => ({ name: i.dataset.env, value: i.value.trim(),
+                     required: i.dataset.req === "1", keep: i.dataset.keep === "1" }))
+        .filter(e => e.value || e.required || e.keep)
+        .map(e => ({ name: e.name, value: e.value }));
+      payload = {
+        name: ($("#mcp-name").value || "").trim(),
+        transport: "stdio",
+        command: ($("#mcp-command").value || "").trim(),
+        args: ($("#mcp-args").value || "").trim(),
+        env: [...detected, ...parseEnvLines($("#mcp-env").value)],
+        replaces,
+      };
+    } else {
+      const key = (($("#mcp-key") || {}).value || "").trim();
+      // Preserve api_key auth when editing without re-entering the key (a blank
+      // field keeps the saved secret); don't silently downgrade to "none".
+      const keepApiKey = !key && ov._editCfg && ov._editCfg.auth === "api_key";
+      payload = {
+        name: ($("#mcp-name").value || "").trim(),
+        url: ($("#mcp-url").value || "").trim(),
+        auth: (key || keepApiKey) ? "api_key" : "none",
+        api_key: key,
+        replaces,
+      };
+    }
     const r = await postJSON("/api/mcp/add", payload);
     if (!r.ok) {
       const st = $("#mcp-status");
@@ -1475,7 +1657,6 @@
     // Honest: nothing is verified here yet — the row says what's still needed.
     toast("Connection added");
   }
-
   // --- top-level render + events ----------------------------------------
   function render() {
     if (atHome) { renderHome(); return; }   // the team hub overlays any stage
@@ -1531,6 +1712,13 @@
     if (e.target.closest("[data-addconn]")) { openMcpModal(); return; }
     const addmcp = e.target.closest("[data-addmcp]");
     if (addmcp) { openMcpModal(addmcp.dataset.addmcp); return; }
+    const editmcp = e.target.closest("[data-editmcp]");
+    if (editmcp) {
+      const k = editmcp.dataset.editmcp;
+      const cfg = ((S.spec && S.spec.mcp_servers) || {})[k];
+      openMcpModal(null, cfg ? { key: k, cfg } : null);
+      return;
+    }
     const ct = e.target.closest("[data-conntrash]");
     if (ct) { trashConnection(ct.dataset.conntrash); return; }
     const cs = e.target.closest("[data-chatset]");
