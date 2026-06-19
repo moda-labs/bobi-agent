@@ -142,13 +142,16 @@ def test_workflows_parse_and_actionlint_clean():
 
 # --- gitops-teams.yml invariants (thin client over `modastack deploy`) -------
 
-def test_teams_triggered_by_push_to_main_on_config_paths():
+def test_teams_deploys_on_release_with_manual_tag_escape_hatch():
+    """Deploy gate = a release (not every push to main); manual via a `deploy-*`
+    tag or workflow_dispatch."""
     wf = _load(WF_TEAMS)
     on = wf.get("on", wf.get(True))  # PyYAML parses bare `on:` as boolean True.
-    assert on["push"]["branches"] == ["main"]
-    paths = on["push"]["paths"]
-    assert any("deployments/" in p for p in paths)
-    assert any("agents/" in p for p in paths)
+    assert "published" in on["release"]["types"]
+    assert any(t.startswith("deploy-") for t in on["push"]["tags"])
+    assert "workflow_dispatch" in on
+    # A push to a branch must NOT auto-deploy — only release/tag/dispatch.
+    assert "branches" not in (on.get("push") or {})
 
 
 def test_teams_is_a_thin_client_no_business_logic_in_yaml():
@@ -185,11 +188,16 @@ def test_teams_deploy_is_idempotent_no_added_vs_changed_split():
     assert "deploy" in jobs
 
 
-def test_teams_excludes_deletions_and_surfaces_orphans_for_human_destroy():
-    wf = _load(WF_TEAMS)
-    plan_script = _step_scripts(_jobs(wf)["plan"])
-    assert "--diff-filter=d" in plan_script  # deletions never auto-deploy
-    orphans = _step_scripts(_jobs(wf)["orphans"])
+def test_teams_reconciles_active_set_and_skips_inactive():
+    """A release reconciles every active deployments/<name>.yaml; defaults is
+    excluded and inactive (.example) files are never picked up."""
+    plan_script = _step_scripts(_jobs(_load(WF_TEAMS))["plan"])
+    assert "deployments/*.yaml" in plan_script
+    assert 'b" = "defaults"' in plan_script or '"defaults"' in plan_script
+
+
+def test_teams_surfaces_orphans_for_human_destroy():
+    orphans = _step_scripts(_jobs(_load(WF_TEAMS))["orphans"])
     # surfaces unmanaged apps for a human `modastack destroy`, never auto-destroys
     assert "modastack destroy" in orphans
     assert "apps destroy" not in orphans and "destroy-instance.sh" not in orphans

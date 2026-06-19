@@ -17,7 +17,7 @@ Pieces:
 - `scripts/provision-instance.sh` + `scripts/destroy-instance.sh` — stand up / tear down one instance
 - `scripts/fleet.sh` — fleet enumeration helper
 - `scripts/build-team-tarballs.sh` — package teams into `.tar.gz`
-- `.github/workflows/gitops-teams.yml` — thin client: reconcile `deployments/*` on push
+- `.github/workflows/gitops-teams.yml` — thin client: reconcile `deployments/*` on release/tag
 - `.github/workflows/gitops-release.yml` — fleet image rollout on release
 - `.github/workflows/team-packages.yml` — publishes team tarballs (for `team-url` delivery)
 
@@ -28,9 +28,9 @@ Pieces:
 **Git is what should be running; Fly is what is running; `modastack deploy` closes
 the gap, one instance at a time.** A `deployments/<name>.yaml` is one instance an
 operator runs. Add/edit one and run `modastack deploy <name>` (or let the GitOps
-Action do it on push) → the instance appears or updates in place. Delete one →
-its Fly app is surfaced for a human `modastack destroy`. There is **no database
-and no manifest** — the Fly API is the only state store.
+Action do it on the next release) → the instance appears or updates in place.
+Delete one → its Fly app is surfaced for a human `modastack destroy`. There is
+**no database and no manifest** — the Fly API is the only state store.
 
 The layering that keeps this operator-agnostic:
 
@@ -241,46 +241,48 @@ token broker fills later (it emits the same blob).
 ## 6. GitHub Ops (thin clients over the primitive)
 
 ```
-push to main (deployments/** or agents/**)
+publish a GitHub Release   (or push a `deploy-*` tag / dispatch — the deploy gate)
    │
-   ▼
-gitops-teams.yml:
-   plan   : git-diff changed deployments/<name>.yaml (deletions excluded)
-   deploy : matrix over changed names, environment=<name>
-            └─ materialize MODASTACK_ENV -> env-file -> `modastack deploy <name>`
-   orphans: Fly apps with no deployments/ file -> warn (human `modastack destroy`)
-
-publish a GitHub Release
+   ├─▶ gitops-teams.yml:
+   │      plan   : list ACTIVE deployments/<name>.yaml (defaults excluded)
+   │      deploy : matrix over names, environment=<name>
+   │               └─ materialize MODASTACK_ENV -> env-file -> `modastack deploy <name>`
+   │      orphans: Fly apps with no deployments/ file -> warn (human `modastack destroy`)
    │
-   ▼
-gitops-release.yml (release: published):
-   build image once -> roll every fleet app to that digest (config preserved)
+   └─▶ gitops-release.yml:
+          build image once -> roll every fleet app to that digest (config preserved)
 ```
 
-The reconcile **business logic lives in `modastack deploy`**, not the YAML. The
-Action only orchestrates: diff which deployments changed, hand each one its
-secrets, loop the primitive. That is why the same engine runs from a laptop, this
-Action, Terraform, or a SaaS plane — see §7.1 (bring your own repo).
+**A release is the deploy gate** — an edit pushed to `main` does NOT auto-deploy;
+you cut a release (or push a `deploy-*` tag) to ship. The reconcile **business
+logic lives in `modastack deploy`**, not the YAML. The Action only orchestrates:
+list the active deployments, hand each its secrets, loop the primitive. That is why
+the same engine runs from a laptop, this Action, Terraform, or a SaaS plane — see
+§7.1 (bring your own repo).
 
 ### gitops-teams.yml — the reconcile
-Triggered by **push to main** (path-filtered to `deployments/**` + `agents/**`).
-Jobs:
-- **plan**: `fetch-depth: 2`; emits the list of `deployments/<name>.yaml` that
-  changed (`git diff --diff-filter=d` to **exclude deletions** — deleting is the
-  orphans job's human-gated concern), plus any deployment whose `team:` matches a
-  changed `agents/<team>/`. Gates the rest on `secrets.FLY_API_TOKEN` being set.
-- **deploy** (matrix over the changed names, `environment: <name>`): install the
+Triggered by **`release: published`**, a **`deploy-*` tag push** (manual deploy
+without a formal release — also how the GitOps path is e2e'd from a branch, since
+tag pushes run the workflow from the tagged commit), or **`workflow_dispatch`**
+(optional `only:` to scope to one deployment). Jobs:
+- **plan**: list every **active** `deployments/<name>.yaml` (`defaults.yaml`
+  excluded; an inactive deployment is a non-`.yaml` like `<name>.yaml.example`).
+  No git-diff — a release reconciles the whole set, and `modastack deploy` is
+  idempotent. Gates the rest on `secrets.FLY_API_TOKEN` being set.
+- **deploy** (matrix over the active names, `environment: <name>`): install the
   CLI, materialize `MODASTACK_ENV` → env-file, then `modastack deploy <name>
   --env-file …`. One idempotent path — `deploy` itself decides provision-vs-update
-  by Fly state, so there is no separate added/changed split any more.
+  by Fly state.
 - **orphans**: enumerate the fleet (`fleet.sh list`, fleet from `defaults.yaml`),
-  warn on any app with no `deployments/` file. **Never auto-destroys** (the volume
-  is the only copy of state).
+  warn on any app with no `deployments/` file (including a removed/inactivated
+  deployment). **Never auto-destroys** (the volume is the only copy of state).
 
 > **Delivery in CI.** moda's internal `deployments/eng-team.yaml` uses
-> `team: eng-team` → **ssh-push** from the checked-out repo, so CI needs no
-> published tarball. An operator who prefers HTTPS-fetch sets `team-url:` instead
-> (and publishes the tarball — see `team-packages.yml`).
+> **`team-url` (HTTPS-fetch) is the CI delivery mode** — a CI Fly token deploys but
+> doesn't `fly ssh`, so CI uses the published-tarball path (`team-packages.yml`
+> publishes them). **ssh-push (`team:`) is the logged-in-dev path** (`fly ssh`
+> needs your full creds). `deployments/ci-smoke.yaml` exercises the CI path via
+> the published `smoke-team.tar.gz`.
 
 ### team-packages.yml (only for `team-url` delivery)
 On push to main (path-filtered to `agents/**` + the smoke fixture), builds each
@@ -334,15 +336,18 @@ The two workflows are operator-agnostic — wire your repo in four steps:
 1. **Copy** `.github/workflows/gitops-teams.yml` (+ `gitops-release.yml` if you
    want release rollouts) and `deployments/defaults.yaml` into your repo. Set
    `fleet:` (your namespace) and `event_server:` in `defaults.yaml`.
-2. **Add a deployment**: `deployments/<team>.yaml` with `team: <team>` (a package
-   under your `agents/`) — or `team-url: <published .tar.gz>` if you publish
-   tarballs. One file per instance.
-3. **Repo secret**: `secrets.FLY_API_TOKEN` = `fly tokens create deploy`.
+2. **Add a deployment**: `deployments/<team>.yaml` with `team-url: <published
+   .tar.gz>` (the CI delivery mode — `team-packages.yml` publishes these). One file
+   per instance. (`team:` ssh-push is for logged-in-dev `modastack deploy`, not CI —
+   a CI Fly token can't `fly ssh`.)
+3. **Repo secret**: `secrets.FLY_API_TOKEN` = `fly tokens create org -o <your-org>`
+   (org-scoped, so CI can create apps/volumes — use a short `--expiry`).
 4. **Per-deployment GitHub Environment** named `<team>`, one secret `MODASTACK_ENV`
    = the full KEY=VALUE env-file body. **No** required-reviewer rule.
 
-Push to `main` → `gitops-teams.yml` runs `modastack deploy <team>` for each changed
-deployment. That's it; no FLEET_PREFIX var, no manifest, no database.
+**Cut a release** (or push a `deploy-*` tag) → `gitops-teams.yml` runs
+`modastack deploy <team>` for every active deployment. That's it; no FLEET_PREFIX
+var, no manifest, no database.
 
 ### Manual ops
 ```

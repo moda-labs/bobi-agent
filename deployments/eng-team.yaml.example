@@ -1,3 +1,7 @@
+# INACTIVE until C24 (#368). eng-team has a `requires: gstack/codex` gate that
+# blocks agent dispatch in the bare image, so deploying it now would provision a
+# real-but-non-functional instance. Rename to eng-team.yaml to activate once the
+# team-flavored image (C24) ships.
 # deployments/eng-team.yaml — moda's internal engineering-org instance.
 #
 # The deployment NAME is this filename ("eng-team"); the app is "<fleet>-eng-team"

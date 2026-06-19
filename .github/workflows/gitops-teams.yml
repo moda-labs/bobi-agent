@@ -1,23 +1,28 @@
 name: GitOps — teams
 
-# Reconcile deployments/<name>.yaml to live Fly instances on each push to main
-# (C22 / #342; docs/design/DEPLOY_INTERFACE.md).
+# Reconcile deployments/<name>.yaml to live Fly instances (C22 / #342;
+# docs/design/DEPLOY_INTERFACE.md).
+#
+# WHEN it runs (deploy gate = a release, not every push to main):
+#   release: published   -> reconcile the whole active deployment set.
+#   push of a `deploy-*` tag -> same, without a formal release (manual / branch e2e;
+#                            tag pushes run the workflow from the TAGGED commit).
+#   workflow_dispatch    -> manual; optional `only:` to scope to one deployment.
 #
 # This workflow is a THIN CLIENT: all deployment business logic lives in the
 # `modastack deploy` primitive (idempotent provision-or-update, delivery-mode
-# selection, secret validation, the Fly mechanics). The Action only does
-# orchestration — diff which deployments changed, materialize each one's secrets,
-# and loop the primitive. Nothing GitHub-specific reaches into the engine, so the
-# same `modastack deploy` runs from a laptop, this Action, Terraform, or a SaaS
-# plane. To wire your own repo, copy this file and set the inputs below; see
-# docs/DEPLOYMENT.md (bring-your-own-repo runbook).
+# selection, secret validation, the Fly mechanics). The Action only orchestrates —
+# list the active deployments, materialize each one's secrets, loop the primitive.
+# Because deploy is idempotent, a release simply reconciles ALL active deployments
+# (provision the new, update the rest) — no git-diff needed. Nothing
+# GitHub-specific reaches into the engine, so the same `modastack deploy` runs from
+# a laptop, this Action, Terraform, or a SaaS plane. To wire your own repo, copy
+# this file; see docs/DEPLOYMENT.md (bring-your-own-repo runbook).
 #
-# Flows:
-#   added/changed deployments/<name>.yaml  -> `modastack deploy <name>` (idempotent:
-#       the primitive provisions a new instance or updates an existing one).
-#   changed agents/<team>/                 -> redeploy any deployment of that team.
-#   deleted deployments/<name>.yaml        -> nothing automatic; the orphans job
-#       surfaces the now-unmanaged Fly app for a human `modastack destroy`.
+#   active deployment   = deployments/<name>.yaml (defaults.yaml excluded).
+#   inactive            = anything else (e.g. <name>.yaml.example) — never deployed.
+#   removed deployment  -> nothing automatic; the orphans job surfaces the
+#                          now-unmanaged Fly app for a human `modastack destroy`.
 #
 # State store = the Fly API (no DB, no committed manifest). Fleet identity comes
 # from deployments/defaults.yaml (`fleet:`), not a repo var.
@@ -31,15 +36,21 @@ name: GitOps — teams
 #   protection rules (a required reviewer would pause the matrix).
 
 on:
+  # Automated deployments fire on a published release — cutting a release is the
+  # deploy gate (an edit pushed to main does NOT auto-deploy; you release to ship).
+  release:
+    types: [published]
+  # Manual deploy without a formal release: push a `deploy-*` tag. Tag pushes run
+  # the workflow from the TAGGED commit (any branch), so this also drives the
+  # branch e2e of the GitOps path before a merge. (Release tags are `v*`, so they
+  # don't double-fire this.)
   push:
-    branches: [main]
-    paths:
-      - "deployments/**"
-      - "agents/**"
+    tags:
+      - "deploy-*"
   workflow_dispatch:
     inputs:
-      sha:
-        description: "Commit SHA to reconcile (default: latest of the branch)"
+      only:
+        description: "Reconcile only this deployment name (default: all active)"
         required: false
 
 # Serialize fleet reconciliation so two pushes can't race on the same app.
@@ -57,9 +68,6 @@ jobs:
       configured: ${{ steps.gate.outputs.configured }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.sha || github.sha }}
-          fetch-depth: 2
 
       - id: gate
         env:
@@ -73,56 +81,32 @@ jobs:
           fi
 
       - id: plan
+        env:
+          ONLY: ${{ github.event.inputs.only }}
         run: |
           set -euo pipefail
-          # A deployment exists iff deployments/<name>.yaml is present (excluding
-          # the shared defaults file and docs). Its name is the filename stem.
-          deployment_names() {
-            for f in deployments/*.yaml; do
-              [ -e "$f" ] || continue
-              b="$(basename "$f" .yaml)"
-              [ "$b" = "defaults" ] && continue
-              printf '%s\n' "$b"
-            done | sort -u
-          }
-
-          # Files changed in this push (deletions excluded — deletion is the
-          # orphans job's human-gated concern, never an auto-deploy).
-          changed() { git diff --name-only --diff-filter=d "${1}^" "$1" 2>/dev/null || true; }
-          files="$(changed "$(git rev-parse HEAD)")"
-
-          # 1) directly-changed deployments/<name>.yaml.
-          names="$(printf '%s\n' "$files" \
-            | sed -nE 's#^deployments/([^/]+)\.yaml$#\1#p' \
-            | grep -vx defaults || true)"
-
-          # 2) changed agents/<team>/ → every deployment whose `team:` is that team
-          #    (the common case: a deployment named after its team).
-          changed_teams="$(printf '%s\n' "$files" \
-            | sed -nE 's#^agents/([^/]+)/.*#\1#p' | sort -u || true)"
-          for team in $changed_teams; do
-            [ -n "$team" ] || continue
-            for name in $(deployment_names); do
-              t="$(sed -nE 's#^team:[[:space:]]*([^[:space:]#]+).*#\1#p' \
-                     "deployments/$name.yaml" | head -n1)"
-              [ "$t" = "$team" ] && names="$(printf '%s\n%s\n' "$names" "$name")"
-            done
+          # A release/tag deploy reconciles the WHOLE active set — `modastack
+          # deploy` is idempotent (provision new, update existing), so deploying
+          # all is correct and needs no git-diff. An active deployment is a
+          # deployments/<name>.yaml (the shared defaults file excluded; an
+          # inactive deployment is a non-.yaml like <name>.yaml.example).
+          names=()
+          for f in deployments/*.yaml; do
+            [ -e "$f" ] || continue
+            b="$(basename "$f" .yaml)"
+            [ "$b" = "defaults" ] && continue
+            # `workflow_dispatch` may scope to a single deployment via `only`.
+            [ -n "${ONLY:-}" ] && [ "$b" != "$ONLY" ] && continue
+            names+=("$b")
           done
 
-          # Keep only names that still have a deployments/<name>.yaml at this sha.
-          keep=()
-          while IFS= read -r n; do
-            [ -n "$n" ] || continue
-            [ -f "deployments/$n.yaml" ] && keep+=("$n")
-          done < <(printf '%s\n' "$names" | sort -u)
-
-          if [ "${#keep[@]}" -eq 0 ]; then
+          if [ "${#names[@]}" -eq 0 ]; then
             echo "names=[]" >> "$GITHUB_OUTPUT"
-            echo "Nothing to reconcile."
+            echo "No active deployments to reconcile."
           else
-            printf '%s\n' "${keep[@]}" | jq -R . | jq -cs . \
+            printf '%s\n' "${names[@]}" | sort -u | jq -R . | jq -cs . \
               | sed 's/^/names=/' >> "$GITHUB_OUTPUT"
-            echo "Deployments to reconcile: ${keep[*]}"
+            echo "Deployments to reconcile: ${names[*]}"
           fi
 
   deploy:
@@ -141,8 +125,6 @@ jobs:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.sha || github.sha }}
 
       - uses: actions/setup-python@v5
         with:
