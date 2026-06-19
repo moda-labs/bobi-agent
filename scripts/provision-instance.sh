@@ -216,7 +216,8 @@ esac
 # minting transmits the bubble key once, so a cleartext remote URL is refused.
 case "$EVENT_SERVER" in
   https://*) ;;
-  http://localhost*|http://127.0.0.1*|http://[::1]*) ;;
+  # Quote the IPv6 literal so `[::1]` is matched as text, not a glob char-class.
+  http://localhost*|http://127.0.0.1*|'http://[::1]'*) ;;
   *) fatal "--event-server must be https:// (or a loopback). Got: $EVENT_SERVER";;
 esac
 

@@ -31,6 +31,33 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q
 
+  lint:
+    name: Lint (workflows + Dockerfile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: actionlint (workflows + their shell)
+        # Lints every .github/workflows/*.yml and shellchecks their run: blocks —
+        # previously only run by hand, so the GitOps workflows could regress.
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+      - name: hadolint (Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+      - name: Dockerfile build-check (source + binary modes)
+        # BuildKit lint + stage-graph resolution for both build modes, so a
+        # regression in the MODASTACK_BUILD=pypi path (binary deploy) is caught
+        # without a full image build.
+        run: |
+          docker build --check .
+          docker build --check --build-arg MODASTACK_BUILD=pypi --build-arg MODASTACK_VERSION=0.0.0 .
+
   event-server:
     name: Event server (Worker/miniflare)
     runs-on: ubuntu-latest

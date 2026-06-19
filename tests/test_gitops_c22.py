@@ -29,6 +29,7 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 FLEET_SH = REPO / "scripts" / "fleet.sh"
 PROVISION_SH = REPO / "scripts" / "provision-instance.sh"
+DESTROY_SH = REPO / "scripts" / "destroy-instance.sh"
 WF_TEAMS = REPO / ".github" / "workflows" / "gitops-teams.yml"
 WF_RELEASE = REPO / ".github" / "workflows" / "gitops-release.yml"
 
@@ -74,9 +75,11 @@ def test_classify_all_added_when_nothing_exists():
     assert lines["changed"] == "[]"
 
 
-def test_fleet_sh_passes_shellcheck():
-    sc = subprocess.run(["shellcheck", str(FLEET_SH)], capture_output=True, text=True)
-    assert sc.returncode == 0, sc.stdout + sc.stderr
+def test_deploy_scripts_pass_shellcheck():
+    """fleet.sh + the provision/destroy scripts deploy drives — keep them clean."""
+    for script in (FLEET_SH, PROVISION_SH, DESTROY_SH):
+        sc = subprocess.run(["shellcheck", str(script)], capture_output=True, text=True)
+        assert sc.returncode == 0, f"{script.name}:\n{sc.stdout}{sc.stderr}"
 
 
 # --- scripts/provision-instance.sh: identity stamps + ssh-push blank mode ----

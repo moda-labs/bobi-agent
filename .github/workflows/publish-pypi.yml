@@ -97,7 +97,7 @@ jobs:
           "$SMOKE/venv/bin/modastack" start
 
           LOG=".modastack/state/manager.log"
-          for i in $(seq 1 90); do
+          for _ in $(seq 1 90); do
             grep -q "Drain loop active" "$LOG" 2>/dev/null && break
             sleep 2
           done
@@ -135,7 +135,7 @@ jobs:
               sys.exit(1)
           "
 
-          for i in $(seq 1 15); do
+          for _ in $(seq 1 15); do
             "$SMOKE/venv/bin/modastack" events 2>/dev/null | grep -q "release-pipeline" && { echo "Event visible in project event log"; exit 0; }
             sleep 2
           done
