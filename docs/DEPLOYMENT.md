@@ -4,8 +4,10 @@ How a modastack agent team becomes a running, self-managing instance on Fly,
 and the hard-won nuances that make it work. This is the **operational** companion
 to the design docs: `docs/design/CONTAINERIZED_INSTANCES.md` is *why/what*,
 `docs/design/DEPLOY_INTERFACE.md` is the *deploy-primitive design*, and this is
-*how it works today + the gotchas*. Current as of the `modastack deploy` refactor
-(2026-06-19).
+*how it works today + the gotchas*. Current as of the `modastack deploy`
+primitive + binary-only deploy, **merged to main 2026-06-19** (PR #365). Next:
+layered-deps (C24 #368) → eng-team on Fly → EC2 decommission
+(`HANDOFF-layered-deps-eng-team-fly.md`).
 
 Pieces:
 

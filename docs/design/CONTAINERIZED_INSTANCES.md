@@ -11,6 +11,20 @@ Amended 2026-06-12: Anthropic auth decision + subscription login bootstrap
 migration (§10 "MVP cut"), C12 promoted into the MVP, open question 3
 resolved.
 
+**Amended 2026-06-19 — Phase 0 + Phase 1 SHIPPED.** C8/C23 (#358), C10 (#359),
+and C22 — refactored into the **`modastack deploy` primitive** + binary-only
+deploy — are MERGED to main (PR #365). The deploy *engine* is now a portable CLI
+(`modastack deploy <name>` / `destroy <name>`), not workflow YAML; it builds the
+instance image three ways (`MODASTACK_BUILD` = `source` for a checkout, `pypi`
+for a published version — the normal/SaaS path, pinned to the operator's CLI
+version — and `wheel` for an rc the CI hasn't published yet, i.e. the canary).
+A permanent Fly **canary** (`moda-canary`) is the live pipeline smoke. C9's
+first-boot hardening landed as the **wait-for-team** entrypoint state (ssh-push).
+**Next:** layered-deps (C24 #368) so a team's tool deps (codex/gstack) bake into
+a per-team image and **eng-team migrates to Fly → EC2 is decommissioned**; the
+canary then subsumes the `publish-pypi.yml` smoke + EC2-promote job. See §9.1,
+§10 Phase 1, §11, and `HANDOFF-layered-deps-eng-team-fly.md`.
+
 Related designs:
 - `docs/design/AUTH.md` (#142) — event-server auth. Complementary, not a
   dependency: this design deliberately keeps integration auth **outside** the
@@ -625,14 +639,28 @@ continuity; RSS drops after recycle.
 
 ## 11. Open questions
 
-1. Wheel vs. source install in the image (C8) — affects release cadence for
-   instance updates; default to wheel + pinned version.
+1. ~~Wheel vs. source install in the image (C8)~~ — **resolved 2026-06-19.**
+   One Dockerfile, `MODASTACK_BUILD` selects: `pypi` (install a published
+   `modastack==<operator's CLI version>` — the normal/SaaS path; build once per
+   version, fan the digest out to N tenants), `wheel` (scp an unpublished rc into
+   the build context — the canary, since it's the run that's *publishing* the
+   version), `source` (a dev checkout). **Image-baked, not push-onto-machine** —
+   keeps the immutable-digest / atomic-deploy / clean-rollback guarantees; the
+   speed comes from **layering** (deps + claude + model in cached early layers,
+   the modastack wheel as the last thin layer → a code-only rebuild is seconds).
+   That layering is C24 #368's "two clocks" extended to three (tool-deps /
+   framework-version / definition).
 2. Does `/browse` (Playwright Chromium, ~250 MB + system libs) ship in the
    base image or a variant? Default: leave it out; add a variant if dogfood
    demand appears.
-3. ~~Fleet upgrade mechanics~~ — **resolved 2026-06-12 → C22** (scripted
-   `fly deploy` loop + GitHub Action); revisit only when instance count
-   makes the loop creak.
+3. ~~Fleet upgrade mechanics~~ — **resolved 2026-06-12 → C22** (now the
+   idempotent `modastack deploy` primitive; release/`deploy-*` tag triggers).
+   **No-downtime upgrade** is the live open question: the in-memory session
+   inbox loses queued events on restart, so durability must live in the event
+   server (Worker/DO buffer + replay on reconnect) — VERIFY. With that +
+   graceful drain + session resume, an upgrade is "delayed, not lost"; a **hot
+   team-reload** makes team-only upgrades zero-restart. Don't chase blue-green
+   (single-attach volume).
 4. C12 outcome decides whether subscription routing needs Worker changes
    before SaaS (potential new ticket under the event contract v2 umbrella).
 5. Subscription credit monitoring: all subscription-mode instances on one
