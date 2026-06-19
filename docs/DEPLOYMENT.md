@@ -281,8 +281,8 @@ tag pushes run the workflow from the tagged commit), or **`workflow_dispatch`**
 > **`team-url` (HTTPS-fetch) is the CI delivery mode** — a CI Fly token deploys but
 > doesn't `fly ssh`, so CI uses the published-tarball path (`team-packages.yml`
 > publishes them). **ssh-push (`team:`) is the logged-in-dev path** (`fly ssh`
-> needs your full creds). `deployments/ci-smoke.yaml` exercises the CI path via
-> the published `smoke-team.tar.gz`.
+> needs your full creds). `deployments/canary.yaml` (the always-on pipeline
+> canary) exercises the CI path via the published `smoke-team.tar.gz`.
 
 ### team-packages.yml (only for `team-url` delivery)
 On push to main (path-filtered to `agents/**` + the smoke fixture), builds each
