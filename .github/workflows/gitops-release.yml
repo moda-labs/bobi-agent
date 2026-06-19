@@ -55,6 +55,11 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "${FLY_API_TOKEN:-}" ] || { echo "::notice::FLY_API_TOKEN unset — fleet not wired, skipping."; exit 0; }
+          # `fly` is the current binary name; some flyctl installs (incl. the
+          # setup-flyctl action) only expose `flyctl`. Detect either — the same
+          # pattern deploy.py (_fly_bin), provision-instance.sh, and fleet.sh use.
+          FLY="$(command -v fly || command -v flyctl)" \
+            || { echo "::error::neither 'fly' nor 'flyctl' found on PATH"; exit 1; }
           # Fleet namespace: the single source of truth is deployments/defaults.yaml.
           FLEET_PREFIX="$(sed -nE 's#^fleet:[[:space:]]*([^[:space:]#]+).*#\1#p' \
                             deployments/defaults.yaml | head -n1)"
@@ -77,12 +82,12 @@ jobs:
             # `fly config save` writes the live config (env/[[mounts]]/[[vm]], no
             # [build] key) to the path given by -c. Our apps deploy via
             # --dockerfile, so the saved config has no dockerfile-path trap.
-            fly config save -a "$app" -c "$cfg" --yes
+            "$FLY" config save -a "$app" -c "$cfg" --yes
             if [ -n "$image" ]; then
-              fly deploy --config "$cfg" --image "$image" \
+              "$FLY" deploy --config "$cfg" --image "$image" \
                 --ha=false --wait-timeout 10m -a "$app"
             else
-              fly deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
+              "$FLY" deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
                 --depot=false --ha=false --wait-timeout 10m --remote-only -a "$app"
             fi
             rm -f "$cfg"
@@ -97,7 +102,7 @@ jobs:
 
           # `fly image show --json` exposes Repository + Digest (the Ref/Reference
           # fields are null), so construct the immutable pull reference ourselves.
-          image="$(fly image show -a "$first" --json | jq -r '
+          image="$("$FLY" image show -a "$first" --json | jq -r '
             (.[0] // .) as $i
             | if ($i.Repository and $i.Digest)
               then "registry.fly.io/\($i.Repository)@\($i.Digest)"
