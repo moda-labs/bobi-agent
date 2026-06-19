@@ -270,6 +270,43 @@ def fetch_from_url(project_path: Path, url: str,
             "gzipped tarball of one team directory."
         ) from e
 
+    return _install_team_tar(project_path, tar, source=url,
+                             source_meta=f"url:{url}", name=name)
+
+
+def fetch_from_archive(project_path: Path, archive: Path,
+                       name: str | None = None) -> tuple[Path, str]:
+    """Install an agent team from a LOCAL `.tar.gz`/`.tgz` archive file.
+
+    The on-disk twin of `fetch_from_url`: same one-team-per-archive contract and
+    extraction safety, but the bytes come from the filesystem instead of HTTP.
+    This is the seam ssh-push delivery uses — `modastack deploy` builds a local
+    team package into a tarball, pushes it onto the instance's volume over
+    `fly ssh`, and the instance runs `modastack install <pushed.tar.gz>`.
+    """
+    archive = Path(archive)
+    try:
+        tar = tarfile.open(archive, mode="r:gz")
+    except (tarfile.TarError, OSError) as e:
+        raise RuntimeError(
+            f"{archive} is not a readable .tar.gz archive ({e}). Pass a gzipped "
+            "tarball of one team directory."
+        ) from e
+
+    return _install_team_tar(project_path, tar, source=str(archive),
+                             source_meta=f"archive:{archive.name}", name=name)
+
+
+def _install_team_tar(project_path: Path, tar: "tarfile.TarFile", *,
+                      source: str, source_meta: str,
+                      name: str | None) -> tuple[Path, str]:
+    """Extract one team from an open tarfile into the project cache.
+
+    Shared core of `fetch_from_url` and `fetch_from_archive`: find the shallowest
+    `agent.yaml`, safely extract its team dir, resolve the team name, copy into
+    the cache, and stamp install metadata. `source` is a human label for errors;
+    `source_meta` is recorded as the install provenance.
+    """
     with tar:
         agent_yaml = min(
             (m for m in tar.getmembers()
@@ -279,7 +316,7 @@ def fetch_from_url(project_path: Path, url: str,
         )
         if agent_yaml is None:
             raise RuntimeError(
-                f"No agent.yaml found in the archive at {url} — it does not look "
+                f"No agent.yaml found in the archive at {source} — it does not look "
                 "like an agent team package."
             )
         team_root = agent_yaml.name.rsplit("/", 1)[0] if "/" in agent_yaml.name else ""
@@ -296,7 +333,7 @@ def fetch_from_url(project_path: Path, url: str,
                 tar.extractall(tmp, members=members)
             extracted = Path(tmp) / team_root if team_root else Path(tmp)
             if not (extracted / "agent.yaml").is_file():
-                raise RuntimeError(f"Extraction failed for the team at {url}")
+                raise RuntimeError(f"Extraction failed for the team at {source}")
 
             resolved = (
                 name
@@ -305,7 +342,7 @@ def fetch_from_url(project_path: Path, url: str,
             )
             if not resolved:
                 raise RuntimeError(
-                    f"Could not determine a team name from {url}; pass an explicit name."
+                    f"Could not determine a team name from {source}; pass an explicit name."
                 )
 
             dest = cache / resolved
@@ -315,8 +352,8 @@ def fetch_from_url(project_path: Path, url: str,
             shutil.copytree(extracted, dest, dirs_exist_ok=True)
 
     version = _read_local_version(project_path, resolved) or "unknown"
-    _write_meta(project_path, resolved, version, f"url:{url}")
-    log.info("Installed %s v%s from %s to %s", resolved, version, url, dest)
+    _write_meta(project_path, resolved, version, source_meta)
+    log.info("Installed %s v%s from %s to %s", resolved, version, source, dest)
     return dest, resolved
 
 

@@ -558,17 +558,19 @@ def login_bootstrap(channel, timeout):
 def install(pack, non_interactive):
     """Install an agent team into the current project.
 
-    PACK is a local directory path, a public `.tar.gz` URL, or a name to
-    fetch from a remote registry.
+    PACK is a local directory path, a local `.tar.gz` archive, a public
+    `.tar.gz` URL, or a name to fetch from a remote registry.
 
     Resolution order:
       1. URL (http/https) → fetch a team archive directly
-      2. Local path (absolute or relative)
-      3. Remote registry lookup by name
+      2. Local `.tar.gz`/`.tgz` file → extract + install
+      3. Local directory path (absolute or relative)
+      4. Remote registry lookup by name
 
     Usage:
         modastack install agents/eng-team
         modastack install /path/to/my-agent
+        modastack install ./eng-team.tar.gz                     # local archive
         modastack install https://example.com/eng-team.tar.gz   # public URL
         modastack install eng-team              # fetches from registry
         modastack install eng-team --non-interactive
@@ -588,6 +590,17 @@ def install(pack, non_interactive):
             pack_dir, _ = fetch_from_url(project_path, pack_str)
         except Exception as e:
             click.echo(f"Failed to fetch '{pack}': {e}", err=True)
+            raise SystemExit(1)
+    elif pack_str.endswith((".tar.gz", ".tgz")) and Path(pack).is_file():
+        # Local team archive → extract + install (the ssh-push delivery seam:
+        # `modastack deploy` pushes a tarball onto the instance, which installs
+        # it from the volume). The installed copy is the source of truth.
+        from modastack.registry import fetch_from_archive
+        try:
+            click.echo(f"'{pack}' is a local archive, extracting team...")
+            pack_dir, _ = fetch_from_archive(project_path, Path(pack).resolve())
+        except Exception as e:
+            click.echo(f"Failed to install '{pack}': {e}", err=True)
             raise SystemExit(1)
     elif (pack_path := Path(pack).resolve()).is_dir() and (pack_path / "agent.yaml").exists():
         pack_dir = pack_path
@@ -695,6 +708,112 @@ def install(pack, non_interactive):
         click.echo("\nSource of truth: .modastack/ — edit in place and check in to customize.")
 
     click.echo(f"Run `modastack start` to launch.")
+
+
+@main.command()
+@click.argument("name")
+@click.option("--team", default=None,
+              help="Local team package (agents/<team>) → ssh-push delivery.")
+@click.option("--team-url", default=None,
+              help="Published team .tar.gz URL → HTTPS-fetch delivery.")
+@click.option("--fleet", default=None, help="Fleet namespace (app = <fleet>-<name>).")
+@click.option("--env-file", "env_file", default=None,
+              help="KEY=VALUE secrets file (overrides secrets.env-file).")
+@click.option("--auth", default=None, type=click.Choice(["api_key", "subscription"]))
+@click.option("--event-server", "event_server", default=None, help="Event server URL.")
+@click.option("--region", default=None, help="Fly region.")
+@click.option("--memory", default=None, help="Machine memory, e.g. 8gb.")
+@click.option("--cpus", default=None, type=int, help="Shared vCPUs.")
+@click.option("--volume-size", "volume_size", default=None, type=int, help="Volume GB.")
+@click.option("--login-channel", "login_channel", default=None,
+              help="Subscription mode: Slack channel for first-boot login (C23).")
+@click.option("--claude-version", "claude_version", default=None,
+              help="Pin the claude CLI version baked into the image.")
+@click.option("--org", default=None, help="Fly org slug.")
+def deploy(name, team, team_url, fleet, env_file, auth, event_server, region,
+           memory, cpus, volume_size, login_channel, claude_version, org):
+    """Provision or update ONE instance — the deployment primitive.
+
+    NAME selects the deployment: deployments/<name>.yaml (merged over
+    deployments/defaults.yaml and built-ins), or — with no file — the local
+    package agents/<name> (ssh-push). Flags override the resolved config.
+
+    Idempotent: no Fly app yet → provision; app exists → in-place update.
+    Two delivery modes, picked by the team source:
+      team:     <name>  local package  → ssh-push (build, push over fly ssh, start)
+      team-url: <url>   published tarball → HTTPS-fetch at first boot
+
+    Works from the binary alone — no checkout. In a modastack checkout the image
+    builds from source; otherwise it builds from PyPI (the bundled deploy assets).
+    Composes with orchestration on top — a GitHub Action / Terraform / a for-loop
+    calls this per instance; the looping/diffing lives there, never here.
+
+    Usage:
+        modastack deploy eng-team            # uses deployments/eng-team.yaml
+        modastack deploy my-team --team my-team   # local package, ssh-push
+    """
+    from modastack import deploy as deploy_mod
+    project_path = Path.cwd()
+
+    overrides = {
+        "team": team, "team_url": team_url, "fleet": fleet, "auth": auth,
+        "event_server": event_server, "region": region, "memory": memory,
+        "cpus": cpus, "volume_size": volume_size, "login_channel": login_channel,
+        "claude_version": claude_version, "org": org,
+    }
+    if env_file:
+        overrides["secrets_env_file"] = env_file
+
+    try:
+        cfg = deploy_mod.load_deploy_config(project_path, name, overrides)
+    except deploy_mod.DeployError as e:
+        raise click.UsageError(str(e))
+
+    # Preflight: guide the user (or an agent) through Fly setup before we build.
+    deploy_mod.preflight_fly_or_exit()
+
+    click.echo(
+        f"Deploying '{name}' → app {cfg.app_name} "
+        f"(fleet {cfg.fleet_stamp}, {cfg.delivery} delivery)"
+    )
+    try:
+        deploy_mod.deploy(project_path, name, overrides)
+    except deploy_mod.DeployError as e:
+        click.echo(f"Deploy failed: {e}", err=True)
+        raise SystemExit(1)
+    except subprocess.CalledProcessError as e:
+        click.echo(f"Deploy failed (exit {e.returncode}).", err=True)
+        raise SystemExit(1)
+    click.echo(f"Deployed '{name}' (app {cfg.app_name}).")
+
+
+@main.command()
+@click.argument("name")
+@click.option("--fleet", default=None, help="Fleet namespace (app = <fleet>-<name>).")
+@click.option("--yes", is_flag=True, help="Skip the typed-confirmation (automation).")
+def destroy(name, fleet, yes):
+    """Tear down ONE instance — its Fly app AND its volume.
+
+    Resolves NAME → app <fleet>-<name> (from deployments/<name>.yaml or --fleet)
+    and destroys it. The volume is the only copy of the instance's state, so this
+    keeps a typed-confirmation; --yes is for automation.
+
+    Usage:
+        modastack destroy eng-team
+        modastack destroy eng-team --yes
+    """
+    from modastack import deploy as deploy_mod
+    deploy_mod.preflight_fly_or_exit()
+
+    overrides = {"fleet": fleet} if fleet else None
+    try:
+        app = deploy_mod.destroy(Path.cwd(), name, overrides, assume_yes=yes)
+    except deploy_mod.DeployError as e:
+        raise click.UsageError(str(e))
+    except subprocess.CalledProcessError as e:
+        click.echo(f"Destroy failed (exit {e.returncode}).", err=True)
+        raise SystemExit(1)
+    click.echo(f"Destroyed '{name}' (app {app}).")
 
 
 @main.command()

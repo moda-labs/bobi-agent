@@ -156,20 +156,45 @@ def test_home_survives_privilege_drop(image: str):
 
 @requires_docker
 @pytest.mark.timeout(120)
-def test_empty_volume_without_team_fails_clearly(image: str, tmp_path: Path):
-    """An empty volume with neither MODASTACK_TEAM nor MODASTACK_TEAM_URL should
-    fail with a clear message, not a confusing crash deep in the manager."""
+def test_empty_volume_without_team_waits_for_push(image: str, tmp_path: Path):
+    """An empty volume with neither MODASTACK_TEAM nor MODASTACK_TEAM_URL enters
+    the wait-for-team state (ssh-push delivery) — it does NOT crash; it logs that
+    it's waiting and stays alive until a team is pushed onto the volume."""
+    import time
+
     vol = tmp_path / "data"
     vol.mkdir()
-    proc = _run(
-        "docker", "run", "--rm",
-        "-e", "MODASTACK_AUTH=api_key",
-        "-e", "ANTHROPIC_API_KEY=sk-ant-test",
-        "-v", f"{vol}:/data",
-        image,
-    )
-    assert proc.returncode != 0
-    assert "nothing to install" in (proc.stdout + proc.stderr)
+    name = "modastack-waitforteam"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "MODASTACK_AUTH=api_key",
+            "-e", "ANTHROPIC_API_KEY=sk-ant-test",
+            "-v", f"{vol}:/data",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        # It should log that it's waiting for a pushed team, and keep running.
+        deadline = time.time() + 30
+        logs = ""
+        while time.time() < deadline:
+            out = _run("docker", "logs", name)
+            logs = out.stdout + out.stderr
+            if "waiting for" in logs.lower():
+                break
+            time.sleep(1)
+        assert "waiting for" in logs.lower(), f"never entered wait state:\n{logs}"
+        # Still alive (didn't crash/exit on the missing team).
+        running = _run(
+            "docker", "inspect", "-f", "{{.State.Running}}", name
+        ).stdout.strip()
+        assert running == "true", f"container exited instead of waiting:\n{logs}"
+        # And it must NOT have used the old fatal path.
+        assert "nothing to install" not in logs
+    finally:
+        _run("docker", "rm", "-f", name)
 
 
 SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "smoke-team"

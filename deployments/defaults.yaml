@@ -1,0 +1,23 @@
+# deployments/defaults.yaml — shared operator VALUES, applied under every
+# deployments/<name>.yaml (DEPLOY_INTERFACE.md).
+#
+# This is NOT a list of what to deploy — the deploy list is the set of
+# deployments/*.yaml files. It only factors out values common to the fleet so
+# each per-instance file stays minimal. Precedence (low → high):
+#   built-in defaults  ‹  THIS FILE  ‹  deployments/<name>.yaml  ‹  CLI flags
+#
+# `modastack deploy <name>` merges these itself, so the command is self-contained.
+
+# Fleet namespace. App name = "<fleet>-<name>"; also stamped MODASTACK_FLEET (the
+# authoritative fleet-membership key the GitOps reconcile enumerates by).
+fleet: moda
+
+# Where instances phone home (outbound WSS only). Omit to use the built-in
+# shared moda-labs Worker.
+event_server: https://modastack-events.modalabs.workers.dev
+
+# Shared machine sizing — override per-instance for heavier teams.
+region: iad
+memory: 4gb
+cpus: 2
+volume_size: 15

@@ -2,60 +2,83 @@
 #
 # modastack instance image (containerized-8 / #338).
 #
-# One image, every tenant. Identity lives entirely in the mounted volume
+# ONE image, every tenant. Identity lives entirely in the mounted volume
 # (project root + $HOME) and env vars — see docs/design/CONTAINERIZED_INSTANCES.md
 # §2 (the instance contract). Nothing reaches in; the manager reaches out to the
 # event server over WSS only.
 #
+# ONE Dockerfile, two BUILD modes (MODASTACK_BUILD build-arg) — the runtime stage
+# is shared, so there's nothing to keep in sync:
+#   * source (default) — build the wheel from a repo checkout (`COPY . .`). Dev +
+#     the repo's own CI, so unreleased branch code is tested.
+#   * pypi             — install a published `modastack==$MODASTACK_VERSION` from
+#     PyPI; the build context is just this file + docker/. This is what binary-mode
+#     `modastack deploy` uses, so deploying needs no checkout (DEPLOY_INTERFACE.md).
+#
 # Design-mandated properties (CONTAINERIZED_INSTANCES.md §5, §6.1, §10 C8):
 #   * Runs the agent as a NON-ROOT user. Claude Code refuses bypassPermissions
-#     as root unless IS_SANDBOX=1; we sidestep that by dropping privileges to
-#     `modastack` before exec'ing the manager.
-#   * No Node.js. The `claude` CLI is the native standalone binary (no npm),
-#     and the local event server (Node) is never started in deployed instances
-#     (a remote event_server_url is configured — C6).
+#     as root unless IS_SANDBOX=1; we drop privileges to `modastack` first.
+#   * No Node.js. The `claude` CLI is the native standalone binary (no npm).
 #   * fastembed model baked into the image at build (cold-start speed; immutable).
 #   * Pinned `claude` CLI; auto-updater disabled so the image version is frozen.
 #   * `modastack start --foreground` as the entrypoint (C2); no tini — Fly's
 #     init is PID 1 (tini-on-Fly is a known boot-failure trigger).
-#   * Both Anthropic auth modes via MODASTACK_AUTH=api_key|subscription (§6.1).
 #
 # Build:
-#   docker build -t modastack:dev .
-#   docker build -t modastack:dev --build-arg CLAUDE_VERSION=2.1.89 .   # pin exact
-#
-# Run (api_key mode):
-#   docker run --rm -v modastack-a:/data \
-#     -e MODASTACK_TEAM=eng-team -e MODASTACK_EVENT_SERVER=https://... \
-#     -e ANTHROPIC_API_KEY=sk-ant-... -e SLACK_BOT_TOKEN=... -e GITHUB_TOKEN=... \
-#     modastack:dev
+#   docker build -t modastack:dev .                                  # source mode
+#   docker build --build-arg MODASTACK_BUILD=pypi \
+#     --build-arg MODASTACK_VERSION=0.22.0 -t modastack:dev .        # pypi mode
+
+# Which builder produces /opt/venv: `source` or `pypi`. modastack deploy passes
+# `pypi` (+ MODASTACK_VERSION) in binary mode; a plain `docker build` defaults to
+# `source` so the repo's own CI keeps building from the branch.
+ARG MODASTACK_BUILD=source
 
 #####################################################################
-# Stage 1 — builder: build the wheel and install it into a venv.     #
-# Build tools live here only; the runtime image never sees them.     #
+# Builder base — build tools live here only; runtime never sees them.#
 #####################################################################
-FROM python:3.11-slim AS builder
-
+FROM python:3.11-slim AS builder-base
 # apsw / native deps may need a compiler if no manylinux wheel is published.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+#####################################################################
+# builder-source — build the wheel FROM the repo (dev + repo CI).    #
+#####################################################################
+FROM builder-base AS builder-source
 RUN pip install --no-cache-dir build
-
 WORKDIR /src
 COPY . .
-
 # pyproject builds the wheel FROM the sdist, so the sdist must carry the
 # force-included templates + event-server (it does — see pyproject sdist include).
 RUN python -m build --wheel --outdir /dist
-
 # Self-contained venv with modastack + the kb extra (fastembed, sqlite-vec).
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir "$(ls /dist/*.whl)[kb]"
 
 #####################################################################
-# Stage 2 — runtime: slim image, no build tools, no Node.            #
+# builder-pypi — install a published modastack (binary-mode deploy).#
+#####################################################################
+FROM builder-base AS builder-pypi
+# Pinned to the operator's CLI so the instance runs the same code as the binary
+# that deployed it.
+ARG MODASTACK_VERSION
+# Install the kb deps the code actually uses (fastembed — the lightweight ONNX
+# embedder — and sqlite-vec) EXPLICITLY, not via the `[kb]` extra: some published
+# releases stale-list `sentence-transformers` in `[kb]`, dragging in torch + ~2 GB
+# of CUDA wheels the dark CPU instance never uses (and that can blow the build
+# timeout). Keep in sync with pyproject's `[project.optional-dependencies].kb`.
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir \
+        "modastack==${MODASTACK_VERSION}" "fastembed>=0.4" "sqlite-vec>=0.1.6"
+
+# Select the builder. With MODASTACK_BUILD=pypi, builder-source isn't in the graph
+# (its `COPY . .` never runs), so the tiny binary context needs no source tree.
+FROM builder-${MODASTACK_BUILD} AS builder
+
+#####################################################################
+# Runtime — slim image, no build tools, no Node. (Shared by both.)  #
 #####################################################################
 FROM python:3.11-slim AS runtime
 
