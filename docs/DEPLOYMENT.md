@@ -341,7 +341,8 @@ The two workflows are operator-agnostic — wire your repo in four steps:
    per instance. (`team:` ssh-push is for logged-in-dev `modastack deploy`, not CI —
    a CI Fly token can't `fly ssh`.)
 3. **Repo secret**: `secrets.FLY_API_TOKEN` = `fly tokens create org -o <your-org>`
-   (org-scoped, so CI can create apps/volumes — use a short `--expiry`).
+   (org-scoped so CI can create apps/volumes). It's a standing production
+   credential — long-lived, rotate periodically (re-mint + re-set).
 4. **Per-deployment GitHub Environment** named `<team>`, one secret `MODASTACK_ENV`
    = the full KEY=VALUE env-file body. **No** required-reviewer rule.
 
