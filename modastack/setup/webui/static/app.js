@@ -546,19 +546,21 @@
     }
     _prevPhase = p;
   }
-  // Connections are "settled" when the slot has been addressed — NOT when every
-  // service is live-connected. Per DESIGN.md, connect/auth is always deferrable
-  // and readiness never walls: a user MCP that's been configured ("added", since
-  // we can't verify it here — it connects at runtime) counts, as does a public
-  // server. So the slot is settled when every live card is already set up
-  // (connected or added), or when the brain has self-scored services "enough"
-  // (which covers "no connection needed" and deferred auth alike).
+  // Connections are "settled" when there's nothing to connect (and the brain
+  // confirmed none are needed) OR every live connection card is handled. A card
+  // counts as handled when it's "connected" (native token present / Venn linked)
+  // OR "added" — a user MCP that's been configured but can't be verified here
+  // (it connects at runtime). A card that still needs a token/config ("missing"
+  // / "needs_auth" / "error") keeps the slot open until the user connects or
+  // removes it. The brain identifying which services are needed is NOT the same
+  // as them being connected, so a service slot scored "enough" does not settle
+  // connections on its own when unconnected cards exist.
   function servicesSettled(sp) {
-    const cards = (_connData && _connData.cards) || [];
-    const allSet = cards.length > 0 &&
-      cards.every(c => c.status === "connected" || c.status === "added");
-    if (allSet) return true;
-    return sp.readiness.services === "enough";
+    const svcs = sp.services || [];
+    if (!svcs.length) return sp.readiness.services === "enough";
+    const cards = (_connData && _connData.cards) || null;
+    if (!cards || !cards.length) return false;
+    return cards.every(c => c.status === "connected" || c.status === "added");
   }
   function slotDot(ok) {
     return `<span class="udot ${ok ? "ok" : "empty"}">${ok ? CHECK : ""}</span>`;
