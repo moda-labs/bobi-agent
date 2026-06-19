@@ -49,13 +49,25 @@ RUN apt-get update \
 FROM builder-base AS builder-source
 RUN pip install --no-cache-dir build
 WORKDIR /src
-COPY . .
+# --- deps layer (cached on pyproject only) -------------------------#
+# Install the project's runtime deps + the lean kb deps into the venv,
+# keyed on pyproject.toml alone: an ordinary code edit doesn't touch it, so
+# this (network-heavy) layer stays cached and only the thin wheel layer below
+# rebuilds. Read the dep list straight from [project.dependencies] (stdlib
+# tomllib) so it never drifts from pyproject. Install fastembed/sqlite-vec
+# EXPLICITLY — never the `[kb]` extra, which on some releases stale-lists
+# sentence-transformers → torch + ~2 GB CUDA the CPU instance never uses.
+COPY pyproject.toml ./
+RUN python -m venv /opt/venv \
+    && python -c "import tomllib; print(chr(10).join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > /tmp/reqs.txt \
+    && /opt/venv/bin/pip install --no-cache-dir -r /tmp/reqs.txt "fastembed>=0.4" "sqlite-vec>=0.1.6"
+# --- wheel layer (thin; rebuilds on any code change) ---------------#
 # pyproject builds the wheel FROM the sdist, so the sdist must carry the
 # force-included templates + event-server (it does — see pyproject sdist include).
-RUN python -m build --wheel --outdir /dist
-# Self-contained venv with modastack + the kb extra (fastembed, sqlite-vec).
-RUN python -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir "$(ls /dist/*.whl)[kb]"
+# --no-deps: deps are already in the venv above, so this is just modastack.
+COPY . .
+RUN python -m build --wheel --outdir /dist \
+    && /opt/venv/bin/pip install --no-cache-dir --no-deps /dist/*.whl
 
 #####################################################################
 # builder-pypi — install a published modastack (binary-mode deploy).#
@@ -76,6 +88,20 @@ RUN python -m venv /opt/venv \
 # Select the builder. With MODASTACK_BUILD=pypi, builder-source isn't in the graph
 # (its `COPY . .` never runs), so the tiny binary context needs no source tree.
 FROM builder-${MODASTACK_BUILD} AS builder
+
+#####################################################################
+# model-baker — pre-download the fastembed model. Keyed ONLY on the  #
+# pinned fastembed version, so this (the slowest layer — a multi-     #
+# minute model download) stays cached across every code/framework    #
+# change. Runtime COPYs the baked model in BELOW the volatile venv,   #
+# so a code-only rebuild never re-bakes it. (Install fastembed alone, #
+# never `[kb]` — see builder-source for the torch-bloat rationale.)   #
+#####################################################################
+FROM python:3.11-slim AS model-baker
+ENV HF_HOME=/opt/modastack/models
+RUN pip install --no-cache-dir "fastembed>=0.4" \
+    && python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2')" \
+    && chmod -R a+rX /opt/modastack/models
 
 #####################################################################
 # Runtime — slim image, no build tools, no Node. (Shared by both.)  #
@@ -113,20 +139,29 @@ RUN apt-get update \
 # Non-root runtime user (see header: bypassPermissions-as-root guard).
 RUN useradd --create-home --uid ${MODASTACK_UID} --shell /bin/bash modastack
 
-# Bring in the prebuilt venv (modastack + deps). Root-owned, world-readable.
-COPY --from=builder /opt/venv /opt/venv
+# Layers are ordered stable → volatile so a code-only rebuild touches only the
+# last (cheap) layers — the model download and `claude` fetch stay cached. See
+# docs/design/CUSTOM_AGENT_DEPS.md §"three clocks" for the ordering rationale.
 
-# Install the pinned native `claude` CLI (no Node) as the modastack user so it
-# lands in that user's ~/.local/bin, which is on PATH above.
+# --- stable layers (cached across code/framework changes) ----------#
+# Pinned native `claude` CLI (no Node) installed as the modastack user so it
+# lands in ~/.local/bin (on PATH above). Cache key is CLAUDE_VERSION alone.
 USER modastack
 RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_VERSION}" \
     && /home/modastack/.local/bin/claude --version
 USER root
 
-# Bake the fastembed embedding model into the image (cold-start speed; immutable).
-# HF_HOME points here at both build and run, so this is a cache hit at runtime.
-RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2')" \
-    && chmod -R a+rX /opt/modastack/models
+# Baked fastembed embedding model (cold-start speed; immutable). HF_HOME points
+# here at both build and run, so it's a cache hit at runtime. Copied from
+# model-baker, whose only cache key is the fastembed version — so an ordinary
+# code change never re-downloads the model.
+COPY --from=model-baker /opt/modastack/models /opt/modastack/models
+
+# --- volatile layer (rebuilds on any framework/code change) --------#
+# The prebuilt venv (modastack + deps) is the LAST heavy layer, so a code-only
+# rebuild is just this copy plus the thin layers below — seconds, not minutes.
+# Root-owned, world-readable.
+COPY --from=builder /opt/venv /opt/venv
 
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker/healthcheck.sh /usr/local/bin/healthcheck.sh
