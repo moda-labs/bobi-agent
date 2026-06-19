@@ -45,29 +45,46 @@ first-class, team-agnostic mechanism.
   provisioner/release deploy it by reference — which the C22 release flow already
   does (`fly deploy --image`).
 
-## Key insight: two clocks
+## Key insight: three clocks
 
-Deps and definition change at very different rates. Keep them on separate paths:
+Three things change at very different rates. Keep them on separate paths, ordered
+fastest-changing to slowest so the cheap update stays cheap:
 
 | | Changes | Lives in | On change |
 |---|---|---|---|
-| **Deps** (codex, gstack, node…) | rarely | the **image** | rebuild image → redeploy |
-| **Definition** (prompts, workflows) | constantly | the **volume** | hot `install <url>` + restart |
+| **Definition** (prompts, workflows) | constantly | the **volume** | hot `install <url>` + restart (~30 s, no rebuild) |
+| **Framework** (the `modastack` wheel) | per release | the **image** (a thin top layer) | rebuild the last layer → redeploy |
+| **Tool deps** (codex, gstack, node…) | rarely | the **image** (cached lower layers) | rebuild image → redeploy |
 
-This preserves the C22 "changed team" flow: a prompt edit is a ~30 s hot update
-with **no rebuild**. Only an actual *dependency* change triggers an image rebuild.
-Corollary: the team image carries **tools only**; the team **definition keeps
-flowing through the tarball** (do not bake the definition into the image — that
-would turn every prompt tweak into a 10-minute build).
+This preserves the C22 "changed team" flow: a prompt edit is a hot update with
+**no rebuild**. The team image carries **tools + framework only**; the team
+**definition keeps flowing through the tarball** (never bake the definition into
+the image — that turns every prompt tweak into a multi-minute build).
+
+**Layer ordering is load-bearing.** The image is a single `Dockerfile`
+(`MODASTACK_BUILD={source|pypi|wheel}`, shipped in C22/#365). Today it inverts the
+order — the `claude` install and the **fastembed model bake** sit *after* the
+modastack venv, so any framework change re-bakes the model every build (~minutes).
+A team image must order layers **stable → volatile**: (1) base OS + sys pkgs →
+(2) **tool deps** (node, codex, gstack) → (3) `claude` CLI + **model bake** →
+(4) modastack's python deps → (5) **the modastack wheel** as the LAST thin layer.
+Then a framework-version bump rebuilds only the final layer (seconds), and a
+tool-deps change rebuilds from (2). That's what keeps image-baked fast enough to
+keep its immutability/atomic-deploy/rollback guarantees instead of mutating live
+machines. (Install `fastembed` explicitly, never the `[kb]` extra — some published
+`[kb]` stale-lists `sentence-transformers` → torch + ~2 GB CUDA the CPU instance
+never uses.)
 
 ## Design
 
 ### 1. Base image becomes a published artifact
 
-The current C8 `Dockerfile` is published as `modastack-base` to a registry,
+The unified C8/C22 `Dockerfile` (`MODASTACK_BUILD=pypi`, version-pinned, lean
+`fastembed` — shipped in #365) is published as `modastack-base` to a registry,
 tagged per framework release (e.g. `ghcr.io/moda-labs/modastack-base:<version>`).
-Team images do `FROM ghcr.io/moda-labs/modastack-base:<version>`. (Registry
-choice is an open question — see below; GHCR is the leaning for portability.)
+Team images do `FROM ghcr.io/moda-labs/modastack-base:<version>` and add only
+their tool-deps layers (the framework wheel is already baked, version-matched).
+(Registry choice is an open question — see below; GHCR is the leaning.)
 
 ### 2. Team build spec — declarative front door + Dockerfile escape hatch
 
