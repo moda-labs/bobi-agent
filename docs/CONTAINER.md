@@ -17,7 +17,7 @@ entirely in the mounted volume and env vars — see
 | Native `claude` CLI (no Node) | the local Node event server is never run in deployed instances (C6); the CLI is the standalone binary |
 | `DISABLE_AUTOUPDATER=1` | freeze the CLI at the built version (the image is the unit of update) |
 | fastembed model baked at `HF_HOME=/opt/modastack/models` | cold-start speed; no first-run download |
-| `tini` (PID 1) + `gosu` | signal forwarding / zombie reaping; privilege drop |
+| `gosu` (privilege drop); no `tini` | Fly injects its own PID-1 init (reaps zombies / forwards signals); tini-on-Fly is a known boot-failure trigger. For other runtimes, use `docker run --init`. |
 | `modastack start --foreground` entrypoint | container mode (C2) |
 
 The agent's `$HOME` is set to `/data/home` (on the volume) so

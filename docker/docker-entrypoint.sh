@@ -2,11 +2,11 @@
 #
 # modastack container entrypoint (containerized-8 / #338).
 #
-# Runs as root under tini (PID 1) only long enough to prepare the mounted
-# volume, then drops to the non-root `modastack` user and exec's the manager.
-# Because the final step is `exec gosu ... modastack start --foreground`, tini's
-# SIGTERM is forwarded straight to the manager, which shuts sessions down
-# gracefully (C2).
+# Runs as root (PID 1, under Fly's injected init — no tini; see Dockerfile) only
+# long enough to prepare the mounted volume, then drops to the non-root
+# `modastack` user and exec's the manager. Because the final step is
+# `exec gosu ... modastack start --foreground`, SIGTERM is forwarded straight to
+# the manager, which shuts sessions down gracefully (C2).
 #
 # First-boot install (empty volume -> `modastack install`) lives here for now so
 # the image is independently testable; #339 (C9) hardens the idempotency and

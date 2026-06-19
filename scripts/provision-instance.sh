@@ -274,9 +274,9 @@ trap 'rm -f "$CFG"' EXIT
 {
   echo "app = \"$APP\""
   echo "primary_region = \"$REGION\""
-  echo
-  echo "[build]"
-  echo "  dockerfile = \"Dockerfile\""
+  # NB: the Dockerfile is passed via `fly deploy --dockerfile`, not a
+  # `[build] dockerfile = …` key — Fly resolves that key relative to THIS
+  # config file's directory (a temp dir), where the Dockerfile isn't.
   if [ -n "$CLAUDE_VERSION" ]; then
     echo
     echo "[build.args]"
@@ -288,7 +288,7 @@ trap 'rm -f "$CFG"' EXIT
     echo "  $k = \"${ENV_VARS[$k]}\""
   done
   echo
-  echo "[mounts]"
+  echo "[[mounts]]"
   echo "  source = \"$VOLUME_NAME\""
   echo "  destination = \"/data\""
   echo
@@ -303,15 +303,32 @@ sed 's/^/    /' "$CFG"
 
 # --- 5. deploy --------------------------------------------------------------
 # --remote-only builds the image on Fly's builders (no local Docker needed).
-# The build context is the repo root (Dockerfile + sdist sources live there).
+# Build context AND --dockerfile are both the repo root (Dockerfile + sdist
+# sources live there); the generated config lives in a temp dir, so the
+# Dockerfile must be pointed at explicitly rather than via a relative key.
+#
+# --depot=false forces Fly's classic buildkit builder (gzip layers). The default
+# Depot builder emits zstd-compressed OCI layers (tar+zstd), which Fly's MACHINE
+# INIT cannot extract — the rootfs comes up incomplete and execve of the
+# entrypoint (and Fly's own hallpass) fails with ENOENT. gzip layers boot fine.
+# (Depot's `--compression=gzip` is a narrower alternative, but disabling Depot is
+# the proven path.)
+#
+# --ha=false: one machine, matching our one volume (Fly defaults to HA = a spare
+#   machine, which would need a second volume and fail the deploy).
+# --wait-timeout 10m: first boot installs a team (and on a cold image warms a
+#   model) past the default 5m machine-state wait.
 log "Building image on Fly and deploying... (first build bakes the model; be patient)"
-"$FLY" deploy "$REPO_ROOT" --config "$CFG" --remote-only
+"$FLY" deploy "$REPO_ROOT" --config "$CFG" --dockerfile "$REPO_ROOT/Dockerfile" \
+  --depot=false --ha=false --wait-timeout 10m --remote-only
 
 echo
 log "Done. Instance '$APP' is provisioning."
 echo "  Logs   : $FLY logs -a $APP"
 echo "  Status : $FLY status -a $APP"
-echo "  Admin  : $FLY ssh console -a $APP --command 'env HOME=/data/home modastack status'"
+# An ssh session lands in / (WORKDIR), but modastack discovers the project by
+# walking up from cwd — so cd into it (as the volume's uid-10001 owner) first.
+echo "  Admin  : $FLY ssh console -a $APP --command 'gosu modastack env HOME=/data/home bash -c \"cd /data/project && modastack status\"'"
 if [ "$AUTH" = "subscription" ]; then
   echo
   echo "  Subscription first boot: the entrypoint posts a login URL to the private"
