@@ -1,0 +1,96 @@
+name: Team packages
+
+# Builds distributable .tar.gz packages from each agent team under agents/, plus
+# the zero-secret tests/fixtures/smoke-team (the canonical smoke-test target).
+# This is the C10 team-injection seam — a dark instance fetches its team from a
+# public URL at first boot via MODASTACK_TEAM_URL / `modastack install <url>`.
+#
+# Path-filtered so unrelated PRs pay nothing. On a PR this validates that every
+# team still packages from source and that each archive contains an agent.yaml.
+# On push to main, the `publish` job uploads the tarballs to a rolling
+# `teams-latest` GitHub Release, giving each team a stable, public, no-auth
+# download URL that --team-url / MODASTACK_TEAM_URL can point at:
+#
+#   https://github.com/<owner>/<repo>/releases/download/teams-latest/<team>.tar.gz
+on:
+  push:
+    branches: [main]
+    paths: &pkg_paths
+      - "agents/**"
+      - "tests/fixtures/smoke-team/**"
+      - "scripts/build-team-tarballs.sh"
+      - ".github/workflows/team-packages.yml"
+  pull_request:
+    branches: [main]
+    paths: *pkg_paths
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build team tarballs from source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build packages
+        run: |
+          # Every real team under agents/, plus the zero-secret smoke-team
+          # fixture (only needs MODASTACK_EVENT_SERVER) — the canonical target
+          # for container/Fly smoke tests via --team-url.
+          scripts/build-team-tarballs.sh --out dist/teams
+          scripts/build-team-tarballs.sh --out dist/teams tests/fixtures/smoke-team
+
+      - name: Verify each archive carries an agent.yaml
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          built=(dist/teams/*.tar.gz)
+          [ "${#built[@]}" -gt 0 ] || { echo "No tarballs were built"; exit 1; }
+          for tgz in "${built[@]}"; do
+            # Disable pipefail for this check: grep -q exits early on match,
+            # which can SIGPIPE tar and make the pipeline return 141 even
+            # though the match was found.
+            if ! (set +o pipefail; tar -tzf "$tgz" | grep -qE '(^|/)agent\.yaml$'); then
+              echo "::error::$tgz has no agent.yaml — not a valid team package"
+              exit 1
+            fi
+            echo "ok: $tgz"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: team-packages
+          path: dist/teams/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish tarballs to a downloadable release
+    needs: build
+    # Only on push to main — never from a PR (no publishing untrusted forks /
+    # asset churn). The rolling tag keeps the download URLs stable.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: team-packages
+          path: dist/teams
+
+      - name: Upload to the rolling 'teams-latest' release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Create the release once (idempotent), then clobber its assets so the
+          # download URLs always serve the latest main build.
+          if ! gh release view teams-latest >/dev/null 2>&1; then
+            gh release create teams-latest --prerelease \
+              --title "Team packages (latest main)" \
+              --notes "Auto-published agent-team .tar.gz packages built from agents/ on each push to main. Pull one with --team-url / MODASTACK_TEAM_URL = https://github.com/${{ github.repository }}/releases/download/teams-latest/<team>.tar.gz"
+          fi
+          gh release upload teams-latest dist/teams/*.tar.gz --clobber
+          echo "Published:"; ls -1 dist/teams/*.tar.gz

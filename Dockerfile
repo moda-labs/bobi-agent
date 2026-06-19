@@ -16,7 +16,8 @@
 #     (a remote event_server_url is configured — C6).
 #   * fastembed model baked into the image at build (cold-start speed; immutable).
 #   * Pinned `claude` CLI; auto-updater disabled so the image version is frozen.
-#   * tini as PID 1 + `modastack start --foreground` (C2).
+#   * `modastack start --foreground` as the entrypoint (C2); no tini — Fly's
+#     init is PID 1 (tini-on-Fly is a known boot-failure trigger).
 #   * Both Anthropic auth modes via MODASTACK_AUTH=api_key|subscription (§6.1).
 #
 # Build:
@@ -25,7 +26,7 @@
 #
 # Run (api_key mode):
 #   docker run --rm -v modastack-a:/data \
-#     -e MODASTACK_TEAM=eng-team -e MODASTACK_EVENT_SERVER_URL=wss://... \
+#     -e MODASTACK_TEAM=eng-team -e MODASTACK_EVENT_SERVER=https://... \
 #     -e ANTHROPIC_API_KEY=sk-ant-... -e SLACK_BOT_TOKEN=... -e GITHUB_TOKEN=... \
 #     modastack:dev
 
@@ -75,12 +76,15 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Runtime packages only:
 #   curl, ca-certificates — fetch the claude installer; TLS
-#   tini                  — PID 1 (signal forwarding + zombie reaping)
 #   gosu                  — drop privileges from root setup to the modastack user
 #   git                   — agents clone/operate on repos
+# NB: no tini. Fly Machines (the deploy target) inject their own PID-1 init that
+# reaps zombies + forwards signals, and layering tini on top is a documented
+# cause of "failed to spawn ... No such file or directory" boot failures there.
+# For other container runtimes, run with an init (e.g. `docker run --init`).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        curl ca-certificates tini gosu git \
+        curl ca-certificates gosu git \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root runtime user (see header: bypassPermissions-as-root guard).
@@ -107,13 +111,18 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/healthcheck.sh
 
 # Persistent state: project root + $HOME both live on this volume (§2).
 VOLUME ["/data"]
-WORKDIR /data/project
+# WORKDIR must NOT be under /data: a volume mounted there shadows the
+# build-time dir, so the container's cwd ceases to exist at runtime and the
+# platform init (e.g. Fly Machines) fails to spawn the entrypoint with ENOENT.
+# The entrypoint cd's into ${MODASTACK_PROJECT} itself after creating it.
+WORKDIR /
 
 # Liveness: read the manager's health port from the volume and probe /health.
 # start-period is generous — first boot installs a team and warms a session.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
     CMD ["/usr/local/bin/healthcheck.sh"]
 
-# tini is PID 1. The entrypoint does root-only volume setup, then drops to the
-# modastack user and exec's `modastack start --foreground`.
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+# The entrypoint is PID 1 (under Fly's injected init): it does root-only volume
+# setup, then `exec gosu`s to the modastack user running `modastack start
+# --foreground`, so SIGTERM reaches the manager directly for graceful shutdown.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
