@@ -174,7 +174,7 @@
   function setPanes(cols) { $("#panes").style.gridTemplateColumns = cols; }
 
   // --- welcome: the on-ramp before the intro ----------------------------
-  // A calm first screen — what modastack is, how setup goes, what you'll need —
+  // A calm first screen — what bobi is, how setup goes, what you'll need —
   // shown once per page load on the `start` stage. "Get started" reveals the
   // intro. Purely presentational: no server state, skipped on resume (resume
   // lands on a later stage, never `start`).
@@ -215,16 +215,16 @@
     setPanes("1fr");
     $("#main").innerHTML = `<div class="node welcome-screen"><div class="welcome-wrap">
       <main class="welcome">
-        <div class="eyebrow">Welcome to modastack</div>
+        <div class="eyebrow">Welcome to bobi</div>
         <h1>Build a team of agents that runs your work</h1>
         <p class="lede">A realtime agent team on your events — reachable from Slack and other chat apps, scheduled to act on their own, or reacting the moment something happens. Not one chatbot waiting for a prompt.</p>
 
         <div class="wsec-label">How setup works</div>
         <ol class="wsteps">
-          <li class="wstep"><span class="wstep-n">1</span><div><b>Describe it.</b> Tell modastack what you want the team to do, in plain words — rough is fine.</div></li>
-          <li class="wstep"><span class="wstep-n">2</span><div><b>Watch it take shape.</b> As you talk, modastack designs the roles, automations, and connections, filling them in live.</div></li>
+          <li class="wstep"><span class="wstep-n">1</span><div><b>Describe it.</b> Tell bobi what you want the team to do, in plain words — rough is fine.</div></li>
+          <li class="wstep"><span class="wstep-n">2</span><div><b>Watch it take shape.</b> As you talk, bobi designs the roles, automations, and connections, filling them in live.</div></li>
           <li class="wstep"><span class="wstep-n">3</span><div><b>Connect services.</b> Hook up Slack, GitHub, or anything else it needs — deferrable until the end.</div></li>
-          <li class="wstep"><span class="wstep-n">4</span><div><b>Build &amp; install.</b> modastack writes the team and installs it, then you start it with one command.</div></li>
+          <li class="wstep"><span class="wstep-n">4</span><div><b>Build &amp; install.</b> bobi writes the team and installs it, then you start it with one command.</div></li>
         </ol>
 
         <div class="wmeta">
@@ -266,11 +266,11 @@
   function drawIntro() {
     $("#main").innerHTML = `<main class="node narrow intro">
       ${pageHead("Setup", "Build an agent team", { attr: "data-introback", label: "Back" })}
-      <p class="lede">modastack manages entire teams of agents that collaborate to solve problems and automate your work. Some of our favorites are engineering, support, and marketing teams.</p>
+      <p class="lede">bobi manages entire teams of agents that collaborate to solve problems and automate your work. Some of our favorites are engineering, support, and marketing teams.</p>
 
       <section class="isec">
         <div class="isec-head"><span class="isec-num">1</span><h2 class="isec-title">Where to set it up</h2></div>
-        <p class="isec-lede">modastack keeps your team's editable source here, then installs it into this project's <code>.modastack/</code> when you finish.</p>
+        <p class="isec-lede">bobi keeps your team's editable source here, then installs it into this project's <code>.modastack/</code> when you finish.</p>
         <div class="locbox">
           <span class="locbox-path" id="loc-path" title="${esc(introLoc)}">${esc(introLoc)}</span>
           <button type="button" class="btn ghost xs" id="loc-change">Change…</button>
@@ -293,7 +293,7 @@
     // popping even when many templates push it past the fold.
     const custom = `<button class="tmpl tmpl-custom" data-newteam>
       <span class="tmpl-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>
-      <span class="tmpl-text"><b>Customize my own agent team</b><span>Start from scratch — describe it and modastack designs it with you.</span></span>
+      <span class="tmpl-text"><b>Customize my own agent team</b><span>Start from scratch — describe it and bobi designs it with you.</span></span>
       <span class="tmpl-go">New →</span>
     </button>`;
     // A template row; official teams (shipped from the canonical modastack
@@ -395,10 +395,10 @@
     // Two grid items (the wrapper #main is display:contents): chat | panel.
     $("#main").innerHTML = `
       <section class="chat sketch uni-chat">
-        <div class="sketch-top"><span class="st-group"><button class="backbtn" data-back>← Back</button><span class="sketch-eyebrow">modastack · build your team</span></span></div>
+        <div class="sketch-top"><span class="st-group"><button class="backbtn" data-back>← Back</button><span class="sketch-eyebrow">bobi · build your team</span></span></div>
         <div class="ch-body" id="chbody"></div>
         <div class="cue" id="cue"></div>
-        <div class="ch-input"><textarea id="chinput" rows="1" placeholder="Tell modastack what you want to build…" autocomplete="off"></textarea><button class="btn primary" id="chsend" style="padding:9px 14px">↑</button></div>
+        <div class="ch-input"><textarea id="chinput" rows="1" placeholder="Tell bobi what you want to build…" autocomplete="off"></textarea><button class="btn primary" id="chsend" style="padding:9px 14px">↑</button></div>
       </section>
       <aside class="uni-panel">
         <div class="uni-head">
@@ -425,9 +425,9 @@
     $("#chsend").addEventListener("click", () => sendMessage());
   }
 
-  // The five things modastack gathers, each a card that fills in + checks off
+  // The five things bobi gathers, each a card that fills in + checks off
   // live: goal, roles, automations, connections, chat.
-  // The team's name shows in the panel header as modastack auto-derives it; click
+  // The team's name shows in the panel header as bobi auto-derives it; click
   // to rename. (Empty until the goal firms up enough to name the team.)
   function setTeamTitle() {
     const el = $("#up-title"); if (!el) return;
@@ -519,9 +519,9 @@
     const foot = $("#uni-foot");
     if (foot) foot.innerHTML = ready
       ? `<button class="btn primary" data-go="build">Finish →</button>`
-      : `<span class="uni-note">modastack is gathering goal, roles, automations, connections, and chat</span>`;
+      : `<span class="uni-note">bobi is gathering goal, roles, automations, connections, and chat</span>`;
   }
-  // The current interview phase, shown so the user always knows where modastack is
+  // The current interview phase, shown so the user always knows where bobi is
   // and that it's moving methodically. S.phase is "goal" | "role:<name>" |
   // "automations" | "connections" | "wrap" (or empty early on).
   function renderPhase() {
@@ -575,7 +575,7 @@
       ? roles.map((r, i) => `<div class="urole click" data-roleopen="${i}">
           <div class="urow"><b>${esc(r.name || "role")}</b>${roleStatusDot(r)}</div>
           ${r.responsibility ? `<span>${esc(r.responsibility)}</span>` : `<span class="ph">click to fill in the details</span>`}</div>`).join("")
-      : `<span class="ph">modastack will shape the roles as you talk</span>`;
+      : `<span class="ph">bobi will shape the roles as you talk</span>`;
     return `<div class="ucard ${roles.length ? "filled" : "empty"}">
       <div class="ut">Roles ${slotDot(sp.readiness.roles === "enough")}</div>
       <div class="ud">${body}</div>
@@ -588,8 +588,8 @@
           <div class="urow"><b>${esc(a.description || "behavior")}</b></div>
           <span>${esc(a.leash || "")}${a.cadence ? " · " + esc(a.cadence) : ""}${a.role ? " · " + esc(a.role) : ""}</span></div>`).join("")
       : (sp.autonomous_confirmed
-          ? `<span class="ph">nothing proactive — modastack acts only when asked</span>`
-          : `<span class="ph">anything modastack should do on its own?</span>`);
+          ? `<span class="ph">nothing proactive — bobi acts only when asked</span>`
+          : `<span class="ph">anything bobi should do on its own?</span>`);
     return `<div class="ucard ${items.length || sp.autonomous_confirmed ? "filled" : "empty"}">
       <div class="ut">Automations ${slotDot(sp.readiness.autonomous === "enough")}</div>
       <div class="ud">${body}</div>
@@ -744,7 +744,7 @@
     if (!body) return;
     let html = "";
     if (!S.messages.length && !extra) {
-      html = `<div class="msg bob">Hi — I'm modastack. Tell me what you want this team to do, in your own words. Rough is fine; we'll sharpen it together.</div>`;
+      html = `<div class="msg bob">Hi — I'm bobi. Tell me what you want this team to do, in your own words. Rough is fine; we'll sharpen it together.</div>`;
     }
     for (const m of S.messages) {
       html += `<div class="msg ${m.role === "user" ? "you" : "bob"}">${esc(m.content)}</div>`;
@@ -786,7 +786,7 @@
     const input = $("#chinput");
     const msg = (typeof text === "string" ? text : (input ? input.value : "")).trim();
     if (!msg) return;
-    // You can keep typing (and queue another message) while modastack is replying.
+    // You can keep typing (and queue another message) while bobi is replying.
     if (streaming) { pendingSend = msg; if (input && typeof text !== "string") { input.value = ""; autoGrow(input); } return; }
     if (input && typeof text !== "string") { input.value = ""; autoGrow(input); }
     streaming = true;
@@ -943,7 +943,7 @@
   }
 
   // --- Venn setup: a small flow (key → loading → pick / error → done) ----
-  // Venn is ONE account-level connection. Paste the key, modastack pulls the
+  // Venn is ONE account-level connection. Paste the key, bobi pulls the
   // MCPs in your Venn account, you pick which to add to THIS team, confirm, and
   // they appear as their own rows. "Open Venn" stays available the whole time.
   let vennStep = "key";          // key | loading | error | pick | done
@@ -996,7 +996,7 @@
     let html;
     if (vennStep === "key") {
       html = `
-        <p class="pd">Paste your Venn API key. modastack pulls in the services
+        <p class="pd">Paste your Venn API key. bobi pulls in the services
         you've connected in Venn — pick which ones this team should use.</p>
         <ol class="steps">
           <li>Sign in at app.venn.ai and create an API key (Settings → API).</li>
@@ -1207,7 +1207,7 @@
       <header class="fd-head">
         <button class="backbtn" data-back>← Keep editing</button>
         <div class="fd-title">
-          <div class="eyebrow">Preview · here's what modastack built</div>
+          <div class="eyebrow">Preview · here's what bobi built</div>
           <h1>${esc(S.team_name || "your team")}</h1>
           <p class="fd-meta">${counts} · source at <code>${esc(where)}</code></p>
         </div>
@@ -1279,7 +1279,7 @@
       <div class="actions" style="margin-top:8px"><button class="btn ghost" id="run-start">Start it for me →</button></div>
 
       <p class="done-h">Next steps</p>
-      <p class="lede">Want to run modastack in the cloud? <a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">Follow these instructions →</a></p>
+      <p class="lede">Want to run bobi in the cloud? <a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">Follow these instructions →</a></p>
 
       <div class="actions" style="margin-top:26px"><button class="btn primary" id="done-home">Done →</button></div>
     </main>`;
@@ -1303,9 +1303,9 @@
   async function renderHome() {
     setPanes("1fr");
     $("#main").innerHTML = `<main class="node home">
-      <div class="eyebrow">modastack</div>
+      <div class="eyebrow">bobi</div>
       <h1>Your agent teams</h1>
-      <p class="lede">Pick a team to view or update it, or add a new one. modastack keeps each team's source and re-installs your changes when you finish editing.</p>
+      <p class="lede">Pick a team to view or update it, or add a new one. bobi keeps each team's source and re-installs your changes when you finish editing.</p>
       <div class="home-grid" id="home-list"><p class="ihint">Loading…</p></div>
       <p class="home-import">Already have a team elsewhere? <button type="button" class="linkbtn" data-importteam>Import a team from your computer</button>.</p>
     </main>`;
@@ -1407,8 +1407,8 @@
   // the custom "build an integration on the fly" placeholder.
   function openDescribeModal(kind) {
     const meta = {
-      role: { title: "Add a role", ph: "Describe the role — what it does, what a good job looks like, what it needs to access.", lead: "Tell modastack about the role and it'll add it to the team." },
-      auto: { title: "Add an automation", ph: "Describe something the team should do on its own — e.g. 'post a daily digest at 9am'.", lead: "Describe the proactive behavior; modastack wires it up." },
+      role: { title: "Add a role", ph: "Describe the role — what it does, what a good job looks like, what it needs to access.", lead: "Tell bobi about the role and it'll add it to the team." },
+      auto: { title: "Add an automation", ph: "Describe something the team should do on its own — e.g. 'post a daily digest at 9am'.", lead: "Describe the proactive behavior; bobi wires it up." },
     }[kind];
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "describe-ov";
@@ -1428,7 +1428,7 @@
       ov.remove(); sendMessage(t);
     });
   }
-  // Add a connection = point modastack at a remote MCP server (the Claude-style
+  // Add a connection = point bobi at a remote MCP server (the Claude-style
   // connector form): name + URL + an API key. When the assistant guesses a
   // connection is needed (a custom service like PostHog), the row's Connect
   // opens this prefilled with the name — you supply the URL. (OAuth-authed MCPs
