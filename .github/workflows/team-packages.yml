@@ -1,8 +1,9 @@
 name: Team packages
 
-# Builds distributable .tar.gz packages from each agent team under agents/
-# (the C10 team-injection seam — a dark instance fetches its team from a public
-# URL at first boot via MODASTACK_TEAM_URL / `modastack install <url>`).
+# Builds distributable .tar.gz packages from each agent team under agents/, plus
+# the zero-secret tests/fixtures/smoke-team (the canonical smoke-test target).
+# This is the C10 team-injection seam — a dark instance fetches its team from a
+# public URL at first boot via MODASTACK_TEAM_URL / `modastack install <url>`.
 #
 # Path-filtered so unrelated PRs pay nothing. On a PR this validates that every
 # team still packages from source and that each archive contains an agent.yaml.
@@ -16,6 +17,7 @@ on:
     branches: [main]
     paths: &pkg_paths
       - "agents/**"
+      - "tests/fixtures/smoke-team/**"
       - "scripts/build-team-tarballs.sh"
       - ".github/workflows/team-packages.yml"
   pull_request:
@@ -31,7 +33,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build packages
-        run: scripts/build-team-tarballs.sh --out dist/teams
+        run: |
+          # Every real team under agents/, plus the zero-secret smoke-team
+          # fixture (only needs MODASTACK_EVENT_SERVER) — the canonical target
+          # for container/Fly smoke tests via --team-url.
+          scripts/build-team-tarballs.sh --out dist/teams
+          scripts/build-team-tarballs.sh --out dist/teams tests/fixtures/smoke-team
 
       - name: Verify each archive carries an agent.yaml
         run: |

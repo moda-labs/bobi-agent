@@ -148,3 +148,20 @@ scripts/provision-instance.sh --help
 Tear down with `scripts/destroy-instance.sh --app <name>` (removes the volume —
 back up first). The script header documents the operator-agnostic flags and the
 "deploy your own event server" runbook (design §9.1).
+
+### Smoke testing
+
+`tests/fixtures/smoke-team` is the zero-secret smoke target — it needs only
+`MODASTACK_EVENT_SERVER` (no service tokens, no `requires`, no monitors), so an
+instance reaches a healthy manager and answers one `modastack ask` with nothing
+but an Anthropic credential. The `team-packages` workflow publishes it to the
+rolling `teams-latest` release, so a full provisioner → boot → ask round-trip is:
+
+```bash
+scripts/provision-instance.sh --app <you>-modastack-smoke \
+  --team-url https://github.com/moda-labs/modastack/releases/download/teams-latest/smoke-team.tar.gz \
+  --env-file ./smoke.env --region sjc          # smoke.env: just ANTHROPIC_API_KEY
+```
+
+(Real teams like `eng-team` carry `requires:`/service secrets; the smoke team
+deliberately doesn't, so it isolates the container/Fly path from team setup.)
