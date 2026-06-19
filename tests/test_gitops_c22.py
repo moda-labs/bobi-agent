@@ -1,18 +1,24 @@
-"""C22 GitOps deploy/update automation (#342).
+"""C22 GitOps deploy/update automation (#342), refactored onto the
+`modastack deploy` primitive (DEPLOY_INTERFACE.md).
 
-Covers the fleet-state primitive (`scripts/fleet.sh`) and the structural
-invariants of the two GitOps workflows + the provisioner's fleet stamp. The
-shell helpers are exercised for real (bash subprocess with a stubbed
-`fleet_exists`, so no Fly calls); the workflows are parsed and asserted, so the
-load-bearing decisions break loudly if someone regresses them:
+Covers the fleet-state primitive (`scripts/fleet.sh`), the provisioner's
+identity stamps + ssh-push blank mode, and the structural invariants of the two
+GitOps workflows. The shell helpers are exercised for real (bash subprocess with
+a stubbed `fleet_exists`, so no Fly calls); the workflows are parsed and
+asserted, so the load-bearing decisions break loudly if someone regresses them:
 
-  * added vs changed is classified by Fly STATE, not git status;
-  * a changed URL-sourced team is updated with `modastack install <url>`,
-    NOT `modastack agents update` (which resolves via the registry, not a URL);
-  * each provisioned instance is stamped MODASTACK_FLEET (the SaaS-extensible
-    fleet-membership key — name is only a hint);
+  * gitops-teams is a THIN CLIENT — the reconcile business logic lives in
+    `modastack deploy` (idempotent provision-or-update), not the YAML;
+  * each instance is stamped MODASTACK_FLEET + MODASTACK_INSTANCE (the
+    SaaS-extensible fleet/tenant keys — the app name is only a hint);
+  * --blank provisions a team-less instance whose entrypoint waits for an
+    ssh-pushed team (the local-package delivery path);
   * the secret interface is one MODASTACK_ENV blob per GitHub Environment;
+  * deletions never auto-deploy — orphaned apps surface for human destroy;
   * release rollout builds one image and reuses it across the fleet.
+
+The deploy ENGINE itself (config precedence, delivery selection, secret
+validation) is unit-tested in test_deploy.py.
 """
 
 import subprocess
@@ -73,7 +79,7 @@ def test_fleet_sh_passes_shellcheck():
     assert sc.returncode == 0, sc.stdout + sc.stderr
 
 
-# --- scripts/provision-instance.sh: the MODASTACK_FLEET stamp ----------------
+# --- scripts/provision-instance.sh: identity stamps + ssh-push blank mode ----
 
 def test_provisioner_stamps_fleet_and_defaults_from_app():
     text = PROVISION_SH.read_text()
@@ -82,6 +88,36 @@ def test_provisioner_stamps_fleet_and_defaults_from_app():
     # --fleet is a real option, and defaults to the app name's leading segment.
     assert "--fleet) FLEET=" in text
     assert 'FLEET="${APP%%-*}"' in text
+
+
+def test_provisioner_stamps_instance_and_defaults_from_slug():
+    """MODASTACK_INSTANCE — the per-instance/SaaS-tenant key `modastack deploy`
+    reads back to find an app for <name> (next to MODASTACK_FLEET)."""
+    text = PROVISION_SH.read_text()
+    assert 'ENV_VARS["MODASTACK_INSTANCE"]="$INSTANCE"' in text
+    assert "--instance) INSTANCE=" in text
+    # Defaults to the app name minus the "<fleet>-" prefix (the slug).
+    assert 'INSTANCE="${APP#"$FLEET"-}"' in text
+
+
+def test_provisioner_supports_blank_ssh_push_mode():
+    """--blank provisions with NO team source so the entrypoint waits for a
+    pushed team — the ssh-push delivery path `modastack deploy` uses for a
+    local package."""
+    text = PROVISION_SH.read_text()
+    assert "--blank) BLANK=" in text
+    # Exactly-one-of team/team-url/blank is enforced.
+    assert "exactly one of --team / --team-url / --blank" in text
+
+
+def test_entrypoint_waits_for_team_when_blank():
+    """The C9-adjacent change: an empty volume with no team source polls for a
+    pushed team instead of crashing (enables ssh-push)."""
+    entry = (REPO / "docker" / "docker-entrypoint.sh").read_text()
+    assert "waiting for" in entry.lower()
+    assert ".modastack/agent.yaml" in entry
+    # It must NOT fatal on the no-team branch any more.
+    assert "nothing to install" not in entry
 
 
 # --- workflows: load + shared helpers ---------------------------------------
@@ -104,52 +140,66 @@ def test_workflows_parse_and_actionlint_clean():
     assert _load(WF_RELEASE)["name"]
 
 
-# --- gitops-teams.yml invariants --------------------------------------------
+# --- gitops-teams.yml invariants (thin client over `modastack deploy`) -------
 
-def test_teams_triggered_by_team_packages_completion():
+def test_teams_triggered_by_push_to_main_on_config_paths():
     wf = _load(WF_TEAMS)
-    # PyYAML parses the bare `on:` key as boolean True.
-    on = wf.get("on", wf.get(True))
-    assert on["workflow_run"]["workflows"] == ["Team packages"]
-    assert "completed" in on["workflow_run"]["types"]
+    on = wf.get("on", wf.get(True))  # PyYAML parses bare `on:` as boolean True.
+    assert on["push"]["branches"] == ["main"]
+    paths = on["push"]["paths"]
+    assert any("deployments/" in p for p in paths)
+    assert any("agents/" in p for p in paths)
 
 
-def test_teams_diff_gates_on_main_success():
-    diff = _jobs(_load(WF_TEAMS))["diff"]
-    cond = diff["if"]
-    assert "success" in cond and "main" in cond
+def test_teams_is_a_thin_client_no_business_logic_in_yaml():
+    """The load-bearing refactor invariant: the reconcile business logic moved
+    OUT of the workflow into the `modastack deploy` primitive. The Action must
+    not call the provisioner or fleet.sh classify itself any more."""
+    wf = _load(WF_TEAMS)
+    all_scripts = "\n".join(_step_scripts(j) for j in _jobs(wf).values())
+    assert "provision-instance.sh" not in all_scripts
+    assert "fleet.sh classify" not in all_scripts
+    # The deploy job drives the primitive instead.
+    deploy_script = _step_scripts(_jobs(wf)["deploy"])
+    assert "modastack deploy" in deploy_script
 
 
-def test_teams_diff_excludes_deletions_and_classifies_via_fleet():
-    script = _step_scripts(_jobs(_load(WF_TEAMS))["diff"])
-    # deletions excluded (human destroy only), classification delegates to fleet.sh
-    assert "--diff-filter=d" in script
-    assert "scripts/fleet.sh classify" in script
-
-
-def test_teams_provision_binds_per_team_environment_and_env_blob():
-    prov = _jobs(_load(WF_TEAMS))["provision"]
-    # one GitHub Environment per team, computed from the matrix
-    assert prov["environment"] == "${{ matrix.team }}"
-    script = _step_scripts(prov)
-    # the single-blob secret interface (token-broker seam), written umask-077
+def test_teams_deploy_binds_per_deployment_environment_and_env_blob():
+    deploy = _jobs(_load(WF_TEAMS))["deploy"]
+    # one GitHub Environment per deployment, computed from the matrix name
+    assert deploy["environment"] == "${{ matrix.name }}"
+    script = _step_scripts(deploy)
+    # the single-blob secret interface, written umask-077, handed to the primitive
     assert "MODASTACK_ENV" in script
     assert "umask 077" in script
-    # provisions with the fleet stamp + the rolling teams-latest tarball
-    assert "--fleet" in script
-    assert "releases/download/teams-latest/" in script
+    assert "--env-file" in script
+    # installs the CLI so `modastack deploy` is available in CI
+    assert "pip install" in script
 
 
-def test_teams_update_uses_install_url_not_agents_update():
-    """The single highest-value correctness invariant for C22."""
-    upd = _jobs(_load(WF_TEAMS))["update"]
-    script = _step_scripts(upd)
-    assert "modastack install" in script
-    assert "modastack agents update" not in script
-    # in-place reload after the workspace-safe reinstall
-    assert "machine restart" in script
-    # update needs no GitHub Environment (secrets already on the volume)
-    assert "environment" not in upd
+def test_teams_deploy_is_idempotent_no_added_vs_changed_split():
+    """`modastack deploy` is provision-or-update internally, so the workflow has
+    a single deploy path — no separate provision/update jobs keyed on Fly state."""
+    jobs = _jobs(_load(WF_TEAMS))
+    assert "provision" not in jobs and "update" not in jobs
+    assert "deploy" in jobs
+
+
+def test_teams_excludes_deletions_and_surfaces_orphans_for_human_destroy():
+    wf = _load(WF_TEAMS)
+    plan_script = _step_scripts(_jobs(wf)["plan"])
+    assert "--diff-filter=d" in plan_script  # deletions never auto-deploy
+    orphans = _step_scripts(_jobs(wf)["orphans"])
+    # surfaces unmanaged apps for a human `modastack destroy`, never auto-destroys
+    assert "modastack destroy" in orphans
+    assert "apps destroy" not in orphans and "destroy-instance.sh" not in orphans
+
+
+def test_teams_no_ops_without_fly_token():
+    """Committing deployments/ before wiring the fleet must not break CI."""
+    wf = _load(WF_TEAMS)
+    deploy = _jobs(wf)["deploy"]
+    assert "configured == 'true'" in deploy["if"]
 
 
 # --- gitops-release.yml invariants ------------------------------------------

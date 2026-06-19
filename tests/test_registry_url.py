@@ -203,3 +203,46 @@ def test_path_traversal_member_is_rejected(project, tmp_path, monkeypatch):
     _serve(monkeypatch, payload)
     with pytest.raises(RuntimeError, match="unsafe path"):
         registry.fetch_from_url(project, "https://x/t.tar.gz")
+
+
+# --- fetch_from_archive: the on-disk twin (ssh-push delivery seam) -----------
+
+def test_fetch_from_archive_installs_local_tarball(project, tmp_path):
+    """A local .tar.gz installs identically to a URL — the path ssh-push uses
+    after pushing a built team tarball onto an instance's volume."""
+    src = _make_team_dir(tmp_path / "src", "eng-team", agent="eng-team")
+    arc = tmp_path / "eng-team.tar.gz"
+    with tarfile.open(arc, "w:gz") as t:
+        t.add(src, arcname="eng-team")
+
+    dest, name = registry.fetch_from_archive(project, arc)
+    assert name == "eng-team"
+    assert (dest / "agent.yaml").is_file()
+    assert (dest / "roles" / "manager" / "ROLE.md").is_file()
+
+
+def test_fetch_from_archive_rejects_non_archive(project, tmp_path):
+    bad = tmp_path / "nope.tar.gz"
+    bad.write_text("not a tarball")
+    with pytest.raises(RuntimeError, match="not a readable .tar.gz"):
+        registry.fetch_from_archive(project, bad)
+
+
+def test_install_cli_routes_local_archive(project, tmp_path, monkeypatch):
+    """`modastack install ./team.tar.gz` takes the local-archive branch."""
+    from click.testing import CliRunner
+    from modastack.cli import main
+
+    src = _make_team_dir(tmp_path / "src", "eng-team", agent="eng-team")
+    arc = tmp_path / "eng-team.tar.gz"
+    with tarfile.open(arc, "w:gz") as t:
+        t.add(src, arcname="eng-team")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("MODASTACK_EVENT_SERVER", "https://ev.example.workers.dev")
+
+    result = CliRunner().invoke(
+        main, ["install", str(arc), "--non-interactive"], catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "local archive" in result.output
+    assert (project / ".modastack" / "agent.yaml").is_file()

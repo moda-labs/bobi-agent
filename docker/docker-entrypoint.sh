@@ -64,7 +64,15 @@ as_app() { gosu "${APP_USER}" env "HOME=${HOME}" "$@"; }
 # --- 3. First boot: install a team if the volume has no agent (C9 hardens) ---
 # Team source precedence: a public MODASTACK_TEAM_URL (fetched at boot — the
 # dark instance reaches out, nothing reaches in) wins over MODASTACK_TEAM (a
-# bundled/registry name). One of the two must be set on an empty volume.
+# bundled/registry name).
+#
+# With NEITHER set on an empty volume the instance enters the "wait for team"
+# state instead of crashing: it was provisioned blank for ssh-push delivery
+# (`modastack deploy` with a local `team:` package — DEPLOY_INTERFACE.md). The
+# operator pushes the team over `fly ssh` (sftp the tarball + `modastack install`),
+# which lands .modastack/agent.yaml on the volume; we poll for it, then start.
+# This is the single-developer "I built it, ship it — no hosting" path, and it
+# keeps PID 1 alive so the Fly machine stays "started" while we wait.
 if [ ! -f "${PROJECT_DIR}/.modastack/agent.yaml" ]; then
   if [ -n "${MODASTACK_TEAM_URL:-}" ]; then
     log "First boot: installing team from URL ${MODASTACK_TEAM_URL} (non-interactive)"
@@ -73,7 +81,18 @@ if [ ! -f "${PROJECT_DIR}/.modastack/agent.yaml" ]; then
     log "First boot: installing team '${MODASTACK_TEAM}' (non-interactive)"
     as_app modastack install "${MODASTACK_TEAM}" --non-interactive
   else
-    fatal "empty volume and neither MODASTACK_TEAM_URL nor MODASTACK_TEAM is set — nothing to install."
+    log "No team source and empty volume — blank instance, waiting for an"
+    log "ssh-push team delivery (modastack deploy). Poll for .modastack/agent.yaml..."
+    waited=0
+    while [ ! -f "${PROJECT_DIR}/.modastack/agent.yaml" ]; do
+      sleep 2
+      waited=$((waited + 2))
+      # Heartbeat every ~2 min so `fly logs` shows the instance is alive, not hung.
+      if [ $((waited % 120)) -eq 0 ]; then
+        log "Still waiting for a pushed team (${waited}s)..."
+      fi
+    done
+    log "Team appeared on the volume after ${waited}s — proceeding to start."
   fi
 fi
 

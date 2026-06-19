@@ -1,40 +1,45 @@
 name: GitOps — teams
 
-# Reconcile agents/ team dirs to live Fly instances after each push to main
-# (C22 / #342; docs/design/CONTAINERIZED_INSTANCES.md §10).
+# Reconcile deployments/<name>.yaml to live Fly instances on each push to main
+# (C22 / #342; docs/design/DEPLOY_INTERFACE.md).
 #
-# Triggered by "Team packages" completing on main — that workflow is the SOLE
-# publisher of the rolling teams-latest release, so by the time we run, every
-# teams-latest/<team>.tar.gz an instance might pull is already fresh. We never
-# build or publish tarballs here.
+# This workflow is a THIN CLIENT: all deployment business logic lives in the
+# `modastack deploy` primitive (idempotent provision-or-update, delivery-mode
+# selection, secret validation, the Fly mechanics). The Action only does
+# orchestration — diff which deployments changed, materialize each one's secrets,
+# and loop the primitive. Nothing GitHub-specific reaches into the engine, so the
+# same `modastack deploy` runs from a laptop, this Action, Terraform, or a SaaS
+# plane. To wire your own repo, copy this file and set the inputs below; see
+# docs/DEPLOYMENT.md (bring-your-own-repo runbook).
 #
-# Flows (classified by Fly STATE via scripts/fleet.sh, not by git status):
-#   added team   (no Fly app yet) -> scripts/provision-instance.sh. The per-team
-#                 GitHub Environment supplies its MODASTACK_ENV secret blob.
-#   changed team (app exists)     -> `modastack install <url>` + restart over
-#                 `fly ssh` — a workspace-safe in-place update; never re-provision
-#                 (volume agent.yaml is source of truth).
-#   deleted team -> nothing automatic (human runs scripts/destroy-instance.sh).
+# Flows:
+#   added/changed deployments/<name>.yaml  -> `modastack deploy <name>` (idempotent:
+#       the primitive provisions a new instance or updates an existing one).
+#   changed agents/<team>/                 -> redeploy any deployment of that team.
+#   deleted deployments/<name>.yaml        -> nothing automatic; the orphans job
+#       surfaces the now-unmanaged Fly app for a human `modastack destroy`.
 #
-# State store = the Fly API (scripts/fleet.sh). No DB, no committed manifest.
+# State store = the Fly API (no DB, no committed manifest). Fleet identity comes
+# from deployments/defaults.yaml (`fleet:`), not a repo var.
 #
-# Required repo configuration:
-#   vars.FLEET_PREFIX            operator namespace; app = "<prefix>-<team>",
-#                                fleet enumerated by the MODASTACK_FLEET stamp.
-#   vars.MODASTACK_EVENT_SERVER  (optional) Worker URL; omit to use the default.
-#   secrets.FLY_API_TOKEN        Fly deploy token (org-scoped) for flyctl.
-#   Environment "<team>" per team, holding secret MODASTACK_ENV = the team's
-#                                full KEY=VALUE env-file body. No protection rules
-#                                (a required reviewer would pause the matrix).
+# Required configuration:
+#   secrets.FLY_API_TOKEN   Fly deploy token (org-scoped). Absent -> the workflow
+#                           no-ops (so committing deployments/ before wiring the
+#                           fleet never breaks CI).
+#   Environment "<name>" per deployment, holding secret MODASTACK_ENV = that
+#   instance's full KEY=VALUE env-file body (the named `secrets.env` source). No
+#   protection rules (a required reviewer would pause the matrix).
 
 on:
-  workflow_run:
-    workflows: ["Team packages"]
-    types: [completed]
+  push:
+    branches: [main]
+    paths:
+      - "deployments/**"
+      - "agents/**"
   workflow_dispatch:
     inputs:
       sha:
-        description: "Commit SHA to reconcile (default: latest of the dispatched branch)"
+        description: "Commit SHA to reconcile (default: latest of the branch)"
         required: false
 
 # Serialize fleet reconciliation so two pushes can't race on the same app.
@@ -42,127 +47,162 @@ concurrency:
   group: gitops-teams
   cancel-in-progress: false
 
-env:
-  FLEET_PREFIX: ${{ vars.FLEET_PREFIX }}
-  EVENT_SERVER: ${{ vars.MODASTACK_EVENT_SERVER }}
-
 jobs:
-  diff:
-    # Act only on a successful main build (or a manual dispatch).
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main')
+  plan:
     runs-on: ubuntu-latest
-    env:
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     outputs:
-      added: ${{ steps.classify.outputs.added }}
-      changed: ${{ steps.classify.outputs.changed }}
+      # JSON array of deployment names to (re)deploy; "[]" when nothing changed.
+      names: ${{ steps.plan.outputs.names }}
+      # "true" only when a Fly token is configured — gates the deploy/orphan jobs.
+      configured: ${{ steps.gate.outputs.configured }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # workflow_run defaults to the default-branch tip, which may have moved;
-          # pin to the exact commit that triggered the package build.
-          ref: ${{ github.event.workflow_run.head_sha || github.event.inputs.sha }}
+          ref: ${{ github.event.inputs.sha || github.sha }}
           fetch-depth: 2
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - id: resolve
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - id: changed-teams
+      - id: gate
         env:
-          SHA: ${{ steps.resolve.outputs.sha }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          set -euo pipefail
-          # Team slugs whose files changed in this commit, deletions excluded (-d).
-          mapfile -t slugs < <(
-            git diff --name-only --diff-filter=d "${SHA}^" "$SHA" -- 'agents/*/' \
-              | sed -E 's#^agents/([^/]+)/.*#\1#' | sort -u
-          )
-          # Keep only slugs that still hold an agent.yaml at this sha (real teams;
-          # a fully-deleted team's edits drop out — deletion is human-only).
-          keep=()
-          for s in "${slugs[@]:-}"; do
-            [ -n "$s" ] || continue
-            [ -f "agents/$s/agent.yaml" ] && keep+=("$s")
-          done
-          echo "slugs=${keep[*]:-}" >> "$GITHUB_OUTPUT"
-          echo "Changed teams: ${keep[*]:-<none>}"
-
-      - id: classify
-        env:
-          SLUGS: ${{ steps.changed-teams.outputs.slugs }}
-        run: |
-          set -euo pipefail
-          read -r -a slugs <<< "${SLUGS:-}"
-          if [ "${#slugs[@]}" -eq 0 ]; then
-            { echo "added=[]"; echo "changed=[]"; } >> "$GITHUB_OUTPUT"
-            echo "Nothing to reconcile."; exit 0
+          if [ -n "${FLY_API_TOKEN:-}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::secrets.FLY_API_TOKEN unset — fleet not wired, skipping."
           fi
-          scripts/fleet.sh classify "$FLEET_PREFIX" "${slugs[@]}" | tee -a "$GITHUB_OUTPUT"
 
-  provision:
-    needs: diff
-    if: ${{ needs.diff.outputs.added != '' && needs.diff.outputs.added != '[]' }}
+      - id: plan
+        run: |
+          set -euo pipefail
+          # A deployment exists iff deployments/<name>.yaml is present (excluding
+          # the shared defaults file and docs). Its name is the filename stem.
+          deployment_names() {
+            for f in deployments/*.yaml; do
+              [ -e "$f" ] || continue
+              b="$(basename "$f" .yaml)"
+              [ "$b" = "defaults" ] && continue
+              printf '%s\n' "$b"
+            done | sort -u
+          }
+
+          # Files changed in this push (deletions excluded — deletion is the
+          # orphans job's human-gated concern, never an auto-deploy).
+          changed() { git diff --name-only --diff-filter=d "${1}^" "$1" 2>/dev/null || true; }
+          files="$(changed "$(git rev-parse HEAD)")"
+
+          # 1) directly-changed deployments/<name>.yaml.
+          names="$(printf '%s\n' "$files" \
+            | sed -nE 's#^deployments/([^/]+)\.yaml$#\1#p' \
+            | grep -vx defaults || true)"
+
+          # 2) changed agents/<team>/ → every deployment whose `team:` is that team
+          #    (the common case: a deployment named after its team).
+          changed_teams="$(printf '%s\n' "$files" \
+            | sed -nE 's#^agents/([^/]+)/.*#\1#p' | sort -u || true)"
+          for team in $changed_teams; do
+            [ -n "$team" ] || continue
+            for name in $(deployment_names); do
+              t="$(sed -nE 's#^team:[[:space:]]*([^[:space:]#]+).*#\1#p' \
+                     "deployments/$name.yaml" | head -n1)"
+              [ "$t" = "$team" ] && names="$(printf '%s\n%s\n' "$names" "$name")"
+            done
+          done
+
+          # Keep only names that still have a deployments/<name>.yaml at this sha.
+          keep=()
+          while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            [ -f "deployments/$n.yaml" ] && keep+=("$n")
+          done < <(printf '%s\n' "$names" | sort -u)
+
+          if [ "${#keep[@]}" -eq 0 ]; then
+            echo "names=[]" >> "$GITHUB_OUTPUT"
+            echo "Nothing to reconcile."
+          else
+            printf '%s\n' "${keep[@]}" | jq -R . | jq -cs . \
+              | sed 's/^/names=/' >> "$GITHUB_OUTPUT"
+            echo "Deployments to reconcile: ${keep[*]}"
+          fi
+
+  deploy:
+    needs: plan
+    if: ${{ needs.plan.outputs.configured == 'true' && needs.plan.outputs.names != '[]' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        team: ${{ fromJSON(needs.diff.outputs.added) }}
-    # Binds this matrix cell to the team's GitHub Environment, exposing its
-    # MODASTACK_ENV secret. Computed-from-matrix environment names are supported.
-    environment: ${{ matrix.team }}
+        name: ${{ fromJSON(needs.plan.outputs.names) }}
+    # Bind this matrix cell to the deployment's GitHub Environment, exposing its
+    # MODASTACK_ENV secret. Convention: the Environment is named after the
+    # deployment (deployments/<name>.yaml's `secrets.env` documents this).
+    environment: ${{ matrix.name }}
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.sha || github.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install modastack CLI
+        run: pip install -e .
+
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Provision instance
+
+      - name: Deploy ${{ matrix.name }}
         env:
           MODASTACK_ENV: ${{ secrets.MODASTACK_ENV }}
         run: |
           set -euo pipefail
           [ -n "${MODASTACK_ENV:-}" ] || {
-            echo "::error::Environment '${{ matrix.team }}' has no MODASTACK_ENV secret"; exit 1; }
+            echo "::error::Environment '${{ matrix.name }}' has no MODASTACK_ENV secret"; exit 1; }
           umask 077
           envfile="$RUNNER_TEMP/instance.env"
           printf '%s' "$MODASTACK_ENV" > "$envfile"
-          url="https://github.com/${{ github.repository }}/releases/download/teams-latest/${{ matrix.team }}.tar.gz"
-          ev=()
-          [ -n "${EVENT_SERVER:-}" ] && ev=(--event-server "$EVENT_SERVER")
-          scripts/provision-instance.sh \
-            --app "$FLEET_PREFIX-${{ matrix.team }}" \
-            --fleet "$FLEET_PREFIX" \
-            --team-url "$url" \
-            "${ev[@]}" \
-            --env-file "$envfile" \
-            --yes
+          # The whole reconcile (provision-or-update, ssh-push vs team-url, secret
+          # validation, identity stamps) is the primitive's job — the Action just
+          # hands it the resolved secrets file and the deployment name.
+          modastack deploy "${{ matrix.name }}" --env-file "$envfile"
 
-  update:
-    needs: diff
-    if: ${{ needs.diff.outputs.changed != '' && needs.diff.outputs.changed != '[]' }}
+  orphans:
+    # Report Fly apps in the fleet that no longer have a deployments/ file, so a
+    # human can `modastack destroy` them. Never auto-destroys (the volume is the
+    # only copy of an instance's state). Pure orchestration: a cross-fleet diff.
+    needs: plan
+    if: ${{ needs.plan.outputs.configured == 'true' }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        team: ${{ fromJSON(needs.diff.outputs.changed) }}
-    # No environment binding: the instance's secrets already live on its volume;
-    # an in-place update needs only the Fly token.
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
+      - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: In-place team update
+      - name: Surface unmanaged instances
         run: |
           set -euo pipefail
-          app="$FLEET_PREFIX-${{ matrix.team }}"
-          url="https://github.com/${{ github.repository }}/releases/download/teams-latest/${{ matrix.team }}.tar.gz"
-          # Re-pull from the refreshed tarball (workspace-safe reinstall), then
-          # restart to load the new config. URL-sourced instance => install <url>,
-          # NOT `agents update` (the registry path won't match a `url:` source).
-          fly ssh console -a "$app" --command \
-            "gosu modastack env HOME=/data/home bash -c 'cd /data/project && modastack install \"$url\"'"
-          fly machine restart -a "$app"
+          fleet="$(sed -nE 's#^fleet:[[:space:]]*([^[:space:]#]+).*#\1#p' \
+                     deployments/defaults.yaml | head -n1)"
+          [ -n "$fleet" ] || { echo "No fleet in deployments/defaults.yaml — skip."; exit 0; }
+
+          # Managed = the slugs we have deployments/<name>.yaml for, as app names.
+          declare -A managed=()
+          for f in deployments/*.yaml; do
+            b="$(basename "$f" .yaml)"; [ "$b" = "defaults" ] && continue
+            managed["$fleet-$b"]=1
+          done
+
+          orphans=()
+          while IFS= read -r app; do
+            [ -n "$app" ] || continue
+            [ -n "${managed[$app]:-}" ] || orphans+=("$app")
+          done < <(scripts/fleet.sh list "$fleet")
+
+          if [ "${#orphans[@]}" -gt 0 ]; then
+            echo "::warning::Unmanaged fleet instances (no deployments/ file): ${orphans[*]}"
+            echo "Run \`modastack destroy <name>\` to remove each one (human-gated)."
+          else
+            echo "No unmanaged instances."
+          fi

@@ -13,9 +13,17 @@ name: GitOps — release rollout
 # Per-app failures are isolated and reported; the Action log IS the deploy log.
 # A re-run is the recovery model (idempotent + C7 format-version guard).
 #
-# Required repo configuration:
-#   vars.FLEET_PREFIX     operator namespace (fleet enumerated by MODASTACK_FLEET).
-#   secrets.FLY_API_TOKEN Fly deploy token (org-scoped) for flyctl.
+# This stays orchestration (not a `modastack deploy` loop) on purpose: rolling N
+# apps to a new image is a CROSS-FLEET operation whose whole point is build-once,
+# reuse-the-image-ref N times — a per-instance primitive can't express that
+# without N redundant builds. Team CONTENT reconcile (provision/update) is the
+# thin-client `modastack deploy` loop in gitops-teams.yml; this is the image roll.
+#
+# Required configuration:
+#   deployments/defaults.yaml `fleet:`   fleet namespace (enumerated by the
+#                                         MODASTACK_FLEET stamp). Single source of
+#                                         fleet truth, shared with gitops-teams.
+#   secrets.FLY_API_TOKEN                 Fly deploy token (org-scoped) for flyctl.
 
 on:
   release:
@@ -35,7 +43,6 @@ jobs:
   rollout:
     runs-on: ubuntu-latest
     env:
-      FLEET_PREFIX: ${{ vars.FLEET_PREFIX }}
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +54,11 @@ jobs:
       - name: Roll the fleet
         run: |
           set -euo pipefail
-          [ -n "${FLEET_PREFIX:-}" ] || { echo "::error::vars.FLEET_PREFIX is unset"; exit 1; }
+          [ -n "${FLY_API_TOKEN:-}" ] || { echo "::notice::FLY_API_TOKEN unset — fleet not wired, skipping."; exit 0; }
+          # Fleet namespace: the single source of truth is deployments/defaults.yaml.
+          FLEET_PREFIX="$(sed -nE 's#^fleet:[[:space:]]*([^[:space:]#]+).*#\1#p' \
+                            deployments/defaults.yaml | head -n1)"
+          [ -n "${FLEET_PREFIX:-}" ] || { echo "::error::no fleet set in deployments/defaults.yaml"; exit 1; }
 
           mapfile -t apps < <(scripts/fleet.sh list "$FLEET_PREFIX")
           if [ "${#apps[@]}" -eq 0 ]; then

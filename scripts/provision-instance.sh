@@ -59,7 +59,13 @@
 #                        boot (MODASTACK_TEAM_URL). The dark instance pulls it over
 #                        HTTPS — works with a GitHub release/raw asset or your own
 #                        server, and is restageable later by swapping the asset.
-#                        Provide exactly one of --team / --team-url.
+#       …or…
+#   --blank              Provision with NO team source. The instance boots into the
+#                        "wait for team" state (entrypoint §3) and holds until a team
+#                        is pushed in over `fly ssh` — the ssh-push delivery path that
+#                        `modastack deploy` uses for a LOCAL team package. Use this
+#                        instead of --team/--team-url; the caller pushes the team next.
+#                        Provide exactly one of --team / --team-url / --blank.
 #   --env-file FILE      KEY=VALUE file of service tokens (SLACK_BOT_TOKEN, GITHUB_TOKEN,
 #                        LINEAR_API_KEY, VENN_API_KEY, ...). In api_key mode it must also
 #                        contain ANTHROPIC_API_KEY; in subscription mode it must NOT.
@@ -74,6 +80,9 @@
 #                        Default: the leading dash-segment of --app (e.g. --app
 #                        acme-modastack-eng ⇒ fleet "acme"). Pass explicitly when
 #                        the app name's first segment isn't your fleet namespace.
+#   --instance NAME      Per-instance identity stamped as MODASTACK_INSTANCE — the
+#                        SaaS tenant key (enumerable in [env] next to MODASTACK_FLEET).
+#                        Default: the app name with the "<fleet>-" prefix stripped.
 #   --auth MODE          api_key (default) | subscription. See §6.1.
 #   --event-server URL   Worker URL (https://). Default: the shared moda-labs Worker.
 #   --region REGION      Fly region for the app + volume. Default: iad.
@@ -109,7 +118,7 @@ DEFAULT_EVENT_SERVER="https://modastack-events.modalabs.workers.dev"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- args -------------------------------------------------------------------
-APP="" TEAM="" TEAM_URL="" ENV_FILE="" AUTH="api_key" FLEET=""
+APP="" TEAM="" TEAM_URL="" BLANK="0" ENV_FILE="" AUTH="api_key" FLEET="" INSTANCE=""
 EVENT_SERVER="$DEFAULT_EVENT_SERVER"
 REGION="iad" ORG="" VOLUME_SIZE="15" MEMORY="4gb" CPUS="2"
 LOGIN_CHANNEL="" CLAUDE_VERSION="" VOLUME_NAME="data" ASSUME_YES="0"
@@ -120,8 +129,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --app) APP="$2"; shift 2;;
     --fleet) FLEET="$2"; shift 2;;
+    --instance) INSTANCE="$2"; shift 2;;
     --team) TEAM="$2"; shift 2;;
     --team-url) TEAM_URL="$2"; shift 2;;
+    --blank) BLANK="1"; shift;;
     --env-file) ENV_FILE="$2"; shift 2;;
     --auth) AUTH="$2"; shift 2;;
     --event-server) EVENT_SERVER="$2"; shift 2;;
@@ -153,10 +164,25 @@ command -v "$FLY" >/dev/null 2>&1 \
 # Fleet namespace defaults to the app name's leading dash-segment so a fleet of
 # apps named "<fleet>-<...>" enumerates by this stamp without extra config.
 [ -n "$FLEET" ] || FLEET="${APP%%-*}"
-if [ -n "$TEAM" ] && [ -n "$TEAM_URL" ]; then
-  fatal "pass exactly one of --team / --team-url, not both."
-elif [ -z "$TEAM" ] && [ -z "$TEAM_URL" ]; then
-  fatal "one of --team (registry name) or --team-url (public .tar.gz URL) is required."
+# Instance key defaults to the app name minus the "<fleet>-" prefix (the slug),
+# matching the app = "<fleet>-<name>" convention. Falls back to the full app name
+# when the prefix doesn't match (e.g. an explicit --fleet that isn't the prefix).
+if [ -z "$INSTANCE" ]; then
+  case "$APP" in
+    "$FLEET"-*) INSTANCE="${APP#"$FLEET"-}";;
+    *)          INSTANCE="$APP";;
+  esac
+fi
+# Exactly one team source: --team (registry name), --team-url (public tarball),
+# or --blank (no source; the entrypoint waits for an ssh-pushed team).
+team_modes=0
+[ -n "$TEAM" ]     && team_modes=$((team_modes + 1))
+[ -n "$TEAM_URL" ] && team_modes=$((team_modes + 1))
+[ "$BLANK" = "1" ] && team_modes=$((team_modes + 1))
+if [ "$team_modes" -gt 1 ]; then
+  fatal "pass exactly one of --team / --team-url / --blank."
+elif [ "$team_modes" -eq 0 ]; then
+  fatal "one of --team (registry name), --team-url (public .tar.gz URL), or --blank (ssh-push) is required."
 fi
 if [ -n "$TEAM_URL" ]; then
   case "$TEAM_URL" in
@@ -233,14 +259,22 @@ ENV_VARS["MODASTACK_EVENT_SERVER"]="$EVENT_SERVER"
 # (`fly config env`/`scripts/fleet.sh`), so two fleets can share one Fly org and
 # a future MODASTACK_TENANT filter slots into the same [env] block (design §9.1).
 ENV_VARS["MODASTACK_FLEET"]="$FLEET"
+# Per-instance identity (the SaaS tenant key). Enumerable alongside MODASTACK_FLEET;
+# `modastack deploy <name>` stamps and reads this back to find the app for <name>.
+ENV_VARS["MODASTACK_INSTANCE"]="$INSTANCE"
 [ -n "$LOGIN_CHANNEL" ] && ENV_VARS["MODASTACK_LOGIN_CHANNEL"]="$LOGIN_CHANNEL"
 
 # --- confirm ----------------------------------------------------------------
 echo
 echo "  Fly app        : $APP${ORG:+  (org: $ORG)}"
 echo "  Fleet          : $FLEET  (MODASTACK_FLEET stamp)"
+echo "  Instance       : $INSTANCE  (MODASTACK_INSTANCE stamp)"
 echo "  Region         : $REGION"
-echo "  Team           : ${TEAM:-(from URL) $TEAM_URL}"
+if [ "$BLANK" = "1" ]; then
+  echo "  Team           : (blank — waits for an ssh-pushed team)"
+else
+  echo "  Team           : ${TEAM:-(from URL) $TEAM_URL}"
+fi
 echo "  Auth mode      : $AUTH"
 echo "  Event server   : $EVENT_SERVER"
 echo "  Volume         : $VOLUME_NAME (${VOLUME_SIZE} GB) at /data"

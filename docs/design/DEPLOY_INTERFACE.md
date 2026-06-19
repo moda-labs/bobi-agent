@@ -1,9 +1,11 @@
 # Deployment interface — `modastack deploy` (design)
 
-Status: **design, ready to implement (2026-06-19).** Refactors the C22 GitOps
-implementation (PR #365) so the deployment *engine* is a portable CLI primitive
-and GitHub Actions is just one client of it. Composes with C8 (image), C22 (the Fly
-mechanics), and C24 (team-flavored images).
+Status: **implemented (2026-06-19), PR #365.** The deployment *engine* is now the
+portable CLI primitive `modastack deploy` / `destroy` (`modastack/deploy.py`); the
+GitHub Actions are thin clients. Both delivery modes (ssh-push for a local
+`team:`, HTTPS-fetch for a published `team-url:`) ship. See `docs/DEPLOYMENT.md`
+§2.5 for how it works today. Composes with C8 (image), C22 (the Fly mechanics),
+and C24 (team-flavored images). (Original design preserved below.)
 
 ## Context / why
 

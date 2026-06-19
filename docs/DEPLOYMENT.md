@@ -2,28 +2,47 @@
 
 How a modastack agent team becomes a running, self-managing instance on Fly,
 and the hard-won nuances that make it work. This is the **operational** companion
-to the design docs: `docs/design/CONTAINERIZED_INSTANCES.md` is *why/what*, this is
-*how it works today + the gotchas*. Current as of the C22 GitOps work (2026-06-19).
+to the design docs: `docs/design/CONTAINERIZED_INSTANCES.md` is *why/what*,
+`docs/design/DEPLOY_INTERFACE.md` is the *deploy-primitive design*, and this is
+*how it works today + the gotchas*. Current as of the `modastack deploy` refactor
+(2026-06-19).
 
 Pieces:
 
+- `modastack deploy <name>` / `destroy <name>` (`modastack/deploy.py`) — **the
+  one-instance primitive**; everything else is mechanics it drives or
+  orchestration that calls it
+- `deployments/<name>.yaml` (+ `defaults.yaml`) — per-instance operator config
 - `Dockerfile` — the image
 - `scripts/provision-instance.sh` + `scripts/destroy-instance.sh` — stand up / tear down one instance
 - `scripts/fleet.sh` — fleet enumeration helper
 - `scripts/build-team-tarballs.sh` — package teams into `.tar.gz`
-- `.github/workflows/team-packages.yml` — publishes team tarballs
-- `.github/workflows/gitops-teams.yml` — provision/update on push
-- `.github/workflows/gitops-release.yml` — fleet rollout on release
+- `.github/workflows/gitops-teams.yml` — thin client: reconcile `deployments/*` on push
+- `.github/workflows/gitops-release.yml` — fleet image rollout on release
+- `.github/workflows/team-packages.yml` — publishes team tarballs (for `team-url` delivery)
 
 ---
 
 ## 1. Mental model
 
-**Git is what should be running; Fly is what is running; three workflows close
-the gap.** Push a team to `main` → its instance appears. Edit a team → the matching
-instance updates in place. Publish a release → the whole fleet rolls to the new
-image. There is **no database and no manifest** — the Fly API is the only state
-store, and the GitHub Actions log is the deploy log.
+**Git is what should be running; Fly is what is running; `modastack deploy` closes
+the gap, one instance at a time.** A `deployments/<name>.yaml` is one instance an
+operator runs. Add/edit one and run `modastack deploy <name>` (or let the GitOps
+Action do it on push) → the instance appears or updates in place. Delete one →
+its Fly app is surfaced for a human `modastack destroy`. There is **no database
+and no manifest** — the Fly API is the only state store.
+
+The layering that keeps this operator-agnostic:
+
+```
+orchestration (per operator) : GitHub Action │ Terraform │ SaaS plane │ a for-loop
+the primitive (modastack)    : modastack deploy <name> / destroy <name>   ← ONE instance
+mechanics                    : provision-instance.sh · fleet.sh · install · fly
+```
+
+`modastack deploy` is **idempotent** — no Fly app yet ⇒ provision, app exists ⇒
+update — so the caller never decides provision-vs-update; it just names the
+instance. Anything that loops or diffs across instances is orchestration on top.
 
 An **instance** = one Fly app + one persistent volume (mounted at `/data`, holding
 both the project and `$HOME`) + env vars + an **outbound-only** WebSocket to one
@@ -45,6 +64,12 @@ First boot (the entrypoint): create the volume layout, install the team
 user running `modastack start --foreground` (PID 1). The instance **self-mints its
 event-bus bubble and self-registers every session** (#240) — the provisioner never
 touches `deployment_id`/`api_key`.
+
+With **neither** team var set on an empty volume the entrypoint enters a
+**wait-for-team** state: it polls for `.modastack/agent.yaml` instead of crashing.
+That is the ssh-push hook — the instance boots blank and holds while
+`modastack deploy` pushes a local team onto the volume (next section); the moment
+the team lands, it proceeds to start. (This is the C9-adjacent first-boot change.)
 
 ### Fly build gotchas (each one cost real debugging — do not regress)
 
@@ -84,6 +109,51 @@ touches `deployment_id`/`api_key`.
 
 ---
 
+## 2.5. The primitive (`modastack deploy <name>`)
+
+`modastack deploy <name>` resolves one instance's config, validates its secrets,
+stamps identity, picks a delivery mode, and applies — idempotently. It is the
+single entry point the CLI, CI, and any future control plane share.
+
+**Config precedence** (merged by the command itself, so it works standalone):
+
+```
+CLI flags  ›  deployments/<name>.yaml  ›  deployments/defaults.yaml  ›  built-ins
+```
+
+- `deployments/<name>.yaml` = one instance (name = filename). `defaults.yaml` =
+  shared operator *values* (fleet, event server, region) — **not** a deploy list;
+  the deploy list is the set of `deployments/*.yaml` files.
+- App name = `<fleet>-<name>`; stamps `MODASTACK_FLEET` + `MODASTACK_INSTANCE`
+  (the per-instance/SaaS-tenant key) into `[env]`.
+- A bare `<name>` with no file falls back to the local package `agents/<name>`
+  (ssh-push) — the minimal dev path.
+
+**Two delivery modes**, picked by the team source:
+
+| `team: <name>` → **ssh-push** | `team-url: <url>` → **HTTPS-fetch** |
+|---|---|
+| a LOCAL package (`agents/<name>`) | a PUBLISHED `.tar.gz` |
+| provision **blank** → build a tarball → push it onto the volume over `fly ssh` → the waiting entrypoint installs it and starts | provision with `--team-url` → the dark instance pulls the tarball at first boot (today's path) |
+| "I built it, ship it" — no hosting (single dev, or CI from its own checkout) | enterprise / SaaS / anyone publishing tarballs |
+
+The ssh-push push: `base64` the built tarball onto `/data` over `fly ssh`, then
+`modastack install <tarball> --non-interactive` as the volume owner (reads secrets
+from the Fly-injected env, fails loudly on a gap). On a **new** instance this
+releases the wait-for-team loop (no restart); on an **existing** one it's a
+workspace-safe reinstall + `fly machine restart` to reload.
+
+**Secrets** come from `secrets.env-file:` (a local path) or the process env (the
+CI seam — the Action exports the team's GitHub-Environment blob and runs
+`modastack deploy`). For a local team the required `${VAR}`s are validated up
+front; `MODASTACK_*` refs are identity (stamped from flags), never demanded as
+secrets.
+
+`modastack destroy <name>` resolves `<name>` → `<fleet>-<name>` and runs
+`destroy-instance.sh` (Fly app + volume, typed-confirm; `--yes` for automation).
+
+---
+
 ## 3. The provisioner (`scripts/provision-instance.sh`)
 
 Stands up one instance: `fly apps create` → 15 GB volume → stage secrets →
@@ -91,14 +161,18 @@ generate a per-app `fly.toml` (identity in `[env]`, 4 GB/shared-2x, **no
 `[http_service]`** = dark/always-on) → `fly deploy`. **Idempotent** — re-running
 redeploys, so it doubles as "redeploy this instance."
 
-Key flags:
-- Exactly one of `--team <name>` (bundled/registry) or `--team-url <.tar.gz URL>`
-  (the dark-instance injection seam — pulled at first boot).
+Most operators drive this through `modastack deploy` (§2.5), which fills these
+flags from `deployments/<name>.yaml`. Key flags:
+- Exactly one of `--team <name>` (bundled/registry), `--team-url <.tar.gz URL>`
+  (the dark-instance injection seam — pulled at first boot), or `--blank` (no team
+  source: boot into the wait-for-team state for ssh-push delivery).
 - `--env-file` — KEY=VALUE; `MODASTACK_*` keys become plaintext `[env]` identity,
   **everything else becomes a Fly secret**. This routing is what lets one blob
   carry both (see §5).
 - `--fleet <prefix>` — stamps `MODASTACK_FLEET` into `[env]` (see §4). Defaults to
   the app name's leading dash-segment.
+- `--instance <name>` — stamps `MODASTACK_INSTANCE` (the per-instance/SaaS-tenant
+  key, enumerable next to the fleet). Defaults to the app name minus `<fleet>-`.
 - `--event-server <https URL>` — defaults to the shared moda Worker; the bubble key
   is refused over cleartext remote URLs, so it must be `https://` (or loopback).
 - `--auth api_key|subscription` — api_key **requires** `ANTHROPIC_API_KEY` in the
@@ -144,36 +218,37 @@ operator namespace, stamped `MODASTACK_FLEET=<prefix>` in each app's `[env]`.
 
 ## 5. Secrets model
 
-One **GitHub Environment per team**, holding a single secret `MODASTACK_ENV` = the
-team's entire KEY=VALUE env-file body. The provision job binds
-`environment: ${{ matrix.team }}`, writes `$MODASTACK_ENV` to a temp file under
-`umask 077`, and passes `--env-file`. The provisioner's routing (`MODASTACK_*` →
-`[env]`, rest → Fly secrets) means the single blob loses no expressiveness, and it
-is the exact seam a token broker fills later (it emits the same blob).
+One **GitHub Environment per deployment**, holding a single secret `MODASTACK_ENV`
+= the instance's entire KEY=VALUE env-file body. The deploy job binds
+`environment: ${{ matrix.name }}`, writes `$MODASTACK_ENV` to a temp file under
+`umask 077`, and hands it to `modastack deploy … --env-file`. `deploy`'s secret
+resolution + the provisioner's routing (`MODASTACK_*` → `[env]`, rest → Fly
+secrets) mean the single blob loses no expressiveness, and it is the exact seam a
+token broker fills later (it emits the same blob).
 
 - Use a **secret**, not a variable (masking). Never `echo`/`cat` it — `printf` to
   disk under `umask 077`.
-- Team Environments must have **no required-reviewer protection rule** — it would
-  pause the provision matrix waiting on a human.
-- Per-fleet config lives in repo **variables/secrets**: `vars.FLEET_PREFIX`,
-  optional `vars.MODASTACK_EVENT_SERVER`, and `secrets.FLY_API_TOKEN` (an
-  org-scoped Fly deploy token: `fly tokens create deploy`).
+- Deployment Environments must have **no required-reviewer protection rule** — it
+  would pause the deploy matrix waiting on a human.
+- Self-service (no CI) points `secrets.env-file:` at a local file instead.
+- Fleet config now lives in **`deployments/defaults.yaml`** (`fleet:`,
+  `event_server:`, sizing), not repo variables — a single source of truth shared by
+  both workflows. The only repo secret is `secrets.FLY_API_TOKEN` (an org-scoped
+  Fly deploy token: `fly tokens create deploy`); absent it, the workflows no-op.
 
 ---
 
-## 6. GitHub Ops (the three workflows)
+## 6. GitHub Ops (thin clients over the primitive)
 
 ```
-push to main
+push to main (deployments/** or agents/**)
    │
    ▼
-team-packages.yml ── builds each team -> teams-latest/<team>.tar.gz (sole publisher)
-   │ (on success, main)
-   ▼
-gitops-teams.yml (workflow_run):
-   diff: git changed agents/*/  ->  fleet.sh classify (by Fly state)
-   ├─ added   -> provision-instance.sh  (env from the team's MODASTACK_ENV)
-   └─ changed -> modastack install <url> + fly machine restart   (in place)
+gitops-teams.yml:
+   plan   : git-diff changed deployments/<name>.yaml (deletions excluded)
+   deploy : matrix over changed names, environment=<name>
+            └─ materialize MODASTACK_ENV -> env-file -> `modastack deploy <name>`
+   orphans: Fly apps with no deployments/ file -> warn (human `modastack destroy`)
 
 publish a GitHub Release
    │
@@ -182,36 +257,38 @@ gitops-release.yml (release: published):
    build image once -> roll every fleet app to that digest (config preserved)
 ```
 
-### team-packages.yml
+The reconcile **business logic lives in `modastack deploy`**, not the YAML. The
+Action only orchestrates: diff which deployments changed, hand each one its
+secrets, loop the primitive. That is why the same engine runs from a laptop, this
+Action, Terraform, or a SaaS plane — see §7.1 (bring your own repo).
+
+### gitops-teams.yml — the reconcile
+Triggered by **push to main** (path-filtered to `deployments/**` + `agents/**`).
+Jobs:
+- **plan**: `fetch-depth: 2`; emits the list of `deployments/<name>.yaml` that
+  changed (`git diff --diff-filter=d` to **exclude deletions** — deleting is the
+  orphans job's human-gated concern), plus any deployment whose `team:` matches a
+  changed `agents/<team>/`. Gates the rest on `secrets.FLY_API_TOKEN` being set.
+- **deploy** (matrix over the changed names, `environment: <name>`): install the
+  CLI, materialize `MODASTACK_ENV` → env-file, then `modastack deploy <name>
+  --env-file …`. One idempotent path — `deploy` itself decides provision-vs-update
+  by Fly state, so there is no separate added/changed split any more.
+- **orphans**: enumerate the fleet (`fleet.sh list`, fleet from `defaults.yaml`),
+  warn on any app with no `deployments/` file. **Never auto-destroys** (the volume
+  is the only copy of state).
+
+> **Delivery in CI.** moda's internal `deployments/eng-team.yaml` uses
+> `team: eng-team` → **ssh-push** from the checked-out repo, so CI needs no
+> published tarball. An operator who prefers HTTPS-fetch sets `team-url:` instead
+> (and publishes the tarball — see `team-packages.yml`).
+
+### team-packages.yml (only for `team-url` delivery)
 On push to main (path-filtered to `agents/**` + the smoke fixture), builds each
 team into `<team>.tar.gz` and **publishes to a rolling `teams-latest` GitHub
 Release** → stable public URL
 `https://github.com/<owner>/<repo>/releases/download/teams-latest/<team>.tar.gz`.
-It is the **sole publisher** of that release; nothing else should `--clobber` it
-(two writers race).
-
-### gitops-teams.yml — added + changed
-Triggered by **`workflow_run` after "Team packages" completes on `main`** (so the
-tarball is fresh before any instance pulls it). Jobs:
-- **diff**: checks out `workflow_run.head_sha` (`fetch-depth: 2`), computes changed
-  top-level `agents/<team>` dirs (`git diff --diff-filter=d` to **exclude
-  deletions** — deleting a team is human-only), drops slugs whose `agent.yaml` is
-  gone, then `fleet.sh classify` against **Fly state** → emits `added`/`changed`.
-  Classifying by Fly state (not git status) makes failed-provision retries and
-  re-add-after-destroy self-heal.
-- **provision** (matrix over `added`, `environment: <team>`): materialize
-  `MODASTACK_ENV` → env-file → `provision-instance.sh --app <prefix>-<team> --fleet
-  <prefix> --team-url <teams-latest/team.tar.gz> --env-file … --yes`.
-- **update** (matrix over `changed`, no environment binding — secrets already on
-  the volume): `fly ssh … modastack install "<url>"` then `fly machine restart`.
-
-> **Why `install <url>`, not `agents update`.** A container first-boots from
-> `MODASTACK_TEAM_URL`, so its installed pack records `source = url:…`
-> (`registry.py:318`). `modastack agents update` resolves via GitHub *registry*
-> repos (`source = github:…`) and won't match a URL source. `install <url>` re-runs
-> the workspace-safe reinstall against the refreshed tarball (reseeds
-> roles/tools/workflows, keeps existing workspace files). `restart` (stop+start,
-> not `--fresh`) reloads config and resumes the session.
+Sole publisher of that release; nothing else should `--clobber` it. Only needed
+when a deployment uses `team-url:`; pure ssh-push (`team:`) deployments ignore it.
 
 ### gitops-release.yml — fleet rollout
 Triggered by **`release: published`** (independent of PyPI — the Fly image builds
@@ -234,27 +311,47 @@ swap the image. Per-app failures are isolated and reported; re-run to retry
 
 ## 7. Operator runbook
 
-**One-time, per repo:**
-1. `vars.FLEET_PREFIX` (e.g. `moda`), optional `vars.MODASTACK_EVENT_SERVER`.
-2. `secrets.FLY_API_TOKEN` = `fly tokens create deploy`.
-
-**One-time, per team:** a GitHub **Environment** named `<team>` with one secret
-`MODASTACK_ENV` = the full env-file (all `ANTHROPIC_API_KEY`/service tokens/
-`MODASTACK_*`). No protection rules.
-
-**Then it's automatic:** push the team → instance appears; edit prompts → hot
-update; publish a release → fleet rolls.
-
-**Manual ops (mirror the workflows):**
+### Self-service (one developer, no CI)
+From a modastack checkout, with your team under `agents/<team>/`:
 ```
-scripts/provision-instance.sh --app <prefix>-<team> --fleet <prefix> \
-  --team-url <teams-latest/team.tar.gz> --env-file ./team.env --yes
-scripts/fleet.sh list <prefix>                       # what's running
-scripts/fleet.sh classify <prefix> <team>…           # added vs changed
+# 1. point a local env-file at your secrets (ANTHROPIC_API_KEY + service tokens)
+printf 'ANTHROPIC_API_KEY=sk-ant-…\nSLACK_BOT_TOKEN=xoxb-…\n' > ./my-team.env
+
+# 2. deploy — ssh-push builds your local team and ships it; no hosting needed
+modastack deploy my-team --team my-team --env-file ./my-team.env
+
+# 3. iterate: edit agents/my-team/…, redeploy (in-place, workspace-safe)
+modastack deploy my-team --team my-team --env-file ./my-team.env
+
+# 4. tear down (removes the volume!)
+modastack destroy my-team
+```
+Or commit a `deployments/my-team.yaml` (`team: my-team`, `secrets.env-file:
+./my-team.env`) and just run `modastack deploy my-team`.
+
+### 7.1. Bring your own repo (CI for your own teams)
+The two workflows are operator-agnostic — wire your repo in four steps:
+1. **Copy** `.github/workflows/gitops-teams.yml` (+ `gitops-release.yml` if you
+   want release rollouts) and `deployments/defaults.yaml` into your repo. Set
+   `fleet:` (your namespace) and `event_server:` in `defaults.yaml`.
+2. **Add a deployment**: `deployments/<team>.yaml` with `team: <team>` (a package
+   under your `agents/`) — or `team-url: <published .tar.gz>` if you publish
+   tarballs. One file per instance.
+3. **Repo secret**: `secrets.FLY_API_TOKEN` = `fly tokens create deploy`.
+4. **Per-deployment GitHub Environment** named `<team>`, one secret `MODASTACK_ENV`
+   = the full KEY=VALUE env-file body. **No** required-reviewer rule.
+
+Push to `main` → `gitops-teams.yml` runs `modastack deploy <team>` for each changed
+deployment. That's it; no FLEET_PREFIX var, no manifest, no database.
+
+### Manual ops
+```
+modastack deploy <name> [--env-file ./x.env]        # provision or update (idempotent)
+modastack destroy <name> [--yes]                     # tear down (removes volume!)
+scripts/fleet.sh list <fleet>                        # what's running
 fly logs -a <app> ; fly status -a <app>              # observe
 fly ssh console -a <app> --command 'gosu modastack env HOME=/data/home \
   bash -c "cd /data/project && modastack status"'    # admin
-scripts/destroy-instance.sh --app <app>              # tear down (removes volume!)
 ```
 Both GitOps workflows also accept `workflow_dispatch` for manual re-runs.
 
@@ -264,8 +361,11 @@ Both GitOps workflows also accept `workflow_dispatch` for manual re-runs.
 - *Deploy fails on volumes* → missing `--ha=false` (§2.4).
 - *Two new teams, one fails with `docker.sock missing hostname`* → concurrent
   builds racing the shared builder; serialize (§2.9).
-- *Changed team didn't update* → confirm the workflow used `install <url>`, not
-  `agents update`, and that `teams-latest` republished first (§6).
+- *Changed `team-url` team didn't update* → confirm the in-place path used
+  `install <url>`, not `agents update`, and that `teams-latest` republished (§6).
+- *ssh-push instance stuck "waiting for a pushed team"* → the blank provision
+  succeeded but the push didn't land `.modastack/agent.yaml`; check `fly logs` and
+  re-run `modastack deploy <name>` (idempotent — it re-pushes).
 - *Instance boots but agents won't dispatch* → a team with a `requires:` gate whose
   tools aren't in the image (e.g. eng-team's gstack/codex). That's the C24 gap —
   see `docs/design/CUSTOM_AGENT_DEPS.md`.
@@ -277,11 +377,33 @@ Both GitOps workflows also accept `workflow_dispatch` for manual re-runs.
 C10 + C22 were verified **live on Fly**, then torn down:
 - Single instance: empty volume → image build → boot → first-boot team install from
   URL → healthy manager → `modastack ask` self-registers on the real Worker →
-  `pong`.
+  `pong`. (The `team-url` delivery path, unchanged by the deploy refactor except
+  the added `MODASTACK_INSTANCE` stamp.)
 - Two-instance fleet (C22): provision both, `fleet.sh list`/`classify` against real
   Fly state, changed-team update (`install <url>` + restart — role content updated,
   workspace file preserved), release rollout (cross-app image pull, config
   preserved, `pong`).
+
+The deploy refactor adds the **ssh-push** path, **verified live on Fly**
+(`modastack deploy sshe2e --team smoke-team`, then torn down):
+- Blank provision (app + 15 GB volume + staged secret); `fly deploy` returns on the
+  blank machine reaching **started** — it does *not* hang on the image healthcheck.
+- `MODASTACK_INSTANCE` confirmed in the live `[env]` (next to `MODASTACK_FLEET`).
+- base64 push over `fly ssh` → `modastack install /data/…tar.gz --non-interactive`
+  (secrets read from the Fly-injected env — confirmed available in the ssh session)
+  → the wait-for-team entrypoint detects the team and starts the manager (`status`
+  shows it running).
+- In-place re-deploy: re-push → workspace-safe reinstall (a role marker propagated)
+  → `fly machine restart <id>` → manager back up.
+- `modastack destroy sshe2e --yes` removes the app + volume.
+
+> **flyctl gotcha (found in this e2e):** `fly machine restart -a <app>` errors
+> "a machine ID must be specified" outside a TTY. `deploy` resolves IDs via
+> `fly machine list --json` and restarts each by ID.
+
+The **team-url** path is unchanged from C22 (live-verified there) except the added
+`MODASTACK_INSTANCE` stamp; it is covered here by the engine unit tests pending a
+fresh live run. <!-- e2e-status: ssh-push verified 2026-06-19 -->
 
 Smoke target: `tests/fixtures/smoke-team` (zero-secret; only needs
 `MODASTACK_EVENT_SERVER` + an Anthropic key for the `ask` round-trip).
