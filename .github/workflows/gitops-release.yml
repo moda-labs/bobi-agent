@@ -1,0 +1,113 @@
+name: GitOps — release rollout
+
+# Roll the whole Fly fleet to a new modastack image when a release is published
+# (C22 / #342; docs/design/CONTAINERIZED_INSTANCES.md §10).
+#
+# Independent of PyPI: the Fly image builds from source (Dockerfile), so the
+# rollout does not wait on the wheel. Build the image ONCE (against the first
+# fleet app), then reuse that exact image reference for every other app — all
+# instances share one image (design §2). Each app keeps its own volume, sessions,
+# env and secrets: we round-trip the live config with `fly config save` and only
+# swap the image, so C9 idempotency makes the restart safe and sessions resume.
+#
+# Per-app failures are isolated and reported; the Action log IS the deploy log.
+# A re-run is the recovery model (idempotent + C7 format-version guard).
+#
+# Required repo configuration:
+#   vars.FLEET_PREFIX     operator namespace (fleet enumerated by MODASTACK_FLEET).
+#   secrets.FLY_API_TOKEN Fly deploy token (org-scoped) for flyctl.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref/tag to build and roll out (default: this branch)"
+        required: false
+
+# One rollout at a time across the whole fleet.
+concurrency:
+  group: gitops-release
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    runs-on: ubuntu-latest
+    env:
+      FLEET_PREFIX: ${{ vars.FLEET_PREFIX }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Roll the fleet
+        run: |
+          set -euo pipefail
+          [ -n "${FLEET_PREFIX:-}" ] || { echo "::error::vars.FLEET_PREFIX is unset"; exit 1; }
+
+          mapfile -t apps < <(scripts/fleet.sh list "$FLEET_PREFIX")
+          if [ "${#apps[@]}" -eq 0 ]; then
+            echo "Fleet '$FLEET_PREFIX' has no instances — nothing to roll."; exit 0
+          fi
+          echo "Fleet ($FLEET_PREFIX): ${apps[*]}"
+
+          # redeploy APP [IMAGE] — round-trip the app's live config and deploy.
+          # With no IMAGE we build from source (the canonical image for this
+          # release); with IMAGE we reuse that exact reference (build once).
+          # Our provisioner deploys via --dockerfile (no [build] key), so the
+          # saved config carries env/[[mounts]]/[[vm]] but no dockerfile-path trap.
+          redeploy() {
+            local app="$1" image="${2:-}" cfg
+            cfg="$(mktemp -t "fly-$app-XXXX.toml")"
+            # `fly config save` writes the live config (env/[[mounts]]/[[vm]], no
+            # [build] key) to the path given by -c. Our apps deploy via
+            # --dockerfile, so the saved config has no dockerfile-path trap.
+            fly config save -a "$app" -c "$cfg" --yes
+            if [ -n "$image" ]; then
+              fly deploy --config "$cfg" --image "$image" \
+                --ha=false --wait-timeout 10m -a "$app"
+            else
+              fly deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
+                --depot=false --ha=false --wait-timeout 10m --remote-only -a "$app"
+            fi
+            rm -f "$cfg"
+          }
+
+          # Build + roll the first app from source, then resolve the image it now
+          # runs and reuse it for the rest — one build, N deploys.
+          first="${apps[0]}"
+          echo "::group::build + deploy $first"
+          redeploy "$first"
+          echo "::endgroup::"
+
+          # `fly image show --json` exposes Repository + Digest (the Ref/Reference
+          # fields are null), so construct the immutable pull reference ourselves.
+          image="$(fly image show -a "$first" --json | jq -r '
+            (.[0] // .) as $i
+            | if ($i.Repository and $i.Digest)
+              then "registry.fly.io/\($i.Repository)@\($i.Digest)"
+              else empty end')"
+          [ -n "$image" ] || { echo "::error::could not resolve built image for $first"; exit 1; }
+          echo "Release image: $image"
+
+          fails=()
+          for app in "${apps[@]:1}"; do
+            echo "::group::deploy $app"
+            if redeploy "$app" "$image"; then
+              echo "ok: $app"
+            else
+              echo "::error::rollout failed for $app"; fails+=("$app")
+            fi
+            echo "::endgroup::"
+          done
+
+          if [ "${#fails[@]}" -gt 0 ]; then
+            echo "::error::Fleet rollout incomplete — failed: ${fails[*]}"
+            echo "Re-run this workflow to retry (deploys are idempotent)."
+            exit 1
+          fi
+          echo "Fleet rolled to $image (${#apps[@]} instance(s))."

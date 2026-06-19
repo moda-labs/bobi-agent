@@ -67,6 +67,13 @@
 #                        are treated as plaintext [env], overridden by the flags below.
 #
 # Options:
+#   --fleet PREFIX       Operator/fleet namespace stamped into the instance as
+#                        MODASTACK_FLEET. The fleet-state primitive: enumerate a
+#                        fleet by `fly apps list` filtered on this stamp (the C22
+#                        GitOps Action and any future provisioner service share it).
+#                        Default: the leading dash-segment of --app (e.g. --app
+#                        acme-modastack-eng ⇒ fleet "acme"). Pass explicitly when
+#                        the app name's first segment isn't your fleet namespace.
 #   --auth MODE          api_key (default) | subscription. See §6.1.
 #   --event-server URL   Worker URL (https://). Default: the shared moda-labs Worker.
 #   --region REGION      Fly region for the app + volume. Default: iad.
@@ -102,7 +109,7 @@ DEFAULT_EVENT_SERVER="https://modastack-events.modalabs.workers.dev"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- args -------------------------------------------------------------------
-APP="" TEAM="" TEAM_URL="" ENV_FILE="" AUTH="api_key"
+APP="" TEAM="" TEAM_URL="" ENV_FILE="" AUTH="api_key" FLEET=""
 EVENT_SERVER="$DEFAULT_EVENT_SERVER"
 REGION="iad" ORG="" VOLUME_SIZE="15" MEMORY="4gb" CPUS="2"
 LOGIN_CHANNEL="" CLAUDE_VERSION="" VOLUME_NAME="data" ASSUME_YES="0"
@@ -112,6 +119,7 @@ usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'
 while [ $# -gt 0 ]; do
   case "$1" in
     --app) APP="$2"; shift 2;;
+    --fleet) FLEET="$2"; shift 2;;
     --team) TEAM="$2"; shift 2;;
     --team-url) TEAM_URL="$2"; shift 2;;
     --env-file) ENV_FILE="$2"; shift 2;;
@@ -142,6 +150,9 @@ command -v "$FLY" >/dev/null 2>&1 \
 
 # --- validate ---------------------------------------------------------------
 [ -n "$APP" ]      || fatal "--app is required (globally-unique Fly app name)."
+# Fleet namespace defaults to the app name's leading dash-segment so a fleet of
+# apps named "<fleet>-<...>" enumerates by this stamp without extra config.
+[ -n "$FLEET" ] || FLEET="${APP%%-*}"
 if [ -n "$TEAM" ] && [ -n "$TEAM_URL" ]; then
   fatal "pass exactly one of --team / --team-url, not both."
 elif [ -z "$TEAM" ] && [ -z "$TEAM_URL" ]; then
@@ -217,11 +228,17 @@ for k in "${!ENV_FROM_FILE[@]}"; do ENV_VARS["$k"]="${ENV_FROM_FILE[$k]}"; done
 [ -n "$TEAM_URL" ] && ENV_VARS["MODASTACK_TEAM_URL"]="$TEAM_URL"
 ENV_VARS["MODASTACK_AUTH"]="$AUTH"
 ENV_VARS["MODASTACK_EVENT_SERVER"]="$EVENT_SERVER"
+# Fleet-membership stamp: this is the authoritative fleet-state key (the app name
+# is only a discovery hint). Enumerate a fleet by reading this back per app
+# (`fly config env`/`scripts/fleet.sh`), so two fleets can share one Fly org and
+# a future MODASTACK_TENANT filter slots into the same [env] block (design §9.1).
+ENV_VARS["MODASTACK_FLEET"]="$FLEET"
 [ -n "$LOGIN_CHANNEL" ] && ENV_VARS["MODASTACK_LOGIN_CHANNEL"]="$LOGIN_CHANNEL"
 
 # --- confirm ----------------------------------------------------------------
 echo
 echo "  Fly app        : $APP${ORG:+  (org: $ORG)}"
+echo "  Fleet          : $FLEET  (MODASTACK_FLEET stamp)"
 echo "  Region         : $REGION"
 echo "  Team           : ${TEAM:-(from URL) $TEAM_URL}"
 echo "  Auth mode      : $AUTH"

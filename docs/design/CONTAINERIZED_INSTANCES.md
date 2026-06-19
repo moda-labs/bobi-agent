@@ -531,9 +531,14 @@ dirs:
   per-team GitHub environment secrets, e.g. `TEAM_<NAME>_*`; an instance
   with unpopulated secrets provisions but sits unhealthy until filled —
   same seam D2 plugs into).
-- **Changed team** → trigger `modastack agents update` on the matching
-  instance. Never re-provision: volume `agent.yaml` is source of truth,
-  reinstall must not clobber workspace edits.
+- **Changed team** → re-pull the team on the matching instance with
+  `modastack install <teams-latest-url>` (then restart), not `modastack
+  agents update`: a container first-boots from `MODASTACK_TEAM_URL`, so its
+  installed pack records `source = url:…`, which the registry-based `agents
+  update` path does not resolve. `install <url>` re-runs the same
+  workspace-safe reinstall against the refreshed tarball. Never re-provision:
+  volume `agent.yaml` is source of truth, reinstall must not clobber workspace
+  edits.
 - **modastack release** → scripted `fly deploy` loop over the fleet.
   Volumes and sessions survive; C9 idempotency makes restart safe; C7
   guards format-version skew.
@@ -542,7 +547,7 @@ dirs:
 Keep it a script + ~50-line workflow — no deploy service, no deployment
 DB; the Fly API is the state store, the Action log is the deploy log.
 This implements the §9 provisioner seam; replace with a service only when
-instance count makes the loop creak (§11.3).
+instance count makes the loop creak (§9, "Provisioner service" upgrade row).
 *Accept:* push a new team dir → live instance with no manual step beyond
 secrets; push a team edit → matching instance updated, workspace intact;
 tag a modastack release → all instances on the new version with sessions
