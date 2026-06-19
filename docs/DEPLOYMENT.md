@@ -5,9 +5,15 @@ and the hard-won nuances that make it work. This is the **operational** companio
 to the design docs: `docs/design/CONTAINERIZED_INSTANCES.md` is *why/what*, this is
 *how it works today + the gotchas*. Current as of the C22 GitOps work (2026-06-19).
 
-Pieces: `Dockerfile` (image) · `scripts/provision-instance.sh` + `destroy-instance.sh`
-· `scripts/fleet.sh` (fleet helper) · `scripts/build-team-tarballs.sh` ·
-`.github/workflows/{team-packages,gitops-teams,gitops-release}.yml`.
+Pieces:
+
+- `Dockerfile` — the image
+- `scripts/provision-instance.sh` + `scripts/destroy-instance.sh` — stand up / tear down one instance
+- `scripts/fleet.sh` — fleet enumeration helper
+- `scripts/build-team-tarballs.sh` — package teams into `.tar.gz`
+- `.github/workflows/team-packages.yml` — publishes team tarballs
+- `.github/workflows/gitops-teams.yml` — provision/update on push
+- `.github/workflows/gitops-release.yml` — fleet rollout on release
 
 ---
 
