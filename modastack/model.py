@@ -36,6 +36,7 @@ PROVIDER_DEFAULT_MODELS: dict[str, str] = {
 PROVIDER_BASE_URLS: dict[str, str] = {
     "openai": "https://api.openai.com/v1",
     "google": "https://generativelanguage.googleapis.com/v1beta",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta",
     "openrouter": "https://openrouter.ai/api/v1",
     "together": "https://api.together.xyz/v1",
 }
