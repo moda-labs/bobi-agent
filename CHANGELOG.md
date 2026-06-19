@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.24.0 — 2026-06-19
+
+Author and live-test custom **stdio (command-based) MCP servers** in the setup/Bobi
+connections UI. The runtime already supported stdio servers; this fills the
+authoring gap (previously HTTP/URL-only), and adds folder-detection, an in-chat
+connection test, and a per-row connection-status indicator.
+
+### Added
+- **Stdio MCP connections.** Add a local command-based MCP server (name +
+  command + args + env) in the connections UI; persisted to `agent.yaml` as a
+  `{type: stdio, command, args, env}` entry with secrets captured as `${VAR}`
+  refs in `.modastack/.env`, never inline. (MOD-209)
+- **Detect from a local folder.** Point at an MCP server's project folder and
+  modastack infers the launch recipe — command/args from `pyproject.toml` /
+  `package.json`, and env vars (required vs optional, secret vs plain) by AST
+  scan, with a confidence guard for highly-configurable servers. Home-confined,
+  read-only static analysis.
+- **In-chat connection test.** Ask Bobi to test a connection; it launches the
+  server, proposes a safe read-only tool, and — on your confirmation — calls it
+  to verify the connection end-to-end. Never proposes or runs a write tool.
+- **Connection-status indicator.** A subtle per-row dot: connected (verified) /
+  needs-config / error / added.
+
+### Internal
+- Canonical-key dedup so a guessed service and the MCP added for it collapse to
+  one row; edit repopulates the stored config; `serialize_state` exposes
+  `mcp_servers` (names/refs only, never secret values).
+- Hardening from a cross-model (Claude + Codex) review: default-deny read-only
+  tool picker, decline-first chat confirmation, minimal child env on probe,
+  secret-scrubbed probe output, coarse-only test-verdict persistence.
+
 ## 0.22.0 — 2026-06-18
 
 Codex-as-a-tool, a methodical setup connections flow, and a round of comms /
