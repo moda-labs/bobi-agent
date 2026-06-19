@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.23.0 — 2026-06-19
+
+Containerized instances land: modastack now runs as an immutable image on Fly,
+deployable from the binary alone, with a fast-rebuilding layered Dockerfile.
+
+### Added
+- **Containerized instance image (C8).** One Dockerfile, two build modes
+  (`MODASTACK_BUILD={source|pypi}`): `source` builds the wheel from a checkout
+  (dev + repo CI), `pypi` installs a published, version-pinned `modastack` so a
+  deploy needs no repo. Runs the agent non-root, ships the native `claude` CLI
+  (no Node), and bakes the embedding model in for cold-start speed. (#338)
+- **`modastack deploy` / `destroy` primitive + binary-only deploy (C22).**
+  Idempotent provision-or-update with config precedence (flags ›
+  `deployments/<name>.yaml` › `defaults.yaml` › built-ins). Deploy assets
+  (Dockerfile, scripts, entrypoints) ship as wheel package data, so
+  `uv tool install modastack` is enough to deploy — no checkout. (#342)
+- **Fly provisioning + install-team-from-URL (C10).** `provision-instance.sh`
+  and `modastack install <url>` deliver a team to a fresh instance. (#340)
+- **Subscription-login bootstrap (C23).** First-boot subscription auth for a
+  dark container. (#343)
+- **GitOps thin clients.** Release / `deploy-*` tag workflows that are thin
+  `modastack deploy` callers; `deployments/` holds per-instance config; a
+  permanent `moda-canary` instance is the pipeline smoke. (#342)
+- **First-class foreground / PID-1 mode + manager health endpoint.** `modastack
+  start --foreground` as the container entrypoint, with a health port the
+  Docker `HEALTHCHECK` probes. (#333)
+- **`modastack install --non-interactive`** for unattended/container installs.
+  (containerized-5)
+- **Subagent concurrency semaphore** bounding parallel agent launches. (#334)
+
+### Changed
+- **fastembed/ONNX replaces the torch embedding sidecar.** The CPU instance no
+  longer pulls torch + ~2 GB of CUDA wheels; embeddings run on the lightweight
+  ONNX embedder. (#346)
+- **Faster, layered Dockerfile.** Layers are ordered stable → volatile so a
+  code-only rebuild is seconds instead of minutes: the fastembed model bake
+  moves to a dedicated `model-baker` stage keyed only on the fastembed version,
+  the `claude` CLI install sits above the framework, and the `modastack` venv is
+  the last heavy layer. `source` mode now splits a pyproject-keyed deps layer
+  from a thin `--no-deps` wheel layer (dep list read from
+  `[project.dependencies]` via stdlib `tomllib`, no drift). This is the layer
+  ordering team-flavored images (C24) inherit — see
+  `docs/design/CUSTOM_AGENT_DEPS.md` §"three clocks".
+- **`[kb]` extra avoided in images.** Both builders install `fastembed` +
+  `sqlite-vec` explicitly, since some published `[kb]` extras stale-list
+  `sentence-transformers` → torch.
+
+### Fixed
+- **State format version marker** so an upgraded CLI detects and migrates stale
+  on-disk state instead of failing against it. (#337)
+- **Skip the local Node event server when `event_server_url` is remote** — a
+  containerized instance talks to the remote event server, not a local one.
+  (containerized-6)
+- **Release promote no longer leaves prod down** on a post-stop failure. (#347)
+- **Container-safe `claude` CLI path resolution.** (containerized-1)
+- **Leaked asyncio event loop** that failed ~53 unit tests in full-suite runs.
+  (#318)
+
+### Internal
+- Phase-0 containerization review fixes (C3/C4/C5). (#356)
+- Design docs for containerized instances and custom agent dependencies (C24).
+  (#368, #369)
+
 ## 0.22.0 — 2026-06-18
 
 Codex-as-a-tool, a methodical setup connections flow, and a round of comms /
