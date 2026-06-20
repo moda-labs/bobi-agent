@@ -4,14 +4,18 @@ name: GitOps — release rollout
 # (C22 / #342; docs/design/CONTAINERIZED_INSTANCES.md §10).
 #
 # Independent of PyPI: the Fly image builds from source (Dockerfile), so the
-# rollout does not wait on the wheel. Build the image ONCE — on the CANARY first
-# — then SMOKE the canary (a functional `ask` proving the new image's agent
-# responds end-to-end through the prod event server) and only reuse that exact
-# image reference for the rest of the fleet if it passes. This canary gate is the
-# on-Fly replacement for the retired EC2 release smoke (publish-pypi.yml). All
-# instances share one image (design §2). Each app keeps its own volume, sessions,
-# env and secrets: we round-trip the live config with `fly config save` and only
-# swap the image, so C9 idempotency makes the restart safe and sessions resume.
+# rollout does not wait on the wheel. Build the shared GENERIC image ONCE — on the
+# CANARY — then SMOKE the canary (a functional `ask` proving the new image's agent
+# responds end-to-end through the prod event server) and only proceed if it passes.
+# This canary gate is the on-Fly replacement for the retired EC2 release smoke
+# (publish-pypi.yml). Then roll the rest: generic instances reuse the shared image
+# ref (build once, deploy many — design §2); a TEAM-FLAVORED instance (its team
+# declares a `build:` spec, C24 #368) instead rebuilds its OWN image with its
+# TEAM_DEPS hook on the new framework wheel — rolling the generic image onto it
+# would strip its baked tools and break dispatch. Each app keeps its own volume,
+# sessions, env and secrets: we round-trip the live config with `fly config save`
+# and only swap the image, so C9 idempotency makes the restart safe and sessions
+# resume.
 #
 # Per-app failures are isolated and reported; the Action log IS the deploy log.
 # A re-run is the recovery model (idempotent + C7 format-version guard).
@@ -54,6 +58,14 @@ jobs:
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
+      # Needed by scripts/render-team-deps.py to render a team-flavored
+      # instance's TEAM_DEPS hook so its own image rebuilds on the new framework.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install modastack (for the team-deps renderer)
+        run: pip install -e .
+
       - name: Roll the fleet
         run: |
           set -euo pipefail
@@ -74,21 +86,25 @@ jobs:
           fi
           echo "Fleet ($FLEET_PREFIX): ${apps[*]}"
 
-          # redeploy APP [IMAGE] — round-trip the app's live config and deploy.
-          # With no IMAGE we build from source (the canonical image for this
-          # release); with IMAGE we reuse that exact reference (build once).
-          # Our provisioner deploys via --dockerfile (no [build] key), so the
-          # saved config carries env/[[mounts]]/[[vm]] but no dockerfile-path trap.
+          # redeploy APP [IMAGE] [TEAM_DEPS] — round-trip the app's live config
+          # (env/[[mounts]]/[[vm]], no [build] key — we deploy via --dockerfile)
+          # and deploy. Three modes:
+          #   IMAGE set      → reuse that exact ref (the shared generic image; build once).
+          #   TEAM_DEPS set  → build from source WITH the team's deps hook (C24) —
+          #                    a team-flavored instance rebuilds its OWN image on the
+          #                    new framework wheel (tool layers cached on Fly's builder).
+          #   neither        → build the plain generic image from source.
           redeploy() {
-            local app="$1" image="${2:-}" cfg
+            local app="$1" image="${2:-}" team_deps="${3:-}" cfg
             cfg="$(mktemp -t "fly-$app-XXXX.toml")"
-            # `fly config save` writes the live config (env/[[mounts]]/[[vm]], no
-            # [build] key) to the path given by -c. Our apps deploy via
-            # --dockerfile, so the saved config has no dockerfile-path trap.
             "$FLY" config save -a "$app" -c "$cfg" --yes
             if [ -n "$image" ]; then
               "$FLY" deploy --config "$cfg" --image "$image" \
                 --ha=false --wait-timeout 10m -a "$app"
+            elif [ -n "$team_deps" ]; then
+              "$FLY" deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
+                --build-arg "TEAM_DEPS=$team_deps" \
+                --depot=false --ha=false --wait-timeout 10m --remote-only -a "$app"
             else
               "$FLY" deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
                 --depot=false --ha=false --wait-timeout 10m --remote-only -a "$app"
@@ -96,54 +112,77 @@ jobs:
             rm -f "$cfg"
           }
 
-          # Build the CANARY first (or apps[0] if no canary in the fleet), then
-          # reuse its image for the rest — one build, N deploys.
+          # team-deps relpath for an APP's deployment (empty = generic). Renders the
+          # hook into the build context so a team-flavored instance rebuilds its own
+          # image; a generic instance rolls the shared base image.
+          team_deps_for() { python scripts/render-team-deps.py "${1#${FLEET_PREFIX}-}"; }
+
+          # Build the shared generic base image on a GENERIC instance (the canary,
+          # preferred — it's also the smoke target). Team-flavored instances can't be
+          # the generic source (they rebuild their own image), so skip them here.
           canary="${FLEET_PREFIX}-canary"
-          first="${apps[0]}"
-          printf '%s\n' "${apps[@]}" | grep -qx "$canary" && first="$canary"
-          echo "::group::build + deploy $first"
-          redeploy "$first"
-          echo "::endgroup::"
+          generic_src=""
+          for cand in "$canary" "${apps[@]}"; do
+            printf '%s\n' "${apps[@]}" | grep -qx "$cand" || continue
+            [ -n "$(team_deps_for "$cand")" ] && continue   # team-flavored — not a generic source
+            generic_src="$cand"; break
+          done
 
-          # Functional canary gate — the on-Fly replacement for the retired EC2
-          # release smoke (publish-pypi.yml): ask the freshly-built canary and
-          # assert it answers CANARY-OK end-to-end through the PROD event server
-          # BEFORE rolling the rest of the fleet. A broken image aborts the rollout
-          # here instead of propagating. The deploy already waited for the image
-          # HEALTHCHECK, so the manager should answer at once; retry covers a slow
-          # reconnect after the restart.
-          if [ "$first" = "$canary" ]; then
-            echo "::group::smoke $canary (functional ask)"
-            ask='gosu modastack env HOME=/data/home bash -c "cd /data/project && /opt/venv/bin/modastack ask \"Release canary smoke: reply with exactly CANARY-OK and nothing else.\" --timeout 180"'
-            ok=""
-            for attempt in 1 2 3; do
-              resp="$("$FLY" ssh console -a "$canary" -C "$ask" 2>&1 || true)"
-              printf '%s' "$resp" | grep -q "CANARY-OK" && { ok=1; break; }
-              echo "canary not ready (attempt $attempt/3) — retrying in 30s"; sleep 30
-            done
-            [ -n "$ok" ] || { echo "::error::canary smoke FAILED — $canary did not answer CANARY-OK; aborting rollout."; exit 1; }
-            echo "Canary smoke passed — $canary answered CANARY-OK."
+          image=""
+          if [ -n "$generic_src" ]; then
+            echo "::group::build + deploy $generic_src (generic base)"
+            redeploy "$generic_src"
             echo "::endgroup::"
-          fi
 
-          # `fly image show --json` exposes Repository + Digest (the Ref/Reference
-          # fields are null), so construct the immutable pull reference ourselves.
-          image="$("$FLY" image show -a "$first" --json | jq -r '
-            (.[0] // .) as $i
-            | if ($i.Repository and $i.Digest)
-              then "registry.fly.io/\($i.Repository)@\($i.Digest)"
-              else empty end')"
-          [ -n "$image" ] || { echo "::error::could not resolve built image for $first"; exit 1; }
-          echo "Release image: $image"
+            # Functional canary gate — the on-Fly replacement for the retired EC2
+            # release smoke (publish-pypi.yml): ask the freshly-built canary and
+            # assert it answers CANARY-OK end-to-end through the PROD event server
+            # BEFORE rolling the rest of the fleet. A broken image aborts here
+            # instead of propagating. The deploy already waited for the image
+            # HEALTHCHECK, so the manager should answer at once; retry covers a slow
+            # reconnect after restart.
+            if [ "$generic_src" = "$canary" ]; then
+              echo "::group::smoke $canary (functional ask)"
+              ask='gosu modastack env HOME=/data/home bash -c "cd /data/project && /opt/venv/bin/modastack ask \"Release canary smoke: reply with exactly CANARY-OK and nothing else.\" --timeout 180"'
+              ok=""
+              for attempt in 1 2 3; do
+                resp="$("$FLY" ssh console -a "$canary" -C "$ask" 2>&1 || true)"
+                printf '%s' "$resp" | grep -q "CANARY-OK" && { ok=1; break; }
+                echo "canary not ready (attempt $attempt/3) — retrying in 30s"; sleep 30
+              done
+              [ -n "$ok" ] || { echo "::error::canary smoke FAILED — $canary did not answer CANARY-OK; aborting rollout."; exit 1; }
+              echo "Canary smoke passed — $canary answered CANARY-OK."
+              echo "::endgroup::"
+            fi
+
+            # `fly image show --json` exposes Repository + Digest (the Ref/Reference
+            # fields are null), so construct the immutable pull reference ourselves.
+            image="$("$FLY" image show -a "$generic_src" --json | jq -r '
+              (.[0] // .) as $i
+              | if ($i.Repository and $i.Digest)
+                then "registry.fly.io/\($i.Repository)@\($i.Digest)"
+                else empty end')"
+            [ -n "$image" ] || { echo "::error::could not resolve built image for $generic_src"; exit 1; }
+            echo "Generic release image: $image"
+          else
+            echo "::notice::no generic instance in the fleet — every app rebuilds its own team image."
+          fi
 
           fails=()
           for app in "${apps[@]}"; do
-            [ "$app" = "$first" ] && continue
+            [ "$app" = "$generic_src" ] && continue
+            td="$(team_deps_for "$app")"
             echo "::group::deploy $app"
-            if redeploy "$app" "$image"; then
-              echo "ok: $app"
+            if [ -n "$td" ]; then
+              # team-flavored: rebuild its OWN image (its baked tools) on the new framework.
+              if redeploy "$app" "" "$td"; then echo "ok (team image): $app"
+              else echo "::error::rollout failed for $app"; fails+=("$app"); fi
+            elif [ -n "$image" ]; then
+              if redeploy "$app" "$image"; then echo "ok: $app"
+              else echo "::error::rollout failed for $app"; fails+=("$app"); fi
             else
-              echo "::error::rollout failed for $app"; fails+=("$app")
+              if redeploy "$app"; then echo "ok (generic build): $app"
+              else echo "::error::rollout failed for $app"; fails+=("$app"); fi
             fi
             echo "::endgroup::"
           done
@@ -153,4 +192,4 @@ jobs:
             echo "Re-run this workflow to retry (deploys are idempotent)."
             exit 1
           fi
-          echo "Fleet rolled to $image (${#apps[@]} instance(s))."
+          echo "Fleet rolled (${#apps[@]} instance(s); generic image: ${image:-none}; team-flavored instances rebuilt their own)."
