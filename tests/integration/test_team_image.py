@@ -5,12 +5,17 @@ SYNTHETIC tiny build spec (not eng-team's real gstack `./setup`, which is slow +
 network-flaky). Two halves of the contract:
 
   1. BUILD: the rendered team-deps hook runs as a layer below the framework
-     wheel, installs tools into the seed HOME, and the `verify: requires` step
-     re-runs the team's checks — so a passing build IS the verification.
-  2. SEED: the entrypoint copies the baked seed onto the VOLUME HOME at boot, so
-     ~-relative tools survive the volume remap (runtime ~ = /data/home). This is
-     the regression net for the build-time-vs-runtime HOME trap that motivated
-     the whole design.
+     wheel, bakes ~-relative tools into the IMAGE home (/home/modastack), and the
+     `verify: requires` step re-runs the team's checks against that same home —
+     so a passing build IS the verification, on the exact path the runtime uses.
+  2. RUNTIME: $HOME stays on the image, so baked tools are read in place — never
+     copied onto a volume. Only Claude's durable state moves to the volume via
+     CLAUDE_CONFIG_DIR, and the entrypoint points the whole ~/.claude at it (with
+     baked skills surfaced under it from an image path). This closes the
+     build-time-vs-runtime HOME trap by construction (build HOME == runtime HOME,
+     no seed copy to silently drop a verified file) AND makes ~/.claude fully
+     coincide with Claude's real state, so tools keying off ~/.claude/{projects,
+     settings.json,skills,…} or $HOME just work.
 
 Gated on a Docker daemon (the `docker` marker, excluded from integration-fast).
 """
@@ -30,9 +35,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 pytestmark = pytest.mark.docker
 
-# A baked tool we can assert on without any network: write a fake skill into the
-# seed HOME and verify it via a requires check (so the build's verify step
-# exercises the same ~-relative path eng-team's gstack check uses).
+# A baked tool we can assert on without any network: write a fake skill via
+# ~/.claude/skills (the path gstack uses) and verify it via a requires check.
 SYNTH_TEAM = """
     agent: pytest-team
     build:
@@ -44,7 +48,12 @@ SYNTH_TEAM = """
         check: "test -e ~/.claude/skills/faketool/SKILL.md"
 """
 
-SEEDED_FILE = "/data/home/.claude/skills/faketool/SKILL.md"
+# The build's ~/.claude/skills symlink redirects the write to the immutable image
+# path (outside ~/.claude). At runtime the agent reaches it two ways that must
+# both resolve: via CLAUDE_CONFIG_DIR/skills and via ~/.claude (-> the config dir).
+BAKED_SKILL = "/opt/modastack/skills/faketool/SKILL.md"
+CONFIG_SKILL = "/data/claude/skills/faketool/SKILL.md"
+HOME_SKILL = "/home/modastack/.claude/skills/faketool/SKILL.md"
 
 
 def _docker_ok() -> bool:
@@ -101,12 +110,16 @@ def team_image(tmp_path_factory) -> str:
 
 @requires_docker
 @pytest.mark.timeout(2500)
-def test_team_deps_baked_into_seed(team_image: str):
-    """The hook ran below the wheel: the baked tool + stamp live in the seed HOME."""
+def test_team_deps_baked_outside_dotclaude(team_image: str):
+    """The hook ran below the wheel: skills bake to the immutable image path
+    OUTSIDE ~/.claude (so the entrypoint can repoint ~/.claude at the volume),
+    and there is NO seed dir or tool stamp (the old copy-to-volume model is
+    gone)."""
     proc = _run(
         "docker", "run", "--rm", "--entrypoint", "sh", team_image, "-c",
-        "test -e /opt/modastack/home-seed/.claude/skills/faketool/SKILL.md "
-        "&& test -e /opt/modastack/home-seed/.modastack-tool-stamp && echo OK",
+        f"test -e {BAKED_SKILL} "
+        "&& ! test -e /opt/modastack/home-seed "
+        "&& ! test -e /home/modastack/.modastack-tool-stamp && echo OK",
     )
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     assert "OK" in proc.stdout
@@ -114,11 +127,17 @@ def test_team_deps_baked_into_seed(team_image: str):
 
 @requires_docker
 @pytest.mark.timeout(2500)
-def test_entrypoint_seeds_volume_home(team_image: str):
-    """At boot the entrypoint copies the seed onto the VOLUME HOME (/data/home).
+def test_runtime_home_fully_coincides_with_config_dir(team_image: str):
+    """At boot $HOME stays on the image; the entrypoint points ~/.claude at the
+    volume config dir and surfaces the baked skills under it. The contract this
+    proves — the thing that makes arbitrary tools "just work":
 
-    This is the trap the design exists to close: runtime ~ is the volume, so a
-    ~-relative tool baked into the image must be seeded onto it or it's invisible.
+      1. the baked skill resolves BOTH via CLAUDE_CONFIG_DIR/skills AND via
+         ~/.claude/skills (one coherent home tree), and
+      2. a NON-skills path written to Claude's real state dir
+         (CLAUDE_CONFIG_DIR/projects, where transcripts live) is readable via
+         ~/.claude/projects — the exact path gstack-memory-ingest walks. The
+         old skills-only bridge left that seam open; full coincidence closes it.
     """
     vol = "modastack-teamtest-vol"
     cname = "modastack-teamtest-run"
@@ -127,8 +146,8 @@ def test_entrypoint_seeds_volume_home(team_image: str):
     _run("docker", "volume", "create", vol)
     try:
         # api_key mode just needs a non-empty key to clear the entrypoint's auth
-        # guard; no team source → after seeding it parks in the wait-for-team
-        # loop, which is fine — we only assert the seed happened.
+        # guard; no team source → after the symlinks it parks in the wait-for-team
+        # loop, which is fine — the ~/.claude wiring happens before that.
         up = _run(
             "docker", "run", "-d", "--name", cname,
             "-v", f"{vol}:/data",
@@ -138,16 +157,32 @@ def test_entrypoint_seeds_volume_home(team_image: str):
         )
         assert up.returncode == 0, up.stderr
 
-        # The seed runs before the wait-for-team loop; poll the volume for it.
-        seeded = False
+        # ~/.claude wiring happens before the wait-for-team loop; poll for the
+        # skill resolving through it.
+        resolved = False
         for _ in range(30):
-            chk = _run("docker", "exec", cname, "test", "-e", SEEDED_FILE)
+            chk = _run("docker", "exec", cname, "test", "-e", HOME_SKILL)
             if chk.returncode == 0:
-                seeded = True
+                resolved = True
                 break
             time.sleep(1)
         logs = _run("docker", "logs", cname).stdout + _run("docker", "logs", cname).stderr
-        assert seeded, f"seed never landed on the volume HOME.\nLogs:\n{logs[-3000:]}"
+        assert resolved, f"skill never resolved via ~/.claude.\nLogs:\n{logs[-3000:]}"
+
+        # (1) Same baked file reachable via BOTH the config dir and ~/.claude.
+        both = _run("docker", "exec", cname, "sh", "-c",
+                    f"test -e {CONFIG_SKILL} && test -e {HOME_SKILL} && echo OK")
+        assert "OK" in both.stdout, both.stdout + both.stderr
+        # ~/.claude is the whole volume config dir (not just a skills bridge).
+        link = _run("docker", "exec", cname, "readlink", "/home/modastack/.claude")
+        assert link.stdout.strip() == "/data/claude", link.stdout
+
+        # (2) The seam that motivated full coincidence: a file written to Claude's
+        # real transcripts dir is visible at the ~/.claude/projects path tools use.
+        seam = _run("docker", "exec", cname, "sh", "-c",
+                    "mkdir -p /data/claude/projects && echo hi > /data/claude/projects/probe.txt "
+                    "&& cat /home/modastack/.claude/projects/probe.txt")
+        assert seam.stdout.strip() == "hi", seam.stdout + seam.stderr
     finally:
         _run("docker", "rm", "-f", cname)
         _run("docker", "volume", "rm", "-f", vol)

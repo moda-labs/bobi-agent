@@ -577,12 +577,15 @@ def push_team(app: str, pkg_dir: Path, *, restart: bool) -> None:
              f"gosu modastack bash -c 'base64 -d > {remote}'"],
             input_bytes=b64,
         )
-        # Install from the pushed tarball as the volume's owner with HOME on the
-        # volume (so ~/.claude + .env land there). --non-interactive => read
-        # secrets from the Fly env and fail loudly on a gap, never hang on a prompt.
+        # Install from the pushed tarball as the volume's owner, matching the
+        # container's runtime env: HOME on the image (/home/modastack), Claude's
+        # durable state on the volume (CLAUDE_CONFIG_DIR=/data/claude). The
+        # project (.modastack/agent.yaml + .env) lands under cwd /data/project on
+        # the volume. --non-interactive => read secrets from the Fly env and fail
+        # loudly on a gap, never hang on a prompt.
         _run([
             fly, "ssh", "console", "-a", app, "-C",
-            "gosu modastack env HOME=/data/home bash -c "
+            "gosu modastack env HOME=/home/modastack CLAUDE_CONFIG_DIR=/data/claude bash -c "
             f"'cd /data/project && modastack install {remote} --non-interactive'",
         ])
     if restart:
@@ -595,7 +598,7 @@ def update_team_url(app: str, url: str) -> None:
     fly = _fly_bin()
     _run([
         fly, "ssh", "console", "-a", app, "-C",
-        "gosu modastack env HOME=/data/home bash -c "
+        "gosu modastack env HOME=/home/modastack CLAUDE_CONFIG_DIR=/data/claude bash -c "
         f"'cd /data/project && modastack install \"{url}\"'",
     ])
     restart_app(app)

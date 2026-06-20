@@ -19,15 +19,30 @@ Two design choices were refined during implementation; they supersede the
    is therefore NOT needed for declarative teams (deferred — only the raw-
    Dockerfile escape hatch + solo `install <url>` pulls would want one).
 
-2. **HOME-seed solves the build-time-vs-runtime HOME trap.** Runtime `$HOME` is
-   the VOLUME (`/data/home`), and `claude` discovers skills from runtime
-   `~/.claude/skills` — so a ~-relative tool (gstack's skills) baked at build
-   would be shadowed by the volume mount. The hook runs `run:` steps as the
-   `modastack` user with `HOME=/opt/modastack/home-seed` (a dir holding ONLY team
-   tools), stamps a content hash, and the entrypoint `cp -a`'s that seed onto the
-   volume HOME at boot when the stamp changes. Tool files merge; creds/transcripts
-   on the volume are never touched. (codex differs: `npm i -g` lands in
-   /usr/local/bin, on PATH, not under HOME — no seed needed.)
+2. **`$HOME` on the image + `CLAUDE_CONFIG_DIR` on the volume (revised
+   2026-06-20 — supersedes the original HOME-seed).** The MVP shipped a
+   "HOME-seed": runtime `$HOME` was the VOLUME (`/data/home`), tools baked into a
+   seed dir, and the entrypoint `cp -a`'d that seed onto the volume at boot,
+   gated by a content stamp. That worked but was brittle — most acutely, the
+   build's `verify: requires` ran against the seed HOME, NOT the post-copy volume
+   HOME the agent actually uses, so a copy that dropped a file passed CI and
+   broke production (build path ≠ runtime path).
+
+   The revised model keeps **`$HOME` on the IMAGE** (`/home/modastack`) — the
+   SAME path at build and runtime, so `verify` proves the live paths and any
+   `$HOME`-relative tool (`~/dev/gstack`) is read in place, never copied. Only
+   Claude's DURABLE state (creds, transcripts, settings) is redirected to the
+   volume via **`CLAUDE_CONFIG_DIR=/data/claude`** (the supported config-dir
+   override). To make this invisible to tools, the entrypoint points the WHOLE
+   `~/.claude` at that volume dir (`~/.claude -> /data/claude`), so a tool keyed
+   off `~/.claude/{projects,settings.json,skills,…}` sees Claude's real state —
+   one coherent home tree, split underneath only by storage lifecycle. Personal
+   skills bake at `/opt/modastack/skills` (immutable image content, OUTSIDE
+   `~/.claude` so the repoint can't clobber them) via a build-time
+   `~/.claude/skills -> /opt/modastack/skills` symlink, and are surfaced under
+   the config dir's `skills/` entry. No seed, no stamp, no `cp -a`, no drift.
+   (codex/gh differ: system installs land in `/usr/local/bin`, on PATH, outside
+   HOME entirely.) See `build_render.py` + `docker-entrypoint.sh` §2b.
 
 3. **Built on Fly during deploy, not pushed to a registry (MVP).** The intended
    "build once in CI → push to a registry → deploy many by ref" hit Fly friction:
@@ -50,7 +65,7 @@ Two design choices were refined during implementation; they supersede the
 
 Pieces: `build:` schema (`modastack/config.py` `BuildSpec`, incl. `run_root`),
 renderer (`build_render.py`), Dockerfile `TEAM_DEPS` hook + `docker/noop-deps.sh`,
-entrypoint seed (`docker/docker-entrypoint.sh` §2b), build-on-deploy
+entrypoint `~/.claude` coincidence (`docker/docker-entrypoint.sh` §2b), build-on-deploy
 (`deploy.py:_render_team_deps_into_context`) + `--image` short-circuit +
 `provision-instance.sh --image`, CI verify gate
 (`scripts/build-team-images.sh` + `.github/workflows/team-images.yml`),

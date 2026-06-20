@@ -266,7 +266,7 @@ else
   [ "$HAS_ANTHROPIC_KEY" = "0" ] \
     || fatal "--auth subscription but ANTHROPIC_API_KEY is in $ENV_FILE. Remove it (it overrides subscription auth)."
   [ -n "$LOGIN_CHANNEL" ] || [ -n "${ENV_FROM_FILE[MODASTACK_LOGIN_CHANNEL]:-}" ] \
-    || log "WARNING: subscription mode without --login-channel. First-boot login (C23) will have no Slack channel; fall back to: $FLY ssh console -a $APP --command 'env HOME=/data/home claude auth login --claudeai'"
+    || log "WARNING: subscription mode without --login-channel. First-boot login (C23) will have no Slack channel; fall back to: $FLY ssh console -a $APP --command 'env CLAUDE_CONFIG_DIR=/data/claude claude auth login --claudeai'"
 fi
 
 # --- assemble the instance's [env] identity ---------------------------------
@@ -423,11 +423,11 @@ echo "  Logs   : $FLY logs -a $APP"
 echo "  Status : $FLY status -a $APP"
 # An ssh session lands in / (WORKDIR), but modastack discovers the project by
 # walking up from cwd — so cd into it (as the volume's uid-10001 owner) first.
-echo "  Admin  : $FLY ssh console -a $APP --command 'gosu modastack env HOME=/data/home bash -c \"cd /data/project && modastack status\"'"
+echo "  Admin  : $FLY ssh console -a $APP --command 'gosu modastack env HOME=/home/modastack CLAUDE_CONFIG_DIR=/data/claude bash -c \"cd /data/project && modastack status\"'"
 if [ "$AUTH" = "subscription" ]; then
   echo
   echo "  Subscription first boot: the entrypoint posts a login URL to the private"
   echo "  Slack channel ${LOGIN_CHANNEL:-<MODASTACK_LOGIN_CHANNEL>}; open it, log in, and paste the code back in"
   echo "  that channel (C23). Manual fallback:"
-  echo "    $FLY ssh console -a $APP --command 'env HOME=/data/home claude auth login --claudeai'"
+  echo "    $FLY ssh console -a $APP --command 'env CLAUDE_CONFIG_DIR=/data/claude claude auth login --claudeai'"
 fi
