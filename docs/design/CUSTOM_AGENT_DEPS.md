@@ -53,9 +53,10 @@ Two design choices were refined during implementation; they supersede the
    `--build-arg TEAM_DEPS`). Fly creates app + registry + machine together, and
    its builder caches the tool layers, so re-deploys are cheap. `--image <ref>`
    still short-circuits to a prebuilt pull when one exists; `team-images.yml` is
-   a build-only **verify gate**. Build-once-deploy-many is deferred until the
-   registry-push path is wired (a dedicated always-on image app, or solving
-   pending-app activation).
+   a build-only **verify gate**. Build-once-deploy-many (per-team digest, pushed
+   to **Fly's registry** — we standardized on `registry.fly.io`, not GHCR) is
+   deferred as a SaaS-scale optimization — tracked as **#378** (the foundation),
+   which in turn unblocks **#379** (deps-vs-definition trigger split, §6 below).
 
 4. **A `run_root` build phase.** Some tools need root steps `apt` can't express
    (gstack's browse drives Playwright Chromium → ~30 system libs). `run_root`
@@ -220,11 +221,18 @@ the base).
 
 ### 6. GitOps trigger split (deps vs definition)
 
+> **NOT BUILT in the MVP — tracked as #379 (depends on #378).** Today
+> `modastack deploy` of an already-running app always takes the hot-push path
+> (`deploy.py:710` `push_team(..., restart=True)`) and never rebuilds the image,
+> so a deps edit to a live instance is a **silent no-op**. Workaround: a
+> framework release (`gitops-release`'s team-aware roll) rebuilds team images.
+
 `gitops-teams.yml` must distinguish a **deps change** (rebuild image → redeploy)
 from a **prompt change** (hot `install <url>`). Diff the build spec / team
 `Dockerfile` (or a deps-hash stamped as an image label): changed → rebuild +
 `deploy --image`; unchanged → the existing hot-install path. Most pushes are
-prompt-only and stay on the fast path.
+prompt-only and stay on the fast path. (After #378, the team image's Fly-registry
+digest IS the deps identity, so detection is a digest comparison.)
 
 ## What changes vs stays
 
@@ -238,9 +246,12 @@ deploy-by-ref mechanic. This is purely additive.
 
 ## Open questions
 
-- **Registry:** GHCR (public, repo-scoped, portable — solo operators pull it too)
-  vs the Fly registry (already in the deploy path, org-scoped). Leaning GHCR, with
-  Fly as a mirror in the deploy path. Decide in implementation.
+- **Registry: DECIDED — Fly's registry (`registry.fly.io`), not GHCR.** We
+  standardized on Fly (one less service; native `fly auth docker`; Fly pulls it
+  with no public-package/token dance). In the MVP nothing is pushed at all —
+  team images build on Fly *during deploy*. The build-once → push → deploy-many
+  path (Fly registry) is #378; its constraint is that Fly repos are app-scoped
+  and only exist after an app's first deploy (pushing to a "pending" app 404s).
 - **Trust / supply chain:** CI building images from team-declared `run:`/Dockerfile
   is fine for the first-party `agents/` repo. For *third-party* teams (future SaaS),
   arbitrary build steps are a supply-chain surface → sandbox the build or restrict
