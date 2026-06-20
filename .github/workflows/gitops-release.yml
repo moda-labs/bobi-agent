@@ -115,7 +115,7 @@ jobs:
           # team-deps relpath for an APP's deployment (empty = generic). Renders the
           # hook into the build context so a team-flavored instance rebuilds its own
           # image; a generic instance rolls the shared base image.
-          team_deps_for() { python scripts/render-team-deps.py "${1#${FLEET_PREFIX}-}"; }
+          team_deps_for() { python scripts/render-team-deps.py "${1#"${FLEET_PREFIX}"-}"; }
 
           # Build the shared generic base image on a GENERIC instance (the canary,
           # preferred — it's also the smoke target). Team-flavored instances can't be
