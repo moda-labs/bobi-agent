@@ -223,17 +223,36 @@ def test_release_triggers_on_published_release():
 
 def test_release_builds_once_and_reuses_image_across_fleet():
     script = _step_scripts(_jobs(_load(WF_RELEASE))["rollout"])
-    # enumerate the fleet by the stamp, build first, reuse --image for the rest
+    # enumerate the fleet by the stamp, build the generic image once, reuse --image
     assert "scripts/fleet.sh list" in script
     assert "fly image show" in script
     assert "--image" in script
     # round-trip live config so env/mounts/vm/volume survive the image swap.
     # `config save` writes to the path given by -c (NOT -o, which it rejects) —
     # both flag and image-ref shape were caught by the live e2e.
-    assert "fly config save" in script
     assert "config save" in script and "-c " in script and " -o " not in script
     # image ref is constructed (Ref/Reference fields come back null from Fly)
     assert "registry.fly.io/" in script and "Digest" in script
+
+
+def test_release_is_team_aware():
+    """A framework release must REBUILD a team-flavored instance's own image
+    (its TEAM_DEPS hook) instead of rolling the generic image onto it, which
+    would strip its baked tools and break dispatch (C24 #368)."""
+    script = _step_scripts(_jobs(_load(WF_RELEASE))["rollout"])
+    # the renderer decides generic-vs-team per app, and team apps build with TEAM_DEPS
+    assert "render-team-deps.py" in script
+    assert "TEAM_DEPS=" in script
+    # the canary functional gate (replaces the retired EC2 release smoke)
+    assert "CANARY-OK" in script
+
+
+def test_release_functional_canary_gate():
+    script = _step_scripts(_jobs(_load(WF_RELEASE))["rollout"])
+    # build + smoke the canary BEFORE rolling the rest: a blocking `ask` proving
+    # the new image's agent answers, asserted by a marker.
+    assert "modastack ask" in script and "CANARY-OK" in script
+    assert "aborting rollout" in script  # a failed smoke stops the roll
 
 
 def test_release_isolates_per_app_failures():
