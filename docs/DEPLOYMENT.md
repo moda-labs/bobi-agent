@@ -101,7 +101,7 @@ the team lands, it proceeds to start. (This is the C9-adjacent first-boot change
    owner:
    ```
    fly ssh console -a <app> --command \
-     'gosu modastack env HOME=/data/home bash -c "cd /data/project && modastack <cmd>"'
+     'gosu modastack env HOME=/home/modastack CLAUDE_CONFIG_DIR=/data/claude bash -c "cd /data/project && modastack <cmd>"'
    ```
 9. **Concurrent `fly deploy --remote-only` builds race on the org's single shared
    remote builder** (`failed to parse daemon host "unix:///var/run/docker.sock":
@@ -168,7 +168,7 @@ its `agent.yaml`:
 build:
   apt: [nodejs, npm]              # installed as root (system-wide)
   npm: ["@openai/codex"]          # global → /usr/local/bin, on PATH
-  run:                            # as the modastack user, into the seed HOME
+  run:                            # as the modastack user, into the image HOME
     - "git clone …/gstack ~/dev/gstack && cd ~/dev/gstack && ./setup"
   verify: requires                # re-run requires[].check at build → fail CI on a miss
 ```
@@ -193,13 +193,16 @@ check) but does not push. (A "build once → push to a registry → deploy many 
 ref" optimization is deferred: Fly's registry rejects pushes to a never-deployed
 app, GHCR needs `write:packages`.)
 
-**The HOME-seed trap (why `run:` steps go to a seed dir).** Runtime `$HOME` is the
-VOLUME (`/data/home`), and `claude` finds skills at runtime `~/.claude/skills`. A
-~-relative tool baked at build would be shadowed by the volume mount. So `run:`
-steps execute with `HOME=/opt/modastack/home-seed` (tool files only), and the
-entrypoint `cp -a`'s that seed onto the volume HOME at boot when a content stamp
-changes (creds/transcripts on the volume are never touched). codex needs no seed
-(`npm i -g` → `/usr/local/bin`, on PATH).
+**Image HOME + volume config dir (no build/runtime split).** `$HOME` stays on the
+**image** (`/home/modastack`) at build AND runtime, so `run:` steps bake
+~-relative tools in place and the build's `verify` checks the exact paths the
+agent uses. Claude's durable state lives on the **volume** via
+`CLAUDE_CONFIG_DIR=/data/claude`, and the entrypoint points the whole `~/.claude`
+at it — so any tool keyed off `~/.claude/{projects,settings.json,skills,…}` sees
+Claude's real state. Personal skills bake at `/opt/modastack/skills` (immutable
+image content, outside `~/.claude`) and are surfaced under the config dir. No
+seed, no stamp, no copy. codex/gh need none of this (`npm i -g`/apt →
+`/usr/local/bin`, on PATH).
 
 **Deploying a prebuilt image (optional).** If a pullable image ref exists, add
 `image: <ref>` to `deployments/<name>.yaml`; `modastack deploy` then passes
@@ -454,8 +457,8 @@ modastack deploy <name> [--env-file ./x.env]        # provision or update (idemp
 modastack destroy <name> [--yes]                     # tear down (removes volume!)
 scripts/fleet.sh list <fleet>                        # what's running
 fly logs -a <app> ; fly status -a <app>              # observe
-fly ssh console -a <app> --command 'gosu modastack env HOME=/data/home \
-  bash -c "cd /data/project && modastack status"'    # admin
+fly ssh console -a <app> --command 'gosu modastack env HOME=/home/modastack \
+  CLAUDE_CONFIG_DIR=/data/claude bash -c "cd /data/project && modastack status"'  # admin
 ```
 Both GitOps workflows also accept `workflow_dispatch` for manual re-runs.
 

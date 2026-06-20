@@ -141,17 +141,18 @@ def test_unknown_auth_mode_rejected(image: str):
 
 @requires_docker
 @pytest.mark.timeout(120)
-def test_home_survives_privilege_drop(image: str):
-    """Regression: gosu resets HOME to the passwd home (/home/modastack), which
-    would send the agent's ~/.claude (subscription creds + transcripts) off the
-    volume. The entrypoint re-asserts the volume HOME inside the privilege drop
-    via `env HOME=...` — verify that mechanism yields the volume path in-image."""
+def test_config_dir_survives_privilege_drop(image: str):
+    """Regression: the agent's HOME stays on the IMAGE (/home/modastack) so baked
+    tools are read in place; only Claude's DURABLE state is redirected to the
+    volume via CLAUDE_CONFIG_DIR. The entrypoint carries both through the gosu
+    privilege drop with `env HOME=... CLAUDE_CONFIG_DIR=...` — verify that
+    mechanism yields the image HOME and the volume config dir in-image."""
     proc = _run(
         "docker", "run", "--rm", "--entrypoint", "sh", image, "-c",
-        'export HOME=/data/home; gosu modastack env HOME="$HOME" '
-        'sh -c \'printf %s "$HOME"\'',
+        'gosu modastack env HOME=/home/modastack CLAUDE_CONFIG_DIR=/data/claude '
+        'sh -c \'printf "%s:%s" "$HOME" "$CLAUDE_CONFIG_DIR"\'',
     )
-    assert proc.stdout.strip() == "/data/home", proc.stdout + proc.stderr
+    assert proc.stdout.strip() == "/home/modastack:/data/claude", proc.stdout + proc.stderr
 
 
 @requires_docker

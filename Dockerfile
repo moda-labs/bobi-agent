@@ -121,7 +121,12 @@ ENV PYTHONUNBUFFERED=1 \
     DISABLE_AUTOUPDATER=1 \
     DATA_DIR=/data \
     MODASTACK_PROJECT=/data/project \
-    MODASTACK_HOME=/data/home
+    MODASTACK_HOME=/home/modastack
+# NB: HOME is the IMAGE home (above), NOT the volume — baked team tools
+# (~/.claude/skills, ~/dev/gstack) are read in place. Claude's durable state
+# (creds + transcripts) is redirected to the volume at runtime via
+# CLAUDE_CONFIG_DIR, which the entrypoint sets (NOT a build ENV — build steps
+# must write skills to the image ~/.claude, so they `env -u CLAUDE_CONFIG_DIR`).
 
 # Runtime packages only:
 #   curl, ca-certificates — fetch the claude installer; TLS
@@ -164,7 +169,10 @@ COPY --from=model-baker /opt/modastack/models /opt/modastack/models
 # team is byte-identical to the generic image. Positioned as the LAST stable
 # layer — just BELOW the volatile venv COPY — so a code-only framework release
 # rebuilds only the wheel, never re-runs the team's apt/npm/run. The hook runs
-# as root (USER is root here); it `gosu`s to modastack for HOME-seeding steps.
+# as root (USER is root here); it `gosu`s to modastack to bake ~-relative tools
+# into the image HOME (/home/modastack/.claude/skills, ~/dev/gstack), which the
+# agent reads in place at runtime — the entrypoint redirects only Claude's
+# durable state to the volume (CLAUDE_CONFIG_DIR) and symlinks skills back.
 # See docs/design/CUSTOM_AGENT_DEPS.md §"three clocks".
 ARG TEAM_DEPS=docker/noop-deps.sh
 COPY ${TEAM_DEPS} /tmp/team-deps.sh

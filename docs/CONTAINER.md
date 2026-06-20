@@ -20,9 +20,12 @@ entirely in the mounted volume and env vars — see
 | `gosu` (privilege drop); no `tini` | Fly injects its own PID-1 init (reaps zombies / forwards signals); tini-on-Fly is a known boot-failure trigger. For other runtimes, use `docker run --init`. |
 | `modastack start --foreground` entrypoint | container mode (C2) |
 
-The agent's `$HOME` is set to `/data/home` (on the volume) so
-`~/.claude/.credentials.json` and `~/.claude/projects/` (session transcripts,
-required for resume) persist across image updates.
+The agent's `$HOME` stays on the **image** (`/home/modastack`), so baked team
+tools (`~/dev/gstack`, skills) are read in place. Claude's durable state is
+redirected to the **volume** via `CLAUDE_CONFIG_DIR=/data/claude`, and the
+entrypoint points the whole `~/.claude` at it — so `~/.claude/.credentials.json`
+and `~/.claude/projects/` (session transcripts, required for resume) persist
+across image updates while remaining reachable at their usual `~/.claude` paths.
 
 ## Build
 
@@ -57,8 +60,8 @@ docker run --rm -v modastack-a:/data \
 
 ### subscription mode (internal dogfood only)
 
-Uses OAuth credentials on the volume (`/data/home/.claude/.credentials.json`)
-instead of an API key. **`ANTHROPIC_API_KEY` must be unset** — it silently
+Uses OAuth credentials on the volume (`/data/claude/.credentials.json`, reachable
+as `~/.claude/.credentials.json`) instead of an API key. **`ANTHROPIC_API_KEY` must be unset** — it silently
 outranks subscription auth and bills the API (§6.1). The image refuses to
 start if both are set.
 
@@ -84,9 +87,9 @@ first. Refresh-token rotation makes this a once-per-machine ceremony.
 Manual fallback (if Slack/event-bus isn't wired yet):
 
 ```bash
-# one-time, interactive, writes /data/home/.claude/.credentials.json
+# one-time, interactive, writes /data/claude/.credentials.json
 docker run --rm -it -v modastack-a:/data \
-  -e HOME=/data/home --entrypoint claude modastack:dev auth login --claudeai
+  -e CLAUDE_CONFIG_DIR=/data/claude --entrypoint claude modastack:dev auth login --claudeai
 ```
 
 Never copy a `.credentials.json` between machines — shared refresh chains
@@ -104,7 +107,8 @@ invalidate each other.
 | `MODASTACK_EVENT_SERVER` | yes | the Worker URL (`https://`) the team config references via `${MODASTACK_EVENT_SERVER}`; the client derives `wss://` from it |
 | `MODASTACK_FLEET` | no (default: app-name prefix) | operator/fleet namespace stamp; the authoritative fleet-membership key the GitOps automation enumerates by (C22). The app name is only a discovery hint |
 | `SLACK_BOT_TOKEN`, `GITHUB_TOKEN`, `LINEAR_API_KEY`, … | per team | service tokens (`${VAR}` refs in `agent.yaml`) |
-| `DATA_DIR` / `MODASTACK_PROJECT` / `MODASTACK_HOME` | no | volume layout overrides (default `/data`, `/data/project`, `/data/home`) |
+| `DATA_DIR` / `MODASTACK_PROJECT` / `MODASTACK_HOME` | no | layout overrides (default `/data`, `/data/project`, `/home/modastack`). `MODASTACK_HOME` is the IMAGE home — baked tools live there |
+| `CLAUDE_CONFIG_DIR` | no (default `/data/claude`) | Claude's durable config dir on the volume (creds, transcripts, settings); the entrypoint links `~/.claude` to it |
 
 ## Health
 

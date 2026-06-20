@@ -168,10 +168,12 @@ class BuildSpec:
     wheel, not the team's tools. `apt`/`npm`/`run_root` install system-wide as
     root (`run_root` is the escape hatch for root steps apt can't express, e.g.
     `npx playwright install-deps chromium`); `run` steps execute as the
-    `modastack` user into a seed HOME the entrypoint copies onto the volume at
-    boot (so ~-relative tools like gstack's skills survive the volume remap).
-    `verify_requires` runs the team's requires[].check as the final hook step,
-    failing CI on a miss.
+    `modastack` user into the image HOME (/home/modastack) — the same path the
+    agent runs with, so ~-relative tools like gstack's skills are baked in place
+    and read directly at runtime (the entrypoint redirects only Claude's durable
+    state to the volume via CLAUDE_CONFIG_DIR; no tool copy). `verify_requires`
+    runs the team's requires[].check as the final hook step, against that same
+    HOME, failing CI on a miss.
 
     `dockerfile` is the escape hatch: when a raw `Dockerfile` sits beside
     agent.yaml it wins, and the renderer is bypassed (the framework only asserts

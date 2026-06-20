@@ -6,7 +6,8 @@ import pytest
 
 from modastack import build_render
 from modastack.build_render import (
-    SEED_HOME,
+    BAKED_SKILLS,
+    TEAM_HOME,
     load_team_config,
     render_team_deps_script,
     team_deps_hash,
@@ -42,8 +43,9 @@ def test_renders_apt_npm_run_verify(tmp_path):
     assert "apt-get install -y --no-install-recommends nodejs npm" in script
     # npm global
     assert "npm install -g @openai/codex" in script
-    # run step under the seed HOME, as the modastack user, with env HOME so ~ works
-    assert f"gosu modastack env HOME={SEED_HOME} bash -lc" in script
+    # run step in the IMAGE home, as the modastack user, with CLAUDE_CONFIG_DIR
+    # stripped (so skills bake to the image ~/.claude, not the runtime volume).
+    assert f"gosu modastack env -u CLAUDE_CONFIG_DIR HOME={TEAM_HOME} bash -lc" in script
     assert "git clone https://x/gstack ~/dev/gstack" in script
     # verify re-runs each requires.check
     assert "test -e ~/.claude/skills/browse/SKILL.md" in script
@@ -59,11 +61,36 @@ def test_run_steps_run_as_user_apt_as_root(tmp_path):
     assert run_line.startswith("gosu modastack")  # run drops to the user
 
 
-def test_stamp_written_when_run_steps_present(tmp_path):
-    cfg = _team(tmp_path, ENG_TEAM)
-    script = render_team_deps_script(cfg)
-    h = team_deps_hash(cfg.build)
-    assert f"echo {h} > {SEED_HOME}/.modastack-tool-stamp" in script
+def test_no_seed_or_stamp_machinery(tmp_path):
+    # The image-home model copies nothing onto the volume — there is no seed
+    # dir, no tool stamp, and no /opt/modastack/home-seed anywhere.
+    script = render_team_deps_script(_team(tmp_path, ENG_TEAM))
+    assert ".modastack-tool-stamp" not in script
+    assert "home-seed" not in script
+
+
+def test_skills_baked_outside_dotclaude(tmp_path):
+    # Run-step teams bake skills at BAKED_SKILLS (outside ~/.claude) via a
+    # build-time ~/.claude/skills symlink, so the entrypoint can later point the
+    # whole ~/.claude at the volume without clobbering skills.
+    script = render_team_deps_script(_team(tmp_path, ENG_TEAM))
+    assert f"install -d -o modastack -g modastack {BAKED_SKILLS}" in script
+    assert f"ln -sfn {BAKED_SKILLS} ~/.claude/skills" in script
+    # ordering: the bake-setup precedes the run step that writes into ~/.claude/skills
+    assert script.index(BAKED_SKILLS) < script.index("git clone")
+
+
+def test_verify_uses_same_home_as_run(tmp_path):
+    # The whole point of the redesign: build-time `verify` reads the SAME HOME
+    # the `run` steps wrote and the runtime agent uses — no build/runtime gap.
+    script = render_team_deps_script(_team(tmp_path, ENG_TEAM))
+    prefix = f"gosu modastack env -u CLAUDE_CONFIG_DIR HOME={TEAM_HOME} bash -lc"
+    run_line = next(ln for ln in script.splitlines()
+                    if "git clone" in ln and ln.startswith("gosu"))
+    verify_line = next(ln for ln in script.splitlines()
+                       if "test -e ~/.claude/skills/browse" in ln)
+    assert run_line.startswith(prefix)
+    assert verify_line.startswith(prefix)
 
 
 def test_hash_is_stable_and_input_sensitive(tmp_path):
