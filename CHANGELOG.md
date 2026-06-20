@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.24.0 — 2026-06-20
+
+Team-flavored images: a team can bake its own host tools into a per-team
+container image, so a real team (eng-team's `gstack`/`codex`) actually runs and
+dispatches on Fly. The EC2 release path is retired in favor of a functional Fly
+canary gate.
+
+### Added
+- **Team-flavored images (C24).** A team declares a `build:` block in
+  `agent.yaml` (`apt` / `npm` / `run_root` / `run`, `verify: requires`); the
+  framework renders a team-deps hook into the one Dockerfile — a stable layer
+  *below* the framework wheel, so a code-only release rebuilds only the wheel —
+  and builds it on Fly during deploy. `~`-relative tools (e.g. gstack's skills)
+  are seeded onto the volume `$HOME` at boot so they survive the volume remap;
+  `run_root` covers root steps `apt` can't express (e.g.
+  `npx playwright install-deps chromium`). A no-`build:` team is byte-identical
+  to the generic image. (#368)
+- **Functional Fly canary gate.** `gitops-release` builds the canary first and
+  asserts it answers a blocking `ask` end-to-end through the production event
+  server (`CANARY-OK`) before rolling the rest of the fleet — the on-Fly
+  replacement for the retired EC2 release smoke.
+- **Team-aware fleet roll.** A framework release rebuilds each team-flavored
+  instance's own image (its baked tools, on the new framework wheel) instead of
+  rolling the generic image onto it.
+
+### Changed
+- **Retired the EC2 release path.** Removed the self-hosted release smoke /
+  promote-to-prod-director (`publish-pypi`) and real-Claude integration (`ci`)
+  jobs; the EC2 director is replaced by `moda-eng-team` running on Fly.
+- `modastack deploy` honors a declared-but-empty optional referenced var (e.g.
+  `channels: ${SLACK_CHANNELS}`, empty = whole workspace) instead of failing on
+  it; auth-critical keys are still enforced at provision and boot.
+
 ## 0.23.0 — 2026-06-19
 
 Containerized instances land: modastack now runs as an immutable image on Fly,
