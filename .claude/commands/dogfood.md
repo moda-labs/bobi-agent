@@ -304,10 +304,67 @@ TEST 10.4: Clean up — modastack stop && modastack event-server stop;
 Use an obviously-synthetic payload (e.g. issue number 999, title
 "Dogfood pipeline test — ignore") so the manager doesn't act on it.
 
-### Section 11: Cleanup
+### Section 11: Fly deployment lifecycle (opt-in — real Fly)
+
+The local battery proves the framework is correct; this is the **real Fly** tier
+layered on top — the deploy *mechanics* CI can't cover (provisioning, the layered
+Dockerfile on Fly's remote builder, secrets, volume, first-boot, idempotent
+update, teardown). It mirrors how Section 3b layers the real Worker on Section 3
+and Section 7 layers real-Claude. Self-contained: it provisions its OWN throwaway
+Fly app (independent of `$DOGFOOD_DIR`) and tears it down.
+
+**Do NOT make Fly the battery's runtime.** Sections 1/1b/5/6/9 are Python-API
+assertions (topology-irrelevant); 3 tests the local node server specifically.
+Driving those "through Fly" only adds latency + flake and conflates "framework
+correct" with "deploy path works." Fly is a separate axis → a separate tier.
+
+Gated: **skip** unless `fly auth whoami` succeeds AND `MODASTACK_DOGFOOD_FLY=1`.
+Needs the personal org + `fly.io/high-risk-unlock`. **Always tear down (11.6),
+even on failure.** Serialize — never run two `fly deploy --remote-only` at once
+(shared remote-builder race: `docker.sock missing hostname`). Build mode is
+**auto-selected, not a flag**: run from a modastack checkout → builds from
+**source** on Fly's remote builder; from the bare binary → builds from **PyPI**
+(only works once the version is published — for an unpublished rc, run from a
+checkout). Isolate the app from the real fleet: pass `--fleet mdftest` (app =
+`mdftest-<name>`) so a `moda` fleet rollout never sweeps it. App name unique +
+obviously-throwaway; resolve image refs as `registry.fly.io/<Repo>@<Digest>`.
+
+> **Verified live 2026-06-19** (v0.23.0 main, source mode): 11.1–11.4 + 11.6 all
+> pass. Expect cold deploy ~3 min (layered image builds on Fly's remote builder;
+> lower layers **dedup** — `Mounted from moda-canary`), idempotent update ~12 s
+> (re-fetch team + restart the SAME machine by ID, no second machine, bubble +
+> volume preserved). 11.5 remains the step-4 gap.
 
 ```
-TEST 11.1: rm -rf "$DOGFOOD_DIR" — remove the throwaway temp project
+TEST 11.1: modastack deploy <throwaway> --team-url <smoke-team url> (source mode)
+           → provisions Fly app + volume, boots; exit 0
+TEST 11.2: fly status -a <throwaway> → exactly one machine, state "started"
+TEST 11.3: instance self-registered on the event server — GET <event-server>/health
+           deployments count incremented (or the app log shows "POST /deployments 201")
+TEST 11.4: re-run 11.1 (idempotent provision-or-update) → exit 0, NO second
+           machine, volume + sessions intact (the C9 idempotency contract)
+TEST 11.5 [BLOCKED ON STEP 4 — the residual gap]: outside-world → RC.
+           Post a webhook to the PRODUCTION event server for a topic the RC
+           subscribed to → assert the deployed instance RECEIVED and acted (the
+           on-Fly analogue of publish-pypi's Smoke-1), PLUS an `ask` against the
+           remote instance. Both need out-of-band reach into a deployed bubble
+           (webhook→remote-RC delivery + remote ask), which is UNBUILT today —
+           bubble isolation / cone-of-silence (#239). Implement with the step-4
+           canary functional probe and SHARE one smoke routine between this
+           section and the CI canary gate (build the deploy+webhook+ask smoke
+           ONCE; drive it manually here and as the release gate in CI).
+TEST 11.6: modastack destroy <throwaway> --yes → Fly app AND volume removed;
+           `fly status -a <throwaway>` errors / app gone. ALWAYS run, even on fail.
+```
+
+Until step 4 lands: run **11.1–11.4 + 11.6** (the deploy lifecycle) and treat
+**11.5** as the tracked residual gap, not a failure.
+
+### Section 12: Cleanup
+
+```
+TEST 12.1: rm -rf "$DOGFOOD_DIR" — remove the throwaway temp project
+           (Section 11's Fly app is torn down by its own 11.6)
 ```
 
 ## Phase 4: Results and Coverage Gaps
