@@ -1,0 +1,40 @@
+# deployments/eng-team.yaml — moda's internal engineering-org instance.
+#
+# The deployment NAME is this filename ("eng-team"); the app is "<fleet>-eng-team"
+# (fleet from defaults.yaml = moda → app "moda-eng-team"). Adding/editing this
+# file is what deploys — `modastack deploy eng-team`, or the GitOps Action on a
+# release (.github/workflows/gitops-teams.yml reconciles deployments/*.yaml).
+#
+# ACTIVATED by C24 (#368): eng-team's `requires: gstack/codex` gate used to block
+# dispatch in the bare image. It now ships a `build:` spec (agents/eng-team/
+# agent.yaml), so CI bakes those tools into the team-flavored image below — the
+# instance can actually dispatch.
+
+# Delivery: a LOCAL package (agents/eng-team) → ssh-push for the team DEFINITION
+# (prompts/workflows flow through the volume, hot-updated on a prompt edit).
+team: eng-team
+
+# Team-flavored image (C24): eng-team declares a `build:` spec (agents/eng-team/
+# agent.yaml — node, codex, gstack), so `modastack deploy` renders its team-deps
+# hook into the build context and builds the team-flavored image ON FLY's remote
+# builder during deploy (Fly creates app + registry + machine together; no
+# separate registry push). Fly's builder caches the tool layers, so re-deploys
+# are fast and a framework bump rebuilds only the wheel layer. (A prebuilt
+# `image: <ref>` would short-circuit the build — a build-once-deploy-many
+# optimization deferred until the registry-push path is wired.)
+
+# Secrets: the GitHub Environment that holds this instance's KEY=VALUE blob. The
+# Action binds the matrix cell to it and passes the values to `modastack deploy`
+# as an --env-file. (Convention: the Environment is named after the deployment.)
+# For self-service, drop this and use `secrets: { env-file: ./eng-team.env }`.
+#
+# The blob (MODASTACK_ENV) MUST include these for eng-team to FUNCTION (any
+# non-MODASTACK_* key becomes a Fly secret → container env var):
+#   ANTHROPIC_API_KEY  the agent's model auth (api_key mode).
+#   SLACK_BOT_TOKEN, LINEAR_API_KEY  service creds (agent.yaml ${...} refs).
+#   OPENAI_API_KEY     codex auth — the baked `codex` binary is unauthenticated
+#                      until this is set; codex reads it automatically at runtime.
+#                      (The build only verifies `codex --version`, which needs no
+#                      auth, so a missing key fails at dispatch, not at build.)
+secrets:
+  env: eng-team

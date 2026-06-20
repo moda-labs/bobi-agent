@@ -64,7 +64,7 @@ BUILTIN_DEFAULTS: dict = {
 _SCALAR_KEYS = {
     "team", "team_url", "fleet", "region", "memory", "cpus", "volume_size",
     "auth", "event_server", "login_channel", "claude_version", "org",
-    "volume_name",
+    "volume_name", "image",
 }
 
 
@@ -90,6 +90,10 @@ class DeployConfig:
     claude_version: str = ""
     org: str = ""
     volume_name: str = "data"
+    # A prebuilt team-flavored image ref (C24). When set, deploy by ref instead
+    # of building from the Dockerfile — the provisioner gets --image and the
+    # binary build context is not assembled.
+    image: str = ""
     # Secret source: a local env-file path (self-service) and/or a named source
     # (a GitHub Environment, etc. — a hint the orchestration layer materializes).
     secrets_env: str = ""
@@ -207,6 +211,7 @@ def load_deploy_config(project_path: Path, name: str,
         claude_version=str(merged.get("claude_version", "") or ""),
         org=str(merged.get("org", "") or ""),
         volume_name=str(merged.get("volume_name", "data") or "data"),
+        image=str(merged.get("image", "") or ""),
         secrets_env=str(merged.get("secrets_env", "") or ""),
         secrets_env_file=str(merged.get("secrets_env_file", "") or ""),
     )
@@ -404,7 +409,12 @@ def resolve_env_file(cfg: DeployConfig, project_path: Path,
         )
 
     if cfg.team:
-        missing = [v for v in required if not values.get(v)]
+        # A var must be DECLARED (in the env-file or process env), but may be
+        # intentionally empty — some referenced vars are optional scoping knobs
+        # (e.g. `channels: ${SLACK_CHANNELS}`, empty = whole workspace) that must
+        # not block a deploy. Auth-critical keys are still enforced non-empty at
+        # provision (provision-instance.sh) and boot (docker-entrypoint.sh §6.1).
+        missing = [v for v in required if v not in values]
         if missing:
             raise DeployError(
                 f"deployment '{cfg.name}' is missing required secret(s): "
@@ -617,6 +627,37 @@ def _provision_args(cfg: DeployConfig, env_file: Path) -> list[str]:
     return args
 
 
+def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
+                                   assets: "DeployAssets") -> str | None:
+    """Render a `build:`-declaring team's deps hook into the build context.
+
+    Returns the TEAM_DEPS build-arg value (a path RELATIVE to the build context,
+    where the Dockerfile's `COPY ${TEAM_DEPS}` resolves it), or None when the
+    team has no declarative build (deploys on the generic image). Only ssh-push
+    (`team:`) teams are visible locally; a `team-url:` package isn't, so its
+    image must be prebuilt and passed via `image:`.
+    """
+    if not cfg.team:
+        return None
+    try:
+        team_dir = local_package_dir(project_path, cfg.team)
+    except DeployError:
+        return None
+    from modastack.build_render import load_team_config, render_team_deps_script
+    tcfg = load_team_config(team_dir)
+    spec = tcfg.build
+    if spec is None or not (spec.apt or spec.npm or spec.run_root or spec.run
+                            or spec.verify_requires):
+        return None  # no spec, or a pure raw-Dockerfile escape hatch
+    ctx = Path(assets.build_context)
+    rel = Path("dist") / "team-deps" / f"{team_dir.name}.sh"
+    out = ctx / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_team_deps_script(tcfg))
+    log.info("rendered team-deps hook for '%s' → %s", team_dir.name, rel)
+    return str(rel)
+
+
 def deploy(project_path: Path, name: str, overrides: dict | None = None) -> DeployConfig:
     """Provision OR update ONE instance, idempotently.
 
@@ -628,20 +669,34 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
     app = cfg.app_name
 
     with tempfile.TemporaryDirectory() as tmp:
-        assets = resolve_assets(project_path, Path(tmp))
+        # In --image mode nothing is built, so the binary build context isn't
+        # assembled (staging=None); we still need provision_sh from the assets.
+        assets = resolve_assets(project_path, None if cfg.image else Path(tmp))
         env_file = resolve_env_file(cfg, project_path, Path(tmp))
         # Provision when there's no running instance — covers a brand-new app AND a
         # half-provisioned one (app/volume exist but the image build failed, so no
         # started machine). Only ssh-update an instance that's actually up.
         deployed = fly_app_exists(app) and fly_instance_running(app)
 
-        # Provision flags shared by both delivery modes, incl. the build context
-        # (source repo, or the binary-mode PyPI context) + image build args.
-        base = ["bash", str(assets.provision_sh), *_provision_args(cfg, env_file),
-                "--build-context", str(assets.build_context),
-                "--dockerfile", str(assets.dockerfile)]
-        for k, v in assets.build_args.items():
-            base += ["--build-arg", f"{k}={v}"]
+        # Provision flags shared by both delivery modes. Either deploy a prebuilt
+        # team image by ref (C24), or pass the build context (source repo, or the
+        # binary-mode PyPI context) + image build args to build one.
+        base = ["bash", str(assets.provision_sh), *_provision_args(cfg, env_file)]
+        if cfg.image:
+            base += ["--image", cfg.image]
+        else:
+            base += ["--build-context", str(assets.build_context),
+                     "--dockerfile", str(assets.dockerfile)]
+            for k, v in assets.build_args.items():
+                base += ["--build-arg", f"{k}={v}"]
+            # C24: if this team bakes host tools (a `build:` spec), render its
+            # team-deps hook into the build context and pass TEAM_DEPS, so the
+            # team-flavored image is built on Fly's remote builder during deploy
+            # (no separate registry push — Fly creates app+registry+machine
+            # together). A prebuilt `image:` ref short-circuits this above.
+            team_deps = _render_team_deps_into_context(project_path, cfg, assets)
+            if team_deps:
+                base += ["--build-arg", f"TEAM_DEPS={team_deps}"]
 
         if cfg.delivery == "ssh-push":
             pkg = local_package_dir(project_path, cfg.team)

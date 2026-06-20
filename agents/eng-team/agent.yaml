@@ -34,6 +34,47 @@ requires:
     why: "Codex-as-a-tool for adversarial reviews and second-opinion analysis (MDS-42 UC3)"
     check: "command -v codex >/dev/null 2>&1 && { test -n \"${OPENAI_API_KEY:-}\" || codex --version >/dev/null 2>&1; }"
     fix: "npm install -g @openai/codex && (codex auth login || echo 'Set OPENAI_API_KEY in .modastack/.env')"
+  - name: gh
+    why: "GitHub CLI — the primary interface for issues, PRs, and CI status (tools/github.md). Auth via GH_TOKEN."
+    check: "command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1"
+    fix: "see https://cli.github.com/manual/installation (apt repo or binary); authenticate by setting GH_TOKEN in .modastack/.env"
+
+# Container build (C24 team-flavored images): bake the host tools the `requires`
+# gate above demands into a per-team image, so a dark Fly instance can actually
+# dispatch (the bare base ships no Node, and a container has no TTY to run
+# `requires.fix` interactively). CI renders this to a Docker hook layer that sits
+# BELOW the framework wheel — a code-only release rebuilds only the wheel, not
+# these tools (modastack/build_render.py). `apt`/`npm` install as root; `run`
+# steps install as the modastack user into a seed HOME copied onto the volume at
+# boot (so gstack's ~/.claude/skills survive the volume remap). `verify:
+# requires` re-runs the checks above at build, failing CI if a tool is missing.
+build:
+  # jq pairs with gh for JSON wrangling; nodejs/npm power codex/bun/gstack.
+  apt: [nodejs, npm, jq]
+  # Global npm installs land in /usr/local/bin — on PATH at build AND runtime,
+  # outside HOME (no volume-seed needed). `bun` is gstack's `./setup` runtime.
+  npm: ["@openai/codex", "bun"]
+  # Root steps apt can't express:
+  #  - Playwright Chromium needs ~30 system libs; let Playwright resolve them for
+  #    the running Debian (avoids hand-listing t64 names) before gstack ./setup.
+  #  - the GitHub CLI (`gh`) isn't in Debian apt — add its official repo. `gh` is
+  #    the eng workflow's primary GitHub interface; it auths via GH_TOKEN at run.
+  run_root:
+    - "npx --yes playwright install-deps chromium"
+    - >-
+      mkdir -p -m 755 /etc/apt/keyrings &&
+      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg &&
+      chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg &&
+      echo "deb [arch=$(dpkg --print-architecture)
+      signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg]
+      https://cli.github.com/packages stable main"
+      > /etc/apt/sources.list.d/github-cli.list &&
+      apt-get update && apt-get install -y --no-install-recommends gh &&
+      rm -rf /var/lib/apt/lists/*
+  run:
+    - "git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && ./setup"
+  verify: requires
 
 # Deterministic event→workflow routing. These rules fire BEFORE the
 # manager LLM sees the event, guaranteeing the workflow is launched

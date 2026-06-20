@@ -157,6 +157,19 @@ USER root
 # code change never re-downloads the model.
 COPY --from=model-baker /opt/modastack/models /opt/modastack/models
 
+# --- team-deps hook (C24 team-flavored images) ---------------------#
+# A team's baked host tools (node, codex, gstack, …) as ONE stable layer,
+# rendered from its `build:` spec by modastack/build_render.py and injected via
+# the TEAM_DEPS build-arg. The default is a no-op, so a plain build / a no-deps
+# team is byte-identical to the generic image. Positioned as the LAST stable
+# layer — just BELOW the volatile venv COPY — so a code-only framework release
+# rebuilds only the wheel, never re-runs the team's apt/npm/run. The hook runs
+# as root (USER is root here); it `gosu`s to modastack for HOME-seeding steps.
+# See docs/design/CUSTOM_AGENT_DEPS.md §"three clocks".
+ARG TEAM_DEPS=docker/noop-deps.sh
+COPY ${TEAM_DEPS} /tmp/team-deps.sh
+RUN bash /tmp/team-deps.sh && rm -f /tmp/team-deps.sh
+
 # --- volatile layer (rebuilds on any framework/code change) --------#
 # The prebuilt venv (modastack + deps) is the LAST heavy layer, so a code-only
 # rebuild is just this copy plus the thin layers below — seconds, not minutes.

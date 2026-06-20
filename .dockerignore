@@ -18,6 +18,11 @@ workspace
 .mypy_cache
 .ruff_cache
 dist
+# …except the rendered team-deps hook (C24): build-team-images.sh writes it under
+# dist/ and the Dockerfile COPYs it via the TEAM_DEPS build-arg, so it MUST be in
+# the build context. Re-include just that subtree.
+!dist/team-deps
+!dist/team-deps/**
 build
 *.egg-info
 

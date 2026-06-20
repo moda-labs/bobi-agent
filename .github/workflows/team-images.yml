@@ -1,0 +1,54 @@
+name: Team images
+
+# Verify that every team with a `build:` spec produces a working team-flavored
+# image (C24 team-flavored images; docs/design/CUSTOM_AGENT_DEPS.md). A team that
+# declares `build:` needs its host tools (node, codex, gstack, …) baked in — the
+# generic base ships none, and a dark container has no TTY to install them. CI
+# renders the team-deps hook (modastack.build_render) and builds the ONE
+# Dockerfile with --build-arg TEAM_DEPS; the hook's final step re-runs the team's
+# requires[].check, so a missing tool fails THIS build, not production dispatch.
+#
+# This is a BUILD-ONLY verify gate. The team-flavored image is built on Fly's
+# remote builder during `modastack deploy` (deploy.py renders TEAM_DEPS into the
+# build context — Fly creates app + registry + machine together, no separate
+# registry push). A "build once in CI → push to a registry → deploy many by ref"
+# optimization is deferred (Fly's registry rejects pushes to a never-deployed
+# app; GHCR needs write:packages). So CI's job here is purely to catch a broken
+# build spec early. Path-filtered so unrelated PRs pay nothing.
+on:
+  push:
+    branches: [main]
+    paths: &img_paths
+      - "agents/**"
+      - "Dockerfile"
+      - "docker/**"
+      - "pyproject.toml"
+      - "modastack/build_render.py"
+      - "modastack/config.py"
+      - "scripts/build-team-images.sh"
+      - ".github/workflows/team-images.yml"
+  pull_request:
+    branches: [main]
+    paths: *img_paths
+  workflow_dispatch: {}
+
+jobs:
+  team-images:
+    name: Build team-flavored images (verify)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # build_render imports modastack.config (needs pyyaml); install the package
+      # so `python -m modastack.build_render` resolves on the runner.
+      - name: Install modastack (for the renderer)
+        run: pip install -e .
+
+      - name: Build team images (no push — verify the build + requires gate)
+        env:
+          PUSH: "0"
+        run: scripts/build-team-images.sh

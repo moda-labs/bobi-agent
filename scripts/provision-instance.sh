@@ -93,6 +93,9 @@
 #   --login-channel ID   subscription mode only: private Slack channel ID for the
 #                        first-boot login bootstrap (C23, MODASTACK_LOGIN_CHANNEL).
 #   --claude-version V   Pin the claude CLI version baked into the image (build-arg).
+#   --image REF          Deploy a prebuilt image by ref (e.g. a team-flavored
+#                        image from CI) instead of building. Skips the build
+#                        context/Dockerfile/build-args entirely (C24).
 #   --volume-name NAME   Volume name. Default: data (mounted at /data).
 #   --yes                Skip the confirmation prompt.
 #   -h, --help           Show this help.
@@ -126,6 +129,9 @@ LOGIN_CHANNEL="" CLAUDE_VERSION="" VOLUME_NAME="data" ASSUME_YES="0"
 # deploy` overrides them to a packaged context (Dockerfile.pypi, PyPI install)
 # in binary mode, so deploy needs no checkout. --build-arg K=V is repeatable.
 BUILD_CONTEXT="" DOCKERFILE=""
+# --image <ref> deploys a prebuilt image (C24 team-flavored images) instead of
+# building one — the build context/Dockerfile/build-args are then unused.
+IMAGE=""
 declare -a BUILD_ARGS=()
 
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'; }
@@ -152,6 +158,7 @@ while [ $# -gt 0 ]; do
     --build-context) BUILD_CONTEXT="$2"; shift 2;;
     --dockerfile) DOCKERFILE="$2"; shift 2;;
     --build-arg) BUILD_ARGS+=("$2"); shift 2;;
+    --image) IMAGE="$2"; shift 2;;
     --yes) ASSUME_YES="1"; shift;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown argument: $1" >&2; echo "Run with --help." >&2; exit 2;;
@@ -201,11 +208,14 @@ fi
 [ -n "$ENV_FILE" ] || fatal "--env-file is required (KEY=VALUE service tokens)."
 [ -f "$ENV_FILE" ] || fatal "--env-file '$ENV_FILE' not found."
 # Build context + Dockerfile: default to the repo (source build) unless the
-# caller passed a packaged context (binary-mode `modastack deploy`).
-[ -n "$BUILD_CONTEXT" ] || BUILD_CONTEXT="$REPO_ROOT"
-[ -n "$DOCKERFILE" ]    || DOCKERFILE="$REPO_ROOT/Dockerfile"
-[ -d "$BUILD_CONTEXT" ] || fatal "--build-context '$BUILD_CONTEXT' is not a directory."
-[ -f "$DOCKERFILE" ]    || fatal "Dockerfile not found: $DOCKERFILE"
+# caller passed a packaged context (binary-mode `modastack deploy`). Skipped
+# entirely in --image mode (a prebuilt image is deployed, nothing is built).
+if [ -z "$IMAGE" ]; then
+  [ -n "$BUILD_CONTEXT" ] || BUILD_CONTEXT="$REPO_ROOT"
+  [ -n "$DOCKERFILE" ]    || DOCKERFILE="$REPO_ROOT/Dockerfile"
+  [ -d "$BUILD_CONTEXT" ] || fatal "--build-context '$BUILD_CONTEXT' is not a directory."
+  [ -f "$DOCKERFILE" ]    || fatal "Dockerfile not found: $DOCKERFILE"
+fi
 
 case "$AUTH" in
   api_key|subscription) ;;
@@ -343,8 +353,9 @@ trap 'rm -f "$CFG"' EXIT
   # `[build] dockerfile = …` key — Fly resolves that key relative to THIS
   # config file's directory (a temp dir), where the Dockerfile isn't.
   # Build args: CLAUDE_VERSION (pin) + any --build-arg (e.g. MODASTACK_VERSION,
-  # which the PyPI image installs). Emitted as a [build.args] TOML table.
-  if [ -n "$CLAUDE_VERSION" ] || [ "${#BUILD_ARGS[@]}" -gt 0 ]; then
+  # which the PyPI image installs). Emitted as a [build.args] TOML table. In
+  # --image mode nothing is built, so the build table is omitted.
+  if [ -z "$IMAGE" ] && { [ -n "$CLAUDE_VERSION" ] || [ "${#BUILD_ARGS[@]}" -gt 0 ]; }; then
     echo
     echo "[build.args]"
     [ -n "$CLAUDE_VERSION" ] && echo "  CLAUDE_VERSION = \"$CLAUDE_VERSION\""
@@ -392,9 +403,19 @@ sed 's/^/    /' "$CFG"
 #   machine, which would need a second volume and fail the deploy).
 # --wait-timeout 10m: first boot installs a team (and on a cold image warms a
 #   model) past the default 5m machine-state wait.
-log "Building image on Fly and deploying... (first build bakes the model; be patient)"
-"$FLY" deploy "$BUILD_CONTEXT" --config "$CFG" --dockerfile "$DOCKERFILE" \
-  --depot=false --ha=false --wait-timeout 10m --remote-only
+#
+# --image mode (C24): deploy a prebuilt team image by ref — no build context,
+#   no Dockerfile, no remote builder. Fly pulls the image (its lower layers
+#   dedup against other fleet apps in the same registry).
+if [ -n "$IMAGE" ]; then
+  log "Deploying prebuilt image '$IMAGE' (no build)..."
+  "$FLY" deploy --image "$IMAGE" --config "$CFG" \
+    --ha=false --wait-timeout 10m
+else
+  log "Building image on Fly and deploying... (first build bakes the model; be patient)"
+  "$FLY" deploy "$BUILD_CONTEXT" --config "$CFG" --dockerfile "$DOCKERFILE" \
+    --depot=false --ha=false --wait-timeout 10m --remote-only
+fi
 
 echo
 log "Done. Instance '$APP' is provisioning."

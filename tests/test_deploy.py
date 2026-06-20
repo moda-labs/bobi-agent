@@ -200,6 +200,21 @@ def test_missing_required_secret_fails_loudly_for_local_team(repo, tmp_path, mon
         D.resolve_env_file(cfg, repo, tmp_path)
 
 
+def test_declared_but_empty_optional_var_satisfies_validation(repo, tmp_path, monkeypatch):
+    """A referenced-but-OPTIONAL var (e.g. eng-team's `channels: ${SLACK_CHANNELS}`,
+    empty = whole workspace) must not block deploy when the operator declares it
+    empty on purpose. Auth keys are still enforced at boot/provision."""
+    monkeypatch.delenv("SLACK_CHANNELS", raising=False)
+    pkg = repo / "agents" / "eng-team" / "agent.yaml"
+    pkg.write_text(pkg.read_text() + "channels: ${SLACK_CHANNELS}\n")
+    ef = tmp_path / "eng.env"
+    ef.write_text("SLACK_BOT_TOKEN=xoxb\nANTHROPIC_API_KEY=sk\nSLACK_CHANNELS=\n")
+    cfg = D.load_deploy_config(repo, "eng-team", {"secrets_env_file": str(ef)})
+    out = D.resolve_env_file(cfg, repo, tmp_path)  # must NOT raise
+    vals = dict(l.split("=", 1) for l in out.read_text().splitlines())
+    assert vals.get("SLACK_CHANNELS", "MISSING") == ""  # present, intentionally empty
+
+
 def test_secrets_materialized_from_process_env(repo, tmp_path, monkeypatch):
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-env")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env")
@@ -323,6 +338,48 @@ def test_provision_passes_build_context_and_dockerfile(repo, recorder, monkeypat
     prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
     assert "--build-context" in prov and str(repo) in prov
     assert "--dockerfile" in prov
+
+
+def test_image_mode_deploys_by_ref_not_build(repo, recorder, monkeypatch):
+    """C24: `image:` deploys a prebuilt team image — pass --image, never build."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
+    (repo / "deployments" / "eng.yaml").write_text(
+        "team-url: https://r/eng.tar.gz\n"
+        "image: ghcr.io/moda-labs/modastack-eng-team:latest\n"
+    )
+    D.deploy(repo, "eng")
+    prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
+    assert "--image" in prov
+    assert "ghcr.io/moda-labs/modastack-eng-team:latest" in prov
+    # build path is skipped entirely in image mode
+    assert "--build-context" not in prov
+    assert "--dockerfile" not in prov
+    assert "--build-arg" not in prov
+
+
+def test_build_spec_team_renders_team_deps_build_arg(repo, recorder, monkeypatch):
+    """C24: a team with a `build:` spec gets its team-deps hook rendered into the
+    build context and passed as --build-arg TEAM_DEPS (built on Fly during deploy)."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    pkg = repo / "agents" / "eng-team" / "agent.yaml"
+    pkg.write_text(pkg.read_text() + "build:\n  npm: [bun]\n  verify: requires\n")
+    D.deploy(repo, "eng-team")
+    prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
+    assert "--build-arg" in prov and "TEAM_DEPS=dist/team-deps/eng-team.sh" in prov
+    assert (repo / "dist" / "team-deps" / "eng-team.sh").exists()
+
+
+def test_no_build_spec_team_passes_no_team_deps(repo, recorder, monkeypatch):
+    """A team with no `build:` spec deploys on the generic image — no TEAM_DEPS."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    D.deploy(repo, "eng-team")  # fixture team has no build: block
+    prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
+    assert "TEAM_DEPS" not in prov
 
 
 def test_binary_mode_pins_modastack_version_as_build_arg(repo, recorder, monkeypatch, tmp_path):

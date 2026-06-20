@@ -156,6 +156,64 @@ secrets.
 
 ---
 
+## 2.6. Team-flavored images — baked host tools (C24)
+
+Some teams need **host tools** in the container, not just prompts. `eng-team`
+declares `requires: [gstack, codex]`; the generic image ships neither (no Node),
+and a dark container can't run `requires.fix` interactively — so it would
+provision but never dispatch. A team fixes this by declaring a `build:` block in
+its `agent.yaml`:
+
+```yaml
+build:
+  apt: [nodejs, npm]              # installed as root (system-wide)
+  npm: ["@openai/codex"]          # global → /usr/local/bin, on PATH
+  run:                            # as the modastack user, into the seed HOME
+    - "git clone …/gstack ~/dev/gstack && cd ~/dev/gstack && ./setup"
+  verify: requires                # re-run requires[].check at build → fail CI on a miss
+```
+
+**Two clocks.** Deps live in the **image**; the team **definition**
+(prompts/workflows) keeps flowing through the volume (ssh-push / team-url). A
+prompt edit is still a hot update — only a deps change rebuilds an image.
+
+**How it builds (built on Fly during deploy).** `modastack deploy` renders the
+`build:` spec to a shell hook (`modastack/build_render.py` →
+`deploy.py:_render_team_deps_into_context`) into the build context and builds the
+ONE Dockerfile **on Fly's remote builder** with `--build-arg TEAM_DEPS=<rendered>`
+— Fly creates app + registry + machine together (no separate registry push), and
+its builder caches the tool layers. The hook runs as a stable layer **below** the
+framework-wheel copy, so a code-only framework release rebuilds only the wheel and
+re-deploys stay cheap. No `build:` → the default `docker/noop-deps.sh` →
+byte-identical to the generic image. `run_root:` steps run as root for tools `apt`
+can't express (e.g. `npx playwright install-deps chromium`). CI
+(`.github/workflows/team-images.yml` → `scripts/build-team-images.sh`) is a
+build-only **verify gate** — it builds each team image (running the `requires`
+check) but does not push. (A "build once → push to a registry → deploy many by
+ref" optimization is deferred: Fly's registry rejects pushes to a never-deployed
+app, GHCR needs `write:packages`.)
+
+**The HOME-seed trap (why `run:` steps go to a seed dir).** Runtime `$HOME` is the
+VOLUME (`/data/home`), and `claude` finds skills at runtime `~/.claude/skills`. A
+~-relative tool baked at build would be shadowed by the volume mount. So `run:`
+steps execute with `HOME=/opt/modastack/home-seed` (tool files only), and the
+entrypoint `cp -a`'s that seed onto the volume HOME at boot when a content stamp
+changes (creds/transcripts on the volume are never touched). codex needs no seed
+(`npm i -g` → `/usr/local/bin`, on PATH).
+
+**Deploying a prebuilt image (optional).** If a pullable image ref exists, add
+`image: <ref>` to `deployments/<name>.yaml`; `modastack deploy` then passes
+`--image` to the provisioner and **skips the build entirely** (no remote builder,
+no race per gotcha #9). Without `image:`, a `build:`-declaring team is built on
+Fly during deploy (above). The definition always flows via `team:`/`team-url:`.
+For codex (and any service the tools call) put its key — e.g. `OPENAI_API_KEY` —
+in the env blob; it becomes a Fly secret and the tool reads it at runtime (the
+build only verifies the binary, which needs no auth). Referenced-but-optional
+scoping vars (e.g. `channels: ${SLACK_CHANNELS}`, empty = whole workspace) may be
+declared empty in the env blob without blocking the deploy.
+
+---
+
 ## 3. The provisioner (`scripts/provision-instance.sh`)
 
 Stands up one instance: `fly apps create` → 15 GB volume → stage secrets →
