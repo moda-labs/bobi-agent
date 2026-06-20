@@ -54,6 +54,26 @@ else
   chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${PROJECT_DIR}" "${HOME}"
 fi
 
+# --- 2b. Seed baked team tools onto the volume HOME (C24) --------------------
+# A team-flavored image (modastack/build_render.py) bakes host tools into a seed
+# dir. The agent's runtime $HOME is the VOLUME (/data/home), so ~-relative tools
+# (e.g. gstack's ~/.claude/skills) would be shadowed by the mount — copy the
+# seed onto the volume HOME. Gated on a content stamp so a re-seed happens ONLY
+# when the image's tools change (a deps bump); an ordinary boot is a no-op. The
+# seed holds tool files only, so creds/transcripts already on the volume survive.
+SEED_DIR="/opt/modastack/home-seed"
+SEED_STAMP="${SEED_DIR}/.modastack-tool-stamp"
+HOME_STAMP="${HOME}/.modastack-tool-stamp"
+if [ -f "${SEED_STAMP}" ]; then
+  if [ "$(cat "${SEED_STAMP}")" != "$(cat "${HOME_STAMP}" 2>/dev/null || true)" ]; then
+    log "Seeding baked team tools onto ${HOME} (tool stamp changed)"
+    cp -a "${SEED_DIR}/." "${HOME}/"
+    chown -R "${APP_USER}:${APP_USER}" "${HOME}"
+  else
+    log "Baked team tools already current on volume — skipping seed"
+  fi
+fi
+
 cd "${PROJECT_DIR}"
 
 # gosu resets HOME to the target user's passwd home (/home/modastack), which

@@ -80,6 +80,7 @@ packages = ["modastack"]
 "Dockerfile" = "modastack/_deploy/Dockerfile"
 "docker/docker-entrypoint.sh" = "modastack/_deploy/docker/docker-entrypoint.sh"
 "docker/healthcheck.sh" = "modastack/_deploy/docker/healthcheck.sh"
+"docker/noop-deps.sh" = "modastack/_deploy/docker/noop-deps.sh"
 "scripts/provision-instance.sh" = "modastack/_deploy/scripts/provision-instance.sh"
 "scripts/destroy-instance.sh" = "modastack/_deploy/scripts/destroy-instance.sh"
 "scripts/fleet.sh" = "modastack/_deploy/scripts/fleet.sh"

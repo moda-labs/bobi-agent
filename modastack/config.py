@@ -159,6 +159,41 @@ def run_requires_checks(
 
 
 @dataclass
+class BuildSpec:
+    """A team's container build declaration (C24 team-flavored images).
+
+    Optional `build:` block in agent.yaml. Renders to a shell hook script
+    (see modastack/build_render.py) run as one stable Docker layer BELOW the
+    volatile framework-wheel copy, so a framework release rebuilds only the
+    wheel, not the team's tools. `apt`/`npm`/`run_root` install system-wide as
+    root (`run_root` is the escape hatch for root steps apt can't express, e.g.
+    `npx playwright install-deps chromium`); `run` steps execute as the
+    `modastack` user into a seed HOME the entrypoint copies onto the volume at
+    boot (so ~-relative tools like gstack's skills survive the volume remap).
+    `verify_requires` runs the team's requires[].check as the final hook step,
+    failing CI on a miss.
+
+    `dockerfile` is the escape hatch: when a raw `Dockerfile` sits beside
+    agent.yaml it wins, and the renderer is bypassed (the framework only asserts
+    its `FROM …modastack-base…`). Set by the loader when that file exists.
+    """
+
+    base: str = ""
+    apt: list[str] = field(default_factory=list)
+    npm: list[str] = field(default_factory=list)
+    run_root: list[str] = field(default_factory=list)
+    run: list[str] = field(default_factory=list)
+    verify_requires: bool = False
+    dockerfile: str = ""
+
+    @property
+    def is_empty(self) -> bool:
+        """True when nothing would be baked (no layers, no escape-hatch file)."""
+        return not (self.apt or self.npm or self.run_root or self.run
+                    or self.dockerfile)
+
+
+@dataclass
 class ServiceConfig:
     """One service declaration from agent.yaml."""
 
@@ -193,6 +228,7 @@ class Config:
     monitors: list[dict] = field(default_factory=list)
     auto_dispatch: list[dict] = field(default_factory=list)
     requires: list[RequiresEntry] = field(default_factory=list)
+    build: "BuildSpec | None" = None  # C24 team image build spec; None = generic base
     spend_cap: int = 0  # max agent invocations per rolling hour; 0 = use default
     max_concurrent_agents: int = 0  # max simultaneous subagents; 0 = use default (2)
 
@@ -231,6 +267,9 @@ class Config:
         # expansion, not config interpolation.
         monitors_raw = raw_uninterpolated.get("monitors", [])
         requires_raw = raw_uninterpolated.get("requires", [])
+        # build steps are shell commands run at image-build time; preserve them
+        # verbatim (they may carry ~ or literal $VAR for the build shell).
+        build_raw = raw_uninterpolated.get("build", None)
         raw = _interpolate_env(raw_uninterpolated)
         raw["monitors"] = monitors_raw
 
@@ -262,6 +301,8 @@ class Config:
                 name=name, check=check,
                 why=r.get("why", ""), fix=r.get("fix", ""),
             ))
+
+        build = cls._parse_build(build_raw, path)
 
         connections = []
         for c in raw.get("connections", []):
@@ -303,9 +344,48 @@ class Config:
             monitors=raw.get("monitors", []),
             auto_dispatch=raw.get("auto_dispatch", []),
             requires=requires,
+            build=build,
             spend_cap=int(raw.get("spend_cap", 0)),
             max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),
         )
+
+    @staticmethod
+    def _parse_build(build_raw, agent_yaml_path: Path) -> "BuildSpec | None":
+        """Parse the `build:` block + detect a sibling Dockerfile escape hatch.
+
+        Returns None when the team declares no build (deploys on the generic
+        base). A raw `Dockerfile` next to agent.yaml counts as a build even with
+        no `build:` block — it's the long-tail escape hatch.
+        """
+        def _str_list(value) -> list[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (list, tuple)):
+                return [str(v) for v in value if str(v).strip()]
+            return []
+
+        sibling = agent_yaml_path.parent / "Dockerfile"
+        dockerfile = str(sibling) if sibling.exists() else ""
+
+        if not isinstance(build_raw, dict):
+            # No build: block. Still a build if a raw Dockerfile is present.
+            if dockerfile:
+                return BuildSpec(dockerfile=dockerfile)
+            return None
+
+        verify = str(build_raw.get("verify", "")).strip().lower() == "requires"
+        spec = BuildSpec(
+            base=str(build_raw.get("base", "")),
+            apt=_str_list(build_raw.get("apt")),
+            npm=_str_list(build_raw.get("npm")),
+            run_root=_str_list(build_raw.get("run_root")),
+            run=_str_list(build_raw.get("run")),
+            verify_requires=verify,
+            dockerfile=dockerfile,
+        )
+        return None if spec.is_empty and not verify else spec
 
     @property
     def venn_services(self) -> list[ServiceConfig]:

@@ -1,7 +1,72 @@
 # Custom agent dependencies — team-flavored images (C24)
 
-Status: **design, ready to ticket (2026-06-19).** Layered on C8 (the container
-image) and C22 (provision/update/release automation). Tracking: `[containerized-24]`.
+Status: **MVP SHIPPED (2026-06-19).** Layered on C8 (the container image) and
+C22 (provision/update/release automation). Tracking: `[containerized-24]`.
+
+## What shipped (MVP) — read this first
+
+Two design choices were refined during implementation; they supersede the
+"FROM modastack-base" framing in §1/§2 below:
+
+1. **Wheel-on-top via a team-deps HOOK, not `FROM modastack-base`.** A team that
+   declares `build:` is rendered to a shell hook (`modastack/build_render.py` →
+   `team-deps.sh`) that the ONE Dockerfile runs via a `TEAM_DEPS` build-arg, as a
+   stable layer **below** the volatile framework-wheel copy. So a code-only
+   framework release rebuilds only the wheel layer — the team's tools stay
+   cached. (FROM-base would re-run every team's apt/npm/run each release, because
+   the FROM digest moves.) The default `TEAM_DEPS=docker/noop-deps.sh` makes a
+   no-build team byte-identical to the generic image. A published `modastack-base`
+   is therefore NOT needed for declarative teams (deferred — only the raw-
+   Dockerfile escape hatch + solo `install <url>` pulls would want one).
+
+2. **HOME-seed solves the build-time-vs-runtime HOME trap.** Runtime `$HOME` is
+   the VOLUME (`/data/home`), and `claude` discovers skills from runtime
+   `~/.claude/skills` — so a ~-relative tool (gstack's skills) baked at build
+   would be shadowed by the volume mount. The hook runs `run:` steps as the
+   `modastack` user with `HOME=/opt/modastack/home-seed` (a dir holding ONLY team
+   tools), stamps a content hash, and the entrypoint `cp -a`'s that seed onto the
+   volume HOME at boot when the stamp changes. Tool files merge; creds/transcripts
+   on the volume are never touched. (codex differs: `npm i -g` lands in
+   /usr/local/bin, on PATH, not under HOME — no seed needed.)
+
+3. **Built on Fly during deploy, not pushed to a registry (MVP).** The intended
+   "build once in CI → push to a registry → deploy many by ref" hit Fly friction:
+   Fly's registry rejects a push to a never-deployed ("pending") app, and GHCR
+   needs `write:packages`. So `modastack deploy` renders the team-deps hook into
+   the build context and builds the team-flavored image **on Fly's remote
+   builder** during deploy (`deploy.py:_render_team_deps_into_context` →
+   `--build-arg TEAM_DEPS`). Fly creates app + registry + machine together, and
+   its builder caches the tool layers, so re-deploys are cheap. `--image <ref>`
+   still short-circuits to a prebuilt pull when one exists; `team-images.yml` is
+   a build-only **verify gate**. Build-once-deploy-many is deferred until the
+   registry-push path is wired (a dedicated always-on image app, or solving
+   pending-app activation).
+
+4. **A `run_root` build phase.** Some tools need root steps `apt` can't express
+   (gstack's browse drives Playwright Chromium → ~30 system libs). `run_root`
+   runs as root before the user `run` steps; eng-team uses
+   `npx playwright install-deps chromium` so Playwright resolves the right
+   packages for the running Debian instead of hand-listing `t64` names.
+
+Pieces: `build:` schema (`modastack/config.py` `BuildSpec`, incl. `run_root`),
+renderer (`build_render.py`), Dockerfile `TEAM_DEPS` hook + `docker/noop-deps.sh`,
+entrypoint seed (`docker/docker-entrypoint.sh` §2b), build-on-deploy
+(`deploy.py:_render_team_deps_into_context`) + `--image` short-circuit +
+`provision-instance.sh --image`, CI verify gate
+(`scripts/build-team-images.sh` + `.github/workflows/team-images.yml`),
+eng-team's `build:` block, and `deployments/eng-team.yaml` (activated). codex
+auth = `OPENAI_API_KEY` in the env blob (flows as a Fly secret; build only
+verifies the binary). Tests: `tests/test_build_spec.py`,
+`tests/test_build_render.py`, `tests/integration/test_team_image.py` (gated
+build+seed proof).
+
+The original design follows (FROM-base framing kept for context).
+
+---
+
+## Original design
+
+Layered on C8 (the container image) and C22 (provision/update/release automation).
 
 ## Problem
 
