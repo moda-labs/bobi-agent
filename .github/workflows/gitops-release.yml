@@ -4,8 +4,11 @@ name: GitOps — release rollout
 # (C22 / #342; docs/design/CONTAINERIZED_INSTANCES.md §10).
 #
 # Independent of PyPI: the Fly image builds from source (Dockerfile), so the
-# rollout does not wait on the wheel. Build the image ONCE (against the first
-# fleet app), then reuse that exact image reference for every other app — all
+# rollout does not wait on the wheel. Build the image ONCE — on the CANARY first
+# — then SMOKE the canary (a functional `ask` proving the new image's agent
+# responds end-to-end through the prod event server) and only reuse that exact
+# image reference for the rest of the fleet if it passes. This canary gate is the
+# on-Fly replacement for the retired EC2 release smoke (publish-pypi.yml). All
 # instances share one image (design §2). Each app keeps its own volume, sessions,
 # env and secrets: we round-trip the live config with `fly config save` and only
 # swap the image, so C9 idempotency makes the restart safe and sessions resume.
@@ -93,12 +96,35 @@ jobs:
             rm -f "$cfg"
           }
 
-          # Build + roll the first app from source, then resolve the image it now
-          # runs and reuse it for the rest — one build, N deploys.
+          # Build the CANARY first (or apps[0] if no canary in the fleet), then
+          # reuse its image for the rest — one build, N deploys.
+          canary="${FLEET_PREFIX}-canary"
           first="${apps[0]}"
+          printf '%s\n' "${apps[@]}" | grep -qx "$canary" && first="$canary"
           echo "::group::build + deploy $first"
           redeploy "$first"
           echo "::endgroup::"
+
+          # Functional canary gate — the on-Fly replacement for the retired EC2
+          # release smoke (publish-pypi.yml): ask the freshly-built canary and
+          # assert it answers CANARY-OK end-to-end through the PROD event server
+          # BEFORE rolling the rest of the fleet. A broken image aborts the rollout
+          # here instead of propagating. The deploy already waited for the image
+          # HEALTHCHECK, so the manager should answer at once; retry covers a slow
+          # reconnect after the restart.
+          if [ "$first" = "$canary" ]; then
+            echo "::group::smoke $canary (functional ask)"
+            ask='gosu modastack env HOME=/data/home bash -c "cd /data/project && /opt/venv/bin/modastack ask \"Release canary smoke: reply with exactly CANARY-OK and nothing else.\" --timeout 180"'
+            ok=""
+            for attempt in 1 2 3; do
+              resp="$("$FLY" ssh console -a "$canary" -C "$ask" 2>&1 || true)"
+              printf '%s' "$resp" | grep -q "CANARY-OK" && { ok=1; break; }
+              echo "canary not ready (attempt $attempt/3) — retrying in 30s"; sleep 30
+            done
+            [ -n "$ok" ] || { echo "::error::canary smoke FAILED — $canary did not answer CANARY-OK; aborting rollout."; exit 1; }
+            echo "Canary smoke passed — $canary answered CANARY-OK."
+            echo "::endgroup::"
+          fi
 
           # `fly image show --json` exposes Repository + Digest (the Ref/Reference
           # fields are null), so construct the immutable pull reference ourselves.
@@ -111,7 +137,8 @@ jobs:
           echo "Release image: $image"
 
           fails=()
-          for app in "${apps[@]:1}"; do
+          for app in "${apps[@]}"; do
+            [ "$app" = "$first" ] && continue
             echo "::group::deploy $app"
             if redeploy "$app" "$image"; then
               echo "ok: $app"
