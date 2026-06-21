@@ -592,6 +592,291 @@ class TestPanelEdits:
             "name": "Evil", "url": "https://mcp.evil.com/mcp",
             "auth": "api_key", "api_key": "abc\nMODASTACK_X=1"})
         assert r.status_code == 400
+
+    def test_mcp_add_stdio_command_connection(self, project, monkeypatch):
+        # A local command-based (stdio) server: name + command (+ args + env).
+        monkeypatch.delenv("SUBSTACK_API_KEY", raising=False)
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/mcp/add", json={
+            "name": "Substack", "transport": "stdio",
+            "command": "substack-mcp", "args": "--stdio --port 0",
+            "env": [{"name": "SUBSTACK_API_KEY", "value": "sk_123"},
+                    {"name": "SUBSTACK_PUBLICATION", "value": ""}]})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        entry = s.spec.mcp_servers["substack"]
+        assert entry["type"] == "stdio" and entry["command"] == "substack-mcp"
+        assert entry["args"] == ["--stdio", "--port", "0"]   # shell-split
+        assert entry["env_vars"] == ["SUBSTACK_API_KEY", "SUBSTACK_PUBLICATION"]
+        # also a team service, so it renders as a row
+        assert any((x.get("name") or "").lower() == "substack"
+                   for x in s.spec.services)
+        # the value landed in .env as a ${VAR} ref, never in the response
+        assert "sk_123" not in r.text
+        env_text = (project / ".modastack" / ".env").read_text()
+        assert "SUBSTACK_API_KEY=sk_123" in env_text
+
+    def test_mcp_add_stdio_requires_command(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/mcp/add", json={
+            "name": "X", "transport": "stdio"}).status_code == 400
+
+    def test_mcp_add_stdio_rejects_bad_env_var_name(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/mcp/add", json={
+            "name": "X", "transport": "stdio", "command": "x-mcp",
+            "env": [{"name": "not-upper", "value": "v"}]})
+        assert r.status_code == 400
+
+    def test_mcp_add_command_without_transport_is_stdio(self, project):
+        # A command (and no URL) is inferred as stdio even without `transport`.
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/mcp/add", json={"name": "Local", "command": "my-mcp"})
+        assert r.status_code == 200
+        assert s.spec.mcp_servers["local"]["type"] == "stdio"
+
+    def test_mcp_with_divergent_slug_supersedes_placeholder(self, project, monkeypatch):
+        # Bug: a service guessed as "substack" plus an MCP added as "substack-mcp"
+        # (slug "substack_mcp") showed TWO cards — a "needs connect" placeholder
+        # and the connected MCP — because dedup matched on exact key.
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.setattr(services, "live_venn_catalog", lambda *a, **k: set())
+        s = SetupState()
+        s.spec.services = [{"name": "substack"}]   # earlier guessed placeholder
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "substack-mcp", "transport": "stdio", "command": "uv",
+            "args": "run --directory /x substack-mcp",
+            "env": [{"name": "SUBSTACK_COOKIE", "value": "abc"}]})
+        cards = c.get("/api/connect").json()["cards"]
+        subs = [cc for cc in cards if "substack" in cc["key"]]
+        assert len(subs) == 1                      # exactly one, not two
+        assert subs[0]["via"] == "local command" and subs[0]["status"] == "added"
+
+    def test_removing_mcp_does_not_resurrect_placeholder(self, project, monkeypatch):
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.setattr(services, "live_venn_catalog", lambda *a, **k: set())
+        s = SetupState()
+        s.spec.services = [{"name": "substack"}]
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "substack-mcp", "transport": "stdio", "command": "uv",
+            "args": "run --directory /x substack-mcp"})
+        c.post("/api/service/remove", json={"service_key": "substack_mcp"})
+        cards = c.get("/api/connect").json()["cards"]
+        assert not [cc for cc in cards if "substack" in cc["key"]]
+
+    def test_edit_preserves_saved_secret_and_updates_in_place(self, project, monkeypatch):
+        # Editing a stdio MCP (re-submit with `replaces`): a blank env value keeps
+        # the saved secret, edits apply in place, and no duplicate entry appears.
+        monkeypatch.delenv("SUBSTACK_COOKIE", raising=False)
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "substack-mcp", "transport": "stdio", "command": "uv",
+            "args": "run --directory /x substack-mcp",
+            "env": [{"name": "SUBSTACK_COOKIE", "value": "sek"}]})
+        assert list(s.spec.mcp_servers) == ["substack_mcp"]
+        # Edit: change args, leave the cookie blank (keep current).
+        c.post("/api/mcp/add", json={
+            "name": "substack-mcp", "transport": "stdio", "command": "uv",
+            "args": "run --directory /y substack-mcp",
+            "env": [{"name": "SUBSTACK_COOKIE", "value": ""}],
+            "replaces": "substack_mcp"})
+        assert list(s.spec.mcp_servers) == ["substack_mcp"]   # no duplicate
+        entry = s.spec.mcp_servers["substack_mcp"]
+        assert entry["args"][-2] == "/y"                      # edit applied
+        assert entry["env_vars"] == ["SUBSTACK_COOKIE"]       # declaration kept
+        env_text = (project / ".modastack" / ".env").read_text()
+        assert "SUBSTACK_COOKIE=sek" in env_text              # secret preserved
+
+    def test_edit_rename_rekeys_without_leaving_stale_entry(self, project, monkeypatch):
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.setattr(services, "live_venn_catalog", lambda *a, **k: set())
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "substack-mcp", "transport": "stdio", "command": "uv",
+            "args": "run x"})
+        c.post("/api/mcp/add", json={
+            "name": "Substack", "transport": "stdio", "command": "uv",
+            "args": "run x", "replaces": "substack_mcp"})
+        # Old key gone, new key present, exactly one — and one card.
+        assert list(s.spec.mcp_servers) == ["substack"]
+        cards = c.get("/api/connect").json()["cards"]
+        assert len([cc for cc in cards if "substack" in cc["key"]]) == 1
+
+    def test_state_serializes_mcp_servers(self, project):
+        s = SetupState()
+        c = _client(s, project)
+        c.post("/api/mcp/add", json={
+            "name": "substack-mcp", "transport": "stdio", "command": "uv",
+            "args": "run x", "env": [{"name": "SUBSTACK_COOKIE"}]})
+        # The UI needs the stored config to repopulate the edit form.
+        spec = c.get("/api/connect")  # touch
+        from modastack.setup.webui.server import serialize_state
+        sp = serialize_state(s)["spec"]
+        assert "substack_mcp" in sp["mcp_servers"]
+        assert sp["mcp_servers"]["substack_mcp"]["command"] == "uv"
+
+    def _stub_probe(self, monkeypatch, *, run_result):
+        """Fake probe: a propose call (call_name=None) lists tools + a suggestion;
+        a run call (call_name=...) returns the given run_result."""
+        import modastack.setup.mcp_probe as mcp_probe
+
+        async def fake_probe(entry, proj, *, call_name=None, **kw):
+            if call_name is None:
+                return {"ok": True, "count": 3, "suggested": "substack_get_notes_feed",
+                        "tools": ["substack_get_notes_feed", "substack_get_profile",
+                                  "substack_post_note"]}
+            return {**run_result, "called": call_name}
+        monkeypatch.setattr(mcp_probe, "probe", fake_probe)
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.setattr(services, "live_venn_catalog", lambda *a, **k: set())
+
+    def _added_substack(self, s, c):
+        c.post("/api/mcp/add", json={
+            "name": "substack-mcp", "transport": "stdio", "command": "uv",
+            "args": "run x"})
+
+    def test_chat_test_proposes_a_tool_then_runs_on_confirm(self, project, monkeypatch):
+        # Turn 1 proposes a safe tool (nothing runs); turn 2 ("yes") runs it and
+        # marks the row connected.
+        self._stub_probe(monkeypatch, run_result={
+            "ok": True, "live_ok": True, "output": "note: hello", "live_error": None})
+        s = SetupState()
+        c = _client(s, project)
+        self._added_substack(s, c)
+        body1 = c.post("/api/message",
+                       json={"text": "test the substack connection"}).text
+        assert "substack_get_notes_feed" in body1          # proposed, not run
+        assert s.spec.mcp_servers["substack_mcp"].get("last_test") is None
+        assert s.pending_test["proposed"] == "substack_get_notes_feed"
+        body2 = c.post("/api/message", json={"text": "yes"}).text
+        assert "worked" in body2 and "note: hello" in body2
+        assert s.spec.mcp_servers["substack_mcp"]["last_test"]["live_ok"] is True
+        assert not s.pending_test
+        card = next(x for x in c.get("/api/connect").json()["cards"]
+                    if x["key"] == "substack_mcp")
+        assert card["status"] == "connected"
+
+    def test_chat_test_user_can_name_a_different_readonly_tool(self, project, monkeypatch):
+        self._stub_probe(monkeypatch, run_result={
+            "ok": True, "live_ok": True, "output": "", "live_error": None})
+        s = SetupState()
+        c = _client(s, project)
+        self._added_substack(s, c)
+        c.post("/api/message", json={"text": "test the substack connection"})
+        c.post("/api/message", json={"text": "call substack_get_profile"})
+        # The named read-only tool (not the proposal) is what ran.
+        assert s.spec.mcp_servers["substack_mcp"]["last_test"]["called"] == "substack_get_profile"
+
+    def test_chat_test_refuses_to_run_a_named_write_tool(self, project, monkeypatch):
+        # Safety: naming a write tool must NOT execute it as a connection test.
+        self._stub_probe(monkeypatch, run_result={"ok": True, "live_ok": True})
+        s = SetupState()
+        c = _client(s, project)
+        self._added_substack(s, c)
+        c.post("/api/message", json={"text": "test the substack connection"})
+        body = c.post("/api/message", json={"text": "call substack_post_note"}).text
+        assert "won't" in body.lower() or "write" in body.lower()
+        # No tool was run → no test verdict recorded.
+        assert s.spec.mcp_servers["substack_mcp"].get("last_test") is None
+
+    def test_chat_test_failed_call_marks_error(self, project, monkeypatch):
+        self._stub_probe(monkeypatch, run_result={
+            "ok": True, "live_ok": False, "live_error": "No Substack cookie configured"})
+        s = SetupState()
+        c = _client(s, project)
+        self._added_substack(s, c)
+        c.post("/api/message", json={"text": "test the substack connection"})
+        body2 = c.post("/api/message", json={"text": "yes"}).text
+        assert "No Substack cookie" in body2
+        card = next(x for x in c.get("/api/connect").json()["cards"]
+                    if x["key"] == "substack_mcp")
+        assert card["status"] == "error"
+
+    def test_chat_test_decline_clears_pending(self, project, monkeypatch):
+        self._stub_probe(monkeypatch, run_result={"ok": True, "live_ok": True})
+        s = SetupState()
+        c = _client(s, project)
+        self._added_substack(s, c)
+        c.post("/api/message", json={"text": "test the substack connection"})
+        body2 = c.post("/api/message", json={"text": "no thanks"}).text
+        assert "skipped" in body2.lower()
+        assert not s.pending_test
+        assert s.spec.mcp_servers["substack_mcp"].get("last_test") is None
+
+    def test_ordinary_chat_does_not_trigger_a_test(self, project, monkeypatch):
+        # A normal design message must fall through to digestion, not the probe.
+        import modastack.setup.mcp_probe as mcp_probe
+        called = {"probe": False}
+
+        async def fake_probe(*a, **k):
+            called["probe"] = True
+            return {"ok": True, "count": 0, "tools": []}
+        monkeypatch.setattr(mcp_probe, "probe", fake_probe)
+
+        async def fake_digest(state, project, msg, **kw):
+            state.messages.append({"role": "assistant", "content": "ok"})
+            yield "ok"
+        monkeypatch.setattr("modastack.setup.digestion.digest_turn", fake_digest)
+        s = SetupState()
+        s.spec.mcp_servers = {"substack_mcp": {"type": "stdio", "command": "uv"}}
+        c = _client(s, project)
+        c.post("/api/message", json={"text": "add a project lead role"}).text
+        assert called["probe"] is False
+
+    def test_mcp_detect_endpoint(self, project, tmp_path):
+        # The detect endpoint runs the static scan and returns the recipe.
+        srv = tmp_path / "acme"
+        (srv / "src" / "acme_mcp").mkdir(parents=True)
+        (srv / "pyproject.toml").write_text(
+            '[project]\nname = "acme-mcp"\nversion = "0.1.0"\n\n'
+            '[project.scripts]\nacme-mcp = "acme_mcp.server:main"\n')
+        (srv / "src" / "acme_mcp" / "__init__.py").write_text("")
+        (srv / "src" / "acme_mcp" / "server.py").write_text(
+            'import os\nT = os.environ.get("ACME_TOKEN", "")\n')
+        c = _client(SetupState(), project, home_root=tmp_path)
+        r = c.post("/api/mcp/detect", json={"path": str(srv)})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["ok"] is True and d["command"] == "uv"
+        assert d["args"][-1] == "acme-mcp"
+        assert any(e["name"] == "ACME_TOKEN" and e["secret"] for e in d["env"])
+
+    def test_mcp_detect_requires_path(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/mcp/detect", json={}).status_code == 400
+
+    def test_mcp_detect_bad_folder(self, project, tmp_path):
+        c = _client(SetupState(), project, home_root=tmp_path)
+        r = c.post("/api/mcp/detect", json={"path": str(tmp_path / "nope")})
+        assert r.status_code == 400 and r.json()["ok"] is False
+
+    def test_mcp_detect_rejects_path_outside_home(self, project, tmp_path):
+        # The scan is confined to the home tree, like the folder picker.
+        c = _client(SetupState(), project, home_root=tmp_path / "home")
+        (tmp_path / "home").mkdir()
+        r = c.post("/api/mcp/detect", json={"path": "/etc"})
+        assert r.status_code == 400 and "home" in r.json()["error"]
+
+    def test_connect_surfaces_stdio_card(self, project, monkeypatch):
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.delenv("SUBSTACK_API_KEY", raising=False)
+        s = SetupState()
+        c = _client(s, project)
+        # env var declared but no value yet → card flags it needs that var.
+        c.post("/api/mcp/add", json={
+            "name": "Substack", "transport": "stdio", "command": "substack-mcp",
+            "env": [{"name": "SUBSTACK_API_KEY"}]})
+        card = next(x for x in c.get("/api/connect").json()["cards"]
+                    if x["key"] == "substack")
+        assert card["kind"] == "mcp" and card["via"] == "local command"
+        assert card["status"] == "needs_auth"
+        assert "SUBSTACK_API_KEY" in card["note"]
+        assert card["summary"] == "substack-mcp"
         envf = project / ".modastack" / ".env"
         assert not envf.exists() or "MODASTACK_X" not in envf.read_text()
 

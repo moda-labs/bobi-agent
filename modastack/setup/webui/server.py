@@ -58,6 +58,9 @@ def serialize_state(state: SetupState) -> dict:
             "autonomous": spec.autonomous,
             "autonomous_confirmed": spec.autonomous_confirmed,
             "services": spec.services,
+            # User-added MCP connections — names/command/args/url only (never
+            # secret VALUES), so the UI can repopulate the edit form.
+            "mcp_servers": spec.mcp_servers,
             "readiness": {s: spec.readiness_for(s).value
                           for s in ("goal", "roles", "autonomous", "services")},
         },
@@ -351,6 +354,123 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         body = await request.json()
         text = (body.get("text") or "").strip()
 
+        def _record(user_text, reply):
+            state.messages.append({"role": "user", "content": user_text})
+            state.messages.append({"role": "assistant", "content": reply})
+            state.save(project)
+
+        async def _propose_test(user_text: str, hit: dict):
+            """First turn: launch the server, list its tools, and PROPOSE a safe
+            read-only tool to call — the user confirms before anything runs."""
+            from modastack.setup import mcp_probe
+            if hit.get("none"):
+                reply = ("There are no MCP connections set up yet to test. Add "
+                         "one with “add a connection,” then ask me to test it.")
+                yield reply
+                _record(user_text, reply)
+                return
+            if hit.get("ambiguous"):
+                reply = ("Which connection should I test? You have: "
+                         + ", ".join(hit.get("candidates") or []) + ".")
+                yield reply
+                _record(user_text, reply)
+                return
+            key = hit["key"]
+            entry = (state.spec.mcp_servers or {}).get(key) or {}
+            label = entry.get("label") or key
+            yield (f"Starting {label} and listing its tools (first run can take "
+                   "a moment)…\n\n")
+            result = await mcp_probe.probe(entry, project)   # list only, no call
+            if not result.get("ok"):
+                reply = f"✗ Couldn’t start {label}: {result.get('error')}"
+                if result.get("stderr"):
+                    reply += f"\n\nServer output:\n{result['stderr'][:600]}"
+                state.pending_test = {}
+                yield reply
+                _record(user_text, reply)
+                return
+            tools = result.get("tools") or []
+            proposed = result.get("suggested")
+            state.pending_test = {"key": key, "proposed": proposed, "tools": tools}
+            state.save(project)
+            shown = ", ".join(tools[:10]) + (" …" if len(tools) > 10 else "")
+            if proposed:
+                reply = (f"{label} is up — {len(tools)} tools available.\n\n"
+                         f"To verify the connection end-to-end I'll call "
+                         f"{proposed} (read-only, no arguments). Reply “yes” "
+                         f"to run it, name another tool, or say no.\n\n"
+                         f"Tools: {shown}")
+            else:
+                reply = (f"{label} is up — {len(tools)} tools available, but I "
+                         f"couldn’t spot a clearly safe read-only one to call. "
+                         f"Name a tool to try (no arguments will be sent): {shown}")
+            yield reply
+            _record(user_text, reply)
+
+        async def _resolve_pending(user_text: str, decision: dict):
+            """Second turn: the user confirmed (or named a tool / declined).
+            Run the chosen tool and report — this is the real connection test."""
+            from modastack.setup import mcp_probe
+            pending = state.pending_test or {}
+            if decision["action"] == "cancel":
+                state.pending_test = {}
+                reply = "Okay — skipped the test. Ask again whenever you’re ready."
+                yield reply
+                _record(user_text, reply)
+                return
+            if decision["action"] == "refuse_write":
+                # User named a tool that looks like it writes/changes data — never
+                # run it as a connection test. Keep the proposal open.
+                reply = (f"{decision.get('tool')} looks like it writes or changes "
+                         f"data, so I won’t call it as a test. Pick a read-only "
+                         f"tool, or reply “yes” to run the proposed one.")
+                yield reply
+                _record(user_text, reply)
+                return
+            tool = decision.get("tool")
+            if not tool:
+                reply = ("Name a tool to call (no arguments will be sent): "
+                         + ", ".join(pending.get("tools") or []))
+                yield reply
+                _record(user_text, reply)
+                return
+            key = pending.get("key")
+            entry = (state.spec.mcp_servers or {}).get(key)
+            state.pending_test = {}
+            # The connection may have been edited or removed between the proposal
+            # and now — don't test a stale/empty key.
+            if not isinstance(entry, dict) or not entry:
+                reply = ("That connection isn’t there anymore — it may have been "
+                         "removed or changed. Ask me to test it again.")
+                yield reply
+                _record(user_text, reply)
+                return
+            label = entry.get("label") or key
+            yield f"Calling {tool} on {label}…\n\n"
+            result = await mcp_probe.probe(entry, project, call_name=tool)
+            # Persist ONLY coarse status — never raw error/stderr text, which can
+            # carry secrets and is served to the browser via /api/state.
+            entry["last_test"] = {"ok": bool(result.get("ok")),
+                                  "live_ok": result.get("live_ok"),
+                                  "called": tool}
+            state.spec.mcp_servers[key] = entry
+            if not result.get("ok"):
+                reply = f"✗ Couldn’t start {label}: {result.get('error')}"
+                if result.get("stderr"):
+                    reply += f"\n\nServer output:\n{result['stderr'][:600]}"
+            elif result.get("live_ok"):
+                out = (result.get("output") or "").strip()
+                snippet = f"\n\nResponse: {out}" if out else ""
+                reply = (f"✓ Called {tool} on {label} — it worked. The "
+                         f"connection is live.{snippet}")
+            else:
+                reply = (f"⚠ {label} starts, but calling {tool} failed: "
+                         f"{result.get('live_error')}\n\nThat usually means "
+                         f"credentials aren’t set or aren’t valid yet — add them "
+                         f"with “edit” on the connection, then re-test.")
+            yield reply
+            _record(user_text, reply)
+
         async def gen() -> AsyncIterator[str]:
             if not text:
                 yield _sse("error", {"message": "empty message"})
@@ -362,6 +482,27 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             clean, redacted = redact_secrets(text)
             if redacted:
                 yield _sse("redacted", {"count": redacted})
+            from modastack.setup import mcp_probe
+            # A proposed test awaiting confirmation takes priority: a "yes" / tool
+            # name / "no" resolves it; anything else drops it and falls through.
+            if state.pending_test:
+                decision = mcp_probe.match_test_confirmation(
+                    clean, state.pending_test)
+                if decision["action"] != "none":
+                    async for chunk in _resolve_pending(clean, decision):
+                        yield _sse("delta", {"text": chunk})
+                    yield _sse("state", serialize_state(state))
+                    return
+                state.pending_test = {}   # user changed the subject
+                state.save(project)
+            # "test the connection" → propose a tool (the no-tools design brain
+            # can't reach the team's servers, so we handle it here).
+            hit = mcp_probe.match_connection_test(clean, state.spec.mcp_servers)
+            if hit.get("intent"):
+                async for chunk in _propose_test(clean, hit):
+                    yield _sse("delta", {"text": chunk})
+                yield _sse("state", serialize_state(state))
+                return
             try:
                 async for chunk in digestion.digest_turn(
                         state, project, clean, model=app.state.model,
@@ -398,11 +539,14 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         cards = services.cards_for(state.spec.services, project,
                                    connected=connected, catalog=venn_catalog)
         # User-defined custom MCP connections supersede their service card (a
-        # service first guessed as "custom" becomes an MCP row once a URL is
-        # given). Drop the placeholder card and render the configured MCP.
+        # service first guessed as "custom" becomes an MCP row once configured).
+        # Match by CANONICAL key so a placeholder guessed as 'substack' is also
+        # superseded by an MCP added as 'substack-mcp' — otherwise the divergent
+        # slug leaves both a "needs connect" placeholder and the MCP row.
         user_mcp = state.spec.mcp_servers or {}
-        mcp_keys = {k.strip().lower() for k in user_mcp}
-        cards = [c for c in cards if c["key"].strip().lower() not in mcp_keys]
+        mcp_canon = {services.canonical_service_key(k) for k in user_mcp}
+        cards = [c for c in cards
+                 if services.canonical_service_key(c["key"]) not in mcp_canon]
         for key, cfg in user_mcp.items():
             if isinstance(cfg, dict):
                 cards.append(services.user_mcp_card(key, cfg, project))
@@ -513,55 +657,158 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             state.spec.mcp_servers = {
                 k: v for k, v in state.spec.mcp_servers.items()
                 if k.strip().lower() != key}
+        # Drop a pending connection-test that targets the removed connection.
+        if (state.pending_test or {}).get("key", "").strip().lower() == key:
+            state.pending_test = {}
         state.validated = False
         state.save(project)
         return JSONResponse(serialize_state(state))
 
+    @app.post("/api/mcp/detect")
+    def mcp_detect_folder(payload: dict) -> JSONResponse:
+        """Inspect a local folder and infer a stdio MCP launch recipe — command,
+        args, and the env vars it needs — to prefill the add-connection form.
+        Pure read-only static analysis: nothing is executed or installed, and no
+        secret VALUES are read (only var names are surfaced)."""
+        from modastack.setup import mcp_detect
+        path = (payload.get("path") or "").strip()
+        if not path:
+            return JSONResponse({"ok": False, "error": "give a folder path"},
+                                status_code=400)
+        # Confine the scan to the home tree — same boundary as the folder picker
+        # (/api/browse, /api/teams). The detector reads README/source/.env.example
+        # under the path, so don't let it probe arbitrary filesystem locations.
+        target, ok = _within_home(mcp_detect._clean_path_input(path), home)
+        if not ok:
+            return JSONResponse(
+                {"ok": False, "error": "pick a folder inside your home directory"},
+                status_code=400)
+        result = mcp_detect.detect(str(target))
+        return JSONResponse(result,
+                            status_code=200 if result.get("ok") else 400)
+
     @app.post("/api/mcp/add")
     def mcp_add(payload: dict) -> JSONResponse:
-        """Add a custom MCP connection by name + remote URL (the Claude-style
-        connector form). Auth is api_key (Bearer header) or none (public). Any
-        key goes straight to .env as a `${VAR}` ref. Persists to
-        spec.mcp_servers and as a team service so it shows as a row; authored
-        into agent.yaml mcp_servers: at build. (OAuth-authed MCPs aren't
-        supported yet — a follow-up.)"""
+        """Add a custom MCP connection — remote or local (the Claude-style
+        connector form).
+
+        - **Remote (http)**: name + remote URL. Auth is api_key (Bearer header)
+          or none (public). Any key goes straight to .env as a `${VAR}` ref.
+        - **Local (stdio)**: name + command (+ optional args + env var names).
+          Each declared env var is captured to .env as a `${VAR}` ref and
+          authored as `env: {VAR: ${VAR}}`; the command line never carries an
+          inline secret.
+
+        Persists to spec.mcp_servers and as a team service so it shows as a row;
+        authored into agent.yaml mcp_servers: at build. (OAuth-authed MCPs
+        aren't supported yet — a follow-up.)"""
         import re
+        import shlex
         from modastack.setup import actions
         name = (payload.get("name") or "").strip()
-        url = (payload.get("url") or "").strip()
         if not name:
             return JSONResponse({"error": "give the connection a name"},
                                 status_code=400)
-        if not (url.startswith("http://") or url.startswith("https://")):
-            return JSONResponse(
-                {"error": "a remote server URL (https://…) is required"},
-                status_code=400)
-        # API key is the only supported auth; no key means a public server.
-        auth = payload.get("auth") or "api_key"
-        if auth not in ("none", "api_key"):
-            return JSONResponse({"error": "auth must be none or api_key"},
-                                status_code=400)
         key = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "mcp"
         prefix = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_") or "MCP"
-        entry: dict = {"url": url, "type": "http", "auth": auth, "label": name}
-        try:
-            if auth == "api_key":
-                var = f"{prefix}_API_KEY"
-                entry["secret_var"] = var
-                api_key = payload.get("api_key", "")
-                if api_key:
-                    actions.save_credential(state, project, var, name, "",
-                                            prompt_fn=lambda *_: api_key)
-        except actions.ActionError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
 
+        url = (payload.get("url") or "").strip()
+        command = (payload.get("command") or "").strip()
+        # stdio when explicitly chosen, or when a command (and no URL) is given.
+        is_stdio = (payload.get("transport") == "stdio"
+                    or (command and not url))
+
+        if is_stdio:
+            if not command:
+                return JSONResponse(
+                    {"error": "a command is required for a local MCP server"},
+                    status_code=400)
+            # args: accept a list or a single shell-style string.
+            raw_args = payload.get("args")
+            if isinstance(raw_args, str):
+                try:
+                    args = shlex.split(raw_args)
+                except ValueError as e:
+                    return JSONResponse({"error": f"bad args: {e}"},
+                                        status_code=400)
+            else:
+                args = [str(a) for a in (raw_args or [])]
+            # env: a list of {name, value?} (or bare names). Capture any value to
+            # .env; record the var name so it's authored as a `${VAR}` ref.
+            env_vars: list[str] = []
+            try:
+                for item in payload.get("env") or []:
+                    if isinstance(item, dict):
+                        var = (item.get("name") or "").strip()
+                        val = item.get("value") or ""
+                    else:
+                        var, val = str(item).strip(), ""
+                    if not var:
+                        continue
+                    if not re.match(r"^[A-Z][A-Z0-9_]*$", var):
+                        return JSONResponse(
+                            {"error": f"env var '{var}' must be "
+                                      "UPPER_SNAKE_CASE"}, status_code=400)
+                    if var not in env_vars:
+                        env_vars.append(var)
+                    if val:
+                        actions.save_credential(state, project, var, name, "",
+                                                prompt_fn=lambda *_: val)
+            except actions.ActionError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            entry: dict = {"type": "stdio", "command": command, "args": args,
+                           "env_vars": env_vars, "auth": "stdio", "label": name}
+        else:
+            if not (url.startswith("http://") or url.startswith("https://")):
+                return JSONResponse(
+                    {"error": "a remote server URL (https://…) or a local "
+                              "command is required"},
+                    status_code=400)
+            # API key is the only supported auth; no key means a public server.
+            auth = payload.get("auth") or "api_key"
+            if auth not in ("none", "api_key"):
+                return JSONResponse({"error": "auth must be none or api_key"},
+                                    status_code=400)
+            entry = {"url": url, "type": "http", "auth": auth, "label": name}
+            try:
+                if auth == "api_key":
+                    var = f"{prefix}_API_KEY"
+                    entry["secret_var"] = var
+                    api_key = payload.get("api_key", "")
+                    if api_key:
+                        actions.save_credential(state, project, var, name, "",
+                                                prompt_fn=lambda *_: api_key)
+            except actions.ActionError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+
+        # `replaces` is the key of the connection being edited — drop its old
+        # entry so an edit (which may rename → re-key) overwrites in place rather
+        # than leaving a stale duplicate.
+        replaces = (payload.get("replaces") or "").strip().lower()
         mcps = dict(state.spec.mcp_servers or {})
+        if replaces and replaces != key:
+            mcps.pop(replaces, None)
         mcps[key] = entry
         state.spec.mcp_servers = mcps
-        have = {((s.get("name") if isinstance(s, dict) else str(s)) or "")
-                .strip().lower() for s in state.spec.services}
-        if key not in have and name.lower() not in have:
-            state.spec.services = list(state.spec.services) + [{"name": key}]
+        # Replace any pre-existing service that's really THIS connection (a bare
+        # placeholder like 'substack' when the MCP is 'substack-mcp', or the row
+        # being edited) with a single row keyed by the MCP, so we never show both
+        # a placeholder and the MCP. Match canonically; keep unrelated services.
+        from modastack.setup.services import canonical_service_key
+        new_canon = canonical_service_key(key)
+
+        def _svc_name(s):
+            return ((s.get("name") if isinstance(s, dict) else str(s)) or "")
+
+        kept = [s for s in state.spec.services
+                if canonical_service_key(_svc_name(s)) != new_canon
+                and _svc_name(s).strip().lower() != replaces]
+        kept.append({"name": key})
+        state.spec.services = kept
+        # Editing a connection invalidates any pending test against it (and a
+        # re-key would orphan it) — drop it so we never test a stale config.
+        if (state.pending_test or {}).get("key") in {key, replaces}:
+            state.pending_test = {}
         state.validated = False
         state.save(project)
         return JSONResponse({"ok": True, "state": serialize_state(state)})

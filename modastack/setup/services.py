@@ -35,6 +35,7 @@ Connect render); the pure `card()` is what the tests pin down.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -466,30 +467,93 @@ def catalog_cards() -> list[dict]:
     return [card(c) for c in CATALOG.values()]
 
 
+def canonical_service_key(key: str) -> str:
+    """A loose identity for a connection so a service first guessed by bare name
+    ('substack') and the MCP a user later adds for it ('substack-mcp' →
+    'substack_mcp') collapse to ONE card. Strips non-alphanumerics and any
+    leading/trailing 'mcp'/'server' qualifier. Falls back to the lower-cased key
+    when stripping would leave nothing (e.g. a server literally named 'mcp')."""
+    k = re.sub(r"[^a-z0-9]+", "", (key or "").lower())
+    changed = True
+    while changed:
+        changed = False
+        for q in ("mcp", "server"):
+            if k.endswith(q) and len(k) > len(q):
+                k = k[:-len(q)]
+                changed = True
+        if k.startswith("mcp") and len(k) > 3:
+            k = k[3:]
+            changed = True
+    return k or (key or "").lower()
+
+
 def user_mcp_card(key: str, cfg: dict, project: Path) -> dict:
-    """A Connect card for a user-defined custom MCP connection (added by name +
-    remote URL). We do NOT verify the connection here — the agent actually
-    connects at `modastack start`, where mcp_servers are probed. So this never
-    claims "connected"; it reports what auth was set and flags when the server
-    still needs a key."""
+    """A Connect card for a user-defined custom MCP connection — either a remote
+    server (name + URL) or a local command-based one (name + command, stdio).
+    We do NOT verify the connection here — the agent actually connects at
+    `modastack start`, where mcp_servers are probed. So this never claims
+    "connected"; it reports what's been set and flags what's still needed."""
     from modastack.setup.actions import read_env
     auth = cfg.get("auth", "none")
     label = cfg.get("label") or _display_name(key)
+    # Local command (stdio) server: summary is the command line; the "auth" it
+    # needs is its declared env vars. Missing any → still incomplete.
+    if cfg.get("type") == "stdio" or cfg.get("command"):
+        env = read_env(project)
+        env_vars = cfg.get("env_vars") or []
+        missing = [v for v in env_vars
+                   if not (env.get(v) or os.environ.get(v))]
+        cmd = " ".join([cfg.get("command", ""),
+                        *(str(a) for a in cfg.get("args") or [])]).strip()
+        if missing:
+            status, note = "needs_auth", "needs env: " + ", ".join(missing)
+        else:
+            status, note = "added", "local command · test it from chat"
+        card = {
+            "key": key.strip().lower(), "name": label, "kind": "mcp",
+            "summary": cmd, "scopes": [], "methods": [],
+            "via": "local command", "status": status, "user_mcp": True,
+            "auth": "stdio", "url": "", "note": note,
+        }
+        return _overlay_last_test(card, cfg.get("last_test"))
     if auth == "api_key":
         var = cfg.get("secret_var", "")
         present = bool(read_env(project).get(var) or os.environ.get(var))
         # No key → genuinely incomplete; a key → set, but still unverified.
         status = "added" if present else "needs_auth"
-        note = ("API key set · connects when you run" if present
+        note = ("API key set · test it from chat" if present
                 else "needs an API key")
     else:
         status, note = "added", "no auth (public server)"
-    return {
+    card = {
         "key": key.strip().lower(), "name": label, "kind": "mcp",
         "summary": cfg.get("url", ""), "scopes": [], "methods": [],
         "via": "hosted MCP", "status": status, "user_mcp": True,
         "auth": auth, "url": cfg.get("url", ""), "note": note,
     }
+    return _overlay_last_test(card, cfg.get("last_test"))
+
+
+def _overlay_last_test(card: dict, last_test) -> dict:
+    """Reflect the most recent live tool-call test on the card. A successful call
+    ('live_ok') marks it 'connected'; a failed call or a server that wouldn't
+    start marks it 'error'. Without a test it stays 'added'/'needs_auth'
+    (pending). A pass only upgrades the optimistic 'added' — a connection still
+    'needs_auth' (missing config) keeps that, so a stale pass can't mask
+    now-missing credentials."""
+    if not isinstance(last_test, dict):
+        return card
+    server_ok = last_test.get("ok")
+    live_ok = last_test.get("live_ok")
+    if server_ok and live_ok:
+        if card["status"] == "added":      # don't override a needs_auth card
+            card["status"] = "connected"
+            tool = last_test.get("called")
+            card["note"] = f"verified · {tool}" if tool else "connected"
+    elif server_ok is False or live_ok is False:
+        card["status"] = "error"
+        card["note"] = "test failed — re-test from chat"
+    return card
 
 
 def _live_service_names(key: str) -> set[str]:

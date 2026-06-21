@@ -456,6 +456,30 @@ class TestUserMcpServers:
         paths = [f.path for f in compute_manifest(s, catalog=set())]
         assert "tools/posthog.md" not in paths
 
+    def test_stdio_mcp_emits_command_args_env(self):
+        s = self._state(substack={"type": "stdio", "command": "substack-mcp",
+                                  "args": ["--stdio"],
+                                  "env_vars": ["SUBSTACK_API_KEY"],
+                                  "auth": "stdio"})
+        cfg = yaml.safe_load(authoring.build_agent_yaml(s, catalog=set()))
+        sub = cfg["mcp_servers"]["substack"]
+        assert sub["type"] == "stdio"
+        assert sub["command"] == "substack-mcp"
+        assert sub["args"] == ["--stdio"]
+        # Env var NAMES → `${VAR}` refs, never inline secrets.
+        assert sub["env"] == {"SUBSTACK_API_KEY": "${SUBSTACK_API_KEY}"}
+
+    def test_stdio_mcp_without_args_or_env_omits_them(self):
+        s = self._state(local={"type": "stdio", "command": "my-mcp"})
+        cfg = yaml.safe_load(authoring.build_agent_yaml(s, catalog=set()))
+        loc = cfg["mcp_servers"]["local"]
+        assert loc == {"type": "stdio", "command": "my-mcp"}
+
+    def test_stdio_mcp_kept_out_of_services_block(self):
+        s = self._state(substack={"type": "stdio", "command": "substack-mcp"})
+        cfg = yaml.safe_load(authoring.build_agent_yaml(s, catalog=set()))
+        assert "substack" not in {x["name"] for x in cfg.get("services", [])}
+
 
 class TestAuthorOpenModeNonLossy:
     """author_pack in open mode edits in place — it must preserve files the
