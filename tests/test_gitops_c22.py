@@ -32,7 +32,7 @@ FLEET_SH = REPO / "scripts" / "fleet.sh"
 PROVISION_SH = REPO / "scripts" / "provision-instance.sh"
 DESTROY_SH = REPO / "scripts" / "destroy-instance.sh"
 WF_TEAMS = REPO / ".github" / "workflows" / "deploy-agent-teams.yml"
-WF_RELEASE = REPO / ".github" / "workflows" / "gitops-release.yml"
+WF_RELEASE = REPO / ".github" / "workflows" / "release.yml"
 
 
 # --- scripts/fleet.sh (exercised for real, Fly stubbed) ---------------------
@@ -146,16 +146,36 @@ def test_workflows_parse_and_actionlint_clean():
 
 # --- deploy-agent-teams.yml invariants (thin client over `modastack deploy`) -------
 
-def test_teams_deploys_on_release_with_manual_tag_escape_hatch():
-    """Deploy gate = a release (not every push to main); manual via a `deploy-*`
-    tag or workflow_dispatch."""
+def test_teams_is_callable_and_not_release_triggered():
+    """The reconcile is invoked by the release pipeline via workflow_call (so the
+    image roll can precede it), NOT directly on a release. Standalone image-free
+    team updates still run via a `deploy-*` tag or workflow_dispatch."""
     wf = _load(WF_TEAMS)
     on = wf.get("on", wf.get(True))  # PyYAML parses bare `on:` as boolean True.
-    assert "published" in on["release"]["types"]
+    # Reusable: release.yml calls it as its final step.
+    assert "workflow_call" in on
+    # No longer fires directly on a release — release.yml owns that ordering.
+    assert "release" not in on
+    # Standalone, image-free path for a team-definition/secret edit.
     assert any(t.startswith("deploy-") for t in on["push"]["tags"])
     assert "workflow_dispatch" in on
-    # A push to a branch must NOT auto-deploy — only release/tag/dispatch.
+    # A push to a branch must NOT auto-deploy — only the call / tag / dispatch.
     assert "branches" not in (on.get("push") or {})
+
+
+def test_release_pipeline_deploys_teams_after_images():
+    """The single gated pipeline: build-images (image roll) FIRST, then
+    deploy-teams reconciles package content + secrets by CALLING the reusable
+    deploy-agent-teams workflow. Image always precedes the package/secret reconcile."""
+    jobs = _jobs(_load(WF_RELEASE))
+    assert "build-images" in jobs
+    deploy_teams = jobs["deploy-teams"]
+    # ordered after the image roll
+    assert deploy_teams["needs"] == "build-images"
+    # reuses the standalone reconcile workflow (one implementation, two entry points)
+    assert deploy_teams["uses"] == "./.github/workflows/deploy-agent-teams.yml"
+    # forwards FLY_API_TOKEN + per-tenant Environment secrets to the called workflow
+    assert deploy_teams["secrets"] == "inherit"
 
 
 def test_teams_is_a_thin_client_no_business_logic_in_yaml():
@@ -218,7 +238,7 @@ def test_teams_no_ops_without_fly_token():
     assert "configured == 'true'" in deploy["if"]
 
 
-# --- gitops-release.yml invariants ------------------------------------------
+# --- release.yml invariants (build-images job) ------------------------------
 
 def test_release_triggers_on_published_release():
     wf = _load(WF_RELEASE)
@@ -227,7 +247,7 @@ def test_release_triggers_on_published_release():
 
 
 def test_release_builds_once_and_reuses_image_across_fleet():
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["rollout"])
+    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-images"])
     # enumerate the fleet by the stamp, build the generic image once, reuse --image
     assert "scripts/fleet.sh list" in script
     assert "fly image show" in script
@@ -244,7 +264,7 @@ def test_release_is_team_aware():
     """A framework release must REBUILD a team-flavored instance's own image
     (its TEAM_DEPS hook) instead of rolling the generic image onto it, which
     would strip its baked tools and break dispatch (C24 #368)."""
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["rollout"])
+    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-images"])
     # the renderer decides generic-vs-team per app, and team apps build with TEAM_DEPS
     assert "render-team-deps.py" in script
     assert "TEAM_DEPS=" in script
@@ -253,7 +273,7 @@ def test_release_is_team_aware():
 
 
 def test_release_functional_canary_gate():
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["rollout"])
+    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-images"])
     # build + smoke the canary BEFORE rolling the rest: a blocking `ask` proving
     # the new image's agent answers, asserted by a marker.
     assert "modastack ask" in script and "CANARY-OK" in script
@@ -261,7 +281,7 @@ def test_release_functional_canary_gate():
 
 
 def test_release_isolates_per_app_failures():
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["rollout"])
+    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-images"])
     assert "fails+=(" in script  # collect, don't abort the fleet
     # load-bearing flags from the provisioner (one-volume + zstd boot bug)
     assert "--ha=false" in script

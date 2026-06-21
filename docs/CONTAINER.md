@@ -209,7 +209,7 @@ secrets) and is the seam a token broker later fills. Team Environments must have
   `fly ssh` (workspace-safe reinstall — *not* `agents update`, which can't
   resolve a `url:`-sourced pack) then `fly machine restart`. The volume's
   `agent.yaml` and workspace edits survive.
-- **Release** → publish a GitHub Release. `gitops-release.yml` builds the image
+- **Release** → publish a GitHub Release. `release.yml` builds the image
   once, then rolls every fleet app to that exact image (`fly config save` +
   `fly deploy --image`), preserving each volume/sessions/env. Per-app failures
   are isolated; re-run to retry (deploys are idempotent).

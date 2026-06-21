@@ -1,8 +1,27 @@
-name: GitOps — release rollout
+name: Release
 
-# Roll the whole Fly fleet to a new modastack image when a release is published
-# (C22 / #342; docs/design/CONTAINERIZED_INSTANCES.md §10).
+# The single gated release pipeline for the Fly fleet, on a published GitHub
+# Release (C22 / #342; docs/design/CONTAINERIZED_INSTANCES.md §10). Two ordered
+# layers — image FIRST, then team packages + secrets — under one success gate:
 #
+#   1. subscription-login-smoke  gate the whole release on a verified login path.
+#   2. build-images              build + ROLL the new framework image across the
+#                                fleet (this file). Build-once-on-canary, smoke it,
+#                                reuse the digest; team-flavored instances rebuild
+#                                their own image. Secrets/config are PRESERVED — an
+#                                image swap doesn't touch them.
+#   3. deploy-teams              reconcile every deployment's package CONTENT +
+#                                SECRETS onto the freshly-rolled image, by CALLING
+#                                deploy-agent-teams.yml (workflow_call). Runs only
+#                                after build-images succeeds, so the image always
+#                                precedes the package/secret reconcile.
+#
+# The split is deliberate: the image roll is CROSS-FLEET (build once, reuse the
+# digest N times) so it can't be a per-instance `modastack deploy` loop; the team
+# reconcile IS that per-instance loop (deploy-agent-teams.yml), reused here as the
+# final step and standalone (a `deploy-*` tag) for image-free team-definition edits.
+#
+# --- build-images ---
 # Independent of PyPI: the Fly image builds from source (Dockerfile), so the
 # rollout does not wait on the wheel. Build the shared GENERIC image ONCE — on the
 # CANARY — then SMOKE the canary (a functional `ask` proving the new image's agent
@@ -20,12 +39,6 @@ name: GitOps — release rollout
 # Per-app failures are isolated and reported; the Action log IS the deploy log.
 # A re-run is the recovery model (idempotent + C7 format-version guard).
 #
-# This stays orchestration (not a `modastack deploy` loop) on purpose: rolling N
-# apps to a new image is a CROSS-FLEET operation whose whole point is build-once,
-# reuse-the-image-ref N times — a per-instance primitive can't express that
-# without N redundant builds. Team CONTENT reconcile (provision/update) is the
-# thin-client `modastack deploy` loop in deploy-agent-teams.yml; this is the image roll.
-#
 # Required configuration:
 #   deployments/defaults.yaml `fleet:`   fleet namespace (enumerated by the
 #                                         MODASTACK_FLEET stamp). Single source of
@@ -41,9 +54,9 @@ on:
         description: "Git ref/tag to build and roll out (default: this branch)"
         required: false
 
-# One rollout at a time across the whole fleet.
+# One release rollout at a time across the whole fleet.
 concurrency:
-  group: gitops-release
+  group: release
   cancel-in-progress: false
 
 jobs:
@@ -95,7 +108,8 @@ jobs:
           # subscription bootstrap path with a synthetic/mock code end-to-end.
           python -m pytest tests/integration/test_login_bootstrap_smoke.py -v
 
-  rollout:
+  build-images:
+    name: Build & roll fleet images
     runs-on: ubuntu-latest
     # Don't roll the fleet unless the subscription-login path is verified (#388).
     needs: subscription-login-smoke
@@ -243,3 +257,18 @@ jobs:
             exit 1
           fi
           echo "Fleet rolled (${#apps[@]} instance(s); generic image: ${image:-none}; team-flavored instances rebuilt their own)."
+
+  # --------------------------------------------------------------------------
+  # Reconcile each deployment's package CONTENT + SECRETS onto the freshly-rolled
+  # image — the FINAL release step. Image FIRST (build-images), packages/secrets
+  # SECOND. This reuses the standalone team-deploy workflow as a called step, so
+  # the same `modastack deploy` reconcile runs from a release and from a `deploy-*`
+  # tag. `secrets: inherit` forwards FLY_API_TOKEN + the per-tenant Environment
+  # secrets; `ref` pins the reconcile to the released commit.
+  deploy-teams:
+    name: Deploy team packages + secrets
+    needs: build-images
+    uses: ./.github/workflows/deploy-agent-teams.yml
+    secrets: inherit
+    with:
+      ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}

@@ -19,8 +19,8 @@ Pieces:
 - `scripts/provision-instance.sh` + `scripts/destroy-instance.sh` — stand up / tear down one instance
 - `scripts/fleet.sh` — fleet enumeration helper
 - `scripts/build-team-tarballs.sh` — package teams into `.tar.gz`
-- `.github/workflows/deploy-agent-teams.yml` — thin client: reconcile `deployments/*` on release/tag
-- `.github/workflows/gitops-release.yml` — fleet image rollout on release
+- `.github/workflows/release.yml` — the single gated release pipeline: build + roll fleet images, then deploy teams
+- `.github/workflows/deploy-agent-teams.yml` — reconcile `deployments/*` (called by `release.yml`; standalone on a `deploy-*` tag)
 - `.github/workflows/team-packages.yml` — publishes team tarballs (for `team-url` delivery)
 
 ---
@@ -368,29 +368,42 @@ one; the reconcile prunes a stray live key. An old per-deployment Environment (e
 ## 6. GitHub Ops (thin clients over the primitive)
 
 ```
-publish a GitHub Release   (or push a `deploy-*` tag / dispatch — the deploy gate)
+publish a GitHub Release   ─▶ release.yml  (the single gated pipeline)
+   │                              subscription-login-smoke   (gate)
+   │                                 │
+   │                              build-images               (image FIRST)
+   │                                 build image once -> roll every fleet app to
+   │                                 that digest; team-flavored apps rebuild their
+   │                                 own image (config/secrets preserved)
+   │                                 │
+   │                              deploy-teams               (packages/secrets SECOND)
+   │                                 └─ uses: deploy-agent-teams.yml (workflow_call)
    │
-   ├─▶ deploy-agent-teams.yml:
-   │      plan   : list ACTIVE deployments/<name>.yaml (defaults excluded) + tenant
-   │      deploy : matrix over {name,tenant}, environment=<tenant>
-   │               └─ toJSON(secrets) | filter <TEAM>__ -> env-file -> `modastack deploy <name>`
-   │      orphans: Fly apps with no deployments/ file -> warn (human `modastack destroy`)
-   │
-   └─▶ gitops-release.yml:
-          build image once -> roll every fleet app to that digest (config preserved)
+push a `deploy-*` tag / dispatch ─▶ deploy-agent-teams.yml   (standalone, NO image roll)
+          plan   : list ACTIVE deployments/<name>.yaml (defaults excluded) + tenant
+          deploy : matrix over {name,tenant}, environment=<tenant>
+                   └─ toJSON(secrets) | filter <TEAM>__ -> env-file -> `modastack deploy <name>`
+          orphans: Fly apps with no deployments/ file -> warn (human `modastack destroy`)
 ```
 
 **A release is the deploy gate** — an edit pushed to `main` does NOT auto-deploy;
-you cut a release (or push a `deploy-*` tag) to ship. The reconcile **business
-logic lives in `modastack deploy`**, not the YAML. The Action only orchestrates:
-list the active deployments, hand each its secrets, loop the primitive. That is why
-the same engine runs from a laptop, this Action, Terraform, or a SaaS plane — see
-§7.1 (bring your own repo).
+you cut a release (or push a `deploy-*` tag) to ship. **Image always precedes
+packages**: `release.yml` rolls the new framework image across the fleet
+(`build-images`), then reconciles each deployment's package content + secrets onto
+it (`deploy-teams`), under one success gate. A team-definition or secret edit that
+needs **no** image rebuild ships on its own via a `deploy-*` tag, which runs
+`deploy-agent-teams.yml` standalone. Either way the reconcile **business logic
+lives in `modastack deploy`**, not the YAML — the Action only orchestrates: list
+the active deployments, hand each its secrets, loop the primitive. That is why the
+same engine runs from a laptop, this Action, Terraform, or a SaaS plane — see §7.1
+(bring your own repo).
 
 ### deploy-agent-teams.yml — the reconcile
-Triggered by **`release: published`**, a **`deploy-*` tag push** (manual deploy
-without a formal release — also how the GitOps path is e2e'd from a branch, since
-tag pushes run the workflow from the tagged commit), or **`workflow_dispatch`**
+Invoked by **`release.yml` via `workflow_call`** (its final step, after the image
+roll — `secrets: inherit` forwards the Fly token + per-tenant Environment secrets,
+and `ref` pins it to the released commit), or run standalone by a **`deploy-*` tag
+push** (an image-free team/secret update — also how the GitOps path is e2e'd from a
+branch, since tag pushes run from the tagged commit) or **`workflow_dispatch`**
 (optional `only:` to scope to one deployment). Jobs:
 - **plan**: list every **active** `deployments/<name>.yaml` (`defaults.yaml`
   excluded; an inactive deployment is a non-`.yaml` like `<name>.yaml.example`).
@@ -420,14 +433,23 @@ Release** → stable public URL
 Sole publisher of that release; nothing else should `--clobber` it. Only needed
 when a deployment uses `team-url:`; pure ssh-push (`team:`) deployments ignore it.
 
-### gitops-release.yml — fleet rollout
+### release.yml — the release pipeline
 Triggered by **`release: published`** (independent of PyPI — the Fly image builds
-from source). Build the image **once** against the first fleet app, resolve the
-image it now runs, and reuse that exact reference for every other app
-(build-once-deploy-many; all instances share one image). Each app keeps its
-volume/sessions/env: round-trip the live config with `fly config save` and only
-swap the image. Per-app failures are isolated and reported; re-run to retry
-(idempotent; C7 guards format-version skew).
+from source). One gated pipeline, three ordered jobs:
+- **subscription-login-smoke** — gate the release on a verified subscription-login
+  bootstrap (a hermetic mock-code smoke; #388).
+- **build-images** — build the image **once** against the first fleet app, resolve
+  the image it now runs, and reuse that exact reference for every other app
+  (build-once-deploy-many; all generic instances share one image). A team-flavored
+  app rebuilds its **own** image (its TEAM_DEPS hook) on the new wheel. Each app
+  keeps its volume/sessions/env/secrets: round-trip the live config with `fly
+  config save` and only swap the image. A functional canary `ask` (`CANARY-OK`)
+  gates the rest of the roll. Per-app failures are isolated and reported; re-run to
+  retry (idempotent; C7 guards format-version skew).
+- **deploy-teams** — `needs: build-images`, then **calls `deploy-agent-teams.yml`**
+  to reconcile each deployment's package content + secrets onto the freshly-rolled
+  image. So the image always lands before the package/secret reconcile, and both
+  share the release's success/failure outcome.
 
 > **flyctl gotchas (found in the C22 e2e):**
 > - `fly config save` writes via **`-c <path>`**, not `-o` (which it rejects).
@@ -503,7 +525,7 @@ published tarball? Use `team-url:` instead.
 
 **B — CI (GitHub Actions, always-fresh).** Cut a release (or push a `deploy-*`
 tag) and the Action deploys every active deployment. Wire your repo once:
-1. Copy `.github/workflows/deploy-agent-teams.yml` (+ `gitops-release.yml`) and
+1. Copy `.github/workflows/release.yml` (+ `deploy-agent-teams.yml`) and
    `deployments/defaults.yaml`; set `fleet:` + `event_server:`. The workflow
    `pip install modastack` — your repo needs only `deployments/`, no modastack
    source.

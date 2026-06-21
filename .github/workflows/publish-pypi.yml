@@ -32,7 +32,7 @@ jobs:
   # a self-hosted EC2 runner and upgraded the EC2 director in-place. The EC2
   # director was retired when eng-team moved to Fly (C24, #368) — release smoke is
   # now covered by container.yml (build → health → blocking ask, on every image
-  # change) and the Fly canary roll on a published GitHub Release (gitops-release).
+  # change) and the Fly canary roll on a published GitHub Release (release.yml).
 
   deploy-event-server:
     name: Deploy event server
