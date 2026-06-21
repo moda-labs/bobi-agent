@@ -661,6 +661,79 @@ def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
     return str(rel)
 
 
+def _local_team_deps_hash(project_path: Path, cfg: DeployConfig) -> str:
+    """Deps identity of the team package on disk — the hash a fresh image bakes.
+
+    Empty string => generic team (no `build:` deps that could drift). Mirrors the
+    spec gate in `_render_team_deps_into_context` so the two never disagree.
+    """
+    if not cfg.team:
+        return ""  # team-url: package isn't local
+    try:
+        team_dir = local_package_dir(project_path, cfg.team)
+    except DeployError:
+        return ""
+    from modastack.build_render import load_team_config, team_deps_hash
+    spec = load_team_config(team_dir).build
+    if spec is None or not (spec.apt or spec.npm or spec.run_root or spec.run
+                            or spec.verify_requires):
+        return ""
+    return team_deps_hash(spec)
+
+
+def _running_team_deps_hash(app: str) -> str:
+    """Deps identity baked into the RUNNING instance's image, read over `fly ssh`.
+
+    Empty => no stamp: a generic image, or one built before the #379 guard.
+    """
+    from modastack.build_render import TEAM_DEPS_STAMP
+    proc = subprocess.run(
+        [_fly_bin(), "ssh", "console", "-a", app, "-C", f"cat {TEAM_DEPS_STAMP}"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def _should_rebuild(project_path: Path, cfg: DeployConfig, app: str,
+                    *, forced: bool) -> bool:
+    """Decide whether an in-place ssh-push update must REBUILD the image (#379).
+
+    A team's baked deps live in the IMAGE; the hot-push fast path re-sends the
+    definition tarball + restarts but never rebuilds the image — so editing a
+    team's `build:` (a new apt/npm tool, a bumped codex) on a live instance would
+    silently never land. We detect the drift (the hash a fresh image would bake
+    != the hash stamped in the running image) and rebuild in place instead, so a
+    `gitops-teams` reconcile self-heals a deps change with no manual step.
+
+    `forced` (--rebuild) always rebuilds. A generic team (no `build:` deps) never
+    rebuilds. When the running image carries no stamp (built before the #379
+    stamp) we can't tell deps apart — warn and take the hot-push path; pass
+    --rebuild to force it. The decision lives HERE (not in YAML diffing) so it's
+    identical from a laptop and from CI.
+    """
+    if forced:
+        return True
+    local = _local_team_deps_hash(project_path, cfg)
+    if not local:
+        return False  # generic team — nothing baked to drift, no ssh probe
+    running = _running_team_deps_hash(app)
+    if not running:
+        log.warning(
+            "couldn't read a deps stamp from '%s' (image predates the #379 "
+            "stamp?) — taking the hot-push path; pass --rebuild if you changed "
+            "the team's build: deps.", app)
+        return False
+    if running != local:
+        log.info(
+            "team '%s' build: deps changed (running %s != rebuilt %s) — rebuilding "
+            "the image in place instead of hot-pushing (#379).", cfg.team, running,
+            local)
+        return True
+    return False  # deps unchanged — the hot-push fast path is correct
+
+
 def deploy(project_path: Path, name: str, overrides: dict | None = None) -> DeployConfig:
     """Provision OR update ONE instance, idempotently.
 
@@ -709,6 +782,15 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
                 _run([*base, "--blank", "--yes"], cwd=assets.run_cwd)
                 # Entrypoint is waiting; the push releases it (no restart needed).
                 push_team(app, pkg, restart=False)
+            elif _should_rebuild(project_path, cfg, app,
+                                 forced=bool((overrides or {}).get("rebuild"))):
+                # Deps changed (or --rebuild): rebuild the image on the existing
+                # app — provision-instance.sh is idempotent (skips create, just
+                # re-deploys) and never touches the volume's project files — then
+                # refresh the definition + reload so the new tools actually land.
+                log.info("rebuilding instance '%s' image in place (ssh-push)...", app)
+                _run([*base, "--blank", "--yes"], cwd=assets.run_cwd)
+                push_team(app, pkg, restart=True)
             else:
                 log.info("updating instance '%s' in place (ssh-push)...", app)
                 push_team(app, pkg, restart=True)

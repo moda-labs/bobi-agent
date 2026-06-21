@@ -382,6 +382,89 @@ def test_no_build_spec_team_passes_no_team_deps(repo, recorder, monkeypatch):
     assert "TEAM_DEPS" not in prov
 
 
+# --- #379: deps-drift guard on the in-place ssh-push update path -------------
+
+def _with_build_spec(repo):
+    """Give the fixture team a `build:` spec so it has a real deps identity."""
+    pkg = repo / "agents" / "eng-team" / "agent.yaml"
+    pkg.write_text(pkg.read_text() + "build:\n  npm: [bun]\n  verify: requires\n")
+
+
+def _running_app(monkeypatch):
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
+    monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
+    monkeypatch.setattr(D, "_fly_machine_ids", lambda app: ["m1"])
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+
+
+def test_ssh_push_deps_drift_rebuilds_in_place(repo, recorder, monkeypatch):
+    """#379: editing a live team's build: deps then re-deploying must NOT silently
+    hot-push (the rebuilt tools would never land). Detect the drift and rebuild
+    the image in place, then refresh the definition."""
+    _running_app(monkeypatch)
+    _with_build_spec(repo)
+    monkeypatch.setattr(D, "_running_team_deps_hash", lambda app: "stalehash0000")
+    D.deploy(repo, "eng-team")
+    joined = _flat(recorder)
+    # rebuilds the image on the existing app (idempotent provision, blank)…
+    assert any("provision-instance.sh" in c and "--blank" in c for c in joined)
+    # …then refreshes the definition + reloads
+    assert any("modastack install /data/incoming-team.tar.gz" in c for c in joined)
+
+
+def test_ssh_push_deps_match_takes_fast_path(repo, recorder, monkeypatch):
+    """Deps unchanged → the in-place hot-push fast path is correct (no rebuild)."""
+    _running_app(monkeypatch)
+    _with_build_spec(repo)
+    from modastack.build_render import load_team_config, team_deps_hash
+    h = team_deps_hash(load_team_config(repo / "agents" / "eng-team").build)
+    monkeypatch.setattr(D, "_running_team_deps_hash", lambda app: h)
+    D.deploy(repo, "eng-team")
+    joined = _flat(recorder)
+    assert not any("provision-instance.sh" in c for c in joined)  # no rebuild
+    assert any("modastack install /data/incoming-team.tar.gz" in c for c in joined)
+
+
+def test_ssh_push_deps_unknown_stamp_hot_pushes(repo, recorder, monkeypatch):
+    """An image built before the #379 stamp carries no hash — can't tell deps
+    apart, so take the hot-push path (warn); --rebuild forces it."""
+    _running_app(monkeypatch)
+    _with_build_spec(repo)
+    monkeypatch.setattr(D, "_running_team_deps_hash", lambda app: "")
+    D.deploy(repo, "eng-team")
+    joined = _flat(recorder)
+    assert not any("provision-instance.sh" in c for c in joined)  # no rebuild
+    assert any("incoming-team.tar.gz" in c for c in joined)
+
+
+def test_ssh_push_rebuild_flag_forces_rebuild(repo, recorder, monkeypatch):
+    """--rebuild forces an in-place image rebuild even when deps haven't drifted
+    (covers the unknown-stamp case where the operator knows deps changed)."""
+    _running_app(monkeypatch)
+    _with_build_spec(repo)
+    # stamp MATCHES → no drift; the flag forces a rebuild anyway
+    from modastack.build_render import load_team_config, team_deps_hash
+    h = team_deps_hash(load_team_config(repo / "agents" / "eng-team").build)
+    monkeypatch.setattr(D, "_running_team_deps_hash", lambda app: h)
+    D.deploy(repo, "eng-team", {"rebuild": True})
+    assert any("provision-instance.sh" in c and "--blank" in c for c in _flat(recorder))
+
+
+def test_generic_team_skips_deps_probe_entirely(repo, recorder, monkeypatch):
+    """A team with no build: spec has no baked deps — never ssh-probe, never
+    rebuild (keeps existing generic deploys untouched)."""
+    _running_app(monkeypatch)  # fixture team has NO build: block
+    probed = []
+    monkeypatch.setattr(D, "_running_team_deps_hash",
+                        lambda app: probed.append(app) or "")
+    D.deploy(repo, "eng-team")
+    joined = _flat(recorder)
+    assert probed == []  # short-circuited before any ssh probe
+    assert not any("provision-instance.sh" in c for c in joined)  # no rebuild
+    assert any("incoming-team.tar.gz" in c for c in joined)
+
+
 def test_binary_mode_pins_modastack_version_as_build_arg(repo, recorder, monkeypatch, tmp_path):
     """Binary mode builds the PyPI image pinned to the installed version."""
     monkeypatch.setattr(D, "fly_app_exists", lambda app: False)

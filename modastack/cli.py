@@ -730,8 +730,12 @@ def install(pack, non_interactive):
 @click.option("--claude-version", "claude_version", default=None,
               help="Pin the claude CLI version baked into the image.")
 @click.option("--org", default=None, help="Fly org slug.")
+@click.option("--rebuild", is_flag=True,
+              help="In-place update: force an image rebuild instead of a hot-push "
+                   "(also automatic when a team's build: deps change — #379).")
 def deploy(name, team, team_url, fleet, env_file, auth, event_server, region,
-           memory, cpus, volume_size, login_channel, claude_version, org):
+           memory, cpus, volume_size, login_channel, claude_version, org,
+           rebuild):
     """Provision or update ONE instance — the deployment primitive.
 
     NAME selects the deployment: deployments/<name>.yaml (merged over
@@ -760,6 +764,7 @@ def deploy(name, team, team_url, fleet, env_file, auth, event_server, region,
         "event_server": event_server, "region": region, "memory": memory,
         "cpus": cpus, "volume_size": volume_size, "login_channel": login_channel,
         "claude_version": claude_version, "org": org,
+        "rebuild": rebuild,
     }
     if env_file:
         overrides["secrets_env_file"] = env_file

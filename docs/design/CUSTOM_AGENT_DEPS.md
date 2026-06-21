@@ -219,20 +219,30 @@ the base).
   `build.run` can reuse* so the install is written once.
 - Secrets unchanged: `OPENAI_API_KEY` etc. flow through the C22 env blob.
 
-### 6. GitOps trigger split (deps vs definition)
+### 6. GitOps trigger split (deps vs definition) — SHIPPED (#379)
 
-> **NOT BUILT in the MVP — tracked as #379 (depends on #378).** Today
-> `modastack deploy` of an already-running app always takes the hot-push path
-> (`deploy.py:710` `push_team(..., restart=True)`) and never rebuilds the image,
-> so a deps edit to a live instance is a **silent no-op**. Workaround: a
-> framework release (`gitops-release`'s team-aware roll) rebuilds team images.
+> **BUILT.** `modastack deploy` of an already-running ssh-push app now **decides**
+> between a hot-push and an in-place rebuild *in the deploy primitive* — so the
+> behavior is identical from a laptop and from the `gitops-teams` reconcile, and a
+> deps edit to a live instance self-heals instead of being a silent no-op.
 
-`gitops-teams.yml` must distinguish a **deps change** (rebuild image → redeploy)
-from a **prompt change** (hot `install <url>`). Diff the build spec / team
-`Dockerfile` (or a deps-hash stamped as an image label): changed → rebuild +
-`deploy --image`; unchanged → the existing hot-install path. Most pushes are
-prompt-only and stay on the fast path. (After #378, the team image's Fly-registry
-digest IS the deps identity, so detection is a digest comparison.)
+**Mechanism — a deps-identity stamp.** The team-deps hook stamps
+`team_deps_hash(build:)` into the image at `/opt/modastack/team-deps.hash`
+(`build_render.py`). On an in-place update the deploy primitive reads that stamp
+off the running instance over `fly ssh` (`deploy._running_team_deps_hash`) and
+compares it to the hash a fresh build would bake (`_local_team_deps_hash`):
+
+- **deps changed** (running ≠ rebuilt) → **rebuild in place**: re-run the
+  idempotent `provision-instance.sh` (rebuilds the image on the existing app,
+  never touches the volume's project files), then hot-push the definition + reload.
+- **deps unchanged** → the **hot-push fast path** (`push_team(..., restart=True)`),
+  exactly as before. Most pushes are prompt-only and stay here.
+- **no stamp** (image built before #379) → can't tell deps apart; warn + hot-push.
+  `modastack deploy --rebuild` forces the rebuild path (and re-stamps).
+
+`--rebuild` also lets an operator force a rebuild unconditionally. After #378, the
+team image's Fly-registry digest becomes the deps identity, so the same decision
+collapses to a digest comparison (no `fly ssh` probe needed).
 
 ## What changes vs stays
 
