@@ -94,6 +94,16 @@ class TestProjectLeadStandingInstructions:
             "CI failure instruction must say to escalate only if unfixable"
         )
 
+    def test_ci_failures_cover_all_branches(self):
+        """Issue #323: auto-fix must cover human-authored PRs, not just
+        agent-authored ones. A failing check on any open PR blocks the
+        merge queue, so all branches get auto-fixed."""
+        text = self.text.lower()
+        assert "agent-authored" in text and "human-authored" in text, (
+            "CI failure instruction must explicitly cover both "
+            "agent-authored and human-authored PR branches"
+        )
+
     def test_auto_pickup_agent_labeled_issues(self):
         assert "auto-pickup agent-labeled issues" in self.text.lower(), (
             "Project lead prompt must instruct auto-pickup of agent-labeled issues"
