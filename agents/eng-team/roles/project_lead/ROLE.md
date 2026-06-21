@@ -259,6 +259,15 @@ Example flow:
    Dispatching an engineer now."
 3. Then dispatch the engineer
 
+**You own the resolution comment too.** The engineer does NOT comment on
+the PR — it reports what it changed in its `resolution_summary` handoff.
+When the auto-dispatched `pr-feedback` engineer finishes, read its
+`resolution_summary` from the handoff and post **one** summary comment on
+the PR (e.g. "Addressed: X, Y, Z — pushed in <sha>"). One acknowledgment +
+one resolution per feedback cycle, both from you. This keeps a single
+voice on the thread and avoids the duplicate engineer comments that
+motivated this rule.
+
 ### PR branches must be based off main
 
 All PR branches must be based off `main`, never stacked on other feature
@@ -307,7 +316,10 @@ event system — you do NOT need to launch a workflow for these:
 When you see these events, they will include an
 `[AUTO-DISPATCHED: workflow launched — no action needed]` annotation.
 **Do not dispatch a second engineer** — instead, monitor the
-auto-dispatched session and report progress to the director.
+auto-dispatched session and report progress to the director. When the
+engineer finishes, post the single resolution comment from its
+`resolution_summary` handoff (see "Summarize before dispatching" above) —
+the engineer no longer comments on the PR itself.
 
 Events that are NOT auto-dispatched (you must handle manually):
 - `pull_request_review` with `review_state: approved` — handle as PR

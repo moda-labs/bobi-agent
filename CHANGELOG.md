@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **pr-feedback no longer posts duplicate comments (#321).** The engineer
+  addressing review feedback no longer comments on the PR itself; it reports
+  what it changed in a new `resolution_summary` handoff field. The lead — which
+  already posts the acknowledgment before dispatching — now posts the single
+  resolution comment from that handoff, keeping one voice per feedback cycle.
+
 ## 0.27.0 — 2026-06-21
 
 Close out the **containerization epic (#344)**: the EC2 → Fly migration is
