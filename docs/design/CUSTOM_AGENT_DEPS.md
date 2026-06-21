@@ -193,6 +193,18 @@ must match runtime). `apt` runs as root; `npm`/`run` as the `modastack` user.
 framework only asserts `FROM …/modastack-base…` and builds it. The team owns
 everything. For the long tail the declarative block can't express.
 
+**Pin deps for reproducible rebuilds (#380).** Pin `npm` to exact versions
+(`@openai/codex@0.141.0`), clone-then-`git checkout <sha>` for `run` clones, and
+pin `npx playwright@<ver> install-deps`. `team_deps_hash` keys on the spec TEXT,
+so this is also the *only* knob that moves the image identity: a deliberate pin
+bump is a one-line diff that rebuilds; an unpinned dep can drift upstream without
+moving the hash (cache serves a stale image) — exactly the failure pinning
+prevents. (Resolved-version folding into the hash was considered and rejected:
+with everything pinned, the spec text already *is* the resolved set.) `apt` is the
+exception — exact Debian versions get pruned from the mirror and break rebuilds,
+so it tracks the pinned base image's Debian release instead. A lint test
+(`tests/test_eng_team_deps_pinned.py`) fails if a pin is dropped.
+
 ### 3. CI builds + publishes per-team images
 
 Extend `team-packages.yml`: for each team with a build spec (declarative or
