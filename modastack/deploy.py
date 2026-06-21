@@ -434,15 +434,67 @@ def resolve_env_file(cfg: DeployConfig, project_path: Path,
 # --- Fly mechanics (thin shells; monkeypatchable in tests) ------------------
 
 def _run(cmd: list[str], *, cwd: Path | None = None, check: bool = True,
-         input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
+         input_bytes: bytes | None = None,
+         extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     log.info("$ %s", " ".join(cmd))
+    env = {**os.environ, **extra_env} if extra_env else None
     return subprocess.run(
         cmd, cwd=str(cwd) if cwd else None, check=check, input=input_bytes,
+        env=env,
     )
 
 
 def _fly_bin() -> str:
     return "fly" if shutil.which("fly") else "flyctl"
+
+
+# --- local image build (#387) ------------------------------------------------
+# Fly's remote builder is unreliable from a macOS / Docker-Desktop laptop: with
+# flyctl v0.4.59 it mis-parses the daemon host ("missing hostname") and the
+# heartbeat dies, regardless of how many remote builders you recreate. The
+# proven path there is a local buildkit build (--local-only → gzip layers, which
+# Fly's machine init can extract; never Depot's zstd) with DOCKER_HOST pointed at
+# Docker Desktop's real socket. The tell for "this is that kind of host" is the
+# standard /var/run/docker.sock being ABSENT — it's present on Linux (including
+# GitHub Actions runners, which also run `modastack deploy`, where the remote
+# builder is correct and must stay the default).
+
+def _default_docker_socket_present() -> bool:
+    """True when the flyctl-default Docker socket /var/run/docker.sock exists."""
+    return Path("/var/run/docker.sock").exists()
+
+
+def _docker_context_host() -> str:
+    """The active docker context's daemon endpoint (e.g.
+    `unix://$HOME/.docker/run/docker.sock` for Docker Desktop), or '' if
+    `docker` is unavailable. The portable way to find Docker Desktop's socket,
+    which is NOT the flyctl default."""
+    proc = subprocess.run(
+        ["docker", "context", "inspect", "--format",
+         "{{.Endpoints.docker.Host}}"],
+        capture_output=True, text=True,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _resolve_local_build() -> tuple[bool, str | None]:
+    """Decide the image build mode for THIS host (#387).
+
+    Returns ``(build_locally, docker_host)``:
+    - ``(False, None)`` — the standard /var/run/docker.sock is present
+      (Linux / CI): keep Fly's remote builder, the correct default.
+    - ``(True, host)`` — no default socket (Docker Desktop): build locally and
+      inject ``host`` (resolved from the active docker context) as DOCKER_HOST.
+    - ``(True, None)`` — local build, but DOCKER_HOST is already set in the env
+      (respected as-is, no overlay) or couldn't be resolved (caller warns)."""
+    if _default_docker_socket_present():
+        return (False, None)
+    if os.environ.get("DOCKER_HOST"):
+        return (True, None)  # operator already pointed Docker; subprocess inherits it
+    host = _docker_context_host()
+    if host.startswith("unix://") and Path(host[len("unix://"):]).exists():
+        return (True, host)
+    return (True, None)  # local host, socket unresolved — deploy() prints the fix
 
 
 def fly_app_exists(app: str) -> bool:
@@ -758,6 +810,7 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
         # team image by ref (C24), or pass the build context (source repo, or the
         # binary-mode PyPI context) + image build args to build one.
         base = ["bash", str(assets.provision_sh), *_provision_args(cfg, env_file)]
+        build_env: dict[str, str] = {}
         if cfg.image:
             base += ["--image", cfg.image]
         else:
@@ -773,13 +826,30 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
             team_deps = _render_team_deps_into_context(project_path, cfg, assets)
             if team_deps:
                 base += ["--build-arg", f"TEAM_DEPS={team_deps}"]
+            # #387: a macOS/Docker-Desktop laptop can't use Fly's remote builder
+            # (flyctl mis-parses the daemon host); build locally with gzip layers
+            # and point DOCKER_HOST at the real socket. No-op on Linux/CI.
+            build_locally, docker_host = _resolve_local_build()
+            if build_locally:
+                base += ["--local-build"]
+                if docker_host:
+                    build_env["DOCKER_HOST"] = docker_host
+                    log.info("building locally (--local-only); DOCKER_HOST=%s (#387)",
+                             docker_host)
+                elif not os.environ.get("DOCKER_HOST"):
+                    log.warning(
+                        "no /var/run/docker.sock and couldn't resolve a Docker "
+                        "socket from `docker context inspect` — the local build "
+                        "may fail. If so, set it manually, e.g.:\n"
+                        "    export DOCKER_HOST=unix://$HOME/.docker/run/docker.sock")
 
         if cfg.delivery == "ssh-push":
             pkg = local_package_dir(project_path, cfg.team)
             if not deployed:
                 log.info("provisioning blank instance '%s' (ssh-push, %s mode)...",
                          app, assets.mode)
-                _run([*base, "--blank", "--yes"], cwd=assets.run_cwd)
+                _run([*base, "--blank", "--yes"], cwd=assets.run_cwd,
+                     extra_env=build_env)
                 # Entrypoint is waiting; the push releases it (no restart needed).
                 push_team(app, pkg, restart=False)
             elif _should_rebuild(project_path, cfg, app,
@@ -789,7 +859,8 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
                 # re-deploys) and never touches the volume's project files — then
                 # refresh the definition + reload so the new tools actually land.
                 log.info("rebuilding instance '%s' image in place (ssh-push)...", app)
-                _run([*base, "--blank", "--yes"], cwd=assets.run_cwd)
+                _run([*base, "--blank", "--yes"], cwd=assets.run_cwd,
+                     extra_env=build_env)
                 push_team(app, pkg, restart=True)
             else:
                 log.info("updating instance '%s' in place (ssh-push)...", app)
@@ -798,7 +869,8 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
             if not deployed:
                 log.info("provisioning instance '%s' (team-url, %s mode)...",
                          app, assets.mode)
-                _run([*base, "--team-url", cfg.team_url, "--yes"], cwd=assets.run_cwd)
+                _run([*base, "--team-url", cfg.team_url, "--yes"],
+                     cwd=assets.run_cwd, extra_env=build_env)
             else:
                 log.info("updating instance '%s' in place (team-url)...", app)
                 update_team_url(app, cfg.team_url)
