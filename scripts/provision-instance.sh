@@ -52,8 +52,13 @@
 #
 # Required:
 #   --app APP            Globally-unique Fly app name (operator-namespaced).
-#   --team TEAM          Team to install on first boot from a bundled/registry NAME
-#                        (MODASTACK_TEAM), e.g. eng-team.
+#   --team TEAM          Team to install on first boot (MODASTACK_TEAM). Resolves
+#                        only a name/path the INSTANCE can already see (e.g. a
+#                        volume path) — there is NO team registry in the image, so
+#                        a bare name won't resolve at boot; the entrypoint fails
+#                        loud and tells you to use --team-url. For a published
+#                        team use --team-url; for a local package, `modastack
+#                        deploy` ssh-pushes it (no team source on the instance).
 #       …or…
 #   --team-url URL       Public .tar.gz URL of one team package, fetched at first
 #                        boot (MODASTACK_TEAM_URL). The dark instance pulls it over

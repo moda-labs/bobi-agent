@@ -198,6 +198,49 @@ def test_empty_volume_without_team_waits_for_push(image: str, tmp_path: Path):
         _run("docker", "rm", "-f", name)
 
 
+@requires_docker
+@pytest.mark.timeout(120)
+def test_unresolvable_team_fails_loudly(image: str, tmp_path: Path):
+    """An unresolvable MODASTACK_TEAM (no team registry in the image) must fail
+    with an ACTIONABLE error pointing at MODASTACK_TEAM_URL, not crash-loop on a
+    bare `set -e` pipefail trace (C9/#339)."""
+    import time
+
+    vol = tmp_path / "data"
+    vol.mkdir()
+    name = "modastack-badteam"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "MODASTACK_AUTH=api_key",
+            "-e", "ANTHROPIC_API_KEY=sk-ant-test",
+            "-e", "MODASTACK_TEAM=does-not-exist-anywhere",
+            "-v", f"{vol}:/data",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        # The container must STOP (clean exit 1), not sit hung or loop silently.
+        deadline = time.time() + 60
+        running = "true"
+        while time.time() < deadline:
+            running = _run(
+                "docker", "inspect", "-f", "{{.State.Running}}", name
+            ).stdout.strip()
+            if running == "false":
+                break
+            time.sleep(1)
+        logs = _run("docker", "logs", name)
+        text = logs.stdout + logs.stderr
+        assert running == "false", f"container didn't exit:\n{text}"
+        # Actionable guidance, not a raw pipefail trace.
+        assert "couldn't install team 'does-not-exist-anywhere'" in text, text
+        assert "MODASTACK_TEAM_URL" in text, text
+    finally:
+        _run("docker", "rm", "-f", name)
+
+
 SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "smoke-team"
 
 
