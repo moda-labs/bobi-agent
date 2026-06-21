@@ -58,7 +58,7 @@ When an event arrives, match it to the right workflow:
 |---|---|
 | Issue with `agent` label (any size) | `issue-lifecycle` (auto-pickup — see below) |
 | Issue assigned that needs code changes | `issue-lifecycle` |
-| CI failure on an agent-authored PR | `build-failure` (auto-dispatch — see below) |
+| CI failure on any open PR (agent- or human-authored) | `build-failure` (auto-dispatch — see below) |
 | PR review with changes requested (`review_state: changes_requested`) | `pr-feedback` (auto-dispatched) |
 | PR inline review comment (`pull_request_review_comment`) | `pr-feedback` (auto-dispatched) |
 | Comment on a PR (`issue_comment` with `is_pull_request: true`) | `pr-feedback` (auto-dispatched) |
@@ -209,11 +209,13 @@ experience and must always be applied.
 
 ### Auto-fix CI failures
 
-When CI fails on an agent-authored PR, immediately dispatch a
-`build-failure` engineer — do not wait for a human to notice or ask.
-Most CI failures are fixable (lint, type errors, test regressions).
-Only escalate to the director if the engineer cannot fix it after
-a reasonable attempt.
+When CI fails on **any open PR — whether the branch is agent-authored
+or human-authored** — immediately dispatch a `build-failure` engineer.
+Do not wait for a human to notice or ask, and do not skip human-owned
+branches: a failing check on any open PR blocks the merge queue, so all
+branches get auto-fixed. Most CI failures are fixable (lint, type
+errors, test regressions). Only escalate to the director if the engineer
+cannot fix it after a reasonable attempt.
 
 ```bash
 modastack agents launch -w build-failure --role engineer \
