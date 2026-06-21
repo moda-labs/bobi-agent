@@ -113,6 +113,9 @@ FROM python:3.11-slim AS runtime
 # exact version (e.g. 2.1.89) for fully reproducible production builds.
 ARG CLAUDE_VERSION=stable
 ARG MODASTACK_UID=10001
+# Pinned aichat (the general-purpose LLM gateway CLI). Bump deliberately via
+# `gh api repos/sigoden/aichat/releases/latest --jq .tag_name`.
+ARG AICHAT_VERSION=0.30.0
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -155,6 +158,24 @@ USER modastack
 RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_VERSION}" \
     && /home/modastack/.local/bin/claude --version
 USER root
+
+# General-purpose LLM gateway CLI (aichat): lets any agent call out to other
+# models over OpenAI-compatible endpoints — a one-shot model call, NOT agent
+# delegation (that's codex). Baked into the base image for every team, like
+# git/claude; the image stays generic — provider/model/key come from the team's
+# `gateway` connection + env at runtime, never from this layer. Pinned,
+# arch-detected static musl binary into /usr/local/bin (system-wide, on PATH).
+# Cache key is AICHAT_VERSION alone, so a code-only rebuild never re-fetches it.
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         amd64) target=x86_64-unknown-linux-musl ;; \
+         arm64) target=aarch64-unknown-linux-musl ;; \
+         *) echo "aichat: unsupported arch $arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/sigoden/aichat/releases/download/v${AICHAT_VERSION}/aichat-v${AICHAT_VERSION}-${target}.tar.gz" \
+       | tar -xz -C /usr/local/bin aichat \
+    && chmod +x /usr/local/bin/aichat \
+    && aichat --version
 
 # Baked fastembed embedding model (cold-start speed; immutable). HF_HOME points
 # here at both build and run, so it's a cache hit at runtime. Copied from

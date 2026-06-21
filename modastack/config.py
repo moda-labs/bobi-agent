@@ -112,7 +112,7 @@ class ConnectionEntry:
     """One external model connection declared in agent.yaml."""
 
     name: str
-    kind: str  # image, chat, embedding, gateway
+    kind: str  # built-in MCP injection trigger; implemented kinds: "image", "codex"
     provider: str = ""
     api_key: str = ""
     model: str = ""

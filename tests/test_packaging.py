@@ -6,6 +6,7 @@ force-includes must also live in the sdist, or the wheel build dies with
 dirs under agents/ were force-included into the wheel but agents/ was missing
 from the sdist include list).
 """
+import re
 from pathlib import Path
 
 try:
@@ -101,3 +102,14 @@ def test_dockerfile_pypi_stage_installs_fastembed_not_kb_extra():
     install = " ".join(l for l in pypi.splitlines() if not l.lstrip().startswith("#"))
     assert "fastembed" in install and "sqlite-vec" in install
     assert "modastack[kb]" not in install
+
+
+def test_dockerfile_pins_aichat_version():
+    """aichat (the baked LLM gateway CLI) must be pinned to an exact version so
+    two builds of the same commit produce identical layers (cf. #380). A floating
+    download would let an upstream bump land with no diff to point at."""
+    df = (PYPROJECT.parent / "Dockerfile").read_text()
+    assert re.search(r"ARG AICHAT_VERSION=\d+\.\d+\.\d+", df), \
+        "AICHAT_VERSION must be pinned to an exact x.y.z"
+    # The install URL must reference the pinned arg, not a floating tag.
+    assert "aichat-v${AICHAT_VERSION}-" in df and "releases/download/v${AICHAT_VERSION}/" in df
