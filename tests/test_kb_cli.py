@@ -20,8 +20,12 @@ def setup_project_root(tmp_path, monkeypatch):
     # Write an agent.yaml so resolve_root() accepts this as a valid root
     (tmp_path / ".modastack" / "agent.yaml").write_text("entry_point: test\n")
     monkeypatch.setattr("modastack.paths._root", tmp_path)
-    # Set MODASTACK_ROOT so the CLI's resolve_root() returns the same path
-    # as _root, making the rebind a no-op instead of a conflict (#249)
+    # Pin the root so the CLI's resolve_root() returns the same path as
+    # _root, making the rebind a no-op instead of a conflict (#249). The
+    # pin is the value inherited at process start, so set the import-time
+    # snapshot resolve_root consults (#375); keep the env var too so any
+    # subprocess the command spawns inherits it.
+    monkeypatch.setattr("modastack.paths._inherited_root_env", str(tmp_path))
     monkeypatch.setenv("MODASTACK_ROOT", str(tmp_path))
     monkeypatch.setattr("modastack.kb.store._kb_dir", lambda: kb_dir)
     return tmp_path
