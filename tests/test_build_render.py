@@ -111,7 +111,27 @@ def test_apt_only_team_has_no_seed_or_stamp(tmp_path):
           npm: ["@openai/codex"]
     """))
     assert ".modastack-tool-stamp" not in script
-    assert "install -d" not in script  # no seed dir created
+    assert "install -d" not in script  # no seed dir created (deps-identity stamp uses mkdir -p)
+
+
+def test_renders_deps_identity_stamp(tmp_path):
+    # Every team-deps hook stamps its deps hash into the image (#379) so a running
+    # instance can report what tools it was built with — deploy reads it to detect
+    # a `build:` drift before the silent hot-push path.
+    cfg = _team(tmp_path, ENG_TEAM)
+    script = render_team_deps_script(cfg)
+    assert f"> {build_render.TEAM_DEPS_STAMP}" in script
+    assert team_deps_hash(cfg.build) in script
+    # uses mkdir -p, never install -d (which would mark a seed-dir team)
+    assert "mkdir -p /opt/modastack" in script
+
+
+def test_deps_stamp_moves_with_the_spec(tmp_path):
+    # The stamped value IS the cache key, so bumping a dep changes both together.
+    a = render_team_deps_script(_team(tmp_path, ENG_TEAM))
+    b = render_team_deps_script(_team(tmp_path, ENG_TEAM.replace(
+        '"@openai/codex"', '"@openai/codex", "extra-pkg"')))
+    assert a != b
 
 
 def test_run_root_runs_as_root_before_user_steps(tmp_path):
