@@ -76,6 +76,22 @@ modastack workflows list    # see available workflows
 modastack roles list        # see available agent roles
 ```
 
+### Call other models
+
+`aichat` calls another LLM (GPT, Gemini, etc.) for a one-shot answer — a second
+opinion, or a model better at a specific task. This is a *model call*, not agent
+delegation: to hand an actual task to an autonomous coding agent, use
+`codex exec "<task>"` instead.
+
+```bash
+aichat -m openrouter:openai/gpt-4o "..."        # one-shot completion
+cat build.log | aichat "What failed and why?"   # pipe input in
+```
+
+Requires a configured gateway (`OPENROUTER_API_KEY` + `AICHAT_PLATFORM` in the
+environment). An auth error means it isn't configured for this instance —
+surface that, don't pass a key inline.
+
 ## Your working directory
 
 Your working directory is an isolated git worktree. All changes go
