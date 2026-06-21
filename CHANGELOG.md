@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.26.0 — 2026-06-21
+
+Reskin the `modastack setup` web UI to **bobi**: a single clay accent palette and
+the probe-mark logo. Terminal layout and behavior are unchanged — only the color
+tokens, the brand mark, and brand wording move. (MOD-190)
+
+### Changed
+- **bobi rebrand (setup UI).** Collapsed the amber/green accent switch to one
+  clay accent, repointed the paper neutrals and the warm-void CRT slab to the
+  bobi token set, and swapped the titlebar/rail glyph for the probe mark (paper
+  body + dashed orbit + a single violet probe dot — the only violet in the
+  product). Shipped `bobi-mark.svg` as the favicon, retitled the page, and
+  renamed all user-facing brand copy `modastack → bobi` (CLI commands, install
+  paths, and docs URLs stay `modastack`). Source of truth:
+  `docs/design/BOBI_STYLE_GUIDE.md`.
+
 ## 0.25.0 — 2026-06-21
 
 Author and live-test custom **stdio (command-based) MCP servers** in the setup/Bobi
