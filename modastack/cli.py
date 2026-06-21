@@ -334,6 +334,16 @@ def start(foreground, fresh, subscribe):
         if not validation.ok:
             click.echo("\nStartup blocked — fix the issues above.", err=True)
             raise SystemExit(1)
+        # Proceeding path only: warn about optional services that failed
+        # preflight so a degraded start isn't mistaken for a clean one.
+        degraded = [c for c in validation.checks if not c.ok and not c.required]
+        if degraded:
+            names = ", ".join(c.name for c in degraded)
+            click.echo(
+                f"\nStarting in degraded mode — optional services unavailable "
+                f"until configured: {names}.",
+                err=True,
+            )
 
     pid_path = paths.manager_pid_path(project_path)
     pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1486,19 +1496,32 @@ def doctor(browser, fix):
         results.extend(browser_mod.run_doctor())
 
     all_ok = True
+    warnings = 0
     sandbox_failure = False
     for r in results:
-        mark = "✓" if r.ok else "✗"
+        required = getattr(r, "required", True)
+        if r.ok:
+            mark = "✓"
+        elif required:
+            mark = "✗"
+        else:
+            mark = "⚠"   # non-blocking warning (e.g. optional service)
         click.echo(f"  {mark} {r.name}: {r.detail}")
         if not r.ok:
-            all_ok = False
+            if required:
+                all_ok = False
+            else:
+                warnings += 1
             if r.hint:
                 click.echo(f"      → {r.hint}")
             if browser and hasattr(r, "sandbox_error") and r.sandbox_error:
                 sandbox_failure = True
 
     if all_ok:
-        click.echo("\nAll checks passed.")
+        if warnings:
+            click.echo(f"\nAll required checks passed ({warnings} warning(s)).")
+        else:
+            click.echo("\nAll checks passed.")
         return
 
     if sandbox_failure and fix:

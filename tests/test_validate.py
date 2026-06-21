@@ -85,6 +85,25 @@ class TestCheckServiceCredentials:
         checks = _check_service_credentials(cfg)
         assert checks == []
 
+    def test_missing_creds_optional_service_is_warning(self):
+        # A non-required service with missing creds fails but does not block.
+        cfg = Config(
+            services=[ServiceConfig(name="slack", credentials={"bot_token": ""})],
+        )
+        checks = _check_service_credentials(cfg)
+        assert not checks[0].ok
+        assert checks[0].required is False
+
+    def test_missing_creds_required_service_blocks(self):
+        cfg = Config(
+            services=[ServiceConfig(
+                name="slack", required=True, credentials={"bot_token": ""},
+            )],
+        )
+        checks = _check_service_credentials(cfg)
+        assert not checks[0].ok
+        assert checks[0].required is True
+
 
 class TestCheckVennServices:
 
@@ -126,6 +145,53 @@ class TestCheckVennServices:
         assert len(checks) == 1
         assert not checks[0].ok
         assert "no API key" in checks[0].detail
+
+    def test_no_venn_key_optional_is_warning(self):
+        # The no-API-key branch: optional venn service warns, required blocks.
+        cfg = Config(
+            services=[
+                ServiceConfig(name="email"),
+                ServiceConfig(name="salesforce", required=True),
+            ],
+            venn_api_key="",
+        )
+        checks = {c.name: c for c in _check_venn_services(cfg)}
+        assert checks["email"].required is False
+        assert checks["salesforce"].required is True
+
+    @patch("modastack.venn.check_services")
+    def test_missing_service_carries_required(self, mock_check):
+        # The live-`missing` branch: per-service required is threaded through.
+        from modastack.venn import ServiceCheck
+        mock_check.return_value = ServiceCheck(connected=[], missing=["email", "salesforce"])
+
+        cfg = Config(
+            services=[
+                ServiceConfig(name="email"),
+                ServiceConfig(name="salesforce", required=True),
+            ],
+            venn_api_key="venn_test",
+        )
+        checks = {c.name: c for c in _check_venn_services(cfg)}
+        assert checks["email"].required is False
+        assert checks["salesforce"].required is True
+
+    @patch("modastack.venn.check_services")
+    def test_missing_service_duplicate_name_fails_safe(self, mock_check):
+        # A name declared twice (required + optional) must block: a required
+        # declaration anywhere wins, regardless of declaration order.
+        from modastack.venn import ServiceCheck
+        mock_check.return_value = ServiceCheck(connected=[], missing=["email"])
+
+        cfg = Config(
+            services=[
+                ServiceConfig(name="email", required=True),
+                ServiceConfig(name="email"),  # optional, declared last
+            ],
+            venn_api_key="venn_test",
+        )
+        checks = _check_venn_services(cfg)
+        assert all(c.required for c in checks if not c.ok)
 
     def test_no_venn_services(self):
         cfg = Config(services=[ServiceConfig(name="github")])
@@ -182,3 +248,59 @@ class TestValidateConfig:
         assert "✓" in output
         assert "✗" in output
         assert "venn.ai" in output
+
+    def test_ok_passes_when_only_optional_failures(self):
+        from modastack.validate import ValidationResult
+        checks = [
+            CheckResult("github", ok=True, detail="native"),
+            CheckResult("email", ok=False, detail="venn — not connected", required=False),
+        ]
+        vr = ValidationResult(
+            ok=not any((not c.ok) and c.required for c in checks),
+            checks=checks,
+        )
+        assert vr.ok is True
+
+    def test_ok_blocks_on_required_failure(self):
+        from modastack.validate import ValidationResult
+        checks = [
+            CheckResult("email", ok=False, detail="venn — not connected", required=False),
+            CheckResult("slack", ok=False, detail="native — missing bot_token", required=True),
+        ]
+        vr = ValidationResult(
+            ok=not any((not c.ok) and c.required for c in checks),
+            checks=checks,
+        )
+        assert vr.ok is False
+
+    def test_format_warns_on_optional_blocks_on_required(self):
+        from modastack.validate import ValidationResult
+        checks = [
+            CheckResult("github", ok=True, detail="native"),
+            CheckResult("email", ok=False, detail="venn — not connected", required=False),
+            CheckResult("slack", ok=False, detail="native — missing bot_token", required=True),
+        ]
+        output = ValidationResult(ok=False, checks=checks).format()
+        lines = {line.split()[1]: line for line in output.splitlines() if line.strip() and not line.strip().startswith("→")}
+        assert lines["github"].lstrip().startswith("✓")
+        assert lines["email"].lstrip().startswith("⚠")   # optional → warning
+        assert lines["slack"].lstrip().startswith("✗")   # required → error
+
+    def test_unmodified_dogfood_style_pack_starts_degraded(self, tmp_path):
+        # github (native, zero-config) + an unconfigured optional venn service:
+        # validate_config must return ok=True so `modastack start` proceeds.
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir()
+        (config_dir / "agent.yaml").write_text(dedent("""\
+            entry_point: manager
+            services:
+              - name: github
+                events: true
+              - name: email
+                events: true
+        """))
+        result = validate_config(tmp_path)
+        assert result.ok is True
+        email = next(c for c in result.checks if c.name == "email")
+        assert not email.ok
+        assert email.required is False

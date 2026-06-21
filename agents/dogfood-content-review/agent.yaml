@@ -14,6 +14,10 @@ event_server: ${MODASTACK_EVENT_SERVER}
 services:
   - name: github
     events: true
+    required: true          # core service — block startup if unconfigured
+  # email is optional: with no Venn/Gmail connection it degrades (email
+  # events just don't arrive) rather than blocking `modastack start`. This
+  # lets the credential-free dogfood/release smoke start the manager. (#329)
   - name: email
     events: true
 

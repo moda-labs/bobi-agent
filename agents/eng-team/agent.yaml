@@ -11,6 +11,7 @@ event_server: ${MODASTACK_EVENT_SERVER}
 services:
   - name: github
     events: true
+    required: true          # core service — block startup if unconfigured
     credentials:
       # The gh CLI auths via GH_TOKEN. Declared here (not just consumed at
       # runtime) so it's a first-class secret: materialized on deploy and never
@@ -18,6 +19,7 @@ services:
       token: ${GH_TOKEN}
   - name: slack
     events: true
+    required: true          # core service — block startup if unconfigured
     # Optional: comma-separated channel IDs to scope this team to specific
     # channels (so multiple teams can share one bot). Empty = whole workspace.
     channels: ${SLACK_CHANNELS}
@@ -25,6 +27,7 @@ services:
       bot_token: ${SLACK_BOT_TOKEN}
   - name: linear
     events: true
+    required: true          # core service — block startup if unconfigured
     credentials:
       api_key: ${LINEAR_API_KEY}
 

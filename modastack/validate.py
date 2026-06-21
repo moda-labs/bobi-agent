@@ -22,12 +22,18 @@ class ValidationResult:
 
     @property
     def errors(self) -> list[CheckResult]:
+        """All failed checks — both blocking (required) and warnings."""
         return [c for c in self.checks if not c.ok]
 
     def format(self) -> str:
         lines = []
         for c in self.checks:
-            icon = "✓" if c.ok else "✗"
+            if c.ok:
+                icon = "✓"
+            elif c.required:
+                icon = "✗"   # blocking failure
+            else:
+                icon = "⚠"   # non-blocking warning (degraded start)
             lines.append(f"  {icon} {c.name:30} {c.detail}")
             if not c.ok and c.hint:
                 lines.append(f"    → {c.hint}")
@@ -40,6 +46,10 @@ class CheckResult:
     ok: bool
     detail: str = ""
     hint: str = ""
+    # Only meaningful when ok is False: a required failure blocks startup; a
+    # non-required failure is a warning and the agent starts degraded.
+    # Defaults True so existing call sites (entry point, MCP) keep blocking.
+    required: bool = True
 
 
 def validate_config(project_path: Path) -> ValidationResult:
@@ -55,7 +65,9 @@ def validate_config(project_path: Path) -> ValidationResult:
     checks.extend(_check_mcp_servers(cfg, project_path))
 
     return ValidationResult(
-        ok=all(c.ok for c in checks),
+        # Block only on required failures; non-required failures are warnings
+        # and the agent starts degraded.
+        ok=not any((not c.ok) and c.required for c in checks),
         checks=checks,
     )
 
@@ -103,6 +115,7 @@ def _check_service_credentials(cfg) -> list[CheckResult]:
                 svc.name, ok=False,
                 detail=f"native — missing {keys_str}",
                 hint=f"Set credentials for {svc.name} in agent.yaml",
+                required=svc.required,
             ))
         else:
             checks.append(CheckResult(svc.name, ok=True, detail="native"))
@@ -120,12 +133,22 @@ def _check_venn_services(cfg) -> list[CheckResult]:
                 s.name, ok=False,
                 detail="venn — no API key",
                 hint="Set venn_api_key in agent.yaml or VENN_API_KEY in environment",
+                required=s.required,
             )
             for s in venn_services
         ]
 
     from modastack.venn import check_services
     result = check_services(cfg.venn_api_key, [s.name for s in venn_services])
+
+    # check_services returns only name strings, so map back to the declaring
+    # ServiceConfig(s) to carry each service's `required` flag. A name can be
+    # declared more than once; treat a failure as blocking if ANY declaration
+    # marked it required (fail safe toward blocking), and default to blocking
+    # for an unrecognized name.
+    def _required_for(name: str) -> bool:
+        decls = [s for s in venn_services if s.name == name]
+        return any(s.required for s in decls) if decls else True
 
     checks = []
     for name in result.connected:
@@ -135,6 +158,7 @@ def _check_venn_services(cfg) -> list[CheckResult]:
             name, ok=False,
             detail="venn — not connected",
             hint="Connect at venn.ai, then restart",
+            required=_required_for(name),
         ))
     return checks
 
