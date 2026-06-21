@@ -235,7 +235,7 @@ the base).
 
 > **BUILT.** `modastack deploy` of an already-running ssh-push app now **decides**
 > between a hot-push and an in-place rebuild *in the deploy primitive* — so the
-> behavior is identical from a laptop and from the `gitops-teams` reconcile, and a
+> behavior is identical from a laptop and from the `deploy-agent-teams` reconcile, and a
 > deps edit to a live instance self-heals instead of being a silent no-op.
 
 **Mechanism — a deps-identity stamp.** The team-deps hook stamps

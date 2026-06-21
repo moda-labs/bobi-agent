@@ -3,7 +3,7 @@
 # The deployment NAME is this filename ("eng-team"); the app is "<fleet>-eng-team"
 # (fleet from defaults.yaml = moda → app "moda-eng-team"). Adding/editing this
 # file is what deploys — `modastack deploy eng-team`, or the GitOps Action on a
-# release (.github/workflows/gitops-teams.yml reconciles deployments/*.yaml).
+# release (.github/workflows/deploy-agent-teams.yml reconciles deployments/*.yaml).
 #
 # ACTIVATED by C24 (#368): eng-team's `requires: gstack/codex` gate used to block
 # dispatch in the bare image. It now ships a `build:` spec (agents/eng-team/

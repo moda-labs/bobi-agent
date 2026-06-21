@@ -24,12 +24,12 @@ name: GitOps — release rollout
 # apps to a new image is a CROSS-FLEET operation whose whole point is build-once,
 # reuse-the-image-ref N times — a per-instance primitive can't express that
 # without N redundant builds. Team CONTENT reconcile (provision/update) is the
-# thin-client `modastack deploy` loop in gitops-teams.yml; this is the image roll.
+# thin-client `modastack deploy` loop in deploy-agent-teams.yml; this is the image roll.
 #
 # Required configuration:
 #   deployments/defaults.yaml `fleet:`   fleet namespace (enumerated by the
 #                                         MODASTACK_FLEET stamp). Single source of
-#                                         fleet truth, shared with gitops-teams.
+#                                         fleet truth, shared with deploy-agent-teams.
 #   secrets.FLY_API_TOKEN                 Fly deploy token (org-scoped) for flyctl.
 
 on:

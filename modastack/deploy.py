@@ -860,7 +860,7 @@ def _should_rebuild(project_path: Path, cfg: DeployConfig, app: str,
     team's `build:` (a new apt/npm tool, a bumped codex) on a live instance would
     silently never land. We detect the drift (the hash a fresh image would bake
     != the hash stamped in the running image) and rebuild in place instead, so a
-    `gitops-teams` reconcile self-heals a deps change with no manual step.
+    `deploy-agent-teams` reconcile self-heals a deps change with no manual step.
 
     `forced` (--rebuild) always rebuilds. A generic team (no `build:` deps) never
     rebuilds. When the running image carries no stamp (built before the #379

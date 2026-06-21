@@ -7,7 +7,7 @@ GitOps workflows. The shell helpers are exercised for real (bash subprocess with
 a stubbed `fleet_exists`, so no Fly calls); the workflows are parsed and
 asserted, so the load-bearing decisions break loudly if someone regresses them:
 
-  * gitops-teams is a THIN CLIENT — the reconcile business logic lives in
+  * deploy-agent-teams is a THIN CLIENT — the reconcile business logic lives in
     `modastack deploy` (idempotent provision-or-update), not the YAML;
   * each instance is stamped MODASTACK_FLEET + MODASTACK_INSTANCE (the
     SaaS-extensible fleet/tenant keys — the app name is only a hint);
@@ -31,7 +31,7 @@ REPO = Path(__file__).resolve().parent.parent
 FLEET_SH = REPO / "scripts" / "fleet.sh"
 PROVISION_SH = REPO / "scripts" / "provision-instance.sh"
 DESTROY_SH = REPO / "scripts" / "destroy-instance.sh"
-WF_TEAMS = REPO / ".github" / "workflows" / "gitops-teams.yml"
+WF_TEAMS = REPO / ".github" / "workflows" / "deploy-agent-teams.yml"
 WF_RELEASE = REPO / ".github" / "workflows" / "gitops-release.yml"
 
 
@@ -144,7 +144,7 @@ def test_workflows_parse_and_actionlint_clean():
     assert _load(WF_RELEASE)["name"]
 
 
-# --- gitops-teams.yml invariants (thin client over `modastack deploy`) -------
+# --- deploy-agent-teams.yml invariants (thin client over `modastack deploy`) -------
 
 def test_teams_deploys_on_release_with_manual_tag_escape_hatch():
     """Deploy gate = a release (not every push to main); manual via a `deploy-*`

@@ -1,4 +1,4 @@
-name: GitOps — teams
+name: Deploy agent teams
 
 # Reconcile deployments/<name>.yaml to live Fly instances (C22 / #342;
 # docs/design/DEPLOY_INTERFACE.md).
@@ -61,7 +61,7 @@ on:
 
 # Serialize fleet reconciliation so two pushes can't race on the same app.
 concurrency:
-  group: gitops-teams
+  group: deploy-agent-teams
   cancel-in-progress: false
 
 jobs:

@@ -19,7 +19,7 @@ Pieces:
 - `scripts/provision-instance.sh` + `scripts/destroy-instance.sh` — stand up / tear down one instance
 - `scripts/fleet.sh` — fleet enumeration helper
 - `scripts/build-team-tarballs.sh` — package teams into `.tar.gz`
-- `.github/workflows/gitops-teams.yml` — thin client: reconcile `deployments/*` on release/tag
+- `.github/workflows/deploy-agent-teams.yml` — thin client: reconcile `deployments/*` on release/tag
 - `.github/workflows/gitops-release.yml` — fleet image rollout on release
 - `.github/workflows/team-packages.yml` — publishes team tarballs (for `team-url` delivery)
 
@@ -370,7 +370,7 @@ one; the reconcile prunes a stray live key. An old per-deployment Environment (e
 ```
 publish a GitHub Release   (or push a `deploy-*` tag / dispatch — the deploy gate)
    │
-   ├─▶ gitops-teams.yml:
+   ├─▶ deploy-agent-teams.yml:
    │      plan   : list ACTIVE deployments/<name>.yaml (defaults excluded) + tenant
    │      deploy : matrix over {name,tenant}, environment=<tenant>
    │               └─ toJSON(secrets) | filter <TEAM>__ -> env-file -> `modastack deploy <name>`
@@ -387,7 +387,7 @@ list the active deployments, hand each its secrets, loop the primitive. That is 
 the same engine runs from a laptop, this Action, Terraform, or a SaaS plane — see
 §7.1 (bring your own repo).
 
-### gitops-teams.yml — the reconcile
+### deploy-agent-teams.yml — the reconcile
 Triggered by **`release: published`**, a **`deploy-*` tag push** (manual deploy
 without a formal release — also how the GitOps path is e2e'd from a branch, since
 tag pushes run the workflow from the tagged commit), or **`workflow_dispatch`**
@@ -503,7 +503,7 @@ published tarball? Use `team-url:` instead.
 
 **B — CI (GitHub Actions, always-fresh).** Cut a release (or push a `deploy-*`
 tag) and the Action deploys every active deployment. Wire your repo once:
-1. Copy `.github/workflows/gitops-teams.yml` (+ `gitops-release.yml`) and
+1. Copy `.github/workflows/deploy-agent-teams.yml` (+ `gitops-release.yml`) and
    `deployments/defaults.yaml`; set `fleet:` + `event_server:`. The workflow
    `pip install modastack` — your repo needs only `deployments/`, no modastack
    source.
@@ -614,7 +614,7 @@ The deploy refactor adds the **ssh-push** path, **verified live on Fly**
 > `fly machine list --json` and restarts each by ID.
 
 The **team-url** path is verified live two ways:
-- **CI / GitOps:** a `deploy-canary-1` tag fired `gitops-teams.yml` from the branch
+- **CI / GitOps:** a `deploy-canary-1` tag fired `deploy-agent-teams.yml` from the branch
   → `modastack deploy canary` → provisioned `moda-canary` (1 GB/1 vCPU) via team-url;
   manager healthy, `MODASTACK_INSTANCE` stamped.
 - **Binary-only (no repo):** from a directory with no modastack checkout,
