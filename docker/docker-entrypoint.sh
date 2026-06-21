@@ -114,7 +114,20 @@ if [ ! -f "${PROJECT_DIR}/.modastack/agent.yaml" ]; then
     as_app modastack install "${MODASTACK_TEAM_URL}" --non-interactive
   elif [ -n "${MODASTACK_TEAM:-}" ]; then
     log "First boot: installing team '${MODASTACK_TEAM}' (non-interactive)"
-    as_app modastack install "${MODASTACK_TEAM}" --non-interactive
+    # MODASTACK_TEAM must resolve to something the INSTANCE can see: a path on the
+    # volume (e.g. an ssh-pushed /mnt/team) or a local package — there is NO team
+    # registry baked into the image, so a bare name won't resolve. Fail LOUD with
+    # the actionable alternative instead of letting `set -e` crash-loop the Fly
+    # machine on a bare pipefail trace (C9/#339).
+    if ! as_app modastack install "${MODASTACK_TEAM}" --non-interactive; then
+      log "ERROR: couldn't install team '${MODASTACK_TEAM}'. The container has no"
+      log "       team registry, so MODASTACK_TEAM only resolves a path/package the"
+      log "       instance can already see. To deliver a PUBLISHED team, set"
+      log "       MODASTACK_TEAM_URL=<https .tar.gz> instead; to deliver a LOCAL"
+      log "       package, use 'modastack deploy <name>' (ssh-push, no team source"
+      log "       on the instance). See DEPLOYMENT.md / DEPLOY_INTERFACE.md."
+      exit 1
+    fi
   else
     log "No team source and empty volume — blank instance, waiting for an"
     log "ssh-push team delivery (modastack deploy). Poll for .modastack/agent.yaml..."
