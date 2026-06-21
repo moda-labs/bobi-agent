@@ -468,6 +468,14 @@ Create or update the PR, then move the ticket to In Review.
 
 **Rules**: Always target `main`. NEVER merge PRs. NEVER run `/land-and-deploy`.
 
+**Feature PRs must not bump the version or edit `CHANGELOG.md`.** Version bumps
+and changelog entries happen at release time only — never in a feature PR. Leave
+`VERSION`, the `version` field in `pyproject.toml`, and `CHANGELOG.md` untouched.
+`/ship` is a generic tool that bumps the version and writes a changelog entry by
+default; for modastack PRs, revert those changes (`VERSION`, `pyproject.toml`
+`version`, `CHANGELOG.md`) and drop any `v<version>` PR-title prefix `/ship` adds
+before finalizing. Put the changelog-worthy detail in the PR description instead.
+
 ### QA Phase
 
 Test the live preview deployment for frontend features.

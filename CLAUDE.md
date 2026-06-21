@@ -251,8 +251,23 @@ digestion-prompt architecture. Live mockups in `docs/design/`. Do not deviate
 without explicit approval. `DESIGN.md` supersedes the visual/UX assumptions in
 `~/.claude/plans/sleepy-crunching-pnueli.md`.
 
+## Contributing
+
+**Feature PRs must not bump the version or edit `CHANGELOG.md`.** Leave
+`VERSION`, the `version` field in `pyproject.toml`, and `CHANGELOG.md`
+untouched — version bumps and changelog entries are added at release time only
+(see [Releasing](#releasing)). This keeps the changelog clean and avoids merge
+conflicts when several PRs land together.
+
+Write a PR description with enough detail that the changelog entry can be
+written from it at release time: what changed, why, and the ticket id.
+
 ## Releasing
 
-1. Bump `version` in `pyproject.toml` and `VERSION`
+Version bumps and `CHANGELOG.md` entries happen **only at release time** — never
+in feature PRs (see [Contributing](#contributing)). To cut a release:
+
+1. Bump `version` in `pyproject.toml` and `VERSION`, and add a `CHANGELOG.md`
+   entry summarizing the PRs merged since the last release.
 2. `git tag v<version> && git push --tags`
 3. GitHub Actions publishes to PyPI
