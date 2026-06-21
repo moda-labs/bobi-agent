@@ -198,7 +198,7 @@ def test_full_bootstrap_smoke_real_event_through_pty(adapter_event, tmp_path, mo
     extractor, so the integration gap that #386 fixed is actually exercised."""
     from modastack import paths
 
-    monkeypatch.setattr(paths, "_ROOT", None, raising=False)
+    monkeypatch.setattr(paths, "_root", None, raising=False)
 
     # Isolated project with a Slack bot_token (run_bootstrap requires it).
     project = tmp_path / "proj"
