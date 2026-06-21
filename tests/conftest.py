@@ -77,12 +77,21 @@ def _reset_paths_root():
     Must also clear MODASTACK_ROOT from os.environ since bind_root() now
     propagates it (#249) — a stale env var causes resolve_root() to
     short-circuit to a prior test's root instead of walking from cwd.
+
+    The inherited-pin snapshot (#375) is frozen at import, so an ambient
+    MODASTACK_ROOT in the CI/dev shell would otherwise short-circuit every
+    in-process resolve_root for the whole session. Neutralize it per-test
+    (None = no inherited pin → walk from cwd); tests that need a pin set it
+    explicitly. The original snapshot is restored on teardown.
     """
     from modastack import paths
     before = paths._root
     env_before = os.environ.get("MODASTACK_ROOT")
+    snapshot_before = paths._inherited_root_env
+    paths._inherited_root_env = None
     yield
     paths._root = before
+    paths._inherited_root_env = snapshot_before
     if env_before is None:
         os.environ.pop("MODASTACK_ROOT", None)
     else:

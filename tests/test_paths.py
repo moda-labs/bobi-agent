@@ -11,6 +11,9 @@ from modastack import paths
 @pytest.fixture(autouse=True)
 def unbound(monkeypatch):
     monkeypatch.setattr(paths, "_root", None)
+    # The inherited-pin snapshot is captured at import; reset it per test so
+    # the ambient MODASTACK_ROOT of the test runner cannot leak in.
+    monkeypatch.setattr(paths, "_inherited_root_env", None)
     monkeypatch.delenv("MODASTACK_ROOT", raising=False)
 
 
@@ -117,33 +120,68 @@ class TestResolveRoot:
         assert paths.resolve_root(repo) == repo
 
     def test_env_var_overrides_walk(self, tmp_path, monkeypatch):
-        """MODASTACK_ROOT env var short-circuits the walk-up resolver,
-        pinning the root for managed child processes (#247)."""
+        """A MODASTACK_ROOT pin inherited at process start short-circuits the
+        walk-up resolver, pinning the root for managed child processes
+        (#247). Simulated by setting the import-time snapshot."""
         real_root = tmp_path / "real"
         _install(real_root)
 
         decoy = tmp_path / "decoy"
         _install(decoy)
 
-        monkeypatch.setenv("MODASTACK_ROOT", str(real_root))
-        # Even starting from inside decoy, env var wins
+        monkeypatch.setattr(paths, "_inherited_root_env", str(real_root))
+        # Even starting from inside decoy, the inherited pin wins
         assert paths.resolve_root(decoy / "src") == real_root
 
     def test_env_var_invalid_raises(self, tmp_path, monkeypatch):
-        """A set-but-invalid MODASTACK_ROOT must raise — the spawning
-        process is broken and silently falling back to walk-up would
-        risk binding a different root (identity-fork)."""
+        """A set-but-invalid inherited MODASTACK_ROOT must raise — the
+        spawning process is broken and silently falling back to walk-up
+        would risk binding a different root (identity-fork)."""
         real_root = tmp_path / "real"
         _install(real_root)
 
         bogus = tmp_path / "bogus"
         bogus.mkdir()
-        monkeypatch.setenv("MODASTACK_ROOT", str(bogus))
+        monkeypatch.setattr(paths, "_inherited_root_env", str(bogus))
 
         deep = real_root / "src"
         deep.mkdir()
         with pytest.raises(RuntimeError, match="MODASTACK_ROOT"):
             paths.resolve_root(deep)
+
+    def test_honors_start_after_self_bind(self, tmp_path):
+        """#375: resolve_root(start) must honor `start` even after THIS
+        process has already resolved+bound a different root.
+
+        bind_root writes MODASTACK_ROOT into os.environ so spawned
+        subprocesses inherit the pin (#249). That self-written value must
+        NOT make a later in-process resolve_root ignore an explicit,
+        different `start` — only a pin INHERITED at process start does."""
+        root1 = tmp_path / "one"
+        _install(root1)
+        root2 = tmp_path / "two"
+        _install(root2)
+
+        # Warm: resolve + bind root1 like a CLI command does. This sets
+        # MODASTACK_ROOT=root1 in os.environ.
+        paths.bind_root(paths.resolve_root(root1))
+        assert os.environ["MODASTACK_ROOT"] == str(root1.resolve())
+
+        # A second resolution from a DIFFERENT start must honor it, not
+        # return the warm root1.
+        assert paths.resolve_root(root2) == root2
+
+    def test_raises_for_unrooted_start_after_self_bind(self, tmp_path):
+        """The issue's exact repro: a warm self-bind must not mask a start
+        that has no installation above it — resolve_root must still raise."""
+        root1 = tmp_path / "one"
+        _install(root1)
+        paths.bind_root(paths.resolve_root(root1))
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        with pytest.raises(RuntimeError, match="no Modastack installation found"):
+            paths.resolve_root(empty)
 
     def test_skips_foreign_owned_marker(self, tmp_path, monkeypatch):
         """A .modastack/ owned by a different uid must be skipped —

@@ -45,6 +45,19 @@ ROOT_MARKER = "agent.yaml"
 
 _root: Path | None = None
 
+# MODASTACK_ROOT present in the environment when this process STARTED is a
+# pin inherited from a spawner (subagent.py sets it for the CLI commands a
+# child agent runs inside its worktree, #249). resolve_root honors THIS
+# value — captured once at import, before any bind_root runs.
+#
+# It deliberately does NOT track the value bind_root later writes to
+# os.environ for our own subprocesses: that write is this process's own
+# echo, and consulting it would make a later in-process resolve_root ignore
+# an explicit, different `start` once we have bound (#375). The env var is
+# still the channel subprocesses inherit through — they capture it at their
+# own import, the same way we capture it here.
+_inherited_root_env: str | None = os.environ.get("MODASTACK_ROOT")
+
 
 def bind_root(path: Path | None) -> None:
     """Bind this process's installation root (None unbinds, tests only).
@@ -129,12 +142,17 @@ def resolve_root(start: Path) -> Path:
     contains agent.yaml and returns it. Raises when no installed root
     exists. Only entry points call this, and they bind what it returns.
 
-    When MODASTACK_ROOT is set in the environment, it short-circuits the
-    walk-up — managed child processes inherit the correct root without
-    filesystem guessing. A set-but-invalid MODASTACK_ROOT raises: the
-    spawning process is broken (stale env, typo, deleted install) and
-    silently walking from cwd would risk binding a different root —
-    the same identity-fork failure mode as #245.
+    When MODASTACK_ROOT was set in the environment at process start, it
+    short-circuits the walk-up — managed child processes inherit the
+    correct root without filesystem guessing. A set-but-invalid inherited
+    MODASTACK_ROOT raises: the spawning process is broken (stale env,
+    typo, deleted install) and silently walking from cwd would risk
+    binding a different root — the same identity-fork failure mode as #245.
+
+    Only the pin INHERITED at process start short-circuits — not the value
+    this process's own bind_root later writes to os.environ for its
+    subprocesses. Honoring our own echo would make a later resolve_root
+    ignore an explicit, different `start` once we have bound (#375).
 
     Trust guards applied during the walk (#249):
     - Linked git worktrees (where .git is a file, not a directory) are
@@ -143,7 +161,7 @@ def resolve_root(start: Path) -> Path:
       the current uid are skipped — a second party on a shared host
       planting a marker in a writable ancestor cannot capture identity.
     """
-    env_root = os.environ.get("MODASTACK_ROOT")
+    env_root = _inherited_root_env
     if env_root:
         p = Path(env_root).resolve()
         if (p / ".modastack" / ROOT_MARKER).is_file():
