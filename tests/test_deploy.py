@@ -45,8 +45,9 @@ def recorder(monkeypatch):
     """Record every deploy._run command; stub fly_app_exists per-test."""
     calls = []
 
-    def fake_run(cmd, *, cwd=None, check=True, input_bytes=None):
-        calls.append({"cmd": cmd, "cwd": cwd, "input": input_bytes})
+    def fake_run(cmd, *, cwd=None, check=True, input_bytes=None, extra_env=None):
+        calls.append({"cmd": cmd, "cwd": cwd, "input": input_bytes,
+                      "extra_env": extra_env})
         class R:  # noqa: E306
             returncode = 0
         return R()
@@ -338,6 +339,86 @@ def test_provision_passes_build_context_and_dockerfile(repo, recorder, monkeypat
     prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
     assert "--build-context" in prov and str(repo) in prov
     assert "--dockerfile" in prov
+
+
+# --- #387: macOS / Docker-Desktop local image build -------------------------
+# Fly's remote builder is unreliable from a Docker-Desktop laptop (flyctl
+# v0.4.59 mis-parses the daemon host); the tell is the standard
+# /var/run/docker.sock being ABSENT (present on Linux/CI). When absent we build
+# with local buildkit (--local-only, gzip) and point DOCKER_HOST at the real
+# Docker Desktop socket from `docker context inspect`.
+
+def test_resolve_local_build_keeps_remote_when_default_socket_present(monkeypatch):
+    """Linux / GitHub-Actions: /var/run/docker.sock exists → remote build stays."""
+    monkeypatch.setattr(D, "_default_docker_socket_present", lambda: True)
+    monkeypatch.setattr(D, "_docker_context_host", lambda: "unix:///nope.sock")
+    assert D._resolve_local_build() == (False, None)
+
+
+def test_resolve_local_build_resolves_desktop_socket(monkeypatch, tmp_path):
+    """macOS Docker Desktop: no default socket → local build + DOCKER_HOST from
+    the active docker context (only when that socket actually exists)."""
+    sock = tmp_path / "docker.sock"
+    sock.write_text("")
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setattr(D, "_default_docker_socket_present", lambda: False)
+    monkeypatch.setattr(D, "_docker_context_host", lambda: f"unix://{sock}")
+    assert D._resolve_local_build() == (True, f"unix://{sock}")
+
+
+def test_resolve_local_build_respects_explicit_docker_host(monkeypatch):
+    """An operator-set DOCKER_HOST wins: local build, no overlay (the subprocess
+    already inherits it)."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///custom.sock")
+    monkeypatch.setattr(D, "_default_docker_socket_present", lambda: False)
+    assert D._resolve_local_build() == (True, None)
+
+
+def test_resolve_local_build_local_host_but_socket_unresolved(monkeypatch):
+    """No default socket and the context yields nothing usable → still a local
+    build (deploy warns with the manual export), but no host to inject."""
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setattr(D, "_default_docker_socket_present", lambda: False)
+    monkeypatch.setattr(D, "_docker_context_host", lambda: "")
+    assert D._resolve_local_build() == (True, None)
+
+
+def test_provision_local_build_passes_flag_and_docker_host(repo, recorder, monkeypatch):
+    """On a Docker-Desktop laptop the provision is --local-build with DOCKER_HOST
+    injected into the provision subprocess env (#387)."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
+    monkeypatch.setattr(D, "_resolve_local_build",
+                        lambda: (True, "unix:///me/.docker/run/docker.sock"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
+    (repo / "deployments" / "eng.yaml").write_text("team-url: https://r/eng.tar.gz\n")
+    D.deploy(repo, "eng")
+    prov = next(c for c in recorder if "provision-instance.sh" in "\n".join(c["cmd"]))
+    assert "--local-build" in prov["cmd"]
+    assert prov["extra_env"] == {"DOCKER_HOST": "unix:///me/.docker/run/docker.sock"}
+
+
+def test_provision_remote_build_default_passes_no_local_flag(repo, recorder, monkeypatch):
+    """Linux/CI (remote build): no --local-build, no DOCKER_HOST overlay."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
+    monkeypatch.setattr(D, "_resolve_local_build", lambda: (False, None))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
+    (repo / "deployments" / "eng.yaml").write_text("team-url: https://r/eng.tar.gz\n")
+    D.deploy(repo, "eng")
+    prov = next(c for c in recorder if "provision-instance.sh" in "\n".join(c["cmd"]))
+    assert "--local-build" not in prov["cmd"]
+    assert not prov["extra_env"]
+
+
+def test_image_mode_never_requests_local_build(repo, recorder, monkeypatch):
+    """--image mode pulls a prebuilt ref (no build) → never --local-build, even
+    on a laptop."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
+    monkeypatch.setattr(D, "_resolve_local_build", lambda: (True, "unix:///x.sock"))
+    (repo / "deployments" / "eng.yaml").write_text(
+        "team-url: https://r/eng.tar.gz\nimage: registry.fly.io/x@sha256:abc\n")
+    D.deploy(repo, "eng")
+    prov = next(c for c in recorder if "provision-instance.sh" in "\n".join(c["cmd"]))
+    assert "--local-build" not in prov["cmd"]
 
 
 def test_image_mode_deploys_by_ref_not_build(repo, recorder, monkeypatch):

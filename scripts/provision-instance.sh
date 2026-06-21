@@ -101,6 +101,10 @@
 #   --image REF          Deploy a prebuilt image by ref (e.g. a team-flavored
 #                        image from CI) instead of building. Skips the build
 #                        context/Dockerfile/build-args entirely (C24).
+#   --local-build        Build with local buildkit (--local-only, gzip layers)
+#                        instead of Fly's remote builder. The path used on a
+#                        macOS/Docker-Desktop laptop where the remote builder is
+#                        unreliable; DOCKER_HOST must point at the daemon (#387).
 #   --volume-name NAME   Volume name. Default: data (mounted at /data).
 #   --yes                Skip the confirmation prompt.
 #   -h, --help           Show this help.
@@ -137,6 +141,11 @@ BUILD_CONTEXT="" DOCKERFILE=""
 # --image <ref> deploys a prebuilt image (C24 team-flavored images) instead of
 # building one — the build context/Dockerfile/build-args are then unused.
 IMAGE=""
+# --local-build builds the image with local buildkit (--local-only, gzip layers)
+# instead of Fly's remote builder — the path `modastack deploy` takes on a
+# macOS/Docker-Desktop laptop, where the remote builder is unreliable (#387).
+# DOCKER_HOST is supplied by the caller's env (deploy.py resolves it).
+LOCAL_BUILD=""
 declare -a BUILD_ARGS=()
 
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'; }
@@ -164,6 +173,7 @@ while [ $# -gt 0 ]; do
     --dockerfile) DOCKERFILE="$2"; shift 2;;
     --build-arg) BUILD_ARGS+=("$2"); shift 2;;
     --image) IMAGE="$2"; shift 2;;
+    --local-build) LOCAL_BUILD="1"; shift;;
     --yes) ASSUME_YES="1"; shift;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown argument: $1" >&2; echo "Run with --help." >&2; exit 2;;
@@ -404,6 +414,13 @@ sed 's/^/    /' "$CFG"
 # (Depot's `--compression=gzip` is a narrower alternative, but disabling Depot is
 # the proven path.)
 #
+# Build mode: --remote-only (default) builds on Fly's builders — correct for
+# CI/GitOps and any host with a working Docker daemon at /var/run/docker.sock.
+# --local-build flips to --local-only (local buildkit), the path `modastack
+# deploy` takes on a macOS/Docker-Desktop laptop where the remote builder is
+# unreliable (#387). Local buildkit also emits gzip layers, so --depot=false is
+# moot but harmless there; we keep it for a single, consistent flag set.
+#
 # --ha=false: one machine, matching our one volume (Fly defaults to HA = a spare
 #   machine, which would need a second volume and fail the deploy).
 # --wait-timeout 10m: first boot installs a team (and on a cold image warms a
@@ -417,9 +434,15 @@ if [ -n "$IMAGE" ]; then
   "$FLY" deploy --image "$IMAGE" --config "$CFG" \
     --ha=false --wait-timeout 10m
 else
+  BUILD_MODE="--remote-only"
+  if [ -n "$LOCAL_BUILD" ]; then
+    BUILD_MODE="--local-only"
+    log "Building locally with buildkit (--local-only, gzip layers) — #387."
+    [ -n "${DOCKER_HOST:-}" ] && log "  DOCKER_HOST=$DOCKER_HOST"
+  fi
   log "Building image on Fly and deploying... (first build bakes the model; be patient)"
   "$FLY" deploy "$BUILD_CONTEXT" --config "$CFG" --dockerfile "$DOCKERFILE" \
-    --depot=false --ha=false --wait-timeout 10m --remote-only
+    --depot=false --ha=false --wait-timeout 10m "$BUILD_MODE"
 fi
 
 echo
