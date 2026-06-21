@@ -47,8 +47,58 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # --------------------------------------------------------------------------
+  # Subscription-login smoke (#388). GATE the fleet roll on a verified
+  # subscription bootstrap so the _extract_code-class integration gap that #386
+  # fixed can't ship silently again. This drives a *subscription-mode* instance
+  # of the bootstrap to "waiting for code" and feeds it a SYNTHETIC code through
+  # the real PTY driver, asserting credentials land. It is hermetic:
+  #   * NO real Anthropic/OAuth credentials — `claude auth login` is faked by a
+  #     stand-in PTY process; the only thing written is a dummy creds file.
+  #   * NO Slack / event-server network — the Slack post and event-bus wait are
+  #     stubbed; the code is the synthetic one we feed in.
+  # The mock auth-code event uses the REAL Slack adapter output shape, generated
+  # from event-server/src/adapters/slack.ts (so adapter + bootstrap can't drift),
+  # exactly as tests/integration/test_login_bootstrap_smoke.py does.
+  subscription-login-smoke:
+    name: Subscription-login smoke (mock code, no creds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node is needed only to GENERATE the auth-code event from slack.ts via
+      # the adapter's own logic (esbuild type-erasure). No event-server deploy.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install modastack
+        run: pip install -e . pytest
+
+      - name: Drive subscription bootstrap to "waiting for code" + accept a synthetic code
+        # MODASTACK_AUTH=subscription puts us in subscription mode; we assert the
+        # bootstrap reaches the event-bus wait, accepts a synthetic code carried
+        # in a REAL-adapter-shaped event, feeds it to the (faked) `claude auth
+        # login` over a PTY, and only then writes credentials. No real creds.
+        env:
+          MODASTACK_AUTH: subscription
+          # Belt-and-suspenders: prove nothing real leaks in.
+          ANTHROPIC_API_KEY: ""
+          CLAUDE_CODE_OAUTH_TOKEN: ""
+        run: |
+          set -euo pipefail
+          # The integration smoke IS the verifier — it exercises the full
+          # subscription bootstrap path with a synthetic/mock code end-to-end.
+          python -m pytest tests/integration/test_login_bootstrap_smoke.py -v
+
   rollout:
     runs-on: ubuntu-latest
+    # Don't roll the fleet unless the subscription-login path is verified (#388).
+    needs: subscription-login-smoke
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
