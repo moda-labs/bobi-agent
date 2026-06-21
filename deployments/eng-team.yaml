@@ -14,6 +14,17 @@
 # (prompts/workflows flow through the volume, hot-updated on a prompt edit).
 team: eng-team
 
+# Auth: subscription (Max-plan OAuth) instead of api_key. On first boot with no
+# creds on the volume, the entrypoint runs `modastack login-bootstrap`: it spawns
+# `claude auth login --claudeai` under a PTY, scrapes the OAuth URL, posts it to
+# login_channel, and waits there for the pasted code. Creds land on the volume
+# (CLAUDE_CONFIG_DIR/.credentials.json) and persist across restarts.
+# REQUIREMENT: ANTHROPIC_API_KEY must be ABSENT from the secrets blob AND unset as
+# a live Fly secret — it silently outranks OAuth and bills the API (entrypoint §6.1
+# refuses to boot if present). login_channel below is Zach's bot DM (U0952RZTHBR).
+auth: subscription
+login_channel: D0B51JP1N4C
+
 # Team-flavored image (C24): eng-team declares a `build:` spec (agents/eng-team/
 # agent.yaml — node, codex, gstack), so `modastack deploy` renders its team-deps
 # hook into the build context and builds the team-flavored image ON FLY's remote
@@ -30,7 +41,7 @@ team: eng-team
 #
 # The blob (MODASTACK_ENV) MUST include these for eng-team to FUNCTION (any
 # non-MODASTACK_* key becomes a Fly secret → container env var):
-#   ANTHROPIC_API_KEY  the agent's model auth (api_key mode).
+#   (NO ANTHROPIC_API_KEY — auth=subscription above; it must be absent.)
 #   SLACK_BOT_TOKEN, LINEAR_API_KEY  service creds (agent.yaml ${...} refs).
 #   OPENAI_API_KEY     codex auth — the baked `codex` binary is unauthenticated
 #                      until this is set; codex reads it automatically at runtime.
