@@ -141,35 +141,104 @@ def test_unknown_auth_mode_rejected(image: str):
 
 @requires_docker
 @pytest.mark.timeout(120)
-def test_home_survives_privilege_drop(image: str):
-    """Regression: gosu resets HOME to the passwd home (/home/modastack), which
-    would send the agent's ~/.claude (subscription creds + transcripts) off the
-    volume. The entrypoint re-asserts the volume HOME inside the privilege drop
-    via `env HOME=...` — verify that mechanism yields the volume path in-image."""
+def test_config_dir_survives_privilege_drop(image: str):
+    """Regression: the agent's HOME stays on the IMAGE (/home/modastack) so baked
+    tools are read in place; only Claude's DURABLE state is redirected to the
+    volume via CLAUDE_CONFIG_DIR. The entrypoint carries both through the gosu
+    privilege drop with `env HOME=... CLAUDE_CONFIG_DIR=...` — verify that
+    mechanism yields the image HOME and the volume config dir in-image."""
     proc = _run(
         "docker", "run", "--rm", "--entrypoint", "sh", image, "-c",
-        'export HOME=/data/home; gosu modastack env HOME="$HOME" '
-        'sh -c \'printf %s "$HOME"\'',
+        'gosu modastack env HOME=/home/modastack CLAUDE_CONFIG_DIR=/data/claude '
+        'sh -c \'printf "%s:%s" "$HOME" "$CLAUDE_CONFIG_DIR"\'',
     )
-    assert proc.stdout.strip() == "/data/home", proc.stdout + proc.stderr
+    assert proc.stdout.strip() == "/home/modastack:/data/claude", proc.stdout + proc.stderr
 
 
 @requires_docker
 @pytest.mark.timeout(120)
-def test_empty_volume_without_team_fails_clearly(image: str, tmp_path: Path):
-    """An empty volume with neither MODASTACK_TEAM nor MODASTACK_TEAM_URL should
-    fail with a clear message, not a confusing crash deep in the manager."""
+def test_empty_volume_without_team_waits_for_push(image: str, tmp_path: Path):
+    """An empty volume with neither MODASTACK_TEAM nor MODASTACK_TEAM_URL enters
+    the wait-for-team state (ssh-push delivery) — it does NOT crash; it logs that
+    it's waiting and stays alive until a team is pushed onto the volume."""
+    import time
+
     vol = tmp_path / "data"
     vol.mkdir()
-    proc = _run(
-        "docker", "run", "--rm",
-        "-e", "MODASTACK_AUTH=api_key",
-        "-e", "ANTHROPIC_API_KEY=sk-ant-test",
-        "-v", f"{vol}:/data",
-        image,
-    )
-    assert proc.returncode != 0
-    assert "nothing to install" in (proc.stdout + proc.stderr)
+    name = "modastack-waitforteam"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "MODASTACK_AUTH=api_key",
+            "-e", "ANTHROPIC_API_KEY=sk-ant-test",
+            "-v", f"{vol}:/data",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        # It should log that it's waiting for a pushed team, and keep running.
+        deadline = time.time() + 30
+        logs = ""
+        while time.time() < deadline:
+            out = _run("docker", "logs", name)
+            logs = out.stdout + out.stderr
+            if "waiting for" in logs.lower():
+                break
+            time.sleep(1)
+        assert "waiting for" in logs.lower(), f"never entered wait state:\n{logs}"
+        # Still alive (didn't crash/exit on the missing team).
+        running = _run(
+            "docker", "inspect", "-f", "{{.State.Running}}", name
+        ).stdout.strip()
+        assert running == "true", f"container exited instead of waiting:\n{logs}"
+        # And it must NOT have used the old fatal path.
+        assert "nothing to install" not in logs
+    finally:
+        _run("docker", "rm", "-f", name)
+
+
+@requires_docker
+@pytest.mark.timeout(120)
+def test_unresolvable_team_fails_loudly(image: str, tmp_path: Path):
+    """An unresolvable MODASTACK_TEAM (no team registry in the image) must fail
+    with an ACTIONABLE error pointing at MODASTACK_TEAM_URL, not crash-loop on a
+    bare `set -e` pipefail trace (C9/#339)."""
+    import time
+
+    vol = tmp_path / "data"
+    vol.mkdir()
+    name = "modastack-badteam"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "MODASTACK_AUTH=api_key",
+            "-e", "ANTHROPIC_API_KEY=sk-ant-test",
+            "-e", "MODASTACK_TEAM=does-not-exist-anywhere",
+            "-v", f"{vol}:/data",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        # The container must STOP (clean exit 1), not sit hung or loop silently.
+        deadline = time.time() + 60
+        running = "true"
+        while time.time() < deadline:
+            running = _run(
+                "docker", "inspect", "-f", "{{.State.Running}}", name
+            ).stdout.strip()
+            if running == "false":
+                break
+            time.sleep(1)
+        logs = _run("docker", "logs", name)
+        text = logs.stdout + logs.stderr
+        assert running == "false", f"container didn't exit:\n{text}"
+        # Actionable guidance, not a raw pipefail trace.
+        assert "couldn't install team 'does-not-exist-anywhere'" in text, text
+        assert "MODASTACK_TEAM_URL" in text, text
+    finally:
+        _run("docker", "rm", "-f", name)
 
 
 SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "smoke-team"

@@ -31,6 +31,33 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q
 
+  lint:
+    name: Lint (workflows + Dockerfile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: actionlint (workflows + their shell)
+        # Lints every .github/workflows/*.yml and shellchecks their run: blocks —
+        # previously only run by hand, so the GitOps workflows could regress.
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+      - name: hadolint (Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+      - name: Dockerfile build-check (source + binary modes)
+        # BuildKit lint + stage-graph resolution for both build modes, so a
+        # regression in the MODASTACK_BUILD=pypi path (binary deploy) is caught
+        # without a full image build.
+        run: |
+          docker build --check .
+          docker build --check --build-arg MODASTACK_BUILD=pypi --build-arg MODASTACK_VERSION=0.0.0 .
+
   event-server:
     name: Event server (Worker/miniflare)
     runs-on: ubuntu-latest
@@ -152,67 +179,9 @@ jobs:
           -k "wrangler"
           --timeout=120 -v
 
-  integration-claude:
-    name: Integration tests (Claude)
-    runs-on: self-hosted
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'ci:claude')
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install dependencies
-        # CPU-only torch: tests need embeddings, not CUDA — the GPU wheel
-        # stack is ~7GB and overflows the self-hosted runner disk (#161).
-        run: |
-          python3 -m venv .venv
-          .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
-          .venv/bin/pip install -e ".[dev,kb]"
-          .venv/bin/pip install pytest-rerunfailures
-
-      - name: Agent launch
-        continue-on-error: true
-        id: agent-launch
-        run: .venv/bin/pytest tests/integration/test_agent_launch.py --timeout=180 --reruns=1 -v
-
-      - name: Manager lifecycle
-        continue-on-error: true
-        id: manager-lifecycle
-        run: .venv/bin/pytest tests/integration/test_manager_lifecycle.py --timeout=180 --reruns=1 -v
-
-      - name: Manager SDK (direct ClaudeSDKClient)
-        continue-on-error: true
-        id: manager-sdk
-        run: .venv/bin/pytest tests/integration/test_manager_sdk.py --timeout=180 --reruns=1 -v
-
-      - name: End-to-end event flow
-        continue-on-error: true
-        id: e2e-flow
-        run: .venv/bin/pytest tests/integration/test_e2e_event_flow.py --timeout=180 --reruns=1 -v
-
-      - name: Messaging
-        continue-on-error: true
-        id: messaging
-        run: .venv/bin/pytest tests/integration/test_messaging.py --timeout=180 --reruns=1 -v
-
-      - name: Setup flow
-        continue-on-error: true
-        id: setup-flow
-        run: .venv/bin/pytest tests/integration/test_setup_flow.py --timeout=900 --reruns=1 -v
-
-      - name: Check for failures
-        # Fail the job if any step above failed, but only after all have run.
-        if: always()
-        run: |
-          failed=""
-          [ "${{ steps.agent-launch.outcome }}" = "failure" ] && failed="$failed agent-launch"
-          [ "${{ steps.manager-lifecycle.outcome }}" = "failure" ] && failed="$failed manager-lifecycle"
-          [ "${{ steps.manager-sdk.outcome }}" = "failure" ] && failed="$failed manager-sdk"
-          [ "${{ steps.e2e-flow.outcome }}" = "failure" ] && failed="$failed e2e-flow"
-          [ "${{ steps.messaging.outcome }}" = "failure" ] && failed="$failed messaging"
-          [ "${{ steps.setup-flow.outcome }}" = "failure" ] && failed="$failed setup-flow"
-          if [ -n "$failed" ]; then
-            echo "::error::Failed steps:$failed"
-            exit 1
-          fi
+  # NOTE: the real-Claude integration suite (test_agent_launch / manager_lifecycle
+  # / manager_sdk / e2e_event_flow / messaging / setup_flow) ran on a self-hosted
+  # EC2 runner. That box was retired when eng-team moved to Fly (C24, #368). These
+  # tests still run locally (`pytest tests/`); a GitHub-hosted replacement (real
+  # Claude on ubuntu-latest with an ANTHROPIC_API_KEY secret, like container.yml's
+  # live `ask`) is a follow-up if we want them gating CI again.

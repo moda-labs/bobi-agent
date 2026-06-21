@@ -102,6 +102,41 @@ def test_extract_code_ignores_empty_text():
     assert ab._extract_code(ev, "C123") is None
 
 
+def test_extract_code_from_real_adapter_dm_shape():
+    """Reproduces the prod bug: the Slack adapter (event-server/src/adapters/
+    slack.ts) emits `text` at the TOP LEVEL and in `payload`, with `fields`
+    holding only channel/channel_type/user_id/ts — never `text`. The login
+    bootstrap must read the code out of that real shape."""
+    ev = {
+        "source": "slack",
+        "type": "slack.dm",
+        "text": "abc#def",
+        "fields": {
+            "channel": "D0B51JP1N4C",
+            "channel_type": "im",
+            "user_id": "U0952RZTHBR",
+            "ts": "1779500000.000100",
+        },
+        "payload": {
+            "channel": "D0B51JP1N4C",
+            "channel_type": "im",
+            "text": "abc#def",
+        },
+    }
+    assert ab._extract_code(ev, "D0B51JP1N4C") == "abc#def"
+
+
+def test_extract_code_real_shape_rejects_other_channel():
+    ev = {
+        "source": "slack",
+        "type": "slack.dm",
+        "text": "abc#def",
+        "fields": {"channel": "D999", "channel_type": "im"},
+        "payload": {"channel": "D999", "text": "abc#def"},
+    }
+    assert ab._extract_code(ev, "D0B51JP1N4C") is None
+
+
 # --- orchestration (everything faked) ---------------------------------------
 
 @pytest.fixture

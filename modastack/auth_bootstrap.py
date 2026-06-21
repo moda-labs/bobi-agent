@@ -107,14 +107,18 @@ def _extract_code(event: dict, channel: str) -> str | None:
     """Pull an auth code out of a Slack message event for ``channel``."""
     if (event.get("source") or "").lower() != "slack":
         return None
-    fields = event.get("fields") or event.get("data") or event.get("payload") or {}
-    if not isinstance(fields, dict):
-        return None
-    ev_channel = fields.get("channel")
+    fields = event.get("fields") if isinstance(event.get("fields"), dict) else {}
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    ev_channel = fields.get("channel") or payload.get("channel")
     # Filter to the login channel; a workspace subscription sees every channel.
     if channel and ev_channel and ev_channel != channel:
         return None
-    text = (fields.get("text") or "").strip()
+    # The real Slack adapter (event-server/src/adapters/slack.ts) puts the message
+    # text at the event TOP LEVEL and in `payload.text`; `fields` carries only
+    # channel/channel_type/user_id/ts. Read all three so we match the live shape
+    # (top-level first) while staying tolerant of older event variants.
+    text = (event.get("text") or payload.get("text")
+            or fields.get("text") or "").strip()
     if not text:
         return None
     # The human is told to paste only the code; tolerate a stray label/prefix

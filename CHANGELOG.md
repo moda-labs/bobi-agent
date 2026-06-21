@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.23.0 — 2026-06-19
+## 0.26.0 — 2026-06-21
 
 Reskin the `modastack setup` web UI to **bobi**: a single clay accent palette and
 the probe-mark logo. Terminal layout and behavior are unchanged — only the color
@@ -15,6 +15,133 @@ tokens, the brand mark, and brand wording move. (MOD-190)
   renamed all user-facing brand copy `modastack → bobi` (CLI commands, install
   paths, and docs URLs stay `modastack`). Source of truth:
   `docs/design/BOBI_STYLE_GUIDE.md`.
+
+## 0.25.0 — 2026-06-21
+
+Author and live-test custom **stdio (command-based) MCP servers** in the setup/Bobi
+connections UI. The runtime already supported stdio servers; this fills the
+authoring gap (previously HTTP/URL-only), and adds folder-detection, an in-chat
+connection test, and a per-row connection-status indicator.
+
+### Added
+- **Stdio MCP connections.** Add a local command-based MCP server (name +
+  command + args + env) in the connections UI; persisted to `agent.yaml` as a
+  `{type: stdio, command, args, env}` entry with secrets captured as `${VAR}`
+  refs in `.modastack/.env`, never inline. (MOD-209)
+- **Detect from a local folder.** Point at an MCP server's project folder and
+  modastack infers the launch recipe — command/args from `pyproject.toml` /
+  `package.json`, and env vars (required vs optional, secret vs plain) by AST
+  scan, with a confidence guard for highly-configurable servers. Home-confined,
+  read-only static analysis.
+- **In-chat connection test.** Ask Bobi to test a connection; it launches the
+  server, proposes a safe read-only tool, and — on your confirmation — calls it
+  to verify the connection end-to-end. Never proposes or runs a write tool.
+- **Connection-status indicator.** A subtle per-row dot: connected (verified) /
+  needs-config / error / added.
+
+### Internal
+- Canonical-key dedup so a guessed service and the MCP added for it collapse to
+  one row; edit repopulates the stored config; `serialize_state` exposes
+  `mcp_servers` (names/refs only, never secret values).
+- Hardening from a cross-model (Claude + Codex) review: default-deny read-only
+  tool picker, decline-first chat confirmation, minimal child env on probe,
+  secret-scrubbed probe output, coarse-only test-verdict persistence.
+
+## 0.24.0 — 2026-06-20
+
+Team-flavored images: a team can bake its own host tools into a per-team
+container image, so a real team (eng-team's `gstack`/`codex`) actually runs and
+dispatches on Fly. The EC2 release path is retired in favor of a functional Fly
+canary gate.
+
+### Added
+- **Team-flavored images (C24).** A team declares a `build:` block in
+  `agent.yaml` (`apt` / `npm` / `run_root` / `run`, `verify: requires`); the
+  framework renders a team-deps hook into the one Dockerfile — a stable layer
+  *below* the framework wheel, so a code-only release rebuilds only the wheel —
+  and builds it on Fly during deploy. `~`-relative tools (e.g. gstack's skills)
+  are seeded onto the volume `$HOME` at boot so they survive the volume remap;
+  `run_root` covers root steps `apt` can't express (e.g.
+  `npx playwright install-deps chromium`). A no-`build:` team is byte-identical
+  to the generic image. (#368)
+- **Functional Fly canary gate.** `gitops-release` builds the canary first and
+  asserts it answers a blocking `ask` end-to-end through the production event
+  server (`CANARY-OK`) before rolling the rest of the fleet — the on-Fly
+  replacement for the retired EC2 release smoke.
+- **Team-aware fleet roll.** A framework release rebuilds each team-flavored
+  instance's own image (its baked tools, on the new framework wheel) instead of
+  rolling the generic image onto it.
+
+### Changed
+- **Retired the EC2 release path.** Removed the self-hosted release smoke /
+  promote-to-prod-director (`publish-pypi`) and real-Claude integration (`ci`)
+  jobs; the EC2 director is replaced by `moda-eng-team` running on Fly.
+- `modastack deploy` honors a declared-but-empty optional referenced var (e.g.
+  `channels: ${SLACK_CHANNELS}`, empty = whole workspace) instead of failing on
+  it; auth-critical keys are still enforced at provision and boot.
+
+## 0.23.0 — 2026-06-19
+
+Containerized instances land: modastack now runs as an immutable image on Fly,
+deployable from the binary alone, with a fast-rebuilding layered Dockerfile.
+
+### Added
+- **Containerized instance image (C8).** One Dockerfile, two build modes
+  (`MODASTACK_BUILD={source|pypi}`): `source` builds the wheel from a checkout
+  (dev + repo CI), `pypi` installs a published, version-pinned `modastack` so a
+  deploy needs no repo. Runs the agent non-root, ships the native `claude` CLI
+  (no Node), and bakes the embedding model in for cold-start speed. (#338)
+- **`modastack deploy` / `destroy` primitive + binary-only deploy (C22).**
+  Idempotent provision-or-update with config precedence (flags ›
+  `deployments/<name>.yaml` › `defaults.yaml` › built-ins). Deploy assets
+  (Dockerfile, scripts, entrypoints) ship as wheel package data, so
+  `uv tool install modastack` is enough to deploy — no checkout. (#342)
+- **Fly provisioning + install-team-from-URL (C10).** `provision-instance.sh`
+  and `modastack install <url>` deliver a team to a fresh instance. (#340)
+- **Subscription-login bootstrap (C23).** First-boot subscription auth for a
+  dark container. (#343)
+- **GitOps thin clients.** Release / `deploy-*` tag workflows that are thin
+  `modastack deploy` callers; `deployments/` holds per-instance config; a
+  permanent `moda-canary` instance is the pipeline smoke. (#342)
+- **First-class foreground / PID-1 mode + manager health endpoint.** `modastack
+  start --foreground` as the container entrypoint, with a health port the
+  Docker `HEALTHCHECK` probes. (#333)
+- **`modastack install --non-interactive`** for unattended/container installs.
+  (containerized-5)
+- **Subagent concurrency semaphore** bounding parallel agent launches. (#334)
+
+### Changed
+- **fastembed/ONNX replaces the torch embedding sidecar.** The CPU instance no
+  longer pulls torch + ~2 GB of CUDA wheels; embeddings run on the lightweight
+  ONNX embedder. (#346)
+- **Faster, layered Dockerfile.** Layers are ordered stable → volatile so a
+  code-only rebuild is seconds instead of minutes: the fastembed model bake
+  moves to a dedicated `model-baker` stage keyed only on the fastembed version,
+  the `claude` CLI install sits above the framework, and the `modastack` venv is
+  the last heavy layer. `source` mode now splits a pyproject-keyed deps layer
+  from a thin `--no-deps` wheel layer (dep list read from
+  `[project.dependencies]` via stdlib `tomllib`, no drift). This is the layer
+  ordering team-flavored images (C24) inherit — see
+  `docs/design/CUSTOM_AGENT_DEPS.md` §"three clocks".
+- **`[kb]` extra avoided in images.** Both builders install `fastembed` +
+  `sqlite-vec` explicitly, since some published `[kb]` extras stale-list
+  `sentence-transformers` → torch.
+
+### Fixed
+- **State format version marker** so an upgraded CLI detects and migrates stale
+  on-disk state instead of failing against it. (#337)
+- **Skip the local Node event server when `event_server_url` is remote** — a
+  containerized instance talks to the remote event server, not a local one.
+  (containerized-6)
+- **Release promote no longer leaves prod down** on a post-stop failure. (#347)
+- **Container-safe `claude` CLI path resolution.** (containerized-1)
+- **Leaked asyncio event loop** that failed ~53 unit tests in full-suite runs.
+  (#318)
+
+### Internal
+- Phase-0 containerization review fixes (C3/C4/C5). (#356)
+- Design docs for containerized instances and custom agent dependencies (C24).
+  (#368, #369)
 
 ## 0.22.0 — 2026-06-18
 

@@ -1,0 +1,190 @@
+name: GitOps — teams
+
+# Reconcile deployments/<name>.yaml to live Fly instances (C22 / #342;
+# docs/design/DEPLOY_INTERFACE.md).
+#
+# WHEN it runs (deploy gate = a release, not every push to main):
+#   release: published   -> reconcile the whole active deployment set.
+#   push of a `deploy-*` tag -> same, without a formal release (manual / branch e2e;
+#                            tag pushes run the workflow from the TAGGED commit).
+#   workflow_dispatch    -> manual; optional `only:` to scope to one deployment.
+#
+# This workflow is a THIN CLIENT: all deployment business logic lives in the
+# `modastack deploy` primitive (idempotent provision-or-update, delivery-mode
+# selection, secret validation, the Fly mechanics). The Action only orchestrates —
+# list the active deployments, materialize each one's secrets, loop the primitive.
+# Because deploy is idempotent, a release simply reconciles ALL active deployments
+# (provision the new, update the rest) — no git-diff needed. Nothing
+# GitHub-specific reaches into the engine, so the same `modastack deploy` runs from
+# a laptop, this Action, Terraform, or a SaaS plane. To wire your own repo, copy
+# this file; see docs/DEPLOYMENT.md (bring-your-own-repo runbook).
+#
+#   active deployment   = deployments/<name>.yaml (defaults.yaml excluded).
+#   inactive            = anything else (e.g. <name>.yaml.example) — never deployed.
+#   removed deployment  -> nothing automatic; the orphans job surfaces the
+#                          now-unmanaged Fly app for a human `modastack destroy`.
+#
+# State store = the Fly API (no DB, no committed manifest). Fleet identity comes
+# from deployments/defaults.yaml (`fleet:`), not a repo var.
+#
+# Required configuration:
+#   secrets.FLY_API_TOKEN   Fly deploy token (org-scoped). Absent -> the workflow
+#                           no-ops (so committing deployments/ before wiring the
+#                           fleet never breaks CI).
+#   Environment "<name>" per deployment, holding secret MODASTACK_ENV = that
+#   instance's full KEY=VALUE env-file body (the named `secrets.env` source). No
+#   protection rules (a required reviewer would pause the matrix).
+
+on:
+  # Automated deployments fire on a published release — cutting a release is the
+  # deploy gate (an edit pushed to main does NOT auto-deploy; you release to ship).
+  release:
+    types: [published]
+  # Manual deploy without a formal release: push a `deploy-*` tag. Tag pushes run
+  # the workflow from the TAGGED commit (any branch), so this also drives the
+  # branch e2e of the GitOps path before a merge. (Release tags are `v*`, so they
+  # don't double-fire this.)
+  push:
+    tags:
+      - "deploy-*"
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Reconcile only this deployment name (default: all active)"
+        required: false
+
+# Serialize fleet reconciliation so two pushes can't race on the same app.
+concurrency:
+  group: gitops-teams
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      # JSON array of deployment names to (re)deploy; "[]" when nothing changed.
+      names: ${{ steps.plan.outputs.names }}
+      # "true" only when a Fly token is configured — gates the deploy/orphan jobs.
+      configured: ${{ steps.gate.outputs.configured }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: gate
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -n "${FLY_API_TOKEN:-}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::secrets.FLY_API_TOKEN unset — fleet not wired, skipping."
+          fi
+
+      - id: plan
+        env:
+          ONLY: ${{ github.event.inputs.only }}
+        run: |
+          set -euo pipefail
+          # A release/tag deploy reconciles the WHOLE active set — `modastack
+          # deploy` is idempotent (provision new, update existing), so deploying
+          # all is correct and needs no git-diff. An active deployment is a
+          # deployments/<name>.yaml (the shared defaults file excluded; an
+          # inactive deployment is a non-.yaml like <name>.yaml.example).
+          names=()
+          for f in deployments/*.yaml; do
+            [ -e "$f" ] || continue
+            b="$(basename "$f" .yaml)"
+            [ "$b" = "defaults" ] && continue
+            # `workflow_dispatch` may scope to a single deployment via `only`.
+            [ -n "${ONLY:-}" ] && [ "$b" != "$ONLY" ] && continue
+            names+=("$b")
+          done
+
+          if [ "${#names[@]}" -eq 0 ]; then
+            echo "names=[]" >> "$GITHUB_OUTPUT"
+            echo "No active deployments to reconcile."
+          else
+            printf '%s\n' "${names[@]}" | sort -u | jq -R . | jq -cs . \
+              | sed 's/^/names=/' >> "$GITHUB_OUTPUT"
+            echo "Deployments to reconcile: ${names[*]}"
+          fi
+
+  deploy:
+    needs: plan
+    if: ${{ needs.plan.outputs.configured == 'true' && needs.plan.outputs.names != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.plan.outputs.names) }}
+    # Bind this matrix cell to the deployment's GitHub Environment, exposing its
+    # MODASTACK_ENV secret. Convention: the Environment is named after the
+    # deployment (deployments/<name>.yaml's `secrets.env` documents this).
+    environment: ${{ matrix.name }}
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install modastack CLI
+        run: pip install -e .
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy ${{ matrix.name }}
+        env:
+          MODASTACK_ENV: ${{ secrets.MODASTACK_ENV }}
+        run: |
+          set -euo pipefail
+          [ -n "${MODASTACK_ENV:-}" ] || {
+            echo "::error::Environment '${{ matrix.name }}' has no MODASTACK_ENV secret"; exit 1; }
+          umask 077
+          envfile="$RUNNER_TEMP/instance.env"
+          printf '%s' "$MODASTACK_ENV" > "$envfile"
+          # The whole reconcile (provision-or-update, ssh-push vs team-url, secret
+          # validation, identity stamps) is the primitive's job — the Action just
+          # hands it the resolved secrets file and the deployment name.
+          modastack deploy "${{ matrix.name }}" --env-file "$envfile"
+
+  orphans:
+    # Report Fly apps in the fleet that no longer have a deployments/ file, so a
+    # human can `modastack destroy` them. Never auto-destroys (the volume is the
+    # only copy of an instance's state). Pure orchestration: a cross-fleet diff.
+    needs: plan
+    if: ${{ needs.plan.outputs.configured == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Surface unmanaged instances
+        run: |
+          set -euo pipefail
+          fleet="$(sed -nE 's#^fleet:[[:space:]]*([^[:space:]#]+).*#\1#p' \
+                     deployments/defaults.yaml | head -n1)"
+          [ -n "$fleet" ] || { echo "No fleet in deployments/defaults.yaml — skip."; exit 0; }
+
+          # Managed = the slugs we have deployments/<name>.yaml for, as app names.
+          declare -A managed=()
+          for f in deployments/*.yaml; do
+            b="$(basename "$f" .yaml)"; [ "$b" = "defaults" ] && continue
+            managed["$fleet-$b"]=1
+          done
+
+          orphans=()
+          while IFS= read -r app; do
+            [ -n "$app" ] || continue
+            [ -n "${managed[$app]:-}" ] || orphans+=("$app")
+          done < <(scripts/fleet.sh list "$fleet")
+
+          if [ "${#orphans[@]}" -gt 0 ]; then
+            echo "::warning::Unmanaged fleet instances (no deployments/ file): ${orphans[*]}"
+            echo "Run \`modastack destroy <name>\` to remove each one (human-gated)."
+          else
+            echo "No unmanaged instances."
+          fi

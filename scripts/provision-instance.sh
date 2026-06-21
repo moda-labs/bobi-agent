@@ -52,14 +52,25 @@
 #
 # Required:
 #   --app APP            Globally-unique Fly app name (operator-namespaced).
-#   --team TEAM          Team to install on first boot from a bundled/registry NAME
-#                        (MODASTACK_TEAM), e.g. eng-team.
+#   --team TEAM          Team to install on first boot (MODASTACK_TEAM). Resolves
+#                        only a name/path the INSTANCE can already see (e.g. a
+#                        volume path) — there is NO team registry in the image, so
+#                        a bare name won't resolve at boot; the entrypoint fails
+#                        loud and tells you to use --team-url. For a published
+#                        team use --team-url; for a local package, `modastack
+#                        deploy` ssh-pushes it (no team source on the instance).
 #       …or…
 #   --team-url URL       Public .tar.gz URL of one team package, fetched at first
 #                        boot (MODASTACK_TEAM_URL). The dark instance pulls it over
 #                        HTTPS — works with a GitHub release/raw asset or your own
 #                        server, and is restageable later by swapping the asset.
-#                        Provide exactly one of --team / --team-url.
+#       …or…
+#   --blank              Provision with NO team source. The instance boots into the
+#                        "wait for team" state (entrypoint §3) and holds until a team
+#                        is pushed in over `fly ssh` — the ssh-push delivery path that
+#                        `modastack deploy` uses for a LOCAL team package. Use this
+#                        instead of --team/--team-url; the caller pushes the team next.
+#                        Provide exactly one of --team / --team-url / --blank.
 #   --env-file FILE      KEY=VALUE file of service tokens (SLACK_BOT_TOKEN, GITHUB_TOKEN,
 #                        LINEAR_API_KEY, VENN_API_KEY, ...). In api_key mode it must also
 #                        contain ANTHROPIC_API_KEY; in subscription mode it must NOT.
@@ -67,6 +78,16 @@
 #                        are treated as plaintext [env], overridden by the flags below.
 #
 # Options:
+#   --fleet PREFIX       Operator/fleet namespace stamped into the instance as
+#                        MODASTACK_FLEET. The fleet-state primitive: enumerate a
+#                        fleet by `fly apps list` filtered on this stamp (the C22
+#                        GitOps Action and any future provisioner service share it).
+#                        Default: the leading dash-segment of --app (e.g. --app
+#                        acme-modastack-eng ⇒ fleet "acme"). Pass explicitly when
+#                        the app name's first segment isn't your fleet namespace.
+#   --instance NAME      Per-instance identity stamped as MODASTACK_INSTANCE — the
+#                        SaaS tenant key (enumerable in [env] next to MODASTACK_FLEET).
+#                        Default: the app name with the "<fleet>-" prefix stripped.
 #   --auth MODE          api_key (default) | subscription. See §6.1.
 #   --event-server URL   Worker URL (https://). Default: the shared moda-labs Worker.
 #   --region REGION      Fly region for the app + volume. Default: iad.
@@ -77,6 +98,9 @@
 #   --login-channel ID   subscription mode only: private Slack channel ID for the
 #                        first-boot login bootstrap (C23, MODASTACK_LOGIN_CHANNEL).
 #   --claude-version V   Pin the claude CLI version baked into the image (build-arg).
+#   --image REF          Deploy a prebuilt image by ref (e.g. a team-flavored
+#                        image from CI) instead of building. Skips the build
+#                        context/Dockerfile/build-args entirely (C24).
 #   --volume-name NAME   Volume name. Default: data (mounted at /data).
 #   --yes                Skip the confirmation prompt.
 #   -h, --help           Show this help.
@@ -102,18 +126,29 @@ DEFAULT_EVENT_SERVER="https://modastack-events.modalabs.workers.dev"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- args -------------------------------------------------------------------
-APP="" TEAM="" TEAM_URL="" ENV_FILE="" AUTH="api_key"
+APP="" TEAM="" TEAM_URL="" BLANK="0" ENV_FILE="" AUTH="api_key" FLEET="" INSTANCE=""
 EVENT_SERVER="$DEFAULT_EVENT_SERVER"
 REGION="iad" ORG="" VOLUME_SIZE="15" MEMORY="4gb" CPUS="2"
 LOGIN_CHANNEL="" CLAUDE_VERSION="" VOLUME_NAME="data" ASSUME_YES="0"
+# Build context + Dockerfile default to the repo (source build); `modastack
+# deploy` overrides them to a packaged context (Dockerfile.pypi, PyPI install)
+# in binary mode, so deploy needs no checkout. --build-arg K=V is repeatable.
+BUILD_CONTEXT="" DOCKERFILE=""
+# --image <ref> deploys a prebuilt image (C24 team-flavored images) instead of
+# building one — the build context/Dockerfile/build-args are then unused.
+IMAGE=""
+declare -a BUILD_ARGS=()
 
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --app) APP="$2"; shift 2;;
+    --fleet) FLEET="$2"; shift 2;;
+    --instance) INSTANCE="$2"; shift 2;;
     --team) TEAM="$2"; shift 2;;
     --team-url) TEAM_URL="$2"; shift 2;;
+    --blank) BLANK="1"; shift;;
     --env-file) ENV_FILE="$2"; shift 2;;
     --auth) AUTH="$2"; shift 2;;
     --event-server) EVENT_SERVER="$2"; shift 2;;
@@ -125,6 +160,10 @@ while [ $# -gt 0 ]; do
     --login-channel) LOGIN_CHANNEL="$2"; shift 2;;
     --claude-version) CLAUDE_VERSION="$2"; shift 2;;
     --volume-name) VOLUME_NAME="$2"; shift 2;;
+    --build-context) BUILD_CONTEXT="$2"; shift 2;;
+    --dockerfile) DOCKERFILE="$2"; shift 2;;
+    --build-arg) BUILD_ARGS+=("$2"); shift 2;;
+    --image) IMAGE="$2"; shift 2;;
     --yes) ASSUME_YES="1"; shift;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown argument: $1" >&2; echo "Run with --help." >&2; exit 2;;
@@ -142,10 +181,28 @@ command -v "$FLY" >/dev/null 2>&1 \
 
 # --- validate ---------------------------------------------------------------
 [ -n "$APP" ]      || fatal "--app is required (globally-unique Fly app name)."
-if [ -n "$TEAM" ] && [ -n "$TEAM_URL" ]; then
-  fatal "pass exactly one of --team / --team-url, not both."
-elif [ -z "$TEAM" ] && [ -z "$TEAM_URL" ]; then
-  fatal "one of --team (registry name) or --team-url (public .tar.gz URL) is required."
+# Fleet namespace defaults to the app name's leading dash-segment so a fleet of
+# apps named "<fleet>-<...>" enumerates by this stamp without extra config.
+[ -n "$FLEET" ] || FLEET="${APP%%-*}"
+# Instance key defaults to the app name minus the "<fleet>-" prefix (the slug),
+# matching the app = "<fleet>-<name>" convention. Falls back to the full app name
+# when the prefix doesn't match (e.g. an explicit --fleet that isn't the prefix).
+if [ -z "$INSTANCE" ]; then
+  case "$APP" in
+    "$FLEET"-*) INSTANCE="${APP#"$FLEET"-}";;
+    *)          INSTANCE="$APP";;
+  esac
+fi
+# Exactly one team source: --team (registry name), --team-url (public tarball),
+# or --blank (no source; the entrypoint waits for an ssh-pushed team).
+team_modes=0
+[ -n "$TEAM" ]     && team_modes=$((team_modes + 1))
+[ -n "$TEAM_URL" ] && team_modes=$((team_modes + 1))
+[ "$BLANK" = "1" ] && team_modes=$((team_modes + 1))
+if [ "$team_modes" -gt 1 ]; then
+  fatal "pass exactly one of --team / --team-url / --blank."
+elif [ "$team_modes" -eq 0 ]; then
+  fatal "one of --team (registry name), --team-url (public .tar.gz URL), or --blank (ssh-push) is required."
 fi
 if [ -n "$TEAM_URL" ]; then
   case "$TEAM_URL" in
@@ -155,7 +212,15 @@ if [ -n "$TEAM_URL" ]; then
 fi
 [ -n "$ENV_FILE" ] || fatal "--env-file is required (KEY=VALUE service tokens)."
 [ -f "$ENV_FILE" ] || fatal "--env-file '$ENV_FILE' not found."
-[ -f "$REPO_ROOT/Dockerfile" ] || fatal "Dockerfile not found at repo root ($REPO_ROOT)."
+# Build context + Dockerfile: default to the repo (source build) unless the
+# caller passed a packaged context (binary-mode `modastack deploy`). Skipped
+# entirely in --image mode (a prebuilt image is deployed, nothing is built).
+if [ -z "$IMAGE" ]; then
+  [ -n "$BUILD_CONTEXT" ] || BUILD_CONTEXT="$REPO_ROOT"
+  [ -n "$DOCKERFILE" ]    || DOCKERFILE="$REPO_ROOT/Dockerfile"
+  [ -d "$BUILD_CONTEXT" ] || fatal "--build-context '$BUILD_CONTEXT' is not a directory."
+  [ -f "$DOCKERFILE" ]    || fatal "Dockerfile not found: $DOCKERFILE"
+fi
 
 case "$AUTH" in
   api_key|subscription) ;;
@@ -166,7 +231,8 @@ esac
 # minting transmits the bubble key once, so a cleartext remote URL is refused.
 case "$EVENT_SERVER" in
   https://*) ;;
-  http://localhost*|http://127.0.0.1*|http://[::1]*) ;;
+  # Quote the IPv6 literal so `[::1]` is matched as text, not a glob char-class.
+  http://localhost*|http://127.0.0.1*|'http://[::1]'*) ;;
   *) fatal "--event-server must be https:// (or a loopback). Got: $EVENT_SERVER";;
 esac
 
@@ -205,7 +271,7 @@ else
   [ "$HAS_ANTHROPIC_KEY" = "0" ] \
     || fatal "--auth subscription but ANTHROPIC_API_KEY is in $ENV_FILE. Remove it (it overrides subscription auth)."
   [ -n "$LOGIN_CHANNEL" ] || [ -n "${ENV_FROM_FILE[MODASTACK_LOGIN_CHANNEL]:-}" ] \
-    || log "WARNING: subscription mode without --login-channel. First-boot login (C23) will have no Slack channel; fall back to: $FLY ssh console -a $APP --command 'env HOME=/data/home claude auth login --claudeai'"
+    || log "WARNING: subscription mode without --login-channel. First-boot login (C23) will have no Slack channel; fall back to: $FLY ssh console -a $APP --command 'env CLAUDE_CONFIG_DIR=/data/claude claude auth login --claudeai'"
 fi
 
 # --- assemble the instance's [env] identity ---------------------------------
@@ -217,13 +283,27 @@ for k in "${!ENV_FROM_FILE[@]}"; do ENV_VARS["$k"]="${ENV_FROM_FILE[$k]}"; done
 [ -n "$TEAM_URL" ] && ENV_VARS["MODASTACK_TEAM_URL"]="$TEAM_URL"
 ENV_VARS["MODASTACK_AUTH"]="$AUTH"
 ENV_VARS["MODASTACK_EVENT_SERVER"]="$EVENT_SERVER"
+# Fleet-membership stamp: this is the authoritative fleet-state key (the app name
+# is only a discovery hint). Enumerate a fleet by reading this back per app
+# (`fly config env`/`scripts/fleet.sh`), so two fleets can share one Fly org and
+# a future MODASTACK_TENANT filter slots into the same [env] block (design §9.1).
+ENV_VARS["MODASTACK_FLEET"]="$FLEET"
+# Per-instance identity (the SaaS tenant key). Enumerable alongside MODASTACK_FLEET;
+# `modastack deploy <name>` stamps and reads this back to find the app for <name>.
+ENV_VARS["MODASTACK_INSTANCE"]="$INSTANCE"
 [ -n "$LOGIN_CHANNEL" ] && ENV_VARS["MODASTACK_LOGIN_CHANNEL"]="$LOGIN_CHANNEL"
 
 # --- confirm ----------------------------------------------------------------
 echo
 echo "  Fly app        : $APP${ORG:+  (org: $ORG)}"
+echo "  Fleet          : $FLEET  (MODASTACK_FLEET stamp)"
+echo "  Instance       : $INSTANCE  (MODASTACK_INSTANCE stamp)"
 echo "  Region         : $REGION"
-echo "  Team           : ${TEAM:-(from URL) $TEAM_URL}"
+if [ "$BLANK" = "1" ]; then
+  echo "  Team           : (blank — waits for an ssh-pushed team)"
+else
+  echo "  Team           : ${TEAM:-(from URL) $TEAM_URL}"
+fi
 echo "  Auth mode      : $AUTH"
 echo "  Event server   : $EVENT_SERVER"
 echo "  Volume         : $VOLUME_NAME (${VOLUME_SIZE} GB) at /data"
@@ -277,10 +357,18 @@ trap 'rm -f "$CFG"' EXIT
   # NB: the Dockerfile is passed via `fly deploy --dockerfile`, not a
   # `[build] dockerfile = …` key — Fly resolves that key relative to THIS
   # config file's directory (a temp dir), where the Dockerfile isn't.
-  if [ -n "$CLAUDE_VERSION" ]; then
+  # Build args: CLAUDE_VERSION (pin) + any --build-arg (e.g. MODASTACK_VERSION,
+  # which the PyPI image installs). Emitted as a [build.args] TOML table. In
+  # --image mode nothing is built, so the build table is omitted.
+  if [ -z "$IMAGE" ] && { [ -n "$CLAUDE_VERSION" ] || [ "${#BUILD_ARGS[@]}" -gt 0 ]; }; then
     echo
     echo "[build.args]"
-    echo "  CLAUDE_VERSION = \"$CLAUDE_VERSION\""
+    [ -n "$CLAUDE_VERSION" ] && echo "  CLAUDE_VERSION = \"$CLAUDE_VERSION\""
+    if [ "${#BUILD_ARGS[@]}" -gt 0 ]; then
+      for kv in "${BUILD_ARGS[@]}"; do
+        echo "  ${kv%%=*} = \"${kv#*=}\""
+      done
+    fi
   fi
   echo
   echo "[env]"
@@ -303,9 +391,11 @@ sed 's/^/    /' "$CFG"
 
 # --- 5. deploy --------------------------------------------------------------
 # --remote-only builds the image on Fly's builders (no local Docker needed).
-# Build context AND --dockerfile are both the repo root (Dockerfile + sdist
-# sources live there); the generated config lives in a temp dir, so the
-# Dockerfile must be pointed at explicitly rather than via a relative key.
+# Build context + --dockerfile default to the repo (source build) but are
+# overridable (--build-context/--dockerfile): binary-mode `modastack deploy`
+# points them at a packaged context whose Dockerfile.pypi installs modastack from
+# PyPI, so no checkout is needed. The generated config lives in a temp dir, so
+# the Dockerfile is pointed at explicitly rather than via a relative key.
 #
 # --depot=false forces Fly's classic buildkit builder (gzip layers). The default
 # Depot builder emits zstd-compressed OCI layers (tar+zstd), which Fly's MACHINE
@@ -318,9 +408,19 @@ sed 's/^/    /' "$CFG"
 #   machine, which would need a second volume and fail the deploy).
 # --wait-timeout 10m: first boot installs a team (and on a cold image warms a
 #   model) past the default 5m machine-state wait.
-log "Building image on Fly and deploying... (first build bakes the model; be patient)"
-"$FLY" deploy "$REPO_ROOT" --config "$CFG" --dockerfile "$REPO_ROOT/Dockerfile" \
-  --depot=false --ha=false --wait-timeout 10m --remote-only
+#
+# --image mode (C24): deploy a prebuilt team image by ref — no build context,
+#   no Dockerfile, no remote builder. Fly pulls the image (its lower layers
+#   dedup against other fleet apps in the same registry).
+if [ -n "$IMAGE" ]; then
+  log "Deploying prebuilt image '$IMAGE' (no build)..."
+  "$FLY" deploy --image "$IMAGE" --config "$CFG" \
+    --ha=false --wait-timeout 10m
+else
+  log "Building image on Fly and deploying... (first build bakes the model; be patient)"
+  "$FLY" deploy "$BUILD_CONTEXT" --config "$CFG" --dockerfile "$DOCKERFILE" \
+    --depot=false --ha=false --wait-timeout 10m --remote-only
+fi
 
 echo
 log "Done. Instance '$APP' is provisioning."
@@ -328,11 +428,11 @@ echo "  Logs   : $FLY logs -a $APP"
 echo "  Status : $FLY status -a $APP"
 # An ssh session lands in / (WORKDIR), but modastack discovers the project by
 # walking up from cwd — so cd into it (as the volume's uid-10001 owner) first.
-echo "  Admin  : $FLY ssh console -a $APP --command 'gosu modastack env HOME=/data/home bash -c \"cd /data/project && modastack status\"'"
+echo "  Admin  : $FLY ssh console -a $APP --command 'gosu modastack env HOME=/home/modastack CLAUDE_CONFIG_DIR=/data/claude bash -c \"cd /data/project && modastack status\"'"
 if [ "$AUTH" = "subscription" ]; then
   echo
   echo "  Subscription first boot: the entrypoint posts a login URL to the private"
   echo "  Slack channel ${LOGIN_CHANNEL:-<MODASTACK_LOGIN_CHANNEL>}; open it, log in, and paste the code back in"
   echo "  that channel (C23). Manual fallback:"
-  echo "    $FLY ssh console -a $APP --command 'env HOME=/data/home claude auth login --claudeai'"
+  echo "    $FLY ssh console -a $APP --command 'env CLAUDE_CONFIG_DIR=/data/claude claude auth login --claudeai'"
 fi

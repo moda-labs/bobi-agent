@@ -73,11 +73,15 @@ class Spec:
     # [{"description","leash","cadence","role" (which agent runs it),"command"}]
     autonomous: list = field(default_factory=list)
     services: list = field(default_factory=list)    # [{"name","status"}]
-    # User-defined custom MCP connections added by name + remote URL (the
-    # Claude-style "add a connector" form). name -> {"url", "type", "auth"
-    # ("none"|"api_key"|"oauth"), and the env-var names holding any secrets:
-    # "secret_var" / "client_id_var" / "client_secret_var"}. Authored verbatim
-    # into agent.yaml mcp_servers: and shown as their own rows.
+    # User-defined custom MCP connections added through the "add a connector"
+    # form. Two shapes, keyed by name, both authored into agent.yaml
+    # mcp_servers: and shown as their own rows:
+    #   - remote (http): {"url", "type": "http", "auth" ("none"|"api_key"),
+    #     "secret_var", "label"}
+    #   - local (stdio): {"command", "args" (list[str]), "type": "stdio",
+    #     "env_vars" (list[str] of env-var NAMES the command needs), "label"}
+    # Secret VALUES never live here — only `${VAR}` references; the values go
+    # to .modastack/.env.
     mcp_servers: dict = field(default_factory=dict)
 
     # Autonomous is "enough" only once explicitly confirmed — even when the
@@ -127,6 +131,10 @@ class SetupState:
     messages: list = field(default_factory=list)
 
     credentials_saved: list = field(default_factory=list)
+    # A proposed-but-unconfirmed connection test awaiting the user's go-ahead:
+    # {"key", "proposed" (tool name), "tools" (names)}. Set when the agent
+    # proposes a tool to call, cleared once run/cancelled.
+    pending_test: dict = field(default_factory=dict)
     validated: bool = False
     validated_hash: str = ""         # source tree hash at validation time
     installed: bool = False
