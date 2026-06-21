@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.27.0 — 2026-06-21
+
+Close out the **containerization epic (#344)**: the EC2 → Fly migration is
+complete and eng-team runs as a team-flavored Fly instance. This release ships
+the last close-out items and the secret-injection revamp that makes a deploy a
+single declarative reconcile, then validates the whole path end-to-end by rolling
+the live fleet.
+
+### Added
+- **Per-key secret reconcile to the agent.yaml declared set.** `modastack deploy`
+  now treats the team's `agent.yaml` `${VAR}` refs as the authoritative secret
+  surface: it sets every declared secret it's given and prunes any live Fly secret
+  the team no longer declares. The GitOps Action (`deploy-agent-teams.yml`)
+  materializes a tenant's per-key `<TEAM>__<KEY>` secrets (from a GitHub
+  Environment) into an `--env-file`, and the engine reconciles them to Fly. A
+  subscription-mode deploy refuses a supplied `ANTHROPIC_API_KEY` and prunes any
+  stray live one. (#385)
+- **`gh` CLI auth declared as a first-class secret.** eng-team's GitHub service
+  declares `credentials.token: ${GH_TOKEN}`, so the gh-CLI token is materialized
+  on deploy and never pruned by the reconcile. (#385)
+- **Slack file send/receive and thread reading.** Agents can attach and receive
+  files and read full Slack threads. (MOD-208)
+- **aichat as the CLI-first model gateway.** Bake `aichat` into the image as the
+  model gateway; retire the bespoke gateway connection kind. (MDS-48/MDS-49)
+
+### Fixed
+- **Build the Fly image locally on macOS/Docker-Desktop laptops.** `modastack
+  deploy` detects the Docker Desktop socket via `docker context` and builds
+  locally when the remote builder isn't reachable. (#387)
+- **`resolve_root` honors its `start` arg after self-bind.** (#375)
+
+### Changed
+- Renamed the GitOps team-reconcile workflow `gitops-teams.yml` →
+  `deploy-agent-teams.yml`. Subscription-login bootstrap now smoke-tested through
+  the real Slack adapter shape, gating the release fleet roll. (#388)
+
 ## 0.26.0 — 2026-06-21
 
 Reskin the `modastack setup` web UI to **bobi**: a single clay accent palette and
