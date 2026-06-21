@@ -279,25 +279,89 @@ operator namespace, stamped `MODASTACK_FLEET=<prefix>` in each app's `[env]`.
 
 ---
 
-## 5. Secrets model
+## 5. Secrets model (#385)
 
-One **GitHub Environment per deployment**, holding a single secret `MODASTACK_ENV`
-= the instance's entire KEY=VALUE env-file body. The deploy job binds
-`environment: ${{ matrix.name }}`, writes `$MODASTACK_ENV` to a temp file under
-`umask 077`, and hands it to `modastack deploy … --env-file`. `deploy`'s secret
-resolution + the provisioner's routing (`MODASTACK_*` → `[env]`, rest → Fly
-secrets) mean the single blob loses no expressiveness, and it is the exact seam a
-token broker fills later (it emits the same blob).
+**Fly secrets are the runtime store; `agent.yaml` is the schema; the env-file is
+ephemeral transport.** The four roles:
 
-- Use a **secret**, not a variable (masking). Never `echo`/`cat` it — `printf` to
-  disk under `umask 077`.
-- Deployment Environments must have **no required-reviewer protection rule** — it
-  would pause the deploy matrix waiting on a human.
-- Self-service (no CI) points `secrets.env-file:` at a local file instead.
-- Fleet config now lives in **`deployments/defaults.yaml`** (`fleet:`,
-  `event_server:`, sizing), not repo variables — a single source of truth shared by
-  both workflows. The only repo secret is `secrets.FLY_API_TOKEN` (an org-scoped
-  Fly deploy token: `fly tokens create deploy`); absent it, the workflows no-op.
+| role | what |
+|---|---|
+| `agent.yaml` `${VAR}` refs | **schema** — which secrets a team needs (the declared set + prune authority) |
+| GitHub Environment / shell | **values** — per-key, editable, transient |
+| `--env-file` | **transport** — ephemeral, never authoritative |
+| live Fly secrets | **runtime store** — the one durable source the instance reads |
+
+**One GitHub Environment per TENANT** (not per deployment). Production deployments
+default to the `modalabs` Environment (`tenant:` in `deployments/defaults.yaml`);
+the canary is its own tenant. Within an Environment, secrets are **per-key**, named
+`<TEAM>__<KEY>` — e.g. `ENG_TEAM__SLACK_BOT_TOKEN`. The `<TEAM>__` prefix
+(deployment name, slug-normalized) namespaces multiple teams in one tenant; the
+tenant lives only in the Environment name, never in the key.
+
+The deploy job binds `environment: <tenant>`, dumps `toJSON(secrets)`, selects keys
+with the `<TEAM>__` prefix, strips it, writes a temp env-file under `umask 077`, and
+hands it to `modastack deploy … --env-file`.
+
+**The reconcile** (`modastack/deploy.py`): on an existing app, deploy reads the live
+Fly secret names (`fly secrets list`), then:
+- a live secret **satisfies the required check** — an update needn't re-supply what
+  Fly already holds (kills the "re-paste the whole blob" friction);
+- supplied values are **set** (Fly no-ops identical ones — steady-state is quiet);
+- live, non-`MODASTACK_*` secrets **not in the team's declared set are pruned**
+  (`--no-prune` to disable) — so the store converges on what `agent.yaml` declares;
+- it sets **only declared keys** — an undeclared key in the env-file (a `toJSON`
+  dump's `FLY_API_TOKEN`, or a typo) is dropped with a warning, never provisioned.
+
+This closes the drift hole that took `moda-eng-team` down: an `ANTHROPIC_API_KEY`
+manually unset in `api_key` mode is **restored** on the next deploy (it's required),
+not perpetuated; a stray one in `subscription` mode is pruned.
+
+Notes:
+- Editing one secret = one `gh secret set <TEAM>__<KEY> --env <tenant>` (or
+  `fly secrets set <KEY>=… -a <app>` directly). No blob re-paste.
+- A secret a team consumes at runtime but doesn't `${VAR}`-reference (e.g. the gh
+  CLI's `GH_TOKEN`) must still be **declared** — add it to `agent.yaml` (eng-team
+  wires `GH_TOKEN` as the github service credential), or the reconcile will prune it.
+- Use a **secret**, not a variable (masking). The job `printf`s to disk under
+  `umask 077`; the engine redacts secret values from its own logs.
+- Tenant Environments must have **no required-reviewer protection rule** — it would
+  pause the deploy matrix. The `<tenant>` prefix is *organization, not isolation*:
+  `toJSON(secrets)` in any cell sees every secret in scope. True multi-tenant
+  isolation needs an Environment (or repo) per tenant with no shared secrets.
+- Self-service (no CI) points `secrets.env-file:` at a local file, or just relies on
+  live Fly secrets + interactive supply.
+- Fleet/tenant config lives in **`deployments/defaults.yaml`** (`fleet:`, `tenant:`,
+  `event_server:`, sizing), not repo variables. The only repo secret is
+  `secrets.FLY_API_TOKEN` (`fly tokens create deploy`); absent it, the workflows no-op.
+
+### 5.1. Migrating an Environment from the old blob (runbook)
+
+Pre-#385 Environments held a single opaque `MODASTACK_ENV` blob. To migrate one
+deployment to per-key (non-destructive — do this *before* deleting the blob):
+
+```bash
+ENV=modalabs                 # the tenant Environment
+TEAM=ENG_TEAM                # deployment name, slug-normalized (eng-team → ENG_TEAM)
+APP=moda-eng-team            # the live Fly app (source of current values)
+
+# Add per-key secrets, sourced from the live Fly app (values never printed):
+for k in SLACK_BOT_TOKEN LINEAR_API_KEY OPENAI_API_KEY GH_TOKEN SLACK_CHANNELS; do
+  v=$(fly ssh console -a "$APP" -C "printenv $k" | tr -d '\r\n')
+  [ -n "$v" ] && printf '%s' "$v" | gh secret set "${TEAM}__${k}" --env "$ENV" -R <owner>/<repo>
+done
+```
+
+The per-key secrets and the old `MODASTACK_ENV` blob **coexist safely** — the
+pre-#385 workflow reads the blob, the new one reads per-key. **At cutover** (after
+the per-key workflow has merged and a deploy is verified green), delete the blob:
+
+```bash
+gh secret delete MODASTACK_ENV --env "$ENV" -R <owner>/<repo>
+```
+
+A subscription team (e.g. eng-team) has **no** `ANTHROPIC_API_KEY` — don't migrate
+one; the reconcile prunes a stray live key. An old per-deployment Environment (e.g.
+`eng-team`) becomes vestigial once its keys live in the tenant Environment.
 
 ---
 
@@ -307,9 +371,9 @@ token broker fills later (it emits the same blob).
 publish a GitHub Release   (or push a `deploy-*` tag / dispatch — the deploy gate)
    │
    ├─▶ gitops-teams.yml:
-   │      plan   : list ACTIVE deployments/<name>.yaml (defaults excluded)
-   │      deploy : matrix over names, environment=<name>
-   │               └─ materialize MODASTACK_ENV -> env-file -> `modastack deploy <name>`
+   │      plan   : list ACTIVE deployments/<name>.yaml (defaults excluded) + tenant
+   │      deploy : matrix over {name,tenant}, environment=<tenant>
+   │               └─ toJSON(secrets) | filter <TEAM>__ -> env-file -> `modastack deploy <name>`
    │      orphans: Fly apps with no deployments/ file -> warn (human `modastack destroy`)
    │
    └─▶ gitops-release.yml:
@@ -332,10 +396,11 @@ tag pushes run the workflow from the tagged commit), or **`workflow_dispatch`**
   excluded; an inactive deployment is a non-`.yaml` like `<name>.yaml.example`).
   No git-diff — a release reconciles the whole set, and `modastack deploy` is
   idempotent. Gates the rest on `secrets.FLY_API_TOKEN` being set.
-- **deploy** (matrix over the active names, `environment: <name>`): install the
-  CLI, materialize `MODASTACK_ENV` → env-file, then `modastack deploy <name>
-  --env-file …`. One idempotent path — `deploy` itself decides provision-vs-update
-  by Fly state.
+- **deploy** (matrix over the active `{name, tenant}`, `environment: <tenant>`):
+  install the CLI, filter this deployment's per-key `<TEAM>__<KEY>` secrets out of
+  `toJSON(secrets)` → env-file, then `modastack deploy <name> --env-file …`. One
+  idempotent path — `deploy` itself decides provision-vs-update by Fly state and
+  reconciles secrets to the declared set (§5).
 - **orphans**: enumerate the fleet (`fleet.sh list`, fleet from `defaults.yaml`),
   warn on any app with no `deployments/` file (including a removed/inactivated
   deployment). **Never auto-destroys** (the volume is the only copy of state).
@@ -444,10 +509,14 @@ tag) and the Action deploys every active deployment. Wire your repo once:
    source.
 2. `deployments/<team>.yaml` with `team-url: <published .tar.gz>` (CI's delivery
    mode — a CI Fly token can't `fly ssh`, so CI uses HTTPS-fetch, not ssh-push).
+   Set `tenant:` (or inherit the `modalabs` default from `defaults.yaml`).
 3. Repo secret `FLY_API_TOKEN` = `fly tokens create org -o <your-org>` — a standing
    production credential (long-lived, rotate periodically).
-4. A GitHub Environment named `<team>` with one secret `MODASTACK_ENV` = the team's
-   full KEY=VALUE env-file. **No** required-reviewer rule.
+4. A GitHub Environment named after the **tenant** (e.g. `modalabs`), holding this
+   team's **per-key** secrets named `<TEAM>__<KEY>` — e.g. `MY_TEAM__SLACK_BOT_TOKEN`
+   (`<TEAM>` = the deployment name slug-normalized: lowercase+hyphen → upper+
+   underscore). Editable/diffable per key in the UI; the engine reconciles them to
+   the team's declared `agent.yaml` set (§5). **No** required-reviewer rule.
 
 No `FLEET_PREFIX` var, no manifest, no database — the Fly API is the state store.
 

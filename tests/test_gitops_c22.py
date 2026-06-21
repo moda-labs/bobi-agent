@@ -13,7 +13,8 @@ asserted, so the load-bearing decisions break loudly if someone regresses them:
     SaaS-extensible fleet/tenant keys — the app name is only a hint);
   * --blank provisions a team-less instance whose entrypoint waits for an
     ssh-pushed team (the local-package delivery path);
-  * the secret interface is one MODASTACK_ENV blob per GitHub Environment;
+  * the secret interface is per-key `<TEAM>__<KEY>` secrets in a per-tenant
+    GitHub Environment, filtered from toJSON(secrets) (#385 — no opaque blob);
   * deletions never auto-deploy — orphaned apps surface for human destroy;
   * release rollout builds one image and reuses it across the fleet.
 
@@ -170,13 +171,17 @@ def test_teams_is_a_thin_client_no_business_logic_in_yaml():
     assert "modastack deploy" in deploy_script
 
 
-def test_teams_deploy_binds_per_deployment_environment_and_env_blob():
+def test_teams_deploy_binds_tenant_environment_and_per_key_secrets():
+    """#385: one GitHub Environment per TENANT (not per deployment), and per-key
+    `<TEAM>__<KEY>` secrets filtered from toJSON(secrets) — no MODASTACK_ENV blob."""
     deploy = _jobs(_load(WF_TEAMS))["deploy"]
-    # one GitHub Environment per deployment, computed from the matrix name
-    assert deploy["environment"] == "${{ matrix.name }}"
+    # bound to the deployment's tenant Environment (from the plan matrix)
+    assert deploy["environment"] == "${{ matrix.entry.tenant }}"
     script = _step_scripts(deploy)
-    # the single-blob secret interface, written umask-077, handed to the primitive
-    assert "MODASTACK_ENV" in script
+    # per-key interface: dump all secrets, filter by the <TEAM>__ prefix
+    assert "toJSON(secrets)" in script
+    assert "startswith($p)" in script
+    assert "MODASTACK_ENV" not in script   # the opaque blob is retired
     assert "umask 077" in script
     assert "--env-file" in script
     # installs the CLI so `modastack deploy` is available in CI

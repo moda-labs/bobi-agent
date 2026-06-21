@@ -20,8 +20,16 @@ memory: 1gb
 cpus: 1
 volume_size: 3
 
-# Secrets: the GitHub Environment "canary" holds MODASTACK_ENV — for this
-# api_key-mode team, just a (durable) ANTHROPIC_API_KEY. The Action materializes
-# it into an --env-file for `modastack deploy`.
+# Tenant override: the canary is its OWN tenant, not part of the production
+# `modalabs` fleet (#385). It's the pre-deploy gate (build candidate → smoke →
+# green-light the fleet roll), with a different cadence and lifecycle. Its secrets
+# live in the `canary` GitHub Environment, keyed `CANARY__<KEY>`, isolated from
+# prod. It stays api_key (a self-healing automated gate — a subscription canary
+# whose volume was lost would block the gate on a human OAuth re-login).
+tenant: canary
+
+# Secrets: the `canary` GitHub Environment holds this instance's per-key secrets
+# (#385) — for this api_key-mode team, just CANARY__ANTHROPIC_API_KEY. The Action
+# filters them by the CANARY__ prefix into an --env-file for `modastack deploy`.
 secrets:
   env: canary

@@ -8,6 +8,7 @@ to record commands), so nothing here touches Fly or the network.
 The workflow STRUCTURE (thin-client asserts) is in test_gitops_c22.py.
 """
 
+import logging
 import os
 import tarfile
 from pathlib import Path
@@ -45,15 +46,20 @@ def recorder(monkeypatch):
     """Record every deploy._run command; stub fly_app_exists per-test."""
     calls = []
 
-    def fake_run(cmd, *, cwd=None, check=True, input_bytes=None, extra_env=None):
+    def fake_run(cmd, *, cwd=None, check=True, input_bytes=None, extra_env=None,
+                 secret=False):
         calls.append({"cmd": cmd, "cwd": cwd, "input": input_bytes,
-                      "extra_env": extra_env})
+                      "extra_env": extra_env, "secret": secret})
         class R:  # noqa: E306
             returncode = 0
         return R()
 
     monkeypatch.setattr(D, "_run", fake_run)
     monkeypatch.setattr(D, "_fly_bin", lambda: "fly")
+    # Secret reconcile reads live names over `fly secrets list` (a subprocess that
+    # captures output — not routed through _run). Default to "nothing live" so
+    # existing orchestration tests don't shell out; per-test override as needed.
+    monkeypatch.setattr(D, "fly_secrets_list", lambda app: set())
     return calls
 
 
@@ -248,6 +254,96 @@ def test_subscription_mode_rejects_anthropic_key(repo, tmp_path):
     cfg = D.load_deploy_config(repo, "dog", {"secrets_env_file": str(ef)})
     with pytest.raises(D.DeployError, match="ANTHROPIC_API_KEY"):
         D.resolve_env_file(cfg, repo, tmp_path)
+
+
+# --- secret reconcile against live Fly (#385) --------------------------------
+
+def test_declared_filter_drops_undeclared_keys_with_warning(repo, tmp_path, caplog):
+    """Only secrets the team REFERENCES reach Fly. A CI-dump key (FLY_API_TOKEN)
+    or a typo'd name is dropped + warned — never silently provisioned."""
+    ef = tmp_path / "e.env"
+    ef.write_text("SLACK_BOT_TOKEN=xoxb\nANTHROPIC_API_KEY=sk\n"
+                  "FLY_API_TOKEN=fly\nSLAKC_BOT_TOKEN=typo\n")
+    cfg = D.load_deploy_config(repo, "eng-team", {"secrets_env_file": str(ef)})
+    with caplog.at_level(logging.WARNING):
+        vals = D.resolve_secret_values(cfg, repo)
+    assert vals["SLACK_BOT_TOKEN"] == "xoxb"          # declared, kept
+    assert "FLY_API_TOKEN" not in vals                # undeclared CI dump, dropped
+    assert "SLAKC_BOT_TOKEN" not in vals              # typo, dropped
+    assert "dropping undeclared secret" in caplog.text.lower()
+
+
+def test_live_secret_satisfies_required_on_update(repo, monkeypatch):
+    """An already-live Fly secret satisfies the required check on an update — no
+    need to re-supply it. Without a live store (provision), the same call fails."""
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cfg = D.load_deploy_config(repo, "eng-team")  # api_key
+    vals = D.resolve_secret_values(
+        cfg, repo, live={"SLACK_BOT_TOKEN", "ANTHROPIC_API_KEY"})
+    assert vals == {}  # live covers it; nothing to set, no raise
+    with pytest.raises(D.DeployError, match="missing required secret"):
+        D.resolve_secret_values(cfg, repo, live=None)  # provision: must supply
+
+
+def test_optional_declared_var_is_kept_but_not_required(repo):
+    """A ${VAR:-default} ref (e.g. codex's OPENAI_API_KEY) is DECLARED (so it's
+    never pruned) but OPTIONAL (so its absence doesn't block a deploy)."""
+    pkg = repo / "agents" / "eng-team" / "agent.yaml"
+    pkg.write_text(pkg.read_text() + "openai: ${OPENAI_API_KEY:-}\n")
+    req, decl = D._secret_sets(D.load_deploy_config(repo, "eng-team"), repo)
+    assert "OPENAI_API_KEY" in decl       # declared → survives prune
+    assert "OPENAI_API_KEY" not in req    # optional → not required
+
+
+def test_outage_unset_required_secret_is_restored_on_update(repo, recorder, monkeypatch):
+    """#385 regression (failing-first): ANTHROPIC_API_KEY manually unset on a live
+    api_key instance is RESTORED on the next deploy, not perpetuated (the eng-team
+    outage). The plain-update path never re-ran the provisioner, so secrets drifted
+    — fixed by reconciling live secrets directly."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
+    monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
+    monkeypatch.setattr(D, "_fly_machine_ids", lambda app: ["m1"])
+    monkeypatch.setattr(D, "fly_secrets_list", lambda app: {"SLACK_BOT_TOKEN"})  # ANTHROPIC unset!
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")  # supplied by CI/Environment
+    D.deploy(repo, "eng-team")
+    sets = [c for c in recorder if "secrets" in c["cmd"] and "set" in c["cmd"]]
+    assert sets, "expected a `fly secrets set` to restore the unset key"
+    assert any("ANTHROPIC_API_KEY=sk-ant" in arg for c in sets for arg in c["cmd"])
+    assert all(c["secret"] for c in sets)  # secret args logged redacted
+
+
+def test_prune_removes_undeclared_live_secret(repo, recorder, monkeypatch):
+    """A live, non-MODASTACK_ secret absent from the declared set is pruned; the
+    declared keys and MODASTACK_* identity are left alone."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
+    monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
+    monkeypatch.setattr(D, "_fly_machine_ids", lambda app: ["m1"])
+    monkeypatch.setattr(D, "fly_secrets_list", lambda app: {
+        "SLACK_BOT_TOKEN", "ANTHROPIC_API_KEY", "STALE_KEY", "MODASTACK_FLEET"})
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    D.deploy(repo, "eng-team")
+    unsets = [c for c in recorder if "secrets" in c["cmd"] and "unset" in c["cmd"]]
+    assert unsets, "expected the undeclared live secret to be pruned"
+    flat = [a for c in unsets for a in c["cmd"]]
+    assert "STALE_KEY" in flat
+    assert "MODASTACK_FLEET" not in flat   # identity — never pruned
+    assert "SLACK_BOT_TOKEN" not in flat   # declared — kept
+
+
+def test_no_prune_override_skips_pruning(repo, recorder, monkeypatch):
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
+    monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
+    monkeypatch.setattr(D, "_fly_machine_ids", lambda app: ["m1"])
+    monkeypatch.setattr(D, "fly_secrets_list", lambda app: {
+        "SLACK_BOT_TOKEN", "ANTHROPIC_API_KEY", "STALE_KEY"})
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    D.deploy(repo, "eng-team", {"no_prune": True})
+    unsets = [c for c in recorder if "secrets" in c["cmd"] and "unset" in c["cmd"]]
+    assert not unsets
 
 
 # --- orchestration: provision-vs-update × delivery mode ----------------------
