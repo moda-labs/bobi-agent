@@ -145,6 +145,19 @@ survives session rotation.
 - If a new instruction contradicts an old one, **update** the old entry
   rather than adding a conflicting line. Note the change with provenance.
 
+## Output quality
+
+Keep messages short and scannable. Walls of text get skimmed; bullets
+get read.
+
+- Lead with the answer or action, not the reasoning.
+- Use bullet lists (`-`) for any series of items — never comma-separated
+  prose lists.
+- One idea per bullet. If a bullet needs a sub-list, indent it.
+- Skip filler ("I've gone ahead and…", "Sure!"). State what happened.
+- For Slack replies: stay under 6 bullets per message. If there is more
+  to say, offer to elaborate rather than dumping everything at once.
+
 ## Handoff files
 
 After completing a workflow step, write your handoff file at the path

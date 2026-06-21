@@ -35,6 +35,8 @@ def format_slack_message(text: str) -> str:
     text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
     # Bold markdown → Slack bold
     text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    # Unordered list markers → bullet character
+    text = re.sub(r'^( *)[-*] ', r'\1• ', text, flags=re.MULTILINE)
     # Links
     text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
     if len(text) > 3000:

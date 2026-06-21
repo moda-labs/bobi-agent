@@ -103,6 +103,16 @@ class TestFormatSlackMessage:
         result = format_slack_message("[click](https://example.com)")
         assert result == "<https://example.com|click>"
 
+    def test_unordered_list_dash(self):
+        assert format_slack_message("- item one\n- item two") == "• item one\n• item two"
+
+    def test_unordered_list_asterisk(self):
+        assert format_slack_message("* item one\n* item two") == "• item one\n• item two"
+
+    def test_nested_list(self):
+        result = format_slack_message("- top\n  - nested")
+        assert result == "• top\n  • nested"
+
     def test_truncation(self):
         long_text = "x" * 4000
         result = format_slack_message(long_text)
