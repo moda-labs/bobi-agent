@@ -479,6 +479,42 @@ Both GitOps workflows also accept `workflow_dispatch` for manual re-runs.
 
 ---
 
+## 7.3. Many teams on one workspace / org — event routing (#341)
+
+Several team instances can share **one Slack workspace + one GitHub org** without
+triaging each other's events. Routing is **targeted, not broadcast-and-filter**:
+each instance subscribes to resource topics and the event server delivers an
+event only to subscribers of the topics it carries (`events/subscriptions.py`
+builds the keys; the Worker matches them in `subscriptionKeysForEvent` / `deliver`).
+
+**The contract — scope each team:**
+- **Slack:** set `channels:` on the team's slack service (`agent.yaml`). The
+  detector then subscribes per channel (`slack:<TEAM>:<CHANNEL>`) and the Worker
+  routes each message only to that channel's team. IDs (`C0ABC123`) or names
+  (`#support`) both work (names resolve via the Slack API). With **no** `channels:`
+  a team subscribes to the bare workspace (`slack:<TEAM>`) and receives **every**
+  channel — the explicit whole-workspace opt-in. So: give each team disjoint
+  channels, and don't leave a second team on the bare workspace key.
+- **GitHub:** already per-repo (`github:<org>/<repo>`), auto-detected from each
+  repo's remote — a director watching a parent dir detects each child repo. An
+  org webhook fans out only to the repo's subscriber, never the whole org.
+- **DMs** stay workspace-level (a DM isn't a real channel) — with a shared bot a
+  DM reaches every whole-workspace subscriber. Per-team DM routing is deferred
+  (the org-level router; see the cross-tenant note below).
+
+**Isolation proof:** end-to-end no-cross-delivery tests in
+`event-server/test/index.spec.ts` (two deployments, disjoint channels/repos →
+each event reaches exactly its subscriber, an unscoped channel/repo reaches
+nobody) plus the key-building tests in `tests/test_adapters.py`. The live
+two-instance `events.jsonl` check is the final acceptance.
+
+**Scope vs. tenancy:** this is channel/repo *delivery scoping* within one trust
+domain. Webhook topics are still **global across bubbles** in v1 (an accepted
+cross-tenant read hole) — true multi-tenant isolation (bind inbound webhooks to a
+bubble/account) is #239 (auth-v2), part of the multitenant phase, not this.
+
+---
+
 ## 8. What's verified
 
 C10 + C22 were verified **live on Fly**, then torn down:
