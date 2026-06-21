@@ -1065,6 +1065,21 @@ class TestIntro:
         assert any(t["name"] == "personal-assistant"
                    and t["path"] == str(src.resolve()) for t in teams)
 
+    def test_intro_includes_team_at_custom_source_dir(self, project, home):
+        # A team authored at the location the user gave at /api/start lives
+        # outside the default library. modastack persisted that path in
+        # source_dir, so the home screen must surface the team — scanning only
+        # the library hides a team the user explicitly placed elsewhere.
+        src = home / "projects" / "moda"
+        _seed_team(src, "sales-prep", parent=".")     # team at <src>/sales-prep
+        state = SetupState(mode="create", team_name="sales-prep",
+                           source_dir=str(src))
+        c = _client(state, project, home_root=home)
+        teams = c.get("/api/intro").json()["teams"]
+        by_name = {t["name"]: t for t in teams}
+        assert "sales-prep" in by_name
+        assert by_name["sales-prep"]["path"] == str((src / "sales-prep").resolve())
+
     def test_teams_scans_a_chosen_directory(self, project, home):
         # Modify asks which folder to scan — point it anywhere under home.
         elsewhere = home / "projects" / "acme"

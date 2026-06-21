@@ -168,7 +168,18 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # (a project repo, a thumb drive, wherever) via /api/teams. Install
         # still targets the project's .modastack/ unchanged — a source outside the
         # project copies in like a registry team (see actions.install_team).
-        return {"teams": open_mode.list_teams_in(library),
+        from modastack.setup.actions import team_source_dir
+        teams = open_mode.list_teams_in(library)
+        # A team can be authored anywhere the user points /api/start (the chosen
+        # location is persisted in state.source_dir). Surface this session's team
+        # even when it lives outside the default library, deduped by path — else a
+        # team the user explicitly placed elsewhere is invisible on the home screen.
+        if state.source_dir:
+            src = team_source_dir(project, state)
+            seen = {t["path"] for t in teams}
+            teams += [t for t in open_mode.list_teams_in(src)
+                      if t["path"] not in seen]
+        return {"teams": teams,
                 "default_location": str(library),
                 "scan_dir": str(library)}
 

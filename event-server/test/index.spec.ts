@@ -398,3 +398,87 @@ describe("cloudflare deployment deregistration", () => {
 		expect(response.status).toBe(403);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// #341 — per-channel / per-repo delivery isolation (the routing layer of the
+// "two live instances, disjoint channels/repos, no cross-delivery" acceptance).
+// deliver() returns a COUNT of matched deployments; with unique team/channel/
+// repo ids per test, an exact count pins down WHICH subscriber matched —
+// "delivered to nobody" for an unscoped channel/repo is the cross-talk guard.
+// The live two-instance events.jsonl check remains the final sign-off; this
+// proves the Worker side end to end (register → ingest → match → count).
+// ---------------------------------------------------------------------------
+describe("#341 targeted routing — no cross-delivery", () => {
+	let uniq = 0;
+	const id = (p: string) => `${p}_${Date.now()}_${uniq++}`;
+
+	async function slackMessage(teamId: string, channel: string): Promise<number> {
+		const res = await SELF.fetch("https://example.com/webhooks/slack", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				type: "event_callback",
+				team_id: teamId,
+				event: {
+					type: "app_mention", channel, user: "U1",
+					text: "hi", ts: `170000${uniq++}.000100`,
+				},
+			}),
+		});
+		expect(res.status).toBe(200);
+		return (await res.json() as { delivered_to: number }).delivered_to;
+	}
+
+	async function githubIssue(repo: string): Promise<number> {
+		const res = await SELF.fetch("https://example.com/webhooks/github", {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"x-github-event": "issues",
+				"x-github-delivery": id("d"),
+			},
+			body: JSON.stringify({
+				action: "opened",
+				repository: { full_name: repo },
+				sender: { login: "u" },
+				issue: {
+					number: 1, title: "t", state: "open",
+					html_url: `https://github.com/${repo}/issues/1`,
+				},
+			}),
+		});
+		expect(res.status).toBe(200);
+		return (await res.json() as { delivered_to: number }).delivered_to;
+	}
+
+	it("slack: a channel message reaches only that channel's subscriber", async () => {
+		const team = id("T");
+		const eng = id("C_ENG");
+		const sup = id("C_SUP");
+		await mintBubble([`slack:${team}:${eng}`]);   // team A scoped to eng
+		await mintBubble([`slack:${team}:${sup}`]);   // team B scoped to support
+
+		expect(await slackMessage(team, eng)).toBe(1);   // only team A
+		expect(await slackMessage(team, sup)).toBe(1);   // only team B
+		// a channel nobody scoped to → delivered to nobody (no broadcast)
+		expect(await slackMessage(team, id("C_OTHER"))).toBe(0);
+	});
+
+	it("slack: a whole-workspace subscriber is the explicit broadcast opt-in", async () => {
+		const team = id("T");
+		await mintBubble([`slack:${team}`]);  // bare workspace key = every channel
+		expect(await slackMessage(team, id("C_ANY"))).toBe(1);
+		expect(await slackMessage(team, id("C_ELSE"))).toBe(1);
+	});
+
+	it("github: an event reaches only that repo's subscriber", async () => {
+		const org = id("org");
+		await mintBubble([`github:${org}/repo-a`]);
+		await mintBubble([`github:${org}/repo-b`]);
+
+		expect(await githubIssue(`${org}/repo-a`)).toBe(1);   // only repo-a sub
+		expect(await githubIssue(`${org}/repo-b`)).toBe(1);   // only repo-b sub
+		// a repo nobody scoped to → delivered to nobody
+		expect(await githubIssue(`${org}/repo-c`)).toBe(0);
+	});
+});

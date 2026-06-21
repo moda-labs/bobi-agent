@@ -20,9 +20,12 @@ entirely in the mounted volume and env vars — see
 | `gosu` (privilege drop); no `tini` | Fly injects its own PID-1 init (reaps zombies / forwards signals); tini-on-Fly is a known boot-failure trigger. For other runtimes, use `docker run --init`. |
 | `modastack start --foreground` entrypoint | container mode (C2) |
 
-The agent's `$HOME` is set to `/data/home` (on the volume) so
-`~/.claude/.credentials.json` and `~/.claude/projects/` (session transcripts,
-required for resume) persist across image updates.
+The agent's `$HOME` stays on the **image** (`/home/modastack`), so baked team
+tools (`~/dev/gstack`, skills) are read in place. Claude's durable state is
+redirected to the **volume** via `CLAUDE_CONFIG_DIR=/data/claude`, and the
+entrypoint points the whole `~/.claude` at it — so `~/.claude/.credentials.json`
+and `~/.claude/projects/` (session transcripts, required for resume) persist
+across image updates while remaining reachable at their usual `~/.claude` paths.
 
 ## Build
 
@@ -57,8 +60,8 @@ docker run --rm -v modastack-a:/data \
 
 ### subscription mode (internal dogfood only)
 
-Uses OAuth credentials on the volume (`/data/home/.claude/.credentials.json`)
-instead of an API key. **`ANTHROPIC_API_KEY` must be unset** — it silently
+Uses OAuth credentials on the volume (`/data/claude/.credentials.json`, reachable
+as `~/.claude/.credentials.json`) instead of an API key. **`ANTHROPIC_API_KEY` must be unset** — it silently
 outranks subscription auth and bills the API (§6.1). The image refuses to
 start if both are set.
 
@@ -84,9 +87,9 @@ first. Refresh-token rotation makes this a once-per-machine ceremony.
 Manual fallback (if Slack/event-bus isn't wired yet):
 
 ```bash
-# one-time, interactive, writes /data/home/.claude/.credentials.json
+# one-time, interactive, writes /data/claude/.credentials.json
 docker run --rm -it -v modastack-a:/data \
-  -e HOME=/data/home --entrypoint claude modastack:dev auth login --claudeai
+  -e CLAUDE_CONFIG_DIR=/data/claude --entrypoint claude modastack:dev auth login --claudeai
 ```
 
 Never copy a `.credentials.json` between machines — shared refresh chains
@@ -102,8 +105,10 @@ invalidate each other.
 | `ANTHROPIC_API_KEY` | api_key mode | **must be absent** in subscription mode |
 | `MODASTACK_LOGIN_CHANNEL` | subscription mode | private Slack channel ID for the first-boot login bootstrap (C23) |
 | `MODASTACK_EVENT_SERVER` | yes | the Worker URL (`https://`) the team config references via `${MODASTACK_EVENT_SERVER}`; the client derives `wss://` from it |
+| `MODASTACK_FLEET` | no (default: app-name prefix) | operator/fleet namespace stamp; the authoritative fleet-membership key the GitOps automation enumerates by (C22). The app name is only a discovery hint |
 | `SLACK_BOT_TOKEN`, `GITHUB_TOKEN`, `LINEAR_API_KEY`, … | per team | service tokens (`${VAR}` refs in `agent.yaml`) |
-| `DATA_DIR` / `MODASTACK_PROJECT` / `MODASTACK_HOME` | no | volume layout overrides (default `/data`, `/data/project`, `/data/home`) |
+| `DATA_DIR` / `MODASTACK_PROJECT` / `MODASTACK_HOME` | no | layout overrides (default `/data`, `/data/project`, `/home/modastack`). `MODASTACK_HOME` is the IMAGE home — baked tools live there |
+| `CLAUDE_CONFIG_DIR` | no (default `/data/claude`) | Claude's durable config dir on the volume (creds, transcripts, settings); the entrypoint links `~/.claude` to it |
 
 ## Health
 
@@ -165,3 +170,53 @@ scripts/provision-instance.sh --app <you>-modastack-smoke \
 
 (Real teams like `eng-team` carry `requires:`/service secrets; the smoke team
 deliberately doesn't, so it isolates the container/Fly path from team setup.)
+
+## GitOps automation (C22)
+
+Provisioning above is the manual seam. C22 reconciles `agents/` to a live Fly
+**fleet** automatically — push a team to `main` and its instance appears; tag a
+release and the whole fleet rolls to the new image. The Fly API is the only
+state store (no DB, no manifest); `scripts/fleet.sh` is the enumeration helper,
+and the same contract a future provisioner service inherits (design §9).
+
+**Fleet identity.** An app is named `<fleet>-<team>` and stamped
+`MODASTACK_FLEET=<fleet>` in its `[env]`. The stamp — not the name — is the
+membership key, so two fleets can share one Fly org and a later
+`MODASTACK_TENANT` filter slots into the same query for multitenant SaaS.
+
+**One-time repo setup** (in `moda-labs/modastack` settings):
+
+| What | Where | Value |
+|---|---|---|
+| `FLEET_PREFIX` | repo **variable** | operator namespace, e.g. `moda` (apps become `moda-<team>`) |
+| `MODASTACK_EVENT_SERVER` | repo **variable** (optional) | Worker URL; omit to use the provisioner default |
+| `FLY_API_TOKEN` | repo **secret** | an org-scoped Fly deploy token (`fly tokens create deploy`) |
+| `MODASTACK_ENV` | **per-team** GitHub *Environment* named `<team>` | the team's entire KEY=VALUE env-file as one secret blob (the same content you'd pass to `--env-file`) |
+
+The single-blob `MODASTACK_ENV` secret is the only secret interface — it routes
+exactly like `--env-file` (`MODASTACK_*` → `[env]`, everything else → Fly
+secrets) and is the seam a token broker later fills. Team Environments must have
+**no required-reviewer protection rule** (it would pause the provision matrix).
+
+**The three flows:**
+
+- **Add a team** → push a new `agents/<team>/` to `main`. `team-packages.yml`
+  publishes its tarball; `gitops-teams.yml` (triggered on that completing) sees
+  no `<fleet>-<team>` app yet → runs the provisioner with the team's
+  `MODASTACK_ENV`. No manual step beyond the one-time Environment secret.
+- **Edit a team** → push changes under an existing `agents/<team>/`. The matching
+  instance is updated in place: `modastack install <teams-latest-url>` over
+  `fly ssh` (workspace-safe reinstall — *not* `agents update`, which can't
+  resolve a `url:`-sourced pack) then `fly machine restart`. The volume's
+  `agent.yaml` and workspace edits survive.
+- **Release** → publish a GitHub Release. `gitops-release.yml` builds the image
+  once, then rolls every fleet app to that exact image (`fly config save` +
+  `fly deploy --image`), preserving each volume/sessions/env. Per-app failures
+  are isolated; re-run to retry (deploys are idempotent).
+
+- **Delete a team** → nothing automatic. Run `scripts/destroy-instance.sh --app
+  <fleet>-<team>` by hand (it removes the volume — back up first).
+
+Manual fleet ops mirror the workflows: `scripts/fleet.sh list <prefix>` lists the
+fleet, `scripts/fleet.sh classify <prefix> <team>…` shows added-vs-changed, and
+both GitOps workflows accept a `workflow_dispatch` for manual re-runs.

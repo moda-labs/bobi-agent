@@ -11,6 +11,27 @@ Amended 2026-06-12: Anthropic auth decision + subscription login bootstrap
 migration (§10 "MVP cut"), C12 promoted into the MVP, open question 3
 resolved.
 
+**Amended 2026-06-20 — MVP COMPLETE; eng-team LIVE on Fly; EC2 retired.** Phase 0
++ Phase 1 shipped; C24 (#368, team-flavored images) merged (PR #377) and
+**released as v0.24.0**. `moda-eng-team` runs containerized on Fly — fully
+GitOps-managed, dispatching as the `modastack` bot — and the **EC2 director is
+decommissioned** (box paused, self-hosted runner deregistered, EC2 CI jobs
+removed). The release smoke is now a **functional Fly canary gate** in
+`gitops-release` (build the canary → `ask` it → assert `CANARY-OK` → roll the
+rest), and the roll is **team-aware** (a team-flavored instance rebuilds its own
+image instead of taking the shared generic one). Earlier history: C8/C23 (#358),
+C10 (#359), C22 + binary deploy (PR #365) — the deploy *engine* is a portable CLI
+(`modastack deploy`/`destroy`), `MODASTACK_BUILD`={source|pypi|wheel}; permanent
+canary `moda-canary`; C9 first-boot landed as the wait-for-team entrypoint state.
+
+**Remaining (none block the cutover):** operationally — re-onboard
+familystories-ai + jobtack as their own Fly instances (via the deployed agent,
+out of band), terminate (vs pause) EC2. Post-MVP scale/hardening — **#378**
+(build-once team images → Fly registry → deploy-many) → **#379** (GitOps
+deps-vs-definition trigger split; near-term guard against the silent deps no-op),
+plus open C9 (#339) hardening and C12 (#341, blocked on #177). See the current
+handoff `HANDOFF-containerization-status.md`.
+
 Related designs:
 - `docs/design/AUTH.md` (#142) — event-server auth. Complementary, not a
   dependency: this design deliberately keeps integration auth **outside** the
@@ -353,21 +374,30 @@ a phase are parallelizable unless noted.
 **Filed 2026-06-18 — epic [#344](https://github.com/moda-labs/modastack/issues/344).**
 MVP-cut issue mapping:
 
-| C | Issue | Phase | Dispatch |
+| C | Issue | Phase | Status |
 |---|---|---|---|
 | C1 | [#332](https://github.com/moda-labs/modastack/issues/332) | 0 | ✅ merged (PR #345) |
-| C2 | [#333](https://github.com/moda-labs/modastack/issues/333) | 0 | Modastack |
-| C3 | [#334](https://github.com/moda-labs/modastack/issues/334) | 0 | Modastack |
-| C4 | [#346](https://github.com/moda-labs/modastack/issues/346) | 0 | Modastack (promoted from deferred) |
-| C5 | [#335](https://github.com/moda-labs/modastack/issues/335) | 0 | Modastack |
-| C6 | [#336](https://github.com/moda-labs/modastack/issues/336) | 0 | Modastack |
-| C7 | [#337](https://github.com/moda-labs/modastack/issues/337) | 0 | Modastack |
-| C8 | [#338](https://github.com/moda-labs/modastack/issues/338) | 1 | human/infra |
-| C9 | [#339](https://github.com/moda-labs/modastack/issues/339) | 1 | human/infra |
-| C10 | [#340](https://github.com/moda-labs/modastack/issues/340) | 1 | human/infra |
-| C12 | [#341](https://github.com/moda-labs/modastack/issues/341) | 1 | human/infra |
-| C22 | [#342](https://github.com/moda-labs/modastack/issues/342) | 1 | human/infra |
-| C23 | [#343](https://github.com/moda-labs/modastack/issues/343) | 1 | human/infra |
+| C2 | [#333](https://github.com/moda-labs/modastack/issues/333) | 0 | ✅ merged (PR #355) |
+| C3 | [#334](https://github.com/moda-labs/modastack/issues/334) | 0 | ✅ merged (PR #354) |
+| C4 | [#346](https://github.com/moda-labs/modastack/issues/346) | 0 | ✅ merged (PR #352) |
+| C5 | [#335](https://github.com/moda-labs/modastack/issues/335) | 0 | ✅ merged (PR #353) |
+| C6 | [#336](https://github.com/moda-labs/modastack/issues/336) | 0 | ✅ merged (PR #350) |
+| C7 | [#337](https://github.com/moda-labs/modastack/issues/337) | 0 | ✅ merged (PR #351) |
+| C8 | [#338](https://github.com/moda-labs/modastack/issues/338) | 1 | ✅ merged (PR #358) |
+| C9 | [#339](https://github.com/moda-labs/modastack/issues/339) | 1 | 🟡 core landed (wait-for-team, #365); extra hardening OPEN |
+| C10 | [#340](https://github.com/moda-labs/modastack/issues/340) | 1 | ✅ merged (PR #359) |
+| C12 | [#341](https://github.com/moda-labs/modastack/issues/341) | 1 | ⛔ OPEN, blocked on #177 |
+| C22 | [#342](https://github.com/moda-labs/modastack/issues/342) | 1 | ✅ merged (PR #365) |
+| C23 | [#343](https://github.com/moda-labs/modastack/issues/343) | 1 | ✅ merged (PR #358) |
+| C24 | [#368](https://github.com/moda-labs/modastack/issues/368) | 1+ | ✅ merged (PR #377); eng-team LIVE, EC2 retired, v0.24.0 |
+| C25 | [#378](https://github.com/moda-labs/modastack/issues/378) | post-MVP | OPEN — build-once team images → Fly registry → deploy-many |
+| C26 | [#379](https://github.com/moda-labs/modastack/issues/379) | post-MVP | OPEN — deps-vs-definition trigger split (depends C25) |
+
+C24 (custom agent dependencies / team-flavored images) is a follow-on capability
+beyond the original §10 list — see `docs/design/CUSTOM_AGENT_DEPS.md`. It unblocked
+real teams (e.g. `eng-team`, which `requires:` gstack+codex) on the C8/C22 base
+and drove the EC2→Fly cutover. C25/C26 are its post-MVP scale/hardening
+follow-ons (do C25 first — it makes C26 a digest comparison).
 
 ### MVP cut — EC2 → Fly migration (decided 2026-06-12)
 
@@ -531,9 +561,14 @@ dirs:
   per-team GitHub environment secrets, e.g. `TEAM_<NAME>_*`; an instance
   with unpopulated secrets provisions but sits unhealthy until filled —
   same seam D2 plugs into).
-- **Changed team** → trigger `modastack agents update` on the matching
-  instance. Never re-provision: volume `agent.yaml` is source of truth,
-  reinstall must not clobber workspace edits.
+- **Changed team** → re-pull the team on the matching instance with
+  `modastack install <teams-latest-url>` (then restart), not `modastack
+  agents update`: a container first-boots from `MODASTACK_TEAM_URL`, so its
+  installed pack records `source = url:…`, which the registry-based `agents
+  update` path does not resolve. `install <url>` re-runs the same
+  workspace-safe reinstall against the refreshed tarball. Never re-provision:
+  volume `agent.yaml` is source of truth, reinstall must not clobber workspace
+  edits.
 - **modastack release** → scripted `fly deploy` loop over the fleet.
   Volumes and sessions survive; C9 idempotency makes restart safe; C7
   guards format-version skew.
@@ -542,7 +577,7 @@ dirs:
 Keep it a script + ~50-line workflow — no deploy service, no deployment
 DB; the Fly API is the state store, the Action log is the deploy log.
 This implements the §9 provisioner seam; replace with a service only when
-instance count makes the loop creak (§11.3).
+instance count makes the loop creak (§9, "Provisioner service" upgrade row).
 *Accept:* push a new team dir → live instance with no manual step beyond
 secrets; push a team edit → matching instance updated, workspace intact;
 tag a modastack release → all instances on the new version with sessions
@@ -620,14 +655,28 @@ continuity; RSS drops after recycle.
 
 ## 11. Open questions
 
-1. Wheel vs. source install in the image (C8) — affects release cadence for
-   instance updates; default to wheel + pinned version.
+1. ~~Wheel vs. source install in the image (C8)~~ — **resolved 2026-06-19.**
+   One Dockerfile, `MODASTACK_BUILD` selects: `pypi` (install a published
+   `modastack==<operator's CLI version>` — the normal/SaaS path; build once per
+   version, fan the digest out to N tenants), `wheel` (scp an unpublished rc into
+   the build context — the canary, since it's the run that's *publishing* the
+   version), `source` (a dev checkout). **Image-baked, not push-onto-machine** —
+   keeps the immutable-digest / atomic-deploy / clean-rollback guarantees; the
+   speed comes from **layering** (deps + claude + model in cached early layers,
+   the modastack wheel as the last thin layer → a code-only rebuild is seconds).
+   That layering is C24 #368's "two clocks" extended to three (tool-deps /
+   framework-version / definition).
 2. Does `/browse` (Playwright Chromium, ~250 MB + system libs) ship in the
    base image or a variant? Default: leave it out; add a variant if dogfood
    demand appears.
-3. ~~Fleet upgrade mechanics~~ — **resolved 2026-06-12 → C22** (scripted
-   `fly deploy` loop + GitHub Action); revisit only when instance count
-   makes the loop creak.
+3. ~~Fleet upgrade mechanics~~ — **resolved 2026-06-12 → C22** (now the
+   idempotent `modastack deploy` primitive; release/`deploy-*` tag triggers).
+   **No-downtime upgrade** is the live open question: the in-memory session
+   inbox loses queued events on restart, so durability must live in the event
+   server (Worker/DO buffer + replay on reconnect) — VERIFY. With that +
+   graceful drain + session resume, an upgrade is "delayed, not lost"; a **hot
+   team-reload** makes team-only upgrades zero-restart. Don't chase blue-green
+   (single-attach volume).
 4. C12 outcome decides whether subscription routing needs Worker changes
    before SaaS (potential new ticket under the event contract v2 umbrella).
 5. Subscription credit monitoring: all subscription-mode instances on one
