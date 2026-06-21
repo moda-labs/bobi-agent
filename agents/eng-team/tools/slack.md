@@ -22,8 +22,8 @@ modastack slack-reply -w <workspace> -c <channel> "message"
 ## Upload a file or image
 
 ```bash
-modastack slack-upload <file_path> -w <workspace> -c <channel>
-modastack slack-upload ./screenshot.png -w <workspace> -c <channel> -t <thread_ts> --title "Screenshot" --comment "Here's what I see"
+modastack slack-upload-file <file_path> -w <workspace> -c <channel>
+modastack slack-upload-file ./screenshot.png -w <workspace> -c <channel> -t <thread_ts> --title "Screenshot" --comment "Here's what I see"
 ```
 
 Options: `--title`, `--comment`, `--thread/-t`, `--filename` (override name).
@@ -33,9 +33,9 @@ Options: `--title`, `--comment`, `--thread/-t`, `--filename` (override name).
 Fetch all messages (and file metadata) in a Slack thread:
 
 ```bash
-modastack slack-thread -w <workspace> -c <channel> -t <thread_ts>
-modastack slack-thread -w <workspace> -c <channel> -t <thread_ts> --json-output
-modastack slack-thread -w <workspace> -c <channel> -t <thread_ts> -n 50
+modastack slack-read-thread -w <workspace> -c <channel> -t <thread_ts>
+modastack slack-read-thread -w <workspace> -c <channel> -t <thread_ts> --json-output
+modastack slack-read-thread -w <workspace> -c <channel> -t <thread_ts> -n 50
 ```
 
 ## Receiving files and images

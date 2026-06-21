@@ -5,8 +5,8 @@ Covers:
 - upload_slack_file (V2 upload flow: getUploadURLExternal + upload + completeUploadExternal)
 - fetch_slack_thread (conversations.replies with pagination)
 - Slack event normalizer file extraction (via Python-side structure validation)
-- CLI slack-upload command
-- CLI slack-thread command
+- CLI slack-upload-file command
+- CLI slack-read-thread command
 """
 
 import json
@@ -406,7 +406,7 @@ class TestSlackEventFileExtraction:
 
 
 # ---------------------------------------------------------------------------
-# CLI slack-upload
+# CLI slack-upload-file
 # ---------------------------------------------------------------------------
 
 class TestSlackUploadCommand:
@@ -437,7 +437,7 @@ class TestSlackUploadCommand:
 
             runner = CliRunner()
             result = runner.invoke(main, [
-                "slack-upload", str(test_file),
+                "slack-upload-file", str(test_file),
                 "-w", "T123", "-c", "C456",
             ])
 
@@ -474,7 +474,7 @@ class TestSlackUploadCommand:
 
             runner = CliRunner()
             result = runner.invoke(main, [
-                "slack-upload", str(test_file),
+                "slack-upload-file", str(test_file),
                 "-w", "T123", "-c", "C456",
                 "-t", "171.42",
                 "--title", "Report",
@@ -497,7 +497,7 @@ class TestSlackUploadCommand:
 
         runner = CliRunner()
         result = runner.invoke(main, [
-            "slack-upload", str(tmp_path / "nonexistent.txt"),
+            "slack-upload-file", str(tmp_path / "nonexistent.txt"),
             "-w", "T123", "-c", "C456",
         ])
         assert result.exit_code != 0
@@ -520,7 +520,7 @@ class TestSlackUploadCommand:
 
             runner = CliRunner()
             result = runner.invoke(main, [
-                "slack-upload", str(test_file),
+                "slack-upload-file", str(test_file),
                 "-w", "T123", "-c", "C456",
             ])
 
@@ -529,7 +529,7 @@ class TestSlackUploadCommand:
 
 
 # ---------------------------------------------------------------------------
-# CLI slack-thread
+# CLI slack-read-thread
 # ---------------------------------------------------------------------------
 
 class TestSlackThreadCommand:
@@ -552,7 +552,7 @@ class TestSlackThreadCommand:
 
             runner = CliRunner()
             result = runner.invoke(main, [
-                "slack-thread",
+                "slack-read-thread",
                 "-w", "T123", "-c", "C456", "-t", "171.42",
             ])
 
@@ -579,7 +579,7 @@ class TestSlackThreadCommand:
 
             runner = CliRunner()
             result = runner.invoke(main, [
-                "slack-thread",
+                "slack-read-thread",
                 "-w", "T123", "-c", "C456", "-t", "171.42",
                 "--json-output",
             ])
@@ -618,7 +618,7 @@ class TestSlackThreadCommand:
 
             runner = CliRunner()
             result = runner.invoke(main, [
-                "slack-thread",
+                "slack-read-thread",
                 "-w", "T123", "-c", "C456", "-t", "171.42",
             ])
 
@@ -641,7 +641,7 @@ class TestSlackThreadCommand:
 
             runner = CliRunner()
             result = runner.invoke(main, [
-                "slack-thread",
+                "slack-read-thread",
                 "-w", "T123", "-c", "C456", "-t", "171.42",
             ])
 

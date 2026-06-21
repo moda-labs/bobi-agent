@@ -1025,7 +1025,7 @@ def slack_reply(text, workspace, channel, thread, edit_ts):
         sys.exit(1)
 
 
-@main.command("slack-upload")
+@main.command("slack-upload-file")
 @click.argument("file_path", type=click.Path(exists=True))
 @click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
 @click.option("--channel", "-c", required=True, help="Slack channel ID")
@@ -1033,12 +1033,12 @@ def slack_reply(text, workspace, channel, thread, edit_ts):
 @click.option("--title", default="", help="File title in Slack")
 @click.option("--comment", default="", help="Initial comment with the file")
 @click.option("--filename", default="", help="Override filename (default: basename of path)")
-def slack_upload(file_path, workspace, channel, thread, title, comment, filename):
+def slack_upload_file(file_path, workspace, channel, thread, title, comment, filename):
     """Upload a file to Slack.
 
     Usage:
-        modastack slack-upload ./screenshot.png -w T0952RZRZ0X -c C123
-        modastack slack-upload ./report.pdf -w T0952RZRZ0X -c C123 -t 171.42 --title "Report"
+        modastack slack-upload-file ./screenshot.png -w T0952RZRZ0X -c C123
+        modastack slack-upload-file ./report.pdf -w T0952RZRZ0X -c C123 -t 171.42 --title "Report"
     """
     import httpx
     from pathlib import Path
@@ -1073,18 +1073,18 @@ def slack_upload(file_path, workspace, channel, thread, title, comment, filename
         sys.exit(1)
 
 
-@main.command("slack-thread")
+@main.command("slack-read-thread")
 @click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
 @click.option("--channel", "-c", required=True, help="Slack channel ID")
 @click.option("--thread", "-t", required=True, help="Thread timestamp to read")
 @click.option("--limit", "-n", default=100, help="Max messages to fetch (default: 100)")
 @click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
-def slack_thread(workspace, channel, thread, limit, as_json):
+def slack_read_thread(workspace, channel, thread, limit, as_json):
     """Read all messages in a Slack thread.
 
     Usage:
-        modastack slack-thread -w T0952RZRZ0X -c C123 -t 1780165787.159589
-        modastack slack-thread -w T0952RZRZ0X -c C123 -t 171.42 --json-output
+        modastack slack-read-thread -w T0952RZRZ0X -c C123 -t 1780165787.159589
+        modastack slack-read-thread -w T0952RZRZ0X -c C123 -t 171.42 --json-output
     """
     import json as _json
 
