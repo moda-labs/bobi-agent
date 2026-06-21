@@ -1149,6 +1149,108 @@ def slack_reply(text, workspace, channel, thread, edit_ts):
         sys.exit(1)
 
 
+@main.command("slack-upload-file")
+@click.argument("file_path", type=click.Path(exists=True))
+@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
+@click.option("--channel", "-c", required=True, help="Slack channel ID")
+@click.option("--thread", "-t", default="", help="Thread timestamp to upload into")
+@click.option("--title", default="", help="File title in Slack")
+@click.option("--comment", default="", help="Initial comment with the file")
+@click.option("--filename", default="", help="Override filename (default: basename of path)")
+def slack_upload_file(file_path, workspace, channel, thread, title, comment, filename):
+    """Upload a file to Slack.
+
+    Usage:
+        modastack slack-upload-file ./screenshot.png -w T0952RZRZ0X -c C123
+        modastack slack-upload-file ./report.pdf -w T0952RZRZ0X -c C123 -t 171.42 --title "Report"
+    """
+    import httpx
+    from pathlib import Path
+
+    from .slack import upload_slack_file
+
+    token = ""
+    project_path = _detect_project_root()
+    if project_path:
+        from .config import Config
+        cfg = Config.load(project_path)
+        token = cfg.credential("slack", "bot_token")
+    if not token:
+        click.echo("No bot token configured (set credentials.bot_token under the slack service in agent.yaml)", err=True)
+        sys.exit(1)
+
+    p = Path(file_path)
+    file_data = p.read_bytes()
+    fname = filename or p.name
+
+    try:
+        upload_slack_file(
+            token, channel, file_data, fname,
+            title=title, thread_ts=thread, initial_comment=comment,
+        )
+        click.echo(f"Uploaded {fname} to {channel}")
+    except RuntimeError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+    except (httpx.HTTPError, OSError, TimeoutError) as e:
+        click.echo(f"Failed: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("slack-read-thread")
+@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
+@click.option("--channel", "-c", required=True, help="Slack channel ID")
+@click.option("--thread", "-t", required=True, help="Thread timestamp to read")
+@click.option("--limit", "-n", default=100, help="Max messages to fetch (default: 100)")
+@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
+def slack_read_thread(workspace, channel, thread, limit, as_json):
+    """Read all messages in a Slack thread.
+
+    Usage:
+        modastack slack-read-thread -w T0952RZRZ0X -c C123 -t 1780165787.159589
+        modastack slack-read-thread -w T0952RZRZ0X -c C123 -t 171.42 --json-output
+    """
+    import json as _json
+
+    import httpx
+
+    from .slack import fetch_slack_thread
+
+    token = ""
+    project_path = _detect_project_root()
+    if project_path:
+        from .config import Config
+        cfg = Config.load(project_path)
+        token = cfg.credential("slack", "bot_token")
+    if not token:
+        click.echo("No bot token configured (set credentials.bot_token under the slack service in agent.yaml)", err=True)
+        sys.exit(1)
+
+    try:
+        messages = fetch_slack_thread(token, channel, thread, limit=limit)
+    except RuntimeError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+    except (httpx.HTTPError, OSError, TimeoutError) as e:
+        click.echo(f"Failed: {e}", err=True)
+        sys.exit(1)
+
+    if as_json:
+        click.echo(_json.dumps(messages, indent=2))
+    else:
+        for msg in messages:
+            user = msg.get("user", "unknown")
+            text = msg.get("text", "")
+            ts = msg.get("ts", "")
+            files = msg.get("files", [])
+            click.echo(f"[{ts}] {user}: {text}")
+            for f in files:
+                name = f.get("name", "file")
+                mimetype = f.get("mimetype", "")
+                click.echo(f"  >> {name} ({mimetype})")
+        click.echo(f"\n{len(messages)} message(s)")
+
+
 @main.group()
 def transcript():
     """Session transcripts — view, search, and index conversation history."""

@@ -59,12 +59,32 @@ export function normalizeSlackWebhook(
 		if (channel && !isDm) topics.push(`slack:${teamId}:${channel}`);
 	}
 
+	// Extract file attachments (images, documents, etc.) from the event.
+	// Slack includes a `files` array on messages with shared files.
+	const rawFiles = event.files as Array<Record<string, unknown>> | undefined;
+	const files: Array<Record<string, string>> = [];
+	if (Array.isArray(rawFiles)) {
+		for (const f of rawFiles) {
+			const entry: Record<string, string> = {};
+			if (f.id) entry.id = String(f.id);
+			if (f.name) entry.name = String(f.name);
+			if (f.mimetype) entry.mimetype = String(f.mimetype);
+			if (f.filetype) entry.filetype = String(f.filetype);
+			if (f.url_private) entry.url_private = String(f.url_private);
+			if (f.url_private_download)
+				entry.url_private_download = String(f.url_private_download);
+			if (f.size) entry.size = String(f.size);
+			files.push(entry);
+		}
+	}
+
 	const fields: Record<string, string | number | boolean> = {};
 	if (userId) fields.user_id = userId;
 	if (channel) fields.channel = channel;
 	if (channelType) fields.channel_type = channelType;
 	if (ts) fields.ts = ts;
 	if (threadTs) fields.thread_ts = threadTs;
+	if (files.length > 0) fields.files = JSON.stringify(files);
 
 	return {
 		event: {
@@ -84,6 +104,7 @@ export function normalizeSlackWebhook(
 				text: rawText,
 				ts,
 				thread_ts: threadTs,
+				...(files.length > 0 ? { files } : {}),
 			},
 		},
 		skip: false,
