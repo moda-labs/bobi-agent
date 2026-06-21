@@ -144,7 +144,7 @@ def slack_config(tmp_path, monkeypatch):
     """A project with a Slack bot_token so run_bootstrap gets past config checks."""
     from modastack import paths
 
-    monkeypatch.setattr(paths, "_ROOT", None, raising=False)
+    monkeypatch.setattr(paths, "_root", None, raising=False)
     project = tmp_path / "proj"
     (project / ".modastack").mkdir(parents=True)
     (project / ".modastack" / "agent.yaml").write_text(
