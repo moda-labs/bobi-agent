@@ -12,6 +12,12 @@
 # authoritative fleet-membership key the GitOps reconcile enumerates by).
 fleet: moda
 
+# Tenant = the GitHub Environment the GitOps Action binds for a deployment's
+# per-key secrets (#385). One Environment per tenant; secret keys are namespaced
+# `<TEAM>__<KEY>` within it. Production deployments default to `modalabs`; the
+# canary overrides this (it's a separate pre-deploy gate, not a prod tenant).
+tenant: modalabs
+
 # Where instances phone home (outbound WSS only). Omit to use the built-in
 # shared moda-labs Worker.
 event_server: https://modastack-events.modalabs.workers.dev

@@ -120,7 +120,7 @@ build the primitive first; the Action doesn't need it.
 
 ### GitHub Actions become thin clients
 ```yaml
-# gitops-teams.yml, essentially:
+# deploy-agent-teams.yml, essentially:
 - run: |
     for name in $(changed deployments/*.yaml); do
       materialize secrets for "$name"        # GitHub Environment → env-file

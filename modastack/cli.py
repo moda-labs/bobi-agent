@@ -733,9 +733,13 @@ def install(pack, non_interactive):
 @click.option("--rebuild", is_flag=True,
               help="In-place update: force an image rebuild instead of a hot-push "
                    "(also automatic when a team's build: deps change — #379).")
+@click.option("--no-prune", "no_prune", is_flag=True,
+              help="Don't remove live Fly secrets that aren't declared in the "
+                   "team's agent.yaml. By default an update reconciles to the "
+                   "declared set, pruning undeclared secrets (#385).")
 def deploy(name, team, team_url, fleet, env_file, auth, event_server, region,
            memory, cpus, volume_size, login_channel, claude_version, org,
-           rebuild):
+           rebuild, no_prune):
     """Provision or update ONE instance — the deployment primitive.
 
     NAME selects the deployment: deployments/<name>.yaml (merged over
@@ -764,7 +768,7 @@ def deploy(name, team, team_url, fleet, env_file, auth, event_server, region,
         "event_server": event_server, "region": region, "memory": memory,
         "cpus": cpus, "volume_size": volume_size, "login_channel": login_channel,
         "claude_version": claude_version, "org": org,
-        "rebuild": rebuild,
+        "rebuild": rebuild, "no_prune": no_prune,
     }
     if env_file:
         overrides["secrets_env_file"] = env_file

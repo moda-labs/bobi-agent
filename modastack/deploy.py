@@ -28,6 +28,7 @@ drives those scripts so the same engine backs the CLI, CI, and any future plane.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -62,9 +63,9 @@ BUILTIN_DEFAULTS: dict = {
 # Config keys the engine understands (after `-`→`_` normalization). `secrets` is
 # a nested mapping handled separately.
 _SCALAR_KEYS = {
-    "team", "team_url", "fleet", "region", "memory", "cpus", "volume_size",
-    "auth", "event_server", "login_channel", "claude_version", "org",
-    "volume_name", "image",
+    "team", "team_url", "fleet", "tenant", "region", "memory", "cpus",
+    "volume_size", "auth", "event_server", "login_channel", "claude_version",
+    "org", "volume_name", "image",
 }
 
 
@@ -80,6 +81,11 @@ class DeployConfig:
     team: str = ""
     team_url: str = ""
     fleet: str = ""
+    # Tenant = the GitHub Environment the GitOps Action binds for this deployment's
+    # per-key secrets (key convention `<TEAM>__<KEY>`). The engine itself never
+    # uses it — secrets are per-app — but it's a first-class config value the
+    # orchestration layer resolves (defaults: prod = `modalabs`; canary overrides).
+    tenant: str = ""
     region: str = "iad"
     memory: str = "4gb"
     cpus: int = 2
@@ -201,6 +207,7 @@ def load_deploy_config(project_path: Path, name: str,
         team=str(merged.get("team", "") or ""),
         team_url=str(merged.get("team_url", "") or ""),
         fleet=str(merged.get("fleet", "") or ""),
+        tenant=str(merged.get("tenant", "") or ""),
         region=str(merged.get("region")),
         memory=str(merged.get("memory")),
         cpus=int(merged.get("cpus")),
@@ -356,22 +363,83 @@ def scan_required_vars(agent_yaml: Path) -> list[str]:
     return [v for v in _ENV_VAR_RE.findall(agent_yaml.read_text()) if ":" not in v]
 
 
+def scan_declared_vars(agent_yaml: Path) -> list[str]:
+    """All ${VAR} secret names a package references — required AND optional.
+
+    Unlike `scan_required_vars`, this keeps ${VAR:-default} refs (stripping the
+    `:-default` suffix). An optional ref is still DECLARED: it may legitimately be
+    set, and must never be pruned. This is the team's complete secret surface, so
+    it doubles as the prune authority and the env-file filter. De-duped, order
+    preserved.
+    """
+    if not agent_yaml.exists():
+        return []
+    seen: dict[str, None] = {}
+    for v in _ENV_VAR_RE.findall(agent_yaml.read_text()):
+        seen.setdefault(v.split(":", 1)[0], None)  # ${VAR:-x} -> VAR
+    return list(seen)
+
+
+def _secret_sets(cfg: DeployConfig,
+                 project_path: Path) -> tuple[list[str], set[str] | None]:
+    """Compute (required, declared) secret keys for one deployment.
+
+    required  — must be present (supplied OR already a live Fly secret) or the
+                deploy fails: the bare ${VAR} refs, plus ANTHROPIC_API_KEY in
+                api_key mode (the auth overlay from the deployment config).
+    declared  — the full surface the team may set AND the prune authority: every
+                ${VAR} ref (incl. ${VAR:-default}) plus the auth overlay. None for
+                a `team-url:` package — it isn't on disk, so we can't see its refs;
+                without the declared set we don't filter or prune (defer to boot).
+
+    MODASTACK_* refs are instance identity the provisioner stamps into [env] from
+    flags — never secrets — so they're excluded from both sets.
+    """
+    auth_req = ["ANTHROPIC_API_KEY"] if cfg.auth == "api_key" else []
+    if not cfg.team:
+        return (auth_req, None)  # team-url: package not local
+    y = local_package_dir(project_path, cfg.team) / "agent.yaml"
+    keep = lambda vs: [v for v in vs if not v.startswith("MODASTACK_")]
+    required = keep(scan_required_vars(y)) + auth_req
+    declared = set(keep(scan_declared_vars(y))) | set(auth_req)
+    return (required, declared)
+
+
 # --- secret resolution -------------------------------------------------------
 
 def resolve_env_file(cfg: DeployConfig, project_path: Path,
-                     out_dir: Path) -> Path:
-    """Produce the KEY=VALUE env-file provision-instance.sh consumes.
+                     out_dir: Path, *, live: set[str] | None = None) -> Path:
+    """Materialize the resolved secrets into the KEY=VALUE env-file that
+    provision-instance.sh consumes (mode 0600). Thin wrapper over
+    resolve_secret_values — see it for sourcing, the declared-set filter, and the
+    live-aware required check."""
+    values = resolve_secret_values(cfg, project_path, live=live)
+    out = out_dir / "instance.env"
+    write_env_file(out, values)
+    try:
+        os.chmod(out, 0o600)
+    except OSError:
+        pass
+    return out
 
-    Sources, in order:
-      1. cfg.secrets_env_file — a local path (self-service / `env-file:`).
-      2. otherwise materialize from the process environment — the package's
-         required vars (+ ANTHROPIC_API_KEY in api_key mode) read from os.environ.
-         This is the CI seam: the Action exports the team's secrets into the job
-         env (from its GitHub Environment) and runs `modastack deploy`.
 
-    For a LOCAL team we know the required vars and fail loudly on a gap, rather
-    than booting a broken instance. For a team-url we can't see the package, so
-    validation defers to the instance's `install --non-interactive` at boot.
+def resolve_secret_values(cfg: DeployConfig, project_path: Path,
+                          *, live: set[str] | None = None) -> dict[str, str]:
+    """Resolve the secret KEY=VALUE map to apply to this instance.
+
+    Sources: cfg.secrets_env_file (a local path), backfilled from the process
+    environment (the CI seam — the Action materializes the team's secrets into the
+    job env and runs `modastack deploy`). The result is FILTERED to the team's
+    DECLARED set, so only secrets the team actually references reach Fly.
+
+    `live` is the set of secret names already on the instance (fly_secrets_list).
+    When given (the update/reconcile path), an already-live secret SATISFIES the
+    required check — an update needn't re-supply what Fly already holds. None (the
+    provision path) means nothing is live yet, so every required key must be here.
+
+    Raises DeployError on a subscription/ANTHROPIC conflict, or (for a local team)
+    a missing required secret. A team-url package isn't on disk, so its refs are
+    invisible: no filter, and presence validation defers to the instance's boot.
     """
     if cfg.secrets_env_file:
         src = Path(cfg.secrets_env_file)
@@ -384,19 +452,11 @@ def resolve_env_file(cfg: DeployConfig, project_path: Path,
     else:
         values = {}
 
-    required: list[str] = []
-    if cfg.team:
-        pkg = local_package_dir(project_path, cfg.team)
-        # MODASTACK_* references are instance identity the provisioner stamps into
-        # [env] from flags (event server, fleet, …) — they are NEVER secrets, so
-        # don't demand them in the env-file.
-        required = [v for v in scan_required_vars(pkg / "agent.yaml")
-                    if not v.startswith("MODASTACK_")]
-        if cfg.auth == "api_key":
-            required = [*required, "ANTHROPIC_API_KEY"]
+    required, declared = _secret_sets(cfg, project_path)
 
-    # Backfill anything still missing from the process environment.
-    for var in required:
+    # Backfill declared keys (or, for a team-url, the auth overlay) from the
+    # process env — the CI seam. Only known keys, never the whole environment.
+    for var in (declared if declared is not None else set(required)):
         if var not in values and var in os.environ:
             values[var] = os.environ[var]
 
@@ -408,35 +468,42 @@ def resolve_env_file(cfg: DeployConfig, project_path: Path,
             "is present in its secrets — remove it (it overrides subscription auth)."
         )
 
-    if cfg.team:
-        # A var must be DECLARED (in the env-file or process env), but may be
-        # intentionally empty — some referenced vars are optional scoping knobs
-        # (e.g. `channels: ${SLACK_CHANNELS}`, empty = whole workspace) that must
-        # not block a deploy. Auth-critical keys are still enforced non-empty at
-        # provision (provision-instance.sh) and boot (docker-entrypoint.sh §6.1).
-        missing = [v for v in required if v not in values]
+    # Filter to the declared set: only secrets the team references reach Fly. An
+    # undeclared key (a CI dump's FLY_API_TOKEN, or a typo'd name) is dropped with
+    # a warning rather than silently provisioned. team-url skips this (no refs
+    # visible). MODASTACK_* identity is already excluded from `declared`.
+    if declared is not None:
+        for key in [k for k in values if k not in declared]:
+            log.warning("dropping undeclared secret '%s' for '%s' (not referenced "
+                        "in the team's agent.yaml — typo?)", key, cfg.name)
+            values.pop(key)
+
+    # Presence check. A var must be DECLARED present (may be intentionally empty —
+    # optional scoping knobs like `channels: ${SLACK_CHANNELS}`). For a LOCAL team
+    # we fail loud rather than boot broken; a team-url defers to its boot install.
+    if declared is not None:
+        missing = [v for v in required
+                   if v not in values and (live is None or v not in live)]
         if missing:
             raise DeployError(
                 f"deployment '{cfg.name}' is missing required secret(s): "
                 f"{', '.join(missing)}. Provide them via the env-file "
-                "(secrets.env-file) or the process environment."
+                f"(secrets.env-file), the process environment, or as live Fly "
+                f"secrets (fly secrets set … -a {cfg.app_name})."
             )
-
-    out = out_dir / "instance.env"
-    write_env_file(out, values)
-    try:
-        os.chmod(out, 0o600)
-    except OSError:
-        pass
-    return out
+    return values
 
 
 # --- Fly mechanics (thin shells; monkeypatchable in tests) ------------------
 
 def _run(cmd: list[str], *, cwd: Path | None = None, check: bool = True,
          input_bytes: bytes | None = None,
-         extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    log.info("$ %s", " ".join(cmd))
+         extra_env: dict[str, str] | None = None,
+         secret: bool = False) -> subprocess.CompletedProcess:
+    # `secret=True` redacts the logged command — used for `fly secrets set`, whose
+    # argv carries KEY=VALUE secret values we must never write to logs.
+    log.info("$ %s", f"{cmd[0]} … ({len(cmd) - 1} redacted args)" if secret
+             else " ".join(cmd))
     env = {**os.environ, **extra_env} if extra_env else None
     return subprocess.run(
         cmd, cwd=str(cwd) if cwd else None, check=check, input=input_bytes,
@@ -500,6 +567,42 @@ def _resolve_local_build() -> tuple[bool, str | None]:
 def fly_app_exists(app: str) -> bool:
     """True if the Fly app exists (and is yours) — the provision-vs-update fork."""
     return _run([_fly_bin(), "status", "-a", app], check=False).returncode == 0
+
+
+def fly_secrets_list(app: str) -> set[str]:
+    """The secret NAMES currently live on the app (Fly never exposes values).
+
+    The source of truth for the reconcile: an already-live secret satisfies the
+    required check, and a live name absent from the declared set is a prune
+    candidate. Empty set when the app doesn't exist or has no secrets.
+    """
+    proc = subprocess.run(
+        [_fly_bin(), "secrets", "list", "-a", app, "--json"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return set()
+    try:
+        return {row["Name"] for row in json.loads(proc.stdout or "[]")}
+    except (ValueError, KeyError, TypeError):
+        return set()
+
+
+def fly_secrets_set(app: str, values: dict[str, str]) -> None:
+    """Set/update secrets on an EXISTING app. Fly no-ops identical values (no
+    needless restart) — only a real change triggers a release. Logging is redacted
+    (the argv carries values)."""
+    if not values:
+        return
+    _run([_fly_bin(), "secrets", "set", "-a", app,
+          *(f"{k}={v}" for k, v in values.items())], secret=True)
+
+
+def fly_secrets_unset(app: str, keys: list[str]) -> None:
+    """Remove secrets from an app (the prune path). Keys are not sensitive."""
+    if not keys:
+        return
+    _run([_fly_bin(), "secrets", "unset", "-a", app, *keys])
 
 
 # --- Fly onboarding preflight (guide a newcomer — or an agent — to a deployable
@@ -757,7 +860,7 @@ def _should_rebuild(project_path: Path, cfg: DeployConfig, app: str,
     team's `build:` (a new apt/npm tool, a bumped codex) on a live instance would
     silently never land. We detect the drift (the hash a fresh image would bake
     != the hash stamped in the running image) and rebuild in place instead, so a
-    `gitops-teams` reconcile self-heals a deps change with no manual step.
+    `deploy-agent-teams` reconcile self-heals a deps change with no manual step.
 
     `forced` (--rebuild) always rebuilds. A generic team (no `build:` deps) never
     rebuilds. When the running image carries no stamp (built before the #379
@@ -786,6 +889,35 @@ def _should_rebuild(project_path: Path, cfg: DeployConfig, app: str,
     return False  # deps unchanged — the hot-push fast path is correct
 
 
+def reconcile_live_secrets(cfg: DeployConfig, project_path: Path, app: str,
+                           values: dict[str, str], live: set[str],
+                           *, prune: bool) -> tuple[list[str], list[str]]:
+    """Reconcile an EXISTING app's Fly secrets to the team's declared set.
+
+    A plain in-place update (push_team / update_team_url) never re-runs
+    provision-instance.sh, so secrets are NOT touched on that path today — which is
+    why a rotated/unset secret silently drifted (the eng-team outage). This closes
+    it: set/update the supplied declared values directly (Fly no-ops identical
+    ones), and PRUNE live, non-MODASTACK_ secrets that aren't in the declared set
+    so the live store converges on what the team declares.
+
+    Prune needs the declared set, so it only runs for a local team (team-url has no
+    visible refs). Returns (set_keys, pruned_keys) for the caller to report.
+    """
+    _, declared = _secret_sets(cfg, project_path)
+    if values:
+        fly_secrets_set(app, values)
+    pruned: list[str] = []
+    if prune and declared is not None:
+        pruned = sorted(k for k in live
+                        if not k.startswith("MODASTACK_") and k not in declared)
+        if pruned:
+            log.info("pruning %d undeclared secret(s) on '%s': %s",
+                     len(pruned), app, ", ".join(pruned))
+            fly_secrets_unset(app, pruned)
+    return (sorted(values), pruned)
+
+
 def deploy(project_path: Path, name: str, overrides: dict | None = None) -> DeployConfig:
     """Provision OR update ONE instance, idempotently.
 
@@ -795,16 +927,33 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
     """
     cfg = load_deploy_config(project_path, name, overrides)
     app = cfg.app_name
+    # Reconcile secrets against what's LIVE on the app, not against a re-supplied
+    # env-file: an existing live secret satisfies the required check, so an update
+    # needn't re-declare everything (the drift the #385 outage exposed).
+    app_exists = fly_app_exists(app)
+    live = fly_secrets_list(app) if app_exists else None
+    prune = not bool((overrides or {}).get("no_prune"))
 
     with tempfile.TemporaryDirectory() as tmp:
         # In --image mode nothing is built, so the binary build context isn't
         # assembled (staging=None); we still need provision_sh from the assets.
         assets = resolve_assets(project_path, None if cfg.image else Path(tmp))
-        env_file = resolve_env_file(cfg, project_path, Path(tmp))
+        values = resolve_secret_values(cfg, project_path, live=live)
+        # On an existing app, apply secret deltas + prune undeclared directly (the
+        # plain-update path never re-runs the provisioner, so secrets land here).
+        if app_exists:
+            reconcile_live_secrets(cfg, project_path, app, values, live or set(),
+                                   prune=prune)
+        env_file = Path(tmp) / "instance.env"
+        write_env_file(env_file, values)
+        try:
+            os.chmod(env_file, 0o600)
+        except OSError:
+            pass
         # Provision when there's no running instance — covers a brand-new app AND a
         # half-provisioned one (app/volume exist but the image build failed, so no
         # started machine). Only ssh-update an instance that's actually up.
-        deployed = fly_app_exists(app) and fly_instance_running(app)
+        deployed = app_exists and fly_instance_running(app)
 
         # Provision flags shared by both delivery modes. Either deploy a prebuilt
         # team image by ref (C24), or pass the build context (source repo, or the

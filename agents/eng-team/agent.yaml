@@ -11,6 +11,11 @@ event_server: ${MODASTACK_EVENT_SERVER}
 services:
   - name: github
     events: true
+    credentials:
+      # The gh CLI auths via GH_TOKEN. Declared here (not just consumed at
+      # runtime) so it's a first-class secret: materialized on deploy and never
+      # pruned by the secrets reconcile (#385).
+      token: ${GH_TOKEN}
   - name: slack
     events: true
     # Optional: comma-separated channel IDs to scope this team to specific

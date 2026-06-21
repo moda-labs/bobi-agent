@@ -201,7 +201,7 @@ secrets) and is the seam a token broker later fills. Team Environments must have
 **The three flows:**
 
 - **Add a team** → push a new `agents/<team>/` to `main`. `team-packages.yml`
-  publishes its tarball; `gitops-teams.yml` (triggered on that completing) sees
+  publishes its tarball; `deploy-agent-teams.yml` (triggered on that completing) sees
   no `<fleet>-<team>` app yet → runs the provisioner with the team's
   `MODASTACK_ENV`. No manual step beyond the one-time Environment secret.
 - **Edit a team** → push changes under an existing `agents/<team>/`. The matching
