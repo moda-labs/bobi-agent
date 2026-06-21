@@ -29,11 +29,11 @@ requires:
   - name: gstack
     why: "QA, browse, ship, and review skills used throughout the eng lifecycle"
     check: "test -e ~/.claude/skills/browse/SKILL.md && test -x ~/.claude/skills/gstack/browse/dist/browse"
-    fix: "git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && ./setup"
+    fix: "git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && git checkout a861c00cfac6e2376d26c7d3ba5207cdc5aefc49 && ./setup"
   - name: codex
     why: "Codex-as-a-tool for adversarial reviews and second-opinion analysis (MDS-42 UC3)"
     check: "command -v codex >/dev/null 2>&1 && { test -n \"${OPENAI_API_KEY:-}\" || codex --version >/dev/null 2>&1; }"
-    fix: "npm install -g @openai/codex && (codex auth login || echo 'Set OPENAI_API_KEY in .modastack/.env')"
+    fix: "npm install -g @openai/codex@0.141.0 && (codex auth login || echo 'Set OPENAI_API_KEY in .modastack/.env')"
   - name: gh
     why: "GitHub CLI — the primary interface for issues, PRs, and CI status (tools/github.md). Auth via GH_TOKEN."
     check: "command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1"
@@ -45,22 +45,33 @@ requires:
 # `requires.fix` interactively). CI renders this to a Docker hook layer that sits
 # BELOW the framework wheel — a code-only release rebuilds only the wheel, not
 # these tools (modastack/build_render.py). `apt`/`npm` install as root; `run`
-# steps install as the modastack user into a seed HOME copied onto the volume at
-# boot (so gstack's ~/.claude/skills survive the volume remap). `verify:
+# steps install as the modastack user into the IMAGE home (/home/modastack, the
+# same HOME the agent uses at runtime — so ~-relative tools like gstack's
+# ~/.claude/skills are read in place, nothing seeded onto the volume). `verify:
 # requires` re-runs the checks above at build, failing CI if a tool is missing.
+#
+# REPRODUCIBILITY (#380): npm/gstack/playwright are PINNED to exact versions so
+# two builds of the same commit produce identical layers, and an upstream bump is
+# a deliberate one-line diff. team_deps_hash keys on this spec TEXT, so bumping a
+# pin moves the image identity (and rebuilds) — and nothing else does. Refresh a
+# pin with `npm view <pkg> version` / `git ls-remote …/gstack HEAD`. apt (nodejs/
+# jq) isn't pinned: exact Debian versions get pruned from the mirror (breaking
+# rebuilds); it tracks the pinned base image's Debian trixie instead.
 build:
   # jq pairs with gh for JSON wrangling; nodejs/npm power codex/bun/gstack.
   apt: [nodejs, npm, jq]
   # Global npm installs land in /usr/local/bin — on PATH at build AND runtime,
   # outside HOME (no volume-seed needed). `bun` is gstack's `./setup` runtime.
-  npm: ["@openai/codex", "bun"]
+  # Pinned (#380) — bump deliberately.
+  npm: ["@openai/codex@0.141.0", "bun@1.3.14"]
   # Root steps apt can't express:
   #  - Playwright Chromium needs ~30 system libs; let Playwright resolve them for
   #    the running Debian (avoids hand-listing t64 names) before gstack ./setup.
+  #    Pinned to playwright@1.61.0 (#380) so the resolved lib set is stable.
   #  - the GitHub CLI (`gh`) isn't in Debian apt — add its official repo. `gh` is
   #    the eng workflow's primary GitHub interface; it auths via GH_TOKEN at run.
   run_root:
-    - "npx --yes playwright install-deps chromium"
+    - "npx --yes playwright@1.61.0 install-deps chromium"
     - >-
       mkdir -p -m 755 /etc/apt/keyrings &&
       curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg
@@ -73,7 +84,9 @@ build:
       apt-get update && apt-get install -y --no-install-recommends gh &&
       rm -rf /var/lib/apt/lists/*
   run:
-    - "git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && ./setup"
+    # Pinned to a gstack commit SHA (#380) — bump deliberately via `git ls-remote
+    # https://github.com/garrytan/gstack HEAD`.
+    - "git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && git checkout a861c00cfac6e2376d26c7d3ba5207cdc5aefc49 && ./setup"
   verify: requires
 
 # Deterministic event→workflow routing. These rules fire BEFORE the
