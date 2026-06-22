@@ -38,6 +38,7 @@ modastack agents add-registry <repo>  # add a remote registry
 
 modastack ask "question"          # ask an agent, block until response
 modastack message "text"          # inject a message into any session
+modastack compact                 # flush + rotate a session's context now (default: manager)
 modastack status                  # show active agents
 modastack events                  # show recent events and decisions
 modastack transcript show <sess>  # session transcript

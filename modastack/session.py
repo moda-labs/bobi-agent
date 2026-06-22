@@ -28,8 +28,33 @@ from modastack.sdk import (
 
 log = logging.getLogger(__name__)
 
-# Default rotation cap — absolute input_tokens, not a window fraction.
+# Default rotation cap — absolute context-fill tokens, not a window fraction.
 DEFAULT_ROTATION_TOKEN_CAP = 275_000
+
+# Control sentinel for `modastack compact` (#433). Delivered as an inbox
+# message body; the run loop recognizes it, flags rotation, and never forwards
+# it to the model. An exact-match constant, so a human message can't trip it.
+COMPACT_SENTINEL = "\x00__modastack_compact__\x00"
+
+
+def _context_fill_tokens(usage: dict | None) -> int:
+    """True context-window fill for a turn.
+
+    The prompt sent to the model is ``input_tokens`` (uncached) +
+    ``cache_read_input_tokens`` (the cached prefix) +
+    ``cache_creation_input_tokens`` (newly cached this turn). With prompt
+    caching on, almost the whole conversation lands in ``cache_read`` and
+    ``input_tokens`` alone is a wildly low proxy — which is why the old
+    rotation check (input_tokens only) never fired and the manager ran to
+    ~424K. Sum all three for the real fill.
+    """
+    if not usage:
+        return 0
+    return (
+        (usage.get("input_tokens") or 0)
+        + (usage.get("cache_read_input_tokens") or 0)
+        + (usage.get("cache_creation_input_tokens") or 0)
+    )
 
 # Background event-subscription retry cadence (#409). When the initial
 # registration handshake with the event server times out, the session boots
@@ -89,6 +114,10 @@ class Session:
 
         # Context rotation state (Steps 1-4, #273)
         self._rotate_pending = False
+        # Manual `compact` bypasses the no-op-flush guard (rotate even if the
+        # decision log didn't change — the durable INDEX.md is already there).
+        self._rotate_force = False
+        self._rotate_reason = "context_cap"
         self._rotation_count = 0
         self._flush_snapshot_mtime = 0.0
         self._flush_snapshot_hash = ""
@@ -187,6 +216,9 @@ class Session:
         await self._drain_turn()
 
         self._rotate_pending = False
+        reason = self._rotate_reason
+        self._rotate_force = False
+        self._rotate_reason = "context_cap"
         self._rotation_count += 1
 
         # Step 6: Observability — log rotation event
@@ -194,7 +226,7 @@ class Session:
             "rotation",
             {
                 "count": self._rotation_count,
-                "reason": "input_tokens_cap",
+                "reason": reason,
             },
             session=self.name,
         )
@@ -208,7 +240,7 @@ class Session:
                     "payload": {
                         "session": self.name,
                         "rotation_count": self._rotation_count,
-                        "reason": "input_tokens_cap",
+                        "reason": reason,
                     },
                 },
                 session_id=self.name,
@@ -297,15 +329,19 @@ class Session:
                     else:
                         self._set_state("waiting_input")
                         registry.update(self.name, status="idle", session_id=msg.session_id)
-                        # Step 2: Check rotation cap — input_tokens IS the
-                        # whole conversation size, so it directly measures fill.
-                        if input_tokens >= self._rotation_token_cap:
+                        # Step 2: Check rotation cap against TRUE context fill.
+                        # input_tokens alone is the uncached delta (≈0 on a warm
+                        # turn) — the conversation lives in cache_read. Summing
+                        # the cache fields is what actually measures the window.
+                        context_tokens = _context_fill_tokens(msg.usage)
+                        if context_tokens >= self._rotation_token_cap:
                             log.info(
-                                "Session '%s' input_tokens=%d exceeds cap=%d — "
+                                "Session '%s' context=%d tokens exceeds cap=%d — "
                                 "rotation pending",
-                                self.name, input_tokens, self._rotation_token_cap,
+                                self.name, context_tokens, self._rotation_token_cap,
                             )
                             self._rotate_pending = True
+                            self._rotate_reason = "context_cap"
         except Exception as e:
             log.error(f"Drain failed for '{self.name}': {e}")
             self._set_state("error")
@@ -346,6 +382,17 @@ class Session:
             log.warning(f"Session '{self.name}' never became ready for inbox message")
             if msg.wait:
                 self.inbox.respond(msg, "session not ready")
+            return
+
+        # `modastack compact` control signal — flag a forced rotation and let
+        # the idle loop flush + rotate. Never forward it to the model.
+        if msg.text == COMPACT_SENTINEL:
+            log.info("Session '%s' received compact request — rotation pending", self.name)
+            self._rotate_pending = True
+            self._rotate_force = True
+            self._rotate_reason = "manual"
+            if msg.wait:
+                self.inbox.respond(msg, "compaction requested; rotating at next idle")
             return
 
         try:
@@ -405,8 +452,11 @@ class Session:
             # Don't rotate on flush failure — retry next idle cycle
             return
 
-        # Step 4: Verify the flush actually changed INDEX.md
-        if not self._verify_flush():
+        # Step 4: Verify the flush actually changed INDEX.md. A no-op flush
+        # normally aborts (don't drop context we failed to persist) — but a
+        # manual `compact` rotates anyway: the durable INDEX.md is already in
+        # place, "nothing new to write" is not a reason to refuse the operator.
+        if not self._verify_flush() and not self._rotate_force:
             # No-op flush — skip rotation, retry next idle cycle
             return
 

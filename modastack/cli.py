@@ -1094,6 +1094,39 @@ def message(text, to, wait, timeout):
         raise SystemExit(1)
 
 
+@main.command()
+@click.option("--to", default=None, help="Target session (default: manager)")
+def compact(to):
+    """Compact a session's context now — flush its decision log and rotate.
+
+    Triggers the same graceful rotation the token cap does, on demand: the
+    session writes its decision log to INDEX.md, then swaps to a fresh
+    conversation that reloads only that log. Use it when a long-lived
+    session has grown slow. Rotation happens at the session's next idle
+    moment (it won't interrupt an in-flight turn).
+
+    Usage:
+        modastack compact                       # compact the manager
+        modastack compact --to eng-42-implement # compact a specific session
+    """
+    from modastack.inbox import deliver
+    from modastack.session import COMPACT_SENTINEL
+
+    address = _resolve_address(to)
+    if not address:
+        target = to or "manager"
+        click.echo(f"No active session found for '{target}'.", err=True)
+        raise SystemExit(1)
+
+    ok, response = deliver(address, COMPACT_SENTINEL, sender="cli", wait=False)
+    if ok:
+        click.echo(f"Compaction requested for {address} — it will flush its "
+                   f"decision log and rotate at its next idle moment.")
+    else:
+        click.echo(f"Failed: {response}", err=True)
+        raise SystemExit(1)
+
+
 @main.command(hidden=True)
 @click.argument("question", required=True)
 @click.option("--timeout", default=300, type=int, help="Timeout in seconds")
