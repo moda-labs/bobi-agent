@@ -108,18 +108,6 @@ def _parse_channels(value) -> list[str]:
 
 
 @dataclass
-class ConnectionEntry:
-    """One external model connection declared in agent.yaml."""
-
-    name: str
-    kind: str  # built-in MCP injection trigger; implemented kinds: "image", "codex"
-    provider: str = ""
-    api_key: str = ""
-    model: str = ""
-    extra: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
 class RequiresEntry:
     """One host-level dependency declared in agent.yaml."""
 
@@ -231,7 +219,6 @@ class Config:
 
     default_role: str = ""
 
-    connections: list[ConnectionEntry] = field(default_factory=list)
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     monitors: list[dict] = field(default_factory=list)
     auto_dispatch: list[dict] = field(default_factory=list)
@@ -246,17 +233,6 @@ class Config:
             if svc.name == service:
                 return svc.credentials.get(key, "")
         return ""
-
-    def connection(self, name: str) -> ConnectionEntry | None:
-        """Look up a connection by name."""
-        for conn in self.connections:
-            if conn.name == name:
-                return conn
-        return None
-
-    def connections_by_kind(self, kind: str) -> list[ConnectionEntry]:
-        """Return all connections of a given kind (image, chat, etc.)."""
-        return [c for c in self.connections if c.kind == kind]
 
     @classmethod
     def load(cls, project_path: Path) -> "Config":
@@ -313,25 +289,6 @@ class Config:
 
         build = cls._parse_build(build_raw, path)
 
-        connections = []
-        for c in raw.get("connections", []):
-            if not isinstance(c, dict):
-                continue
-            name = c.get("name", "")
-            kind = c.get("kind", "")
-            if not name or not kind:
-                log.warning("connection entry missing name or kind, skipping: %s", c)
-                continue
-            extra = {k: str(v) for k, v in c.items()
-                     if k not in ("name", "kind", "provider", "api_key", "model")}
-            connections.append(ConnectionEntry(
-                name=name, kind=kind,
-                provider=c.get("provider", ""),
-                api_key=c.get("api_key", ""),
-                model=c.get("model", ""),
-                extra=extra,
-            ))
-
         event_server = raw.get("event_server", {})
         if isinstance(event_server, str):
             event_server_url = event_server
@@ -348,7 +305,6 @@ class Config:
             registries=raw.get("registries", []),
             default_role=raw.get("defaults", {}).get("role", "") if isinstance(raw.get("defaults"), dict) else "",
             venn_api_key=raw.get("venn_api_key", ""),
-            connections=connections,
             mcp_servers=raw.get("mcp_servers", {}),
             monitors=raw.get("monitors", []),
             auto_dispatch=raw.get("auto_dispatch", []),

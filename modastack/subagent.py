@@ -359,14 +359,13 @@ def run_phase_blocking(
     if memory_prompt:
         append_text += "\n\n" + memory_prompt
 
-    # Inject built-in MCP servers so workflow step agents also have access
-    # to image generation and other connection-based tools.
+    # Pass through any user-declared MCP servers from config so workflow
+    # step agents also have access to them.
     from modastack.paths import modastack_root as _mr
     from modastack.config import Config as _Config
-    from modastack.mcp.inject import inject_builtin_mcp_servers
     try:
         _cfg = _Config.load(_mr())
-        _mcp = inject_builtin_mcp_servers(_cfg.mcp_servers, _cfg.connections)
+        _mcp = _cfg.mcp_servers
     except Exception:
         _mcp = None
 
@@ -492,16 +491,14 @@ def spawn_adhoc(
         if memory_prompt:
             append_parts.append(memory_prompt)
 
-    # Inject built-in MCP servers (e.g. image generation) based on config.
+    # Resolve MCP servers: caller-supplied override, else config-declared.
     # Done here so all spawn paths (CLI, workflow, subagent) go through one
     # call site.
     from modastack.paths import modastack_root as _mr
     from modastack.config import Config as _Config
-    from modastack.mcp.inject import inject_builtin_mcp_servers
     try:
         _cfg = _Config.load(_mr())
-        merged_mcp = inject_builtin_mcp_servers(
-            mcp_servers or _cfg.mcp_servers, _cfg.connections)
+        merged_mcp = mcp_servers or _cfg.mcp_servers
     except Exception:
         merged_mcp = mcp_servers
 
