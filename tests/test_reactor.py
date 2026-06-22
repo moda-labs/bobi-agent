@@ -139,6 +139,36 @@ class TestAutoDispatchRule:
         key = rule.dedup_key(event)
         assert key == "pr-feedback:github:moda-labs/test:unknown"
 
+    def test_dedup_key_includes_event_id(self):
+        """Distinct deliveries on the same PR get distinct keys (issue #326)."""
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+        )
+        base = {
+            "type": "github.issue_comment",
+            "topics": ["github:moda-labs/test"],
+            "fields": {"number": 42},
+        }
+        key_a = rule.dedup_key({**base, "id": "delivery-aaa"})
+        key_b = rule.dedup_key({**base, "id": "delivery-bbb"})
+        assert key_a == "pr-feedback:github:moda-labs/test:42:delivery-aaa"
+        assert key_a != key_b
+
+    def test_dedup_key_stable_for_same_id(self):
+        """Redelivery of the same event (same id) yields the same key."""
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+        )
+        event = {
+            "type": "github.issue_comment",
+            "id": "delivery-aaa",
+            "topics": ["github:moda-labs/test"],
+            "fields": {"number": 42},
+        }
+        assert rule.dedup_key(event) == rule.dedup_key(dict(event))
+
 
 class TestEventReactor:
     """EventReactor matches events to rules and dispatches workflows."""
@@ -257,6 +287,35 @@ class TestEventReactor:
         assert reactor.process(event) == "dispatched"
         _wait_calls(mock_launch, 2)
         assert mock_launch.call_count == 2
+
+    @patch("modastack.subagent.launch_agent")
+    def test_distinct_comments_same_pr_each_dispatch_within_cooldown(self, mock_launch):
+        """Two distinct comments on one PR both dispatch despite the cooldown.
+
+        Regression for issue #326: the cooldown must dedup redelivery of the
+        SAME event, not suppress genuinely new comments on the same PR.
+        """
+        mock_launch.return_value = "wf-pr-feedback-test-42"
+        reactor = self._make_reactor(cooldown=1800)  # production cooldown
+        first = dict(self._make_review_comment_event(), id="delivery-aaa")
+        followup = dict(self._make_review_comment_event(), id="delivery-bbb")
+
+        assert reactor.process(first) == "dispatched"
+        assert reactor.process(followup) == "dispatched"
+        _wait_calls(mock_launch, 2)
+        assert mock_launch.call_count == 2
+
+    @patch("modastack.subagent.launch_agent")
+    def test_same_comment_redelivered_dedups_within_cooldown(self, mock_launch):
+        """Replay of the identical event (same id) dedups to one dispatch."""
+        mock_launch.return_value = "wf-pr-feedback-test-42"
+        reactor = self._make_reactor(cooldown=1800)
+        event = dict(self._make_review_comment_event(), id="delivery-aaa")
+
+        assert reactor.process(event) == "dispatched"
+        assert reactor.process(dict(event)) is None
+        _wait_calls(mock_launch, 1)
+        assert mock_launch.call_count == 1
 
     @patch("modastack.subagent.launch_agent")
     def test_different_prs_dispatch_independently(self, mock_launch):
