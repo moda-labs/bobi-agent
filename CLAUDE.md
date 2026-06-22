@@ -269,5 +269,14 @@ in feature PRs (see [Contributing](#contributing)). To cut a release:
 
 1. Bump `version` in `pyproject.toml` and `VERSION`, and add a `CHANGELOG.md`
    entry summarizing the PRs merged since the last release.
-2. `git tag v<version> && git push --tags`
-3. GitHub Actions publishes to PyPI
+2. Publish a GitHub Release: `gh release create v<version> --target main …`
+   (creates the tag **and** publishes the Release — that event is the gate).
+3. Publishing the Release runs `release.yml` — one gated pipeline:
+   subscription-login smoke → build the wheel once → build the canary **from that
+   wheel** + `CANARY-OK` smoke (the gate) → then, in parallel: publish the same
+   wheel to **PyPI** (+ Cloudflare event-server + Homebrew) **and** roll the Fly
+   fleet → reconcile team packages + secrets.
+
+The canary runs the exact wheel we publish, so it gates both the PyPI upload and
+the fleet roll. PyPI trusted publishing is configured for `release.yml` +
+environment `pypi`. A bare `git push --tags` no longer publishes — publish a Release.

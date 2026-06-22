@@ -7,7 +7,7 @@ value to pass as the Dockerfile's TEAM_DEPS build-arg). Print NOTHING (and exit 
 for a generic deployment — no `build:` spec, no local team package (a `team-url:`
 deployment whose package CI can't see), or no deployment file at all.
 
-Used by .github/workflows/gitops-release.yml so a framework release rebuilds each
+Used by .github/workflows/release.yml so a framework release rebuilds each
 team-flavored instance's OWN image (its baked host tools on the new framework
 wheel) instead of rolling the shared generic image onto it — which would strip a
 team's tools and break its dispatch gate.

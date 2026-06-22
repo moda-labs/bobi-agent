@@ -3,11 +3,21 @@ name: Deploy agent teams
 # Reconcile deployments/<name>.yaml to live Fly instances (C22 / #342;
 # docs/design/DEPLOY_INTERFACE.md).
 #
-# WHEN it runs (deploy gate = a release, not every push to main):
-#   release: published   -> reconcile the whole active deployment set.
-#   push of a `deploy-*` tag -> same, without a formal release (manual / branch e2e;
-#                            tag pushes run the workflow from the TAGGED commit).
+# WHEN it runs (deploy gate = a release or an explicit deploy tag, not every push):
+#   workflow_call        -> invoked by the release pipeline (release.yml) as its
+#                           FINAL step, AFTER the fleet image roll — so a release
+#                           reconciles every deployment onto the freshly-built image.
+#   push of a `deploy-*` tag -> reconcile the active set WITHOUT an image build/roll.
+#                           This is the common standalone path: you edited a team
+#                           definition or a secret and want it live, no framework
+#                           bump. Tag pushes run the workflow from the TAGGED commit.
 #   workflow_dispatch    -> manual; optional `only:` to scope to one deployment.
+#
+# Team-package updates do NOT need an image rebuild: the definition (prompts,
+# roles, workflows) lives on the volume and is hot-pushed by `modastack deploy`;
+# only a framework bump or a team `build:` (host-deps) change rebuilds the image,
+# which is the release pipeline's job. So the deploy-* tag / dispatch path ships a
+# team edit on its own; the release pipeline's image roll precedes this reconcile.
 #
 # This workflow is a THIN CLIENT: all deployment business logic lives in the
 # `modastack deploy` primitive (idempotent provision-or-update, delivery-mode
@@ -42,14 +52,24 @@ name: Deploy agent teams
 #   Environment (or repo) per tenant with no shared secrets across them.
 
 on:
-  # Automated deployments fire on a published release — cutting a release is the
-  # deploy gate (an edit pushed to main does NOT auto-deploy; you release to ship).
-  release:
-    types: [published]
-  # Manual deploy without a formal release: push a `deploy-*` tag. Tag pushes run
-  # the workflow from the TAGGED commit (any branch), so this also drives the
-  # branch e2e of the GitOps path before a merge. (Release tags are `v*`, so they
-  # don't double-fire this.)
+  # Invoked by the release pipeline (release.yml) AFTER the image roll. The caller
+  # passes the release ref so the reconcile runs from the released commit, and
+  # `secrets: inherit` forwards FLY_API_TOKEN + the per-tenant Environment secrets.
+  workflow_call:
+    inputs:
+      only:
+        description: "Reconcile only this deployment name (default: all active)"
+        type: string
+        required: false
+      ref:
+        description: "Git ref to reconcile from (default: the triggering ref)"
+        type: string
+        required: false
+  # Standalone team-package deploy without a framework release: push a `deploy-*`
+  # tag. Ships a team-definition or secret edit live with NO image rebuild. Tag
+  # pushes run from the TAGGED commit (any branch), so this also drives the branch
+  # e2e of the GitOps path before a merge. (Release tags are `v*` and go through
+  # release.yml, so they don't double-fire this.)
   push:
     tags:
       - "deploy-*"
@@ -75,6 +95,9 @@ jobs:
       configured: ${{ steps.gate.outputs.configured }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_call passes the release ref; empty otherwise -> the triggering ref.
+          ref: ${{ inputs.ref || github.ref }}
 
       - id: gate
         env:
@@ -89,7 +112,9 @@ jobs:
 
       - id: plan
         env:
-          ONLY: ${{ github.event.inputs.only }}
+          # `inputs.only` is populated for BOTH workflow_dispatch and workflow_call;
+          # empty for a deploy-* tag push (reconcile the whole active set).
+          ONLY: ${{ inputs.only }}
         run: |
           set -euo pipefail
           # A release/tag deploy reconciles the WHOLE active set — `modastack
@@ -139,6 +164,9 @@ jobs:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_call passes the release ref; empty otherwise -> the triggering ref.
+          ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -188,6 +216,9 @@ jobs:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_call passes the release ref; empty otherwise -> the triggering ref.
+          ref: ${{ inputs.ref || github.ref }}
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Surface unmanaged instances
         run: |

@@ -1,6 +1,6 @@
 """Guards scripts/render-team-deps.py — the release-rollout helper that decides
 whether a fleet instance rebuilds its OWN team image (C24) or rolls the shared
-generic image (gitops-release.yml). A regression here would let a framework
+generic image (release.yml). A regression here would let a framework
 release clobber a team-flavored instance (e.g. moda-eng-team) with the generic
 image, stripping its baked tools."""
 import subprocess
