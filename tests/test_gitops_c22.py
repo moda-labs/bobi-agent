@@ -33,6 +33,7 @@ PROVISION_SH = REPO / "scripts" / "provision-instance.sh"
 DESTROY_SH = REPO / "scripts" / "destroy-instance.sh"
 WF_TEAMS = REPO / ".github" / "workflows" / "deploy-agent-teams.yml"
 WF_RELEASE = REPO / ".github" / "workflows" / "release.yml"
+WF_PUBLISH = REPO / ".github" / "workflows" / "publish-pypi.yml"
 
 
 # --- scripts/fleet.sh (exercised for real, Fly stubbed) ---------------------
@@ -286,3 +287,31 @@ def test_release_isolates_per_app_failures():
     # load-bearing flags from the provisioner (one-volume + zstd boot bug)
     assert "--ha=false" in script
     assert "--depot=false" in script
+
+
+# --- publish-pypi.yml invariants (gate the irreversible publish) ------------
+
+def test_publish_triggers_on_release_not_bare_tag():
+    """Publish fires on a published Release (the same gate as release.yml), NOT a
+    raw `v*` tag push — so a bare `git push --tags` can't ship an unverified build,
+    and the publish lines up behind the same event as the fleet roll."""
+    on = _load(WF_PUBLISH).get("on", _load(WF_PUBLISH).get(True))
+    assert "published" in on["release"]["types"]
+    assert "push" not in on  # the old tag-push trigger is retired
+
+
+def test_publish_is_gated_on_a_functional_wheel_smoke():
+    """PyPI is irreversible, so the upload job depends on a job that builds the
+    wheel, installs THAT artifact into a clean venv, and runs it — test the bytes,
+    then ship the bytes (the publish step does NOT rebuild)."""
+    jobs = _jobs(_load(WF_PUBLISH))
+    assert jobs["publish"]["needs"] == "build-and-smoke"
+    smoke = _step_scripts(jobs["build-and-smoke"])
+    assert "python -m build" in smoke
+    assert "dist/*.whl" in smoke           # installs the built artifact, not from PyPI
+    assert "modastack --version" in smoke  # functional: entry point + version
+    assert "modastack skill" in smoke      # functional: package_data shipped
+    # publish reuses the tested artifact instead of rebuilding it
+    publish_steps = jobs["publish"].get("steps", [])
+    assert any("download-artifact" in (s.get("uses") or "") for s in publish_steps)
+    assert not any("python -m build" in (s.get("run") or "") for s in publish_steps)

@@ -253,6 +253,13 @@ without explicit approval. `DESIGN.md` supersedes the visual/UX assumptions in
 
 ## Releasing
 
-1. Bump `version` in `pyproject.toml` and `VERSION`
-2. `git tag v<version> && git push --tags`
-3. GitHub Actions publishes to PyPI
+1. Bump `version` in `pyproject.toml` and `VERSION` (+ a `CHANGELOG.md` section)
+2. Publish a GitHub Release: `gh release create v<version> --target main …`
+   (creates the tag **and** publishes the Release — that event is the gate)
+3. Publishing the Release runs, gated:
+   - `publish-pypi.yml` — build wheel → functional install smoke → **PyPI**, then
+     Cloudflare event-server + Homebrew bump
+   - `release.yml` — subscription-login smoke → build + roll the Fly fleet image
+     (canary `CANARY-OK` gate) → reconcile team packages + secrets
+
+A bare `git push --tags` no longer publishes — you must publish a Release.
