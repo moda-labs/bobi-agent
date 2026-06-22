@@ -212,8 +212,49 @@ not provider-generic like aichat.
 - **Option B — eng-team `build:` spec** (recommended): consistent with how the
   other OpenAI-specific tool (`codex`) is actually baked today; keeps the base
   image provider-generic; only teams that opt in carry it.
-- **Recommendation: B**, on the codex-consistency argument — but flagging because
-  it diverges from the literal wording of the locked comment. Your call.
+- **Option C — pre-configured tool library (Zach, 2026-06-22).** A curated
+  catalog where each entry bundles the runtime binary (e.g. `openai`, `codex`)
+  *and* its tools guide markdown, and a team opts in with a one-line reference in
+  `agent.yaml` (e.g. `tool_library: [openai, codex]`) instead of hand-editing
+  three coordinated places.
+
+> **My take on C (the convention question Zach asked):** it is **better than
+> today's convention, and worth doing — but as its own ticket, not inside #397.**
+>
+> *Why better.* Adopting an OpenAI-specific tool today touches **three** places
+> that must stay in lockstep: `requires:` (check/fix), `build:` (the pinned
+> install), and `tools/<name>.md` (the guide). They already drift-by-design — the
+> codex version pin is **hand-duplicated** in `agent.yaml`: `requires.fix` says
+> `@openai/codex@0.141.0` and `build.npm` says `@openai/codex@0.141.0`. A library
+> entry collapses that to one pinned definition + one guide, opted into by name —
+> strictly less surface to keep in sync, and reusable across teams (eng-team,
+> dogfood, market-research today each re-derive their own bake).
+>
+> *Why it does **not** reintroduce what #397/#403 are tearing down.* The
+> `kind: image` MCP shim is a **runtime** indirection — it wraps a capability in
+> an injected server. A tool library is a **build/config-time** convenience that
+> *expands to the primitives we already have* (a `build:` bake + a `tools/*.md`
+> guide); the agent still calls the bare CLI directly. It removes hand-coordination,
+> it doesn't add a runtime layer. So it is on the right side of the line we drew.
+>
+> *Why not in #397.* This ticket is explicitly one slice of a three-ticket
+> teardown ("stay in lane"); designing a catalog format + a resolver that expands
+> a library reference into `requires`+`build`+guide at render time is a net-new
+> framework feature with its own blast radius, and bolting it onto a teardown
+> slice would create merge churn with #285/#403. It deserves its own spec.
+>
+> *Crucially, picking B now does not paint us into a corner.* B is exactly what a
+> future library entry would expand into — when the library lands, the
+> openai-image bake + `tools/image.md` lift into a catalog entry mechanically,
+> with no rework. A (base Dockerfile) is the option to avoid, because base-baking
+> an OpenAI-specific tool is itself an inconsistency the library would later have
+> to unwind.
+- **Recommendation: ship #397 on B now; capture the tool library as its own
+  issue/spec.** Happy to file that ticket (problem = three-places-by-hand +
+  duplicated pins; proposal = named catalog of binary+guide, opt-in via
+  `agent.yaml`) and link it here on your nod — that's the "best of both worlds":
+  #397 lands small and consistent, your convention improvement gets designed
+  properly instead of rushed.
 
 **D2 — Save-to-file: documented one-liner vs thin wrapper.**
 The CLI has no native file output (verified above). The locked decision says
