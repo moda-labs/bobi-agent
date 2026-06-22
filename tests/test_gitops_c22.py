@@ -329,8 +329,10 @@ def test_release_isolates_per_app_failures():
 
 
 def test_release_publishes_to_pypi_only_after_the_canary():
-    """Publish + its downstream (event-server, Homebrew) are part of THIS pipeline
-    (trusted publishing can't run from a reusable workflow), all behind the canary."""
+    """Publish + its wheel-dependent downstream (Homebrew) are part of THIS pipeline
+    (trusted publishing can't run from a reusable workflow), all behind the canary.
+    The event server is a Cloudflare Worker with no dependency on the published
+    wheel, so it gates on the canary directly and runs concurrently with publish."""
     jobs = _jobs(_load(WF_RELEASE))
-    assert jobs["deploy-event-server"]["needs"] == "publish"
+    assert jobs["deploy-event-server"]["needs"] == "build-canary"
     assert jobs["update-homebrew"]["needs"] == "publish"
