@@ -568,6 +568,43 @@ class TestWebSocketDrain:
             assert len(replayed) >= 1
 
 
+class TestHeartbeatLiveness:
+    """The real server must answer the app-level heartbeat so the client can
+    tell a live receive path from a deaf-but-connected one (#425)."""
+
+    def test_real_client_becomes_and_stays_live(self, deployment):
+        from modastack.events.client import EventServerClient
+
+        base_url, dep_id, api_key = deployment
+
+        client = EventServerClient(
+            server_url=base_url,
+            deployment_id=dep_id,
+            api_key=api_key,
+            cursor_path=None,
+        )
+        # Fast cadence so the round-trip is observable within the test budget.
+        client._HEARTBEAT_INTERVAL_S = 0.2
+        client._HEARTBEAT_TIMEOUT_S = 1.5
+        client.start()
+        try:
+            assert client.wait_connected(timeout=5.0)
+
+            # A real ping must round-trip to a real pong → liveness goes True.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not client.is_live():
+                time.sleep(0.05)
+            assert client.is_live(), "real server never answered the heartbeat ping"
+
+            # And stay live across several heartbeat windows — a healthy server
+            # must not be mistaken for deaf.
+            time.sleep(client._HEARTBEAT_TIMEOUT_S * 2)
+            assert client.is_live()
+            assert client._deaf_reconnects == 0
+        finally:
+            client.stop()
+
+
 @pytest.mark.local_only
 class TestEventServerCLI:
 

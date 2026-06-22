@@ -156,7 +156,8 @@ class EventServerClient:
 
     def __init__(self, server_url: str, deployment_id: str, api_key: str,
                  on_event: callable = None, cursor_path: Path | None = None,
-                 queue: SimpleQueue | None = None):
+                 queue: SimpleQueue | None = None,
+                 on_deaf_reconnect: callable = None):
         self.server_url = server_url.rstrip("/")
         self.deployment_id = deployment_id
         self.api_key = api_key
@@ -176,6 +177,23 @@ class EventServerClient:
         # buffered but never replayed to this brand-new subscriber.
         self._connected = threading.Event()
         self._reconnect_delay = 1
+        # Receive-side liveness (#425). The transport ping (run_forever's
+        # ping_interval) only proves the SOCKET is alive — on Cloudflare a
+        # hibernated WebSocket is kept warm by the edge and answers protocol
+        # pings even when the Durable Object behind it has stopped delivering
+        # events. The result is a "deaf manager": the connected frame arrives
+        # (so the session logs "ready"), next_seq freezes, and no events are
+        # ever queued, until a manual --fresh restart. The app-level heartbeat
+        # below round-trips a ping through the SERVER (which replies "pong"); if
+        # pongs stop while the socket still reports connected, the receive path
+        # is deaf and we force a reconnect to self-heal.
+        self._last_pong_at: float | None = None
+        self._deaf_reconnects = 0
+        # Set after a deaf-triggered reconnect so the next "connected" frame can
+        # re-assert subscriptions (covers a stale server-side subscription index
+        # in addition to a zombie socket).
+        self._needs_resubscribe = False
+        self._on_deaf_reconnect = on_deaf_reconnect
         # Connection-stability tracking so routine reconnects stay quiet but
         # genuine flapping still surfaces. A Cloudflare Durable Object cycles
         # hibernating WebSockets from the runtime side every few minutes; the
@@ -192,6 +210,62 @@ class EventServerClient:
     _STABLE_AFTER_S = 30.0
     # This many short-lived connections in a row flips logging to a warning.
     _FLAP_WARN_STREAK = 5
+    # App-level heartbeat cadence. A ping is sent every interval; if no pong has
+    # come back within the timeout (~3 missed beats) while the socket still
+    # claims connected, the receive path is deaf and we force a reconnect.
+    _HEARTBEAT_INTERVAL_S = 30.0
+    _HEARTBEAT_TIMEOUT_S = 95.0
+
+    def _handle_pong(self) -> None:
+        """Record a pong — proof the receive path round-tripped the server."""
+        self._last_pong_at = time.monotonic()
+
+    def seconds_since_pong(self) -> float | None:
+        """Seconds since the last pong, or None if none seen yet."""
+        if self._last_pong_at is None:
+            return None
+        return time.monotonic() - self._last_pong_at
+
+    def is_live(self) -> bool:
+        """True when the receive path is verified live, not merely connected.
+
+        Distinct from ``wait_connected`` (which only proves the connect frame
+        arrived): a deaf-but-connected socket reports connected forever, so
+        "ready" overstated health (#425). Liveness requires a recent pong.
+        """
+        since = self.seconds_since_pong()
+        return (self._connected.is_set() and since is not None
+                and since <= self._HEARTBEAT_TIMEOUT_S)
+
+    def _heartbeat(self, ws: "websocket.WebSocketApp",
+                   hb_stop: threading.Event) -> None:
+        """Per-connection watchdog: ping the server, force-reconnect if deaf.
+
+        Runs for the life of one connection. ``hb_stop`` is set when that
+        connection closes, so the loop never outlives its socket.
+        """
+        while not hb_stop.wait(self._HEARTBEAT_INTERVAL_S):
+            if self._stop.is_set():
+                return
+            since = self.seconds_since_pong()
+            if since is not None and since > self._HEARTBEAT_TIMEOUT_S:
+                self._deaf_reconnects += 1
+                self._connected.clear()
+                self._needs_resubscribe = True
+                log.warning(
+                    "Event client deaf: no pong in %.0fs though the socket "
+                    "reports connected — forcing reconnect (deaf #%d)",
+                    since, self._deaf_reconnects,
+                )
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+                return
+            try:
+                ws.send(json.dumps({"type": "ping"}))
+            except Exception:
+                return  # socket already broken; the run loop will reconnect
 
     def _record_disconnect(self, uptime: float | None) -> str:
         """Classify a just-ended connection and update flap-streak state.
@@ -283,6 +357,16 @@ class EventServerClient:
             f"{self.server_url.replace('https://', 'wss://').replace('http://', 'ws://')}"
             f"/deployments/{self.deployment_id}/subscribe?last_seen={last_seen}"
         )
+        # One watchdog per connection; closing the socket sets this so the
+        # heartbeat thread never outlives its socket.
+        hb_stop = threading.Event()
+
+        def on_open(ws):
+            # Baseline the pong clock so the watchdog has a reference before the
+            # first beat completes, then run the heartbeat for this connection.
+            self._last_pong_at = time.monotonic()
+            threading.Thread(target=self._heartbeat, args=(ws, hb_stop),
+                             daemon=True, name="event-client-hb").start()
 
         def on_message(ws, message):
             try:
@@ -295,6 +379,9 @@ class EventServerClient:
             if msg_type == "connected":
                 self._last_connected_at = time.monotonic()
                 self._reconnect_delay = 1
+                # Treat the connect frame as a fresh liveness proof so the
+                # watchdog doesn't immediately fire on a just-opened socket.
+                self._last_pong_at = time.monotonic()
                 # First connect of the process is worth surfacing; routine
                 # reconnects after CF cycling are not, so they go to debug.
                 if not self._ever_connected:
@@ -303,9 +390,20 @@ class EventServerClient:
                     log.debug(f"Event client reconnected (next_seq: {msg.get('next_seq')})")
                 self._ever_connected = True
                 self._connected.set()
+                # After a deaf reconnect, re-assert subscriptions in case the
+                # server-side subscription index went stale (e.g. eviction
+                # during a long redeploy gap), not just the socket.
+                if self._needs_resubscribe:
+                    self._needs_resubscribe = False
+                    cb = self._on_deaf_reconnect
+                    if cb:
+                        threading.Thread(
+                            target=self._safe_resubscribe, args=(cb,),
+                            daemon=True, name="event-client-resub").start()
                 return
 
             if msg_type == "pong":
+                self._handle_pong()
                 return
 
             if msg_type in ("event", "replay"):
@@ -326,14 +424,37 @@ class EventServerClient:
             log.debug(f"Event client WebSocket error: {error}")
 
         def on_close(ws, close_status, close_msg):
+            hb_stop.set()  # stop this connection's heartbeat watchdog
             log.debug(f"Event client disconnected: {close_status} {close_msg}")
 
         self._ws = websocket.WebSocketApp(
             ws_url,
             header={"Authorization": f"Bearer {self.api_key}"},
+            on_open=on_open,
             on_message=on_message,
             on_error=on_error,
             on_close=on_close,
         )
         ssl_context = ssl.create_default_context(cafile=certifi.where())
-        self._ws.run_forever(ping_interval=30, ping_timeout=10, sslopt={"context": ssl_context})
+        try:
+            self._ws.run_forever(ping_interval=30, ping_timeout=10,
+                                 sslopt={"context": ssl_context})
+        finally:
+            # Belt-and-suspenders: ensure the watchdog stops even if on_close
+            # never fired (e.g. run_forever raised before opening). _connected
+            # is left as-is for routine reconnects (sub-second, lossless) so
+            # subscribe-before-publish waiters aren't stalled; the deaf watchdog
+            # clears it explicitly when the path is genuinely dead.
+            hb_stop.set()
+
+    def _safe_resubscribe(self, cb: callable) -> None:
+        """Run the deaf-reconnect resubscribe hook, swallowing its errors.
+
+        The hook re-asserts this deployment's subscriptions (and re-registers on
+        failure) so a reconnect restores delivery even when the server-side
+        subscription index — not just the socket — went stale.
+        """
+        try:
+            cb()
+        except Exception as e:
+            log.debug("Resubscribe after deaf reconnect failed: %s", e)
