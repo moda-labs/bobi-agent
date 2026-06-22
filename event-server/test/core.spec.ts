@@ -88,6 +88,61 @@ describe("normalizeGitHubPayload", () => {
 		expect(event!.fields!.assignee).toBe("dev1");
 	});
 
+	it("extracts comment_id + is_pull_request from an issue_comment on a PR (#411)", () => {
+		const event = normalizeGitHubPayload("issue_comment", "d-ic", {
+			action: "created",
+			repository: { full_name: "org/repo" },
+			sender: { login: "modastack" },
+			issue: {
+				number: 410, title: "spec", state: "open",
+				draft: true,
+				pull_request: { html_url: "https://github.com/org/repo/pull/410" },
+			},
+			comment: { id: 99887766, body: "Rendered spec", html_url: "x" },
+		});
+		expect(event!.type).toBe("github.issue_comment");
+		expect(event!.fields!.is_pull_request).toBe(true);
+		expect(event!.fields!.comment_id).toBe(99887766);
+		expect(event!.fields!.sender).toBe("modastack");
+		// draft carried on the issue representation of a PR
+		expect(event!.fields!.draft).toBe(true);
+	});
+
+	it("extracts comment_id from a pull_request_review_comment (#411)", () => {
+		const event = normalizeGitHubPayload("pull_request_review_comment", "d-prc", {
+			action: "created",
+			repository: { full_name: "org/repo" },
+			sender: { login: "reviewer" },
+			pull_request: { number: 12, title: "feat", state: "open", draft: false },
+			comment: { id: 555, body: "nit", path: "a.ts", html_url: "x" },
+		});
+		expect(event!.fields!.comment_id).toBe(555);
+		expect(event!.fields!.draft).toBe(false);
+	});
+
+	it("extracts review_id + draft from a pull_request_review (#411)", () => {
+		const event = normalizeGitHubPayload("pull_request_review", "d-pr", {
+			action: "submitted",
+			repository: { full_name: "org/repo" },
+			sender: { login: "reviewer" },
+			pull_request: { number: 7, title: "fix", state: "open", draft: true },
+			review: { id: 4242, state: "changes_requested", body: "redo" },
+		});
+		expect(event!.fields!.review_id).toBe(4242);
+		expect(event!.fields!.review_state).toBe("changes_requested");
+		expect(event!.fields!.draft).toBe(true);
+	});
+
+	it("omits draft/comment_id when absent (plain issue)", () => {
+		const event = normalizeGitHubPayload("issues", "d-plain", {
+			action: "opened",
+			repository: { full_name: "org/repo" },
+			issue: { number: 10, title: "Bug", state: "open" },
+		});
+		expect(event!.fields!.draft).toBeUndefined();
+		expect(event!.fields!.comment_id).toBeUndefined();
+	});
+
 	it("returns null when no repository", () => {
 		const event = normalizeGitHubPayload("push", "d-1", { action: "opened" });
 		expect(event).toBeNull();
