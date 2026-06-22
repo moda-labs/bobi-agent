@@ -242,7 +242,13 @@ class TestMCPInjectCodex:
         result = inject_builtin_mcp_servers(existing, connections)
         assert result["modastack-codex"]["command"] == "custom"
 
-    def test_both_image_and_codex_injected(self):
+    def test_image_connection_injects_nothing(self):
+        """The kind:image MCP shim was retired in #397 — image is a baked CLI now.
+
+        A kind:image connection must inject NO server; a sibling kind:codex
+        connection still injects modastack-codex (proves we removed only the
+        image branch, not the codex one — which #403 will take later).
+        """
         from modastack.mcp.inject import inject_builtin_mcp_servers
         from modastack.config import ConnectionEntry
 
@@ -251,5 +257,5 @@ class TestMCPInjectCodex:
             ConnectionEntry(name="codex", kind="codex", provider="openai-codex", api_key="sk-test"),
         ]
         result = inject_builtin_mcp_servers(None, connections)
-        assert "modastack-image" in result
+        assert "modastack-image" not in result
         assert "modastack-codex" in result
