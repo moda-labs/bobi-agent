@@ -991,12 +991,32 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from queue import SimpleQueue
     session_queue: SimpleQueue = SimpleQueue()
 
+    def _resubscribe_on_deaf() -> None:
+        """Re-assert subscriptions after the client force-reconnects a deaf path.
+
+        A zombie socket is healed by the reconnect itself; this additionally
+        repairs a stale server-side subscription index (e.g. the deployment was
+        dropped from the index during a long redeploy gap) by re-adding every
+        key. Idempotent — the server dedups keys already present (#425).
+        """
+        from modastack import http as pooled
+        pooled.put(
+            f"{es_url}/deployments/{es_deployment}/subscriptions",
+            json={"add": subscribe},
+            headers={
+                "Authorization": f"Bearer {es_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=10.0,
+        )
+
     client = EventServerClient(
         server_url=es_url,
         deployment_id=es_deployment,
         api_key=es_key,
         cursor_path=cursor_path,
         queue=session_queue,
+        on_deaf_reconnect=_resubscribe_on_deaf,
     )
     client.start()
 
