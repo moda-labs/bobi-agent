@@ -10,13 +10,19 @@
 
 # Fleet namespace. App name = "<fleet>-<name>"; also stamped MODASTACK_FLEET (the
 # authoritative fleet-membership key the GitOps reconcile enumerates by).
-fleet: moda
+#
+# This repo's fleet is `ci` — the release pipeline's SELF-GATE canary ONLY. The
+# production agent teams (eng-team) moved to their own repo, moda-labs/
+# moda-agent-teams, which owns the `moda` fleet. Two repos, one Fly org, two
+# fleets that never cross-enumerate (fleet_list confirms by the exact
+# MODASTACK_FLEET stamp, so even a name-prefix overlap is safe).
+fleet: ci
 
 # Tenant = the GitHub Environment the GitOps Action binds for a deployment's
 # per-key secrets (#385). One Environment per tenant; secret keys are namespaced
-# `<TEAM>__<KEY>` within it. Production deployments default to `modalabs`; the
-# canary overrides this (it's a separate pre-deploy gate, not a prod tenant).
-tenant: modalabs
+# `<TEAM>__<KEY>` within it. The only deployment here is the canary, which
+# overrides this to its own `canary` tenant (a separate pre-deploy gate).
+tenant: canary
 
 # Where instances phone home (outbound WSS only). Omit to use the built-in
 # shared moda-labs Worker.

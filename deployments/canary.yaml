@@ -2,14 +2,15 @@
 #
 # An always-on instance that revalidates the whole deploy path on every release:
 # the GitOps thin client → `modastack deploy` → the base image → the event
-# server. Valuable while eng-team is parked until C24, and a standing health
-# signal afterwards.
+# server. It is the ONLY deployment in this repo — the production agent teams
+# moved to moda-labs/moda-agent-teams (the `moda` fleet), leaving this repo's
+# `ci` fleet as the release self-gate alone.
 #
 # Runs the published, dependency-free smoke team via team-url (HTTPS-fetch): the
 # dark instance pulls the tarball at first boot — the design's CI/enterprise
 # delivery mode (no SSH needed; a Fly deploy token suffices). The smoke team has
-# no `requires:` gate, so it actually DISPATCHES in the bare image (unlike
-# eng-team — the C24 gap). App: moda-canary (fleet from defaults.yaml).
+# no `requires:` gate, so it DISPATCHES in the bare generic image. App: ci-canary
+# (fleet `ci` from defaults.yaml).
 team-url: https://github.com/moda-labs/modastack/releases/download/teams-latest/smoke-team.tar.gz
 
 # Right-sized to keep an always-on canary cheap (~$6/mo vs ~$25 at the 4gb/2cpu
