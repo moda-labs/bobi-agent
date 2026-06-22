@@ -286,9 +286,10 @@ class TestValidateConfig:
         assert lines["email"].lstrip().startswith("⚠")   # optional → warning
         assert lines["slack"].lstrip().startswith("✗")   # required → error
 
-    def test_unmodified_dogfood_style_pack_starts_degraded(self, tmp_path):
-        # github (native, zero-config) + an unconfigured optional venn service:
-        # validate_config must return ok=True so `modastack start` proceeds.
+    def test_pack_with_optional_venn_service_starts_degraded(self, tmp_path):
+        # github (native, zero-config) + an unconfigured venn service explicitly
+        # marked required: false: validate_config must return ok=True so
+        # `modastack start` proceeds and the optional service degrades.
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\
@@ -298,9 +299,32 @@ class TestValidateConfig:
                 events: true
               - name: email
                 events: true
+                required: false
         """))
         result = validate_config(tmp_path)
         assert result.ok is True
         email = next(c for c in result.checks if c.name == "email")
         assert not email.ok
         assert email.required is False
+
+    def test_pack_with_required_venn_service_blocks(self, tmp_path):
+        # Mirrors the dogfood-content-review decision (#329 / PR #405): a venn
+        # service marked required: true (dogfood's email) hard-blocks startup
+        # when its credential is missing — it does NOT degrade.
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir()
+        (config_dir / "agent.yaml").write_text(dedent("""\
+            entry_point: manager
+            services:
+              - name: github
+                events: true
+                required: true
+              - name: email
+                events: true
+                required: true
+        """))
+        result = validate_config(tmp_path)
+        assert result.ok is False
+        email = next(c for c in result.checks if c.name == "email")
+        assert not email.ok
+        assert email.required is True

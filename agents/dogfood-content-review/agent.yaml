@@ -15,11 +15,13 @@ services:
   - name: github
     events: true
     required: true          # core service — block startup if unconfigured
-  # email is optional: with no Venn/Gmail connection it degrades (email
-  # events just don't arrive) rather than blocking `modastack start`. This
-  # lets the credential-free dogfood/release smoke start the manager. (#329)
+  # email/venn is required: dogfood-content-review polls Gmail and acts on
+  # email, so it genuinely needs a Venn connection to function. A missing
+  # Venn credential hard-blocks `modastack start` (per human review on #329 /
+  # PR #405). The dogfood team must be provisioned with real Venn creds.
   - name: email
     events: true
+    required: true          # core service — block startup if unconfigured
 
 task_tracking:
   system: github-issues
