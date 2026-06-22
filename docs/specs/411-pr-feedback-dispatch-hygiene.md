@@ -1,10 +1,10 @@
-# Spec — #411: pr-feedback dispatch hygiene (self-author skip on ALL event types, human-author hard-skip, draft skip, per-comment dedup)
+# Spec — #411 + #412: dispatch hygiene + implement-phase approval gate
 
 - **Issue:** [moda-labs/modastack#411](https://github.com/moda-labs/modastack/issues/411)
 - **Type:** bug (event-reactor / auto-dispatch)
 - **Status:** SPEC — held for Zach's approval. Implementation is gated on sign-off; this PR must not auto-build past the spec gate.
 - **Author:** engineer (spec phase)
-- **Related:** #326 (reactor dedup key — merged, commit `ded0375`), #321 (duplicate-comment dispatch — merged), #412 (lifecycle auto-advance past spec gate — open, adjacent)
+- **Related:** #326 (reactor dedup key — merged, commit `ded0375`), #321 (duplicate-comment dispatch — merged), #412 (lifecycle auto-advance past spec gate — **folded into this spec as part (e)**; Zach confirmed #411 and #412 are the same PR, 2026-06-22)
 - **Concrete harm:** #416 / #417 / #418 — three near-identical "Reusable tool library" tickets the bot filed from a **single** trigger; #417 and #418 are now closed as duplicates of #416 (see §1(c))
 - **Most severe harm (live, 2026-06-22):** #423 — the auto-dispatched `pr-feedback` engine acted on a **human-authored** PR (lukelin10, branch `luke/setup-home-nav`) and **pushed a bot revert commit (`15a7fb5`, Co-Authored-By Claude) to the human's branch**, then self-cascaded off its own push/title-edit `synchronize` events. None of (a)/(b)/(c) would have stopped it — it was a genuine human comment on a human-owned PR. This is the motivation for the new part (d) (see §1(d)).
 
@@ -20,6 +20,12 @@ engineer **editing a PR it has no business touching**: a spec PR explicitly held
 (parts a/b), or — most severely — a **human-authored** PR the bot pushed an unrequested commit onto
 (part d, observed live in #423). Both directly defeat the boundary that auto-dispatch is supposed to
 respect.
+
+A fifth, related gap (part **(e)**, #412) lives one layer up — in the **`issue-lifecycle` workflow**,
+not the reactor: the lifecycle auto-advances from the spec phase into the implement phase **before the
+spec PR is approved**, so implementation lands before a human has signed off on the design. It defeats
+the same spec-approval boundary from the *workflow-routing* side that (b) defends from the *dispatch*
+side. (#411 and #412 are the same PR — Zach confirmed, 2026-06-22.)
 
 ### (a) Dispatch on the bot's OWN events — comments **and** pushes / synchronizes / reviews / edits
 
@@ -155,11 +161,34 @@ fix for #423 and a clean sibling to (a)/(b)/(c).
 > push/title-edit) is stopped by broadened (a) regardless of PR ownership. Defense-in-depth, not
 > redundancy.
 
+### (e) issue-lifecycle advances spec → implement before the spec is approved (#412)
+
+This part is a different subsystem from (a)–(d): not the event reactor's dispatch path, but the
+**`issue-lifecycle` workflow** (`agents/eng-team/workflows/issue-lifecycle.yaml` + the orchestrator
+route that follows the spec phase). The gap: after the spec phase opens a **draft** spec PR that is
+explicitly held for human sign-off, the lifecycle **auto-advances into the implement phase without
+waiting for a formal approval**. Implementation then lands before the human has approved the design —
+defeating the very spec-approval gate that part (b) protects from the dispatch side.
+
+**Evidence — spec work that proceeded to implementation with no recorded `APPROVED` review on the
+spec:**
+
+- **#329 / #409 → #413** — spec work auto-progressed into impl PR **#413** with no approval gate in
+  between.
+- **#411 → #420** — this very ticket's spec auto-advanced toward implementation (**#420**) before
+  Zach signed off.
+
+The missing guard: the route between the spec step and the implement step must **block** unless the
+spec PR's `reviewDecision == APPROVED` (formal human approval). A still-**draft** spec PR, an
+**unapproved** spec PR (no review yet), or one in **`CHANGES_REQUESTED`** MUST NOT advance to the
+implement phase.
+
 ---
 
 ## 2. Solution (overview)
 
-Four independent, composable changes in the reactor + adapter, each guarded by a test that fails first:
+Five independent, composable changes — four in the reactor + adapter (a–d), one in the
+`issue-lifecycle` workflow (e) — each guarded by a test that fails first:
 
 | Part | Change | Primary file |
 |------|--------|--------------|
@@ -167,10 +196,12 @@ Four independent, composable changes in the reactor + adapter, each guarded by a
 | (b) | Skip `pr-feedback` dispatch when the target PR is a **draft**. | `reactor.py` (+ adapter enrichment) |
 | (c) | Anchor dedup on the **stable comment/review id** and pass a **deterministic `run_key`** so the active-run guard prevents fan-out. | `reactor.py` (+ adapter field) |
 | (d) | **Hard-skip `pr-feedback` on human-authored PRs** — dispatch only when the PR author == bot identity. | `reactor.py` (+ adapter field) |
+| (e) | **Gate `issue-lifecycle` spec→implement on spec-PR approval** — block the implement phase until the spec PR's `reviewDecision == APPROVED`; draft / unapproved / `CHANGES_REQUESTED` blocks (#412). | `agents/eng-team/workflows/issue-lifecycle.yaml` (+ orchestrator route) |
 
-All four are scoped to the dispatch path. No change to workflow DAGs, role prompts, or the
-`pr-feedback` workflow body. Blast radius is the reactor + one adapter field; both are unit- and
-integration-tested.
+Parts (a)–(d) are scoped to the dispatch path: no change to role prompts or the `pr-feedback`
+workflow body; blast radius is the reactor + one adapter field, both unit- and integration-tested.
+Part (e) is the one workflow-DAG change — a single approval-gated route in `issue-lifecycle.yaml`
+between the spec and implement steps; it touches no reactor or adapter code.
 
 ---
 
@@ -328,6 +359,28 @@ by a human is hard-skipped — the bot never pushes to a branch it does not own.
 > #423 demonstrated. Confirm with Zach; if he prefers symmetry with (a)/(b), the alternative is
 > fail-open, accepting that an unresolved author would let a human-PR dispatch through.
 
+### (e) issue-lifecycle implement-phase approval gate (#412)
+
+Unlike (a)–(d), this change is in the **`issue-lifecycle` workflow**, not the reactor. After the spec
+phase opens a **draft** spec PR, the workflow today routes straight into the implement phase. Insert an
+approval gate on that route:
+
+- Before the implement step runs, resolve the spec PR's review decision with
+  `gh pr view <number> --repo <repo> --json reviewDecision,isDraft --jq .reviewDecision`.
+- **Advance to the implement phase only when `reviewDecision == "APPROVED"`** (formal human approval).
+  Every other state **blocks**: a still-`isDraft == true` spec PR, an **unapproved** PR
+  (`reviewDecision` is `null`/empty / `REVIEW_REQUIRED` — no review submitted yet), or
+  **`CHANGES_REQUESTED`**. On block, the workflow suspends at an `await` on human approval rather than
+  dispatching the implement engineer.
+- Mechanism: a `route` step keyed on the spec PR's `reviewDecision`, with the non-`APPROVED` branch
+  feeding an `await` step (the existing suspend-until-external-event step type). The implement phase is
+  reachable **only** through the `APPROVED` branch — there is no path that proceeds while the spec is
+  draft or unapproved.
+- **Fail-closed:** if `reviewDecision` can't be resolved, treat it as **not approved** and hold.
+  Consistent with (d)'s fail-closed stance and with §6's "do NOT start until Zach signs off" — a missed
+  advance is recoverable (a human re-approves), but implementing against an unapproved spec is the exact
+  harm #413/#420 demonstrate.
+
 ---
 
 ## 4. Verification plan
@@ -385,6 +438,23 @@ Drive the real drain → reactor pipeline against the shipped `eng-team` `auto_d
 5. Human comment on a **bot-authored, ready** PR → exactly one dispatch (regression — the happy path,
    the bot iterating on its own PR, still works).
 
+### Workflow-routing test — part (e), issue-lifecycle approval gate (#412)
+
+Drive the `issue-lifecycle` spec→implement route directly (orchestrator/workflow level, not the
+reactor):
+
+- (e) `test_issue_lifecycle_blocks_implement_until_spec_approved` — run the route that follows the spec
+  step with the spec PR in each **non-approved** state and assert the **implement phase REFUSES to
+  proceed** (the workflow suspends at the approval `await`; no implement step/engineer is dispatched):
+  - still **draft** (`isDraft == true`),
+  - **unapproved** — no review submitted (`reviewDecision` null/empty / `REVIEW_REQUIRED`),
+  - **`CHANGES_REQUESTED`**.
+  Reproduces #413 (#329/#409) and #420 (#411), which proceeded without an `APPROVED` review.
+- (e) `test_issue_lifecycle_advances_when_spec_approved` — `reviewDecision == "APPROVED"` → the route
+  advances into the implement phase (regression guard — approved specs still flow through).
+- (e) `test_issue_lifecycle_gate_fails_closed_when_review_decision_unknown` — `reviewDecision`
+  unresolved → **hold** (asserts the deliberate fail-closed behavior).
+
 ### Regression / non-goals to protect
 
 - #326 behavior preserved: distinct human comments on the same ready PR each dispatch.
@@ -412,12 +482,15 @@ cd event-server && <adapter test cmd>                          # adapter field t
   events** (part a broadening).
 - `agents/eng-team/agent.yaml`: `skip_draft: true` **and `require_bot_author: true`** on the
   `pr-feedback` rules.
-- Unit + adapter + integration tests above.
+- **`agents/eng-team/workflows/issue-lifecycle.yaml` + orchestrator route (part e, #412):** gate the
+  spec→implement transition on the spec PR's `reviewDecision == APPROVED`; a draft, unapproved, or
+  `CHANGES_REQUESTED` spec PR blocks (suspends at an approval `await`) instead of advancing to implement.
+- Unit + adapter + integration + workflow-routing tests above.
 
 ### Out of scope
 - A durable/shared cross-process dedup store (only if D3-A proves insufficient — separate ticket).
-- #412 (lifecycle auto-advancing past the spec-approval gate) — related but distinct.
-- Any change to the `pr-feedback` workflow body, role prompts, or other workflows.
+- Any change to the `pr-feedback` workflow body, role prompts, or workflows other than the single
+  `issue-lifecycle` spec→implement gate (part e).
 - Slack / Linear dispatch paths (GitHub reactor only).
 
 ---
@@ -438,10 +511,14 @@ cd event-server && <adapter test cmd>                          # adapter field t
    events, author resolved in the **same** off-thread `gh pr view --json isDraft,author` call as (b);
    **fail-closed** when author/bot login is unresolved.
 7. `agent.yaml`: add `skip_draft: true` and `require_bot_author: true` to the two `pr-feedback` rules.
-8. Extend the integration test (including the #423 / self-cascade case); run full suite +
+8. Workflow (e, #412): add the approval-gated `route` + `await` between the spec and implement steps in
+   `agents/eng-team/workflows/issue-lifecycle.yaml` (advance only on `reviewDecision == APPROVED`;
+   fail-closed on unresolved). Write the failing workflow-routing test first (confirm red), then wire
+   the route. Run `modastack workflows validate`.
+9. Extend the integration test (including the #423 / self-cascade case); run full suite +
    `modastack workflows validate`.
-9. `/review`; fix everything it finds.
-10. Open the impl PR against `main` (it — not this spec PR — carries `Fixes #411`).
+10. `/review`; fix everything it finds.
+11. Open the impl PR against `main` (it — not this spec PR — carries `Fixes #411` and `Fixes #412`).
 
 ---
 
