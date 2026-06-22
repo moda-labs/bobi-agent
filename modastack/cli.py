@@ -334,6 +334,16 @@ def start(foreground, fresh, subscribe):
         if not validation.ok:
             click.echo("\nStartup blocked — fix the issues above.", err=True)
             raise SystemExit(1)
+        # Proceeding path only: warn about optional services that failed
+        # preflight so a degraded start isn't mistaken for a clean one.
+        degraded = [c for c in validation.checks if not c.ok and not c.required]
+        if degraded:
+            names = ", ".join(c.name for c in degraded)
+            click.echo(
+                f"\nStarting in degraded mode — optional services unavailable "
+                f"until configured: {names}.",
+                err=True,
+            )
 
     pid_path = paths.manager_pid_path(project_path)
     pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1468,13 +1478,20 @@ def doctor(browser, fix):
         modastack doctor --browser --fix
     """
     from .doctor import run_doctor
+    from modastack.validate import status_glyph, supports_unicode
+
+    # Resolve the glyph set once: ✓/✗/⚠, or [OK]/[ERROR]/[WARN] on
+    # unicode-stripped terminals. Shared by the no-install warning below and
+    # the per-check rows further down.
+    unicode = supports_unicode()
+    warn_mark = status_glyph(False, False, unicode=unicode)
 
     # doctor is advisory and must run anywhere — but never silently: a
     # green report outside an installation would be a lie.
     if paths.bound_root() is None:
-        click.echo(click.style("⚠ No Modastack installation found at or above "
-                               "this directory — project-level checks will "
-                               "report 'no project detected'.", fg="yellow"))
+        click.echo(click.style(f"{warn_mark} No Modastack installation found at "
+                               "or above this directory — project-level checks "
+                               "will report 'no project detected'.", fg="yellow"))
 
     results = run_doctor()
 
@@ -1486,19 +1503,29 @@ def doctor(browser, fix):
         results.extend(browser_mod.run_doctor())
 
     all_ok = True
+    warnings = 0
     sandbox_failure = False
     for r in results:
-        mark = "✓" if r.ok else "✗"
+        required = getattr(r, "required", True)
+        # ✓ ok / ✗ blocking failure / ⚠ non-blocking warning (optional service),
+        # with [OK]/[ERROR]/[WARN] fallback on unicode-stripped terminals.
+        mark = status_glyph(r.ok, required, unicode=unicode)
         click.echo(f"  {mark} {r.name}: {r.detail}")
         if not r.ok:
-            all_ok = False
+            if required:
+                all_ok = False
+            else:
+                warnings += 1
             if r.hint:
                 click.echo(f"      → {r.hint}")
             if browser and hasattr(r, "sandbox_error") and r.sandbox_error:
                 sandbox_failure = True
 
     if all_ok:
-        click.echo("\nAll checks passed.")
+        if warnings:
+            click.echo(f"\nAll required checks passed ({warnings} warning(s)).")
+        else:
+            click.echo("\nAll checks passed.")
         return
 
     if sandbox_failure and fix:

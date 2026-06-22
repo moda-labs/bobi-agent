@@ -18,6 +18,11 @@ class CheckResult:
     ok: bool
     detail: str = ""
     hint: str = ""
+    # Only meaningful when ok is False: a required failure is a real problem;
+    # a non-required failure is a warning (e.g. an optional service that's
+    # unconfigured but doesn't block `modastack start`). Defaults True so all
+    # existing health checks keep counting as hard failures.
+    required: bool = True
     # Set when the failure is specifically the AppArmor userns sandbox block,
     # so callers can offer the targeted fix.
     sandbox_error: bool = False
@@ -228,7 +233,8 @@ def _check_services() -> list[CheckResult]:
         from modastack.validate import validate_config
         result = validate_config(root)
         return [
-            CheckResult(c.name, ok=c.ok, detail=c.detail, hint=c.hint)
+            CheckResult(c.name, ok=c.ok, detail=c.detail, hint=c.hint,
+                        required=c.required)
             for c in result.checks
         ]
     except Exception as e:

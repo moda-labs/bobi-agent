@@ -177,6 +177,37 @@ def test_agent_yaml_services_as_strings(tmp_path):
     assert cfg.services[0].events is False
 
 
+def test_service_required_defaults_false():
+    # Constructed directly: a service is optional unless explicitly marked.
+    assert ServiceConfig(name="email").required is False
+
+
+def test_service_required_parsed_from_yaml(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+        services:
+          - name: github
+            required: true
+          - name: email
+            events: true
+    """)
+    cfg = Config.load(tmp_path)
+    github = next(s for s in cfg.services if s.name == "github")
+    email = next(s for s in cfg.services if s.name == "email")
+    assert github.required is True
+    assert email.required is False  # default when omitted
+
+
+def test_service_required_string_form_defaults_false(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+        services:
+          - github
+    """)
+    cfg = Config.load(tmp_path)
+    assert cfg.services[0].required is False
+
+
 def test_agent_yaml_monitors(tmp_path):
     config_dir = tmp_path / ".modastack"
     config_dir.mkdir()

@@ -201,6 +201,12 @@ class ServiceConfig:
 
     name: str
     events: bool = False
+    # When True, a failed preflight check for this service blocks `modastack
+    # start`. When False (the default), the failure is surfaced as a warning
+    # and the agent starts degraded — the service's events just don't arrive
+    # until it's configured. Pack authors mark genuinely-essential services
+    # `required: true`.
+    required: bool = False
     credentials: dict[str, str] = field(default_factory=dict)
     # Optional event-scoping keys (e.g. Slack channel IDs). When set, the
     # service subscribes only to these channels rather than the whole
@@ -286,6 +292,7 @@ class Config:
                 services.append(ServiceConfig(
                     name=s.get("name", ""),
                     events=s.get("events", False),
+                    required=bool(s.get("required", False)),
                     credentials={k: str(v) for k, v in creds.items()},
                     channels=_parse_channels(s.get("channels")),
                 ))
