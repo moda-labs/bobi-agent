@@ -241,6 +241,15 @@ is found in CI or a deployed system, STOP and write an integration test
 that reproduces the failure BEFORE writing the fix. The test must fail
 first, then the fix makes it pass. No exceptions.
 
+## Ticket state
+
+`docs/TICKET_STATE.md` is the living overview of all open GitHub issues —
+tracks/epics, what's blocked vs. ready, and which one-offs are ready to hand to
+the `modastack` bot. **Keep it current:** whenever an issue is opened, closed,
+assigned, unblocked, or moves tracks during a session, update the relevant table
+there in the same session, and bump its "Last reviewed" date + open-count. Read
+it first when asked about the state of the work or what to pick up next.
+
 ## Design System (modastack setup web UI)
 
 Before any visual or UX decision on the `modastack setup` web UI, read `DESIGN.md`
