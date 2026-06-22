@@ -11,6 +11,7 @@ Rules are defined in agent.yaml under ``auto_dispatch``.
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -21,6 +22,36 @@ log = logging.getLogger(__name__)
 
 DEFAULT_COOLDOWN = 1800  # 30 minutes
 _MAX_DEDUP_ENTRIES = 500
+_DRAFT_LOOKUP_TIMEOUT = 15  # seconds for the off-thread `gh pr view` lookup
+
+
+def _pr_is_draft(repo: str, number, cwd: str) -> bool | None:
+    """Best-effort: is PR ``number`` in ``repo`` a draft? ``None`` when unknown.
+
+    ``issue_comment`` webhooks (the dominant #411 case — the rendered-spec link
+    comment) do NOT carry the PR's draft state, so the reactor resolves it via
+    an authenticated ``gh pr view``. Called off the drain thread (see
+    ``_dispatch``) so event delivery never blocks on the network. Returns
+    ``None`` on any error so the caller can **fail open** (dispatch rather than
+    silently drop) — matching the team's "verify live, don't fabricate" policy.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(number), "--repo", repo,
+             "--json", "isDraft", "--jq", ".isDraft"],
+            capture_output=True, text=True,
+            timeout=_DRAFT_LOOKUP_TIMEOUT, cwd=cwd,
+        )
+        if result.returncode != 0:
+            return None
+        out = result.stdout.strip()
+        if out == "true":
+            return True
+        if out == "false":
+            return False
+        return None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 @dataclass
@@ -32,6 +63,10 @@ class AutoDispatchRule:
     match: dict[str, str | int | bool] = field(default_factory=dict)
     cooldown: int = DEFAULT_COOLDOWN
     suppress: bool = False
+    # Dispatch-hygiene guards (issue #411). Opt-in per rule so they apply only
+    # where they make sense (pr-feedback), never to e.g. pr-closed cleanup.
+    skip_draft: bool = False  # don't dispatch when the PR is a draft
+    skip_self_author: bool = False  # don't dispatch on the bot's own comments
 
     def matches(self, event: dict) -> bool:
         """Return True if the event matches this rule's type and field conditions."""
@@ -49,29 +84,89 @@ class AutoDispatchRule:
         redelivery of the *same* trigger. A PR-level key (workflow:topic:number)
         is too coarse: every comment on a PR collapses onto one key, so the
         cooldown treats a reviewer's follow-up comments as duplicates of the
-        first and silently drops them (issue #326). Include the event's unique
-        per-delivery id — distinct across comments, stable across stream replay
-        of the same event — so each comment dispatches while true redelivery
-        still dedups. Fall back to the PR-level key when no id is present.
+        first and silently drops them (issue #326).
+
+        Prefer a STABLE per-comment / per-review identifier (``comment_id`` /
+        ``review_id``). It is distinct per comment — so genuinely new comments
+        each dispatch (#326) — yet identical across *every* delivery of that one
+        comment, so a comment that reaches the reactor more than once (a webhook
+        plus a monitor re-poll, each stamped with a different per-delivery id)
+        collapses onto a single key instead of fanning out into multiple engines
+        (issue #411). Fall back to the per-delivery event id (distinct per
+        delivery, stable across stream replay), then to the PR-level key.
         """
         topics = event.get("topics", [])
         topic = topics[0] if topics else "unknown"
-        number = event.get("fields", {}).get("number", "unknown")
+        fields = event.get("fields", {})
+        number = fields.get("number", "unknown")
         base = f"{self.workflow}:{topic}:{number}"
+        comment_id = fields.get("comment_id")
+        if comment_id is not None:
+            return f"{base}:comment:{comment_id}"
+        review_id = fields.get("review_id")
+        if review_id is not None:
+            return f"{base}:review:{review_id}"
         event_id = event.get("id")
         return f"{base}:{event_id}" if event_id else base
+
+    def run_key(self, event: dict) -> str | None:
+        """Deterministic launch key anchored on the stable comment/review id.
+
+        The dedup dict (``dedup_key``) only guards a single reactor process; the
+        observed #411 fan-out (#416/#417/#418) came from *concurrent* sessions,
+        each with an empty dict. Passing this key to ``launch_agent`` makes the
+        resulting ``session_name`` identical for two dispatches of the same
+        comment, so the persisted "A run is already active" guard rejects the
+        duplicate even across processes — a second, process-independent line of
+        defense behind the in-memory dedup. Returns ``None`` (→ launch_agent
+        mints its own random key) when no stable id is available, preserving the
+        prior behavior for events without a comment/review.
+        """
+        fields = event.get("fields", {})
+        number = fields.get("number")
+        if number is None:
+            return None
+        comment_id = fields.get("comment_id")
+        if comment_id is not None:
+            return f"{number}-comment-{comment_id}"
+        review_id = fields.get("review_id")
+        if review_id is not None:
+            return f"{number}-review-{review_id}"
+        return None
+
+    def skip_reason(self, event: dict, self_login: str | None) -> str | None:
+        """Return a reason to skip dispatch for this matched event, or None.
+
+        Guards spurious pr-feedback dispatches (issue #411): the bot reacting to
+        its OWN comments, and feedback engineers run against DRAFT PRs that are
+        explicitly held for human approval. Both fail *open* — when the signal
+        is absent (no resolved bot identity, no draft flag in the payload) the
+        event dispatches normally rather than being silently dropped.
+        """
+        fields = event.get("fields", {})
+        if self.skip_self_author and self_login and fields.get("sender") == self_login:
+            return "self-authored"
+        if self.skip_draft and fields.get("draft") is True:
+            return "draft PR"
+        return None
 
 
 class EventReactor:
     """Checks events against auto-dispatch rules and launches workflows."""
 
-    def __init__(self, rules: list[AutoDispatchRule], cwd: str):
+    def __init__(self, rules: list[AutoDispatchRule], cwd: str,
+                 self_login: str | None = None):
         self.rules = rules
         self.cwd = cwd
+        # The bot's own GitHub login, used to skip auto-dispatch on the bot's
+        # own comments (issue #411). None when it could not be resolved — the
+        # self-author guard then stays inactive (fail open).
+        self.self_login = self_login
         self._dispatched: dict[str, float] = {}  # dedup_key → timestamp
 
     @classmethod
-    def from_config(cls, config: list[dict], cwd: str) -> "EventReactor":
+    def from_config(cls, config: list[dict], cwd: str,
+                    self_login: str | None = None) -> "EventReactor":
         """Build a reactor from the auto_dispatch config list."""
         rules = []
         for entry in config:
@@ -81,8 +176,10 @@ class EventReactor:
                 match=entry.get("match", {}),
                 cooldown=entry.get("cooldown", DEFAULT_COOLDOWN),
                 suppress=entry.get("suppress", False),
+                skip_draft=entry.get("skip_draft", False),
+                skip_self_author=entry.get("skip_self_author", False),
             ))
-        return cls(rules=rules, cwd=cwd)
+        return cls(rules=rules, cwd=cwd, self_login=self_login)
 
     def process(self, event: dict) -> str | None:
         """Check event against rules.
@@ -97,6 +194,14 @@ class EventReactor:
         for rule in self.rules:
             if not rule.matches(event):
                 continue
+
+            # Dispatch-hygiene guards (issue #411): never spin up a feedback
+            # engine on the bot's own comment or against a held draft PR.
+            skip = rule.skip_reason(event, self.self_login)
+            if skip:
+                log.info("Auto-dispatch skipped (%s): %s",
+                         skip, rule.dedup_key(event))
+                return None
 
             key = rule.dedup_key(event)
             now = time.monotonic()
@@ -148,6 +253,9 @@ class EventReactor:
         }
         input_fields.update(fields)
 
+        # Deterministic per-comment launch key (issue #411) — see run_key().
+        run_key = rule.run_key(event)
+
         log.info("Auto-dispatching %s for %s", rule.workflow, key)
 
         # launch_agent runs the concurrency-semaphore preflight, which BLOCKS
@@ -158,11 +266,24 @@ class EventReactor:
         # semaphore still bounds how many agents actually run at once.
         def _launch() -> None:
             try:
+                # issue_comment webhooks don't carry the PR's draft state, so a
+                # draft held for human approval is resolved here, off the drain
+                # thread, right before launch (issue #411 part b). Review events
+                # are already filtered synchronously via fields.draft in
+                # skip_reason(); this only covers the comment case. Fail open:
+                # an unresolved lookup (None) dispatches rather than dropping.
+                if (rule.skip_draft and event_type == "github.issue_comment"
+                        and fields.get("draft") is None):
+                    if _pr_is_draft(repo, number, self.cwd) is True:
+                        log.info(
+                            "Auto-dispatch skipped (draft PR, resolved): %s", key)
+                        return
                 modastack.subagent.launch_agent(
                     task=task,
                     cwd=self.cwd,
                     workflow_name=rule.workflow,
                     role="engineer",
+                    run_key=run_key,
                     input_fields=input_fields,
                 )
             except RuntimeError as e:

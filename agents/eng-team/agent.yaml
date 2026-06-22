@@ -106,21 +106,31 @@ auto_dispatch:
       action: review_requested
     suppress: true
 
+  # pr-feedback guards (issue #411): never spin up a feedback engineer on the
+  # bot's own comments (the lead posts a "Rendered spec" link per spec policy),
+  # nor against a DRAFT PR held for human approval. skip_self_author needs the
+  # bot's GitHub login, resolved at startup via `gh api user`.
   - event: github.pull_request_review
     match:
       review_state: changes_requested
     workflow: pr-feedback
     cooldown: 1800
+    skip_draft: true
+    skip_self_author: true
 
   - event: github.pull_request_review_comment
     workflow: pr-feedback
     cooldown: 1800
+    skip_draft: true
+    skip_self_author: true
 
   - event: github.issue_comment
     match:
       is_pull_request: true
     workflow: pr-feedback
     cooldown: 1800
+    skip_draft: true
+    skip_self_author: true
 
   - event: github.issues.assigned
     workflow: issue-lifecycle

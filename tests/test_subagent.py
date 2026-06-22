@@ -461,3 +461,43 @@ class TestRunAgentEntryRootBinding:
         mock_spawn.assert_not_called()
 
 
+class TestResolveSelfGitHubLogin:
+    """The bot's own GitHub login backs the reactor self-author guard (#411)."""
+
+    def _reset_cache(self):
+        import modastack.subagent as sub
+        sub._self_github_login = None
+        sub._self_github_login_resolved = False
+
+    @patch("modastack.subagent.sp.run")
+    def test_resolves_login_from_gh(self, mock_run):
+        self._reset_cache()
+        mock_run.return_value = MagicMock(returncode=0, stdout="modastack\n")
+        from modastack.subagent import _resolve_self_github_login
+        assert _resolve_self_github_login() == "modastack"
+
+    @patch("modastack.subagent.sp.run")
+    def test_caches_result_across_calls(self, mock_run):
+        self._reset_cache()
+        mock_run.return_value = MagicMock(returncode=0, stdout="modastack\n")
+        from modastack.subagent import _resolve_self_github_login
+        _resolve_self_github_login()
+        _resolve_self_github_login()
+        mock_run.assert_called_once()  # cached, not re-shelled
+
+    @patch("modastack.subagent.sp.run")
+    def test_fail_open_on_gh_error(self, mock_run):
+        """gh missing/unauthenticated → None (guard stays off, fail open)."""
+        self._reset_cache()
+        mock_run.side_effect = OSError("gh not found")
+        from modastack.subagent import _resolve_self_github_login
+        assert _resolve_self_github_login() is None
+
+    @patch("modastack.subagent.sp.run")
+    def test_fail_open_on_nonzero_exit(self, mock_run):
+        self._reset_cache()
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        from modastack.subagent import _resolve_self_github_login
+        assert _resolve_self_github_login() is None
+
+

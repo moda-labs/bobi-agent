@@ -169,6 +169,62 @@ class TestAutoDispatchRule:
         }
         assert rule.dedup_key(event) == rule.dedup_key(dict(event))
 
+    def test_dedup_key_prefers_stable_comment_id(self):
+        """A stable comment_id keys the dedup, NOT the per-delivery id (#411).
+
+        The same comment can reach the reactor more than once — a webhook plus
+        a monitor re-poll, each stamped with a *different* per-delivery id. If
+        the dedup key used that id, one comment would fan out into several
+        engines (the #411 harm: one comment spawned 3 engines → tickets
+        #416/#417/#418). Keying on the stable comment id collapses every
+        delivery of one comment onto a single key.
+        """
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+        )
+        base = {
+            "type": "github.issue_comment",
+            "topics": ["github:moda-labs/test"],
+            "fields": {"number": 42, "comment_id": 99887766},
+        }
+        key_a = rule.dedup_key({**base, "id": "delivery-aaa"})
+        key_b = rule.dedup_key({**base, "id": "delivery-bbb"})
+        # Same comment via two deliveries → one stable key (no fan-out).
+        assert key_a == "pr-feedback:github:moda-labs/test:42:comment:99887766"
+        assert key_a == key_b
+
+    def test_dedup_key_distinct_comments_differ(self):
+        """Distinct comments on one PR still get distinct keys (preserves #326)."""
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+        )
+        base = {
+            "type": "github.issue_comment",
+            "topics": ["github:moda-labs/test"],
+            "fields": {"number": 42},
+        }
+        key_a = rule.dedup_key({**base, "fields": {"number": 42, "comment_id": 1}})
+        key_b = rule.dedup_key({**base, "fields": {"number": 42, "comment_id": 2}})
+        assert key_a != key_b
+
+    def test_dedup_key_prefers_review_id_for_reviews(self):
+        """A review event keys on its stable review id."""
+        rule = AutoDispatchRule(
+            event="github.pull_request_review",
+            workflow="pr-feedback",
+        )
+        base = {
+            "type": "github.pull_request_review",
+            "topics": ["github:moda-labs/test"],
+            "fields": {"number": 42, "review_id": 555},
+        }
+        key_a = rule.dedup_key({**base, "id": "delivery-aaa"})
+        key_b = rule.dedup_key({**base, "id": "delivery-bbb"})
+        assert key_a == "pr-feedback:github:moda-labs/test:42:review:555"
+        assert key_a == key_b
+
 
 class TestEventReactor:
     """EventReactor matches events to rules and dispatches workflows."""
@@ -531,6 +587,40 @@ class TestEventReactorFromConfig:
         assert reactor.rules[0].suppress is True
         assert reactor.rules[0].workflow == ""
 
+    def test_from_config_parses_hygiene_flags(self):
+        """skip_draft / skip_self_author flags are parsed from config (#411)."""
+        config = [
+            {
+                "event": "github.issue_comment",
+                "match": {"is_pull_request": True},
+                "workflow": "pr-feedback",
+                "skip_draft": True,
+                "skip_self_author": True,
+            },
+        ]
+        reactor = EventReactor.from_config(config, cwd="/tmp/project")
+        assert reactor.rules[0].skip_draft is True
+        assert reactor.rules[0].skip_self_author is True
+
+    def test_from_config_hygiene_flags_default_false(self):
+        config = [
+            {"event": "github.pull_request", "match": {"action": "closed"},
+             "workflow": "pr-closed"},
+        ]
+        reactor = EventReactor.from_config(config, cwd="/tmp/project")
+        assert reactor.rules[0].skip_draft is False
+        assert reactor.rules[0].skip_self_author is False
+
+    def test_from_config_threads_self_login(self):
+        """The bot's own GitHub login is threaded into the reactor (#411)."""
+        config = [
+            {"event": "github.issue_comment", "workflow": "pr-feedback",
+             "skip_self_author": True},
+        ]
+        reactor = EventReactor.from_config(config, cwd="/tmp/project",
+                                           self_login="modastack")
+        assert reactor.self_login == "modastack"
+
 
 class TestConfigAutoDispatch:
     """Config.load parses auto_dispatch rules from agent.yaml."""
@@ -568,3 +658,279 @@ class TestConfigAutoDispatch:
         from modastack.config import Config
         cfg = Config.load(tmp_path)
         assert cfg.auto_dispatch == []
+
+
+class TestPrFeedbackDispatchHygiene:
+    """Reactor skips spurious pr-feedback dispatches (#411).
+
+    Three failure modes, all observed on held spec draft PRs:
+      (a) the bot's OWN comments (rendered-spec link, "held" notes) fired
+          pr-feedback against a PR with no human feedback to act on,
+      (b) pr-feedback ran on DRAFT PRs explicitly held for human approval,
+      (c) a single comment fanned out into multiple engines (one comment →
+          ≥3 engines → duplicate tickets #416/#417/#418).
+    """
+
+    def _pr_feedback_rules(self, cooldown=1800):
+        return [
+            AutoDispatchRule(
+                event="github.issue_comment",
+                workflow="pr-feedback",
+                match={"is_pull_request": True},
+                cooldown=cooldown,
+                skip_draft=True,
+                skip_self_author=True,
+            ),
+        ]
+
+    def _issue_comment_event(self, *, sender="reviewer1", draft=False,
+                             comment_id=1, number=410, delivery="d1"):
+        fields = {
+            "action": "created",
+            "number": number,
+            "title": "spec: something",
+            "sender": sender,
+            "is_pull_request": True,
+            "comment_id": comment_id,
+        }
+        if draft is not None:
+            fields["draft"] = draft
+        return {
+            "type": "github.issue_comment",
+            "source": "github",
+            "id": delivery,
+            "topics": ["github:moda-labs/modastack"],
+            "fields": fields,
+        }
+
+    # --- (a) bot-authored comments ---
+
+    @patch("modastack.subagent.launch_agent")
+    def test_skips_bot_authored_comment(self, mock_launch):
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        event = self._issue_comment_event(sender="modastack")
+
+        result = reactor.process(event)
+
+        assert result is None
+        time.sleep(0.05)
+        mock_launch.assert_not_called()
+
+    @patch("modastack.subagent.launch_agent")
+    def test_dispatches_on_human_comment(self, mock_launch):
+        """A genuine human comment still dispatches pr-feedback."""
+        mock_launch.return_value = "wf-x"
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        event = self._issue_comment_event(sender="zach")
+
+        result = reactor.process(event)
+
+        assert result == "dispatched"
+        _wait_calls(mock_launch, 1)
+        mock_launch.assert_called_once()
+
+    @patch("modastack.subagent.launch_agent")
+    def test_self_author_skip_inactive_without_self_login(self, mock_launch):
+        """No resolved bot identity → fail open (don't silently drop)."""
+        mock_launch.return_value = "wf-x"
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login=None)
+        event = self._issue_comment_event(sender="modastack")
+
+        assert reactor.process(event) == "dispatched"
+        _wait_calls(mock_launch, 1)
+        mock_launch.assert_called_once()
+
+    # --- (b) draft PRs ---
+
+    @patch("modastack.subagent.launch_agent")
+    def test_skips_draft_pr(self, mock_launch):
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        event = self._issue_comment_event(sender="zach", draft=True)
+
+        result = reactor.process(event)
+
+        assert result is None
+        time.sleep(0.05)
+        mock_launch.assert_not_called()
+
+    @patch("modastack.subagent.launch_agent")
+    def test_dispatches_on_non_draft_pr(self, mock_launch):
+        mock_launch.return_value = "wf-x"
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        event = self._issue_comment_event(sender="zach", draft=False)
+
+        assert reactor.process(event) == "dispatched"
+        _wait_calls(mock_launch, 1)
+        mock_launch.assert_called_once()
+
+    @patch("modastack.subagent.launch_agent")
+    def test_draft_skip_fail_open_on_review_event_without_flag(self, mock_launch):
+        """Review event with no draft flag → dispatch (synchronous fail open).
+
+        Review events carry draft synchronously in fields.draft and never take
+        the off-thread ``gh pr view`` lookup path (that's issue_comment-only).
+        When the flag is simply absent, the reactor must dispatch rather than
+        drop.
+        """
+        mock_launch.return_value = "wf-x"
+        rule = AutoDispatchRule(
+            event="github.pull_request_review_comment",
+            workflow="pr-feedback",
+            cooldown=1800,
+            skip_draft=True,
+            skip_self_author=True,
+        )
+        reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="modastack")
+        event = {
+            "type": "github.pull_request_review_comment",
+            "source": "github",
+            "id": "d1",
+            "topics": ["github:moda-labs/modastack"],
+            "fields": {"number": 42, "sender": "zach", "comment_id": 9},
+        }
+
+        assert reactor.process(event) == "dispatched"
+        _wait_calls(mock_launch, 1)
+        mock_launch.assert_called_once()
+
+    # --- (c) per-comment dedup (no fan-out) ---
+
+    @patch("modastack.subagent.launch_agent")
+    def test_one_comment_dispatches_at_most_one_engine(self, mock_launch):
+        """One comment redelivered with different per-delivery ids → one engine.
+
+        Reproduces the #411 fan-out: the same comment arriving twice (webhook +
+        monitor re-poll) must NOT spawn two engines.
+        """
+        mock_launch.return_value = "wf-x"
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        first = self._issue_comment_event(sender="zach", comment_id=777,
+                                          delivery="delivery-aaa")
+        second = self._issue_comment_event(sender="zach", comment_id=777,
+                                           delivery="delivery-bbb")
+
+        assert reactor.process(first) == "dispatched"
+        assert reactor.process(second) is None
+        _wait_calls(mock_launch, 1)
+        assert mock_launch.call_count == 1
+
+    @patch("modastack.subagent.launch_agent")
+    def test_distinct_comments_dispatch_independently(self, mock_launch):
+        """Two genuinely different comments each dispatch (preserves #326)."""
+        mock_launch.return_value = "wf-x"
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        first = self._issue_comment_event(sender="zach", comment_id=1,
+                                          delivery="delivery-aaa")
+        second = self._issue_comment_event(sender="zach", comment_id=2,
+                                           delivery="delivery-bbb")
+
+        assert reactor.process(first) == "dispatched"
+        assert reactor.process(second) == "dispatched"
+        _wait_calls(mock_launch, 2)
+        assert mock_launch.call_count == 2
+
+    # --- (c) deterministic run_key → cross-process fan-out guard ---
+
+    @patch("modastack.subagent.launch_agent")
+    def test_dispatch_uses_deterministic_run_key_for_comment(self, mock_launch):
+        """The launch gets a run_key derived from the stable comment id (#411).
+
+        The in-memory dedup dict only guards a *single* reactor process; the
+        real #416/#417/#418 fan-out came from concurrent sessions, each with an
+        empty dict. A deterministic run_key makes ``make_session_name``
+        identical for two dispatches of the same comment, so launch_agent's
+        persisted "A run is already active" guard rejects the duplicate even
+        across processes.
+        """
+        mock_launch.return_value = "wf-x"
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        event = self._issue_comment_event(sender="zach", comment_id=777,
+                                          number=410)
+
+        reactor.process(event)
+
+        _wait_calls(mock_launch, 1)
+        assert mock_launch.call_args[1]["run_key"] == "410-comment-777"
+
+    @patch("modastack.subagent.launch_agent")
+    def test_dispatch_run_key_uses_review_id(self, mock_launch):
+        """A review event's run_key derives from its stable review id."""
+        mock_launch.return_value = "wf-x"
+        rule = AutoDispatchRule(
+            event="github.pull_request_review",
+            workflow="pr-feedback",
+            match={"review_state": "changes_requested"},
+            skip_draft=True,
+            skip_self_author=True,
+        )
+        reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="modastack")
+        event = {
+            "type": "github.pull_request_review",
+            "source": "github",
+            "id": "d1",
+            "topics": ["github:moda-labs/modastack"],
+            "fields": {
+                "number": 7, "sender": "zach",
+                "review_state": "changes_requested",
+                "review_id": 4242, "draft": False,
+            },
+        }
+
+        reactor.process(event)
+
+        _wait_calls(mock_launch, 1)
+        assert mock_launch.call_args[1]["run_key"] == "7-review-4242"
+
+    # --- (b) issue_comment draft resolved off-thread via gh pr view ---
+    # issue_comment webhooks carry no PR draft flag, so the reactor resolves it
+    # off the drain thread (never blocking event delivery) right before launch.
+
+    @patch("modastack.events.reactor._pr_is_draft", return_value=True)
+    @patch("modastack.subagent.launch_agent")
+    def test_issue_comment_draft_resolved_skips_launch(self, mock_launch, mock_draft):
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        event = self._issue_comment_event(sender="zach", draft=None,
+                                          comment_id=5, number=410)
+
+        # process() returns promptly; the draft resolution + skip happen on the
+        # launch thread so the drain loop never blocks on the network.
+        assert reactor.process(event) == "dispatched"
+        time.sleep(0.1)
+        mock_launch.assert_not_called()
+        mock_draft.assert_called_once()
+
+    @patch("modastack.events.reactor._pr_is_draft", return_value=None)
+    @patch("modastack.subagent.launch_agent")
+    def test_issue_comment_draft_lookup_fails_open(self, mock_launch, mock_draft):
+        """Draft lookup can't resolve (network/auth blip) → dispatch anyway."""
+        mock_launch.return_value = "wf-x"
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        event = self._issue_comment_event(sender="zach", draft=None,
+                                          comment_id=6, number=410)
+
+        assert reactor.process(event) == "dispatched"
+        _wait_calls(mock_launch, 1)
+        mock_launch.assert_called_once()
+
+    @patch("modastack.events.reactor._pr_is_draft", return_value=False)
+    @patch("modastack.subagent.launch_agent")
+    def test_issue_comment_non_draft_resolved_dispatches(self, mock_launch, mock_draft):
+        mock_launch.return_value = "wf-x"
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        event = self._issue_comment_event(sender="zach", draft=None,
+                                          comment_id=7, number=410)
+
+        assert reactor.process(event) == "dispatched"
+        _wait_calls(mock_launch, 1)
+        mock_launch.assert_called_once()
