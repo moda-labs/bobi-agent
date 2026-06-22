@@ -1,4 +1,4 @@
-# Spec — #411: pr-feedback dispatch hygiene (self-author skip, human-author hard-skip, draft skip, per-comment dedup)
+# Spec — #411: pr-feedback dispatch hygiene (self-author skip on ALL event types, human-author hard-skip, draft skip, per-comment dedup)
 
 - **Issue:** [moda-labs/modastack#411](https://github.com/moda-labs/modastack/issues/411)
 - **Type:** bug (event-reactor / auto-dispatch)
@@ -21,16 +21,35 @@ engineer **editing a PR it has no business touching**: a spec PR explicitly held
 (part d, observed live in #423). Both directly defeat the boundary that auto-dispatch is supposed to
 respect.
 
-### (a) Dispatch on the bot's OWN comments
+### (a) Dispatch on the bot's OWN events — comments **and** pushes / synchronizes / reviews / edits
 
-Per the spec-PR / markdown policy, the lead posts a "📄 Rendered spec" link comment on every spec PR.
-That self-authored `issue_comment` re-enters the event stream and matches the
-`github.issue_comment` → `pr-feedback` auto-dispatch rule, spinning up an engineer even though there
-is no human feedback to act on.
+`pr-feedback` (and every dispatch rule) must never re-trigger off the bot's **own** activity, on **any**
+event type — not just comments. A bot auto-reacting to an event it itself emitted is never the intent.
+Two distinct self-trigger vectors have been observed:
 
-Observed repeatedly on spec PRs **#405, #407, #410**, and again on impl PRs **#413, #414** (it fires
-on the bot's own "Ready for review" / "held pending approval" comments too — not only spec/draft PRs).
-The lead has had to recognize and no-op these by hand each time.
+**Self-authored comments (original report).** Per the spec-PR / markdown policy, the lead posts a
+"📄 Rendered spec" link comment on every spec PR. That self-authored `issue_comment` re-enters the
+event stream and matches the `github.issue_comment` → `pr-feedback` auto-dispatch rule, spinning up an
+engineer even though there is no human feedback to act on. Observed repeatedly on spec PRs
+**#405, #407, #410**, and again on impl PRs **#413, #414** (it fires on the bot's own "Ready for
+review" / "held pending approval" comments too — not only spec/draft PRs). The lead has had to
+recognize and no-op these by hand each time.
+
+**Self-authored pushes / title-edits → `synchronize` self-cascade (live, #423, 2026-06-22).** The
+self-trigger is not limited to comments. On **#423** the `pr-feedback` engineer pushed its own revert
+commit (`15a7fb5`) and then **edited the PR title**; both the bot's `push` and the title-edit emitted
+GitHub `pull_request` **`synchronize`** events whose `sender` was the **bot itself**. Those events
+re-entered the reactor and **re-triggered `pr-feedback` ≥2 more times** (sessions **`d8e2aa12`** and
+**`73da8106`**) even though **nothing had changed** — `HEAD` stayed at `15a7fb5` across all of them.
+The loop compounds purely off the bot's own events: each dispatch's push/edit feeds the next.
+
+The original part-(a) fix was framed narrowly around `issue_comment`s. **This spec broadens it: the
+self-author skip must apply to every event type the reactor dispatches on — `issue_comment`,
+`pull_request_review`, `pull_request_review_comment`, and crucially `push` / `pull_request`
+(`synchronize`, edited) events** — keyed on the event `sender`, not on the event being a comment. See
+the broadened §3(a). (This is distinct from part (d): (a) skips the bot's own *events* on **any** PR
+including its own; (d) skips dispatch onto a *human-owned* PR regardless of who triggered. #423 is
+caught by **both** — see the note at the end of §1(d).)
 
 ### (b) Dispatch on DRAFT PRs held for approval
 
@@ -113,8 +132,12 @@ author**:
 **Why (a), (b), and (c) do not catch this.** The incident slips through every existing guard in this
 spec:
 
-- **(a) self-author skip** keys on the **comment `sender`** — here the sender was Zach (a human), so
-  the comment is a legitimate dispatch trigger. (a) is about *who commented*, not *whose PR it is*.
+- **(a) self-author skip** keys on the event `sender`. For the **initial** trigger this does not help —
+  the sender was Zach (a human), so his review comment is a legitimate dispatch trigger; (a) is about
+  *who sent the event*, not *whose PR it is*. (Note: broadened (a) — see §1(a)/§3(a) — **does** catch
+  the **subsequent self-cascade**, where the bot's own push/title-edit `synchronize` events have
+  `sender == bot`. So (a) and (d) split the #423 incident: (d) blocks the *first* unwanted dispatch off
+  Zach's comment; broadened (a) blocks the *self-cascade* that followed. Both are needed.)
 - **(b) draft skip** does not apply — #423 was a ready (non-draft) PR.
 - **(c) per-comment dedup** would at most collapse the cascade to *one* unwanted push; it does not
   stop the bot from touching a human PR at all.
@@ -124,10 +147,13 @@ comment authorship or draft state. `pr-feedback` must **hard-skip any PR whose a
 identity** — i.e. dispatch only when `pr.author == bot_login`. This is the direct, narrowly-scoped
 fix for #423 and a clean sibling to (a)/(b)/(c).
 
-> Note the symmetry with (a): (a) checks the **commenter** (`fields.sender`); (d) checks the
-> **PR owner** (`pull_request.user.login`). Both resolve against the same cached bot login from §3(a),
-> so (d) adds a guard, not a new identity source. They are complementary, not redundant — #423 passes
-> (a) and fails (d).
+> Note the symmetry with (a): (a) checks the **event `sender`** (`fields.sender`, now across all event
+> types — comments, pushes, synchronizes, edits); (d) checks the **PR owner**
+> (`pull_request.user.login`). Both resolve against the same cached bot login from §3(a), so (d) adds a
+> guard, not a new identity source. They are complementary: on #423 the **initial** human-comment
+> trigger passes (a) and is stopped only by (d); the **self-cascade** that follows (bot's own
+> push/title-edit) is stopped by broadened (a) regardless of PR ownership. Defense-in-depth, not
+> redundancy.
 
 ---
 
@@ -137,7 +163,7 @@ Four independent, composable changes in the reactor + adapter, each guarded by a
 
 | Part | Change | Primary file |
 |------|--------|--------------|
-| (a) | Skip auto-dispatch for events whose `sender` is the bot's own GitHub identity — **default-on**, no enable flag, with an `allow_self_authored: true` opt-in escape hatch. | `modastack/events/reactor.py` |
+| (a) | Skip auto-dispatch for **any event type** whose `sender` is the bot's own GitHub identity — comments **and** `push` / `synchronize` / review / edit events (closes the #423 self-cascade) — **default-on**, no enable flag, with an `allow_self_authored: true` opt-in escape hatch. | `modastack/events/reactor.py` (+ adapter `fields.sender` on push/synchronize) |
 | (b) | Skip `pr-feedback` dispatch when the target PR is a **draft**. | `reactor.py` (+ adapter enrichment) |
 | (c) | Anchor dedup on the **stable comment/review id** and pass a **deterministic `run_key`** so the active-run guard prevents fan-out. | `reactor.py` (+ adapter field) |
 | (d) | **Hard-skip `pr-feedback` on human-authored PRs** — dispatch only when the PR author == bot identity. | `reactor.py` (+ adapter field) |
@@ -163,6 +189,19 @@ GitHub login to compare. The bot's identity is the authenticated `gh` token's us
   if the bot login is known and `fields.sender == bot_login`, **skip** (return `None`, log
   `Auto-dispatch skipped (self-authored): <key>`). This applies to **all** dispatch rules. A bot
   auto-reacting to its own action is never the intent, so it requires no opt-in to turn on.
+- **The skip is keyed on the event `sender` for EVERY event type the reactor dispatches on — not just
+  comments.** This is the broadening over the original part-(a) framing. Concretely it must cover:
+  - `issue_comment`, `pull_request_review`, `pull_request_review_comment` (the original comment/review
+    vectors), **and**
+  - `push` and `pull_request` **`synchronize`** / **`edited`** events — the #423 self-cascade vector,
+    where the bot's own commit-push and PR-title edit each emit a `synchronize` whose `sender` is the
+    bot. These must be skipped on `sender` even though no comment is involved and even on the bot's own
+    PR (so the loop is closed before part (d)'s author check is reached).
+- **Adapter prerequisite.** Because the skip now gates push/synchronize/edited events, the worker
+  adapter must emit `fields.sender = payload.sender.login` for **those** event types too (it already
+  does for comment/review events). Verify `event-server/src/adapters/github.ts` populates `sender` on
+  the `push` and `pull_request` event paths; add it where missing. Without `fields.sender` on these
+  events the reactor cannot recognize them as self-authored and the cascade persists.
 - **Opt-in escape hatch for the rare reverse case.** The only realistic situation where you'd *want*
   the bot to react to its own event is a rule that deliberately self-chains — e.g. a future rule that
   triggers off a structured command comment the bot posts to itself as a work queue. For that, a rule
@@ -176,6 +215,23 @@ GitHub login to compare. The bot's identity is the authenticated `gh` token's us
 > self-author skip is **default-on for every rule with no config field to enable it**, plus an
 > `allow_self_authored: true` per-rule opt-in for the rare deliberate self-trigger. This is exactly the
 > "default to skip, opt-in to receive your own events" shape the reviewer asked for.
+
+> ⚠️ **For Zach's review — broadening (a) to push/synchronize/edit likely shifts earlier
+> design points/decisions.** Part (a) was originally scoped, reviewed, and resolved as a *comment*
+> skip. Extending it to all event types (`push`, `synchronize`, `edited`) changes assumptions baked
+> into the existing decisions, and these knock-on effects need explicit sign-off:
+> - **`allow_self_authored` opt-in semantics widen.** The resolved decision notes `pr-closed` /
+>   `issues.assigned` carry `allow_self_authored: true` because they legitimately act on the bot's own
+>   merges/assigns. With (a) now covering push/synchronize, **re-confirm which rules need the opt-in** so
+>   broadening the skip doesn't silently suppress a self-chain a rule actually depends on (e.g. any rule
+>   meant to react to the bot's own push). New open question **D5** below.
+> - **Overlap with part (d) on #423.** #423 is now caught by *both* (a) (bot is the `synchronize`
+>   sender) and (d) (PR author is human). That redundancy is deliberate defense-in-depth, but it means
+>   the #423 self-cascade is closed by (a) **independent of PR ownership** — so the cascade is also
+>   stopped on the bot's *own* PRs, which (d) alone would not do. Confirm this is the intended layering.
+> - **Adapter scope grows.** (a) now depends on `fields.sender` being present on push/synchronize
+>   events (see adapter prerequisite above), adding an adapter test surface that the comment-only
+>   framing did not have.
 
 > **Decision point D1 (bot identity *source*).** Separate from the skip default above: how the reactor
 > learns *which* login is its own. Recommended: resolve from `gh api user` and cache. Alternative: add
@@ -284,6 +340,9 @@ current `main` first**, then passes after the fix.
 - (a) `test_skips_dispatch_when_sender_is_bot` — event with `fields.sender == bot_login` → `process()`
   returns `None`, no launch. And `test_dispatches_when_sender_is_human` (regression guard — human
   comments still dispatch).
+- (a) `test_skips_bot_authored_synchronize_event` — `pull_request` `synchronize` event with
+  `fields.sender == bot_login` → no dispatch (reproduces the #423 self-cascade; broadened (a) covers
+  non-comment event types). Parametrize over `push` / `synchronize` / `edited`.
 - (a) `test_self_author_skip_fails_open_when_login_unknown` — login unresolved → dispatch proceeds.
 - (a) `test_allow_self_authored_opt_in_dispatches` — rule with `allow_self_authored: true` + bot
   `sender` → dispatch proceeds (escape hatch works, default-skip is overridable per rule).
@@ -307,6 +366,8 @@ current `main` first**, then passes after the fix.
 - `fields.comment_id` / `fields.review_id` set from the respective payload objects.
 - `fields.pr_author` set from `pull_request.user.login` on review / review_comment / `synchronize`
   events (part d).
+- `fields.sender` set from `payload.sender.login` on `push` and `pull_request`
+  (`synchronize` / `edited`) events (part a — broadening; without it the self-cascade skip can't fire).
 
 ### Integration test (`tests/test_drain_dispatch.py`)
 
@@ -318,8 +379,9 @@ Drive the real drain → reactor pipeline against the shipped `eng-team` `auto_d
 3. The **same** human comment (same `comment_id`) delivered **twice** → exactly **one** dispatch
    (part c, redelivery).
 4. **Human review comment on a ready, human-authored PR → zero dispatches (part d, reproduces #423).**
-   The same fixture re-delivered as a bot `synchronize` self-cascade event → still zero (the #423
-   self-trigger loop is closed).
+   The same fixture re-delivered as a bot `synchronize` self-cascade event (`sender == bot`) → still
+   zero — closed by **broadened (a)** (self-sender skip on synchronize), and would also be closed by
+   (d) on author. Assert zero so the #423 self-trigger loop is provably shut on both axes.
 5. Human comment on a **bot-authored, ready** PR → exactly one dispatch (regression — the happy path,
    the bot iterating on its own PR, still works).
 
@@ -341,10 +403,13 @@ cd event-server && <adapter test cmd>                          # adapter field t
 ## 5. Scope
 
 ### In scope
-- `modastack/events/reactor.py`: self-author skip (default-on, `allow_self_authored` opt-in), draft
-  skip, stable-comment-id dedup key, deterministic `run_key`, **human-author hard-skip (part d)**.
+- `modastack/events/reactor.py`: self-author skip (default-on, `allow_self_authored` opt-in) **applied
+  to all event types incl. `push` / `synchronize` / `edited` (part a broadening — closes #423
+  self-cascade)**, draft skip, stable-comment-id dedup key, deterministic `run_key`, **human-author
+  hard-skip (part d)**.
 - `event-server/src/adapters/github.ts`: emit `fields.draft`, `fields.comment_id`, `fields.review_id`,
-  **`fields.pr_author`**.
+  **`fields.pr_author`**, and **`fields.sender` on `push` / `pull_request` (`synchronize`/`edited`)
+  events** (part a broadening).
 - `agents/eng-team/agent.yaml`: `skip_draft: true` **and `require_bot_author: true`** on the
   `pr-feedback` rules.
 - Unit + adapter + integration tests above.
@@ -360,10 +425,12 @@ cd event-server && <adapter test cmd>                          # adapter field t
 ## 6. Implementation plan (post-approval — do NOT start until Zach signs off)
 
 1. Write the failing unit tests (a/b/c/d) in `tests/test_reactor.py` — confirm red on `main`.
-2. Adapter: add `fields.draft`, `fields.comment_id`, `fields.review_id`, `fields.pr_author` + adapter
-   tests.
-3. Reactor (a): resolve + cache bot login; default-on self-author skip in `process()`, honoring a
-   per-rule `allow_self_authored: true` opt-in.
+2. Adapter: add `fields.draft`, `fields.comment_id`, `fields.review_id`, `fields.pr_author`, and
+   `fields.sender` on `push` / `synchronize` / `edited` events + adapter tests.
+3. Reactor (a): resolve + cache bot login; default-on self-author skip in `process()` **for all event
+   types (comments, reviews, `push`, `synchronize`, `edited`)**, honoring a per-rule
+   `allow_self_authored: true` opt-in. Re-audit which shipped rules need the opt-in given the broadened
+   scope (see D5).
 4. Reactor (b): `skip_draft` rule flag; field-based skip for review events, off-thread `gh pr view`
    lookup for `issue_comment`.
 5. Reactor (c): stable-id dedup key; deterministic `run_key` into `launch_agent`.
@@ -391,6 +458,14 @@ cd event-server && <adapter test cmd>                          # adapter field t
 - **Scope of (d):** confirm the human-author hard-skip is scoped to **`pr-feedback`** only (other
   workflows like `pr-closed` legitimately act on human PRs). (Recommended: `pr-feedback`-only via the
   `require_bot_author` rule flag.)
+- **D5 (broadening (a) to push/synchronize/edit — NEW, needs review):** part (a) now skips the bot's
+  own `push` / `synchronize` / `edited` events, not just comments (closes the #423 self-cascade). This
+  shifts decisions already resolved under the comment-only framing — see the ⚠️ callout in §3(a).
+  Confirm: (1) the broadened scope is wanted; (2) the `allow_self_authored: true` opt-in set is
+  re-audited so no rule that legitimately reacts to the bot's own push is silently suppressed; (3) the
+  deliberate (a)+(d) overlap on #423 (cascade closed independent of PR ownership) is the intended
+  layering. (Recommended: ship the broadening — the #423 evidence shows the self-cascade is the live
+  recurring harm and comment-only (a) does not stop it.)
 
 **Resolved during review:**
 
