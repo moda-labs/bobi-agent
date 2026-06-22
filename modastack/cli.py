@@ -2099,12 +2099,16 @@ def monitor_list():
 
 @monitors.command("add")
 @click.argument("name")
-@click.option("--interval", default="15m", help="How often to run (e.g. 5m, 15m, 1h)")
+@click.option("--interval", default=None, help="How often to run (e.g. 5m, 15m, 1h). Mutually exclusive with --at.")
+@click.option("--at", "at_times", multiple=True, help="Wall-clock time(s) HH:MM (repeatable). Schedules instead of --interval.")
+@click.option("--tz", default="", help="IANA timezone for --at (e.g. America/Los_Angeles); defaults to host local.")
+@click.option("--days", default="", help="Weekday(s) to gate --at to (e.g. 'sun' or 'mon,wed,fri'). Requires --at.")
+@click.option("--notify", is_flag=True, help="Fire the event on every scheduled run (a scheduled nudge, not a condition).")
 @click.option("--description", default="", help="What the monitor checks (interpreted by the manager)")
 @click.option("--event", default=None, help="Synthetic event type to inject (default monitor/<name>)")
 @click.option("--check", default="", help="Native check runner (pr_conflicts, stale_prs)")
 @click.option("--url", default=None, help="URL the description references (e.g. deploy health)")
-def monitor_add(name, interval, description, event, check, url):
+def monitor_add(name, interval, at_times, tz, days, notify, description, event, check, url):
     """Add a monitor to the current project.
 
     Usage:
@@ -2112,8 +2116,14 @@ def monitor_add(name, interval, description, event, check, url):
             --description "Check open PRs for merge conflicts"
         modastack monitors add deploy-health --interval 5m \\
             --url https://example.com
+        modastack monitors add weekly-prep-doc \\
+            --at 21:00 --days sun --tz America/Los_Angeles --notify \\
+            --event monitor/prep.weekly_due \\
+            --description "Generate my prep doc for the upcoming week"
     """
-    from .monitors.schema import Monitor, parse_interval
+    import re as _re
+
+    from .monitors.schema import Monitor, parse_at, parse_days, parse_interval
     from .monitors.registry import MonitorRegistry
 
     project_path = _detect_project_root()
@@ -2121,9 +2131,21 @@ def monitor_add(name, interval, description, event, check, url):
         click.echo("Not inside a modastack project.", err=True)
         raise SystemExit(1)
 
+    at_list = list(at_times)
+    day_list = [d for d in _re.split(r"[,\s]+", days.strip()) if d]
+
+    if at_list and interval is not None:
+        raise click.ClickException("--interval and --at are mutually exclusive")
+    if day_list and not at_list:
+        raise click.ClickException("--days only applies to --at scheduling (add --at HH:MM)")
+
     slug = _slugify(name)
     try:
-        parse_interval(interval)
+        if at_list:
+            parse_at(at_list)
+            parse_days(day_list)
+        else:
+            parse_interval(interval or "15m")
     except ValueError as e:
         raise click.ClickException(str(e))
 
@@ -2134,7 +2156,11 @@ def monitor_add(name, interval, description, event, check, url):
     m = Monitor(
         name=slug,
         description=description,
-        interval=interval,
+        interval=interval or "15m",
+        at=at_list,
+        tz=tz,
+        days=day_list,
+        notify=notify,
         event=event or f"monitor/{slug}",
         check=check,
         extra=extra,
@@ -2142,8 +2168,16 @@ def monitor_add(name, interval, description, event, check, url):
 
     MonitorRegistry.add_project(m, project_path)
     click.echo(f"Added monitor '{slug}' to {project_path}/.modastack/monitors.yaml")
-    click.echo(f"  interval={interval} event={m.event} "
-               f"check={check or 'manager-interpreted'}")
+    if at_list:
+        schedule = f"at={','.join(at_list)}"
+        if day_list:
+            schedule += f" days={','.join(day_list)}"
+        if tz:
+            schedule += f" tz={tz}"
+    else:
+        schedule = f"interval={interval or '15m'}"
+    click.echo(f"  {schedule} event={m.event} "
+               f"{'notify' if notify else (check or 'manager-interpreted')}")
 
 
 @monitors.command("pause")

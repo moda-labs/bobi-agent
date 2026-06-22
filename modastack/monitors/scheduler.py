@@ -29,8 +29,11 @@ instead of being lost.
 
 Monitors run on an `interval` (e.g. '15m') or at wall-clock times
 (`at: ["06:00", "18:00"]`, optionally pinned to a timezone with
-`tz: America/Los_Angeles`). At-monitors don't fire on first sight — the
-first tick records a baseline, then each scheduled time fires once.
+`tz: America/Los_Angeles`, and optionally gated to specific weekdays with
+`days: [sun]` for weekly recurrence). At-monitors don't fire on first sight —
+the first tick records a baseline, then each scheduled time fires once. A
+plain daily `at:` slot missed during downtime fires once, late (catch-up); a
+weekday-gated weekly slot does not catch up — a missed run is skipped.
 
 Monitor flavors:
   - Notification (`notify: true`) — detects a single condition keyed to the
@@ -131,6 +134,13 @@ def _monitor_state_path() -> Path:
 
 
 TICK_INTERVAL = 30  # seconds between scheduler ticks
+
+# How late a weekday-gated (`days:`) at-monitor may fire and still count as a
+# live run rather than a missed-while-down catch-up. A live fire lands within
+# one tick of the scheduled instant; anything later means the manager was down
+# across it, so the weekly run is skipped (D8 — no catch-up). Two ticks of
+# slack absorb tick jitter without ever catching up a real outage.
+_AT_CATCHUP_GRACE = 2 * TICK_INTERVAL
 
 
 def _default_publish(event: str, data: dict) -> bool:
@@ -306,33 +316,71 @@ class MonitorScheduler:
         starting the manager at 2pm shouldn't trigger the 6am slot. The first
         tick just records a baseline; subsequent ticks fire once per scheduled
         time crossed.
+
+        Plain daily `at:` monitors catch up: a slot missed while the manager
+        was down fires once, late, on the next tick. A weekday-gated (`days:`)
+        weekly monitor does NOT catch up (D8) — if the manager was down across
+        the scheduled instant, that run is skipped and only the next scheduled
+        occurrence fires. The two are told apart by how late `now` is relative
+        to the scheduled instant: a live fire lands within ~a tick of it, a
+        catch-up after downtime lands much later.
         """
         try:
             scheduled = self._last_scheduled(monitor, now)
         except ValueError as e:
-            log.warning(f"Monitor {monitor.name} has bad at-times: {e}")
+            log.warning(f"Monitor {monitor.name} has a bad at/days schedule: {e}")
             return False
         last = _parse_iso(last_run) if last_run else None
         if last is None:
-            with self._state_lock:
-                self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
-                self._save_state()
+            self._rebaseline_at(monitor, now)
             return False
-        return scheduled > last
+        if scheduled <= last:
+            return False
+        if monitor.weekdays and (now - scheduled).total_seconds() > _AT_CATCHUP_GRACE:
+            # Weekly schedule, instant passed while we were down — skip it,
+            # rebaseline past the missed slot, fire at the next occurrence.
+            self._rebaseline_at(monitor, now)
+            return False
+        return True
+
+    def _rebaseline_at(self, monitor, now: datetime) -> None:
+        """Record an at-monitor's baseline without firing — so a passed slot
+        isn't retro-fired on first sight or after a skipped weekly run."""
+        with self._state_lock:
+            self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
+            self._save_state()
 
     @staticmethod
     def _last_scheduled(monitor, now: datetime) -> datetime:
         """The most recent scheduled fire time at or before `now`, computed in
-        the monitor's timezone (so '06:00' means 6am in `tz`, not UTC)."""
+        the monitor's timezone (so '06:00' means 6am in `tz`, not UTC).
+
+        When `days:` is set, only those weekdays are eligible: for each `at:`
+        time we walk back day-by-day (rebuilding the wall-clock instant on each
+        local date, so DST shifts stay correct) to the most recent allowed
+        weekday at/before `now`. Empty `days:` ⇒ every weekday eligible, which
+        reduces to the original "most recent at-time within the last day"."""
         from datetime import timedelta
 
         local = now.astimezone(monitor.tzinfo)
+        weekdays = monitor.weekdays  # empty set ⇒ no gating (every day)
+        base_date = local.date()
         candidates = []
         for hour, minute in monitor.at_times:
-            t = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if t > local:
-                t -= timedelta(days=1)
-            candidates.append(t)
+            # Search back up to a full week for the most recent eligible
+            # (weekday, at-time) instant at or before `now`. Range 0..7 covers
+            # every weekday, so a gated monitor always finds a candidate.
+            for delta in range(8):
+                day = base_date - timedelta(days=delta)
+                t = local.replace(year=day.year, month=day.month, day=day.day,
+                                  hour=hour, minute=minute,
+                                  second=0, microsecond=0)
+                if t > local:
+                    continue  # at-time hasn't arrived yet on this date
+                if weekdays and t.weekday() not in weekdays:
+                    continue  # not an eligible weekday
+                candidates.append(t)
+                break
         return max(candidates)
 
     def run_monitor(self, monitor, registry: MonitorRegistry, now: datetime) -> None:

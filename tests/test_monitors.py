@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from modastack.monitors.schema import Monitor, parse_at, parse_interval
+from modastack.monitors.schema import Monitor, parse_at, parse_days, parse_interval
 from modastack.monitors import registry as registry_mod
 from modastack.monitors.registry import MonitorRegistry
 from modastack.monitors.schema import Condition
@@ -46,6 +46,39 @@ class TestParseAt:
         for bad in ["6am", "25:00", "12:60", "noon", ""]:
             with pytest.raises(ValueError):
                 parse_at(bad)
+
+
+# === Weekday parsing (days:) ===
+
+class TestParseDays:
+    def test_names_short_and_full(self):
+        assert parse_days("sun") == {6}
+        assert parse_days("Sunday") == {6}
+        assert parse_days("MON") == {0}
+        assert parse_days(["mon", "tue", "wed", "thu", "fri"]) == {0, 1, 2, 3, 4}
+
+    def test_both_numberings_for_sunday(self):
+        # cron 0=Sunday and ISO 7=Sunday both map to Python weekday 6 (D3).
+        assert parse_days(0) == {6}
+        assert parse_days(7) == {6}
+        assert parse_days("0") == {6}
+        assert parse_days("7") == {6}
+
+    def test_numbers_one_through_six_are_mon_to_sat(self):
+        assert parse_days([1, 2, 3, 4, 5, 6]) == {0, 1, 2, 3, 4, 5}
+
+    def test_mixed_names_and_numbers_dedup(self):
+        assert parse_days(["sun", 0, 7, "sunday"]) == {6}
+
+    def test_empty_and_none_mean_every_day(self):
+        assert parse_days(None) == set()
+        assert parse_days([]) == set()
+        assert parse_days("") == set()
+
+    def test_invalid(self):
+        for bad in ["funday", "8", "-1", "1.5", "su"]:
+            with pytest.raises(ValueError):
+                parse_days(bad)
 
 
 # === Monitor schema ===
@@ -93,6 +126,28 @@ class TestMonitor:
     def test_single_at_string_becomes_list(self):
         m = Monitor.from_dict({"name": "x", "at": "06:00"})
         assert m.at == ["06:00"]
+
+    def test_days_roundtrip_and_weekdays_property(self):
+        m = Monitor.from_dict({"name": "prep", "at": ["21:00"],
+                               "tz": "America/Los_Angeles", "days": ["sun"],
+                               "notify": True})
+        assert m.weekdays == {6}
+        d = m.to_dict()
+        assert d["days"] == ["sun"]
+        assert d["at"] == ["21:00"]
+        # round-trips back to an equivalent monitor
+        assert Monitor.from_dict(d).weekdays == {6}
+
+    def test_bare_scalar_days_including_zero(self):
+        # `days: 0` (cron Sunday) is a falsy int — must not be dropped.
+        m = Monitor.from_dict({"name": "x", "at": ["09:00"], "days": 0})
+        assert m.days == [0]
+        assert m.weekdays == {6}
+
+    def test_days_only_serialized_with_at(self):
+        # days are meaningless without at: an interval monitor drops them.
+        m = Monitor(name="x", interval="5m", days=["sun"])
+        assert "days" not in m.to_dict()
 
 
 # === Registry merge ===
@@ -322,6 +377,110 @@ class TestSchedulerDueAt:
         sched.state["r2"] = {"last_run": (_fixed_now() - timedelta(hours=2)).isoformat()}
         assert sched._due(m, _fixed_now()) is False  # 12:00 UTC = 5am PDT
         assert sched._due(m, _fixed_now() + timedelta(hours=1, minutes=5)) is True  # 6:05am PDT
+
+
+class TestSchedulerWeekdayGating:
+    """Weekly recurrence: a `days:` filter on the `at:`/`tz:` schedule.
+
+    _fixed_now() is 2026-06-01 12:00 UTC, a **Monday**. The Sunday before is
+    2026-05-31; the one before that is 2026-05-24.
+    """
+    def _weekly(self):
+        return Monitor(name="prep", at=["21:00"], tz="UTC", days=["sun"],
+                       notify=True, event="monitor/prep.weekly_due")
+
+    def test_fires_live_on_configured_weekday(self, tmp_path):
+        # Continuous operation: last fire was the previous Sunday; the tick just
+        # after this Sunday's 21:00 slot (within the catch-up grace) fires.
+        m = self._weekly()
+        sched, _ = _scheduler(tmp_path, [m])
+        sched.state["prep"] = {"last_run": datetime(2026, 5, 24, 21, 0,
+                                                    tzinfo=timezone.utc).isoformat()}
+        sun_210020 = datetime(2026, 5, 31, 21, 0, 20, tzinfo=timezone.utc)
+        assert sched._due(m, sun_210020) is True
+
+    def test_not_due_on_other_weekdays(self, tmp_path):
+        m = self._weekly()
+        sched, _ = _scheduler(tmp_path, [m])
+        # last_run already at the most recent Sunday slot; a Wednesday 21:30
+        # is NOT a new scheduled instant (no Wed firing).
+        sched.state["prep"] = {"last_run": datetime(2026, 5, 31, 21, 0,
+                                                    tzinfo=timezone.utc).isoformat()}
+        wed_2130 = datetime(2026, 6, 3, 21, 30, tzinfo=timezone.utc)
+        assert sched._due(m, wed_2130) is False
+
+    def test_no_catch_up_skips_missed_run_and_rebaselines(self, tmp_path):
+        # Manager down over the Sunday slot, comes back Monday noon: the weekly
+        # run is SKIPPED (no catch-up, D8) and the baseline advances past it so
+        # the stale slot is never retro-fired.
+        m = self._weekly()
+        sched, _ = _scheduler(tmp_path, [m])
+        sched.state["prep"] = {"last_run": datetime(2026, 5, 30, 12, 0,
+                                                    tzinfo=timezone.utc).isoformat()}
+        assert sched._due(m, _fixed_now()) is False  # Monday noon, Sunday slot missed
+        assert sched.state["prep"]["last_run"] == _fixed_now().isoformat()  # rebaselined
+        # The next occurrence (the following Sunday) still fires live.
+        next_sun = datetime(2026, 6, 7, 21, 0, 15, tzinfo=timezone.utc)
+        assert sched._due(m, next_sun) is True
+
+    def test_daily_at_still_catches_up(self, tmp_path):
+        # Regression guard: an ungated daily at-monitor KEEPS catch-up — a slot
+        # missed during downtime fires once, late.
+        daily = Monitor(name="d", at=["21:00"], tz="UTC", notify=True)
+        sched, _ = _scheduler(tmp_path, [daily])
+        sched.state["d"] = {"last_run": datetime(2026, 5, 30, 12, 0,
+                                                 tzinfo=timezone.utc).isoformat()}
+        assert sched._due(daily, _fixed_now()) is True  # Monday noon, Sunday 21:00 missed
+
+    def test_does_not_double_fire_same_instant(self, tmp_path):
+        m = self._weekly()
+        sched, _ = _scheduler(tmp_path, [m])
+        # Already ran at the Sunday slot — a later Monday tick must not re-fire.
+        sched.state["prep"] = {"last_run": datetime(2026, 5, 31, 21, 0,
+                                                    tzinfo=timezone.utc).isoformat()}
+        assert sched._due(m, _fixed_now()) is False
+
+    def test_empty_days_is_identical_to_daily(self, tmp_path):
+        # Regression guard: days:[] must behave exactly like today's daily at:.
+        gated = Monitor(name="g", at=["21:00"], tz="UTC", days=[])
+        daily = Monitor(name="g", at=["21:00"], tz="UTC")
+        assert (MonitorScheduler._last_scheduled(gated, _fixed_now())
+                == MonitorScheduler._last_scheduled(daily, _fixed_now()))
+
+    def test_dst_keeps_wall_clock_time(self, tmp_path):
+        # 'Sunday 21:00 LA' stays 21:00 local across the spring-forward boundary
+        # (DST began 2026-03-08). Fixed `now` = Monday 2026-03-09 12:00 UTC.
+        m = Monitor(name="p", at=["21:00"], tz="America/Los_Angeles", days=["sun"])
+        now = datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc)
+        scheduled = MonitorScheduler._last_scheduled(m, now)
+        local = scheduled.astimezone(scheduled.tzinfo)
+        assert (local.hour, local.minute) == (21, 0)
+        assert local.weekday() == 6  # Sunday
+        assert local.date() == datetime(2026, 3, 8).date()  # the DST-start Sunday
+
+
+class TestWeeklyJobRouting:
+    """End-to-end for the weekly prep-doc job: when the weekly notify monitor
+    is due it publishes its event, and that event's topic is one the manager
+    subscribes to — so a handler actually receives it."""
+
+    def test_weekly_notify_fires_and_event_is_subscribable(self, tmp_path):
+        from modastack.events.subscriptions import monitor_subscription_keys
+
+        m = Monitor(name="weekly-prep-doc", at=["21:00"], tz="UTC", days=["sun"],
+                    notify=True, event="monitor/prep.weekly_due",
+                    description="Generate my prep doc for the upcoming week")
+        sched, published = _scheduler(tmp_path, [m])
+        # Last fired the previous Sunday; the tick just after this Sunday's slot.
+        sched.state["weekly-prep-doc"] = {
+            "last_run": datetime(2026, 5, 24, 21, 0, tzinfo=timezone.utc).isoformat()}
+        sun_now = datetime(2026, 5, 31, 21, 0, 20, tzinfo=timezone.utc)
+        assert sched._due(m, sun_now) is True
+        sched.run_monitor(m, sched._registry_loader(), sun_now)
+
+        assert [p["event"] for p in published] == ["monitor/prep.weekly_due"]
+        # The manager subscribes to this topic (both bare + source-qualified).
+        assert "monitor/prep.weekly_due" in monitor_subscription_keys([m.event])
 
 
 class TestNotifyMonitor:

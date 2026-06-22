@@ -89,7 +89,9 @@ follow.
 
 ## Monitors
 
-Two kinds:
+A monitor either runs on an `interval:` (`15m`, `1h`, `2d`) or at
+wall-clock times (`at:`), and detects a condition the scheduler dedups and
+publishes as `event:`. The flavors:
 
 - **Command monitors** — a shell command returning JSON; the scheduler
   diffs results by stable `id` across runs and fires `event:` for new
@@ -100,6 +102,50 @@ Two kinds:
   a `description:` instead of a `command:`; the scheduler spawns a
   short-lived agent to decide whether to fire. Costs an LLM call per
   interval; use when diffable JSON isn't available.
+- **Native checks** — `check: pr_conflicts` names a Python runner shipped
+  with the framework or the pack's `monitors/*_checks.py`.
+- **Scheduled notifications** — `notify: true` fires `event:` once on every
+  scheduled run, keyed to the due time so dedup never suppresses it. For
+  *nudges* an agent reacts to, not condition detection.
+
+### Wall-clock and weekly schedules
+
+`at:` runs a monitor at fixed times of day instead of on an interval,
+optionally pinned to a timezone and gated to specific weekdays:
+
+| field | meaning |
+|---|---|
+| `at:` | time(s) of day — `"21:00"` or `["06:00", "18:00"]` |
+| `tz:` | IANA timezone for `at:` (e.g. `America/Los_Angeles`); defaults to host local |
+| `days:` | weekday(s) the `at:` times may fire on — names (`sun`, `mon`) or numbers (`0`/`7`=Sunday … `6`=Saturday). Absent ⇒ every day |
+
+`days:` is how you express **weekly** recurrence — it's just a filter on
+which weekdays an `at:` time is eligible. An at-monitor never fires on
+first sight (the first tick records a baseline). A plain daily `at:` slot
+missed while the manager was down fires **once, late**, on the next tick
+(catch-up); a **weekly** (`days:`-gated) slot does **not** catch up — a
+missed run is skipped and only the next scheduled occurrence fires. DST is
+handled: "Sunday 21:00 LA" stays 21:00 local across the boundary.
+
+### Schedule a weekly job
+
+A weekly job is a `notify` monitor on a weekly `at:`/`days:` schedule whose
+`event:` an agent reacts to — no special "job" machinery. Create it without
+hand-editing YAML:
+
+```bash
+modastack monitors add weekly-prep-doc \
+  --at 21:00 --days sun --tz America/Los_Angeles --notify \
+  --event monitor/prep.weekly_due \
+  --description "Generate my prep doc for the upcoming week"
+```
+
+The *task* the job performs lives in the pack, not the framework: a
+`context/` skill file the agent reads when the event arrives, plus a
+routing line in the role prompt that points to it. The eng-team ships
+exactly this pattern as a worked example — `context/prep-doc.md` (the
+skill) wired from the director role's `monitor/prep.weekly_due` handler.
+Copy it as a template for your own weekly jobs.
 
 ## Tool guides: function vs. policy
 
