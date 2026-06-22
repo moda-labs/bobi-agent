@@ -31,6 +31,14 @@ log = logging.getLogger(__name__)
 # Default rotation cap — absolute input_tokens, not a window fraction.
 DEFAULT_ROTATION_TOKEN_CAP = 275_000
 
+# Background event-subscription retry cadence (#409). When the initial
+# registration handshake with the event server times out, the session boots
+# anyway and a daemon thread keeps retrying with capped exponential backoff —
+# events are queued/sequenced/resumable, so a late registration just resumes
+# the stream from the saved cursor.
+SUBSCRIPTION_RETRY_BASE = 2.0
+SUBSCRIPTION_RETRY_MAX = 60.0
+
 
 class Session:
     """A Claude Code session with an inbox for receiving messages."""
@@ -63,6 +71,10 @@ class Session:
 
         self._client = None
         self._subscription = None
+        self._sub_retry_stop = threading.Event()
+        self._sub_retry_thread: threading.Thread | None = None
+        # Guards the hand-off of a background-registered subscription to stop().
+        self._sub_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -498,32 +510,91 @@ class Session:
         resource topics). The drain feeds arriving messages into this session's
         in-process inbox queue.
 
-        Failure handling depends on what the session needs the subscription for.
-        A **coordinator** (subscribes to external resource topics — the manager)
-        is useless without it: a deaf manager that still reports ``idle`` would
-        silently swallow every Slack/GitHub/inbox event, so its failure is fatal
-        and surfaces at start. An **ephemeral inbox-only worker** stays
-        best-effort — a transient event-server blip shouldn't abort real work;
-        it just can't be messaged until it next subscribes.
+        A failed initial registration is **never fatal** (#409). Registration
+        used to be terminal for coordinators — a timed-out handshake re-raised,
+        the session went to ``error`` state and died, taking out project leads
+        and sub-agents at init. But the event server queues, sequences, and
+        replays events, so a late registration simply resumes the stream from
+        the saved cursor. A transient timeout must not kill the session: we boot
+        now and retry registration in the background until it lands.
         """
         keys = [f"inbox/{self.name}"]
         for key in self._subscribe:
             if key not in keys:
                 keys.append(key)
-        has_external = any(not k.startswith("inbox/") for k in keys)
+        # Clear any stop signal from a prior lifecycle so a reused Session can
+        # subscribe again (Sessions are single-use today, but a stuck flag here
+        # would silently disable all reconnects).
+        self._sub_retry_stop.clear()
         try:
             from modastack.paths import modastack_root
             from modastack.subagent import _start_event_subscription
+            # One fast probe on the boot path — a healthy registration lands in
+            # ~ms. We deliberately DON'T burn the full in-band retry budget here:
+            # blocking start() for tens of seconds on a slow event server would
+            # stall the manager's boot and trip liveness probes. The background
+            # loop below owns the patient, backed-off retries instead.
             self._subscription = _start_event_subscription(
-                self.name, keys, modastack_root())
+                self.name, keys, modastack_root(), register_attempts=1)
         except Exception:
-            if has_external:
-                # Don't let a coordinator advertise itself as alive while deaf.
-                raise
             log.warning(
-                "Event subscription failed for '%s' — session will run but "
-                "will not receive messages", self.name, exc_info=True,
+                "Event subscription registration failed for '%s' — booting "
+                "anyway and retrying in the background; queued events resume "
+                "on reconnect", self.name, exc_info=True,
             )
+            self._retry_subscription_in_background(keys)
+
+    def _retry_subscription_in_background(self, keys: list[str]) -> None:
+        """Keep retrying event-server registration off the boot path.
+
+        Runs in a daemon thread with capped exponential backoff. Repeated
+        failures are logged but never terminate the process. On success the
+        subscription is wired in and the thread exits; ``stop()`` signals it to
+        give up so a shutting-down session leaves no live client behind.
+        """
+        def _loop() -> None:
+            from modastack.paths import modastack_root
+            from modastack.subagent import _start_event_subscription
+            delay = SUBSCRIPTION_RETRY_BASE
+            attempt = 0
+            while not self._sub_retry_stop.is_set():
+                if self._sub_retry_stop.wait(delay):
+                    return
+                attempt += 1
+                try:
+                    # One attempt per loop iteration — the loop's own backoff is
+                    # the retry cadence, so don't nest the in-band retry budget.
+                    sub = _start_event_subscription(
+                        self.name, keys, modastack_root(), register_attempts=1)
+                except Exception as e:
+                    delay = min(delay * 2, SUBSCRIPTION_RETRY_MAX)
+                    log.warning(
+                        "Background event-subscription retry #%d for '%s' "
+                        "failed: %s — retrying in %.0fs",
+                        attempt, self.name, e, delay,
+                    )
+                    continue
+                # Wire in (or discard) under the lock so we can't race stop():
+                # either stop() tears this client down, or we discard it here —
+                # never leave a live client+drain that stop() already skipped.
+                with self._sub_lock:
+                    shutting_down = self._sub_retry_stop.is_set()
+                    if not shutting_down:
+                        self._subscription = sub
+                if shutting_down:
+                    sub.stop()
+                    return
+                log.info(
+                    "Event subscription established for '%s' after %d "
+                    "background retr%s", self.name, attempt,
+                    "y" if attempt == 1 else "ies",
+                )
+                return
+
+        self._sub_retry_thread = threading.Thread(
+            target=_loop, daemon=True, name=f"sub-retry-{self.name}",
+        )
+        self._sub_retry_thread.start()
 
     def start(self, startup_prompt: str | None = None, timeout: int = 120) -> bool:
         """Start the session in a daemon thread.
@@ -573,14 +644,23 @@ class Session:
     def stop(self) -> None:
         if self._keep_alive:
             self._keep_alive.set()
+        # Tell any background registration retry to give up before we tear the
+        # subscription down, so it can't wire in a fresh client mid-shutdown.
+        self._sub_retry_stop.set()
+        if self._sub_retry_thread:
+            self._sub_retry_thread.join(timeout=5)
+            self._sub_retry_thread = None
         if self._thread:
             self._thread.join(timeout=15)
         # Tear down the event subscription (WS client + drain thread) BEFORE
         # unregistering the inbox, so the drain can't push into — or warn about —
-        # a closed inbox on its way out.
-        if self._subscription is not None:
-            self._subscription.stop()
-            self._subscription = None
+        # a closed inbox on its way out. Swap under the lock: a background retry
+        # that registered concurrently either handed its client to us here, or
+        # saw the stop flag and tore its own down — never both, never neither.
+        with self._sub_lock:
+            sub, self._subscription = self._subscription, None
+        if sub is not None:
+            sub.stop()
         self.inbox.close()
 
     def is_alive(self) -> bool:
