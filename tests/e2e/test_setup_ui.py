@@ -283,6 +283,28 @@ def test_homepage_lists_teams_and_opens_one(page, modastack):
     expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
 
 
+def test_welcome_button_goes_to_homepage(page, modastack_url):
+    # The welcome on-ramp offers a direct path to the team hub, so returning
+    # users don't have to walk through setup to reach their teams.
+    page.goto(modastack_url)
+    expect(page.get_by_role(
+        "heading", name="Build a team of agents that runs your work")).to_be_visible()
+    page.click("#welcome-home")
+    # Lands on the team hub (empty library → just the "add a team" card).
+    expect(page.get_by_role("heading", name="Your agent teams")).to_be_visible()
+    expect(page.locator("[data-addteam]")).to_be_visible()
+
+
+def test_brand_icon_navigates_home_from_anywhere(page, modastack_url):
+    # The titlebar brand is a home button reachable from any screen — here,
+    # mid-flow on the intro, clicking it jumps straight to the team hub.
+    page.goto(modastack_url)
+    page.click("#welcome-go")
+    expect(page.get_by_role("heading", name="Build an agent team")).to_be_visible()
+    page.click(".brand[data-home]")
+    expect(page.get_by_role("heading", name="Your agent teams")).to_be_visible()
+
+
 def test_disconnect_overlay_when_server_dies(page, modastack):
     # The page is useless without its local server — if it dies, the UI must
     # say so and stop pretending to be live (heartbeat catches it within ~4s).

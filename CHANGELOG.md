@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.28.1 — 2026-06-22
+
+A small setup-UI navigation pass: the homepage (team hub) is now reachable at any
+time, so users aren't stranded in the setup flow when they just want to get back
+to their teams.
+
+### Added
+- **Homepage is reachable from anywhere in setup.** The titlebar bobi mark is now
+  a home button — clicking it jumps to the team hub from any screen (welcome,
+  intro, the editor, the build/done views). The welcome on-ramp also gains a
+  direct "Go to homepage" button so returning users can skip straight to their
+  teams. Going home mid-flow is safe: the hub is re-entrant and the server keeps
+  each team's state. Added e2e coverage for both paths.
+
 ## 0.28.0 — 2026-06-22
 
 A stability release. The headline is **#409**: agent sessions (project leads and
