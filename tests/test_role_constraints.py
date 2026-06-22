@@ -14,6 +14,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LEAD_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "project_lead" / "ROLE.md"
+ENGINEER_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "engineer" / "ROLE.md"
+CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 
 
 class TestProjectLeadDelegation:
@@ -94,6 +96,16 @@ class TestProjectLeadStandingInstructions:
             "CI failure instruction must say to escalate only if unfixable"
         )
 
+    def test_ci_failures_cover_all_branches(self):
+        """Issue #323: auto-fix must cover human-authored PRs, not just
+        agent-authored ones. A failing check on any open PR blocks the
+        merge queue, so all branches get auto-fixed."""
+        text = self.text.lower()
+        assert "agent-authored" in text and "human-authored" in text, (
+            "CI failure instruction must explicitly cover both "
+            "agent-authored and human-authored PR branches"
+        )
+
     def test_auto_pickup_agent_labeled_issues(self):
         assert "auto-pickup agent-labeled issues" in self.text.lower(), (
             "Project lead prompt must instruct auto-pickup of agent-labeled issues"
@@ -132,4 +144,48 @@ class TestProjectLeadStandingInstructions:
     def test_merge_conflict_auto_dispatch(self):
         assert "conflict_detected" in self.text.lower(), (
             "Project lead prompt must handle merge conflict auto-dispatch"
+        )
+
+
+class TestReleaseTimeOnlyVersionConvention:
+    """Feature PRs must never bump the version or edit the changelog.
+
+    Issue #325: version bumps and CHANGELOG.md entries are a release-time
+    concern only. The generic `/ship` tool bumps both by default, so the
+    engineer prompt must override that for modastack PRs, and the
+    contributor docs must state the convention. These tests fail if either
+    the prompt guard or the documented convention regresses.
+    """
+
+    def test_engineer_prompt_forbids_version_bump_in_pr(self):
+        text = ENGINEER_PROMPT.read_text().lower()
+        assert "must not bump the version" in text, (
+            "Engineer prompt must forbid bumping the version in feature PRs"
+        )
+
+    def test_engineer_prompt_forbids_changelog_edit_in_pr(self):
+        text = ENGINEER_PROMPT.read_text().lower()
+        assert "changelog.md" in text and "release time" in text, (
+            "Engineer prompt must say CHANGELOG.md changes happen at release time"
+        )
+
+    def test_engineer_prompt_overrides_ship_default(self):
+        """`/ship` bumps version + changelog by default; the prompt must
+        tell the engineer to revert those for modastack PRs."""
+        text = ENGINEER_PROMPT.read_text().lower()
+        assert "/ship" in text and "revert" in text, (
+            "Engineer prompt must tell the engineer to revert /ship's "
+            "version/changelog changes"
+        )
+
+    def test_contributor_docs_state_convention(self):
+        text = CLAUDE_MD.read_text().lower()
+        assert "feature prs must not bump the version" in text, (
+            "CLAUDE.md must document the no-version-bump-in-feature-PRs convention"
+        )
+
+    def test_contributor_docs_forbid_changelog_edit(self):
+        text = CLAUDE_MD.read_text().lower()
+        assert "changelog.md" in text and "release time" in text, (
+            "CLAUDE.md must state CHANGELOG.md entries are added at release time"
         )

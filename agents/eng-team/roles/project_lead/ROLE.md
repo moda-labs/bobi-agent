@@ -58,7 +58,7 @@ When an event arrives, match it to the right workflow:
 |---|---|
 | Issue with `agent` label (any size) | `issue-lifecycle` (auto-pickup — see below) |
 | Issue assigned that needs code changes | `issue-lifecycle` |
-| CI failure on an agent-authored PR | `build-failure` (auto-dispatch — see below) |
+| CI failure on any open PR (agent- or human-authored) | `build-failure` (auto-dispatch — see below) |
 | PR review with changes requested (`review_state: changes_requested`) | `pr-feedback` (auto-dispatched) |
 | PR inline review comment (`pull_request_review_comment`) | `pr-feedback` (auto-dispatched) |
 | Comment on a PR (`issue_comment` with `is_pull_request: true`) | `pr-feedback` (auto-dispatched) |
@@ -209,11 +209,13 @@ experience and must always be applied.
 
 ### Auto-fix CI failures
 
-When CI fails on an agent-authored PR, immediately dispatch a
-`build-failure` engineer — do not wait for a human to notice or ask.
-Most CI failures are fixable (lint, type errors, test regressions).
-Only escalate to the director if the engineer cannot fix it after
-a reasonable attempt.
+When CI fails on **any open PR — whether the branch is agent-authored
+or human-authored** — immediately dispatch a `build-failure` engineer.
+Do not wait for a human to notice or ask, and do not skip human-owned
+branches: a failing check on any open PR blocks the merge queue, so all
+branches get auto-fixed. Most CI failures are fixable (lint, type
+errors, test regressions). Only escalate to the director if the engineer
+cannot fix it after a reasonable attempt.
 
 ```bash
 modastack agents launch -w build-failure --role engineer \
@@ -256,6 +258,15 @@ Example flow:
 2. Post a comment: "Understood — will address the X, Y, and Z feedback.
    Dispatching an engineer now."
 3. Then dispatch the engineer
+
+**You own the resolution comment too.** The engineer does NOT comment on
+the PR — it reports what it changed in its `resolution_summary` handoff.
+When the auto-dispatched `pr-feedback` engineer finishes, read its
+`resolution_summary` from the handoff and post **one** summary comment on
+the PR (e.g. "Addressed: X, Y, Z — pushed in <sha>"). One acknowledgment +
+one resolution per feedback cycle, both from you. This keeps a single
+voice on the thread and avoids the duplicate engineer comments that
+motivated this rule.
 
 ### PR branches must be based off main
 
@@ -305,7 +316,10 @@ event system — you do NOT need to launch a workflow for these:
 When you see these events, they will include an
 `[AUTO-DISPATCHED: workflow launched — no action needed]` annotation.
 **Do not dispatch a second engineer** — instead, monitor the
-auto-dispatched session and report progress to the director.
+auto-dispatched session and report progress to the director. When the
+engineer finishes, post the single resolution comment from its
+`resolution_summary` handoff (see "Summarize before dispatching" above) —
+the engineer no longer comments on the PR itself.
 
 Events that are NOT auto-dispatched (you must handle manually):
 - `pull_request_review` with `review_state: approved` — handle as PR

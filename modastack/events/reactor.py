@@ -43,11 +43,23 @@ class AutoDispatchRule:
         return all(fields.get(k) == v for k, v in self.match.items())
 
     def dedup_key(self, event: dict) -> str:
-        """Build a dedup key from the event to prevent rapid duplicate dispatches."""
+        """Build a dedup key from the event to prevent rapid duplicate dispatches.
+
+        The key must be unique per *distinct* trigger but stable across genuine
+        redelivery of the *same* trigger. A PR-level key (workflow:topic:number)
+        is too coarse: every comment on a PR collapses onto one key, so the
+        cooldown treats a reviewer's follow-up comments as duplicates of the
+        first and silently drops them (issue #326). Include the event's unique
+        per-delivery id — distinct across comments, stable across stream replay
+        of the same event — so each comment dispatches while true redelivery
+        still dedups. Fall back to the PR-level key when no id is present.
+        """
         topics = event.get("topics", [])
         topic = topics[0] if topics else "unknown"
         number = event.get("fields", {}).get("number", "unknown")
-        return f"{self.workflow}:{topic}:{number}"
+        base = f"{self.workflow}:{topic}:{number}"
+        event_id = event.get("id")
+        return f"{base}:{event_id}" if event_id else base
 
 
 class EventReactor:
