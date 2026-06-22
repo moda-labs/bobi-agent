@@ -152,3 +152,107 @@ class TestSetState:
         session._input_ready.clear()
         session._set_state("running")
         assert not session._input_ready.is_set()
+
+
+class TestSubscriptionResilience:
+    """#409: a registration read-timeout at init must not kill the session.
+
+    Regression for the lead/sub-agent crashes: a timed-out event-server
+    registration handshake re-raised and the session went to ``error`` state
+    and died. Events are queued/sequenced/resumable, so a transient timeout
+    must instead boot the session and retry registration in the background.
+    """
+
+    def test_registration_timeout_is_nonfatal_and_retries(
+        self, session, monkeypatch
+    ):
+        monkeypatch.setattr("modastack.session.SUBSCRIPTION_RETRY_BASE", 0.01)
+        fake_sub = MagicMock()
+        calls = {"n": 0}
+
+        def fake_start(name, keys, root, register_attempts=3):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # First (foreground) attempt times out, as in the incident.
+                raise TimeoutError("The read operation timed out")
+            return fake_sub
+
+        monkeypatch.setattr(
+            "modastack.subagent._start_event_subscription", fake_start
+        )
+        # A non-inbox topic makes this a coordinator — the exact case that used
+        # to be FATAL (the re-raise killed managers/leads at init).
+        session._subscribe = ["github:o/r"]
+
+        # Must not raise and must not flip the session into error state.
+        session._start_subscription()
+        assert session.detect_state() != "error"
+        assert session._subscription is None  # first attempt failed → not wired
+
+        # The background thread retries and wires the subscription in.
+        deadline = time.time() + 5
+        while session._subscription is None and time.time() < deadline:
+            time.sleep(0.01)
+
+        assert session._subscription is fake_sub
+        assert calls["n"] >= 2
+
+        session._sub_retry_stop.set()
+
+    def test_persistent_failure_never_terminates(self, session, monkeypatch):
+        monkeypatch.setattr("modastack.session.SUBSCRIPTION_RETRY_BASE", 0.01)
+        attempts = {"n": 0}
+
+        def always_timeout(name, keys, root, register_attempts=3):
+            attempts["n"] += 1
+            raise TimeoutError("The read operation timed out")
+
+        monkeypatch.setattr(
+            "modastack.subagent._start_event_subscription", always_timeout
+        )
+        session._subscribe = ["github:o/r"]
+
+        session._start_subscription()
+        assert session.detect_state() != "error"
+
+        # It keeps retrying (logged, not fatal) — observe repeated attempts.
+        deadline = time.time() + 2
+        while attempts["n"] < 3 and time.time() < deadline:
+            time.sleep(0.01)
+        assert attempts["n"] >= 3
+        assert session._subscription is None
+
+        # The retry loop honors the stop signal (the stop() contract).
+        session._sub_retry_stop.set()
+        session._sub_retry_thread.join(timeout=2)
+        assert not session._sub_retry_thread.is_alive()
+
+    def test_stop_tears_down_background_wired_subscription(
+        self, session, monkeypatch
+    ):
+        """A subscription wired in by the background retry must be torn down by
+        stop() — never leaked. Regression for the shutdown TOCTOU."""
+        monkeypatch.setattr("modastack.session.SUBSCRIPTION_RETRY_BASE", 0.01)
+        fake_sub = MagicMock()
+        calls = {"n": 0}
+
+        def fake_start(name, keys, root, register_attempts=3):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("The read operation timed out")
+            return fake_sub
+
+        monkeypatch.setattr(
+            "modastack.subagent._start_event_subscription", fake_start
+        )
+        session._subscribe = ["github:o/r"]
+        session._start_subscription()
+
+        deadline = time.time() + 5
+        while session._subscription is None and time.time() < deadline:
+            time.sleep(0.01)
+        assert session._subscription is fake_sub
+
+        session.stop()
+        fake_sub.stop.assert_called_once()
+        assert session._subscription is None

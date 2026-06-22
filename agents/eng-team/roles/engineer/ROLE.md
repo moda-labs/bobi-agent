@@ -461,12 +461,22 @@ Create or update the PR, then move the ticket to In Review.
 2. Create or update:
    - No PR: invoke `/ship` for test running, review, and PR creation.
    - Draft exists: `git push && gh pr ready`, then invoke `/ship`.
-   - Updating after feedback: `git push` and comment on the PR.
+   - Updating after feedback: `git push` only. Do NOT comment on the PR —
+     report the change in your `resolution_summary` handoff; the lead posts
+     the single resolution comment (see Feedback Phase).
 3. Move ticket to In Review (your responsibility, not the manager's).
    Comment on the issue with the PR link.
 4. Update handoff: `phase: pr_ready`, `pr_url: <PR URL>`. Then **STOP**.
 
 **Rules**: Always target `main`. NEVER merge PRs. NEVER run `/land-and-deploy`.
+
+**Feature PRs must not bump the version or edit `CHANGELOG.md`.** Version bumps
+and changelog entries happen at release time only — never in a feature PR. Leave
+`VERSION`, the `version` field in `pyproject.toml`, and `CHANGELOG.md` untouched.
+`/ship` is a generic tool that bumps the version and writes a changelog entry by
+default; for modastack PRs, revert those changes (`VERSION`, `pyproject.toml`
+`version`, `CHANGELOG.md`) and drop any `v<version>` PR-title prefix `/ship` adds
+before finalizing. Put the changelog-worthy detail in the PR description instead.
 
 ### QA Phase
 
@@ -515,8 +525,14 @@ Address review comments from a human reviewer.
 3. Spawn sub-agent with feedback items. Make fixes, commit.
 4. Review fixes with `/review`.
 5. Run tests. Push.
+6. Report what you changed in the `resolution_summary` handoff field — a
+   short summary of how each feedback item was addressed.
 
 **Rules**: Only change what was requested. Feedback overrides spec.
+**Do NOT comment on the PR yourself** — the lead posts the single
+resolution comment from your `resolution_summary` handoff (it already
+posted the acknowledgment). This keeps one voice on the thread and
+avoids duplicate comments.
 
 ### Merge Conflict Phase
 

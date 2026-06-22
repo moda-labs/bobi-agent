@@ -74,9 +74,9 @@ def test_deploy_assets_force_included_under_deploy_dir():
 
 # (A real `python -m build` + wheel-inspection guard lived here, but `build`
 # isn't in the unit-test venv and the actual wheel is built for real by
-# container.yml + publish-pypi; the config-level guards above — force-include
-# mapping + in-sdist + source-exists — already catch every way the deploy
-# assets can drop out of the wheel.)
+# container.yml + release.yml (build-wheel); the config-level guards above —
+# force-include mapping + in-sdist + source-exists — already catch every way the
+# deploy assets can drop out of the wheel.)
 
 
 # --- Dockerfile build modes (binary deploy + lean image) --------------------

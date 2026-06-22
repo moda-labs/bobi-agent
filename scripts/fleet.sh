@@ -6,7 +6,7 @@
 # stamped MODASTACK_FLEET=<prefix> into each app's [env] by provision-instance.sh.
 # The Fly API is the ONLY state store — no database, no committed manifest. These
 # helpers are the enumeration/classification primitive that gitops-teams.yml and
-# gitops-release.yml build on, and that a future provisioner service (design §9,
+# release.yml build on, and that a future provisioner service (design §9,
 # "Provisioner service replaces the C10 script + C22 Action behind the same
 # contract") can replace wholesale without changing how instances are stamped.
 #
