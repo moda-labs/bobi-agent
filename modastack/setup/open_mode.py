@@ -79,10 +79,12 @@ def list_teams_in(scan_dir: Path) -> list[dict]:
 
 
 def _bundled_templates_dir() -> Path | None:
-    """Where the starter templates that ship with modastack live. In a wheel
-    install they're packaged under `modastack/templates/`; in a source checkout
-    they're the repo's `agents/` directory beside the package. Returns the first
-    that actually holds team folders, or None."""
+    """Where offline starter templates live, if any. A published wheel ships NO
+    agent teams (they live in the moda-agent-teams repo, fetched via a registry),
+    so `modastack/templates/` is normally absent — this returns None there and
+    setup falls back to the registry. In a source checkout the repo's `agents/`
+    directory beside the package still serves as offline templates. Returns the
+    first candidate that actually holds team folders, or None."""
     import modastack
     pkg = Path(modastack.__file__).resolve().parent
     for cand in (pkg / "templates", pkg.parent / "agents"):

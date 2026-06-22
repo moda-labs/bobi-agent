@@ -68,11 +68,11 @@ packages = ["modastack"]
 "event-server/package.json" = "modastack/event-server/package.json"
 "event-server/package-lock.json" = "modastack/event-server/package-lock.json"
 "event-server/tsconfig.json" = "modastack/event-server/tsconfig.json"
-# Bundle a few starter teams so `modastack setup` always offers templates,
-# offline and without depending on a (possibly private) GitHub registry.
-"agents/eng-team" = "modastack/templates/eng-team"
-"agents/market-research" = "modastack/templates/market-research"
-"agents/support-manager" = "modastack/templates/support-manager"
+# NOTE: agent teams are intentionally NOT bundled into the binary — they live in
+# the separate `moda-agent-teams` repo and are fetched from a registry by
+# `modastack setup`/`install`. A source checkout still offers the repo's `agents/`
+# as offline starter templates (see modastack/setup/open_mode.py), but the
+# published wheel ships zero teams.
 # Bundle the Fly deploy assets so `modastack deploy` works from the binary alone
 # — no repo checkout. The one Dockerfile builds in `pypi` mode (installs modastack
 # from PyPI), so its build context is just these files; modastack/deploy.py
@@ -86,13 +86,12 @@ packages = ["modastack"]
 "scripts/fleet.sh" = "modastack/_deploy/scripts/fleet.sh"
 
 [tool.hatch.build.targets.sdist]
-# `agents` is required: the wheel force-includes agents/{eng-team,market-research,
-# support-manager} as bundled templates, and `python -m build` builds the wheel
-# FROM the sdist — so those dirs must be in the sdist or the wheel build fails
-# with "Forced include not found". `Dockerfile.pypi`, `docker`, and `scripts`
-# are likewise force-included into the wheel (the deploy assets), so the sdist
-# must carry them too.
-include = ["modastack", "event-server", "agents", "Dockerfile", "docker",
+# `python -m build` builds the wheel FROM the sdist, so every root the wheel
+# force-includes must live here too, or the build dies with "Forced include not
+# found". That's the event-server source + the deploy assets (Dockerfile, docker/,
+# scripts/). Agent teams are NOT bundled (they live in the moda-agent-teams repo),
+# so `agents/` is intentionally absent — keeping it out of the binary AND the sdist.
+include = ["modastack", "event-server", "Dockerfile", "docker",
            "scripts", "README.md", "CHANGELOG.md"]
 exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
 

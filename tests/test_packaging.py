@@ -42,6 +42,27 @@ def test_every_wheel_force_include_is_in_sdist():
     )
 
 
+def test_no_agent_teams_bundled_in_binary():
+    """Agent teams live in the `moda-agent-teams` repo, NOT the wheel. Guard the
+    de-bundle: nothing under agents/ may be force-included into the wheel, no
+    force-include may target modastack/templates/, and agents/ must stay out of
+    the sdist. Re-bundling a team should trip this, not ship silently."""
+    cfg = _config()
+    force_include = cfg["tool"]["hatch"]["build"]["targets"]["wheel"].get("force-include", {})
+    bundled = [
+        src for src, dest in force_include.items()
+        if src.split("/", 1)[0] == "agents" or str(dest).startswith("modastack/templates")
+    ]
+    assert not bundled, f"agent teams must not be bundled into the wheel: {bundled}"
+
+    sdist_include = cfg["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+    sdist_roots = {entry.split("/", 1)[0] for entry in sdist_include}
+    assert "agents" not in sdist_roots, (
+        "agents/ must not ship in the sdist — teams live in moda-agent-teams, "
+        "and nothing the wheel builds force-includes them anymore"
+    )
+
+
 def test_force_included_template_paths_exist_on_disk():
     """The bundled-template source dirs must actually exist in the repo."""
     cfg = _config()
