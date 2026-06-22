@@ -164,6 +164,15 @@
     if (introFrom === "hub") { atHome = true; render(); }
     else { welcomed = false; render(); }
   }
+  // Jump to the homepage (team hub) from anywhere — the titlebar brand and the
+  // welcome screen both call this. The hub overlays any stage and is re-entrant,
+  // so leaving mid-flow is safe; the server keeps each team's state.
+  function goHome() {
+    if (atHome) { renderHome(); return; }
+    atHome = true; welcomed = true;   // don't fall back to the welcome on-ramp
+    building = false; buildGen++;      // supersede any in-flight build
+    renderHome();
+  }
   function toast(msg) {
     const t = document.createElement("div");
     t.textContent = msg;
@@ -232,11 +241,12 @@
           <div class="wmeta-row"><span class="wmeta-k">You'll need</span><span class="wmeta-v">the Claude Code CLI (already running this), plus logins for any services you want to connect — added as you go.</span></div>
         </div>
 
-        <div class="actions"><button class="btn primary" id="welcome-go">Get started →</button></div>
+        <div class="actions"><button class="btn primary" id="welcome-go">Get started →</button><button class="btn ghost" id="welcome-home">Go to homepage</button></div>
       </main>
       ${flowDiagramHTML()}
     </div></div>`;
     $("#welcome-go").addEventListener("click", () => { welcomed = true; introFrom = "welcome"; renderIntro(); });
+    $("#welcome-home").addEventListener("click", goHome);
   }
 
   // --- intro: pick a template team or design a new one ------------------
@@ -1670,6 +1680,7 @@
   }
 
   document.addEventListener("click", (e) => {
+    if (e.target.closest("[data-home]")) { goHome(); return; }
     if (e.target.closest("[data-back]")) { goBack(); return; }
     const go_ = e.target.closest("[data-go]");
     if (go_) { go(go_.dataset.go); return; }
