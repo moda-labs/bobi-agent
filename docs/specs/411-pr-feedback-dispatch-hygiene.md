@@ -137,7 +137,7 @@ Four independent, composable changes in the reactor + adapter, each guarded by a
 
 | Part | Change | Primary file |
 |------|--------|--------------|
-| (a) | Skip auto-dispatch for events whose `sender` is the bot's own GitHub identity. | `modastack/events/reactor.py` |
+| (a) | Skip auto-dispatch for events whose `sender` is the bot's own GitHub identity — **default-on**, no enable flag, with an `allow_self_authored: true` opt-in escape hatch. | `modastack/events/reactor.py` |
 | (b) | Skip `pr-feedback` dispatch when the target PR is a **draft**. | `reactor.py` (+ adapter enrichment) |
 | (c) | Anchor dedup on the **stable comment/review id** and pass a **deterministic `run_key`** so the active-run guard prevents fan-out. | `reactor.py` (+ adapter field) |
 | (d) | **Hard-skip `pr-feedback` on human-authored PRs** — dispatch only when the PR author == bot identity. | `reactor.py` (+ adapter field) |
@@ -157,18 +157,30 @@ GitHub login to compare. The bot's identity is the authenticated `gh` token's us
 `modastack` (verified via `gh api user --jq .login`).
 
 - Resolve the bot login **once** at reactor construction (or first use) via `gh api user --jq .login`,
-  cache it on the `EventReactor`. No new config key — the token is the single source of truth, which
-  also survives token rotation (a documented operational event).
-- In `process()`, before dispatching, if the bot login is known and `fields.sender == bot_login`,
-  **skip** (return `None`, log `Auto-dispatch skipped (self-authored): <key>`).
-- Scope: applies to **all** dispatch rules, not just `pr-feedback`. A bot auto-reacting to its own
-  action is never desired. `suppress` rules are unaffected (they already return without launching).
+  cache it on the `EventReactor`. No config key is needed to *resolve identity* — the token is the
+  single source of truth, which also survives token rotation (a documented operational event).
+- **Skip is the default and is always on — no flag enables it.** In `process()`, before dispatching,
+  if the bot login is known and `fields.sender == bot_login`, **skip** (return `None`, log
+  `Auto-dispatch skipped (self-authored): <key>`). This applies to **all** dispatch rules. A bot
+  auto-reacting to its own action is never the intent, so it requires no opt-in to turn on.
+- **Opt-in escape hatch for the rare reverse case.** The only realistic situation where you'd *want*
+  the bot to react to its own event is a rule that deliberately self-chains — e.g. a future rule that
+  triggers off a structured command comment the bot posts to itself as a work queue. For that, a rule
+  may set an explicit `allow_self_authored: true`; absent the flag, self-authored events are skipped.
+  **None of the shipped `eng-team` rules set it**, and the framework default stays skip-on.
+- `suppress` rules are unaffected (they already return without launching).
 - Fail-open: if the login can't be resolved (network/auth blip), do **not** skip — preserve today's
   behavior rather than silently dropping real events.
 
-> **Decision point D1 (bot identity source).** Recommended: resolve from `gh api user` and cache.
-> Alternative: add an explicit `services.github.identity` config field. Recommend the token-derived
-> approach (no duplication, rotation-safe).
+> **Resolved (was "scope of (a)" open question) — per review (underminedsk, 2026-06-22).** The
+> self-author skip is **default-on for every rule with no config field to enable it**, plus an
+> `allow_self_authored: true` per-rule opt-in for the rare deliberate self-trigger. This is exactly the
+> "default to skip, opt-in to receive your own events" shape the reviewer asked for.
+
+> **Decision point D1 (bot identity *source*).** Separate from the skip default above: how the reactor
+> learns *which* login is its own. Recommended: resolve from `gh api user` and cache. Alternative: add
+> an explicit `services.github.identity` config field. Recommend the token-derived approach (no
+> duplication, rotation-safe).
 
 ### (b) Draft skip
 
@@ -273,6 +285,8 @@ current `main` first**, then passes after the fix.
   returns `None`, no launch. And `test_dispatches_when_sender_is_human` (regression guard — human
   comments still dispatch).
 - (a) `test_self_author_skip_fails_open_when_login_unknown` — login unresolved → dispatch proceeds.
+- (a) `test_allow_self_authored_opt_in_dispatches` — rule with `allow_self_authored: true` + bot
+  `sender` → dispatch proceeds (escape hatch works, default-skip is overridable per rule).
 - (b) `test_skips_pr_feedback_on_draft_review_event` — `fields.draft == True` → no dispatch.
   `test_dispatches_pr_feedback_on_ready_pr` — `draft == False` → dispatch (regression guard).
 - (b) `test_draft_lookup_fails_open` — lookup raises → dispatch proceeds.
@@ -327,8 +341,8 @@ cd event-server && <adapter test cmd>                          # adapter field t
 ## 5. Scope
 
 ### In scope
-- `modastack/events/reactor.py`: self-author skip, draft skip, stable-comment-id dedup key,
-  deterministic `run_key`, **human-author hard-skip (part d)**.
+- `modastack/events/reactor.py`: self-author skip (default-on, `allow_self_authored` opt-in), draft
+  skip, stable-comment-id dedup key, deterministic `run_key`, **human-author hard-skip (part d)**.
 - `event-server/src/adapters/github.ts`: emit `fields.draft`, `fields.comment_id`, `fields.review_id`,
   **`fields.pr_author`**.
 - `agents/eng-team/agent.yaml`: `skip_draft: true` **and `require_bot_author: true`** on the
@@ -348,7 +362,8 @@ cd event-server && <adapter test cmd>                          # adapter field t
 1. Write the failing unit tests (a/b/c/d) in `tests/test_reactor.py` — confirm red on `main`.
 2. Adapter: add `fields.draft`, `fields.comment_id`, `fields.review_id`, `fields.pr_author` + adapter
    tests.
-3. Reactor (a): resolve + cache bot login; self-author skip in `process()`.
+3. Reactor (a): resolve + cache bot login; default-on self-author skip in `process()`, honoring a
+   per-rule `allow_self_authored: true` opt-in.
 4. Reactor (b): `skip_draft` rule flag; field-based skip for review events, off-thread `gh pr view`
    lookup for `issue_comment`.
 5. Reactor (c): stable-id dedup key; deterministic `run_key` into `launch_agent`.
@@ -373,8 +388,13 @@ cd event-server && <adapter test cmd>                          # adapter field t
 - **D4:** for the human-author hard-skip (part d), **fail-closed** when the PR author can't be resolved
   (recommended — #423 showed a false dispatch onto a human PR is the costly direction) vs fail-open for
   symmetry with (a)/(b)?
-- **Scope of (a):** confirm the self-author skip should be **global** (all dispatch rules), not just
-  `pr-feedback`. (Recommended: global — a bot should never auto-react to its own action.)
 - **Scope of (d):** confirm the human-author hard-skip is scoped to **`pr-feedback`** only (other
   workflows like `pr-closed` legitimately act on human PRs). (Recommended: `pr-feedback`-only via the
   `require_bot_author` rule flag.)
+
+**Resolved during review:**
+
+- ~~**Scope of (a):**~~ **Decided (underminedsk, 2026-06-22):** self-author skip is **default-on for
+  all dispatch rules with no config field to enable it**, plus an `allow_self_authored: true` per-rule
+  opt-in for the rare deliberate self-trigger. See §3(a). (The shipped `pr-closed` / `issues.assigned`
+  rules carry `allow_self_authored: true` because they legitimately act on the bot's own merges/assigns.)
