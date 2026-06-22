@@ -853,6 +853,37 @@ class Subscription:
             log.debug("Drain thread stop failed", exc_info=True)
 
 
+_self_github_login: str | None = None
+_self_github_login_resolved = False
+
+
+def _resolve_self_github_login() -> str | None:
+    """Best-effort lookup of the bot's own GitHub login via ``gh api user``.
+
+    Cached for the process lifetime. Returns None when ``gh`` is unavailable or
+    unauthenticated — the reactor's self-author guard then stays inactive
+    (fail open) rather than dropping events. Used to skip auto-dispatching
+    pr-feedback on the bot's own comments (issue #411).
+    """
+    global _self_github_login, _self_github_login_resolved
+    if _self_github_login_resolved:
+        return _self_github_login
+    _self_github_login_resolved = True
+    try:
+        result = sp.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            login = result.stdout.strip()
+            _self_github_login = login or None
+            if _self_github_login:
+                log.info("Resolved bot GitHub login: %s", _self_github_login)
+    except (OSError, sp.SubprocessError) as e:
+        log.info("Could not resolve bot GitHub login (self-author guard off): %s", e)
+    return _self_github_login
+
+
 def _start_event_subscription(session_name: str, subscribe: list[str],
                                project_path: Path,
                                register_attempts: int = 3) -> "Subscription":
@@ -1021,8 +1052,17 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     reactor = None
     if has_external and cfg.auto_dispatch:
         from modastack.events.reactor import EventReactor
-        reactor = EventReactor.from_config(cfg.auto_dispatch, cwd=str(project_path))
-        log.info("Auto-dispatch reactor loaded with %d rule(s)", len(reactor.rules))
+        # Resolve the bot's own GitHub login so the reactor can skip
+        # auto-dispatching on the bot's own events (issue #411). Self-author
+        # skip is the default, so we need the login unless EVERY rule opts back
+        # in via allow_self_authored.
+        self_login = None
+        if any(not r.get("allow_self_authored") for r in cfg.auto_dispatch):
+            self_login = _resolve_self_github_login()
+        reactor = EventReactor.from_config(
+            cfg.auto_dispatch, cwd=str(project_path), self_login=self_login)
+        log.info("Auto-dispatch reactor loaded with %d rule(s) (self_login=%s)",
+                 len(reactor.rules), self_login or "unresolved")
 
     drain_thread = threading.Thread(
         target=drain_loop, args=(session_name,),

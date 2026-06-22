@@ -54,18 +54,27 @@ export function normalizeGitHubWebhook(
 
 	// Review-specific fields — pull_request_review and pull_request_review_comment
 	// carry a review/comment object with state, body, and file context that the
-	// consuming agent needs to decide whether to dispatch pr-feedback.
+	// consuming agent needs to decide whether to dispatch pr-feedback. The review
+	// id is a stable per-review identifier used to dedup dispatch (issue #411).
 	const review = payload.review as Record<string, unknown> | undefined;
 	if (review) {
 		if (review.state) fields.review_state = review.state as string;
 		if (review.body) fields.review_body = (review.body as string).slice(0, 500);
 		if (review.html_url) fields.review_url = review.html_url as string;
+		if (review.id !== undefined) fields.review_id = review.id as number;
 	}
 	const comment = payload.comment as Record<string, unknown> | undefined;
 	if (comment && eventHeader === "pull_request_review_comment") {
 		if (comment.body) fields.comment_body = (comment.body as string).slice(0, 500);
 		if (comment.path) fields.comment_path = comment.path as string;
 		if (comment.html_url) fields.comment_url = comment.html_url as string;
+	}
+	// Stable per-comment id — dedups dispatch so one comment can't fan out into
+	// multiple feedback engines (issue #411). Present on issue_comment and
+	// pull_request_review_comment payloads.
+	if (comment && (eventHeader === "pull_request_review_comment" ||
+		eventHeader === "issue_comment")) {
+		if (comment.id !== undefined) fields.comment_id = comment.id as number;
 	}
 
 	// issue_comment on a PR — GitHub sends issue_comment for both issues and
