@@ -92,6 +92,25 @@ Requires a configured gateway (`OPENROUTER_API_KEY` + `AICHAT_PLATFORM` in the
 environment). An auth error means it isn't configured for this instance —
 surface that, don't pass a key inline.
 
+### Generate images
+
+Generate images by calling the OpenAI Images API with `curl` — a direct
+capability call, not delegation. The API returns base64, so the convention is
+**generate → decode the bytes to `/tmp/*.png` → `Read` the path** (never let
+base64 land in your context); reuse that file downstream (Slack upload, PR
+attachment).
+
+```bash
+curl -fsS https://api.openai.com/v1/images/generations \
+  -H "Authorization: Bearer $OPENAI_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-1","prompt":"...","n":1,"size":"1024x1024"}' \
+  | jq -e -r '.data[0].b64_json' | base64 --decode > /tmp/img-$RANDOM.png
+```
+
+`OPENAI_API_KEY` comes from the environment at call time — never baked, never on
+the command line. A 401 means it isn't configured for this instance; surface
+that rather than improvising. Full details: your team's `tools/image.md`.
+
 ## Your working directory
 
 Your working directory is an isolated git worktree. All changes go
