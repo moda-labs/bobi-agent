@@ -1,13 +1,49 @@
 # Changelog
 
-## Unreleased
+## 0.28.0 — 2026-06-22
+
+A stability release. The headline is **#409**: agent sessions (project leads and
+sub-agents) were dying at init roughly every 1–2h when the cloud event-server
+registration handshake timed out. Registration is now non-fatal with background
+retry, so a transient timeout no longer takes out a running fleet.
 
 ### Fixed
+- **Event-server registration is non-fatal at startup (#409).** Agent sessions
+  died during init when the cloud registration handshake timed out — a failed
+  registration re-raised, the session went to `error` state, and the process
+  died, taking out project leads and sub-agents about every 1–2h. Events are
+  cloud-queued, sequenced, and resumable, so a late registration just resumes the
+  stream from the saved cursor. The boot path now does one fast probe so a slow
+  event server can't stall `start()` and trip liveness probes; on failure a daemon
+  thread retries with capped exponential backoff (2s→60s), logging without
+  terminating. A lock guards hand-off of a background-registered subscription to
+  `stop()` so shutdown never leaks a live client/drain thread. Server-side, the
+  registration read-timeout goes 15s→30s and the `ensure_bubble` mint-wait budget
+  30s→45s to stay above it.
+- **Reviewer follow-up comments no longer get silently dropped (#326).** The
+  reactor's dedup key was PR-level (`workflow:topic:number`) with a 1800s
+  cooldown, so a reviewer's follow-up comments on the same PR collapsed onto the
+  first comment's key and were dropped. The per-delivery event id is now appended
+  to the dedup key, so distinct comments each dispatch while genuine redelivery
+  still dedups.
 - **pr-feedback no longer posts duplicate comments (#321).** The engineer
   addressing review feedback no longer comments on the PR itself; it reports
   what it changed in a new `resolution_summary` handoff field. The lead — which
   already posts the acknowledgment before dispatching — now posts the single
   resolution comment from that handoff, keeping one voice per feedback cycle.
+
+### Added
+- **Auto-fix CI failures on any open PR (#323).** The project lead's "Auto-fix CI
+  failures" standing instruction now covers any open PR — agent- or
+  human-authored — not just agent-authored PRs. A failing check on any open PR
+  blocks the merge queue, so all branches get auto-fixed.
+
+### Changed
+- **Unified, canary-gated release pipeline (#401).** The release is now one gated
+  `release.yml`: subscription-login smoke → build the wheel once → build the
+  canary from that wheel + `CANARY-OK` smoke (the gate) → then publish the same
+  wheel to PyPI (+ Cloudflare event-server + Homebrew) and roll the Fly fleet in
+  parallel → reconcile team packages + secrets.
 
 ## 0.27.0 — 2026-06-21
 
