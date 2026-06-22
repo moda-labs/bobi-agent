@@ -1478,13 +1478,20 @@ def doctor(browser, fix):
         modastack doctor --browser --fix
     """
     from .doctor import run_doctor
+    from modastack.validate import status_glyph, supports_unicode
+
+    # Resolve the glyph set once: ✓/✗/⚠, or [OK]/[ERROR]/[WARN] on
+    # unicode-stripped terminals. Shared by the no-install warning below and
+    # the per-check rows further down.
+    unicode = supports_unicode()
+    warn_mark = status_glyph(False, False, unicode=unicode)
 
     # doctor is advisory and must run anywhere — but never silently: a
     # green report outside an installation would be a lie.
     if paths.bound_root() is None:
-        click.echo(click.style("⚠ No Modastack installation found at or above "
-                               "this directory — project-level checks will "
-                               "report 'no project detected'.", fg="yellow"))
+        click.echo(click.style(f"{warn_mark} No Modastack installation found at "
+                               "or above this directory — project-level checks "
+                               "will report 'no project detected'.", fg="yellow"))
 
     results = run_doctor()
 
@@ -1500,12 +1507,9 @@ def doctor(browser, fix):
     sandbox_failure = False
     for r in results:
         required = getattr(r, "required", True)
-        if r.ok:
-            mark = "✓"
-        elif required:
-            mark = "✗"
-        else:
-            mark = "⚠"   # non-blocking warning (e.g. optional service)
+        # ✓ ok / ✗ blocking failure / ⚠ non-blocking warning (optional service),
+        # with [OK]/[ERROR]/[WARN] fallback on unicode-stripped terminals.
+        mark = status_glyph(r.ok, required, unicode=unicode)
         click.echo(f"  {mark} {r.name}: {r.detail}")
         if not r.ok:
             if required:

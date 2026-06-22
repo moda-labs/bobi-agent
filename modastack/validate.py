@@ -9,10 +9,46 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+def supports_unicode(stream=None) -> bool:
+    """True if *stream* (default stdout) can encode the status glyphs.
+
+    Unicode-stripped terminals (ASCII/POSIX locales, redirected pipes with
+    no declared encoding) fall back to bracketed text markers via
+    ``status_glyph`` so preflight output never raises or mojibakes.
+    """
+    stream = stream if stream is not None else sys.stdout
+    enc = getattr(stream, "encoding", None)
+    if not enc:
+        return False
+    try:
+        "✓⚠✗".encode(enc)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+def status_glyph(ok: bool, required: bool, *, unicode: bool | None = None) -> str:
+    """Status marker for a check.
+
+    ``✓`` ok, ``✗`` blocking (required) failure, ``⚠`` non-blocking warning.
+    Falls back to ``[OK]`` / ``[ERROR]`` / ``[WARN]`` when the terminal can't
+    encode unicode. ``required`` is only consulted when ``ok`` is False.
+    Pass ``unicode`` explicitly to avoid re-probing stdout per row.
+    """
+    if unicode is None:
+        unicode = supports_unicode()
+    if ok:
+        return "✓" if unicode else "[OK]"
+    if required:
+        return "✗" if unicode else "[ERROR]"
+    return "⚠" if unicode else "[WARN]"
 
 
 @dataclass
@@ -26,14 +62,10 @@ class ValidationResult:
         return [c for c in self.checks if not c.ok]
 
     def format(self) -> str:
+        unicode = supports_unicode()
         lines = []
         for c in self.checks:
-            if c.ok:
-                icon = "✓"
-            elif c.required:
-                icon = "✗"   # blocking failure
-            else:
-                icon = "⚠"   # non-blocking warning (degraded start)
+            icon = status_glyph(c.ok, c.required, unicode=unicode)
             lines.append(f"  {icon} {c.name:30} {c.detail}")
             if not c.ok and c.hint:
                 lines.append(f"    → {c.hint}")

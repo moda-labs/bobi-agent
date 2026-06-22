@@ -10,9 +10,62 @@ from modastack.validate import (
     _check_service_credentials,
     _check_venn_services,
     _check_mcp_servers,
+    status_glyph,
+    supports_unicode,
     CheckResult,
 )
 from modastack.config import Config, ServiceConfig
+
+
+class _FakeStream:
+    def __init__(self, encoding):
+        self.encoding = encoding
+
+
+class TestStatusGlyph:
+
+    def test_unicode_glyphs(self):
+        assert status_glyph(True, True, unicode=True) == "✓"
+        assert status_glyph(False, True, unicode=True) == "✗"   # blocking
+        assert status_glyph(False, False, unicode=True) == "⚠"  # warning
+
+    def test_ascii_fallback(self):
+        assert status_glyph(True, True, unicode=False) == "[OK]"
+        assert status_glyph(False, True, unicode=False) == "[ERROR]"
+        assert status_glyph(False, False, unicode=False) == "[WARN]"
+
+    def test_required_ignored_when_ok(self):
+        # When a check passes, `required` doesn't change the marker.
+        assert status_glyph(True, False, unicode=True) == "✓"
+        assert status_glyph(True, False, unicode=False) == "[OK]"
+
+    def test_supports_unicode_utf8(self):
+        assert supports_unicode(_FakeStream("utf-8")) is True
+
+    def test_supports_unicode_ascii(self):
+        assert supports_unicode(_FakeStream("ascii")) is False
+
+    def test_supports_unicode_no_encoding(self):
+        assert supports_unicode(_FakeStream(None)) is False
+
+    def test_supports_unicode_unknown_encoding(self):
+        # An unknown codec name raises LookupError → treat as no support.
+        assert supports_unicode(_FakeStream("definitely-not-a-codec")) is False
+
+    def test_format_falls_back_to_text_markers(self):
+        from modastack.validate import ValidationResult
+        checks = [
+            CheckResult("github", ok=True, detail="native"),
+            CheckResult("email", ok=False, detail="venn — not connected", required=False),
+            CheckResult("slack", ok=False, detail="native — missing bot_token", required=True),
+        ]
+        vr = ValidationResult(ok=False, checks=checks)
+        with patch("modastack.validate.supports_unicode", return_value=False):
+            output = vr.format()
+        assert "[OK]" in output
+        assert "[WARN]" in output   # optional failure
+        assert "[ERROR]" in output  # required failure
+        assert "✓" not in output and "⚠" not in output and "✗" not in output
 
 
 class TestCheckEntryPoint:
