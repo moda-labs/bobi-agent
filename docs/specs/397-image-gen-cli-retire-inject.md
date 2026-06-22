@@ -206,9 +206,9 @@ returns only docs/spec mentions.
 > - **D3 = both** — `agents/eng-team/tools/image.md` guide **plus** the
 >   `base.md` pointer.
 > - The **tool-library convention** (D1 Option C) is split out to its own
->   follow-on: **#418** — a define-once catalog migrating aichat, codex, the
+>   follow-on: **#416** — a define-once catalog migrating aichat, codex, the
 >   OpenAI image CLI, venn, and gstack. Option B here is exactly what a library
->   entry expands into, so #418 lands with zero rework against this slice.
+>   entry expands into, so #416 lands with zero rework against this slice.
 
 **D1 — Where to bake: base `Dockerfile` vs eng-team `build:` spec.**
 The locked comment says "bake into the base `Dockerfile` alongside aichat/codex."
