@@ -11,7 +11,6 @@ Rules are defined in agent.yaml under ``auto_dispatch``.
 from __future__ import annotations
 
 import logging
-import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -22,36 +21,6 @@ log = logging.getLogger(__name__)
 
 DEFAULT_COOLDOWN = 1800  # 30 minutes
 _MAX_DEDUP_ENTRIES = 500
-_DRAFT_LOOKUP_TIMEOUT = 15  # seconds for the off-thread `gh pr view` lookup
-
-
-def _pr_is_draft(repo: str, number, cwd: str) -> bool | None:
-    """Best-effort: is PR ``number`` in ``repo`` a draft? ``None`` when unknown.
-
-    ``issue_comment`` webhooks (the dominant #411 case — the rendered-spec link
-    comment) do NOT carry the PR's draft state, so the reactor resolves it via
-    an authenticated ``gh pr view``. Called off the drain thread (see
-    ``_dispatch``) so event delivery never blocks on the network. Returns
-    ``None`` on any error so the caller can **fail open** (dispatch rather than
-    silently drop) — matching the team's "verify live, don't fabricate" policy.
-    """
-    try:
-        result = subprocess.run(
-            ["gh", "pr", "view", str(number), "--repo", repo,
-             "--json", "isDraft", "--jq", ".isDraft"],
-            capture_output=True, text=True,
-            timeout=_DRAFT_LOOKUP_TIMEOUT, cwd=cwd,
-        )
-        if result.returncode != 0:
-            return None
-        out = result.stdout.strip()
-        if out == "true":
-            return True
-        if out == "false":
-            return False
-        return None
-    except (OSError, subprocess.SubprocessError):
-        return None
 
 
 @dataclass
@@ -64,7 +33,6 @@ class AutoDispatchRule:
     cooldown: int = DEFAULT_COOLDOWN
     suppress: bool = False
     # Dispatch-hygiene guards (issue #411).
-    skip_draft: bool = False  # opt-in: don't dispatch when the PR is a draft
     # Skipping the bot's OWN events is the DEFAULT — a bot auto-reacting to its
     # own action is never the intent (per review, underminedsk 2026-06-22). The
     # rare rule that deliberately reacts to the bot's own action (e.g. pr-closed
@@ -140,17 +108,19 @@ class AutoDispatchRule:
     def skip_reason(self, event: dict, self_login: str | None) -> str | None:
         """Return a reason to skip dispatch for this matched event, or None.
 
-        Guards spurious pr-feedback dispatches (issue #411): the bot reacting to
-        its OWN comments, and feedback engineers run against DRAFT PRs that are
-        explicitly held for human approval. Both fail *open* — when the signal
-        is absent (no resolved bot identity, no draft flag in the payload) the
-        event dispatches normally rather than being silently dropped.
+        Guards the spurious pr-feedback dispatch that issue #411 is really about:
+        the bot reacting to its OWN comments (the self-cascade that loops the
+        feedback engine onto a comment it just posted). It fails *open* — when
+        the bot identity can't be resolved the event dispatches normally rather
+        than being silently dropped.
+
+        Draft PRs are deliberately NOT skipped: a held draft is exactly where we
+        want feedback discussion to happen, and the self-author skip already
+        stops the only loop that matters (per review, underminedsk 2026-06-22).
         """
         fields = event.get("fields", {})
         if not self.allow_self_authored and self_login and fields.get("sender") == self_login:
             return "self-authored"
-        if self.skip_draft and fields.get("draft") is True:
-            return "draft PR"
         return None
 
 
@@ -179,7 +149,6 @@ class EventReactor:
                 match=entry.get("match", {}),
                 cooldown=entry.get("cooldown", DEFAULT_COOLDOWN),
                 suppress=entry.get("suppress", False),
-                skip_draft=entry.get("skip_draft", False),
                 allow_self_authored=entry.get("allow_self_authored", False),
             ))
         return cls(rules=rules, cwd=cwd, self_login=self_login)
@@ -198,8 +167,8 @@ class EventReactor:
             if not rule.matches(event):
                 continue
 
-            # Dispatch-hygiene guards (issue #411): never spin up a feedback
-            # engine on the bot's own comment or against a held draft PR.
+            # Dispatch-hygiene guard (issue #411): never spin up a feedback
+            # engine on the bot's own comment (the self-cascade loop).
             skip = rule.skip_reason(event, self.self_login)
             if skip:
                 log.info("Auto-dispatch skipped (%s): %s",
@@ -269,18 +238,6 @@ class EventReactor:
         # semaphore still bounds how many agents actually run at once.
         def _launch() -> None:
             try:
-                # issue_comment webhooks don't carry the PR's draft state, so a
-                # draft held for human approval is resolved here, off the drain
-                # thread, right before launch (issue #411 part b). Review events
-                # are already filtered synchronously via fields.draft in
-                # skip_reason(); this only covers the comment case. Fail open:
-                # an unresolved lookup (None) dispatches rather than dropping.
-                if (rule.skip_draft and event_type == "github.issue_comment"
-                        and fields.get("draft") is None):
-                    if _pr_is_draft(repo, number, self.cwd) is True:
-                        log.info(
-                            "Auto-dispatch skipped (draft PR, resolved): %s", key)
-                        return
                 modastack.subagent.launch_agent(
                     task=task,
                     cwd=self.cwd,

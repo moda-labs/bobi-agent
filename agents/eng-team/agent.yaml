@@ -111,27 +111,26 @@ auto_dispatch:
 
   # pr-feedback guards (issue #411): the bot's OWN comments are skipped by
   # DEFAULT (no flag needed — the lead posts a "Rendered spec" link per spec
-  # policy that must not spin up a feedback engineer), and skip_draft keeps
-  # feedback engineers off DRAFT PRs held for human approval. The self-author
-  # skip needs the bot's GitHub login, resolved at startup via `gh api user`.
+  # policy that must not spin up a feedback engineer). Draft PRs are NOT
+  # skipped — a held draft is exactly where feedback discussion belongs, and
+  # the self-author skip already stops the only loop that matters (per review,
+  # underminedsk 2026-06-22). The self-author skip needs the bot's GitHub
+  # login, resolved at startup via `gh api user`.
   - event: github.pull_request_review
     match:
       review_state: changes_requested
     workflow: pr-feedback
     cooldown: 1800
-    skip_draft: true
 
   - event: github.pull_request_review_comment
     workflow: pr-feedback
     cooldown: 1800
-    skip_draft: true
 
   - event: github.issue_comment
     match:
       is_pull_request: true
     workflow: pr-feedback
     cooldown: 1800
-    skip_draft: true
 
   # issue-lifecycle / pr-closed legitimately react to the bot's OWN actions
   # (the bot self-assigns issues to start work; the bot merges PRs and that

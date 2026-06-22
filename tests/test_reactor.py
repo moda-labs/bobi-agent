@@ -588,7 +588,7 @@ class TestEventReactorFromConfig:
         assert reactor.rules[0].workflow == ""
 
     def test_from_config_parses_hygiene_flags(self):
-        """skip_draft / allow_self_authored flags are parsed from config (#411)."""
+        """allow_self_authored opt-in is parsed from config (#411)."""
         config = [
             {
                 "event": "github.pull_request",
@@ -601,14 +601,13 @@ class TestEventReactorFromConfig:
         assert reactor.rules[0].allow_self_authored is True
 
     def test_from_config_hygiene_flags_default(self):
-        """skip_draft defaults off; self-author skip is on by default
-        (allow_self_authored defaults False)."""
+        """Self-author skip is on by default (allow_self_authored defaults
+        False)."""
         config = [
             {"event": "github.issue_comment", "match": {"is_pull_request": True},
              "workflow": "pr-feedback"},
         ]
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
-        assert reactor.rules[0].skip_draft is False
         assert reactor.rules[0].allow_self_authored is False
 
     def test_from_config_threads_self_login(self):
@@ -662,12 +661,15 @@ class TestConfigAutoDispatch:
 class TestPrFeedbackDispatchHygiene:
     """Reactor skips spurious pr-feedback dispatches (#411).
 
-    Three failure modes, all observed on held spec draft PRs:
+    Two failure modes, both observed on held spec PRs:
       (a) the bot's OWN comments (rendered-spec link, "held" notes) fired
           pr-feedback against a PR with no human feedback to act on,
-      (b) pr-feedback ran on DRAFT PRs explicitly held for human approval,
       (c) a single comment fanned out into multiple engines (one comment →
           ≥3 engines → duplicate tickets #416/#417/#418).
+
+    Draft PRs are intentionally still watchable — a held draft is exactly
+    where feedback discussion happens, and the self-author skip (a) already
+    stops the only loop that matters (per review, underminedsk 2026-06-22).
     """
 
     def _pr_feedback_rules(self, cooldown=1800):
@@ -679,11 +681,10 @@ class TestPrFeedbackDispatchHygiene:
                 workflow="pr-feedback",
                 match={"is_pull_request": True},
                 cooldown=cooldown,
-                skip_draft=True,
             ),
         ]
 
-    def _issue_comment_event(self, *, sender="reviewer1", draft=False,
+    def _issue_comment_event(self, *, sender="reviewer1",
                              comment_id=1, number=410, delivery="d1"):
         fields = {
             "action": "created",
@@ -693,8 +694,6 @@ class TestPrFeedbackDispatchHygiene:
             "is_pull_request": True,
             "comment_id": comment_id,
         }
-        if draft is not None:
-            fields["draft"] = draft
         return {
             "type": "github.issue_comment",
             "source": "github",
@@ -772,59 +771,38 @@ class TestPrFeedbackDispatchHygiene:
         _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
 
-    # --- (b) draft PRs ---
+    # --- draft PRs stay watchable (reverted draft-skip, underminedsk 2026-06-22) ---
 
     @patch("modastack.subagent.launch_agent")
-    def test_skips_draft_pr(self, mock_launch):
-        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
-        event = self._issue_comment_event(sender="zach", draft=True)
+    def test_dispatches_on_draft_pr(self, mock_launch):
+        """A human comment on a DRAFT PR still dispatches pr-feedback.
 
-        result = reactor.process(event)
-
-        assert result is None
-        time.sleep(0.05)
-        mock_launch.assert_not_called()
-
-    @patch("modastack.subagent.launch_agent")
-    def test_dispatches_on_non_draft_pr(self, mock_launch):
-        mock_launch.return_value = "wf-x"
-        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
-        event = self._issue_comment_event(sender="zach", draft=False)
-
-        assert reactor.process(event) == "dispatched"
-        _wait_calls(mock_launch, 1)
-        mock_launch.assert_called_once()
-
-    @patch("modastack.subagent.launch_agent")
-    def test_draft_skip_fail_open_on_review_event_without_flag(self, mock_launch):
-        """Review event with no draft flag → dispatch (synchronous fail open).
-
-        Review events carry draft synchronously in fields.draft and never take
-        the off-thread ``gh pr view`` lookup path (that's issue_comment-only).
-        When the flag is simply absent, the reactor must dispatch rather than
-        drop.
+        Draft skip was reverted: a held draft is exactly where feedback
+        discussion belongs. The self-author skip stops the only loop that
+        matters, so draft is no longer treated as un-watchable.
         """
         mock_launch.return_value = "wf-x"
-        rule = AutoDispatchRule(
-            event="github.pull_request_review_comment",
-            workflow="pr-feedback",
-            cooldown=1800,
-            skip_draft=True,
-        )
-        reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="modastack")
-        event = {
-            "type": "github.pull_request_review_comment",
-            "source": "github",
-            "id": "d1",
-            "topics": ["github:moda-labs/modastack"],
-            "fields": {"number": 42, "sender": "zach", "comment_id": 9},
-        }
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        event = self._issue_comment_event(sender="zach")
+        event["fields"]["draft"] = True
 
         assert reactor.process(event) == "dispatched"
         _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
+
+    @patch("modastack.subagent.launch_agent")
+    def test_skips_bot_comment_even_on_draft(self, mock_launch):
+        """The loop guard still fires on a draft: the bot's own comment on a
+        draft PR must NOT dispatch (self-author skip, not draft skip)."""
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="modastack")
+        event = self._issue_comment_event(sender="modastack")
+        event["fields"]["draft"] = True
+
+        assert reactor.process(event) is None
+        time.sleep(0.05)
+        mock_launch.assert_not_called()
 
     # --- (c) per-comment dedup (no fan-out) ---
 
@@ -896,7 +874,6 @@ class TestPrFeedbackDispatchHygiene:
             event="github.pull_request_review",
             workflow="pr-feedback",
             match={"review_state": "changes_requested"},
-            skip_draft=True,
         )
         reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="modastack")
         event = {
@@ -907,7 +884,7 @@ class TestPrFeedbackDispatchHygiene:
             "fields": {
                 "number": 7, "sender": "zach",
                 "review_state": "changes_requested",
-                "review_id": 4242, "draft": False,
+                "review_id": 4242,
             },
         }
 
@@ -915,49 +892,3 @@ class TestPrFeedbackDispatchHygiene:
 
         _wait_calls(mock_launch, 1)
         assert mock_launch.call_args[1]["run_key"] == "7-review-4242"
-
-    # --- (b) issue_comment draft resolved off-thread via gh pr view ---
-    # issue_comment webhooks carry no PR draft flag, so the reactor resolves it
-    # off the drain thread (never blocking event delivery) right before launch.
-
-    @patch("modastack.events.reactor._pr_is_draft", return_value=True)
-    @patch("modastack.subagent.launch_agent")
-    def test_issue_comment_draft_resolved_skips_launch(self, mock_launch, mock_draft):
-        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
-        event = self._issue_comment_event(sender="zach", draft=None,
-                                          comment_id=5, number=410)
-
-        # process() returns promptly; the draft resolution + skip happen on the
-        # launch thread so the drain loop never blocks on the network.
-        assert reactor.process(event) == "dispatched"
-        time.sleep(0.1)
-        mock_launch.assert_not_called()
-        mock_draft.assert_called_once()
-
-    @patch("modastack.events.reactor._pr_is_draft", return_value=None)
-    @patch("modastack.subagent.launch_agent")
-    def test_issue_comment_draft_lookup_fails_open(self, mock_launch, mock_draft):
-        """Draft lookup can't resolve (network/auth blip) → dispatch anyway."""
-        mock_launch.return_value = "wf-x"
-        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
-        event = self._issue_comment_event(sender="zach", draft=None,
-                                          comment_id=6, number=410)
-
-        assert reactor.process(event) == "dispatched"
-        _wait_calls(mock_launch, 1)
-        mock_launch.assert_called_once()
-
-    @patch("modastack.events.reactor._pr_is_draft", return_value=False)
-    @patch("modastack.subagent.launch_agent")
-    def test_issue_comment_non_draft_resolved_dispatches(self, mock_launch, mock_draft):
-        mock_launch.return_value = "wf-x"
-        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
-        event = self._issue_comment_event(sender="zach", draft=None,
-                                          comment_id=7, number=410)
-
-        assert reactor.process(event) == "dispatched"
-        _wait_calls(mock_launch, 1)
-        mock_launch.assert_called_once()

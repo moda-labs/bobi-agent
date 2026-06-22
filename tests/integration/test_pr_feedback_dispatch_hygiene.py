@@ -12,14 +12,16 @@ This drives the REAL pipeline against the SHIPPED config (same approach as the
         → drain_loop (the actual event-drain path)
         → launch_agent (mocked, so no live Claude session spawns)
 
-Three failure modes, each a separate test that FAILS on the comment-agnostic /
+Two failure modes, each a separate test that FAILS on the comment-agnostic /
 guard-less reactor and PASSES once the #411 fix lands:
 
   (a) the bot's OWN comment (rendered-spec link, "held" notes) must NOT dispatch,
-  (b) a comment on a DRAFT PR held for human approval must NOT dispatch,
   (c) the SAME comment delivered twice must dispatch EXACTLY once (no fan-out).
 
-Plus the happy-path regression: a human comment on a ready PR still dispatches.
+Plus regressions: a human comment on a ready PR still dispatches, AND a human
+comment on a DRAFT PR still dispatches — drafts stay watchable (the draft-skip
+was reverted; the self-author guard alone stops the loop, underminedsk
+2026-06-22).
 """
 
 import queue
@@ -80,20 +82,17 @@ def _reactor_from_shipped_config():
     cfg = yaml.safe_load(ENG_TEAM_AGENT_YAML.read_text())
     rules = cfg.get("auto_dispatch", [])
     assert rules, "eng-team agent.yaml must define auto_dispatch rules"
-    # The shipped pr-feedback rules must carry the #411 guards. Self-author skip
-    # is the DEFAULT (per review, underminedsk) — these rules must NOT opt back
-    # in via allow_self_authored — and skip_draft stays an explicit opt-in.
+    # The shipped pr-feedback rules rely on the DEFAULT self-author skip (per
+    # review, underminedsk) — they must NOT opt back in via allow_self_authored.
     pr_feedback = [r for r in rules if r.get("workflow") == "pr-feedback"]
     assert pr_feedback, "expected pr-feedback rules in shipped config"
     assert not any(r.get("allow_self_authored") for r in pr_feedback), \
         "shipped pr-feedback rules must rely on default self-author skip (#411)"
-    assert all(r.get("skip_draft") for r in pr_feedback), \
-        "shipped pr-feedback rules must set skip_draft (#411)"
     return EventReactor.from_config(rules, cwd="/tmp/proj-411",
                                     self_login=BOT_LOGIN)
 
 
-def _pr_comment(*, number, delivery_id, comment_id, sender):
+def _pr_comment(*, number, delivery_id, comment_id, sender, draft=False):
     """An issue_comment on a PR (github.issue_comment, is_pull_request)."""
     return {
         "type": "github.issue_comment",
@@ -108,6 +107,7 @@ def _pr_comment(*, number, delivery_id, comment_id, sender):
             "is_pull_request": True,
             "sender": sender,
             "comment_id": comment_id,
+            "draft": draft,
             "title": "Some PR",
         },
     }
@@ -150,9 +150,8 @@ def _drain_sequentially(events, reactor):
 
 # (a) the bot's own comment must not dispatch a feedback engineer ------------
 
-@patch("modastack.events.reactor._pr_is_draft", return_value=False)
 @patch("modastack.subagent.launch_agent")
-def test_bot_authored_comment_does_not_dispatch(mock_launch, _mock_draft):
+def test_bot_authored_comment_does_not_dispatch(mock_launch):
     """The lead's own 'Rendered spec' / 'held' comment must NOT dispatch (a)."""
     mock_launch.return_value = "wf-pr-feedback-411"
     reactor = _reactor_from_shipped_config()
@@ -169,30 +168,33 @@ def test_bot_authored_comment_does_not_dispatch(mock_launch, _mock_draft):
         "pr-feedback dispatched on the bot's OWN comment (#411 part a)"
 
 
-# (b) a comment on a draft PR held for approval must not dispatch ------------
+# draft PRs stay watchable: a human comment on a held draft still dispatches --
 
-@patch("modastack.events.reactor._pr_is_draft", return_value=True)
 @patch("modastack.subagent.launch_agent")
-def test_comment_on_draft_pr_does_not_dispatch(mock_launch, _mock_draft):
-    """A human comment on a DRAFT PR held for approval must NOT dispatch (b)."""
+def test_human_comment_on_draft_pr_dispatches(mock_launch):
+    """A human comment on a DRAFT PR held for approval still dispatches.
+
+    Draft skip was reverted (underminedsk 2026-06-22): a held draft is exactly
+    where feedback discussion belongs. Only the self-author loop is blocked.
+    """
     mock_launch.return_value = "wf-pr-feedback-411"
     reactor = _reactor_from_shipped_config()
 
     human_comment = _pr_comment(number=410, delivery_id="d-human",
-                                comment_id=2002, sender="underminedsk")
+                                comment_id=2002, sender="underminedsk",
+                                draft=True)
     delivered = _drain_sequentially([human_comment], reactor)
 
     assert len(delivered) == 1
-    time.sleep(0.1)
-    assert mock_launch.call_count == 0, \
-        "pr-feedback dispatched against a held DRAFT PR (#411 part b)"
+    _wait_calls(mock_launch, 1)
+    assert mock_launch.call_count == 1, \
+        "a human comment on a held DRAFT PR must still dispatch pr-feedback"
 
 
 # (c) one comment dispatches at most one engine (no fan-out) -----------------
 
-@patch("modastack.events.reactor._pr_is_draft", return_value=False)
 @patch("modastack.subagent.launch_agent")
-def test_same_comment_redelivered_dispatches_once(mock_launch, _mock_draft):
+def test_same_comment_redelivered_dispatches_once(mock_launch):
     """The SAME comment via two deliveries → exactly one engine (c).
 
     This is the #411/#416-#418 fan-out: one trigger redelivered (a webhook plus
@@ -216,9 +218,8 @@ def test_same_comment_redelivered_dispatches_once(mock_launch, _mock_draft):
 
 # regression: the happy path still works ------------------------------------
 
-@patch("modastack.events.reactor._pr_is_draft", return_value=False)
 @patch("modastack.subagent.launch_agent")
-def test_human_comment_on_ready_pr_dispatches(mock_launch, _mock_draft):
+def test_human_comment_on_ready_pr_dispatches(mock_launch):
     """A genuine human comment on a ready (non-draft) PR still dispatches."""
     mock_launch.return_value = "wf-pr-feedback-411"
     reactor = _reactor_from_shipped_config()

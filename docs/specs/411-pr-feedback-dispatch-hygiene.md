@@ -6,7 +6,7 @@
 - **Author:** engineer (spec phase)
 - **Related:** #326 (reactor dedup key — merged, commit `ded0375`), #321 (duplicate-comment dispatch — merged), #412 (lifecycle auto-advance past spec gate — **folded into this spec as part (e)**; Zach confirmed #411 and #412 are the same PR, 2026-06-22)
 - **Concrete harm:** #416 / #417 / #418 — three near-identical "Reusable tool library" tickets the bot filed from a **single** trigger; #417 and #418 are now closed as duplicates of #416 (see §1(c))
-- **Most severe harm (live, 2026-06-22):** #423 — the auto-dispatched `pr-feedback` engine acted on a **human-authored** PR (lukelin10, branch `luke/setup-home-nav`) and **pushed a bot revert commit (`15a7fb5`, Co-Authored-By Claude) to the human's branch**, then self-cascaded off its own push/title-edit `synchronize` events. None of (a)/(b)/(c) would have stopped it — it was a genuine human comment on a human-owned PR. This is the motivation for the new part (d) (see §1(d)).
+- **Most severe harm (live, 2026-06-22):** #423 — the auto-dispatched `pr-feedback` engine acted on a **human-authored** PR (lukelin10, branch `luke/setup-home-nav`) and **pushed a bot revert commit (`15a7fb5`, Co-Authored-By Claude) to the human's branch**, then self-cascaded off its own push/title-edit `synchronize` events. None of (a)/(c) would have stopped it — it was a genuine human comment on a human-owned PR. This is the motivation for the new part (d) (see §1(d)). (Part (b) draft skip was reverted on review — see §1(b).)
 
 > This spec is a strict superset of the issue (summary + the follow-up comment that added part (c)). Nothing in the issue is dropped.
 
@@ -16,16 +16,16 @@
 
 The deterministic event reactor (`modastack/events/reactor.py`) auto-dispatches a `pr-feedback`
 engineer in four situations where it must not. Each wastes an agent launch and — worse — risks an
-engineer **editing a PR it has no business touching**: a spec PR explicitly held for human approval
-(parts a/b), or — most severely — a **human-authored** PR the bot pushed an unrequested commit onto
-(part d, observed live in #423). Both directly defeat the boundary that auto-dispatch is supposed to
-respect.
+engineer **editing a PR it has no business touching**: the bot reacting to its own activity (part a),
+or — most severely — a **human-authored** PR the bot pushed an unrequested commit onto (part d,
+observed live in #423). Both directly defeat the boundary that auto-dispatch is supposed to respect.
+(A draft-skip guard, part b, was proposed and then **reverted on review** — see §1(b).)
 
 A fifth, related gap (part **(e)**, #412) lives one layer up — in the **`issue-lifecycle` workflow**,
 not the reactor: the lifecycle auto-advances from the spec phase into the implement phase **before the
-spec PR is approved**, so implementation lands before a human has signed off on the design. It defeats
-the same spec-approval boundary from the *workflow-routing* side that (b) defends from the *dispatch*
-side. (#411 and #412 are the same PR — Zach confirmed, 2026-06-22.)
+spec PR is approved**, so implementation lands before a human has signed off on the design. This is the
+guard that actually keeps the bot off a held spec (the role draft-skip was originally floated for),
+enforced from the *workflow-routing* side. (#411 and #412 are the same PR — Zach confirmed, 2026-06-22.)
 
 ### (a) Dispatch on the bot's OWN events — comments **and** pushes / synchronizes / reviews / edits
 
@@ -57,12 +57,23 @@ the broadened §3(a). (This is distinct from part (d): (a) skips the bot's own *
 including its own; (d) skips dispatch onto a *human-owned* PR regardless of who triggered. #423 is
 caught by **both** — see the note at the end of §1(d).)
 
-### (b) Dispatch on DRAFT PRs held for approval
+### (b) Dispatch on DRAFT PRs held for approval — ~~draft skip~~ **REVERTED (underminedsk, 2026-06-22)**
 
-Spec PRs go up as **draft** and are explicitly held: implementation is gated on a human sign-off.
+> **Decision: do NOT skip draft PRs.** On review, underminedsk pushed back: a held draft is exactly
+> where we *want* feedback discussion to happen — classifying drafts as un-watchable is wrong. The one
+> thing to prevent is the **loop** where the bot acts on comments it generated itself, and that is
+> already covered by the **default-on self-author skip (part a)**. Part (b) is therefore dropped from
+> both spec and implementation: no `skip_draft` flag, no `fields.draft` enrichment, no off-thread
+> `gh pr view` draft lookup. Draft PRs dispatch `pr-feedback` exactly like ready PRs (subject to (a)
+> and, where implemented, (d)). The original motivation is kept below for the record.
+
+~~Spec PRs go up as **draft** and are explicitly held: implementation is gated on a human sign-off.
 A `pr-feedback` engineer dispatched against a held draft can edit the spec before the human has
 approved it — the exact thing the spec-approval gate exists to prevent. Even a *genuine human comment*
-on a held draft spec PR should open a discussion, not dispatch an editor.
+on a held draft spec PR should open a discussion, not dispatch an editor.~~ The bot-editing-a-held-spec
+concern is instead handled where it belongs: the **issue-lifecycle implement-phase approval gate
+(part e, #412)** blocks implementation until the spec PR is formally approved — a far more direct guard
+than treating every comment on a draft as undispatchable.
 
 ### (c) No per-comment dedup — one comment fans out multiple engineers
 
@@ -144,7 +155,7 @@ spec:
   the **subsequent self-cascade**, where the bot's own push/title-edit `synchronize` events have
   `sender == bot`. So (a) and (d) split the #423 incident: (d) blocks the *first* unwanted dispatch off
   Zach's comment; broadened (a) blocks the *self-cascade* that followed. Both are needed.)
-- **(b) draft skip** does not apply — #423 was a ready (non-draft) PR.
+- **(b) draft skip** is moot — it was reverted (drafts stay watchable), and #423 was a ready PR regardless.
 - **(c) per-comment dedup** would at most collapse the cascade to *one* unwanted push; it does not
   stop the bot from touching a human PR at all.
 
@@ -187,13 +198,14 @@ implement phase.
 
 ## 2. Solution (overview)
 
-Five independent, composable changes — four in the reactor + adapter (a–d), one in the
-`issue-lifecycle` workflow (e) — each guarded by a test that fails first:
+Independent, composable changes — three in the reactor + adapter (a, c, d), one in the
+`issue-lifecycle` workflow (e) — each guarded by a test that fails first. Part (b) (draft skip) was
+proposed and then **reverted on review** (kept in the table for traceability):
 
 | Part | Change | Primary file |
 |------|--------|--------------|
 | (a) | Skip auto-dispatch for **any event type** whose `sender` is the bot's own GitHub identity — comments **and** `push` / `synchronize` / review / edit events (closes the #423 self-cascade) — **default-on**, no enable flag, with an `allow_self_authored: true` opt-in escape hatch. | `modastack/events/reactor.py` (+ adapter `fields.sender` on push/synchronize) |
-| (b) | Skip `pr-feedback` dispatch when the target PR is a **draft**. | `reactor.py` (+ adapter enrichment) |
+| (b) | ~~Skip `pr-feedback` dispatch when the target PR is a **draft**.~~ **REVERTED (underminedsk, 2026-06-22)** — drafts stay watchable; the self-author skip (a) handles the loop and the part-(e) approval gate handles held specs. | — (removed) |
 | (c) | Anchor dedup on the **stable comment/review id** and pass a **deterministic `run_key`** so the active-run guard prevents fan-out. | `reactor.py` (+ adapter field) |
 | (d) | **Hard-skip `pr-feedback` on human-authored PRs** — dispatch only when the PR author == bot identity. | `reactor.py` (+ adapter field) |
 | (e) | **Gate `issue-lifecycle` spec→implement on spec-PR approval** — block the implement phase until the spec PR's `reviewDecision == APPROVED`; draft / unapproved / `CHANGES_REQUESTED` blocks (#412). | `agents/eng-team/workflows/issue-lifecycle.yaml` (+ orchestrator route) |
@@ -269,32 +281,14 @@ GitHub login to compare. The bot's identity is the authenticated `gh` token's us
 > an explicit `services.github.identity` config field. Recommend the token-derived approach (no
 > duplication, rotation-safe).
 
-### (b) Draft skip
+### (b) Draft skip — **REVERTED (underminedsk, 2026-06-22)**
 
-`pr-feedback` should not dispatch against a draft PR.
-
-- **Review events** (`github.pull_request_review`, `github.pull_request_review_comment`) carry
-  `payload.pull_request.draft`. Enrich the adapter to set `fields.draft = pr.draft` (boolean) for
-  these — free, no API call.
-- **`issue_comment` events** (the dominant observed case — the rendered-spec link comment) do **not**
-  include the PR's draft state in the webhook payload (`issue.pull_request` is a bare ref). The reactor
-  resolves it via an authenticated `gh pr view <number> --repo <repo> --json isDraft` lookup.
-- To preserve the invariant that **the drain thread never blocks on the network** (the documented
-  reason `_dispatch` already runs off-thread), the draft lookup for `issue_comment` runs in the
-  **off-thread launch path**, immediately before `launch_agent`. If the PR is a draft, log
-  `Auto-dispatch skipped (draft PR): <key>` and do not launch. (Wasted-dispatch elimination for
-  `issue_comment` is therefore best-effort but reliably prevents the engineer from *running*; review
-  events skip synchronously via the `fields.draft` field with zero added latency.)
-- Mechanism in the rule: add a `skip_draft: true` flag on the `pr-feedback` rules in `agent.yaml`
-  (explicit, opt-in, leaves non-PR rules untouched).
-- Fail-open: if the draft lookup errors, do **not** skip — dispatch and let the workflow's
-  verify-live step decide (matches today's "verify review state before acting" policy).
-
-> **Decision point D2 (draft source for `issue_comment`).** Recommended: reactor-side
-> `gh pr view --json isDraft`, off the drain thread (self-contained — the Python side always has
-> `GH_TOKEN`). Alternative: enrich draft in the worker adapter via a REST call, which would require a
-> GH token in the Cloudflare worker env (an infra dependency we don't currently have). Recommend the
-> reactor-side lookup.
+**Dropped.** `pr-feedback` *does* dispatch on draft PRs — a held draft is exactly where feedback
+discussion belongs. The loop the ticket actually needs to stop (the bot reacting to its own comments)
+is closed by the default-on self-author skip (part a), and the "bot edits a held spec before sign-off"
+concern is handled by the issue-lifecycle implement-phase approval gate (part e, #412). No `skip_draft`
+flag, no `fields.draft` adapter enrichment, and no off-thread `gh pr view` draft lookup ship. The
+decision-point D2 below (draft source for `issue_comment`) is therefore moot.
 
 ### (c) Per-comment dedup + deterministic run_key
 
@@ -337,16 +331,15 @@ by a human is hard-skipped — the bot never pushes to a branch it does not own.
     `payload.pull_request.user.login`. Enrich the adapter to set `fields.pr_author` (string) for these
     — free, no API call. Skip synchronously when `fields.pr_author != bot_login`.
   - **`issue_comment` events** do not include PR authorship in the webhook payload. Resolve it in the
-    **off-thread launch path** (same place as the draft lookup) via
-    `gh pr view <number> --repo <repo> --json author --jq .author.login`. Fold this into the **single**
-    `gh pr view` call that (b) already makes (`--json isDraft,author`) so (b) and (d) cost **one**
-    lookup, not two.
+    **off-thread launch path** via
+    `gh pr view <number> --repo <repo> --json author --jq .author.login`. (With part (b) reverted this
+    is the only off-thread `gh pr view` call; the earlier plan to share one lookup with (b)'s draft
+    check no longer applies.)
   - **`synchronize` / `push`-derived events** (the #423 self-cascade vector) carry
     `payload.pull_request.user.login` and are gated identically — the bot's own push to a human PR is
     skipped on author, not just on sender.
 - Mechanism in the rule: gate behind a `require_bot_author: true` flag on the `pr-feedback` rules in
-  `agent.yaml` (explicit, opt-in, leaves non-`pr-feedback` rules untouched). Combined with (b)'s
-  `skip_draft`, the two PR-state guards are declared side by side on the same rules.
+  `agent.yaml` (explicit, opt-in, leaves non-`pr-feedback` rules untouched).
 - On skip: log `Auto-dispatch skipped (human-authored PR): <key>` and do not launch.
 - **Fail-CLOSED (deliberate asymmetry vs (a)/(b)).** If the bot login or the PR author cannot be
   resolved, **skip** rather than dispatch. Rationale: the failure mode this part prevents — the bot
@@ -399,9 +392,9 @@ current `main` first**, then passes after the fix.
 - (a) `test_self_author_skip_fails_open_when_login_unknown` — login unresolved → dispatch proceeds.
 - (a) `test_allow_self_authored_opt_in_dispatches` — rule with `allow_self_authored: true` + bot
   `sender` → dispatch proceeds (escape hatch works, default-skip is overridable per rule).
-- (b) `test_skips_pr_feedback_on_draft_review_event` — `fields.draft == True` → no dispatch.
-  `test_dispatches_pr_feedback_on_ready_pr` — `draft == False` → dispatch (regression guard).
-- (b) `test_draft_lookup_fails_open` — lookup raises → dispatch proceeds.
+- (b) **REVERTED** — drafts stay watchable. Guard: `test_dispatches_on_draft_pr` (a human comment on a
+  draft PR still dispatches) and `test_skips_bot_comment_even_on_draft` (the loop is still blocked on a
+  draft, by the self-author skip — not by a draft skip).
 - (c) `test_dedup_key_uses_stable_comment_id` — two events, same `comment_id`, different `event.id` →
   one dispatch. `test_distinct_comments_dispatch_independently` — different `comment_id` → two
   dispatches (preserves #326).
@@ -415,7 +408,6 @@ current `main` first**, then passes after the fix.
 
 ### Adapter tests (`event-server` test suite)
 
-- `fields.draft` set from `pull_request.draft` on review / review_comment events.
 - `fields.comment_id` / `fields.review_id` set from the respective payload objects.
 - `fields.pr_author` set from `pull_request.user.login` on review / review_comment / `synchronize`
   events (part d).
@@ -428,7 +420,7 @@ Drive the real drain → reactor pipeline against the shipped `eng-team` `auto_d
 (extends the harness #326 added):
 
 1. Bot-authored `issue_comment` on a PR → **zero** dispatches (part a).
-2. Human `issue_comment` on a **draft** PR → zero dispatches (part b).
+2. Human `issue_comment` on a **draft** PR → **one** dispatch (part b reverted — drafts stay watchable).
 3. The **same** human comment (same `comment_id`) delivered **twice** → exactly **one** dispatch
    (part c, redelivery).
 4. **Human review comment on a ready, human-authored PR → zero dispatches (part d, reproduces #423).**
@@ -475,13 +467,13 @@ cd event-server && <adapter test cmd>                          # adapter field t
 ### In scope
 - `modastack/events/reactor.py`: self-author skip (default-on, `allow_self_authored` opt-in) **applied
   to all event types incl. `push` / `synchronize` / `edited` (part a broadening — closes #423
-  self-cascade)**, draft skip, stable-comment-id dedup key, deterministic `run_key`, **human-author
-  hard-skip (part d)**.
-- `event-server/src/adapters/github.ts`: emit `fields.draft`, `fields.comment_id`, `fields.review_id`,
+  self-cascade)**, stable-comment-id dedup key, deterministic `run_key`, **human-author hard-skip
+  (part d)**. (Part b draft skip reverted — not in scope.)
+- `event-server/src/adapters/github.ts`: emit `fields.comment_id`, `fields.review_id`,
   **`fields.pr_author`**, and **`fields.sender` on `push` / `pull_request` (`synchronize`/`edited`)
-  events** (part a broadening).
-- `agents/eng-team/agent.yaml`: `skip_draft: true` **and `require_bot_author: true`** on the
-  `pr-feedback` rules.
+  events** (part a broadening). (No `fields.draft` — part b reverted.)
+- `agents/eng-team/agent.yaml`: **`require_bot_author: true`** on the `pr-feedback` rules. (No
+  `skip_draft` — part b reverted.)
 - **`agents/eng-team/workflows/issue-lifecycle.yaml` + orchestrator route (part e, #412):** gate the
   spec→implement transition on the spec PR's `reviewDecision == APPROVED`; a draft, unapproved, or
   `CHANGES_REQUESTED` spec PR blocks (suspends at an approval `await`) instead of advancing to implement.
@@ -498,19 +490,20 @@ cd event-server && <adapter test cmd>                          # adapter field t
 ## 6. Implementation plan (post-approval — do NOT start until Zach signs off)
 
 1. Write the failing unit tests (a/b/c/d) in `tests/test_reactor.py` — confirm red on `main`.
-2. Adapter: add `fields.draft`, `fields.comment_id`, `fields.review_id`, `fields.pr_author`, and
-   `fields.sender` on `push` / `synchronize` / `edited` events + adapter tests.
+2. Adapter: add `fields.comment_id`, `fields.review_id`, `fields.pr_author`, and
+   `fields.sender` on `push` / `synchronize` / `edited` events + adapter tests. (No `fields.draft` —
+   part b reverted.)
 3. Reactor (a): resolve + cache bot login; default-on self-author skip in `process()` **for all event
    types (comments, reviews, `push`, `synchronize`, `edited`)**, honoring a per-rule
    `allow_self_authored: true` opt-in. Re-audit which shipped rules need the opt-in given the broadened
    scope (see D5).
-4. Reactor (b): `skip_draft` rule flag; field-based skip for review events, off-thread `gh pr view`
-   lookup for `issue_comment`.
+4. ~~Reactor (b): draft skip~~ — **reverted** (drafts stay watchable; see §1(b)/§3(b)).
 5. Reactor (c): stable-id dedup key; deterministic `run_key` into `launch_agent`.
 6. Reactor (d): `require_bot_author` rule flag; field-based author skip for review/`synchronize`
-   events, author resolved in the **same** off-thread `gh pr view --json isDraft,author` call as (b);
-   **fail-closed** when author/bot login is unresolved.
-7. `agent.yaml`: add `skip_draft: true` and `require_bot_author: true` to the two `pr-feedback` rules.
+   events, author resolved via an off-thread `gh pr view --json author` call; **fail-closed** when
+   author/bot login is unresolved.
+7. `agent.yaml`: add `require_bot_author: true` to the two `pr-feedback` rules. (No `skip_draft` —
+   part b reverted.)
 8. Workflow (e, #412): add the approval-gated `route` + `await` between the spec and implement steps in
    `agents/eng-team/workflows/issue-lifecycle.yaml` (advance only on `reviewDecision == APPROVED`;
    fail-closed on unresolved). Write the failing workflow-routing test first (confirm red), then wire
@@ -525,8 +518,8 @@ cd event-server && <adapter test cmd>                          # adapter field t
 ## 7. Open questions for Zach
 
 - **D1:** bot identity from `gh api user` (recommended) vs explicit `agent.yaml` config field?
-- **D2:** draft source for `issue_comment` — reactor-side `gh pr view` off-thread (recommended) vs
-  worker adapter REST call (needs a GH token in the worker)?
+- ~~**D2:** draft source for `issue_comment`~~ — **moot:** part (b) draft skip was reverted (see
+  Resolved below), so there is no draft lookup to source.
 - **D3:** accept deterministic-`run_key` + persisted active-run guard for cross-process dedup
   (recommended) vs invest now in a durable shared dedup store?
 - **D4:** for the human-author hard-skip (part d), **fail-closed** when the PR author can't be resolved
@@ -546,6 +539,12 @@ cd event-server && <adapter test cmd>                          # adapter field t
 
 **Resolved during review:**
 
+- ~~**Part (b) draft skip:**~~ **Reverted (underminedsk, 2026-06-22):** do not classify draft PRs as
+  un-watchable — a held draft is exactly where feedback discussion belongs. The only loop that matters
+  (the bot acting on its own comments) is already closed by the default-on self-author skip (part a),
+  and the "bot edits a held spec before sign-off" concern is owned by the part-(e) approval gate (#412).
+  Draft skip is dropped from spec **and** implementation (no `skip_draft`, no `fields.draft`, no draft
+  `gh pr view`). See §1(b)/§3(b).
 - ~~**Scope of (a):**~~ **Decided (underminedsk, 2026-06-22):** self-author skip is **default-on for
   all dispatch rules with no config field to enable it**, plus an `allow_self_authored: true` per-rule
   opt-in for the rare deliberate self-trigger. See §3(a). (The shipped `pr-closed` / `issues.assigned`

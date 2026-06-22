@@ -52,12 +52,6 @@ export function normalizeGitHubWebhook(
 		if (typeof pr.merged === "boolean") fields.merged = pr.merged;
 	}
 
-	// Draft status — feedback engineers must not be dispatched against draft PRs
-	// held for human approval (issue #411). The full PR object carries it on
-	// review events; the issue representation of a PR carries it on issue_comment.
-	const draftSource = pr ?? issue;
-	if (typeof draftSource?.draft === "boolean") fields.draft = draftSource.draft;
-
 	// Review-specific fields — pull_request_review and pull_request_review_comment
 	// carry a review/comment object with state, body, and file context that the
 	// consuming agent needs to decide whether to dispatch pr-feedback. The review
