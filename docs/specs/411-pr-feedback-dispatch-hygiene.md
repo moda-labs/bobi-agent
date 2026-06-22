@@ -5,6 +5,7 @@
 - **Status:** SPEC — held for Zach's approval. Implementation is gated on sign-off; this PR must not auto-build past the spec gate.
 - **Author:** engineer (spec phase)
 - **Related:** #326 (reactor dedup key — merged, commit `ded0375`), #321 (duplicate-comment dispatch — merged), #412 (lifecycle auto-advance past spec gate — open, adjacent)
+- **Concrete harm:** #416 / #417 / #418 — three near-identical "Reusable tool library" tickets the bot filed from a **single** trigger; #417 and #418 are now closed as duplicates of #416 (see §1(c))
 
 > This spec is a strict superset of the issue (summary + the follow-up comment that added part (c)). Nothing in the issue is dropped.
 
@@ -39,6 +40,25 @@ on a held draft spec PR should open a discussion, not dispatch an editor.
 
 A single bot-authored comment on held draft PR **#413** dispatched **two** `pr-feedback` engineers
 simultaneously (a third on a later check); the lead cancelled all three before any touched the PR.
+
+**Concrete harm — duplicate tickets, not just duplicate launches (#416/#417/#418).** The most visible
+damage from the missing per-trigger dedup is not wasted launches that the lead catches in flight — it
+is **duplicate work products that escape onto GitHub**. One logical trigger (Zach's "open a new ticket
+to build out a reusable tool library" instruction on PR **#407**, 2026-06-22) fanned out into **three**
+near-identical issues, all authored by `modastack` within **51 seconds**:
+
+| Issue | Created (UTC) | State | Title |
+|-------|---------------|-------|-------|
+| #416 | 17:04:59 | OPEN | Reusable tool library: opt-in catalog of baked CLI tools … |
+| #417 | 17:05:45 | CLOSED (dup) | Reusable tool library: opt-in catalog of (pinned binary + tools guide) … |
+| #418 | 17:05:50 | CLOSED (dup) | Reusable tool library: define-once catalog of binary + guide … |
+
+Three engines each independently created the same ticket because nothing deduped on the **stable
+trigger identity**. #417 and #418 were later closed by hand as duplicates of #416 — the same manual
+clean-up the lead performs for the in-flight engine fan-out above, except here the spam reached the
+issue tracker first. This is the same root cause as the duplicate-engine fan-out (part c), and it is
+the strongest motivation for anchoring dedup on a stable identity rather than a volatile per-delivery
+id.
 
 **Root cause (verified in code, current `origin/main`):**
 
