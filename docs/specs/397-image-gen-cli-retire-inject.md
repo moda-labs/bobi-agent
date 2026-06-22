@@ -194,10 +194,21 @@ returns only docs/spec mentions.
 
 ---
 
-## Decision Points (for Zach — please resolve in review)
+## Decision Points (RESOLVED in review — Zach, 2026-06-22)
 
 > The "adopt OpenAI image CLI" call is already locked. These are the open
 > implementation choices the locked comment left under-specified.
+>
+> **Resolved (Zach, PR #407 review, 2026-06-22): ship this PR as designed.**
+> - **D1 = Option B** — bake via the eng-team `build:` spec (provider-specific
+>   tool, consistent with how `codex` is baked); NOT base-baked (Option A).
+> - **D2 = Option A** — documented save-to-file one-liner; no bespoke wrapper.
+> - **D3 = both** — `agents/eng-team/tools/image.md` guide **plus** the
+>   `base.md` pointer.
+> - The **tool-library convention** (D1 Option C) is split out to its own
+>   follow-on: **#418** — a define-once catalog migrating aichat, codex, the
+>   OpenAI image CLI, venn, and gstack. Option B here is exactly what a library
+>   entry expands into, so #418 lands with zero rework against this slice.
 
 **D1 — Where to bake: base `Dockerfile` vs eng-team `build:` spec.**
 The locked comment says "bake into the base `Dockerfile` alongside aichat/codex."
