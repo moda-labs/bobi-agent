@@ -63,10 +63,13 @@ class AutoDispatchRule:
     match: dict[str, str | int | bool] = field(default_factory=dict)
     cooldown: int = DEFAULT_COOLDOWN
     suppress: bool = False
-    # Dispatch-hygiene guards (issue #411). Opt-in per rule so they apply only
-    # where they make sense (pr-feedback), never to e.g. pr-closed cleanup.
-    skip_draft: bool = False  # don't dispatch when the PR is a draft
-    skip_self_author: bool = False  # don't dispatch on the bot's own comments
+    # Dispatch-hygiene guards (issue #411).
+    skip_draft: bool = False  # opt-in: don't dispatch when the PR is a draft
+    # Skipping the bot's OWN events is the DEFAULT — a bot auto-reacting to its
+    # own action is never the intent (per review, underminedsk 2026-06-22). The
+    # rare rule that deliberately reacts to the bot's own action (e.g. pr-closed
+    # worktree cleanup on a bot-merged PR) opts back in with allow_self_authored.
+    allow_self_authored: bool = False  # opt-in: DO dispatch on the bot's own events
 
     def matches(self, event: dict) -> bool:
         """Return True if the event matches this rule's type and field conditions."""
@@ -144,7 +147,7 @@ class AutoDispatchRule:
         event dispatches normally rather than being silently dropped.
         """
         fields = event.get("fields", {})
-        if self.skip_self_author and self_login and fields.get("sender") == self_login:
+        if not self.allow_self_authored and self_login and fields.get("sender") == self_login:
             return "self-authored"
         if self.skip_draft and fields.get("draft") is True:
             return "draft PR"
@@ -177,7 +180,7 @@ class EventReactor:
                 cooldown=entry.get("cooldown", DEFAULT_COOLDOWN),
                 suppress=entry.get("suppress", False),
                 skip_draft=entry.get("skip_draft", False),
-                skip_self_author=entry.get("skip_self_author", False),
+                allow_self_authored=entry.get("allow_self_authored", False),
             ))
         return cls(rules=rules, cwd=cwd, self_login=self_login)
 

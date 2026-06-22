@@ -80,11 +80,13 @@ def _reactor_from_shipped_config():
     cfg = yaml.safe_load(ENG_TEAM_AGENT_YAML.read_text())
     rules = cfg.get("auto_dispatch", [])
     assert rules, "eng-team agent.yaml must define auto_dispatch rules"
-    # The shipped pr-feedback rules must opt into the #411 guards.
+    # The shipped pr-feedback rules must carry the #411 guards. Self-author skip
+    # is the DEFAULT (per review, underminedsk) — these rules must NOT opt back
+    # in via allow_self_authored — and skip_draft stays an explicit opt-in.
     pr_feedback = [r for r in rules if r.get("workflow") == "pr-feedback"]
     assert pr_feedback, "expected pr-feedback rules in shipped config"
-    assert all(r.get("skip_self_author") for r in pr_feedback), \
-        "shipped pr-feedback rules must set skip_self_author (#411)"
+    assert not any(r.get("allow_self_authored") for r in pr_feedback), \
+        "shipped pr-feedback rules must rely on default self-author skip (#411)"
     assert all(r.get("skip_draft") for r in pr_feedback), \
         "shipped pr-feedback rules must set skip_draft (#411)"
     return EventReactor.from_config(rules, cwd="/tmp/proj-411",

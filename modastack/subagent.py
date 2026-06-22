@@ -1036,10 +1036,11 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     if has_external and cfg.auto_dispatch:
         from modastack.events.reactor import EventReactor
         # Resolve the bot's own GitHub login so the reactor can skip
-        # auto-dispatching on the bot's own comments (issue #411) — only
-        # bother when a rule actually opts into that guard.
+        # auto-dispatching on the bot's own events (issue #411). Self-author
+        # skip is the default, so we need the login unless EVERY rule opts back
+        # in via allow_self_authored.
         self_login = None
-        if any(r.get("skip_self_author") for r in cfg.auto_dispatch):
+        if any(not r.get("allow_self_authored") for r in cfg.auto_dispatch):
             self_login = _resolve_self_github_login()
         reactor = EventReactor.from_config(
             cfg.auto_dispatch, cwd=str(project_path), self_login=self_login)

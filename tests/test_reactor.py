@@ -588,34 +588,33 @@ class TestEventReactorFromConfig:
         assert reactor.rules[0].workflow == ""
 
     def test_from_config_parses_hygiene_flags(self):
-        """skip_draft / skip_self_author flags are parsed from config (#411)."""
+        """skip_draft / allow_self_authored flags are parsed from config (#411)."""
         config = [
             {
-                "event": "github.issue_comment",
-                "match": {"is_pull_request": True},
-                "workflow": "pr-feedback",
-                "skip_draft": True,
-                "skip_self_author": True,
+                "event": "github.pull_request",
+                "match": {"action": "closed"},
+                "workflow": "pr-closed",
+                "allow_self_authored": True,
             },
         ]
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
-        assert reactor.rules[0].skip_draft is True
-        assert reactor.rules[0].skip_self_author is True
+        assert reactor.rules[0].allow_self_authored is True
 
-    def test_from_config_hygiene_flags_default_false(self):
+    def test_from_config_hygiene_flags_default(self):
+        """skip_draft defaults off; self-author skip is on by default
+        (allow_self_authored defaults False)."""
         config = [
-            {"event": "github.pull_request", "match": {"action": "closed"},
-             "workflow": "pr-closed"},
+            {"event": "github.issue_comment", "match": {"is_pull_request": True},
+             "workflow": "pr-feedback"},
         ]
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
         assert reactor.rules[0].skip_draft is False
-        assert reactor.rules[0].skip_self_author is False
+        assert reactor.rules[0].allow_self_authored is False
 
     def test_from_config_threads_self_login(self):
         """The bot's own GitHub login is threaded into the reactor (#411)."""
         config = [
-            {"event": "github.issue_comment", "workflow": "pr-feedback",
-             "skip_self_author": True},
+            {"event": "github.issue_comment", "workflow": "pr-feedback"},
         ]
         reactor = EventReactor.from_config(config, cwd="/tmp/project",
                                            self_login="modastack")
@@ -672,6 +671,8 @@ class TestPrFeedbackDispatchHygiene:
     """
 
     def _pr_feedback_rules(self, cooldown=1800):
+        # Self-author skip is the default (no allow_self_authored flag), matching
+        # the shipped pr-feedback rules after the #411 review (underminedsk).
         return [
             AutoDispatchRule(
                 event="github.issue_comment",
@@ -679,7 +680,6 @@ class TestPrFeedbackDispatchHygiene:
                 match={"is_pull_request": True},
                 cooldown=cooldown,
                 skip_draft=True,
-                skip_self_author=True,
             ),
         ]
 
@@ -743,6 +743,35 @@ class TestPrFeedbackDispatchHygiene:
         _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
 
+    @patch("modastack.subagent.launch_agent")
+    def test_allow_self_authored_opt_in_dispatches(self, mock_launch):
+        """The escape hatch: a rule with allow_self_authored=True still
+        dispatches on the bot's own event (per review, underminedsk 2026-06-22).
+
+        Self-author skip is the default; rules that legitimately react to the
+        bot's own action (e.g. pr-closed cleanup on a bot-merged PR) opt back in.
+        """
+        mock_launch.return_value = "wf-x"
+        rule = AutoDispatchRule(
+            event="github.pull_request",
+            workflow="pr-closed",
+            match={"action": "closed"},
+            cooldown=60,
+            allow_self_authored=True,
+        )
+        reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="modastack")
+        event = {
+            "type": "github.pull_request",
+            "source": "github",
+            "id": "d1",
+            "topics": ["github:moda-labs/modastack"],
+            "fields": {"number": 99, "action": "closed", "sender": "modastack"},
+        }
+
+        assert reactor.process(event) == "dispatched"
+        _wait_calls(mock_launch, 1)
+        mock_launch.assert_called_once()
+
     # --- (b) draft PRs ---
 
     @patch("modastack.subagent.launch_agent")
@@ -783,7 +812,6 @@ class TestPrFeedbackDispatchHygiene:
             workflow="pr-feedback",
             cooldown=1800,
             skip_draft=True,
-            skip_self_author=True,
         )
         reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="modastack")
         event = {
@@ -869,7 +897,6 @@ class TestPrFeedbackDispatchHygiene:
             workflow="pr-feedback",
             match={"review_state": "changes_requested"},
             skip_draft=True,
-            skip_self_author=True,
         )
         reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="modastack")
         event = {

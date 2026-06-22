@@ -101,28 +101,30 @@ auto_dispatch:
   # Suppress reviewer assignments — they're informational, not feedback.
   # Without this rule the event reaches the project lead un-annotated
   # and the LLM incorrectly dispatches pr-feedback.
+  # allow_self_authored: this rule annotates the event regardless of who
+  # requested the review, so don't let the default self-author skip swallow it.
   - event: github.pull_request
     match:
       action: review_requested
     suppress: true
+    allow_self_authored: true
 
-  # pr-feedback guards (issue #411): never spin up a feedback engineer on the
-  # bot's own comments (the lead posts a "Rendered spec" link per spec policy),
-  # nor against a DRAFT PR held for human approval. skip_self_author needs the
-  # bot's GitHub login, resolved at startup via `gh api user`.
+  # pr-feedback guards (issue #411): the bot's OWN comments are skipped by
+  # DEFAULT (no flag needed — the lead posts a "Rendered spec" link per spec
+  # policy that must not spin up a feedback engineer), and skip_draft keeps
+  # feedback engineers off DRAFT PRs held for human approval. The self-author
+  # skip needs the bot's GitHub login, resolved at startup via `gh api user`.
   - event: github.pull_request_review
     match:
       review_state: changes_requested
     workflow: pr-feedback
     cooldown: 1800
     skip_draft: true
-    skip_self_author: true
 
   - event: github.pull_request_review_comment
     workflow: pr-feedback
     cooldown: 1800
     skip_draft: true
-    skip_self_author: true
 
   - event: github.issue_comment
     match:
@@ -130,14 +132,18 @@ auto_dispatch:
     workflow: pr-feedback
     cooldown: 1800
     skip_draft: true
-    skip_self_author: true
 
+  # issue-lifecycle / pr-closed legitimately react to the bot's OWN actions
+  # (the bot self-assigns issues to start work; the bot merges PRs and that
+  # close must still trigger worktree cleanup), so they opt back in.
   - event: github.issues.assigned
     workflow: issue-lifecycle
     cooldown: 1800
+    allow_self_authored: true
 
   - event: github.pull_request
     match:
       action: closed
     workflow: pr-closed
     cooldown: 60
+    allow_self_authored: true
