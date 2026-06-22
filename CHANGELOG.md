@@ -33,6 +33,13 @@ retry, so a transient timeout no longer takes out a running fleet.
   resolution comment from that handoff, keeping one voice per feedback cycle.
 
 ### Added
+- **Graceful preflight degradation for non-required services (#329).** Declared
+  services gain a `required: true|false` flag (default false). `modastack start`
+  and `doctor` now block only on the entry point and required-service failures;
+  other failed service checks render as warnings (⚠) and start proceeds in
+  degraded mode. Essential services in the shipped packs are marked
+  `required: true`, so this doesn't silently loosen them. Preflight status glyphs
+  (⚠/✗/✓) fall back to `[WARN]/[ERROR]/[OK]` on unicode-stripped terminals.
 - **Auto-fix CI failures on any open PR (#323).** The project lead's "Auto-fix CI
   failures" standing instruction now covers any open PR — agent- or
   human-authored — not just agent-authored PRs. A failing check on any open PR
