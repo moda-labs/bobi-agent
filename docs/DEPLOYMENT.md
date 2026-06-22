@@ -371,13 +371,20 @@ one; the reconcile prunes a stray live key. An old per-deployment Environment (e
 publish a GitHub Release   ─▶ release.yml  (the single gated pipeline)
    │                              subscription-login-smoke   (gate)
    │                                 │
-   │                              build-images               (image FIRST)
-   │                                 build image once -> roll every fleet app to
-   │                                 that digest; team-flavored apps rebuild their
-   │                                 own image (config/secrets preserved)
+   │                              build-wheel                (one artifact for all)
+   │                                 python -m build -> upload the wheel/sdist
    │                                 │
-   │                              deploy-teams               (packages/secrets SECOND)
-   │                                 └─ uses: deploy-agent-teams.yml (workflow_call)
+   │                              build-canary               (THE gate)
+   │                                 build canary image FROM the wheel + `ask`
+   │                                 it -> assert CANARY-OK end-to-end
+   │                                 ├──────────────┐
+   │                              publish        roll-fleet  (parallel; both need canary)
+   │                              same wheel      reuse canary digest (generic);
+   │                              -> PyPI (+      team-flavored rebuild own image
+   │                              event-server,   from the wheel + TEAM_DEPS
+   │                              Homebrew)            │
+   │                                              deploy-teams   (packages/secrets last)
+   │                                                └─ uses: deploy-agent-teams.yml
    │
 push a `deploy-*` tag / dispatch ─▶ deploy-agent-teams.yml   (standalone, NO image roll)
           plan   : list ACTIVE deployments/<name>.yaml (defaults excluded) + tenant
@@ -387,13 +394,16 @@ push a `deploy-*` tag / dispatch ─▶ deploy-agent-teams.yml   (standalone, NO
 ```
 
 **A release is the deploy gate** — an edit pushed to `main` does NOT auto-deploy;
-you cut a release (or push a `deploy-*` tag) to ship. **Image always precedes
-packages**: `release.yml` rolls the new framework image across the fleet
-(`build-images`), then reconciles each deployment's package content + secrets onto
-it (`deploy-teams`), under one success gate. A team-definition or secret edit that
-needs **no** image rebuild ships on its own via a `deploy-*` tag, which runs
-`deploy-agent-teams.yml` standalone. Either way the reconcile **business logic
-lives in `modastack deploy`**, not the YAML — the Action only orchestrates: list
+you cut a release (or push a `deploy-*` tag) to ship. **One functional gate guards
+everything**: `release.yml` builds the wheel once, builds the canary *from that
+wheel* and smokes it (`CANARY-OK`), and only then — in parallel — publishes the
+same wheel to PyPI and rolls the fleet, finally reconciling each deployment's
+package content + secrets (`deploy-teams`). Publish is gated on the **canary**, not
+the fleet roll, so a flaky non-canary instance can't block an already-proven
+publish. A team-definition or secret edit that needs **no** image rebuild ships on
+its own via a `deploy-*` tag, which runs `deploy-agent-teams.yml` standalone. Either
+way the reconcile **business logic lives in `modastack deploy`**, not the YAML — the
+Action only orchestrates: list
 the active deployments, hand each its secrets, loop the primitive. That is why the
 same engine runs from a laptop, this Action, Terraform, or a SaaS plane — see §7.1
 (bring your own repo).
@@ -434,22 +444,36 @@ Sole publisher of that release; nothing else should `--clobber` it. Only needed
 when a deployment uses `team-url:`; pure ssh-push (`team:`) deployments ignore it.
 
 ### release.yml — the release pipeline
-Triggered by **`release: published`** (independent of PyPI — the Fly image builds
-from source). One gated pipeline, three ordered jobs:
+Triggered by **`release: published`**. One gated pipeline; the canary, running the
+exact wheel we publish, is the single functional gate for both PyPI and the fleet:
 - **subscription-login-smoke** — gate the release on a verified subscription-login
   bootstrap (a hermetic mock-code smoke; #388).
-- **build-images** — build the image **once** against the first fleet app, resolve
-  the image it now runs, and reuse that exact reference for every other app
-  (build-once-deploy-many; all generic instances share one image). A team-flavored
-  app rebuilds its **own** image (its TEAM_DEPS hook) on the new wheel. Each app
-  keeps its volume/sessions/env/secrets: round-trip the live config with `fly
-  config save` and only swap the image. A functional canary `ask` (`CANARY-OK`)
-  gates the rest of the roll. Per-app failures are isolated and reported; re-run to
-  retry (idempotent; C7 guards format-version skew).
-- **deploy-teams** — `needs: build-images`, then **calls `deploy-agent-teams.yml`**
-  to reconcile each deployment's package content + secrets onto the freshly-rolled
-  image. So the image always lands before the package/secret reconcile, and both
-  share the release's success/failure outcome.
+- **build-wheel** — `python -m build` the wheel/sdist **once** and upload it, so the
+  canary, the fleet, and PyPI all run the identical artifact. A fail-fast
+  `pip install dist/*.whl && modastack --version` rejects an obviously-broken wheel
+  before the expensive canary build.
+- **build-canary** — deploy the canary from an image built **from that wheel**
+  (`--build-arg MODASTACK_BUILD=wheel`, the artifact staged into `dist/`), then a
+  functional `ask` asserts `CANARY-OK` end-to-end. **This is the gate.** It resolves
+  and outputs the built image digest for `roll-fleet` to reuse.
+- **publish** — `needs: build-canary` (the canary, **not** the fleet roll). Uploads
+  the **same** wheel to PyPI via trusted publishing (`environment: pypi`), then
+  `deploy-event-server` + `update-homebrew`.
+- **roll-fleet** — `needs: build-canary`, in parallel with publish. Generic
+  instances reuse the canary's image digest (build-once-deploy-many); a team-flavored
+  app rebuilds its **own** image from the wheel + its TEAM_DEPS hook. Each app keeps
+  its volume/sessions/env/secrets (round-trip live config, swap image only). Per-app
+  failures are isolated and reported; re-run to retry (idempotent; C7 guards skew).
+- **deploy-teams** — `needs: roll-fleet`, then **calls `deploy-agent-teams.yml`** to
+  reconcile each deployment's package content + secrets onto the rolled image. Image
+  always lands before the package/secret reconcile.
+
+> **PyPI trusted publishing.** The publish step must run in the top-level workflow
+> the trusted-publisher config names (PyPI rejects a reusable workflow with
+> `invalid-publisher`), so it's a native job in `release.yml`. Configure the PyPI
+> trusted publisher as: repo `<owner>/<repo>`, workflow `release.yml`, environment
+> `pypi`. (If you migrate from a prior `publish-pypi.yml` publisher, update it
+> **before** the next release or the upload fails.)
 
 > **flyctl gotchas (found in the C22 e2e):**
 > - `fly config save` writes via **`-c <path>`**, not `-o` (which it rejects).

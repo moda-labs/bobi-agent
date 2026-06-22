@@ -256,10 +256,12 @@ without explicit approval. `DESIGN.md` supersedes the visual/UX assumptions in
 1. Bump `version` in `pyproject.toml` and `VERSION` (+ a `CHANGELOG.md` section)
 2. Publish a GitHub Release: `gh release create v<version> --target main …`
    (creates the tag **and** publishes the Release — that event is the gate)
-3. Publishing the Release runs, gated:
-   - `publish-pypi.yml` — build wheel → functional install smoke → **PyPI**, then
-     Cloudflare event-server + Homebrew bump
-   - `release.yml` — subscription-login smoke → build + roll the Fly fleet image
-     (canary `CANARY-OK` gate) → reconcile team packages + secrets
+3. Publishing the Release runs `release.yml` — one gated pipeline:
+   subscription-login smoke → build the wheel once → build the canary **from that
+   wheel** + `CANARY-OK` smoke (the gate) → then, in parallel: publish the same
+   wheel to **PyPI** (+ Cloudflare event-server + Homebrew) **and** roll the Fly
+   fleet → reconcile team packages + secrets.
 
-A bare `git push --tags` no longer publishes — you must publish a Release.
+The canary runs the exact wheel we publish, so it gates both the PyPI upload and
+the fleet roll. PyPI trusted publishing is configured for `release.yml` +
+environment `pypi`. A bare `git push --tags` no longer publishes — publish a Release.

@@ -346,7 +346,7 @@ TEST 11.4: re-run 11.1 (idempotent provision-or-update) → exit 0, NO second
 TEST 11.5 [BLOCKED ON STEP 4 — the residual gap]: outside-world → RC.
            Post a webhook to the PRODUCTION event server for a topic the RC
            subscribed to → assert the deployed instance RECEIVED and acted (the
-           on-Fly analogue of publish-pypi's Smoke-1), PLUS an `ask` against the
+           on-Fly analogue of the retired EC2 release smoke), PLUS an `ask` against the
            remote instance. Both need out-of-band reach into a deployed bubble
            (webhook→remote-RC delivery + remote ask), which is UNBUILT today —
            bubble isolation / cone-of-silence (#239). Implement with the step-4

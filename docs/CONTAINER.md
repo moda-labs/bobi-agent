@@ -209,10 +209,12 @@ secrets) and is the seam a token broker later fills. Team Environments must have
   `fly ssh` (workspace-safe reinstall — *not* `agents update`, which can't
   resolve a `url:`-sourced pack) then `fly machine restart`. The volume's
   `agent.yaml` and workspace edits survive.
-- **Release** → publish a GitHub Release. `release.yml` builds the image
-  once, then rolls every fleet app to that exact image (`fly config save` +
-  `fly deploy --image`), preserving each volume/sessions/env. Per-app failures
-  are isolated; re-run to retry (deploys are idempotent).
+- **Release** → publish a GitHub Release. `release.yml` builds the wheel once,
+  builds the canary image **from that wheel** and smokes it (`CANARY-OK`), and only
+  then — gated on the canary — publishes the same wheel to PyPI and rolls the fleet:
+  generic apps reuse the canary's image digest (`fly config save` + `fly deploy
+  --image`), team-flavored apps rebuild their own image from the wheel. Each app's
+  volume/sessions/env is preserved; per-app failures are isolated; re-run to retry.
 
 - **Delete a team** → nothing automatic. Run `scripts/destroy-instance.sh --app
   <fleet>-<team>` by hand (it removes the volume — back up first).

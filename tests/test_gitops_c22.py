@@ -33,7 +33,6 @@ PROVISION_SH = REPO / "scripts" / "provision-instance.sh"
 DESTROY_SH = REPO / "scripts" / "destroy-instance.sh"
 WF_TEAMS = REPO / ".github" / "workflows" / "deploy-agent-teams.yml"
 WF_RELEASE = REPO / ".github" / "workflows" / "release.yml"
-WF_PUBLISH = REPO / ".github" / "workflows" / "publish-pypi.yml"
 
 
 # --- scripts/fleet.sh (exercised for real, Fly stubbed) ---------------------
@@ -125,6 +124,16 @@ def test_entrypoint_waits_for_team_when_blank():
     assert "nothing to install" not in entry
 
 
+def test_dockerfile_supports_wheel_build_mode():
+    """The release pipeline builds the image from a PREBUILT wheel (builder-wheel),
+    so the canary smokes — and the fleet runs — the exact bytes published to PyPI."""
+    df = (REPO / "Dockerfile").read_text()
+    assert "builder-wheel" in df
+    assert "COPY dist/" in df  # the staged prebuilt wheel
+    # .dockerignore excludes dist/ but must re-include the wheel for wheel-mode.
+    assert "!dist/*.whl" in (REPO / ".dockerignore").read_text()
+
+
 # --- workflows: load + shared helpers ---------------------------------------
 
 def _load(path: Path) -> dict:
@@ -164,15 +173,15 @@ def test_teams_is_callable_and_not_release_triggered():
     assert "branches" not in (on.get("push") or {})
 
 
-def test_release_pipeline_deploys_teams_after_images():
-    """The single gated pipeline: build-images (image roll) FIRST, then
-    deploy-teams reconciles package content + secrets by CALLING the reusable
-    deploy-agent-teams workflow. Image always precedes the package/secret reconcile."""
+def test_release_pipeline_deploys_teams_after_the_fleet_roll():
+    """The single gated pipeline ends by reconciling package content + secrets onto
+    the rolled image, by CALLING the reusable deploy-agent-teams workflow. Image
+    (roll-fleet) always precedes the package/secret reconcile."""
     jobs = _jobs(_load(WF_RELEASE))
-    assert "build-images" in jobs
+    assert "roll-fleet" in jobs
     deploy_teams = jobs["deploy-teams"]
     # ordered after the image roll
-    assert deploy_teams["needs"] == "build-images"
+    assert deploy_teams["needs"] == "roll-fleet"
     # reuses the standalone reconcile workflow (one implementation, two entry points)
     assert deploy_teams["uses"] == "./.github/workflows/deploy-agent-teams.yml"
     # forwards FLY_API_TOKEN + per-tenant Environment secrets to the called workflow
@@ -239,7 +248,16 @@ def test_teams_no_ops_without_fly_token():
     assert "configured == 'true'" in deploy["if"]
 
 
-# --- release.yml invariants (build-images job) ------------------------------
+# --- release.yml invariants (build-wheel → build-canary → publish/roll) ------
+
+def _steps(job: dict) -> list:
+    return job.get("steps", [])
+
+
+def _uses_blob(job: dict) -> str:
+    """All `uses:` refs in a job, joined — for asserting actions like up/download."""
+    return "\n".join(s.get("uses") or "" for s in _steps(job))
+
 
 def test_release_triggers_on_published_release():
     wf = _load(WF_RELEASE)
@@ -247,71 +265,72 @@ def test_release_triggers_on_published_release():
     assert "published" in on["release"]["types"]
 
 
-def test_release_builds_once_and_reuses_image_across_fleet():
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-images"])
-    # enumerate the fleet by the stamp, build the generic image once, reuse --image
-    assert "scripts/fleet.sh list" in script
-    assert "fly image show" in script
-    assert "--image" in script
-    # round-trip live config so env/mounts/vm/volume survive the image swap.
-    # `config save` writes to the path given by -c (NOT -o, which it rejects) —
-    # both flag and image-ref shape were caught by the live e2e.
+def test_release_builds_the_wheel_once_and_uploads_it():
+    """The wheel is built ONCE (build-wheel) and uploaded, so the canary, the fleet,
+    and PyPI all run the exact same artifact."""
+    jobs = _jobs(_load(WF_RELEASE))
+    bw = jobs["build-wheel"]
+    assert "python -m build" in _step_scripts(bw)
+    assert "upload-artifact" in _uses_blob(bw)
+
+
+def test_release_canary_is_built_from_the_wheel_and_smoked():
+    """THE gate: the canary image is built FROM the prebuilt wheel (not source) and
+    smoked with a functional ask — so we prove the exact bytes we publish boot and
+    answer end-to-end."""
+    canary = _jobs(_load(WF_RELEASE))["build-canary"]
+    # consumes the built wheel and builds the image in wheel mode
+    assert "download-artifact" in _uses_blob(canary)
+    script = _step_scripts(canary)
+    assert "MODASTACK_BUILD=wheel" in script
+    # functional smoke with an abort-on-failure gate
+    assert "modastack ask" in script and "CANARY-OK" in script
+    assert "aborting release" in script
+    # round-trips live config + resolves the built image digest (reused by roll-fleet)
     assert "config save" in script and "-c " in script and " -o " not in script
-    # image ref is constructed (Ref/Reference fields come back null from Fly)
     assert "registry.fly.io/" in script and "Digest" in script
 
 
-def test_release_is_team_aware():
-    """A framework release must REBUILD a team-flavored instance's own image
-    (its TEAM_DEPS hook) instead of rolling the generic image onto it, which
-    would strip its baked tools and break dispatch (C24 #368)."""
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-images"])
-    # the renderer decides generic-vs-team per app, and team apps build with TEAM_DEPS
-    assert "render-team-deps.py" in script
-    assert "TEAM_DEPS=" in script
-    # the canary functional gate (replaces the retired EC2 release smoke)
-    assert "CANARY-OK" in script
+def test_release_publish_is_gated_on_the_canary_not_the_fleet_roll():
+    """PyPI is irreversible, so publish waits on the canary gate — but NOT on the
+    fleet roll, so a flaky non-canary instance can't block an already-proven
+    publish. Publish reuses the SAME artifact the canary ran (no rebuild)."""
+    jobs = _jobs(_load(WF_RELEASE))
+    publish = jobs["publish"]
+    assert publish["needs"] == "build-canary"      # gated on the canary
+    assert publish["needs"] != "roll-fleet"        # NOT on the fleet roll
+    assert publish["environment"] == "pypi"        # trusted-publishing env
+    # publishes the proven bytes: downloads the artifact, never rebuilds
+    assert "download-artifact" in _uses_blob(publish)
+    assert "python -m build" not in _step_scripts(publish)
+    assert any("pypi-publish" in (s.get("uses") or "") for s in _steps(publish))
 
 
-def test_release_functional_canary_gate():
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-images"])
-    # build + smoke the canary BEFORE rolling the rest: a blocking `ask` proving
-    # the new image's agent answers, asserted by a marker.
-    assert "modastack ask" in script and "CANARY-OK" in script
-    assert "aborting rollout" in script  # a failed smoke stops the roll
+def test_release_reuses_canary_image_and_is_team_aware():
+    """roll-fleet reuses the canary's wheel image digest for generic instances; a
+    team-flavored instance rebuilds its OWN image from the wheel + its TEAM_DEPS
+    hook (rolling the generic image onto it would strip its baked tools, C24 #368)."""
+    roll = _jobs(_load(WF_RELEASE))["roll-fleet"]
+    assert roll["needs"] == "build-canary"
+    script = _step_scripts(roll)
+    assert "scripts/fleet.sh list" in script
+    assert "--image" in script                       # generic: reuse the digest
+    assert "render-team-deps.py" in script           # team-flavored detection
+    assert "TEAM_DEPS=" in script and "MODASTACK_BUILD=wheel" in script  # team rebuild from wheel
+    assert "config save" in script and "-c " in script and " -o " not in script
 
 
 def test_release_isolates_per_app_failures():
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-images"])
+    script = _step_scripts(_jobs(_load(WF_RELEASE))["roll-fleet"])
     assert "fails+=(" in script  # collect, don't abort the fleet
     # load-bearing flags from the provisioner (one-volume + zstd boot bug)
     assert "--ha=false" in script
     assert "--depot=false" in script
 
 
-# --- publish-pypi.yml invariants (gate the irreversible publish) ------------
-
-def test_publish_triggers_on_release_not_bare_tag():
-    """Publish fires on a published Release (the same gate as release.yml), NOT a
-    raw `v*` tag push — so a bare `git push --tags` can't ship an unverified build,
-    and the publish lines up behind the same event as the fleet roll."""
-    on = _load(WF_PUBLISH).get("on", _load(WF_PUBLISH).get(True))
-    assert "published" in on["release"]["types"]
-    assert "push" not in on  # the old tag-push trigger is retired
-
-
-def test_publish_is_gated_on_a_functional_wheel_smoke():
-    """PyPI is irreversible, so the upload job depends on a job that builds the
-    wheel, installs THAT artifact into a clean venv, and runs it — test the bytes,
-    then ship the bytes (the publish step does NOT rebuild)."""
-    jobs = _jobs(_load(WF_PUBLISH))
-    assert jobs["publish"]["needs"] == "build-and-smoke"
-    smoke = _step_scripts(jobs["build-and-smoke"])
-    assert "python -m build" in smoke
-    assert "dist/*.whl" in smoke           # installs the built artifact, not from PyPI
-    assert "modastack --version" in smoke  # functional: entry point + version
-    assert "modastack skill" in smoke      # functional: package_data shipped
-    # publish reuses the tested artifact instead of rebuilding it
-    publish_steps = jobs["publish"].get("steps", [])
-    assert any("download-artifact" in (s.get("uses") or "") for s in publish_steps)
-    assert not any("python -m build" in (s.get("run") or "") for s in publish_steps)
+def test_release_publishes_to_pypi_only_after_the_canary():
+    """Publish + its downstream (event-server, Homebrew) are part of THIS pipeline
+    (trusted publishing can't run from a reusable workflow), all behind the canary."""
+    jobs = _jobs(_load(WF_RELEASE))
+    assert jobs["deploy-event-server"]["needs"] == "publish"
+    assert jobs["update-homebrew"]["needs"] == "publish"
