@@ -11,9 +11,16 @@ These tests catch regressions — if someone loosens the prompt back to
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LEAD_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "project_lead" / "ROLE.md"
+ENG_TEAM = REPO_ROOT / "agents" / "eng-team"
+LEAD_PROMPT = ENG_TEAM / "roles" / "project_lead" / "ROLE.md"
+ENGINEER_PROMPT = ENG_TEAM / "roles" / "engineer" / "ROLE.md"
+CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+ISSUE_LIFECYCLE = ENG_TEAM / "workflows" / "issue-lifecycle.yaml"
+CODEX_GUIDE = ENG_TEAM / "tools" / "codex.md"
+AGENT_YAML = ENG_TEAM / "agent.yaml"
 
 
 class TestProjectLeadDelegation:
@@ -142,4 +149,118 @@ class TestProjectLeadStandingInstructions:
     def test_merge_conflict_auto_dispatch(self):
         assert "conflict_detected" in self.text.lower(), (
             "Project lead prompt must handle merge conflict auto-dispatch"
+        )
+
+
+class TestReleaseTimeOnlyVersionConvention:
+    """Feature PRs must never bump the version or edit the changelog.
+
+    Issue #325: version bumps and CHANGELOG.md entries are a release-time
+    concern only. The generic `/ship` tool bumps both by default, so the
+    engineer prompt must override that for modastack PRs, and the
+    contributor docs must state the convention. These tests fail if either
+    the prompt guard or the documented convention regresses.
+    """
+
+    def test_engineer_prompt_forbids_version_bump_in_pr(self):
+        text = ENGINEER_PROMPT.read_text().lower()
+        assert "must not bump the version" in text, (
+            "Engineer prompt must forbid bumping the version in feature PRs"
+        )
+
+    def test_engineer_prompt_forbids_changelog_edit_in_pr(self):
+        text = ENGINEER_PROMPT.read_text().lower()
+        assert "changelog.md" in text and "release time" in text, (
+            "Engineer prompt must say CHANGELOG.md changes happen at release time"
+        )
+
+    def test_engineer_prompt_overrides_ship_default(self):
+        """`/ship` bumps version + changelog by default; the prompt must
+        tell the engineer to revert those for modastack PRs."""
+        text = ENGINEER_PROMPT.read_text().lower()
+        assert "/ship" in text and "revert" in text, (
+            "Engineer prompt must tell the engineer to revert /ship's "
+            "version/changelog changes"
+        )
+
+    def test_contributor_docs_state_convention(self):
+        text = CLAUDE_MD.read_text().lower()
+        assert "feature prs must not bump the version" in text, (
+            "CLAUDE.md must document the no-version-bump-in-feature-PRs convention"
+        )
+
+    def test_contributor_docs_forbid_changelog_edit(self):
+        text = CLAUDE_MD.read_text().lower()
+        assert "changelog.md" in text and "release time" in text, (
+            "CLAUDE.md must state CHANGELOG.md entries are added at release time"
+        )
+
+
+class TestCodexAdversarialReviewStep:
+    """The eng-team must wire the baked Codex CLI as an adversarial reviewer.
+
+    Issue #285 / MDS-47: the `codex` CLI is baked + preflighted in agent.yaml
+    but nothing uses it. A `plan_review` step in issue-lifecycle runs
+    `codex exec` on the just-written spec and captures the critique in the
+    handoff for the human approval gate, documented by tools/codex.md. These
+    tests fail if the step, the guide, or the CLI-first contract regresses —
+    or if someone reintroduces the retired `codex_exec` MCP shim (#403).
+    """
+
+    def _steps(self):
+        wf = yaml.safe_load(ISSUE_LIFECYCLE.read_text())
+        return {s["name"]: s for s in wf["steps"] if "name" in s}
+
+    def test_plan_review_step_exists(self):
+        assert "plan_review" in self._steps(), (
+            "issue-lifecycle.yaml must contain a plan_review step (#285)"
+        )
+
+    def test_plan_review_runs_after_spec_before_approval(self):
+        """The critique must reach the human at the approval gate, so the
+        step sits between `spec` and `await_approval`."""
+        order = list(self._steps())
+        assert order.index("spec") < order.index("plan_review") < order.index(
+            "await_approval"
+        ), "plan_review must run after spec and before await_approval"
+
+    def test_plan_review_captures_critique_in_handoff(self):
+        step = self._steps()["plan_review"]
+        required = step.get("handoff", {}).get("required", [])
+        assert "codex_critique" in required, (
+            "plan_review handoff must require codex_critique"
+        )
+        assert "codex_verdict" in required, (
+            "plan_review handoff must require codex_verdict"
+        )
+
+    def test_plan_review_invokes_codex_cli(self):
+        step = self._steps()["plan_review"]
+        assert "codex exec" in step["prompt"], (
+            "plan_review must instruct the agent to run `codex exec`"
+        )
+
+    def test_codex_guide_exists(self):
+        assert CODEX_GUIDE.exists(), "agents/eng-team/tools/codex.md must exist (#285)"
+
+    def test_codex_guide_documents_not_delegation(self):
+        text = CODEX_GUIDE.read_text().lower()
+        assert "not" in text and "delegation" in text, (
+            "codex.md must state the call is NOT agent delegation"
+        )
+
+    def test_codex_guide_has_exec_example(self):
+        assert "codex exec" in CODEX_GUIDE.read_text(), (
+            "codex.md must show a `codex exec` example"
+        )
+
+    def test_no_codex_connections_or_mcp_shim(self):
+        """Guards the out-of-scope items: the step must use the baked CLI,
+        never a `connections:` block or the retired codex_exec MCP shim."""
+        agent_cfg = AGENT_YAML.read_text()
+        assert "connections:" not in agent_cfg, (
+            "agent.yaml must not add a connections: block (#285 CLI-first)"
+        )
+        assert "codex_exec" not in agent_cfg, (
+            "agent.yaml must not reference the retired codex_exec MCP shim (#403)"
         )

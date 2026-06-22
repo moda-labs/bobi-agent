@@ -17,7 +17,7 @@ resolved.
 GitOps-managed, dispatching as the `modastack` bot — and the **EC2 director is
 decommissioned** (box paused, self-hosted runner deregistered, EC2 CI jobs
 removed). The release smoke is now a **functional Fly canary gate** in
-`gitops-release` (build the canary → `ask` it → assert `CANARY-OK` → roll the
+`release.yml` (build the canary → `ask` it → assert `CANARY-OK` → roll the
 rest), and the roll is **team-aware** (a team-flavored instance rebuilds its own
 image instead of taking the shared generic one). Earlier history: C8/C23 (#358),
 C10 (#359), C22 + binary deploy (PR #365) — the deploy *engine* is a portable CLI

@@ -128,7 +128,7 @@ build the primitive first; the Action doesn't need it.
     done
     # report Fly apps (fleet.sh) with no deployments/ file → human destroy
 ```
-`gitops-release.yml` similarly loops `modastack deploy` (image rebuild) over the
+`release.yml` similarly loops `modastack deploy` (image rebuild) over the
 fleet. Nothing GitHub-specific remains in the engine.
 
 ## What's reused vs new

@@ -46,6 +46,26 @@ steps:
       required: [spec_url]
     timeout: 3000
 
+  - name: plan_review
+    agent: engineer
+    prompt: |
+      Get an independent adversarial review of the spec you just wrote, using
+      the baked Codex CLI (see tools/codex.md). This is a one-shot second
+      opinion — NOT agent delegation; you remain the author.
+
+      1. Read the spec you published to the issue (spec_url from the previous
+         step).
+      2. Run `codex exec` per tools/codex.md, asking Codex to attack the plan:
+         unhandled edge cases, wrong assumptions, missing tests, simpler
+         alternatives, scope it gets wrong.
+      3. Write Codex's verbatim critique into the `codex_critique` handoff
+         field, plus a one-line `codex_verdict` (e.g. "no blockers" /
+         "blockers: ..."). Do NOT edit the spec here — the human decides at
+         the approval gate.
+    handoff:
+      required: [codex_critique, codex_verdict]
+    timeout: 600
+
   - name: await_approval
     await: approval
     timeout: 86400

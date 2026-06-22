@@ -7,13 +7,16 @@
 # §2 (the instance contract). Nothing reaches in; the manager reaches out to the
 # event server over WSS only.
 #
-# ONE Dockerfile, two BUILD modes (MODASTACK_BUILD build-arg) — the runtime stage
+# ONE Dockerfile, three BUILD modes (MODASTACK_BUILD build-arg) — the runtime stage
 # is shared, so there's nothing to keep in sync:
 #   * source (default) — build the wheel from a repo checkout (`COPY . .`). Dev +
 #     the repo's own CI, so unreleased branch code is tested.
 #   * pypi             — install a published `modastack==$MODASTACK_VERSION` from
 #     PyPI; the build context is just this file + docker/. This is what binary-mode
 #     `modastack deploy` uses, so deploying needs no checkout (DEPLOY_INTERFACE.md).
+#   * wheel            — install a PREBUILT local wheel staged in dist/. The release
+#     pipeline (release.yml) builds the wheel once, then bakes THAT artifact so the
+#     canary smokes — and the fleet runs — the exact bytes published to PyPI.
 #
 # Design-mandated properties (CONTAINERIZED_INSTANCES.md §5, §6.1, §10 C8):
 #   * Runs the agent as a NON-ROOT user. Claude Code refuses bypassPermissions
@@ -28,9 +31,11 @@
 #   docker build -t modastack:dev .                                  # source mode
 #   docker build --build-arg MODASTACK_BUILD=pypi \
 #     --build-arg MODASTACK_VERSION=0.22.0 -t modastack:dev .        # pypi mode
+#   docker build --build-arg MODASTACK_BUILD=wheel -t modastack:dev . # wheel (dist/*.whl)
 
-# Which builder produces /opt/venv: `source` or `pypi`. modastack deploy passes
-# `pypi` (+ MODASTACK_VERSION) in binary mode; a plain `docker build` defaults to
+# Which builder produces /opt/venv: `source`, `pypi`, or `wheel`. modastack deploy
+# passes `pypi` (+ MODASTACK_VERSION) in binary mode; the release pipeline passes
+# `wheel` (with the prebuilt artifact in dist/); a plain `docker build` defaults to
 # `source` so the repo's own CI keeps building from the branch.
 ARG MODASTACK_BUILD=source
 
@@ -85,8 +90,28 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir \
         "modastack==${MODASTACK_VERSION}" "fastembed>=0.4" "sqlite-vec>=0.1.6"
 
+#####################################################################
+# builder-wheel — install a PREBUILT local wheel (release pipeline). #
+#####################################################################
+# The release pipeline builds the wheel ONCE in CI and stages it into the build
+# context at dist/ (re-included in .dockerignore). We install THAT exact artifact
+# here, so the canary smokes — and the fleet runs — the same bytes we publish to
+# PyPI (not a separately source-rebuilt wheel). Deps come from the same
+# pyproject-keyed layer as builder-source (cached across code-only changes); the
+# wheel goes in --no-deps on top.
+FROM builder-base AS builder-wheel
+WORKDIR /src
+COPY pyproject.toml ./
+RUN python -m venv /opt/venv \
+    && python -c "import tomllib; print(chr(10).join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > /tmp/reqs.txt \
+    && /opt/venv/bin/pip install --no-cache-dir -r /tmp/reqs.txt "fastembed>=0.4" "sqlite-vec>=0.1.6"
+# The prebuilt wheel staged by the release pipeline (exactly one *.whl in dist/).
+COPY dist/ /dist/
+RUN /opt/venv/bin/pip install --no-cache-dir --no-deps /dist/*.whl
+
 # Select the builder. With MODASTACK_BUILD=pypi, builder-source isn't in the graph
 # (its `COPY . .` never runs), so the tiny binary context needs no source tree.
+# MODASTACK_BUILD=wheel (the release pipeline) installs the prebuilt dist/ wheel.
 FROM builder-${MODASTACK_BUILD} AS builder
 
 #####################################################################

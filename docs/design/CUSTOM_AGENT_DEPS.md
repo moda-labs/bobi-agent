@@ -220,7 +220,7 @@ the base).
   instead of building the generic one from the local Dockerfile. The C22 provision
   job passes `--image modastack-<team>:latest` when the team has one; otherwise the
   generic path (unchanged).
-- `gitops-release.yml`: a framework release rebuilds each team image `FROM` the new
+- `release.yml`: a framework release rebuilds each team image `FROM` the new
   base, then rolls. The C22 release loop already deploys by image ref — it iterates
   team images instead of one shared image. (Build-once-per-team, deploy-many.)
 

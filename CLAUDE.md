@@ -251,8 +251,32 @@ digestion-prompt architecture. Live mockups in `docs/design/`. Do not deviate
 without explicit approval. `DESIGN.md` supersedes the visual/UX assumptions in
 `~/.claude/plans/sleepy-crunching-pnueli.md`.
 
+## Contributing
+
+**Feature PRs must not bump the version or edit `CHANGELOG.md`.** Leave
+`VERSION`, the `version` field in `pyproject.toml`, and `CHANGELOG.md`
+untouched — version bumps and changelog entries are added at release time only
+(see [Releasing](#releasing)). This keeps the changelog clean and avoids merge
+conflicts when several PRs land together.
+
+Write a PR description with enough detail that the changelog entry can be
+written from it at release time: what changed, why, and the ticket id.
+
 ## Releasing
 
-1. Bump `version` in `pyproject.toml` and `VERSION`
-2. `git tag v<version> && git push --tags`
-3. GitHub Actions publishes to PyPI
+Version bumps and `CHANGELOG.md` entries happen **only at release time** — never
+in feature PRs (see [Contributing](#contributing)). To cut a release:
+
+1. Bump `version` in `pyproject.toml` and `VERSION`, and add a `CHANGELOG.md`
+   entry summarizing the PRs merged since the last release.
+2. Publish a GitHub Release: `gh release create v<version> --target main …`
+   (creates the tag **and** publishes the Release — that event is the gate).
+3. Publishing the Release runs `release.yml` — one gated pipeline:
+   subscription-login smoke → build the wheel once → build the canary **from that
+   wheel** + `CANARY-OK` smoke (the gate) → then, in parallel: publish the same
+   wheel to **PyPI** (+ Cloudflare event-server + Homebrew) **and** roll the Fly
+   fleet → reconcile team packages + secrets.
+
+The canary runs the exact wheel we publish, so it gates both the PyPI upload and
+the fleet roll. PyPI trusted publishing is configured for `release.yml` +
+environment `pypi`. A bare `git push --tags` no longer publishes — publish a Release.
