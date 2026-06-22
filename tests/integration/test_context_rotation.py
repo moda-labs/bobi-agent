@@ -83,6 +83,49 @@ class TestContextRotation:
         assert hasattr(s, '_rotate_pending'), \
             "Session must have _rotate_pending attribute"
 
+    @pytest.mark.asyncio
+    async def test_drain_rotates_on_cached_context(self, modastack_install):
+        """End-to-end through _drain_turn: a warm turn whose context lives in
+        cache_read (tiny input_tokens) must still trip the cap.
+
+        This is the gap that let #433 ship — a real ResultMessage (not a
+        MagicMock, which fails the isinstance gate) carrying the cache-heavy
+        usage shape the deployed manager actually emitted (~424K cached, 2
+        fresh).
+        """
+        from claude_agent_sdk import ResultMessage
+
+        class _Client:
+            async def query(self, text):
+                pass
+
+            async def receive_response(self):
+                yield ResultMessage(
+                    subtype="success", duration_ms=1, duration_api_ms=1,
+                    is_error=False, num_turns=1, session_id="sess-1",
+                    total_cost_usd=0.01,
+                    usage={
+                        "input_tokens": 2,
+                        "cache_read_input_tokens": 422_468,
+                        "cache_creation_input_tokens": 1_262,
+                        "output_tokens": 3_432,
+                    },
+                    model_usage={"claude-opus-4-8": {"input_tokens": 2}},
+                )
+
+        s = Session(
+            name="test-cap-drain",
+            cwd=str(modastack_install.repo_path),
+            extra_options={"rotation_token_cap": 275_000},
+        )
+        s._input_ready = asyncio.Event()
+        s._client = _Client()
+
+        await s._drain_turn()
+
+        assert s._rotate_pending is True, \
+            "context fill (input + cache) exceeded cap but rotation did not arm"
+
     def test_rotation_token_cap_default(self, modastack_install):
         """Default rotation_token_cap is 275_000."""
         s = Session(name="test-default-cap", cwd=str(modastack_install.repo_path))
