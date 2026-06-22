@@ -1,9 +1,16 @@
-## Open decisions for human sign-off
+## Resolved by human sign-off (Zach, 2026-06-22)
 
-> Resolve these two when approving this spec (they're called out here so they're part of the reviewed file, not just the PR description).
+> Both open decisions were resolved by the human reviewer when approving this spec. Recorded here so they're part of the reviewed file, not just the PR thread.
 
-1. **Behavior-preserving `required:` annotations (important).** A global default of `required: false` would *silently* loosen existing multi-service packs (e.g. a missing `SLACK_BOT_TOKEN` in eng-team would no longer block). Proposal: in the implementation PR, mark genuinely-critical services `required: true` to preserve today's blocking behavior — **eng-team:** `github` / `slack` / `linear`; **support-manager + market-research:** `slack` / `linear`; **dogfood:** `github` only (email stays optional). **Confirm these annotations.**
-2. **Cosmetic — warning presentation.** Warning glyph `⚠` vs `✗ (optional)`, plus a `[WARN]` / `[ERROR]` text fallback for unicode-stripped terminals. **State a preference.**
+1. **Behavior-preserving `required:` annotations — confirmed.** Mark genuinely-critical services `required: true` to preserve today's blocking behavior — **eng-team:** `github` / `slack` / `linear`; **support-manager + market-research:** `slack` / `linear`. **dogfood: `github` _and_ `email`/venn are both `required: true`.** Per the reviewer, the dogfood-content-review team genuinely needs Venn to function (it polls Gmail and acts on email), so `email` is **not** optional — it is required, and the dogfood team must be provisioned with real Venn credentials (operational follow-up — see [Implication of the dogfood decision](#implication-of-the-dogfood-decision) below).
+2. **Cosmetic — warning presentation — confirmed.** Use the `⚠` glyph for non-blocking warnings and `✗` for blocking errors (glyphs are good for readability), with a `[WARN]` / `[ERROR]` text fallback for unicode-stripped terminals.
+
+### Implication of the dogfood decision
+
+The original #329 trigger was *"the credential-free dogfood/release smoke can't `modastack start` because Venn `email` isn't connected."* The reviewer resolved dogfood **the other way**: `email` is required and the dogfood team gets real Venn credentials, rather than letting dogfood's `email` degrade. So:
+
+- The **framework mechanism** (per-service `required` flag + graceful degradation of non-required services) still ships exactly as specified below — it is the general fix and benefits any pack.
+- For **dogfood specifically**, the smoke now runs **with** Venn credentials provisioned, not credential-free. The graceful-degradation path is verified against a genuinely-optional service rather than dogfood `email` (see updated Verification plan / Acceptance criteria).
 
 ---
 
@@ -31,6 +38,13 @@ connection.
 
 Not a regression: the all-or-nothing gate is pre-existing (auth-v1, #281,
 shipped in 0.21.0). Filing as a quality/UX fix, not a release blocker.
+
+> **Note (human review, 2026-06-22):** the *general* problem above — one
+> unconfigured non-critical service bricking the whole agent — is the real
+> target and is fixed by the mechanism below. For **dogfood specifically**,
+> the reviewer determined `email`/venn is genuinely **required** (dogfood acts
+> on email), so dogfood is fixed by provisioning Venn creds, not by degrading
+> `email`. See [Implication of the dogfood decision](#implication-of-the-dogfood-decision).
 
 ## Solution
 
@@ -69,8 +83,10 @@ explicit, declarative control.
   every degraded service as a hard failure.
 - **Annotate critical services in shipped packs as `required: true`** (see
   Resolved decision 1) so this change does **not** silently loosen existing
-  multi-service packs (eng-team, support-manager, market-research). Only
-  genuinely-optional services (e.g. dogfood `email`) degrade.
+  multi-service packs (eng-team, support-manager, market-research). For
+  dogfood-content-review, **both `github` and `email`/venn are `required: true`**
+  (per human review — dogfood genuinely needs Venn). Only services a pack
+  author explicitly marks `required: false` degrade.
 - Unit tests for every new branch; keep entry-point/required-failure
   blocking as a regression guard.
 
@@ -188,12 +204,18 @@ Unit tests (`tests/test_validate.py`, mirroring existing structure):
   produce `ok=False`.
 
 Manual / smoke:
-- `modastack start` against the **unmodified** `dogfood-content-review`
-  pack with no `VENN_API_KEY`: preflight shows `✓ github`, `⚠ email`,
-  prints "degraded mode", and the manager starts (satisfies acceptance
-  criteria 1 & 2 / dogfood Sections 7/10).
+- **Degradation path** — `modastack start` against a pack with an
+  unconfigured service explicitly marked `required: false`: preflight shows
+  `✓` for required services, `⚠` for the optional one, prints "degraded mode",
+  and the manager starts (satisfies acceptance criteria 1 & 2). dogfood
+  `email` is **no longer** this case — it is `required: true` per human
+  review, so use a pack/service marked `required: false` to exercise this.
+- **dogfood smoke** — `modastack start` against `dogfood-content-review` now
+  requires **both** `github` and `email`/venn; the dogfood team must have real
+  Venn credentials provisioned (operational follow-up). With creds present,
+  preflight shows `✓ github`, `✓ email` and the manager starts.
 - `modastack start` with a genuinely required service unset still blocks
-  (acceptance criterion 3).
+  (acceptance criterion 3) — including dogfood with no `VENN_API_KEY`.
 
 Run `pytest tests/ --ignore=tests/integration/` (zero new failures).
 
@@ -211,6 +233,9 @@ Run `pytest tests/ --ignore=tests/integration/` (zero new failures).
    render.
 7. Annotate shipped packs (`agents/eng-team`, `support-manager`,
    `market-research`, `dogfood-content-review`) per Resolved decision 1.
+   Note: dogfood `email` is `required: true` — drop the
+   "email is optional / degrades" annotation that the premature `agent/329`
+   impl added, and provision Venn creds for the dogfood team (operational).
 8. Tests for all new branches; run unit suite; `/review`.
 9. Open PR against `main`: `[#329] fix: preflight degrades on unconfigured
    non-required services`.
@@ -228,17 +253,19 @@ Run `pytest tests/ --ignore=tests/integration/` (zero new failures).
    - **eng-team**: `github`, `slack`, `linear`
    - **support-manager**: `slack`, `linear`
    - **market-research**: `slack`, `linear`
-   - **dogfood-content-review**: `github` (email stays optional → degrades)
+   - **dogfood-content-review**: `github` **and** `email`/venn (human review,
+     Zach 2026-06-22 — dogfood genuinely requires Venn; provision creds)
 
-   This still satisfies all acceptance criteria (dogfood starts with only
-   github required; email degrades). **Confirm with the human** since it is
-   a (deliberate) behavior-preserving change to shipped packs.
+   **Confirmed by the human** (Zach, 2026-06-22). This is a deliberate
+   behavior-preserving change to shipped packs. The dogfood change shifts the
+   original acceptance criterion (see [Implication of the dogfood decision](#implication-of-the-dogfood-decision)):
+   dogfood now starts **with** Venn creds rather than degrading `email`.
 
-## Open decisions for human review
+## Resolved cosmetic decision
 
-1. **Warning glyph** `⚠` vs keeping `✗` with a "(optional)" suffix, plus a
-   `[WARN]`/`[ERROR]` text fallback for unicode-stripped terminals (design
-   review suggestion) — purely cosmetic; will match whatever reads clearest.
+1. **Warning glyph — confirmed** (Zach, 2026-06-22): use `⚠` for non-blocking
+   warnings and `✗` for blocking errors (glyphs are good for readability),
+   with a `[WARN]`/`[ERROR]` text fallback for unicode-stripped terminals.
 
 ## Triple-review summary
 - **Eng review** — approve-with-changes. Folded in: `doctor.py` parity
@@ -253,12 +280,15 @@ Run `pytest tests/ --ignore=tests/integration/` (zero new failures).
 - **CEO review** — right-sized; single biggest risk = silent degrade of
   production packs → fold pack annotations into this PR. Adopted (Resolved 1).
 
-## Acceptance criteria (from issue, restated)
-- A pack declaring an unconfigured non-required service (dogfood `email`)
-  can `modastack start`; the unmet service is a **warning**, not a block.
-- The dogfood manager smoke (Sections 7/10) runs against the **unmodified**
-  `dogfood-content-review` pack with no external credentials.
+## Acceptance criteria (restated; dogfood criterion updated per human review)
+- A pack declaring an unconfigured service marked `required: false` can
+  `modastack start`; the unmet service is a **warning**, not a block.
 - Entry-point / required-service failures still block (regression guard).
+- **dogfood (revised by Zach, 2026-06-22):** `email`/venn is `required: true`,
+  not optional. The dogfood team is provisioned with real Venn credentials and
+  the manager smoke runs **with** them; dogfood with no `VENN_API_KEY` blocks
+  (as it should for a required service). The original "runs credential-free"
+  criterion is superseded — see [Implication of the dogfood decision](#implication-of-the-dogfood-decision).
 
 ---
 
