@@ -381,11 +381,12 @@ jobs:
           echo "Fleet rolled (${#apps[@]} instance(s); generic image: ${IMAGE:-none}; team-flavored instances rebuilt their own)."
 
   # --------------------------------------------------------------------------
-  # Deploy the Cloudflare event server — after a successful publish (the released
-  # framework and the event server move together).
+  # Deploy the Cloudflare event server — gated on the canary, not PyPI publish.
+  # The event server is a Cloudflare Worker built from event-server/src; it has
+  # no dependency on the published wheel, so it runs concurrently with publish.
   deploy-event-server:
     name: Deploy event server
-    needs: publish
+    needs: build-canary
     runs-on: ubuntu-latest
     defaults:
       run:
