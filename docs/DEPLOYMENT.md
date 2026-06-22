@@ -405,8 +405,8 @@ its own via a `deploy-*` tag, which runs `deploy-agent-teams.yml` standalone. Ei
 way the reconcile **business logic lives in `modastack deploy`**, not the YAML — the
 Action only orchestrates: list
 the active deployments, hand each its secrets, loop the primitive. That is why the
-same engine runs from a laptop, this Action, Terraform, or a SaaS plane — see §7.1
-(bring your own repo).
+same engine runs from a laptop, this Action, Terraform, or a SaaS plane — see §7.2
+B (*Bring your own repo*).
 
 ### deploy-agent-teams.yml — the reconcile
 Invoked by **`release.yml` via `workflow_call`** (its final step, after the image
@@ -428,12 +428,15 @@ branch, since tag pushes run from the tagged commit) or **`workflow_dispatch`**
   warn on any app with no `deployments/` file (including a removed/inactivated
   deployment). **Never auto-destroys** (the volume is the only copy of state).
 
-> **Delivery in CI.** moda's internal `deployments/eng-team.yaml` uses
-> **`team-url` (HTTPS-fetch) is the CI delivery mode** — a CI Fly token deploys but
-> doesn't `fly ssh`, so CI uses the published-tarball path (`team-packages.yml`
-> publishes them). **ssh-push (`team:`) is the logged-in-dev path** (`fly ssh`
-> needs your full creds). `deployments/canary.yaml` (the always-on pipeline
-> canary) exercises the CI path via the published `smoke-team.tar.gz`.
+> **Delivery in CI.** Both delivery modes run from CI. **ssh-push (`team:`)** works
+> with an **org-scoped** Fly token (`fly tokens create org` *can* `fly ssh`) — this
+> is how moda-agent-teams reconciles eng-team in place (`updating instance
+> 'moda-eng-team' in place (ssh-push)`), pushing the team definition to the volume
+> and reloading. **`team-url` (HTTPS-fetch)** is the alternative when you'd rather
+> not give CI ssh, or to first-boot a dark instance with no SSH at all
+> (`team-packages.yml` publishes the tarballs). `deployments/canary.yaml` (the
+> always-on pipeline canary) exercises the `team-url` path via the published
+> `smoke-team.tar.gz`.
 
 ### team-packages.yml (only for `team-url` delivery)
 On push to main (path-filtered to `agents/**` + the smoke fixture), builds each
@@ -549,13 +552,21 @@ published tarball? Use `team-url:` instead.
 
 **B — CI (GitHub Actions, always-fresh).** Cut a release (or push a `deploy-*`
 tag) and the Action deploys every active deployment. Wire your repo once:
-1. Copy `.github/workflows/release.yml` (+ `deploy-agent-teams.yml`) and
-   `deployments/defaults.yaml`; set `fleet:` + `event_server:`. The workflow
-   `pip install modastack` — your repo needs only `deployments/`, no modastack
-   source.
-2. `deployments/<team>.yaml` with `team-url: <published .tar.gz>` (CI's delivery
-   mode — a CI Fly token can't `fly ssh`, so CI uses HTTPS-fetch, not ssh-push).
-   Set `tenant:` (or inherit the `modalabs` default from `defaults.yaml`).
+1. Copy `.github/workflows/deploy-agent-teams.yml` + `deployments/`; set `fleet:`
+   + `event_server:` in `defaults.yaml`. Two one-line adaptations for a repo with
+   **no modastack source** (the recommended shape — see *Bring your own repo*
+   below): `pip install -e .` → `pip install "modastack==<pin>"` (track a
+   *published* framework version), and have the `orphans` job enumerate the fleet
+   inline (`fly apps list` + the `MODASTACK_FLEET` stamp) since `scripts/fleet.sh`
+   isn't present. Do **not** copy `release.yml` — that's the framework's own
+   wheel-publish pipeline; you adopt new framework versions by bumping the pin.
+2. `deployments/<team>.yaml` with `team:` (local package → **ssh-push**) **or**
+   `team-url:` (published `.tar.gz` → **HTTPS-fetch**). Both work in CI: an
+   **org-scoped** Fly token (`fly tokens create org`) *can* `fly ssh`, so ssh-push
+   reconciles in place from the Action — proven by moda-agent-teams updating
+   eng-team (`updating instance 'moda-eng-team' in place (ssh-push)`). Reach for
+   `team-url` when you'd rather not give CI ssh, or to provision a dark instance
+   with no SSH at all. Set `tenant:` (or inherit `defaults.yaml`).
 3. Repo secret `FLY_API_TOKEN` = `fly tokens create org -o <your-org>` — a standing
    production credential (long-lived, rotate periodically).
 4. A GitHub Environment named after the **tenant** (e.g. `modalabs`), holding this
@@ -565,6 +576,31 @@ tag) and the Action deploys every active deployment. Wire your repo once:
    the team's declared `agent.yaml` set (§5). **No** required-reviewer rule.
 
 No `FLEET_PREFIX` var, no manifest, no database — the Fly API is the state store.
+
+**Bring your own repo (teams developed *independently* of the framework).** A
+team is pure config (role prompts, workflows, monitors, `agent.yaml`) with **zero
+framework imports**, and `modastack deploy` has a **binary mode**: outside a
+modastack checkout it falls back to the deploy assets bundled in the wheel
+(`modastack/_deploy`: a PyPI `Dockerfile` + provision/destroy/fleet scripts), so
+`pip install modastack==<pin>` is fully self-sufficient. That means your teams can
+live in their **own private repo** that never carries framework source — the
+"outside user runs their own teams on Fly" shape. The reference example is
+**`moda-labs/moda-agent-teams`** (it owns the `moda` fleet; this framework repo
+keeps only its `ci` self-gate canary). The split model:
+
+- **One Fly org, two (or more) fleets.** Fleets are distinguished by the exact
+  `MODASTACK_FLEET` stamp (§4), so repos that share an org never cross-enumerate.
+- **Adopt vs. fresh.** Keep the same `fleet:` as the live app to **adopt** it at
+  cutover (idempotent reconcile, no data migration — volume/login/identity
+  preserved); pick a new `fleet:` to provision fresh.
+- **Prune-safety at cutover.** The reconcile sets the supplied secrets and
+  **prunes any live secret not in the declared set** (§5). Before the first reconcile
+  of an existing app, populate the tenant Environment with **every** declared key
+  (source values from the live app — `fly ssh … printenv <KEY>` — so the digests
+  don't change and nothing is pruned), and confirm the live set == declared set.
+- **Framework upgrades** are a version-pin bump in the team repo (rebuilds the
+  team image from the newly-pinned wheel on the next deploy), decoupled from the
+  framework's own release cadence.
 
 ### Manual ops
 ```
