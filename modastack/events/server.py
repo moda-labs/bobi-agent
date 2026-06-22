@@ -16,7 +16,18 @@ import sys
 import time
 from pathlib import Path
 
+import httpx
+
 log = logging.getLogger(__name__)
+
+# Registration (deployment MINT/JOIN) HTTP timeout. The read leg is generous
+# because the cloud event server's registration path occasionally cold-starts
+# or runs slow, and a too-tight read timeout was killing agent sessions at init
+# (#409: "Event server registration failed … The read operation timed out").
+# A long-but-bounded read timeout lets those slow registrations land instead of
+# tripping a retry. Connect stays short — a dead host should fail fast.
+REGISTER_READ_TIMEOUT = 30.0
+REGISTER_TIMEOUT = httpx.Timeout(REGISTER_READ_TIMEOUT, connect=5.0)
 
 
 def _find_event_server_dir() -> Path:
@@ -199,7 +210,7 @@ def _post_register(base_url: str, name: str, subscriptions: list[str],
         f"{base_url}/deployments",
         content=body,
         headers=headers,
-        timeout=15.0,
+        timeout=REGISTER_TIMEOUT,
     )
     if resp.status_code == 403:
         raise BubbleRejected(f"join rejected for bubble {bubble_id}")
@@ -258,11 +269,12 @@ def ensure_bubble(base_url: str, project_path: Path,
         os.close(fd)
     except FileExistsError:
         # Another process is minting — wait for it to publish bubble.json.
-        # The budget MUST exceed the mint's HTTP timeout (_post_register, 15s)
-        # plus margin — otherwise a slow-but-alive first minter outlasts the
-        # wait and the waiter forks its own bubble. 30s covers it; only a
-        # crashed minter holding the lock falls through to mint ourselves.
-        for _ in range(300):
+        # The budget MUST exceed the mint's HTTP timeout (_post_register, now
+        # REGISTER_READ_TIMEOUT=30s) plus margin — otherwise a slow-but-alive
+        # first minter outlasts the wait and the waiter forks its own bubble.
+        # 45s covers it; only a crashed minter holding the lock falls through
+        # to mint ourselves.
+        for _ in range(450):
             time.sleep(0.1)
             existing = load_bubble_state(project_path)
             if existing.get("bubble_id") and existing["bubble_id"] != force_remint_of:

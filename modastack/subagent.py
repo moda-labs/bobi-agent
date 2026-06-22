@@ -857,7 +857,8 @@ class Subscription:
 
 
 def _start_event_subscription(session_name: str, subscribe: list[str],
-                               project_path: Path) -> "Subscription":
+                               project_path: Path,
+                               register_attempts: int = 3) -> "Subscription":
     """Start event client + drain loop for a subscribing agent.
 
     Every session subscribes — at minimum to its own ``inbox/<self>`` topic, so
@@ -893,7 +894,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     es_deployment = state.get("deployment_id", "")
     cursor_path = session_cursor_path(project_path, session_name)
 
-    def _register_with_retry(url: str, attempts: int = 3) -> tuple[str, str]:
+    def _register_with_retry(url: str, attempts: int = register_attempts) -> tuple[str, str]:
         last_err: Exception | None = None
         for attempt in range(attempts):
             try:
