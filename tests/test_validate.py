@@ -340,9 +340,11 @@ class TestValidateConfig:
         assert lines["slack"].lstrip().startswith("✗")   # required → error
 
     def test_pack_with_optional_venn_service_starts_degraded(self, tmp_path):
-        # github (native, zero-config) + an unconfigured venn service explicitly
-        # marked required: false: validate_config must return ok=True so
-        # `modastack start` proceeds and the optional service degrades.
+        # Mirrors the dogfood-content-review decision (#329 / PR #415): dogfood's
+        # email/venn is marked required: false, so a missing Venn credential is a
+        # non-blocking warning and `modastack start` proceeds degraded —
+        # preserving the credential-free dogfood smoke. github (native,
+        # zero-config) + an unconfigured optional venn service → ok=True.
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\
@@ -361,9 +363,10 @@ class TestValidateConfig:
         assert email.required is False
 
     def test_pack_with_required_venn_service_blocks(self, tmp_path):
-        # Mirrors the dogfood-content-review decision (#329 / PR #405): a venn
-        # service marked required: true (dogfood's email) hard-blocks startup
-        # when its credential is missing — it does NOT degrade.
+        # Generic mechanism check: any venn service marked required: true
+        # hard-blocks startup when its credential is missing — it does NOT
+        # degrade. (Dogfood's email is now required: false — see the optional
+        # case above; this guards the opposite, blocking path.)
         config_dir = tmp_path / ".modastack"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\
