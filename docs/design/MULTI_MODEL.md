@@ -35,18 +35,22 @@ task to Codex.
   runtime (all are terminal-driving agents), and a CLI keeps secrets out of the
   model's context. Live examples: `aichat` (call other models), `codex` (delegate
   to an agent), `gh`, `venn`.
-- **Legacy: connection-kind + built-in MCP injection.** `agent.yaml`
-  `connections` declare a `kind`; `mcp/inject.py` auto-injects a
-  modastack-shipped MCP server for it. Only `image` and `codex` were ever
-  implemented this way. Reserve MCP injection for capabilities whose *data
-  channel* genuinely needs it (streaming, native image content, sampling
-  callbacks) — not for secrets, discovery, or plain request/response, which a CLI
-  covers more portably.
-- **Retired:** the `gateway`, `chat`, and `embedding` connection kinds were
-  declared in the registry but never implemented. The `gateway` call-out role is
-  now the baked **`aichat`** CLI — do not reintroduce a `gateway` connection
-  kind. (The Axis-1 backend swap in #327 is a different mechanism that merely
-  reused the same name.)
+- **Removed: connection-kind + built-in MCP injection.** Historically
+  `agent.yaml` `connections` declared a `kind` and `mcp/inject.py` auto-injected
+  a modastack-shipped MCP server for it. Only `image` and `codex` were ever
+  implemented; both moved to the CLI-first model (`image` → #397, `codex` →
+  #285), and the shim itself — `inject.py`, `codex_server.py`, the
+  `ConnectionEntry` config primitive, and the `connections:` agent.yaml block —
+  was dismantled entirely in **#403**. A stray `connections:` block in an
+  `agent.yaml` is now ignored (no longer part of the schema). The `gateway`,
+  `chat`, and `embedding` kinds were declared but never implemented; the
+  `gateway` call-out role is the baked **`aichat`** CLI — do not reintroduce a
+  `gateway` connection kind. (The Axis-1 backend swap in #327 is a different
+  mechanism that merely reused the same name.)
+- **If a future capability genuinely needs MCP injection** (a *data channel*
+  requiring streaming, native image content, or sampling callbacks — not
+  secrets, discovery, or plain request/response, which a CLI covers more
+  portably), reintroduce it deliberately rather than reviving this shim.
 
 ## Cost attribution (shipped, axis-independent)
 
@@ -61,8 +65,10 @@ This is accounting; it applies regardless of which axis a model call came from.
 
 ## Status
 
-- **Shipped:** connections registry + `image` MCP server (the legacy Axis-2
-  pattern); cost attribution; `aichat` baked as the Axis-2 model-call CLI.
+- **Shipped:** all Axis-2 capabilities are CLI-first — `aichat` (model calls),
+  `codex` (delegate to an agent), image generation via a direct Images API call;
+  cost attribution. The legacy connections registry + built-in MCP injection
+  shim was removed entirely (#397, #285, #403).
 - **Direction:** new Axis-2 capabilities ship CLI-first (binary + env + guide),
   not new connection kinds / MCP shims.
 - **Separate tracks:** Axis-1 runtime pluggability (future); Axis-1 backend

@@ -153,37 +153,6 @@ class TestChannelParsing:
         assert slack.channels == ["C100", "C200"]
 
 
-class TestConnections:
-    """Connection entries in agent.yaml."""
-
-    def test_connections_loaded(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
-        config_dir.mkdir()
-        (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
-            entry_point: manager
-            connections:
-              - name: openai-gpt4
-                kind: chat
-                provider: openai
-                api_key: sk-test-key
-                model: gpt-4
-              - name: dalle
-                kind: image
-                provider: openai
-                api_key: sk-img-key
-        """))
-
-        from modastack.config import Config
-        cfg = Config.load(tmp_path)
-
-        assert len(cfg.connections) == 2
-        gpt = cfg.connection("openai-gpt4")
-        assert gpt is not None
-        assert gpt.kind == "chat"
-        assert gpt.model == "gpt-4"
-        assert cfg.connections_by_kind("image")[0].name == "dalle"
-
-
 class TestRequiresChecks:
     """Health-check commands declared in requires: block."""
 
