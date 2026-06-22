@@ -11,11 +11,16 @@ These tests catch regressions — if someone loosens the prompt back to
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LEAD_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "project_lead" / "ROLE.md"
-ENGINEER_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "engineer" / "ROLE.md"
+ENG_TEAM = REPO_ROOT / "agents" / "eng-team"
+LEAD_PROMPT = ENG_TEAM / "roles" / "project_lead" / "ROLE.md"
+ENGINEER_PROMPT = ENG_TEAM / "roles" / "engineer" / "ROLE.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+ISSUE_LIFECYCLE = ENG_TEAM / "workflows" / "issue-lifecycle.yaml"
+CODEX_GUIDE = ENG_TEAM / "tools" / "codex.md"
+AGENT_YAML = ENG_TEAM / "agent.yaml"
 
 
 class TestProjectLeadDelegation:
@@ -188,4 +193,74 @@ class TestReleaseTimeOnlyVersionConvention:
         text = CLAUDE_MD.read_text().lower()
         assert "changelog.md" in text and "release time" in text, (
             "CLAUDE.md must state CHANGELOG.md entries are added at release time"
+        )
+
+
+class TestCodexAdversarialReviewStep:
+    """The eng-team must wire the baked Codex CLI as an adversarial reviewer.
+
+    Issue #285 / MDS-47: the `codex` CLI is baked + preflighted in agent.yaml
+    but nothing uses it. A `plan_review` step in issue-lifecycle runs
+    `codex exec` on the just-written spec and captures the critique in the
+    handoff for the human approval gate, documented by tools/codex.md. These
+    tests fail if the step, the guide, or the CLI-first contract regresses —
+    or if someone reintroduces the retired `codex_exec` MCP shim (#403).
+    """
+
+    def _steps(self):
+        wf = yaml.safe_load(ISSUE_LIFECYCLE.read_text())
+        return {s["name"]: s for s in wf["steps"] if "name" in s}
+
+    def test_plan_review_step_exists(self):
+        assert "plan_review" in self._steps(), (
+            "issue-lifecycle.yaml must contain a plan_review step (#285)"
+        )
+
+    def test_plan_review_runs_after_spec_before_approval(self):
+        """The critique must reach the human at the approval gate, so the
+        step sits between `spec` and `await_approval`."""
+        order = list(self._steps())
+        assert order.index("spec") < order.index("plan_review") < order.index(
+            "await_approval"
+        ), "plan_review must run after spec and before await_approval"
+
+    def test_plan_review_captures_critique_in_handoff(self):
+        step = self._steps()["plan_review"]
+        required = step.get("handoff", {}).get("required", [])
+        assert "codex_critique" in required, (
+            "plan_review handoff must require codex_critique"
+        )
+        assert "codex_verdict" in required, (
+            "plan_review handoff must require codex_verdict"
+        )
+
+    def test_plan_review_invokes_codex_cli(self):
+        step = self._steps()["plan_review"]
+        assert "codex exec" in step["prompt"], (
+            "plan_review must instruct the agent to run `codex exec`"
+        )
+
+    def test_codex_guide_exists(self):
+        assert CODEX_GUIDE.exists(), "agents/eng-team/tools/codex.md must exist (#285)"
+
+    def test_codex_guide_documents_not_delegation(self):
+        text = CODEX_GUIDE.read_text().lower()
+        assert "not" in text and "delegation" in text, (
+            "codex.md must state the call is NOT agent delegation"
+        )
+
+    def test_codex_guide_has_exec_example(self):
+        assert "codex exec" in CODEX_GUIDE.read_text(), (
+            "codex.md must show a `codex exec` example"
+        )
+
+    def test_no_codex_connections_or_mcp_shim(self):
+        """Guards the out-of-scope items: the step must use the baked CLI,
+        never a `connections:` block or the retired codex_exec MCP shim."""
+        agent_cfg = AGENT_YAML.read_text()
+        assert "connections:" not in agent_cfg, (
+            "agent.yaml must not add a connections: block (#285 CLI-first)"
+        )
+        assert "codex_exec" not in agent_cfg, (
+            "agent.yaml must not reference the retired codex_exec MCP shim (#403)"
         )
