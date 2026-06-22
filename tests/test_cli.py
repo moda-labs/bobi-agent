@@ -503,3 +503,77 @@ class TestDiscoveryCommandsNoRoot:
         with self._no_root():
             result = runner.invoke(main, ["agents", "list"])
         assert result.exit_code != 0
+
+
+# --- modastack monitors add (weekly scheduling, #216 / MOD-216) ----------------
+
+
+class TestMonitorAdd:
+    """The `monitors add` CLI grows --at/--tz/--days/--notify so a weekly job
+    is creatable without hand-editing YAML."""
+
+    def _add(self, tmp_path, args):
+        runner = CliRunner()
+        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+            return runner.invoke(main, ["monitors", "add", *args])
+
+    def _written(self, tmp_path):
+        import yaml
+        path = tmp_path / ".modastack" / "monitors.yaml"
+        return yaml.safe_load(path.read_text())["monitors"]
+
+    def test_interval_monitor_still_works(self, tmp_path):
+        result = self._add(tmp_path, ["pr check", "--interval", "15m",
+                                      "--description", "check PRs"])
+        assert result.exit_code == 0, result.output
+        rec = self._written(tmp_path)[0]
+        assert rec["name"] == "pr-check"
+        assert rec["interval"] == "15m"
+        assert "at" not in rec
+
+    def test_weekly_notify_monitor_writes_at_days_tz(self, tmp_path):
+        result = self._add(tmp_path, [
+            "weekly-prep-doc", "--at", "21:00", "--days", "sun",
+            "--tz", "America/Los_Angeles", "--notify",
+            "--event", "monitor/prep.weekly_due",
+            "--description", "Generate my prep doc for the upcoming week",
+        ])
+        assert result.exit_code == 0, result.output
+        rec = self._written(tmp_path)[0]
+        assert rec["name"] == "weekly-prep-doc"
+        assert rec["at"] == ["21:00"]
+        assert rec["days"] == ["sun"]
+        assert rec["tz"] == "America/Los_Angeles"
+        assert rec["notify"] is True
+        assert rec["event"] == "monitor/prep.weekly_due"
+        assert "interval" not in rec  # at-monitors don't serialize an interval
+
+    def test_multiple_at_and_days(self, tmp_path):
+        result = self._add(tmp_path, [
+            "biweekly", "--at", "09:00", "--at", "17:00",
+            "--days", "mon,wed,fri",
+        ])
+        assert result.exit_code == 0, result.output
+        rec = self._written(tmp_path)[0]
+        assert rec["at"] == ["09:00", "17:00"]
+        assert rec["days"] == ["mon", "wed", "fri"]
+
+    def test_interval_and_at_are_mutually_exclusive(self, tmp_path):
+        result = self._add(tmp_path, ["x", "--interval", "5m", "--at", "21:00"])
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output
+
+    def test_days_without_at_is_rejected(self, tmp_path):
+        result = self._add(tmp_path, ["x", "--days", "sun"])
+        assert result.exit_code != 0
+        assert "--days only applies to --at" in result.output
+
+    def test_invalid_at_time_is_rejected(self, tmp_path):
+        result = self._add(tmp_path, ["x", "--at", "25:00"])
+        assert result.exit_code != 0
+        assert "at-time" in result.output
+
+    def test_invalid_weekday_is_rejected(self, tmp_path):
+        result = self._add(tmp_path, ["x", "--at", "21:00", "--days", "funday"])
+        assert result.exit_code != 0
+        assert "weekday" in result.output.lower()

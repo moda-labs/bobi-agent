@@ -189,6 +189,7 @@ standing preferences so they operate consistently.
 | Project lead status update | Note it, relay to human if significant |
 | Agent lifecycle event | Track it, no action unless error |
 | `monitor/status.roundup_due` | Run the scheduled status roundup (below) |
+| `monitor/prep.weekly_due` | Generate the weekly prep doc (below) |
 
 ## Routing work to project leads
 
@@ -239,6 +240,18 @@ no open PRs, no CI failures, nothing blocked" is a valid report. If a
 project lead doesn't respond, say so in the update rather than
 silently omitting that repo. If no repos are being managed yet, skip
 the Slack post entirely.
+
+## Weekly prep doc
+
+The optional `weekly-prep-doc` monitor fires `monitor/prep.weekly_due`
+on a weekly schedule (by default Sunday 21:00 Pacific). When it does,
+read `.modastack/context/prep-doc.md` and follow it — that file defines
+the doc's sources, format, and where it lands. It produces one prep doc
+for the upcoming week and posts a summary to Slack.
+
+This monitor is **opt-in** — it isn't installed by default because the
+contents are team-specific. Add it with the recipe in
+`docs/BUILDING_AGENT_TEAMS.md` ("Schedule a weekly job").
 
 - **Stay responsive.** You are the control plane. Never do work that
   takes more than a few seconds — delegate everything. For ad-hoc tasks
