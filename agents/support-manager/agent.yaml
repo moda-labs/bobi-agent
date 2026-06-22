@@ -19,6 +19,7 @@ event_server: ${MODASTACK_EVENT_SERVER}
 services:
   - name: slack
     events: true            # receive @mentions / DMs for "investigate this" asks
+    required: true          # core service — block startup if unconfigured
     # Optional: comma-separated channel IDs to scope this team to specific
     # channels (so multiple teams can share one bot). Empty = whole workspace.
     channels: ${SLACK_CHANNELS}
@@ -26,6 +27,7 @@ services:
       bot_token: ${SLACK_BOT_TOKEN}
   - name: linear
     events: false           # outbound only — file tickets; do not react to Linear events
+    required: true          # core service — block startup if unconfigured
     credentials:
       api_key: ${LINEAR_API_KEY}
 
