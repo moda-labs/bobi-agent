@@ -376,3 +376,30 @@ def test_new_shell_scripts_pass_shellcheck():
         sc = subprocess.run(["shellcheck", str(script)],
                             capture_output=True, text=True)
         assert sc.returncode == 0, f"{script.name}:\n{sc.stdout}{sc.stderr}"
+
+
+def test_build_rejects_path_based_from(tmp_path):
+    """Packaging must hard-fail on a path-based `from:` (#446 §7.1) — a path
+    override is local-only and would arrive broken at a consumer."""
+    src = tmp_path / "src"
+    team = _make_team(src, "overlay-team", "1.0.0")
+    # Re-write agent.yaml to declare a path-based `from:`.
+    (team / "agent.yaml").write_text(
+        'from: ../eng-team-core\nversion: "1.0.0"\nagent: demo\n')
+    out = tmp_path / "dist"
+    proc = _build(team, out)
+    assert proc.returncode != 0
+    assert "path override" in proc.stderr
+    assert not (out / "overlay-team.tar.gz").exists()
+
+
+def test_build_allows_name_based_from(tmp_path):
+    """A `name@version` `from:` is publishable and packages normally."""
+    src = tmp_path / "src"
+    team = _make_team(src, "overlay-team", "1.0.0")
+    (team / "agent.yaml").write_text(
+        'from: eng-team-core@1.0.0\nversion: "1.0.0"\nagent: demo\n')
+    out = tmp_path / "dist"
+    proc = _build(team, out)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (out / "overlay-team.tar.gz").exists()

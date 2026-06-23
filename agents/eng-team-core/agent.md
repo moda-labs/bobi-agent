@@ -1,7 +1,11 @@
-# eng-team
+# eng-team-core
 
-Multi-repo agent team where a director manages multiple software teams,
-each running independently in their own repo. Also works for a single repo.
+A portable, tool-agnostic engineering org. A director manages multiple
+software teams, each running independently in its own repo. Also works for a
+single repo. This is the **reusable base** — it speaks the engineering
+lifecycle in terms of roles and generic seams (your tracker, your review gate,
+your test/QA gate), binding only GitHub issues + Slack by default. Derive a
+house team with `from: eng-team-core` and an overlay that binds your toolchain.
 
 ## Roles
 
@@ -20,7 +24,7 @@ each running independently in their own repo. Also works for a single repo.
 
 ```bash
 cd ~/dev                          # parent of all repos
-modastack start eng-team
+modastack start eng-team-core
 ```
 
 Then onboard repos via Slack:

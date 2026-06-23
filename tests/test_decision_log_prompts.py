@@ -10,8 +10,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_PROMPT = REPO_ROOT / "modastack" / "prompts" / "base.md"
-DIRECTOR_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "director" / "ROLE.md"
-LEAD_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "project_lead" / "ROLE.md"
+DIRECTOR_PROMPT = REPO_ROOT / "agents" / "eng-team-core" / "roles" / "director" / "ROLE.md"
+LEAD_PROMPT = REPO_ROOT / "agents" / "eng-team-core" / "roles" / "project_lead" / "ROLE.md"
 
 
 class TestBaseDecisionLogContract:

@@ -79,27 +79,31 @@ def list_teams_in(scan_dir: Path) -> list[dict]:
 
 
 def _bundled_templates_dir() -> Path | None:
-    """Where the starter templates that ship with modastack live. In a wheel
-    install they're packaged under `modastack/templates/`; in a source checkout
-    they're the repo's `agents/` directory beside the package. Returns the first
-    that actually holds team folders, or None."""
+    """The repo's `agents/` dir, when running from a source checkout — a dev
+    convenience so `modastack setup` lists local teams without the registry.
+
+    Agent teams are NOT bundled into the wheel (they're versioned registry
+    packages, #440/#446), so a real install has no local templates dir and this
+    returns None — setup lists teams from the registry instead. Returns the
+    `agents/` dir only if it actually holds team folders."""
     import modastack
     pkg = Path(modastack.__file__).resolve().parent
-    for cand in (pkg / "templates", pkg.parent / "agents"):
-        try:
-            if cand.is_dir() and any((c / "agent.yaml").is_file()
-                                     for c in cand.iterdir() if c.is_dir()):
-                return cand
-        except OSError:
-            continue
+    cand = pkg.parent / "agents"
+    try:
+        if cand.is_dir() and any((c / "agent.yaml").is_file()
+                                 for c in cand.iterdir() if c.is_dir()):
+            return cand
+    except OSError:
+        pass
     return None
 
 
 def list_bundled_templates() -> list[dict]:
-    """Starter teams shipped with modastack — always available and offline, so
-    the setup intro offers a few options even when no registry is reachable.
-    Each is tagged official + bundled and carries a local `path`, so selecting
-    it copies from disk instead of hitting the network."""
+    """Local starter teams from a source checkout's `agents/` dir, offered by the
+    setup intro as a dev convenience (empty in a real wheel install — teams come
+    from the registry there). Each is tagged official + bundled and carries a
+    local `path`, so selecting it copies from disk instead of hitting the
+    network."""
     d = _bundled_templates_dir()
     if d is None:
         return []

@@ -123,23 +123,22 @@ skills/                           # Claude Code skill files (also in modastack/s
 
 agents/                           # Agent teams (portable agent definitions)
 ├── registry.yaml                 # Local team index
-└── eng-team/                      # Engineering org agent team (reference impl)
+└── eng-team-core/                 # Pristine, portable engineering org (reference impl)
     ├── agent.yaml                # Team config (entry point, services, credentials)
     ├── agent.md                  # Shared base prompt for all roles
     ├── roles/                    # Role-specific prompts (folder format)
     │   ├── director/ROLE.md
     │   ├── project_lead/ROLE.md
     │   └── engineer/ROLE.md
-    ├── tools/                    # Service interaction guides
-    │   ├── github.md
-    │   ├── linear.md
-    │   └── slack.md
+    ├── tools/                    # Service interaction guides (github.md, slack.md)
     ├── workflows/                # Workflow definitions
     │   ├── issue-lifecycle.yaml
     │   ├── pr-feedback.yaml
     │   └── ...
     └── monitors/                 # Background checks
-        └── agent.yaml
+        └── defaults.yaml
+                                  # Moda's house team = `from: eng-team-core` +
+                                  # overlay, in the private moda-agent-teams repo.
 
 .modastack/                       # Per-project installed agent + runtime state
 ├── agent.yaml                    # Installed config (check-in-able, ${VAR} refs for secrets)
@@ -167,13 +166,27 @@ for a domain.
 1. `<project>/agents/<name>/` — project-level (checked in)
 2. `<project>/.modastack/agents/<name>/` — local agents (overrides + cached)
 
-**Role prompts** resolve from:
-1. `<project>/.modastack/roles/<role>/ROLE.md` — project override
-2. Agent team `roles/<role>/ROLE.md`
+**Inheritance (`from:`).** A team may declare `from: <base-team>` and contribute
+only its delta — Docker-style composition (`modastack/compose.py`, #446/#451). At
+**install/deploy time**, compose walks the `from:` chain (`base → … → leaf`,
+local-always-wins + fail-fast on a pin mismatch) and freezes one flat
+`.modastack/` image: prose surfaces (agent.md, ROLE.md) **concatenate** in chain
+order (`replace: true` frontmatter to override); structured surfaces (tools,
+workflows, monitors, agent.yaml) **deep-merge by key** (`build` deps accrete,
+`prune:` removes inherited items). Nothing downstream learns about layers — the
+runtime resolver reads only the frozen output. `install --pinned` resolves
+registry-only at locked versions for reproducible CI/deploy. The pristine
+`agents/eng-team-core/` is the public base; Moda's house team is
+`from: eng-team-core` + an overlay in the private `moda-agent-teams` repo.
+
+**Role prompts** are read by the runtime resolver from the frozen
+`<project>/.modastack/roles/<role>/ROLE.md` — which is now compose **output**.
+Customize by editing the leaf team source (or adding a `replace: true` overlay
+ROLE.md), not by dropping an override into `.modastack/`.
 
 **Tools** are markdown service guides in `tools/`. All tools load into
-every role's context. Project tools in `.modastack/tools/` override
-team tools with the same filename.
+every role's context. In a `from:` chain, later layers' tools override
+earlier ones by filename.
 
 **Context** files in `context/` are team-shipped reference content
 (rubrics, methodology, examples). Installed frozen to

@@ -91,6 +91,33 @@ linear:
 Only include services the team actually needs. `modastack install`
 prompts for any `${VAR}` references and writes them to `.modastack/.env`.
 
+### Inheriting from a base team (`from:`)
+
+Instead of forking a whole team, a team can declare `from: <base-team>` and
+contribute only its delta:
+
+```yaml
+from: eng-team-core@1.0.0          # or `eng-team-core` for latest, or ../path
+version: "1.1.0"
+services:
+  - {name: linear, required: true, credentials: {api_key: ${LINEAR_API_KEY}}}
+build:
+  npm: ["@openai/codex@0.141.0"]   # appends to the base team's build deps
+```
+
+At install/deploy, compose walks the chain (`base → … → leaf`) and freezes one
+flat team. Merge rules: **prose** (`agent.md`, `roles/<role>/ROLE.md`)
+concatenates in chain order — start a file with `replace: true` YAML frontmatter
+to override the base wholesale instead of appending. **Structured** surfaces
+(`tools/`, `workflows/`, `monitors/`, `agent.yaml`) deep-merge by key: same name
+→ the leaf wins; `build` list deps (`apt`/`npm`/`run`/`run_root`) append +
+de-dupe; `auto_dispatch` appends (an `id:` keys a replace). Drop inherited items
+with a `prune:` block (`prune: {tools: [codex], roles: [some_role]}`). `from:`
+itself is consumed — never written to the frozen `agent.yaml`. Use a `name` /
+`name@version` ref to publish (a path ref is local-only and rejected at
+packaging); `install --pinned` resolves the chain registry-only for reproducible
+CI/deploy. The pristine `eng-team-core` is the canonical base to derive from.
+
 ### agent.md
 
 ```markdown

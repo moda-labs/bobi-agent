@@ -50,20 +50,20 @@ steps:
     agent: engineer
     prompt: |
       Get an independent adversarial review of the spec you just wrote, using
-      the baked Codex CLI (see tools/codex.md). This is a one-shot second
-      opinion — NOT agent delegation; you remain the author.
+      your adversarial review gate (the binding in your role prompt). This is a
+      one-shot second opinion — NOT agent delegation; you remain the author.
 
       1. Read the spec you published to the issue (spec_url from the previous
          step).
-      2. Run `codex exec` per tools/codex.md, asking Codex to attack the plan:
+      2. Run your adversarial review gate, asking it to attack the plan:
          unhandled edge cases, wrong assumptions, missing tests, simpler
          alternatives, scope it gets wrong.
-      3. Write Codex's verbatim critique into the `codex_critique` handoff
-         field, plus a one-line `codex_verdict` (e.g. "no blockers" /
+      3. Write the reviewer's verbatim critique into the `review_critique`
+         handoff field, plus a one-line `review_verdict` (e.g. "no blockers" /
          "blockers: ..."). Do NOT edit the spec here — the human decides at
          the approval gate.
     handoff:
-      required: [codex_critique, codex_verdict]
+      required: [review_critique, review_verdict]
     timeout: 600
 
   - name: await_approval

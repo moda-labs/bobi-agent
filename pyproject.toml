@@ -68,11 +68,11 @@ packages = ["modastack"]
 "event-server/package.json" = "modastack/event-server/package.json"
 "event-server/package-lock.json" = "modastack/event-server/package-lock.json"
 "event-server/tsconfig.json" = "modastack/event-server/tsconfig.json"
-# Bundle a few starter teams so `modastack setup` always offers templates,
-# offline and without depending on a (possibly private) GitHub registry.
-"agents/eng-team" = "modastack/templates/eng-team"
-"agents/market-research" = "modastack/templates/market-research"
-"agents/support-manager" = "modastack/templates/support-manager"
+# Agent teams are NOT bundled into the wheel — they are versioned packages
+# fetched from the registry (`name@version`, #440/#446/#451). Baking a frozen
+# copy into the framework wheel would pin a team to the framework release and
+# defeat independent team versioning. `modastack setup` lists teams from the
+# registry (and, in a source checkout, the repo's `agents/` dir for dev).
 # Bundle the Fly deploy assets so `modastack deploy` works from the binary alone
 # — no repo checkout. The one Dockerfile builds in `pypi` mode (installs modastack
 # from PyPI), so its build context is just these files; modastack/deploy.py
@@ -86,13 +86,13 @@ packages = ["modastack"]
 "scripts/fleet.sh" = "modastack/_deploy/scripts/fleet.sh"
 
 [tool.hatch.build.targets.sdist]
-# `agents` is required: the wheel force-includes agents/{eng-team,market-research,
-# support-manager} as bundled templates, and `python -m build` builds the wheel
-# FROM the sdist — so those dirs must be in the sdist or the wheel build fails
-# with "Forced include not found". `Dockerfile.pypi`, `docker`, and `scripts`
-# are likewise force-included into the wheel (the deploy assets), so the sdist
-# must carry them too.
-include = ["modastack", "event-server", "agents", "Dockerfile", "docker",
+# `Dockerfile`, `docker/`, and `scripts/` are force-included into the wheel (the
+# deploy assets), and `python -m build` builds the wheel FROM the sdist — so the
+# sdist must carry them or the wheel build fails with "Forced include not found".
+# Agent teams are deliberately NOT shipped in the distribution (wheel or sdist) —
+# they're fetched from the registry as versioned packages (see the wheel
+# force-include note above).
+include = ["modastack", "event-server", "Dockerfile", "docker",
            "scripts", "README.md", "CHANGELOG.md"]
 exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
 
