@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.30.0 — 2026-06-23
+
+A stability release. The headline is **#454**: a rotation-metric over-count that
+fired a perpetual false "rotation pending" and wedged a persistent session — the
+same deaf-manager symptom as #443, different cause. Observed live on
+`moda-eng-team` (director frozen ~2h40m mid-rotation, Slack "thinking…" refreshing
+forever, user messages unanswered). Ships alongside a sub-agent
+completion-delivery fix and Phase 2 of the versioned-team-package work.
+
+### Fixed
+- **Rotation metric no longer over-counts `cache_read` across a turn (#454).**
+  `_context_fill_tokens()` was applied to the **`ResultMessage`'s cumulative turn
+  usage**. In a multi-step turn (model → tool → model → tool → …) the cached prefix
+  is re-read on every model call, so the aggregate summed `cache_read_input_tokens`
+  across all N calls → reported context = **`real_context × N`** (a fresh ~65k-token
+  session read `context=583061` ≈ `65k × ~9 steps`). That fired a perpetual **false**
+  `rotation pending`, and the fragile auto-rotation it triggered wedged the session.
+  Fill is now measured from a **single representative call** — the last
+  `AssistantMessage`'s per-call usage — not the turn aggregate. The rotation path is
+  also hardened: an over-cap rotation sets `_rotate_force` to bypass the
+  `Flush no-op — INDEX.md unchanged, skipping rotation` guard (so a real over-cap
+  self-heals even when the decision log is unchanged), and the flush is wrapped in a
+  hard timeout (`ROTATION_FLUSH_TIMEOUT`) with bounded attempts
+  (`ROTATION_MAX_FLUSH_ATTEMPTS`) so it can no longer hang or no-op-livelock. This is
+  the over-correction of #433/#434 and is distinct from #443 (no 529 here).
+  Reproduced failing-first against **real** `ResultMessage`/`AssistantMessage`
+  objects in `tests/test_rotation_metric.py` (the `MagicMock` shape is what let #433
+  ship).
+- **Sub-agent completions now reliably reach the requester (MDS-65).** Detached
+  sub-agents finished silently and crashes were recorded as `done`, so completed or
+  failed work never reached the requester unless the launcher blocked on `--wait`
+  (pinning a concurrency slot). The entry point now subscribes to
+  `agent/session.{completed,failed}` and delivers lifecycle events to the inbox like
+  monitor findings; terminal status uses an honest `completed`/`failed`/`crashed`
+  vocabulary (never `done` on an error), is persisted to `state.json` *before* and
+  independent of the best-effort bus POST, and a dead-pid sweep marks `crashed`. A
+  new reconciler (`modastack/reconcile.py`), run on manager wake, re-emits
+  unconfirmed terminals, marks dead-pid runs `crashed`, and times out hung runs —
+  idempotent via `emit_confirmed` so healthy completions deliver exactly once.
+  `requested_by` is threaded through the blocking, orchestrator, and resume paths so
+  completions route to the requester's thread.
+
+### Added
+- **Versioned team fetch / install / deploy resolution (#440, Phase 2).** Consumes
+  the Phase 1 immutable per-team packages (#442). A team **version** is now the unit
+  of distribution: `modastack install <name>[@version]` and
+  `modastack agents update <name>[@version]` accept a pin, and `deploy` resolves
+  `team: <name>@<version>` through one seam. A single parse rule
+  (`registry.split_team_ref()`, split on the last `@`) and one resolver
+  (`deploy.resolve_team_dir()`, routing all four production call sites) back it. A
+  **pinned** ref downloads only the immutable, token-authed asset and a **404 on a
+  pin is a hard error** — never a silent fallback to latest; an **unpinned** ref
+  resolves the registry's latest (a version-less team uses the rolling tarball) and
+  falls back to the whole-repo path if assets aren't published yet. `version` is
+  keyword-only (default `None`), so every existing caller and local/URL install is
+  byte-for-byte unchanged. No fleet migration here.
+
+### Changed
+- **The release canary gate tolerates a cold image-swap boot (#449).** The v0.29.0
+  gate false-failed on a good wheel: the `CANARY-OK` ask raced a cold boot (volume
+  ownership + team install + session spin-up) under a too-tight 3 × 30s = 90s budget.
+  The gate is now a dedicated `scripts/canary-smoke.sh` that starts the canary
+  up-front and polls with a generous, bounded wall-clock budget
+  (`CANARY_SMOKE_MAX_WAIT`, default 300s); a genuinely broken wheel still never
+  answers and fails the gate.
+
 ## 0.29.0 — 2026-06-23
 
 A stability release. The headline is **#443**: a single transient `529 Overloaded`
