@@ -22,7 +22,9 @@ from typing import Any, Callable
 from modastack.sdk import (
     get_cli_path, save_session_id, load_session_id, log_activity,
     get_registry, SessionEntry, SessionRegistry,
+    TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
+from modastack.transient import is_transient_api_error
 
 InputHandler = Callable[[str, dict[str, Any]], str]
 
@@ -49,6 +51,11 @@ class AgentResult:
     num_turns: int = 0
     error: str = ""
     final_text: str = ""
+    # Whether a failure was a transient API error (529/rate-limit/5xx). Set from
+    # the shared classifier (modastack.transient) so the spawn path and the
+    # persistent session agree on "transient" — the launcher's re-dispatch
+    # decision can consult it. Survival/retry stays at the #444 layer (§4.3).
+    transient: bool = False
 
 
 def _build_prompt(phase: str, run_key: str, role: str = "", context: str = "") -> str:
@@ -96,7 +103,7 @@ def _summarize_output(text: str, max_lines: int = 6, max_chars: int = 600) -> st
 def _emit_lifecycle_event(
     event_type: str, data: dict[str, Any], *, blocking: bool = False,
     timeout: float = 5,
-) -> None:
+) -> bool:
     """POST an agent lifecycle event to the event bus.
 
     Runs on a daemon thread and swallows all errors — event delivery is
@@ -108,13 +115,21 @@ def _emit_lifecycle_event(
     spawn process exits, and a daemon thread is killed at interpreter shutdown
     without finishing its in-flight POST. The bounded join can't hang the
     process — ``post_event`` carries its own socket timeout.
+
+    Returns whether the POST is known to have landed (only meaningful with
+    ``blocking=True``; a non-blocking emit always returns False since the result
+    is unknown). The terminal-emit path uses this to mark ``emit_confirmed`` so
+    the reconciler re-emits only the completions whose POST never landed —
+    never double-delivering a healthy one (MDS-65 RC#3, §4.6).
     """
     payload = {k: v for k, v in data.items() if v not in (None, "")}
+    result = {"ok": False}
 
     def _send() -> None:
         try:
             from modastack.events.publish import post_event
             post_event(event_type, payload)
+            result["ok"] = True
         except Exception as e:  # never let event posting surface
             log.debug(f"Lifecycle event {event_type} not posted: {e}")
 
@@ -122,6 +137,8 @@ def _emit_lifecycle_event(
     t.start()
     if blocking:
         t.join(timeout)  # let the POST land before the process exits
+        return result["ok"]
+    return False
 
 
 def _emit_session_started(
@@ -147,10 +164,20 @@ def _emit_session_finished(
 ) -> None:
     duration = round(time.time() - started_at, 1)
     label = role or "Agent"
-    # Terminal emit: block so the POST lands before the agent process exits.
+    # The 3rd positional ``session_id`` is the registry ENTRY NAME (callers pass
+    # the session name). Durably record the honest terminal status to state.json
+    # BEFORE the best-effort bus POST (RC#3), so a swallowed emit never loses the
+    # outcome; then mark emit_confirmed only if the POST actually landed, so the
+    # reconciler re-emits exactly the completions that didn't reach the bus.
+    name = session_id
+    registry = get_registry()
+    terminal = TERMINAL_COMPLETED if result.success else TERMINAL_FAILED
+    _persist_terminal(registry, name, terminal, error=result.error,
+                      session_id=result.session_id or "", phase=result.phase)
+
     if result.success:
         summary = _summarize_output(result.final_text)
-        _emit_lifecycle_event("agent/session.completed", {
+        landed = _emit_lifecycle_event("agent/session.completed", {
             "run_key": result.run_key,
             "role": role,
             "project": project,
@@ -163,7 +190,7 @@ def _emit_session_finished(
         }, blocking=True)
     else:
         error = result.error or "unknown error"
-        _emit_lifecycle_event("agent/session.failed", {
+        landed = _emit_lifecycle_event("agent/session.failed", {
             "run_key": result.run_key,
             "role": role,
             "project": project,
@@ -174,6 +201,34 @@ def _emit_session_finished(
             "requested_by": requested_by or None,
             "text": f"{label} failed on {result.run_key}: {error}",
         }, blocking=True)
+
+    if landed:
+        try:
+            registry.update(name, emit_confirmed=True)
+        except Exception:
+            log.debug("emit_confirmed update failed for %s", name, exc_info=True)
+
+
+def _persist_terminal(registry, name: str, status: str, *, error: str = "",
+                      session_id: str = "", phase: str = "") -> None:
+    """Durably record an honest terminal status to ``state.json`` (MDS-65 RC#3).
+
+    Written synchronously to local disk *before* and independent of the
+    best-effort lifecycle bus POST, so a swallowed emit (flaky event server, a
+    daemon thread killed mid-POST at shutdown) never loses the outcome. The
+    reconciler reads ``state.json`` as the source of truth and re-emits any
+    terminal run whose emit was never confirmed. Best-effort itself: a registry
+    write failure must not mask the agent's real result.
+    """
+    try:
+        registry.mark_terminal(
+            name, status, error=error,
+            session_id=session_id or None, phase=phase or None,
+        )
+    except Exception:  # never let bookkeeping surface over the agent result
+        # A failed persist defeats the reconciler backstop (state.json is the
+        # durable source of truth), so this is worth a warning, not just debug.
+        log.warning("Terminal status persist failed for %s", name, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +336,8 @@ async def _run_agent_supervised(
 
             if result_msg is None:
                 result.error = "connection lost (no ResultMessage)"
-                registry.update(name, status="error")
+                _persist_terminal(registry, name, TERMINAL_FAILED,
+                                  error=result.error, phase=phase)
                 return result
 
             save_session_id(name, result_msg.session_id)
@@ -303,18 +359,35 @@ async def _run_agent_supervised(
             result.success = not result_msg.is_error
             if result_msg.is_error:
                 result.error = result_msg.result or "unknown error"
-            registry.update(name, status="done", phase=phase,
-                            session_id=result_msg.session_id)
-            log_activity("stop", {"session_id": result_msg.session_id},
-                         session=name)
+                # Single-sourced transient classification (§4.3): a 529/rate-limit
+                # /5xx is tagged transient so the launcher can re-dispatch. We do
+                # NOT retry here — survival/retry is owned by #444.
+                result.transient = is_transient_api_error(
+                    getattr(result_msg, "api_error_status", None),
+                    result_msg.result or "",
+                )
+            # RC#2: honest terminal status — never record `done` on an error
+            # result. A transient 529 surfaces as an error ResultMessage (not an
+            # exception), so the old unconditional `done` wrote a success over a
+            # real failure. We record it honestly as `failed` and let it be
+            # delivered (RC#1); transient survival/retry is owned by the
+            # persistent session (#444), so the spawn path adds no retry (§4.3).
+            terminal = TERMINAL_COMPLETED if result.success else TERMINAL_FAILED
+            _persist_terminal(registry, name, terminal, error=result.error,
+                              session_id=result_msg.session_id, phase=phase)
+            log_activity("stop", {"session_id": result_msg.session_id,
+                                  "status": terminal}, session=name)
             return result
 
     except asyncio.TimeoutError:
         result.error = f"timeout after {timeout}s"
-        registry.update(name, status="error")
+        _persist_terminal(registry, name, TERMINAL_FAILED, error=result.error,
+                          phase=phase)
     except Exception as e:
         result.error = str(e)
-        registry.update(name, status="error")
+        # An unhandled executor exception is a crash, not a clean failure.
+        _persist_terminal(registry, name, TERMINAL_CRASHED, error=result.error,
+                          phase=phase)
         log.error(f"Sub-agent error for {run_key}/{phase}: {e}")
     finally:
         try:
@@ -334,12 +407,17 @@ def run_phase_blocking(
     project: str = "",
     timeout: int | None = None,
     role: str = "",
+    requested_by: dict | None = None,
 ) -> AgentResult:
     """Run a sub-agent phase, blocking until completion.
 
     Creates a Session, starts with the phase prompt, and blocks until
     the Claude session finishes processing. The session has an inbox
     so other sessions can message it during execution.
+
+    ``requested_by`` is threaded onto the started/finished lifecycle events so
+    a completion can be routed back to the requester's thread (MDS-65 RC#4) —
+    the non-persistent phase path previously dropped it entirely.
     """
     from modastack.session import Session
 
@@ -348,7 +426,8 @@ def run_phase_blocking(
     name = _session_name(run_key, role=role, phase=phase)
 
     started_at = time.time()
-    _emit_session_started(run_key, project, title or context, name, phase=phase, role=role)
+    _emit_session_started(run_key, project, title or context, name, phase=phase,
+                          requested_by=requested_by, role=role)
 
     label = role or "agent"
     append_text = (
@@ -405,7 +484,8 @@ def run_phase_blocking(
         )
 
     session.stop()
-    _emit_session_finished(result, project, name, started_at, role=role)
+    _emit_session_finished(result, project, name, started_at,
+                           requested_by=requested_by, role=role)
     return result
 
 
@@ -809,6 +889,9 @@ def launch_agent(
         project=project, cwd=cwd, status="starting",
         requested_by=requested_by or {},
         image_hash=compute_manifest_hash(root),
+        # Persist the declared timeout so the dead-man reconciler knows this
+        # run's deadline (MDS-65 §4.6).
+        timeout=timeout,
     ))
 
     log_file = SessionRegistry.log_path(session_name)

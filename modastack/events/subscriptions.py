@@ -42,6 +42,33 @@ def discover_subscriptions(project_path: Path) -> list[str]:
     return [project_path.name]
 
 
+# Sub-agent lifecycle topics the persistent entry point must hear so a detached
+# agent's completion/failure is delivered back to the launcher instead of being
+# emitted into the void (MDS-65 RC#1). _emit_session_finished already POSTs these
+# carrying requested_by; nothing subscribed to them before.
+LIFECYCLE_EVENTS = ("agent/session.completed", "agent/session.failed")
+
+
+def lifecycle_subscription_keys() -> list[str]:
+    """Topics the entry point subscribes to so sub-agent completions reach it.
+
+    Mirrors ``monitor_subscription_keys``: returns BOTH the bare delivered type
+    (``session.completed``) and the source-qualified topic
+    (``agent/session.completed``). Current servers route a posted event onto both
+    forms; older servers (pre-#235 topic contract) deliver only the bare type, so
+    subscribing to both keeps delivery working across server versions.
+    ``deliver()`` dedupes across matched topics, so the double subscription never
+    double-delivers.
+    """
+    keys: list[str] = []
+    for event in LIFECYCLE_EVENTS:
+        delivered_topic = event.split("/", 1)[1] if "/" in event else event
+        for key in (delivered_topic, event):
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
 def monitor_subscription_keys(monitor_events: list[str]) -> list[str]:
     """Topics the manager must subscribe to so monitor findings get delivered.
 

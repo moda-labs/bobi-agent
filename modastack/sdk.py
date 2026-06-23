@@ -28,6 +28,27 @@ from modastack import paths
 
 log = logging.getLogger(__name__)
 
+# Terminal-status vocabulary (MDS-65 D1). A run ends in exactly one of these.
+# ``done`` is retained as a backward-compatible alias for reading old records —
+# new code writes the honest vocabulary so a failed/crashed run is never
+# recorded as a success.
+TERMINAL_COMPLETED = "completed"
+TERMINAL_FAILED = "failed"
+TERMINAL_CRASHED = "crashed"
+# Statuses that mean "still running" — everything else is terminal/inactive.
+ACTIVE_STATUSES = ("starting", "running", "idle")
+# Honest-failure terminal statuses (used by the reconciler / delivery routing).
+FAILED_STATUSES = (TERMINAL_FAILED, TERMINAL_CRASHED)
+# Honest terminal vocabulary (``done`` kept as a legacy read alias).
+TERMINAL_STATUSES = (TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED, "done")
+# A session in any of these has torn down its inbox/subscription — publishing to
+# it would succeed but no one would consume it (inbox.py guard).
+DEAD_STATUSES = (
+    "stopped", "error", "cancelled", "done",
+    TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
+)
+
+
 def _resolve_cli_path() -> str:
     """Locate the ``claude`` CLI, container-safe.
 
@@ -199,6 +220,19 @@ class SessionEntry:
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     requested_by: dict = field(default_factory=dict)
+    # Honest terminal status + reconciler backstop (MDS-65).
+    # error: terminal failure message; "" on success/while running.
+    error: str = ""
+    # terminal_at: when a terminal status was durably written (0.0 = not terminal).
+    terminal_at: float = 0.0
+    # emit_confirmed: whether the terminal lifecycle bus POST is known to have
+    # landed. The reconciler re-emits terminal-but-unconfirmed runs.
+    emit_confirmed: bool = False
+    # timeout: the run's declared/effective timeout in seconds, persisted at
+    # register so the dead-man reconciler knows each run's deadline.
+    timeout: int = 0
+    # reconciled_at: set when the reconciler closed a stranded run (idempotency).
+    reconciled_at: float = 0.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "SessionEntry":
@@ -245,6 +279,13 @@ class SessionRegistry:
             data = json.loads(path.read_text())
         except (json.JSONDecodeError, TypeError):
             return
+        # Normalize through the dataclass so fields added in a later schema
+        # version (e.g. emit_confirmed/terminal_at — MDS-65) are present and can
+        # be written. Without this, update() only touches keys already in the
+        # on-disk JSON, so an entry written by older code would silently DROP a
+        # set to a new field — and the reconciler, unable to persist
+        # emit_confirmed=True, would re-emit that completion on every wake.
+        data = asdict(SessionEntry.from_dict(data))
         for k, v in kwargs.items():
             if k in data:
                 data[k] = v
@@ -284,6 +325,31 @@ class SessionRegistry:
     def mark_done(self, name: str) -> None:
         self.update(name, status="done", pid=0)
 
+    def mark_terminal(self, name: str, status: str, *, error: str = "",
+                      session_id: str | None = None, phase: str | None = None,
+                      emit_confirmed: bool = False,
+                      reconciled: bool = False) -> None:
+        """Durably record an honest terminal status (MDS-65 RC#2/#3).
+
+        Writes ``status`` (one of completed/failed/crashed) plus a monotonic
+        ``terminal_at`` and clears the pid — synchronously to local disk, before
+        and independent of any best-effort bus POST, so a swallowed lifecycle
+        emit never loses the outcome. The reconciler reads ``state.json`` as the
+        source of truth and re-emits when ``emit_confirmed`` is still False.
+        """
+        updates: dict = {"status": status, "pid": 0, "terminal_at": time.time()}
+        if error:
+            updates["error"] = error
+        if session_id is not None:
+            updates["session_id"] = session_id
+        if phase is not None:
+            updates["phase"] = phase
+        if emit_confirmed:
+            updates["emit_confirmed"] = True
+        if reconciled:
+            updates["reconciled_at"] = time.time()
+        self.update(name, **updates)
+
     def get(self, name: str) -> SessionEntry | None:
         path = self._state_path(name)
         if not path.exists():
@@ -311,7 +377,15 @@ class SessionRegistry:
             if entry.status not in ("starting", "running", "idle"):
                 continue
             if entry.pid and not pid_alive(entry.pid):
-                self.mark_done(entry.name)
+                # A live status with a dead pid is a crash, not a clean finish.
+                # Recording it `crashed` (not the old `done`) is the core
+                # honest-status fix (MDS-65 RC#2/#3): "crashes recorded as done"
+                # is exactly the gtm-team bug. The reconciler then re-emits an
+                # honest agent/session.failed for it (emit_confirmed is False).
+                self.mark_terminal(
+                    entry.name, TERMINAL_CRASHED,
+                    error="agent process died without reporting a terminal status",
+                )
                 continue
             result.append(entry)
         return result

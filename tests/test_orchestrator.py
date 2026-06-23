@@ -347,6 +347,108 @@ class TestRunWorkflow:
         assert name1 != name2
 
 
+class FailingClient:
+    """ClaudeSDKClient mock whose turn yields no ResultMessage — _drain_response
+    returns None, driving the orchestrator's failure path."""
+
+    def __init__(self):
+        self.connected = False
+
+    async def connect(self, prompt=None):
+        self.connected = True
+
+    async def query(self, text):
+        pass
+
+    async def receive_response(self):
+        yield FakeAssistantMessage(content=[FakeTextBlock(text="...")])
+        # no ResultMessage → drain returns None → step fails
+
+    async def disconnect(self):
+        self.connected = False
+
+
+class TestHonestTerminalEmit:
+    """MDS-65 RC#2/RC#4 — the orchestrator must emit the HONEST terminal session
+    event (session.failed on failure, never session.completed after a failure)
+    and carry requested_by so the launcher can route it to the requester."""
+
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
+
+    def _run_capture(self, workflow, client_cls, **kwargs):
+        cwd = kwargs.get("cwd", "/tmp")
+        emits = []
+        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("modastack.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda etype, data, **kw: emits.append((etype, data))), \
+             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("modastack.workflow.orchestrator.save_session_id"), \
+             patch("modastack.workflow.orchestrator.log_activity"), \
+             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+                 ClaudeSDKClient=lambda opts: client_cls(),
+                 ClaudeAgentOptions=MagicMock,
+                 AssistantMessage=FakeAssistantMessage,
+                 ResultMessage=FakeResultMessage,
+                 TextBlock=FakeTextBlock,
+             )}):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(workflow, **kwargs)
+        return result, emits
+
+    def test_failure_emits_session_failed_not_completed(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, FailingClient, task="t", repo="r", cwd="/tmp", run_key="1",
+            requested_by={"slack_user": "U1", "thread_ts": "123.45"},
+        )
+        assert result is False
+        types = [e[0] for e in emits]
+        assert "agent/session.failed" in types
+        # The bug: session.completed must NOT be emitted on a failure.
+        assert "agent/session.completed" not in types
+        # RC#4: the failure event carries requested_by for routing.
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["requested_by"] == {"slack_user": "U1", "thread_ts": "123.45"}
+
+    def test_success_emits_session_completed_with_requested_by(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, FakeClient, task="t", repo="r", cwd="/tmp", run_key="1",
+            requested_by={"slack_user": "U2"},
+        )
+        assert result is True
+        types = [e[0] for e in emits]
+        assert "agent/session.completed" in types
+        assert "agent/session.failed" not in types
+        done = next(d for t, d in emits if t == "agent/session.completed")
+        assert done["requested_by"] == {"slack_user": "U2"}
+
+    def test_suspend_does_not_emit_terminal_session_event(self, tmp_path, monkeypatch):
+        """An await/suspend is dormant, not terminal: it must emit
+        workflow.suspended but NEITHER session.completed NOR session.failed —
+        else the (now-subscribed) manager is told the agent finished while it
+        waits for the external event."""
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_r")
+        (tmp_path / "_r" / ".modastack" / "state" / "workflow" / "runs").mkdir(
+            parents=True, exist_ok=True)
+        (tmp_path / "_r" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("modastack.paths._root", tmp_path / "_r")
+
+        wf = Workflow(name="t", steps=[StepDef(name="wait", await_event="approval")])
+        result, emits = self._run_capture(
+            wf, FakeClient, task="t", repo="r", cwd="/tmp", run_key="1",
+            requested_by={"slack_user": "U3"},
+        )
+        types = [e[0] for e in emits]
+        assert "agent/workflow.suspended" in types
+        assert "agent/session.completed" not in types
+        assert "agent/session.failed" not in types
+
+
 # ---------------------------------------------------------------------------
 # Await / resume
 # ---------------------------------------------------------------------------

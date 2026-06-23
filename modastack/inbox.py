@@ -297,7 +297,8 @@ def deliver(
     # would succeed but no one would consume it (a wait=True sender would just
     # burn the full timeout). pid_alive isn't enough — one process can outlive a
     # stopped phase session, or a SIGKILL'd pid can be recycled.
-    if entry.status in ("stopped", "error", "cancelled", "done"):
+    from modastack.sdk import DEAD_STATUSES
+    if entry.status in DEAD_STATUSES:
         return False, f"session '{to}' is {entry.status}"
 
     from modastack.events.publish import publish_inbox

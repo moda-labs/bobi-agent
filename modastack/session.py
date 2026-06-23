@@ -70,12 +70,17 @@ SUBSCRIPTION_RETRY_MAX = 60.0
 # before giving up. This must never leave the session terminally wedged: see
 # _drain_turn / _process_message. Retries are bounded so a genuinely failing
 # turn surfaces its error to the caller instead of looping forever.
-TURN_RETRY_BASE = 2.0
-TURN_RETRY_MAX_ATTEMPTS = 2
-
-# HTTP statuses worth retrying: overload, rate limit, gateway/timeout 5xx.
-# Anything else (4xx like 400/401/403) is a real error — recover but don't retry.
-TRANSIENT_API_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+#
+# The retry budget and the "what counts as transient" set/classifier live in
+# modastack.transient so the sub-agent spawn/executor path agrees on the same
+# definition (MDS-65, §4.3). Re-imported here for back-compat — existing call
+# sites and tests reference these names off modastack.session.
+from modastack.transient import (  # noqa: F401  (re-exported for back-compat)
+    TURN_RETRY_BASE,
+    TURN_RETRY_MAX_ATTEMPTS,
+    TRANSIENT_API_STATUSES,
+    is_transient_api_error,
+)
 
 
 class Session:
@@ -148,19 +153,13 @@ class Session:
     def _is_transient_turn_error(self) -> bool:
         """Whether the last turn's error is worth retrying.
 
-        Prefers the SDK-reported ``api_error_status`` (e.g. 529); falls back to
-        sniffing the response text for overload/rate-limit/timeout phrasing when
-        no status was surfaced.
+        Thin delegate over the shared classifier (modastack.transient): prefers
+        the SDK-reported ``api_error_status`` (e.g. 529); falls back to sniffing
+        the response text for overload/rate-limit/timeout phrasing when no status
+        was surfaced.
         """
-        if self._last_api_error_status in TRANSIENT_API_STATUSES:
-            return True
-        if self._last_api_error_status is not None:
-            return False  # a concrete non-transient status (e.g. 400) — don't retry
-        text = (self._last_response or "").lower()
-        return any(
-            s in text
-            for s in ("overloaded", "rate limit", "rate_limit", "529",
-                      "503", "502", "504", "timed out", "timeout")
+        return is_transient_api_error(
+            self._last_api_error_status, self._last_response or ""
         )
 
     def _stop_status_indicators(self) -> None:
