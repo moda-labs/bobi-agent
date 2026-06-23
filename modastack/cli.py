@@ -465,16 +465,23 @@ def _install_pack(pack_dir: Path, project_path: Path,
     dest = paths.modastack_dir(project_path)
     dest.mkdir(parents=True, exist_ok=True)
 
-    # Clear the previously frozen surfaces so a re-install (or a chain that no
-    # longer contributes a surface) never leaves stale files behind.
-    for subdir in ["roles", "tools", "workflows", "monitors", "context"]:
-        d = dest / subdir
-        if d.exists():
-            shutil.rmtree(d)
-
     locked = _read_compose_lock(dest) if pinned else None
     chain = _compose.resolve_chain(pack_dir, project_path, pinned=pinned,
                                    locked=locked)
+
+    # Clear the previously frozen copy of each surface the composed chain
+    # contributes, so a re-install drops stale files (e.g. a tool the new chain
+    # no longer ships). A surface NO layer contributes is left untouched — the
+    # pre-compose install semantics — so project-added files (e.g. an extra
+    # `.modastack/workflows/*.yaml`) survive a reinstall of the same team.
+    contributed = {sub for layer in chain
+                   for sub in ["roles", "tools", "workflows", "monitors", "context"]
+                   if (layer.dir / sub).is_dir()}
+    for sub in contributed:
+        d = dest / sub
+        if d.exists():
+            shutil.rmtree(d)
+
     prov = _compose.compose(chain, dest)
 
     # Seed workspace from every layer, base → leaf (first-writer-wins), so a base

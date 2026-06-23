@@ -468,3 +468,42 @@ def test_synthetic_outside_org_overlay_composes(tmp_path):
     assert "Acme house bindings" in eng and "Jira" in eng
     assert (dest / "tools" / "jira.md").exists()
     assert (dest / "tools" / "github.md").exists()            # core tool inherited
+
+
+# --- install clearing semantics (reinstall drops stale; project files survive)
+
+
+def test_reinstall_drops_stale_surface_files(tmp_path, monkeypatch):
+    """A reinstall clears the previously frozen copy of each surface the chain
+    contributes, so a file the team no longer ships is dropped."""
+    from modastack.cli import _install_pack
+    proj = tmp_path
+    (proj / "agents").mkdir()
+    team = _team(proj, "t", 'version: "1.0.0"\nentry_point: director\n',
+                 tools={"a.md": "A", "b.md": "B"})
+    monkeypatch.chdir(proj)
+    _install_pack(team, proj, local_source=True)
+    dest = proj / ".modastack"
+    assert {p.name for p in (dest / "tools").iterdir()} == {"a.md", "b.md"}
+    # Drop b.md from the source and reinstall — the frozen b.md must go.
+    (team / "tools" / "b.md").unlink()
+    _install_pack(team, proj, local_source=True)
+    assert {p.name for p in (dest / "tools").iterdir()} == {"a.md"}
+
+
+def test_reinstall_keeps_uncontributed_project_dirs(tmp_path, monkeypatch):
+    """A surface NO layer contributes is left untouched on reinstall — so a
+    project-added `.modastack/workflows/*.yaml` survives (pre-compose semantics)."""
+    from modastack.cli import _install_pack
+    proj = tmp_path
+    (proj / "agents").mkdir()
+    team = _team(proj, "t", 'version: "1.0.0"\nentry_point: director\n',
+                 tools={"a.md": "A"})  # no workflows/
+    monkeypatch.chdir(proj)
+    _install_pack(team, proj, local_source=True)
+    # A project adds its own workflow after install.
+    proj_wf = proj / ".modastack" / "workflows"
+    proj_wf.mkdir(parents=True, exist_ok=True)
+    (proj_wf / "adhoc.yaml").write_text("name: adhoc\nsteps: []\n")
+    _install_pack(team, proj, local_source=True)  # reinstall
+    assert (proj_wf / "adhoc.yaml").exists()  # survived
