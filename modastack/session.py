@@ -31,6 +31,14 @@ log = logging.getLogger(__name__)
 # Default rotation cap — absolute context-fill tokens, not a window fraction.
 DEFAULT_ROTATION_TOKEN_CAP = 275_000
 
+# Rotation robustness bounds (#454). An over-cap session MUST shed context, so
+# rotation can never hang on a slow flush or no-op-livelock on an unchanged
+# decision log. The flush turn is wrapped in a hard timeout; after a bounded
+# number of flush attempts we rotate unconditionally rather than re-injecting
+# flush prompts forever (each one only grows context further over-cap).
+ROTATION_FLUSH_TIMEOUT = 180.0
+ROTATION_MAX_FLUSH_ATTEMPTS = 3
+
 # Control sentinel for `modastack compact` (#433). Delivered as an inbox
 # message body; the run loop recognizes it, flags rotation, and never forwards
 # it to the model. An exact-match constant, so a human message can't trip it.
@@ -138,6 +146,8 @@ class Session:
         self._rotate_force = False
         self._rotate_reason = "context_cap"
         self._rotation_count = 0
+        # Bounded flush attempts so over-cap rotation can't no-op-livelock (#454).
+        self._rotate_attempts = 0
         self._flush_snapshot_mtime = 0.0
         self._flush_snapshot_hash = ""
 
@@ -324,9 +334,20 @@ class Session:
         registry = get_registry()
         registry.update(self.name, status="running")
 
+        # Per-call usage from the LAST assistant message in the turn — the
+        # single representative API call we measure context fill from (#454).
+        # The ResultMessage's usage is the turn AGGREGATE: in a multi-step turn
+        # (model → tool → model → …) the cached prefix is re-read on every call,
+        # so summing its cache_read counts the context N times (real_context×N)
+        # and fires a perpetual false "rotation pending". One call's usage is
+        # the actual window fill.
+        last_assistant_usage: dict | None = None
+
         try:
             async for msg in self._client.receive_response():
                 if isinstance(msg, AssistantMessage):
+                    if msg.usage is not None:
+                        last_assistant_usage = msg.usage
                     text_parts = [
                         b.text for b in msg.content if isinstance(b, TextBlock)
                     ]
@@ -393,11 +414,16 @@ class Session:
                     else:
                         self._set_state("waiting_input")
                         registry.update(self.name, status="idle", session_id=msg.session_id)
-                        # Step 2: Check rotation cap against TRUE context fill.
+                        # Step 2: Check rotation cap against TRUE context fill,
+                        # measured from a SINGLE representative API call (the
+                        # last assistant message's usage) — NOT the cumulative
+                        # ResultMessage usage, which sums cache_read across every
+                        # model call in the turn and over-counts by ×N (#454).
                         # input_tokens alone is the uncached delta (≈0 on a warm
-                        # turn) — the conversation lives in cache_read. Summing
-                        # the cache fields is what actually measures the window.
-                        context_tokens = _context_fill_tokens(msg.usage)
+                        # turn) — the conversation lives in cache_read — so we
+                        # still sum input + cache_read + cache_creation, just of
+                        # that one call.
+                        context_tokens = _context_fill_tokens(last_assistant_usage)
                         if context_tokens >= self._rotation_token_cap:
                             log.info(
                                 "Session '%s' context=%d tokens exceeds cap=%d — "
@@ -406,6 +432,11 @@ class Session:
                             )
                             self._rotate_pending = True
                             self._rotate_reason = "context_cap"
+                            # Over-cap is non-negotiable: the session MUST shed
+                            # context. Force-compact so a no-op/unchanged
+                            # decision log can't block rotation (#454 wedge) —
+                            # same bypass `modastack compact` uses.
+                            self._rotate_force = True
         except Exception as e:
             log.error(f"Drain failed for '{self.name}': {e}")
             self._set_state("error")
@@ -519,8 +550,22 @@ class Session:
             await self._process_message(msg)
 
     async def _do_flush_and_rotate(self) -> None:
-        """Flush the decision log, verify it, and rotate if successful."""
-        log.info("Session '%s' idle with rotation pending — flushing decision log", self.name)
+        """Flush the decision log, then rotate.
+
+        Over-cap rotation is non-negotiable: the session is past the context
+        cap and MUST shed context, so a no-op or failing flush can never block
+        it (the #454 wedge — auto-rotation logged "Flush no-op … skipping
+        rotation" and never self-healed). The flush is best-effort continuity;
+        rotation is mandatory. A hard flush timeout + a bounded attempt budget
+        guarantee forward progress — no hang, no no-op-livelock.
+        """
+        self._rotate_attempts += 1
+        forced = self._rotate_force
+        log.info(
+            "Session '%s' idle with rotation pending (attempt %d, force=%s) — "
+            "flushing decision log",
+            self.name, self._rotate_attempts, forced,
+        )
 
         # Step 4: Snapshot INDEX.md before flush
         self._snapshot_index()
@@ -534,28 +579,46 @@ class Session:
             "restart. Be thorough: this is your only continuity mechanism."
         ).format(session=self.name)
 
+        # Bound the flush turn so a hung/slow flush can't deadlock rotation.
+        flush_ok = False
         try:
-            await self._client.query(flush_prompt)
-            await self._drain_turn()
+            await asyncio.wait_for(
+                self._run_flush_turn(flush_prompt), timeout=ROTATION_FLUSH_TIMEOUT
+            )
+            flush_ok = True
+        except asyncio.TimeoutError:
+            log.warning(
+                "Flush turn timed out for '%s' after %.0fs — rotating anyway",
+                self.name, ROTATION_FLUSH_TIMEOUT,
+            )
         except Exception as e:
             log.warning("Flush prompt failed for '%s': %s", self.name, e)
-            # Don't rotate on flush failure — retry next idle cycle
+
+        # Decide whether to rotate. A verified flush always rotates. A no-op,
+        # timed-out, or failed flush rotates anyway when the rotation is forced
+        # (over-cap or manual `compact`), or once the bounded attempt budget is
+        # spent — we never re-inject flush prompts forever (each only grows
+        # context further over-cap). Only a transient failure on a *non-forced*
+        # rotation within budget defers to the next idle cycle.
+        verified = flush_ok and self._verify_flush()
+        must_rotate = (
+            verified or forced or self._rotate_attempts >= ROTATION_MAX_FLUSH_ATTEMPTS
+        )
+        if not must_rotate:
             return
 
-        # Step 4: Verify the flush actually changed INDEX.md. A no-op flush
-        # normally aborts (don't drop context we failed to persist) — but a
-        # manual `compact` rotates anyway: the durable INDEX.md is already in
-        # place, "nothing new to write" is not a reason to refuse the operator.
-        if not self._verify_flush() and not self._rotate_force:
-            # No-op flush — skip rotation, retry next idle cycle
-            return
-
-        # Flush verified — rotate
         try:
             await self._rotate()
         except Exception as e:
             log.error("Rotation failed for '%s': %s", self.name, e, exc_info=True)
             self._rotate_pending = False  # Don't retry indefinitely
+        finally:
+            self._rotate_attempts = 0
+
+    async def _run_flush_turn(self, flush_prompt: str) -> None:
+        """Inject the flush prompt and drain its turn (wrapped by a timeout)."""
+        await self._client.query(flush_prompt)
+        await self._drain_turn()
 
     async def _run(self, startup_prompt: str | None = None) -> None:
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
