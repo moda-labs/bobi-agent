@@ -287,36 +287,38 @@ sharing safe.)
 
 ---
 
-## 4. Open design decisions (for the reviewer)
+## 4. Design decisions (RESOLVED)
 
-Each has a recommended default; absent objection we build the recommendation.
+> **Resolved 2026-06-23** — approved by **@underminedsk** on PR #441:
+> *"approved with all the recommended options."* Every decision below is locked
+> to its **recommended option**; implementation builds these, no further
+> reviewer input needed.
 
-- **D-1 — multi-version cache layout.** (a) **[review leans here]** Overwrite
+Each had a recommended default; the reviewer accepted all of them.
+
+- **D-1 — multi-version cache layout.** → **RESOLVED: (a)** Overwrite
   `<cache>/<name>` + pin meta (simplest) — the immutable upstream already
-  guarantees re-fetch determinism, so the sidecar's marginal offline benefit may
-  not justify the copy logic. (b) Keep `<cache>/<name>` active *and* an immutable
-  `<cache>/.versions/<name>@<version>` sidecar for offline re-pin / coexistence.
-  **Reviewer recommends (a); original spec leaned (b) — explicitly for Zach to
-  pick.**
-- **D-2 — resolver shape.** (a) Extend `local_package_dir` in place to fetch when
-  not local. (b) **[recommended — reinforced by review]** Add `resolve_team_dir()`
-  that does name@version + fetch, and have **all five** callers (incl. the
-  `deploy()`-body ssh-push site at `:996`) use it; keep `local_package_dir` as the
-  pure-local primitive. The review showed (a) risks missing a call site and
-  shipping the wrong dir — (b) makes coverage explicit and testable.
-- **D-3 — deploy cache.** (a) **[recommended]** Shared with install cache.
-  (b) Separate deploy cache. Recommend shared.
-- **D-4 — version-agreement check home.** (a) **[recommended]** A step in
+  guarantees re-fetch determinism, so the sidecar's marginal offline benefit did
+  not justify the copy logic. (Option (b), the immutable
+  `<cache>/.versions/<name>@<version>` sidecar, is dropped; the original spec had
+  leaned (b) but the reviewer picked the review-recommended (a).)
+- **D-2 — resolver shape.** → **RESOLVED: (b)** Add `resolve_team_dir()` that does
+  name@version + fetch, and have **all five** callers (incl. the `deploy()`-body
+  ssh-push site at `:996`) use it; keep `local_package_dir` as the pure-local
+  primitive. (Option (a), extending `local_package_dir` in place, is dropped — it
+  risked missing a call site and shipping the wrong dir; (b) makes coverage
+  explicit and testable.)
+- **D-3 — deploy cache.** → **RESOLVED: (a)** Shared with the install cache.
+- **D-4 — version-agreement check home.** → **RESOLVED: (a)** A step in
   `team-packages.yml` (avoids editing `tests/test_packaging.py` while #438 is
-  open — see §7). (b) A pytest in `test_packaging.py` (better local signal, but
-  collides with #438). Recommend (a) now; optionally migrate to a test after #438
-  lands.
-- **D-5 — version-less teams.** Confirm: a team with no `agent.yaml` `version:`
-  publishes only the rolling tarball and is fetchable only as "latest"
-  (no pinned asset). Recommended: yes (keeps smoke-team / fixtures working).
-- **D-6 — `@version` parse rule.** Split on the **last** `@`; `@` is meaningful
-  only on the registry-name branch of `install` (not for URLs / paths / local
-  archives) and on `deploy`'s `team:`. Recommended as stated.
+  open — see §7). Optionally migrate to a pytest in `test_packaging.py` after
+  #438 lands.
+- **D-5 — version-less teams.** → **RESOLVED: yes.** A team with no `agent.yaml`
+  `version:` publishes only the rolling tarball and is fetchable only as "latest"
+  (no pinned asset) — keeps smoke-team / fixtures working.
+- **D-6 — `@version` parse rule.** → **RESOLVED: as stated.** Split on the
+  **last** `@`; `@` is meaningful only on the registry-name branch of `install`
+  (not for URLs / paths / local archives) and on `deploy`'s `team:`.
 
 ---
 
@@ -568,3 +570,6 @@ phased commits. Lead's call at implementation time; this spec covers all three.
   addition beyond the issue — §5 staged rollout + §7 coordination — is mandated by
   the director (operationally sensitive: reshapes our own fleet) and is
   documentation/sequencing, not extra build surface. Not too wide, not too narrow.
+- **Reviewer approval (2026-06-23):** **@underminedsk** approved the spec on
+  PR #441 — *"approved with all the recommended options."* §4 D-1…D-6 are now
+  locked to their recommended options (see §4). No spec changes were requested.
