@@ -806,6 +806,66 @@ def deploy(name, team, team_url, fleet, env_file, auth, event_server, region,
     click.echo(f"Deployed '{name}' (app {cfg.app_name}).")
 
 
+@main.command("deploy-init")
+@click.argument("team", required=False)
+@click.option("--fleet", default="myfleet",
+              help="Fleet namespace (app names become <fleet>-<team>).")
+@click.option("--tenant", default="prod",
+              help="Default GitHub Environment that holds the secrets.")
+@click.option("--event-server", "event_server", default=None,
+              help="Event server URL (omit for the shared moda Worker).")
+@click.option("--auth", default="api_key",
+              type=click.Choice(["api_key", "subscription"]),
+              help="Auth mode written into the deployment(s) and reflected in the "
+                   "printed secret list (subscription drops ANTHROPIC_API_KEY).")
+@click.option("--force", is_flag=True, help="Overwrite existing scaffold files.")
+def deploy_init(team, fleet, tenant, event_server, auth, force):
+    """Scaffold CI deploy automation for this repo's agent teams (bring-your-own-repo).
+
+    Generates a standalone .github/workflows/deploy-agent-teams.yml (installs
+    modastack from PyPI — no framework checkout needed) + a deployments/ skeleton,
+    then prints the exact `fly`/`gh` commands to wire the Fly token and per-key
+    secrets, derived from each team's declared ${VAR} set so the list is correct.
+    Non-destructive: existing files are skipped unless --force.
+
+    TEAM scopes to one team under agents/; omit to scaffold every team found.
+
+    Usage:
+        modastack deploy-init                          # every team under agents/
+        modastack deploy-init eng-team --fleet acme --tenant prod
+    """
+    from modastack import scaffold as scaffold_mod
+    from modastack.deploy import _modastack_version, DeployError
+
+    project_path = Path.cwd()
+    if team and not (project_path / "agents" / team / "agent.yaml").is_file():
+        raise click.UsageError(f"no agents/{team}/agent.yaml found.")
+    teams = [team] if team else scaffold_mod.discover_teams(project_path)
+    if not teams:
+        raise click.UsageError(
+            "no teams found under agents/ (expected agents/<team>/agent.yaml). "
+            "Pass a TEAM name or run from your agent-teams repo root.")
+
+    try:
+        version = _modastack_version()
+    except DeployError:
+        version = "<version>"  # modastack not pip-installed; user pins manually
+
+    result = scaffold_mod.scaffold(
+        project_path, teams=teams, fleet=fleet, tenant=tenant,
+        event_server=event_server, auth=auth, force=force, version=version)
+
+    for p in result.written:
+        click.echo(f"  wrote   {p.relative_to(project_path)}")
+    for p in result.skipped:
+        click.echo(f"  skipped {p.relative_to(project_path)} "
+                   "(exists; --force to overwrite)")
+    if not result.written:
+        click.echo("Nothing written (all files already exist).")
+    click.echo("")
+    click.echo(scaffold_mod.next_steps(result))
+
+
 @main.command()
 @click.argument("name")
 @click.option("--fleet", default=None, help="Fleet namespace (app = <fleet>-<name>).")
