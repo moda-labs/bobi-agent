@@ -15,14 +15,20 @@ Exit 0 = all agree.  Exit 1 = drift (names the team and both values).
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 import yaml
 
+SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+
 
 def check(agents_dir: Path) -> list[str]:
-    registry = yaml.safe_load((agents_dir / "registry.yaml").read_text()) or {}
+    try:
+        registry = yaml.safe_load((agents_dir / "registry.yaml").read_text()) or {}
+    except yaml.YAMLError as exc:
+        return [f"registry.yaml is not valid YAML ({exc.__class__.__name__})"]
     entries = registry.get("agents") or {}
     errors: list[str] = []
     for team, meta in entries.items():
@@ -32,7 +38,13 @@ def check(agents_dir: Path) -> list[str]:
             errors.append(
                 f"{team}: listed in registry.yaml but no agents/{team}/agent.yaml")
             continue
-        data = yaml.safe_load(agent_yaml.read_text()) or {}
+        try:
+            data = yaml.safe_load(agent_yaml.read_text()) or {}
+        except yaml.YAMLError as exc:
+            errors.append(
+                f"{team}: agents/{team}/agent.yaml is not valid YAML "
+                f"({exc.__class__.__name__})")
+            continue
         agent_version = str(data.get("version", "")).strip()
         if not agent_version:
             errors.append(
@@ -42,6 +54,14 @@ def check(agents_dir: Path) -> list[str]:
             errors.append(
                 f"{team}: version drift — registry.yaml={reg_version!r} "
                 f"agent.yaml={agent_version!r} (bump both together)")
+        elif not SEMVER.match(reg_version):
+            # A pinned 'latest' pointer must be strict X.Y.Z so a published
+            # immutable asset can exist for it (the publisher only emits
+            # <team>-X.Y.Z.tar.gz). Fail loudly rather than silently shipping a
+            # team that can never resolve a pinned asset.
+            errors.append(
+                f"{team}: version {reg_version!r} is not strict MAJOR.MINOR.PATCH "
+                f"(a pinnable team needs a semver version)")
     return errors
 
 

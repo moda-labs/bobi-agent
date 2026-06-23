@@ -65,7 +65,9 @@ for dir in "${DIRS[@]}"; do
   # time — only the filename differs — so a pinned install gets exactly what the
   # rolling one served. The version is read in Python (bash YAML parsing is
   # brittle); a team with no `version:` gets only the rolling tarball (D-5).
-  version="$(python3 "$REPO_ROOT/scripts/team-version.py" "$dir")"
+  # `|| version=""`: a single broken team must never abort the whole build
+  # (it would strand healthy teams' tarballs). Degrade it to rolling-only.
+  version="$(python3 "$REPO_ROOT/scripts/team-version.py" "$dir")" || version=""
   if [ -n "$version" ]; then
     cp "$OUT_ABS/$name.tar.gz" "$OUT_ABS/$name-$version.tar.gz"
     echo "  $name -> $OUT/$name-$version.tar.gz (versioned, immutable)"

@@ -85,6 +85,38 @@ def test_versionless_team_rolling_only_with_warning(tmp_path):
     assert "warning" in proc.stderr.lower() and "version" in proc.stderr.lower()
 
 
+def test_build_prerelease_version_is_rolling_only(tmp_path):
+    """Regression for the misclassification footgun: a non-semver version must
+    NOT produce a versioned asset (which the publisher would clobber as if
+    rolling). The team still ships its rolling tarball."""
+    team = _make_team(tmp_path / "src", "demo-team", "1.2.0-rc1")
+    out = tmp_path / "dist"
+    proc = _build(team, out)
+    assert proc.returncode == 0, proc.stderr
+    assert (out / "demo-team.tar.gz").exists()
+    assert list(out.glob("demo-team-*.tar.gz")) == []
+
+
+def test_build_survives_one_bad_team(tmp_path):
+    """One team with malformed agent.yaml must not abort a multi-team build."""
+    src = tmp_path / "src"
+    good = _make_team(src, "good-team", "1.0.0")
+    bad = src / "bad-team"
+    bad.mkdir()
+    (bad / "agent.yaml").write_text("version: [unterminated")
+    out = tmp_path / "dist"
+    proc = subprocess.run(
+        ["bash", str(BUILD_SH), "--out", str(out), str(good), str(bad)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # Healthy team got both tarballs; bad team got rolling only (no crash).
+    assert (out / "good-team.tar.gz").exists()
+    assert (out / "good-team-1.0.0.tar.gz").exists()
+    assert (out / "bad-team.tar.gz").exists()
+    assert list(out.glob("bad-team-*.tar.gz")) == []
+
+
 # --- team-version.py helper -------------------------------------------------
 
 def _team_version(team_dir: Path) -> subprocess.CompletedProcess:
@@ -106,6 +138,29 @@ def test_team_version_silent_when_absent(tmp_path):
     proc = _team_version(team)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == ""
+
+
+@pytest.mark.parametrize("bad", ["1.2.0-rc1", "1.0", "1", "1.0/0", "v1.0.0", "latest"])
+def test_team_version_rejects_non_semver(tmp_path, bad):
+    """Only strict X.Y.Z is pinnable. A non-semver version must NOT become an
+    asset filename (it would be misclassified as rolling by the publisher and
+    silently clobbered, losing immutability) — degrade to rolling-only + warn."""
+    team = _make_team(tmp_path, "t", bad)
+    proc = _team_version(team)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "", f"{bad!r} must not be emitted as a pin"
+    assert "version" in proc.stderr.lower()
+
+
+def test_team_version_clean_error_on_bad_yaml(tmp_path):
+    team = tmp_path / "broken"
+    team.mkdir()
+    (team / "agent.yaml").write_text('version: "1.0.0\nagent: [oops')  # invalid YAML
+    proc = _team_version(team)
+    # Malformed YAML must not crash with a traceback; degrade to rolling-only.
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == ""
+    assert "yaml" in proc.stderr.lower() or "parse" in proc.stderr.lower()
 
 
 # --- check-team-versions.py: registry.yaml vs agent.yaml --------------------
@@ -146,6 +201,32 @@ def test_check_fails_on_drift(tmp_path):
     assert proc.returncode == 1
     assert "alpha" in proc.stderr
     assert "1.2.0" in proc.stderr and "1.3.0" in proc.stderr
+
+
+def test_check_fails_on_non_semver_registry_version(tmp_path):
+    """A pinned 'latest' pointer must be strict X.Y.Z so a published asset can
+    exist for it. A prerelease/partial version fails loudly, not silently."""
+    agents = _agents_fixture(
+        tmp_path,
+        {"agents": {"alpha": {"version": "1.2.0-rc1"}}},
+        {"alpha": "1.2.0-rc1"},
+    )
+    proc = _check(agents)
+    assert proc.returncode == 1
+    assert "alpha" in proc.stderr
+
+
+def test_check_clean_error_on_bad_agent_yaml(tmp_path):
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    (agents / "registry.yaml").write_text(
+        yaml.safe_dump({"agents": {"alpha": {"version": "1.0.0"}}}))
+    bad = agents / "alpha"
+    bad.mkdir()
+    (bad / "agent.yaml").write_text("version: [unterminated")
+    proc = _check(agents)
+    assert proc.returncode == 1
+    assert "alpha" in proc.stderr
 
 
 def test_check_fails_when_pinned_team_has_no_version(tmp_path):
