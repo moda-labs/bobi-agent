@@ -31,6 +31,7 @@ REPO = Path(__file__).resolve().parent.parent
 FLEET_SH = REPO / "scripts" / "fleet.sh"
 PROVISION_SH = REPO / "scripts" / "provision-instance.sh"
 DESTROY_SH = REPO / "scripts" / "destroy-instance.sh"
+CANARY_SMOKE_SH = REPO / "scripts" / "canary-smoke.sh"
 WF_TEAMS = REPO / ".github" / "workflows" / "deploy-agent-teams.yml"
 WF_RELEASE = REPO / ".github" / "workflows" / "release.yml"
 
@@ -78,7 +79,7 @@ def test_classify_all_added_when_nothing_exists():
 
 def test_deploy_scripts_pass_shellcheck():
     """fleet.sh + the provision/destroy scripts deploy drives — keep them clean."""
-    for script in (FLEET_SH, PROVISION_SH, DESTROY_SH):
+    for script in (FLEET_SH, PROVISION_SH, DESTROY_SH, CANARY_SMOKE_SH):
         sc = subprocess.run(["shellcheck", str(script)], capture_output=True, text=True)
         assert sc.returncode == 0, f"{script.name}:\n{sc.stdout}{sc.stderr}"
 
@@ -283,9 +284,12 @@ def test_release_canary_is_built_from_the_wheel_and_smoked():
     assert "download-artifact" in _uses_blob(canary)
     script = _step_scripts(canary)
     assert "MODASTACK_BUILD=wheel" in script
-    # functional smoke with an abort-on-failure gate
-    assert "modastack ask" in script and "CANARY-OK" in script
-    assert "aborting release" in script
+    # functional smoke with an abort-on-failure gate — the ask loop lives in
+    # canary-smoke.sh (cold-boot-robust), invoked from the workflow.
+    assert "scripts/canary-smoke.sh" in script
+    smoke = CANARY_SMOKE_SH.read_text()
+    assert "modastack ask" in smoke and "CANARY-OK" in smoke
+    assert "aborting release" in smoke
     # round-trips live config + resolves the built image digest (reused by roll-fleet)
     assert "config save" in script and "-c " in script and " -o " not in script
     assert "registry.fly.io/" in script and "Digest" in script

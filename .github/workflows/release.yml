@@ -229,19 +229,13 @@ jobs:
 
           # Functional canary gate — ask the freshly-built canary and assert it
           # answers CANARY-OK end-to-end through the PROD event server. A broken
-          # image aborts the whole release here. The deploy already waited for the
-          # HEALTHCHECK; retry covers a slow reconnect after restart.
+          # image aborts the whole release here. The deploy only waited for the
+          # manager HEALTHCHECK (up BEFORE the session is ready) and the canary
+          # auto-suspends, so canary-smoke.sh starts the machine and polls the
+          # ask with a generous budget that covers a cold first boot.
           if [ "$generic_src" = "$canary" ]; then
             echo "::group::smoke $canary (functional ask)"
-            ask='gosu modastack env HOME=/data/home bash -c "cd /data/project && /opt/venv/bin/modastack ask \"Release canary smoke: reply with exactly CANARY-OK and nothing else.\" --timeout 180"'
-            ok=""
-            for attempt in 1 2 3; do
-              resp="$("$FLY" ssh console -a "$canary" -C "$ask" 2>&1 || true)"
-              printf '%s' "$resp" | grep -q "CANARY-OK" && { ok=1; break; }
-              echo "canary not ready (attempt $attempt/3) — retrying in 30s"; sleep 30
-            done
-            [ -n "$ok" ] || { echo "::error::canary smoke FAILED — $canary did not answer CANARY-OK; aborting release."; exit 1; }
-            echo "Canary smoke passed — $canary answered CANARY-OK on the wheel."
+            FLY="$FLY" scripts/canary-smoke.sh "$canary"
             echo "::endgroup::"
           else
             echo "::warning::generic source is $generic_src (no '$canary' in the fleet) — published/rolled without a functional smoke."
