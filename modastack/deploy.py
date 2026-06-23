@@ -111,6 +111,18 @@ class DeployConfig:
         return "ssh-push" if self.team else "team-url"
 
     @property
+    def team_name(self) -> str:
+        """The team name with any `@version` stripped (D-6). Empty for team-url."""
+        from modastack.registry import split_team_ref
+        return split_team_ref(self.team)[0] if self.team else ""
+
+    @property
+    def team_version(self) -> str | None:
+        """The pinned version from a `team: <name>@<version>`, else None (D-6)."""
+        from modastack.registry import split_team_ref
+        return split_team_ref(self.team)[1] if self.team else None
+
+    @property
     def app_name(self) -> str:
         """Fly app name: `<fleet>-<name>`, or bare `<name>` with no fleet."""
         return f"{self.fleet}-{self.name}" if self.fleet else self.name
@@ -351,6 +363,55 @@ def local_package_dir(base: Path, team: str) -> Path:
     )
 
 
+def resolve_team_dir(project_path: Path, team: str) -> Path:
+    """Resolve a deploy `team:` ref (optionally `name@version`) to a package dir.
+
+    The single seam every deploy consumer routes through (D-2) — secret-prune
+    scan, deps-render, deps-hash, AND the ssh-push at the `deploy()` body — so a
+    pinned team lands the right package at all of them. After resolution the
+    package is on disk, so the existing local-team build/prune/push path runs
+    unchanged. Resolution order:
+
+      1. explicit `@version` → fetch the immutable per-team asset into the
+         **shared** install/deploy cache (D-3). A pin **never** falls back to a
+         local dir: a stale `agents/<name>` must not silently shadow the pin, and
+         a missing asset is a hard error (surfaced by registry.fetch).
+      2. bare name with a local `agents/<name>` / `<name>` dir → use it (today's
+         behavior, byte-for-byte unchanged — local dev keeps working).
+      3. bare name, no local dir → fetch latest into the shared cache.
+    """
+    from modastack import registry
+    # A `team:` that is itself a path to a package dir wins literally — mirrors
+    # local_package_dir's first candidate (`Path(team)`) and avoids mis-splitting
+    # a filesystem path that happens to contain '@' (e.g. `/work@v2/eng-team`).
+    if (Path(team) / "agent.yaml").exists():
+        return Path(team).resolve()
+    name, version = registry.split_team_ref(team)
+    if version:
+        # Reuse an already-cached pin with no second download (§3.4); the
+        # immutable asset makes the cached copy authoritative.
+        if (registry.cached_version(project_path, name) == version
+                and registry.is_cached(project_path, name)):
+            return registry.cache_path(project_path, name)
+        try:
+            return registry.fetch(project_path, name, version=version)
+        except Exception as e:
+            raise DeployError(
+                f"could not resolve pinned team '{name}@{version}': {e}"
+            ) from e
+    # Bare name: a local checkout wins (unchanged), exactly like local_package_dir.
+    for cand in (project_path / "agents" / name, project_path / name):
+        if (cand / "agent.yaml").exists():
+            return cand.resolve()
+    try:
+        return registry.fetch(project_path, name)
+    except Exception as e:
+        raise DeployError(
+            f"local team '{name}' not found and could not fetch it from the "
+            f"registry: {e}"
+        ) from e
+
+
 def scan_required_vars(agent_yaml: Path) -> list[str]:
     """Return the bare ${VAR} secret names a package's agent.yaml requires.
 
@@ -398,7 +459,7 @@ def _secret_sets(cfg: DeployConfig,
     auth_req = ["ANTHROPIC_API_KEY"] if cfg.auth == "api_key" else []
     if not cfg.team:
         return (auth_req, None)  # team-url: package not local
-    y = local_package_dir(project_path, cfg.team) / "agent.yaml"
+    y = resolve_team_dir(project_path, cfg.team) / "agent.yaml"
     keep = lambda vs: [v for v in vs if not v.startswith("MODASTACK_")]
     required = keep(scan_required_vars(y)) + auth_req
     declared = set(keep(scan_declared_vars(y))) | set(auth_req)
@@ -798,8 +859,13 @@ def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
     if not cfg.team:
         return None
     try:
-        team_dir = local_package_dir(project_path, cfg.team)
+        team_dir = resolve_team_dir(project_path, cfg.team)
     except DeployError:
+        # A bare-name team with no local dir / no registry hit is legitimately
+        # "not buildable here" → generic image. But a PIN that fails to resolve
+        # must never be silently downgraded to a generic image — propagate it.
+        if cfg.team_version:
+            raise
         return None
     from modastack.build_render import load_team_config, render_team_deps_script
     tcfg = load_team_config(team_dir)
@@ -825,8 +891,10 @@ def _local_team_deps_hash(project_path: Path, cfg: DeployConfig) -> str:
     if not cfg.team:
         return ""  # team-url: package isn't local
     try:
-        team_dir = local_package_dir(project_path, cfg.team)
+        team_dir = resolve_team_dir(project_path, cfg.team)
     except DeployError:
+        if cfg.team_version:  # a pin must hard-fail, not silently hash-as-generic
+            raise
         return ""
     from modastack.build_render import load_team_config, team_deps_hash
     spec = load_team_config(team_dir).build
@@ -993,7 +1061,7 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
                         "    export DOCKER_HOST=unix://$HOME/.docker/run/docker.sock")
 
         if cfg.delivery == "ssh-push":
-            pkg = local_package_dir(project_path, cfg.team)
+            pkg = resolve_team_dir(project_path, cfg.team)
             if not deployed:
                 log.info("provisioning blank instance '%s' (ssh-push, %s mode)...",
                          app, assets.mode)

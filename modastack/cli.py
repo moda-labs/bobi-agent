@@ -615,12 +615,18 @@ def install(pack, non_interactive):
     elif (pack_path := Path(pack).resolve()).is_dir() and (pack_path / "agent.yaml").exists():
         pack_dir = pack_path
     else:
-        # Try remote registry
-        from modastack.registry import fetch
+        # Try remote registry. A trailing `@version` pins an immutable per-team
+        # asset (D-6: split on the last `@`); a bare name takes latest. The `@`
+        # is meaningful ONLY here — the URL / local-archive / local-dir branches
+        # above never split on it.
+        from modastack.registry import fetch, split_team_ref
+        name, version = split_team_ref(pack_str)
         try:
-            click.echo(f"'{pack}' is not a local team directory, fetching from remote...")
-            fetch(project_path, pack)
-            resolved = _resolve_agent_pack(pack, project_path)
+            label = f"{name}@{version}" if version else name
+            click.echo(f"'{pack}' is not a local team directory, fetching "
+                       f"{label} from remote...")
+            fetch(project_path, name, version=version)
+            resolved = _resolve_agent_pack(name, project_path)
             if not resolved:
                 click.echo(f"Failed to fetch '{pack}' from remote registries.", err=True)
                 raise SystemExit(1)
@@ -2516,10 +2522,12 @@ def agents_update(name):
     """Update agent teams from the remote registry.
 
     Usage:
-        modastack agents update eng-team    # update one pack
-        modastack agents update            # update all cached packs
+        modastack agents update eng-team         # update one pack to latest
+        modastack agents update eng-team@1.1.0   # pin to an immutable version
+        modastack agents update                  # update all cached packs
     """
-    from modastack.registry import fetch, list_cached, check_update
+    from modastack.registry import (fetch, list_cached, check_update,
+                                    split_team_ref, _read_local_version)
 
     project_path = _detect_project_root()
     if not project_path:
@@ -2527,18 +2535,25 @@ def agents_update(name):
         raise SystemExit(1)
 
     if name:
+        pkg_name, version = split_team_ref(name)  # D-6: split on the last `@`
         try:
-            local_v, remote_v = check_update(project_path, name)
-            if local_v and remote_v and remote_v == local_v:
-                click.echo(f"{name} v{local_v} is already up to date.")
+            if version:
+                # A pin targets an immutable asset — fetch directly (idempotent),
+                # no latest-vs-local short-circuit.
+                fetch(project_path, pkg_name, version=version)
+                new_v = _read_local_version(project_path, pkg_name) or version
+                click.echo(f"Pinned {pkg_name} to v{new_v}")
                 return
-            path = fetch(project_path, name)
-            from modastack.registry import _read_local_version
-            new_v = _read_local_version(project_path, name) or "unknown"
+            local_v, remote_v = check_update(project_path, pkg_name)
+            if local_v and remote_v and remote_v == local_v:
+                click.echo(f"{pkg_name} v{local_v} is already up to date.")
+                return
+            path = fetch(project_path, pkg_name)
+            new_v = _read_local_version(project_path, pkg_name) or "unknown"
             if local_v:
-                click.echo(f"Updated {name}: v{local_v} → v{new_v}")
+                click.echo(f"Updated {pkg_name}: v{local_v} → v{new_v}")
             else:
-                click.echo(f"Installed {name} v{new_v} → {path}")
+                click.echo(f"Installed {pkg_name} v{new_v} → {path}")
         except Exception as e:
             click.echo(f"Failed: {e}", err=True)
             raise SystemExit(1)

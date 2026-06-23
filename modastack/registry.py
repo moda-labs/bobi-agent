@@ -29,10 +29,50 @@ log = logging.getLogger(__name__)
 
 DEFAULT_REPO = "moda-labs/modastack"
 GITHUB_RAW = "https://raw.githubusercontent.com"
+# The single rolling GitHub release that holds every published team asset:
+# rolling `<team>.tar.gz` (clobbered each main push) + immutable
+# `<team>-<version>.tar.gz` (published once). Both `install` and `deploy`
+# resolve a `name@version` to an asset under this tag (#440).
+RELEASE_TAG = "teams-latest"
+
+
+def split_team_ref(ref: str) -> tuple[str, str | None]:
+    """Split a `name@version` reference into `(name, version_or_None)`.
+
+    D-6: split on the **last** `@`, so a name that itself contains `@` keeps it.
+    A bare name (no `@`) or a trailing `@` (e.g. `eng-team@`) means "latest" →
+    version is ``None``. The single authority both `install`/`agents update`
+    (cli.py) and `deploy` (`team:`) use, so the parse rule lives in one place.
+    """
+    if "@" in ref:
+        name, _, version = ref.rpartition("@")
+        if name:  # non-empty name before the last '@'
+            return name, (version or None)
+    return ref, None
+
+
+def _asset_url(repo: str, name: str, version: str | None) -> str:
+    """The per-team release asset URL. A concrete `version` → the immutable
+    `<name>-<version>.tar.gz`; `version is None` → the rolling `<name>.tar.gz`."""
+    fname = f"{name}-{version}.tar.gz" if version else f"{name}.tar.gz"
+    return f"https://github.com/{repo}/releases/download/{RELEASE_TAG}/{fname}"
 
 
 def _cache_dir(project_path: Path) -> Path:
     return paths.agents_dir(project_path)
+
+
+def cache_path(project_path: Path, name: str) -> Path:
+    """The install/deploy cache directory for a team (shared cache, D-3)."""
+    return _cache_dir(project_path) / name
+
+
+def cached_version(project_path: Path, name: str) -> str | None:
+    """The version recorded in the cached pack's `.meta.json`, if any.
+
+    Lets a pinned deploy reuse an already-installed `name@version` with no
+    second download (§3.4) — the resolver checks this before fetching."""
+    return _read_meta(project_path, name).get("version")
 
 
 def _all_registries(project_path: Path) -> list[str]:
@@ -143,20 +183,88 @@ def check_update(project_path: Path, name: str, repo: str | None = None) -> tupl
     return local, None
 
 
-def fetch(project_path: Path, name: str, repo: str | None = None) -> Path:
-    """Download an agent team from GitHub and install to project cache."""
+def _repo_for(project_path: Path, name: str) -> str | None:
+    """The first configured registry whose `registry.yaml` lists `name`.
+
+    Membership-based (not version-based) so version-less teams resolve too —
+    `_read_remote_version` returns None for them, which would otherwise hide
+    them from repo resolution."""
+    for r in _all_registries(project_path):
+        for pack in _list_remote_single(r):
+            if pack.get("name") == name:
+                return r
+    return None
+
+
+def fetch(project_path: Path, name: str, *, version: str | None = None,
+          repo: str | None = None) -> Path:
+    """Download an agent team from GitHub and install it to the project cache.
+
+    Resolution (#440 Phase 2):
+      - `version` given → download **only** the immutable per-team asset
+        `…/teams-latest/<name>-<version>.tar.gz`. A 404 is a **hard error**
+        (a pin must resolve to exactly that pin — never a silent fallback).
+      - `version` None → resolve the team's latest version from the registry
+        and fetch that per-team asset (rolling `<name>.tar.gz` for a
+        version-less team, D-5). A 404 here logs a warning and falls back to
+        the whole-repo `tarball/main` path, so a repo that hasn't published
+        assets yet still installs.
+
+    `version` is keyword-only and defaults to None, so existing callers are
+    unaffected (the only change at version=None is "per-team asset instead of
+    the repo tarball, with the repo tarball as a logged fallback")."""
+    pinned = version is not None
     if not repo:
-        registries = _all_registries(project_path)
-        for r in registries:
-            if _read_remote_version(name, r):
-                repo = r
-                break
+        repo = _repo_for(project_path, name)
         if not repo:
             raise RuntimeError(
                 f"Agent team '{name}' not found in any registry. "
-                f"Searched: {', '.join(registries)}"
+                f"Searched: {', '.join(_all_registries(project_path))}"
             )
 
+    # The concrete version to fetch. For an explicit pin it's `version`; for
+    # "latest" it's the registry's published version (None → version-less →
+    # rolling asset).
+    target = version if pinned else _read_remote_version(name, repo)
+    asset_url = _asset_url(repo, name, target)
+    try:
+        return _fetch_asset(project_path, repo, name, target, asset_url)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
+            raise RuntimeError(f"Failed to fetch '{name}' from {asset_url}: {e}") from e
+        if pinned:
+            raise RuntimeError(
+                f"Agent team '{name}@{version}' has no published asset at "
+                f"{asset_url}. A pinned version must exist — it is never "
+                "resolved to 'latest' or the repo tarball."
+            ) from e
+        log.warning(
+            "No release asset for '%s' at %s; falling back to the repo tarball "
+            "at main.", name, asset_url)
+    return _fetch_repo_tarball(project_path, name, repo)
+
+
+def _fetch_asset(project_path: Path, repo: str, name: str,
+                 version: str | None, url: str) -> Path:
+    """Download + install one per-team release asset. Returns the cache dir.
+
+    Token-authed via `_urlopen` (works against a private repo) — deliberately
+    NOT `fetch_from_url`, whose `pooled.get` is un-authenticated. The asset is a
+    single-team tarball, so it flows through the same hardened `_install_team_tar`
+    extraction we trust for URL installs. Propagates `httpx.HTTPStatusError` so
+    the caller can apply the pinned-vs-latest 404 policy."""
+    log.info("Fetching agent team '%s'%s from %s", name,
+             f"@{version}" if version else " (latest)", url)
+    resp = _urlopen(url, timeout=30)
+    tar = tarfile.open(fileobj=BytesIO(resp.content), mode="r:gz")
+    dest, _ = _install_team_tar(project_path, tar, source=url,
+                                source_meta=f"asset:{url}", name=name)
+    return dest
+
+
+def _fetch_repo_tarball(project_path: Path, name: str, repo: str) -> Path:
+    """Install a team from the whole-repo `tarball/main` (the legacy / fallback
+    path). Downloads the entire repo at main and extracts one `agents/<name>/`."""
     url = f"https://api.github.com/repos/{repo}/tarball/main"
     log.info(f"Fetching agent team '{name}' from {repo}")
 
