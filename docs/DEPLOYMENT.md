@@ -551,7 +551,18 @@ update in place. Or commit a `deployments/my-team.yaml` (`team: my-team`,
 published tarball? Use `team-url:` instead.
 
 **B — CI (GitHub Actions, always-fresh).** Cut a release (or push a `deploy-*`
-tag) and the Action deploys every active deployment. Wire your repo once:
+tag) and the Action deploys every active deployment.
+
+> **One command:** from your agent-teams repo root, `modastack deploy-init`
+> scaffolds all of this — it writes the standalone `deploy-agent-teams.yml`
+> (already PyPI-pinned to your installed modastack, with the inline-orphans
+> adaptation) + a `deployments/` skeleton for every team under `agents/`, then
+> **prints the exact `fly`/`gh` commands** for steps 3–4 below, with each team's
+> per-key secret list derived from its declared `${VAR}`s. `--fleet/--tenant/
+> --auth/--event-server` set the defaults; it's non-destructive (`--force` to
+> overwrite). The manual steps below are what it automates.
+
+Wire your repo once (or let `deploy-init` do 1–2 and print 3–4):
 1. Copy `.github/workflows/deploy-agent-teams.yml` + `deployments/`; set `fleet:`
    + `event_server:` in `defaults.yaml`. Two one-line adaptations for a repo with
    **no modastack source** (the recommended shape — see *Bring your own repo*
