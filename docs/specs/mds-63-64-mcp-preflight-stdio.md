@@ -80,6 +80,15 @@ one set of regression tests, one review.
 - Reworking HTTP/SSE probing — unaffected by both bugs.
 - Broader MCP config schema changes.
 
+> **Forward dependency (informational — no work here).** This PR is foundational plumbing for the
+> `kind: mcp` capability spoke ([#398](https://github.com/moda-labs/modastack/issues/398)), under
+> the reusable-tool-library umbrella ([#416](https://github.com/moda-labs/modastack/issues/416)).
+> #398 sequences *after* this lands and should **consume** what ships here, not re-derive it:
+> its "probe/validate on add" reuses MDS-63's hardened poll-until-settled probe, and MDS-64's
+> shared spawn-env helper (D-64a, option A) is the seed of #398's per-runtime MCP registration
+> adapter. Captured per reviewer note on the PR so the dependency isn't lost; nothing to build in
+> this PR.
+
 ---
 
 ## 3. Technical approach
@@ -164,7 +173,10 @@ for reviewers who prefer absolute paths baked into config over PATH normalizatio
   *(recommended)*; **(B)** which-resolve bare commands to absolute paths (Opt 2), in-memory at load
   vs. rewriting `agent.yaml`; **(C)** A **and** B (normalize PATH *and* which-resolve, belt-and-
   suspenders); **(D)** warn-only (Opt 3) and document the absolute-path workaround. *Recommendation: A,
-  plus the Opt 3 warning regardless.*
+  plus the Opt 3 warning regardless.* *Downstream note: option A (the shared spawn-env helper) is
+  also the seed of #398's per-runtime MCP registration adapter — making preflight-env == spawn-env
+  is the Claude-runtime registration path the multi-runtime adapter builds on. Reinforces A, per
+  the forward-dependency note above.*
 - **D-64b — user-bin dir set** (only if A/normalize chosen). Which dirs to prepend to the daemon
   `PATH`? Recommend `~/.local/bin` + `$XDG_BIN_HOME` (default `~/.local/bin`); consider
   `/opt/homebrew/bin`, `/usr/local/bin` for mac dev. *Recommendation: `~/.local/bin` (+
