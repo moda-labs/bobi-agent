@@ -507,3 +507,70 @@ def test_reinstall_keeps_uncontributed_project_dirs(tmp_path, monkeypatch):
     (proj_wf / "adhoc.yaml").write_text("name: adhoc\nsteps: []\n")
     _install_pack(team, proj, local_source=True)  # reinstall
     assert (proj_wf / "adhoc.yaml").exists()  # survived
+
+
+# --- versioned-tarball + setup/install compatibility (#440 ↔ #446/#451) ------
+
+
+def test_install_versioned_from_team_fetches_base_from_registry(tmp_path, monkeypatch):
+    """The end-to-end new-system path: `modastack install over@2.0.0` for a team
+    whose agent.yaml declares `from: core@1.0.0` composes by fetching the
+    *versioned base* from the registry — proving versioned tarballs (#440),
+    resolution (#446) and merge (#451) work together for install/setup.
+
+    Mirrors how setup's `fetch_into` lands the leaf overlay and install then
+    composes its base from the registry (the base isn't a local sibling)."""
+    from modastack.cli import _install_pack
+
+    proj = tmp_path
+    (proj / "agents").mkdir()
+
+    # A "published" versioned base, served by a stubbed registry.fetch into the
+    # shared cache (exactly what registry.fetch does for an immutable asset).
+    published_core = tmp_path / "published" / "core"
+    _write(published_core / "agent.yaml",
+           'version: "1.0.0"\nentry_point: director\n'
+           'services:\n  - {name: github, required: true}\n'
+           'build:\n  apt: [nodejs]\n')
+    _write(published_core / "tools" / "github.md", "gh")
+    _write(published_core / "roles" / "engineer" / "ROLE.md",
+           "# Engineer\nrun your review gate")
+
+    def fake_fetch(project_path, name, *, version=None, repo=None):
+        assert (name, version) == ("core", "1.0.0")  # versioned base, exact pin
+        dest = registry.cache_path(project_path, name)
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(published_core, dest)
+        (dest / ".meta.json").write_text('{"version": "1.0.0"}')
+        return dest
+
+    monkeypatch.setattr(registry, "fetch", fake_fetch)
+
+    # The fetched leaf overlay (as setup/install would land it), pinning the base.
+    over = tmp_path / "over"
+    _write(over / "agent.yaml",
+           'from: core@1.0.0\nversion: "2.0.0"\n'
+           'services:\n  - {name: linear, required: true}\n'
+           'build:\n  npm: [codex]\n')
+    _write(over / "roles" / "engineer" / "ROLE.md", "use /review (house)")
+    _write(over / "tools" / "linear.md", "linear")
+
+    monkeypatch.chdir(proj)
+    _install_pack(over, proj, local_source=False)
+
+    dest = proj / ".modastack"
+    cfg = yaml.safe_load((dest / "agent.yaml").read_text())
+    # Composed from the registry-fetched base + the overlay leaf.
+    assert {s["name"] for s in cfg["services"]} == {"github", "linear"}
+    assert cfg["build"]["apt"] == ["nodejs"] and cfg["build"]["npm"] == ["codex"]
+    assert "from" not in cfg and cfg["version"] == "2.0.0"
+    eng = (dest / "roles" / "engineer" / "ROLE.md").read_text()
+    assert "run your review gate" in eng and "use /review (house)" in eng
+    assert (dest / "tools" / "github.md").exists()   # from the fetched base
+    assert (dest / "tools" / "linear.md").exists()    # from the leaf
+    # The compose-lock records the resolved versioned chain (reproducibility).
+    import json
+    lock = json.loads((dest / "compose-lock.json").read_text())
+    assert [(c["ref"], c["version"]) for c in lock["chain"]] == \
+        [("core@1.0.0", "1.0.0"), (None, "2.0.0")]
