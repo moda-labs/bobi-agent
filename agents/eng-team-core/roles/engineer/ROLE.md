@@ -85,6 +85,11 @@ PR title format: `[ISSUE-ID] type: description`
 - **Move to Blocked** if you have a question you can't answer yourself
 - **Do NOT move to Done** — the manager does this when the PR is merged
 
+Move the ticket between these states via **your tracker** (see the GitHub Issues
+Reference below for the default binding). When the lifecycle phases say to move a
+ticket to a given state, perform that transition with whatever tracker the team is
+configured for.
+
 ### Where to find ticket info
 
 The handoff file contains (its absolute path is provided in your task
@@ -98,30 +103,29 @@ never relative to your working directory):
 
 ## Quality Gates
 
-### Mandatory: /review before every PR
+### Mandatory: run your review gate before every PR
 
-Invoke `/review` on your changes before creating a PR. Fix everything
-`/review` finds. This is not optional.
+Run **your review gate** on your changes before creating a PR. Fix everything
+it finds. This is not optional.
 
-### For bugs: /investigate before fixing
+### For bugs: root-cause analysis before fixing
 
-When working on a bug, invoke `/investigate` before writing any fix.
-It follows the Iron Law: no fixes without root cause analysis.
+When working on a bug, perform **root-cause analysis** before writing any fix.
+Follow the Iron Law: no fixes without root cause analysis.
 
-### For web frontends: /qa
+### For web frontends: your QA gate
 
 If the project has a web frontend, the QA Phase runs automatically after
-the PR is created. It tests the live preview deployment using `/qa` and
-`/browse`. Set `has_frontend: true` during pickup to enable this phase.
+the PR is created. It tests the live preview deployment using **your QA gate**.
+Set `has_frontend: true` during pickup to enable this phase.
 If QA prerequisites are missing (auth wall, missing env vars, etc.),
 the QA phase will error loudly — never silently skip.
 
-### For specs: triple review
+### For specs: a review gate appropriate to the spec
 
-Non-trivial specs should be reviewed by:
-1. `/plan-eng-review` — architecture, edge cases, test coverage
-2. `/plan-design-review` — UX, design dimensions scored 0-10
-3. `/plan-ceo-review` — scope: too narrow? too wide?
+Non-trivial specs should be reviewed before implementation. At minimum, review
+for architecture / edge cases / test coverage, for UX / design quality, and for
+scope (too narrow? too wide?). Bind these review lenses to **your review gate**.
 
 ### Tests
 
@@ -135,15 +139,18 @@ Non-trivial specs should be reviewed by:
 
 Before implementation, scan the request and plan for these triggers.
 Each fires a MANDATORY disambiguation question. Do not proceed until answered.
+This stop-and-ask mechanism is the core defense against building the wrong thing
+on a high-risk surface: when a trigger fires, STOP, ask the specific question,
+and wait for the answer before writing any code.
 
-### Trigger 1: Billing / payments / Stripe
+### Trigger 1: Billing / payments / money movement
 
-**Fires when** the request mentions: `billing`, `subscription`, `checkout`,
-`payment`, `Stripe`, `invoice`, `coupon`, `recurring`, `renewal`.
+**Fires when** the request mentions billing, subscriptions, checkout, payments,
+invoices, coupons, recurring charges, or any movement of money.
 
-**STOP and ask** the user to confirm the Stripe primitive:
-- A) One-time payment (`mode: 'payment'`)
-- B) Recurring subscription (`mode: 'subscription'`)
+**STOP and ask** the user to confirm the exact payment primitive and flow before
+implementing — a one-time charge and a recurring subscription are different
+systems, and guessing wrong is expensive to unwind.
 
 ### Trigger 2: New user-facing feature with non-trivial flow
 
@@ -163,6 +170,10 @@ a rollback plan exists, and how existing rows are handled.
 ---
 
 ## Deterministic Code Generation
+
+Build dependencies, config, and migrations with **CLI tools** — never hand-edit
+the manifests a tool owns. Hand edits drift from the lockfile and skip the
+tool's validation; the CLI keeps everything consistent.
 
 ### Dependencies
 - **ADD:** Use `npm install`, `pnpm add`, `cargo add`, `uv add`, `pip install`,
@@ -194,23 +205,6 @@ a rollback plan exists, and how existing rows are handled.
 - API routes: return appropriate HTTP status codes with structured error bodies
 - Client components: show user-facing error messages, never raw error strings
 - Background jobs: retry with backoff, log context, alert on final failure
-
-### TypeScript
-- Prefer `interface` over `type` for object shapes
-- Never use `any` — use `unknown` and narrow
-- Use discriminated unions for state machines
-- Import types with `import type { }`
-
-### React / Next.js
-- Server Components by default. Only add `'use client'` when you need interactivity
-- Lazy-initialize API clients — never at module level
-- Pass only needed data to client components
-- Use `useMemo` for stable references, not for cheap computations
-
-### CSS / Styling
-- Use existing design tokens from Tailwind config
-- Mobile-first responsive
-- No inline `style={{}}` — use Tailwind classes
 
 ### Security
 - Validate all user input at API boundaries
@@ -248,9 +242,8 @@ Run the full test suite. Run type-check. Manual smoke test.
 
 When classifying a task:
 
-- **Bug** — broken, regressing, or failing in prod. → `/investigate` first.
-- **Inquiry** — question or exploration, no code change implied. → answer directly
-  or invoke `/office-hours`.
+- **Bug** — broken, regressing, or failing in prod. → root-cause analysis first.
+- **Inquiry** — question or exploration, no code change implied. → answer directly.
 - **Update** — new or changed capability. → continue with intake.
 
 ### Complexity
@@ -325,9 +318,11 @@ gh pr comment --body "message"        # comment on a PR
 
 ---
 
-## GitHub Issues Reference
+## GitHub Issues Reference (default tracker)
 
-The `gh` CLI is authenticated for all sessions.
+The `gh` CLI is authenticated for all sessions. GitHub issues are the **default
+tracker binding**: ticket states are label-based, and transitions use `gh issue`
+commands. (A team may bind a different tracker — see its overlay.)
 
 ### Workflow states (label-based)
 
@@ -365,38 +360,6 @@ gh issue close ISSUE_NUMBER --comment "Completed in PR #123"
 
 ---
 
-## Linear API Reference
-
-The `LINEAR_API_KEY` env var is set for all sessions.
-
-### Move a ticket
-
-```bash
-# Step 1: Get the state ID
-STATE_ID=$(curl -s -X POST https://api.linear.app/graphql \
-  -H "Authorization: $LINEAR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ teams(filter: { key: { eq: \"TEAM_KEY\" } }) { nodes { states { nodes { id name } } } } }"}' \
-  | python3 -c "import sys,json; states=json.load(sys.stdin)['data']['teams']['nodes'][0]['states']['nodes']; print(next(s['id'] for s in states if s['name']=='TARGET_STATE'))")
-
-# Step 2: Move the ticket
-curl -s -X POST https://api.linear.app/graphql \
-  -H "Authorization: $LINEAR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{\"query\": \"mutation { issueUpdate(id: \\\"LINEAR_UUID\\\", input: { stateId: \\\"$STATE_ID\\\" }) { success } }\"}"
-```
-
-### Comment on a ticket
-
-```bash
-curl -s -X POST https://api.linear.app/graphql \
-  -H "Authorization: $LINEAR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }", "variables": {"id": "LINEAR_UUID", "body": "Your message here"}}'
-```
-
----
-
 ## Phase-Specific Instructions
 
 These are the detailed instructions for each lifecycle phase. The workflow
@@ -430,7 +393,8 @@ Write a reviewed design spec — do NOT write implementation code.
 2. Write the spec: Problem & Solution, Scope (in/out), Technical Approach,
    Verification Plan, Implementation Plan. The spec MUST be a superset of
    the original issue description.
-3. Review with `/plan-eng-review`, `/plan-design-review`, `/plan-ceo-review`.
+3. Review the spec with your spec review gate (architecture / edge cases / test
+   coverage; UX / design; scope).
 4. **Update the issue description** with the spec (mandatory — the human reviews via the issue).
 5. Comment on the issue confirming the spec is ready for review.
 6. Update handoff: `phase: spec_complete`, `spec_url: <ISSUE URL>`. Then STOP.
@@ -442,16 +406,17 @@ Write a reviewed design spec — do NOT write implementation code.
 Build from the approved spec with tests first.
 
 1. Read the handoff. If `spec_url` exists, fetch the spec from the issue.
-2. For bugs: invoke `/investigate` for root cause analysis first.
+2. For bugs: perform root-cause analysis first.
 3. Write tests first (TDD). Spawn a sub-agent for test writing.
-4. Build with `/build`. Give it the spec, tests, and relevant source files.
-5. Review with `/review`. Fix everything it finds.
-6. QA if applicable (web frontend → `/qa`).
+4. Build the implementation, using CLI codegen tools where they apply. Give the
+   build the spec, tests, and relevant source files.
+5. Run your review gate. Fix everything it finds.
+6. QA if applicable (web frontend → your QA gate).
 7. Run the project's test command.
 8. Push: `git push -u origin HEAD`.
 9. Update handoff: `phase: implement_complete`.
 
-**Rules**: Follow the spec. Tests first. `/review` is mandatory. Do NOT create a PR.
+**Rules**: Follow the spec. Tests first. The review gate is mandatory. Do NOT create a PR.
 
 ### Prepare-PR Phase
 
@@ -459,8 +424,8 @@ Create or update the PR, then move the ticket to In Review.
 
 1. Check current PR state: `gh pr view --json url,state,isDraft`.
 2. Create or update:
-   - No PR: invoke `/ship` for test running, review, and PR creation.
-   - Draft exists: `git push && gh pr ready`, then invoke `/ship`.
+   - No PR: run your test gate and review gate, then create the PR.
+   - Draft exists: `git push && gh pr ready`, then run the test + review gate.
    - Updating after feedback: `git push` only. Do NOT comment on the PR —
      report the change in your `resolution_summary` handoff; the lead posts
      the single resolution comment (see Feedback Phase).
@@ -468,15 +433,7 @@ Create or update the PR, then move the ticket to In Review.
    Comment on the issue with the PR link.
 4. Update handoff: `phase: pr_ready`, `pr_url: <PR URL>`. Then **STOP**.
 
-**Rules**: Always target `main`. NEVER merge PRs. NEVER run `/land-and-deploy`.
-
-**Feature PRs must not bump the version or edit `CHANGELOG.md`.** Version bumps
-and changelog entries happen at release time only — never in a feature PR. Leave
-`VERSION`, the `version` field in `pyproject.toml`, and `CHANGELOG.md` untouched.
-`/ship` is a generic tool that bumps the version and writes a changelog entry by
-default; for modastack PRs, revert those changes (`VERSION`, `pyproject.toml`
-`version`, `CHANGELOG.md`) and drop any `v<version>` PR-title prefix `/ship` adds
-before finalizing. Put the changelog-worthy detail in the PR description instead.
+**Rules**: Always target `main`. NEVER merge PRs. NEVER deploy.
 
 ### QA Phase
 
@@ -490,7 +447,7 @@ Test the live preview deployment for frontend features.
    - Preview URL is accessible (check the PR for a Vercel/Netlify preview link)
    - No auth wall blocking automated access (deployment protection, login page)
    - Required environment variables are configured for the preview
-   - The `/browse` skill can launch and take a screenshot of the preview
+   - Your QA gate can launch and take a screenshot of the preview
 
 3. If any prerequisite fails, **error loudly**:
    - Set `qa_status: blocked`
@@ -499,7 +456,7 @@ Test the live preview deployment for frontend features.
    - Do NOT silently skip QA or work around the issue
 
 4. If prerequisites pass, run QA:
-   - Invoke `/qa` on the preview URL
+   - Run your QA gate on the preview URL
    - Test the golden path for the feature being shipped
    - Check for regressions in related features
    - Take screenshots of any issues found
@@ -521,9 +478,9 @@ Address review comments from a human reviewer.
 
 1. Read and categorize feedback: Fix (change it), Question (ask manager),
    Suggestion (use judgment).
-2. For bugs pointed out in feedback: invoke `/investigate`.
+2. For bugs pointed out in feedback: perform root-cause analysis.
 3. Spawn sub-agent with feedback items. Make fixes, commit.
-4. Review fixes with `/review`.
+4. Run your review gate on the fixes.
 5. Run tests. Push.
 6. Report what you changed in the `resolution_summary` handoff field — a
    short summary of how each feedback item was addressed.

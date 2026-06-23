@@ -13,13 +13,16 @@ from pathlib import Path
 import pytest
 import yaml
 
+# The pristine, in-repo reference team. These constraints are generic (they
+# apply to any eng org), so they're validated against eng-team-core. The Moda
+# house bindings (codex as the adversarial reviewer, Linear) live in the private
+# moda-eng-team overlay and are validated there.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ENG_TEAM = REPO_ROOT / "agents" / "eng-team"
+ENG_TEAM = REPO_ROOT / "agents" / "eng-team-core"
 LEAD_PROMPT = ENG_TEAM / "roles" / "project_lead" / "ROLE.md"
 ENGINEER_PROMPT = ENG_TEAM / "roles" / "engineer" / "ROLE.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 ISSUE_LIFECYCLE = ENG_TEAM / "workflows" / "issue-lifecycle.yaml"
-CODEX_GUIDE = ENG_TEAM / "tools" / "codex.md"
 AGENT_YAML = ENG_TEAM / "agent.yaml"
 
 
@@ -156,32 +159,14 @@ class TestReleaseTimeOnlyVersionConvention:
     """Feature PRs must never bump the version or edit the changelog.
 
     Issue #325: version bumps and CHANGELOG.md entries are a release-time
-    concern only. The generic `/ship` tool bumps both by default, so the
-    engineer prompt must override that for modastack PRs, and the
-    contributor docs must state the convention. These tests fail if either
-    the prompt guard or the documented convention regresses.
+    concern only — modastack's own contributor convention, documented in
+    CLAUDE.md. These tests fail if the documented convention regresses.
+
+    The *engineer-prompt* side of this guard (telling the engineer to revert
+    `/ship`'s version/changelog bump) is Moda house policy and lives in the
+    private moda-eng-team overlay engineer role — it is validated there, not
+    against the pristine eng-team-core.
     """
-
-    def test_engineer_prompt_forbids_version_bump_in_pr(self):
-        text = ENGINEER_PROMPT.read_text().lower()
-        assert "must not bump the version" in text, (
-            "Engineer prompt must forbid bumping the version in feature PRs"
-        )
-
-    def test_engineer_prompt_forbids_changelog_edit_in_pr(self):
-        text = ENGINEER_PROMPT.read_text().lower()
-        assert "changelog.md" in text and "release time" in text, (
-            "Engineer prompt must say CHANGELOG.md changes happen at release time"
-        )
-
-    def test_engineer_prompt_overrides_ship_default(self):
-        """`/ship` bumps version + changelog by default; the prompt must
-        tell the engineer to revert those for modastack PRs."""
-        text = ENGINEER_PROMPT.read_text().lower()
-        assert "/ship" in text and "revert" in text, (
-            "Engineer prompt must tell the engineer to revert /ship's "
-            "version/changelog changes"
-        )
 
     def test_contributor_docs_state_convention(self):
         text = CLAUDE_MD.read_text().lower()
@@ -196,15 +181,15 @@ class TestReleaseTimeOnlyVersionConvention:
         )
 
 
-class TestCodexAdversarialReviewStep:
-    """The eng-team must wire the baked Codex CLI as an adversarial reviewer.
+class TestAdversarialReviewStep:
+    """eng-team-core must wire a tool-agnostic adversarial-review seam.
 
-    Issue #285 / MDS-47: the `codex` CLI is baked + preflighted in agent.yaml
-    but nothing uses it. A `plan_review` step in issue-lifecycle runs
-    `codex exec` on the just-written spec and captures the critique in the
-    handoff for the human approval gate, documented by tools/codex.md. These
-    tests fail if the step, the guide, or the CLI-first contract regresses —
-    or if someone reintroduces the retired `codex_exec` MCP shim (#403).
+    A `plan_review` step in issue-lifecycle runs the engineer's *adversarial
+    review gate* (a generic seam — the overlay binds it to a concrete tool like
+    Codex) on the just-written spec and captures the critique in the handoff for
+    the human approval gate. These tests fail if the generic step or its seam
+    wording regresses. The concrete Codex binding + tools/codex.md guide live in
+    the private moda-eng-team overlay and are validated there (#285).
     """
 
     def _steps(self):
@@ -213,7 +198,7 @@ class TestCodexAdversarialReviewStep:
 
     def test_plan_review_step_exists(self):
         assert "plan_review" in self._steps(), (
-            "issue-lifecycle.yaml must contain a plan_review step (#285)"
+            "issue-lifecycle.yaml must contain a plan_review step"
         )
 
     def test_plan_review_runs_after_spec_before_approval(self):
@@ -227,36 +212,28 @@ class TestCodexAdversarialReviewStep:
     def test_plan_review_captures_critique_in_handoff(self):
         step = self._steps()["plan_review"]
         required = step.get("handoff", {}).get("required", [])
-        assert "codex_critique" in required, (
-            "plan_review handoff must require codex_critique"
+        assert "review_critique" in required, (
+            "plan_review handoff must require review_critique"
         )
-        assert "codex_verdict" in required, (
-            "plan_review handoff must require codex_verdict"
+        assert "review_verdict" in required, (
+            "plan_review handoff must require review_verdict"
         )
 
-    def test_plan_review_invokes_codex_cli(self):
+    def test_plan_review_uses_generic_seam(self):
+        """Core stays tool-agnostic: the step delegates to the engineer's
+        'adversarial review gate' binding, never a hard-coded tool."""
         step = self._steps()["plan_review"]
-        assert "codex exec" in step["prompt"], (
-            "plan_review must instruct the agent to run `codex exec`"
+        assert "adversarial review gate" in step["prompt"], (
+            "plan_review must reference the generic adversarial review gate seam"
         )
-
-    def test_codex_guide_exists(self):
-        assert CODEX_GUIDE.exists(), "agents/eng-team/tools/codex.md must exist (#285)"
-
-    def test_codex_guide_documents_not_delegation(self):
-        text = CODEX_GUIDE.read_text().lower()
-        assert "not" in text and "delegation" in text, (
-            "codex.md must state the call is NOT agent delegation"
-        )
-
-    def test_codex_guide_has_exec_example(self):
-        assert "codex exec" in CODEX_GUIDE.read_text(), (
-            "codex.md must show a `codex exec` example"
+        assert "codex" not in step["prompt"].lower(), (
+            "core's plan_review must NOT name a concrete tool (Codex is an "
+            "overlay binding)"
         )
 
     def test_no_codex_connections_or_mcp_shim(self):
-        """Guards the out-of-scope items: the step must use the baked CLI,
-        never a `connections:` block or the retired codex_exec MCP shim."""
+        """CLI-first contract: core must never add a `connections:` block or
+        reference the retired codex_exec MCP shim (#403)."""
         agent_cfg = AGENT_YAML.read_text()
         assert "connections:" not in agent_cfg, (
             "agent.yaml must not add a connections: block (#285 CLI-first)"

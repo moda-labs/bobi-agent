@@ -10,6 +10,7 @@ Covers the acceptance criteria of both specs:
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -408,3 +409,62 @@ def test_deploy_resolve_team_dir_passthrough_no_from(project):
     src = _team(project, "solo", 'version: "1.0.0"\nentry_point: director\n')
     out = deploy.resolve_team_dir(project, "solo")
     assert out == src.resolve()  # unchanged when there's no `from:`
+
+
+# --- #452 acceptance: eng-team-core standalone + a synthetic outside-org overlay
+
+
+REPO = Path(__file__).resolve().parents[1]
+ENG_TEAM_CORE = REPO / "agents" / "eng-team-core"
+
+
+def test_eng_team_core_installs_standalone(tmp_path):
+    """eng-team-core composes on its own (no `from:`) — GitHub + Slack only,
+    generic tool-agnostic seams. Proves the pristine base is a usable team."""
+    proj = tmp_path
+    (proj / "agents").mkdir()
+    shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team-core")
+    chain = compose.resolve_chain(proj / "agents" / "eng-team-core", proj)
+    assert [l.dir.name for l in chain] == ["eng-team-core"]
+    dest = proj / ".modastack"
+    compose.compose(chain, dest)
+    cfg = yaml.safe_load((dest / "agent.yaml").read_text())
+    assert {s["name"] for s in cfg["services"]} == {"github", "slack"}  # no linear
+    assert {r["name"] for r in cfg["requires"]} == {"gh"}               # no gstack/codex
+    for role in ("director", "engineer", "project_lead"):
+        assert (dest / "roles" / role / "ROLE.md").exists()
+    # Tool-agnostic: core names no house tool in its engineer role.
+    eng = (dest / "roles" / "engineer" / "ROLE.md").read_text().lower()
+    assert "/review" not in eng and "linear" not in eng
+
+
+def test_synthetic_outside_org_overlay_composes(tmp_path):
+    """A third org reuses eng-team-core without forking: `from: eng-team-core`
+    + a thin overlay (no gstack, a Jira-flavored tracker note, Go house style).
+    Proves cross-org reuse is append-only (#452 §6)."""
+    proj = tmp_path
+    (proj / "agents").mkdir()
+    shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team-core")
+    acme = proj / "agents" / "acme-eng-team"
+    _write(acme / "agent.yaml",
+           'from: eng-team-core@1.0.0\nversion: "0.1.0"\n'
+           'services:\n  - {name: jira, required: true}\n'
+           'build:\n  npm: [some-linter]\n')
+    _write(acme / "roles" / "engineer" / "ROLE.md",
+           "## Acme house bindings\nUse Jira for tracking; Go/Rust house style.")
+    _write(acme / "tools" / "jira.md", "jira guide")
+    chain = compose.resolve_chain(acme, proj)
+    assert [l.dir.name for l in chain] == ["eng-team-core", "acme-eng-team"]
+    dest = proj / ".modastack"
+    compose.compose(chain, dest)
+    cfg = yaml.safe_load((dest / "agent.yaml").read_text())
+    # core services + the overlay's jira; core's generic build accreted the linter.
+    assert {s["name"] for s in cfg["services"]} == {"github", "slack", "jira"}
+    assert cfg["build"]["apt"] == ["nodejs", "npm", "jq"]      # inherited from core
+    assert cfg["build"]["npm"] == ["some-linter"]             # overlay delta
+    assert "from" not in cfg
+    # engineer role = core craft + acme house bindings appended.
+    eng = (dest / "roles" / "engineer" / "ROLE.md").read_text()
+    assert "Acme house bindings" in eng and "Jira" in eng
+    assert (dest / "tools" / "jira.md").exists()
+    assert (dest / "tools" / "github.md").exists()            # core tool inherited

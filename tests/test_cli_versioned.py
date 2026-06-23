@@ -23,8 +23,8 @@ def test_install_pins_version(tmp_path, monkeypatch):
     with runner.isolated_filesystem(temp_dir=tmp_path):
         # _resolve_agent_pack returns None → exits right after fetch; we only
         # care that the version was parsed and forwarded.
-        runner.invoke(main, ["install", "eng-team@1.1.0", "--non-interactive"])
-    assert calls == [("eng-team", "1.1.0")]
+        runner.invoke(main, ["install", "eng-team-core@1.1.0", "--non-interactive"])
+    assert calls == [("eng-team-core", "1.1.0")]
 
 
 def test_install_bare_name_is_latest(tmp_path, monkeypatch):
@@ -34,8 +34,8 @@ def test_install_bare_name_is_latest(tmp_path, monkeypatch):
                         calls.append((name, version)))
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        runner.invoke(main, ["install", "eng-team", "--non-interactive"])
-    assert calls == [("eng-team", None)]
+        runner.invoke(main, ["install", "eng-team-core", "--non-interactive"])
+    assert calls == [("eng-team-core", None)]
 
 
 def test_install_url_branch_does_not_split_on_at(tmp_path, monkeypatch):
@@ -66,9 +66,9 @@ def test_agents_update_pins_version(tmp_path, monkeypatch):
         AssertionError("a pin must not call check_update")))
     runner = CliRunner()
     with patch("modastack.cli._detect_project_root", return_value=tmp_path):
-        result = runner.invoke(main, ["agents", "update", "eng-team@1.1.0"])
-    assert calls == [("eng-team", "1.1.0")]
-    assert "Pinned eng-team to v1.1.0" in result.output
+        result = runner.invoke(main, ["agents", "update", "eng-team-core@1.1.0"])
+    assert calls == [("eng-team-core", "1.1.0")]
+    assert "Pinned eng-team-core to v1.1.0" in result.output
 
 
 def test_agents_update_bare_name_checks_latest(tmp_path, monkeypatch):
@@ -80,6 +80,6 @@ def test_agents_update_bare_name_checks_latest(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_read_local_version", lambda pp, name: "1.1.0")
     runner = CliRunner()
     with patch("modastack.cli._detect_project_root", return_value=tmp_path):
-        result = runner.invoke(main, ["agents", "update", "eng-team"])
-    assert calls == [("eng-team", None)]
+        result = runner.invoke(main, ["agents", "update", "eng-team-core"])
+    assert calls == [("eng-team-core", None)]
     assert "→ v1.1.0" in result.output

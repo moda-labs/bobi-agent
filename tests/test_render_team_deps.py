@@ -31,11 +31,13 @@ def _cleanup():
 
 
 def test_team_flavored_deployment_renders_hook():
-    # eng-team declares a build: spec → a team-deps path + a real rendered hook.
-    rel = _run("eng-team")
-    assert rel == "dist/team-deps/eng-team.sh"
+    # eng-team-core declares a build: spec (generic nodejs/npm/jq + the gh CLI)
+    # → a team-deps path + a real rendered hook. The house toolchain pins
+    # (gstack/codex/playwright) live in the private moda-eng-team overlay.
+    rel = _run("eng-team-core")
+    assert rel == "dist/team-deps/eng-team-core.sh"
     hook = (REPO / rel).read_text()
-    assert "verify gstack" in hook and "verify codex" in hook and "verify gh" in hook
+    assert "verify gh" in hook
 
 
 def test_generic_deployment_prints_nothing():

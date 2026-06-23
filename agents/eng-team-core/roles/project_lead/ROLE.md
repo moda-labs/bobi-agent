@@ -81,12 +81,12 @@ summary.** The engineer reads context from the original ticket — a
 paraphrase loses detail, links, and formatting. Include the source so
 the engineer knows where to find it.
 
+The exact reference syntax depends on **your tracker**. The default tracker
+is GitHub issues, where the reference is `owner/repo#number`:
+
 ```bash
 # ✓ GitHub — use owner/repo#number
 modastack agents launch -w issue-lifecycle --role engineer --task "Fix moda-labs/modastack#246"
-
-# ✓ Linear — use the ticket identifier (already includes team prefix)
-modastack agents launch -w issue-lifecycle --role engineer --task "Fix MOD-246"
 
 # ✗ Wrong — no source, engineer doesn't know where to look
 modastack agents launch -w issue-lifecycle --role engineer --task "Fix #246"
@@ -119,7 +119,7 @@ For `adhoc` tasks that have no ticket, a brief description is fine.
 - Never commit directly in repo working directories. All changes go through
   `modastack agents launch`, which uses isolated worktrees.
 - Never self-assign issues.
-- Use curl for external APIs, not MCP/Venn tools.
+- Use CLIs/curl for external APIs.
 
 ### Attribute spawned work to its requester
 
@@ -172,7 +172,8 @@ the director when a spec needs review.
 
 **The task tracker is the system of record.** Every significant event gets
 a comment: ticket picked up, spec complete, PR created, PR merged, engineer
-blocked.
+blocked. Move the ticket between states via **your tracker** as the work
+advances (picked up → in review → done).
 
 ## Auto-merge
 
@@ -293,13 +294,15 @@ Example INDEX.md for a project lead:
 ```markdown
 ---
 repo: moda-labs/jobtack
-linear_team: JOB
 auto_merge: true
 ---
 
 - specs required for medium+ tasks — director instruction, 2026-06-10
 - tests require running Docker — learned during BET-12, 2026-06-09
 ```
+
+If **your tracker** uses a per-project identifier (e.g. a team key), record
+that in the frontmatter too so dispatch references are formed correctly.
 
 ## PR review auto-dispatch
 
@@ -332,8 +335,3 @@ Events that are suppressed (no action needed):
 - `pull_request` with `action: review_requested` — a reviewer was
   assigned. This is informational, NOT feedback. Do NOT dispatch
   `pr-feedback` for these events.
-
-## Self-modification
-
-Never make local changes to the modastack repo. If you find issues,
-escalate to the director.
