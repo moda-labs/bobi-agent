@@ -1,7 +1,10 @@
 # Spec: Registry-based agent-team install + deploy — versioned per-team packages (`name@version`)
 
 - **Issue:** [#440](https://github.com/moda-labs/modastack/issues/440)
-- **Status:** Draft — awaiting human approval (spec-first; do not implement until approved)
+- **Status:** Approved by reviewer (`@underminedsk`, 2026-06-23, comment on PR #441
+  — "all the recommended options"); §4 design decisions D-1–D-6 now **locked**.
+  Implementation is staged/gated separately (§5.2) — Phase 1 first; merge of this
+  spec PR is a separate gate, not implied by the comment approval.
 - **Author:** eng-team (bot)
 - **Type:** feature (medium→large, operationally sensitive — reshapes how every
   agent team, *including our own director/lead fleet*, is packaged, versioned,
@@ -198,17 +201,14 @@ callers unaffected):
   `name` when `repo` is not given.
 
 **Cache & meta**
-- Cache key becomes **`name@version`**. Proposal: cache pinned versions at
-  `_cache_dir / name` **with `.meta.json` recording the pinned version** (the
-  installed-pack layout stays `<cache>/<name>/` so resolver/install code is
-  unchanged), AND keep an immutable content-addressed copy under
-  `_cache_dir / ".versions" / f"{name}@{version}"` so re-fetching a pinned
-  version is a local copy, never a network hit. Immutable versions cache
-  permanently; the rolling "latest" re-validates against `registry.yaml` on each
-  `agents update`.
-  - *(Open design point D-1 in §4 — the simplest version is "no `.versions`
-    sidecar, just overwrite `<cache>/<name>` and pin meta"; the sidecar buys
-    offline re-pin and multi-version coexistence. Recommend the sidecar.)*
+- Cache key becomes **`name@version`**. **Per the locked D-1=(a) (§4):** cache
+  pinned versions at `_cache_dir / name` **with `.meta.json` recording the pinned
+  version** (the installed-pack layout stays `<cache>/<name>/` so resolver/install
+  code is unchanged); re-fetching a pinned version overwrites `<cache>/<name>` and
+  re-pins meta. **No `.versions` sidecar** — the immutable upstream asset already
+  guarantees re-fetch determinism, so the sidecar's marginal offline / multi-version
+  benefit doesn't justify the extra copy logic. The rolling "latest" re-validates
+  against `registry.yaml` on each `agents update`.
 - `_write_meta` records `version` (the resolved concrete version, never
   `"unknown"` when pinned) and `source` (the asset URL).
 
@@ -233,7 +233,7 @@ resolver** so every consumer inherits it.
   last `@` (a bare `team:` keeps `team_version=None`).
 - **Add a new wrapper `resolve_team_dir(project_path, team)`** that does the
   `name@version` split + fetch, and **switch every current `local_package_dir`
-  caller to it** (D-2b, now strongly recommended after the review). Keep
+  caller to it** (locked: D-2=(b), see §4). Keep
   `local_package_dir` as the pure local-only primitive. Resolution order for
   `team: <name>[@<version>]`:
   1. `<version>` present → `registry.fetch(project_path, name, version=version)`
