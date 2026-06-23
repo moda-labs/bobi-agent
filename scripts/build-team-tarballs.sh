@@ -50,6 +50,10 @@ OUT_ABS="$(cd "$OUT" && pwd)"
 
 for dir in "${DIRS[@]}"; do
   [ -f "$dir/agent.yaml" ] || { echo "Skipping '$dir' (no agent.yaml)" >&2; continue; }
+  # Reject a path-based `from:` before packaging (#446 §7.1) — a path override
+  # is local-only and would arrive broken. Hard-fails the build (unlike the
+  # version helper below, whose exit code is intentionally swallowed).
+  python3 "$REPO_ROOT/scripts/check-publishable.py" "$dir"
   name="$(basename "$dir")"
   parent="$(cd "$(dirname "$dir")" && pwd)"
   # Reproducible-ish: sorted entries, normalized ownership. (GNU tar flags; the

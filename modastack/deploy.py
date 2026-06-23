@@ -364,13 +364,55 @@ def local_package_dir(base: Path, team: str) -> Path:
 
 
 def resolve_team_dir(project_path: Path, team: str) -> Path:
-    """Resolve a deploy `team:` ref (optionally `name@version`) to a package dir.
+    """Resolve a deploy `team:` ref to a **flat, ready-to-ship** package dir.
 
     The single seam every deploy consumer routes through (D-2) — secret-prune
-    scan, deps-render, deps-hash, AND the ssh-push at the `deploy()` body — so a
-    pinned team lands the right package at all of them. After resolution the
-    package is on disk, so the existing local-team build/prune/push path runs
-    unchanged. Resolution order:
+    scan, deps-render, deps-hash, AND the ssh-push — so they all see the same
+    package. A team that declares `from:` is **composed (flattened) here** (#446/
+    #451): the base is resolved on the host (which has registry access), the
+    chain is merged into a staging dir with no `from:`, and every downstream
+    consumer sees the merged build/secrets. The pushed tarball is already flat,
+    so the instance never resolves a chain at first boot.
+    """
+    src = _resolve_team_package(project_path, team)
+    return _flatten_if_chained(project_path, src)
+
+
+def _flatten_if_chained(project_path: Path, team_dir: Path) -> Path:
+    """Compose a `from:` chain into a flat staging dir; pass through otherwise.
+
+    A team with no `from:` is returned unchanged (today's behavior, byte-for-byte).
+    Composition is deterministic, so the repeated `resolve_team_dir` calls across
+    one deploy each produce the same staged image."""
+    from modastack import compose, paths
+    try:
+        has_from = bool((compose._read_agent_yaml(team_dir)).get("from"))
+    except compose.ComposeError:
+        return team_dir
+    if not has_from:
+        return team_dir
+    chain = compose.resolve_chain(team_dir, project_path)
+    staged = paths.modastack_dir(project_path) / "build" / f"composed-{team_dir.name}"
+    if staged.exists():
+        shutil.rmtree(staged)
+    compose.compose(chain, staged)
+    # Preserve the leaf's directory name so the app/tarball naming is unchanged.
+    cfg = compose._read_agent_yaml(staged)
+    cfg.setdefault("agent", team_dir.name)
+    (staged / "agent.yaml").write_text(
+        yaml.dump(cfg, default_flow_style=False, sort_keys=False))
+    final = staged.parent / team_dir.name
+    if final.exists():
+        shutil.rmtree(final)
+    staged.rename(final)
+    return final
+
+
+def _resolve_team_package(project_path: Path, team: str) -> Path:
+    """Resolve a deploy `team:` ref (optionally `name@version`) to a package dir.
+
+    After resolution the package is on disk, so the existing local-team
+    build/prune/push path runs unchanged. Resolution order:
 
       1. explicit `@version` → fetch the immutable per-team asset into the
          **shared** install/deploy cache (D-3). A pin **never** falls back to a

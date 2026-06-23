@@ -443,45 +443,96 @@ def start(foreground, fresh, subscribe):
 
 
 def _install_pack(pack_dir: Path, project_path: Path,
-                  local_source: bool = True) -> None:
-    """Copy pack contents into .modastack/ for runtime use.
+                  local_source: bool = True, *, pinned: bool = False) -> None:
+    """Compose the pack's `from:` chain into .modastack/ for runtime use.
 
     The installed copy is a frozen runtime image: install regenerates it
     verbatim from the pack source every time, including agent.yaml.
     Machine- and project-specific variance enters through ${VAR}
     references resolved from .modastack/.env, never by editing the
     installed copy.
+
+    A team may declare `from: <base-team>`; compose then walks the chain
+    (base → … → leaf) and merges the layers into one flat image (#446/#451).
+    A team with no `from:` composes to a single-layer image identical in
+    content to the team itself — the common case is unchanged. ``pinned``
+    resolves the chain registry-only at locked versions (CI/deploy).
     """
     import shutil
-    import yaml as _yaml
+
+    from modastack import compose as _compose
 
     dest = paths.modastack_dir(project_path)
     dest.mkdir(parents=True, exist_ok=True)
 
+    # Clear the previously frozen surfaces so a re-install (or a chain that no
+    # longer contributes a surface) never leaves stale files behind.
     for subdir in ["roles", "tools", "workflows", "monitors", "context"]:
-        src = pack_dir / subdir
-        if src.is_dir():
-            dst = dest / subdir
-            if dst.exists():
-                shutil.rmtree(dst)
-            shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
+        d = dest / subdir
+        if d.exists():
+            shutil.rmtree(d)
 
-    _seed_workspace(pack_dir, project_path)
+    locked = _read_compose_lock(dest) if pinned else None
+    chain = _compose.resolve_chain(pack_dir, project_path, pinned=pinned,
+                                   locked=locked)
+    prov = _compose.compose(chain, dest)
 
-    # Copy agent.md if present
-    agent_md = pack_dir / "agent.md"
-    if agent_md.exists():
-        shutil.copy2(agent_md, dest / "agent.md")
+    # Seed workspace from every layer, base → leaf (first-writer-wins), so a base
+    # team's templates seed unless the overlay supplies its own.
+    for layer in chain:
+        _seed_workspace(layer.dir, project_path)
 
-    # agent.yaml is written verbatim from the pack — no merge with any
-    # existing installed copy, so reinstall is idempotent and clean.
-    pack_yaml = pack_dir / "agent.yaml"
-    cfg = _yaml.safe_load(pack_yaml.read_text()) if pack_yaml.exists() else {}
+    # The leaf's directory name is the installed agent name (the team a user
+    # named on the CLI), regardless of how deep its `from:` chain runs.
+    cfg = _read_yaml(dest / "agent.yaml")
     cfg.setdefault("agent", pack_dir.name)
-    (dest / "agent.yaml").write_text(
-        _yaml.dump(cfg, default_flow_style=False, sort_keys=False))
+    _write_yaml(dest / "agent.yaml", cfg)
 
+    _write_compose_lock(dest, chain, prov)
     _write_install_manifest(dest, pack_dir, local_source)
+
+
+def _read_yaml(path: Path) -> dict:
+    import yaml as _yaml
+    if not path.exists():
+        return {}
+    return _yaml.safe_load(path.read_text()) or {}
+
+
+def _write_yaml(path: Path, data: dict) -> None:
+    import yaml as _yaml
+    path.write_text(_yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+
+def _read_compose_lock(dest: Path) -> dict[str, str]:
+    """The {team_name: version} map recorded by the last compose, used by
+    `install --pinned` to pin otherwise-floating `latest` refs reproducibly."""
+    import json as _json
+    f = dest / "compose-lock.json"
+    if not f.exists():
+        return {}
+    try:
+        data = _json.loads(f.read_text())
+    except (OSError, ValueError):
+        return {}
+    locked = {}
+    for layer in data.get("chain", []):
+        ref, ver = layer.get("ref"), layer.get("version")
+        if ref and ver:
+            name = ref.split("@", 1)[0]
+            locked[name] = ver
+    return locked
+
+
+def _write_compose_lock(dest: Path, chain, prov) -> None:
+    """Record the resolved `from:` chain + provenance so a deploy/outside-org
+    install is reproducible and `doctor` can flag a drifted local sibling."""
+    import json as _json
+    (dest / "compose-lock.json").write_text(_json.dumps({
+        "chain": prov.chain,
+        "provenance": prov.items,
+        "warnings": prov.warnings,
+    }, indent=1))
 
 
 def _seed_workspace(pack_dir: Path, project_path: Path) -> None:
@@ -548,7 +599,7 @@ def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
     rewrites it each run so switching paths doesn't leave stale entries.
     """
     entries = [".env", ".gitignore", "sessions/", "state/", "agents/",
-               "install-manifest.json"]
+               "install-manifest.json", "compose-lock.json"]
     if local_source:
         entries += ["roles/", "tools/", "workflows/", "monitors/", "context/",
                     "agent.md", "agent.yaml"]
@@ -594,7 +645,11 @@ def login_bootstrap(channel, timeout):
 @click.option("--non-interactive", is_flag=True,
               help="Skip prompts; read secrets from the environment. "
                    "Suitable for container entrypoints and CI.")
-def install(pack, non_interactive):
+@click.option("--pinned", is_flag=True,
+              help="Resolve any `from:` base teams registry-only at locked "
+                   "versions (ignore local sibling checkouts). For "
+                   "reproducible CI/deploy installs.")
+def install(pack, non_interactive, pinned):
     """Install an agent team into the current project.
 
     PACK is a local directory path, a local `.tar.gz` archive, a public
@@ -675,7 +730,14 @@ def install(pack, non_interactive):
         and not pack_dir.is_relative_to(dot_moda)
     )
 
-    _install_pack(pack_dir, project_path, local_source)
+    try:
+        _install_pack(pack_dir, project_path, local_source, pinned=pinned)
+    except Exception as e:
+        from modastack.compose import ComposeError
+        if isinstance(e, ComposeError):
+            click.echo(f"\n{e}", err=True)
+            raise SystemExit(1)
+        raise
     _write_install_gitignore(project_path, local_source)
 
     agent_name = pack_dir.name
