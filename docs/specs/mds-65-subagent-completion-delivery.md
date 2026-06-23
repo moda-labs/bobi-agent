@@ -4,7 +4,8 @@
 **Type:** Framework fix (modastack runtime). Medium+, multi-file.
 **Files:** `modastack/subagent.py`, `modastack/events/subscriptions.py`,
 `modastack/cli.py`, `modastack/workflow/orchestrator.py`, `modastack/sdk.py`,
-plus a new reconciler module + tests.
+`modastack/session.py` (re-import only), plus new modules `modastack/transient.py`
+and a reconciler + tests.
 **Observed on:** modastack 0.28.0 (current latest), gtm-team deployment.
 **Baseline:** reconciled against `main` @ `d36fbd6` (post-#444). See §1.1.
 
@@ -51,8 +52,23 @@ double-fix it with a second bespoke retry loop in the spawn path. Instead a
 transient `529` in a spawned sub-agent becomes an **honest `failed`** (RC#2 fix
 below) that is **delivered** to the launcher (RC#1) — and the launcher is now
 itself 529-resilient (#444), so re-dispatch happens at the orchestration layer,
-not via duplicated retry logic. If a spawn-side classifier is ever wanted, it
-reuses #444's `TRANSIENT_API_STATUSES` rather than a new string match.
+not via duplicated retry logic.
+
+**Single-source the transient classifier (reviewer recommendation, @underminedsk
+on #445).** #444 introduced the canonical "what counts as transient" set
+(`TRANSIENT_API_STATUSES`) and the classifier `Session._is_transient_turn_error()`
+inside `modastack/session.py` — but the classifier is today a `Session` *method*
+coupled to `self._last_api_error_status` / `self._last_response`, so the
+spawn/workflow path cannot reuse it without importing the persistent-session
+class or re-deriving a second copy. MDS-65 therefore **lifts the shared
+definitions into a small `modastack/transient.py` helper** (the status set + a
+pure `is_transient_api_error(status, text="")` function + the `TURN_RETRY_BASE` /
+`TURN_RETRY_MAX_ATTEMPTS` budget constants), and has `session.py` re-import them
+(behaviour-preserving — `Session._is_transient_turn_error()` becomes a thin
+delegate). This is a pure extraction, **not** a second retry loop: it gives the
+spawn/executor path (RC#2 honest classification, and any future orchestration-layer
+re-dispatch decision) and the persistent-session path **one** definition of
+"transient" and one retry budget instead of two divergent copies. See §4.3.
 
 **What MDS-65 keeps (untouched by #444, all re-verified against `d36fbd6`):**
 honest terminal status (RC#2), lifecycle subscription (RC#1), durable/reconcilable
@@ -158,6 +174,12 @@ missing subscription are all in the runtime and cannot be reached from topology.
 ## 3. Scope
 
 ### In scope
+- **New module `modastack/transient.py`**: lift #444's `TRANSIENT_API_STATUSES`,
+  a pure `is_transient_api_error(status, text="")` classifier, and the
+  `TURN_RETRY_BASE` / `TURN_RETRY_MAX_ATTEMPTS` budget constants into one shared
+  home; have `session.py` re-import them (behaviour-preserving). Single-sources
+  the definition of "transient" across the persistent-session and spawn/workflow
+  paths (reviewer recommendation; §1.1, §4.3).
 - `subscriptions.py`: add `lifecycle_subscription_keys()`.
 - `cli.py`: wire lifecycle keys into the entry-point subscribe list.
 - `subagent.py`: honest terminal status in `_run_agent_supervised`; durable
@@ -191,8 +213,13 @@ missing subscription are all in the runtime and cannot be reached from topology.
   inactive. *Alternative:* reuse `done`/`error` and add an orthogonal
   `outcome` field. Recommendation: the explicit vocabulary — status honesty is
   the whole point of #2.
-  (~~D2 — transient-5xx retry budget~~ — **removed**; transient-529 retry is now
-  owned by #444 at the persistent-session layer. See §1.1.)
+  (~~D2 — transient-5xx retry budget~~ — **resolved, no longer open.** No
+  spawn-side retry loop (transient-529 *retry* is owned by #444 at the
+  persistent-session layer). Per the reviewer (@underminedsk, #445), the residual
+  concern — two divergent copies of "what is transient" / the retry budget — is
+  resolved by lifting #444's classifier + budget into the shared
+  `modastack/transient.py` (in scope above; §4.3), not by adding a second retry
+  loop. See §1.1.)
 - **D2 — reconciler trigger.** Recommended: event-driven sweep on manager wake +
   a bounded grace period past each run's declared `timeout`
   (`PHASE_TIMEOUT` / workflow step `timeout` / `spawn` timeout), **not** a
@@ -271,7 +298,7 @@ after a failure. Track the workflow outcome and emit `session.completed` only on
 success, `session.failed` (with `error`) on the failure path — carrying
 `requested_by` from scope (`ctx.scopes.get("requested_by")`).
 
-### 4.3 Transient-5xx retry — REMOVED (owned by #444)
+### 4.3 Shared transient classifier — no spawn-side retry (owned by #444)
 
 Originally MDS-65 proposed retrying a transient `529`/`5xx` error `ResultMessage`
 in the supervised spawn loop. **#444 now owns transient-529 survival/retry** at
@@ -282,9 +309,52 @@ duplicate that with a second bespoke retry loop in `subagent.py`.
 Instead, a transient `529` in a spawned sub-agent is handled by the rest of this
 spec: §4.2 records it **honestly as `failed`** (no `done`-on-error), and §4.1
 **delivers** that `failed` to the launcher, which is itself 529-resilient via #444
-and can re-dispatch at the orchestration layer. Should a spawn-side transient
-classifier ever be wanted, it must reuse #444's `TRANSIENT_API_STATUSES` /
-`_is_transient_turn_error` rather than a new string-match set.
+and can re-dispatch at the orchestration layer.
+
+**What MDS-65 *does* do here (reviewer recommendation, @underminedsk on #445):**
+single-source the classifier so the two paths never drift. Extract a small
+`modastack/transient.py`:
+
+```python
+# modastack/transient.py
+TURN_RETRY_BASE = 2.0
+TURN_RETRY_MAX_ATTEMPTS = 2
+
+# overload, rate limit, gateway/timeout 5xx — anything else (4xx) is a real error.
+TRANSIENT_API_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+
+_TRANSIENT_TEXT = ("overloaded", "rate limit", "rate_limit", "529",
+                   "503", "502", "504", "timed out", "timeout")
+
+def is_transient_api_error(status: int | None, text: str = "") -> bool:
+    """Status-first, text-sniff fallback. Pure — no session state."""
+    if status in TRANSIENT_API_STATUSES:
+        return True
+    if status is not None:
+        return False  # a concrete non-transient status (e.g. 400) — don't retry
+    t = (text or "").lower()
+    return any(s in t for s in _TRANSIENT_TEXT)
+```
+
+`session.py` then re-imports these (no behaviour change): the constants come from
+`transient.py`, and `Session._is_transient_turn_error()` becomes a thin delegate
+—
+
+```python
+from modastack.transient import (
+    TRANSIENT_API_STATUSES, TURN_RETRY_BASE, TURN_RETRY_MAX_ATTEMPTS,
+    is_transient_api_error,
+)
+
+def _is_transient_turn_error(self) -> bool:
+    return is_transient_api_error(self._last_api_error_status, self._last_response or "")
+```
+
+This is a **pure extraction**, covered by the existing `tests/test_session.py`
+(unchanged behaviour) plus a small unit test for the free function. The spawn
+executor's honest-status logic (§4.2) and any orchestration-layer re-dispatch
+decision now consult the *same* `is_transient_api_error` / budget — one
+definition of "transient", not two.
 
 ### 4.4 Durable, reconcilable terminal status (RC #3)
 
@@ -393,11 +463,15 @@ the full spawn → complete → deliver loop.
 Each phase is independently reviewable and lands behind passing tests. Order is
 chosen so honesty/durability land before the subscription that exposes them.
 
-- **Phase 0 — terminal vocabulary + durable persistence (RC#2/#3 core).**
-  Write failing tests. Add the terminal-status vocabulary (D1) + `_persist_terminal`
-  helper; make `_run_agent_supervised` honest (a transient 529 → honest `failed`,
-  no spawn-side retry — §4.3); make the orchestrator `finally` honest. Keep `done`
-  readable for old records.
+- **Phase 0 — shared transient classifier + terminal vocabulary + durable
+  persistence (RC#2/#3 core).** First, the behaviour-preserving extraction:
+  create `modastack/transient.py` (§4.3) and re-point `session.py` at it
+  (`tests/test_session.py` must stay green; add a unit test for the free
+  `is_transient_api_error`). Then write the RC#2/#3 failing tests; add the
+  terminal-status vocabulary (D1) + `_persist_terminal` helper; make
+  `_run_agent_supervised` honest (a transient 529 → honest `failed`, no spawn-side
+  retry — §4.3); make the orchestrator `finally` honest. Keep `done` readable for
+  old records.
 - **Phase 1 — thread `requested_by` (RC#4).** Failing tests → add the parameter
   to `run_phase_blocking` + orchestrator scope plumbing.
 - **Phase 2 — subscribe the entry point (RC#1).** Failing test →
