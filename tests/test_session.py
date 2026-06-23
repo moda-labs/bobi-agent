@@ -9,6 +9,7 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
+from claude_agent_sdk import ResultMessage
 
 from modastack.inbox import Message
 from modastack.session import Session
@@ -256,3 +257,142 @@ class TestSubscriptionResilience:
         session.stop()
         fake_sub.stop.assert_called_once()
         assert session._subscription is None
+
+
+def _result(is_error, api_error_status=None, session_id="sess-1"):
+    """A minimal ResultMessage as the SDK emits at the end of a turn."""
+    return ResultMessage(
+        subtype="success",
+        duration_ms=10,
+        duration_api_ms=5,
+        is_error=is_error,
+        num_turns=1,
+        session_id=session_id,
+        total_cost_usd=0.0,
+        usage={},
+        result="API Error: 529 Overloaded" if is_error else "ok",
+        api_error_status=api_error_status,
+    )
+
+
+def _streaming_client(session, batches):
+    """Fake SDK client: receive_response() yields one batch of messages per
+    turn; query() records the prompts it was asked to send.
+
+    A wedged session is one that silently stops calling query() — so the
+    recorded prompts are the proof the model is (or isn't) still being asked.
+    """
+
+    class FakeClient:
+        def __init__(self):
+            self.queries: list[str] = []
+            self._batches = [list(b) for b in batches]
+
+        async def query(self, text):
+            self.queries.append(text)
+
+        async def receive_response(self):
+            batch = self._batches.pop(0) if self._batches else []
+            for m in batch:
+                yield m
+
+    c = FakeClient()
+    session._client = c
+    return c
+
+
+class TestTurnErrorRecovery:
+    """Regression for the prod incident: a single transient ``529 Overloaded``
+    turn error permanently wedged the live director session.
+
+    ``_drain_turn`` set state to terminal ``error`` on ``ResultMessage.is_error``;
+    nothing ever cleared it, so ``_process_message`` silently dropped every
+    subsequent event (``state in ("stopped", "error")``) and the agent went
+    deaf until a process restart. A transient turn error must instead leave
+    the session ready for the next event.
+    """
+
+    @pytest.mark.asyncio
+    async def test_turn_error_is_not_terminal(self, session, monkeypatch):
+        """After a 529 turn, the session must be ready — not in ``error``."""
+        monkeypatch.setattr("modastack.session.save_session_id", lambda *a, **k: None)
+        session._set_state("working")
+        _streaming_client(session, [[_result(is_error=True, api_error_status=529)]])
+
+        await session._drain_turn()
+
+        assert session.detect_state() == "waiting_input"
+        assert session.detect_state() != "error"
+
+    @pytest.mark.asyncio
+    async def test_529_does_not_wedge_subsequent_messages(self, session, monkeypatch):
+        """The core wedge: a 529 on one turn must not silence later events."""
+        monkeypatch.setattr("modastack.session.save_session_id", lambda *a, **k: None)
+        # Isolate recovery from retry so this asserts the wedge fix specifically.
+        monkeypatch.setattr("modastack.session.TURN_RETRY_MAX_ATTEMPTS", 0)
+        session._set_state("waiting_input")
+
+        # Turn 1 — Anthropic 529s.
+        c1 = _streaming_client(session, [[_result(is_error=True, api_error_status=529)]])
+        await session._process_message(_make_msg(wait=True))
+        assert c1.queries == ["hello"]  # the turn was attempted
+
+        # Turn 2 — a fresh event must reach the model, not be dropped.
+        c2 = _streaming_client(session, [[_result(is_error=False)]])
+        await session._process_message(_make_msg(wait=True))
+        assert c2.queries == ["hello"], "session went deaf after a 529 (wedged)"
+        assert session.detect_state() == "waiting_input"
+
+    @pytest.mark.asyncio
+    async def test_transient_error_is_retried_in_band(self, session, monkeypatch):
+        """A transient 529 should self-heal within the turn via bounded retry,
+        so the triggering event is answered rather than dropped."""
+        monkeypatch.setattr("modastack.session.save_session_id", lambda *a, **k: None)
+        monkeypatch.setattr("modastack.session.TURN_RETRY_BASE", 0.0)
+        monkeypatch.setattr("modastack.session.TURN_RETRY_MAX_ATTEMPTS", 3)
+        session._set_state("waiting_input")
+
+        # First turn 529s, the retry succeeds.
+        c = _streaming_client(
+            session,
+            [
+                [_result(is_error=True, api_error_status=529)],
+                [_result(is_error=False)],
+            ],
+        )
+        await session._process_message(_make_msg(wait=True))
+
+        assert c.queries == ["hello", "hello"], "transient error was not retried"
+        assert session.detect_state() == "waiting_input"
+        assert not session._last_is_error
+
+    @pytest.mark.asyncio
+    async def test_nontransient_error_is_not_retried(self, session, monkeypatch):
+        """A non-transient error (e.g. 400) must recover but NOT retry —
+        re-sending the same bad turn would just fail again."""
+        monkeypatch.setattr("modastack.session.save_session_id", lambda *a, **k: None)
+        monkeypatch.setattr("modastack.session.TURN_RETRY_BASE", 0.0)
+        monkeypatch.setattr("modastack.session.TURN_RETRY_MAX_ATTEMPTS", 3)
+        session._set_state("waiting_input")
+
+        c = _streaming_client(session, [[_result(is_error=True, api_error_status=400)]])
+        await session._process_message(_make_msg(wait=True))
+
+        assert c.queries == ["hello"], "non-transient error should not be retried"
+        assert session.detect_state() == "waiting_input"  # still recovered
+
+    @pytest.mark.asyncio
+    async def test_dropped_message_stops_status_indicators(self, session, monkeypatch):
+        """A message dropped because the session is genuinely stopped/error must
+        still clear any Slack 'thinking…' refresh loop, which is otherwise only
+        cleared at the end of a turn that never runs."""
+        called = {"n": 0}
+        monkeypatch.setattr(
+            "modastack.events.channels.stop_all_refresh_loops",
+            lambda: called.__setitem__("n", called["n"] + 1),
+        )
+        session._set_state("error")
+
+        await session._process_message(_make_msg(wait=True))
+
+        assert called["n"] >= 1, "status indicator was not cleared on a dropped message"

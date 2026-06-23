@@ -64,6 +64,19 @@ def _context_fill_tokens(usage: dict | None) -> int:
 SUBSCRIPTION_RETRY_BASE = 2.0
 SUBSCRIPTION_RETRY_MAX = 60.0
 
+# In-band retry for transient turn-level API errors (e.g. 529 Overloaded, rate
+# limits). A transient error is scoped to a single turn — the SDK client stays
+# connected — so we re-issue the same query with capped exponential backoff
+# before giving up. This must never leave the session terminally wedged: see
+# _drain_turn / _process_message. Retries are bounded so a genuinely failing
+# turn surfaces its error to the caller instead of looping forever.
+TURN_RETRY_BASE = 2.0
+TURN_RETRY_MAX_ATTEMPTS = 2
+
+# HTTP statuses worth retrying: overload, rate limit, gateway/timeout 5xx.
+# Anything else (4xx like 400/401/403) is a real error — recover but don't retry.
+TRANSIENT_API_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+
 
 class Session:
     """A Claude Code session with an inbox for receiving messages."""
@@ -108,6 +121,7 @@ class Session:
         self._state = "stopped"
         self._last_response = ""
         self._last_is_error = False
+        self._last_api_error_status: int | None = None
         self._total_cost_usd = 0.0
         self._total_duration_ms = 0
         self._total_turns = 0
@@ -130,6 +144,37 @@ class Session:
         self._state = state
         if state in ("waiting_input", "stopped", "error") and self._input_ready:
             self._input_ready.set()
+
+    def _is_transient_turn_error(self) -> bool:
+        """Whether the last turn's error is worth retrying.
+
+        Prefers the SDK-reported ``api_error_status`` (e.g. 529); falls back to
+        sniffing the response text for overload/rate-limit/timeout phrasing when
+        no status was surfaced.
+        """
+        if self._last_api_error_status in TRANSIENT_API_STATUSES:
+            return True
+        if self._last_api_error_status is not None:
+            return False  # a concrete non-transient status (e.g. 400) — don't retry
+        text = (self._last_response or "").lower()
+        return any(
+            s in text
+            for s in ("overloaded", "rate limit", "rate_limit", "529",
+                      "503", "502", "504", "timed out", "timeout")
+        )
+
+    def _stop_status_indicators(self) -> None:
+        """Clear any Slack "is thinking…" refresh loops this manager started.
+
+        Normally cleared at the end of a turn (see ``_drain_turn``), but a
+        message dropped before it runs a turn (session stopped/error/not ready)
+        would otherwise leave the indicator refreshing itself forever.
+        """
+        try:
+            from modastack.events.channels import stop_all_refresh_loops
+            stop_all_refresh_loops()
+        except Exception:
+            pass
 
     # -----------------------------------------------------------------
     # Context rotation (Steps 1, 4 — #273)
@@ -322,10 +367,30 @@ class Session:
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
                         )
+                    self._last_api_error_status = getattr(
+                        msg, "api_error_status", None
+                    )
                     if msg.is_error:
-                        self._set_state("error")
-                        log.error(f"Session '{self.name}' error: {self._last_response[:200]}")
-                        registry.update(self.name, status="error", session_id=msg.session_id)
+                        # A turn-level API error (e.g. 529 Overloaded, rate
+                        # limit) is transient and scoped to this turn — the SDK
+                        # client stays connected. It must NOT drop the session
+                        # into the terminal "error" state: _process_message
+                        # silently rejects every future message while the state
+                        # is "error" and is_alive() reports the session dead, so
+                        # a single 529 would deafen the agent until a process
+                        # restart (#443). Surface the error but return to ready so the
+                        # next event is served (the caller may also retry — see
+                        # _process_message).
+                        log.error(
+                            "Session '%s' turn error (api_status=%s): %s",
+                            self.name,
+                            self._last_api_error_status,
+                            self._last_response[:200],
+                        )
+                        self._set_state("waiting_input")
+                        registry.update(
+                            self.name, status="idle", session_id=msg.session_id
+                        )
                     else:
                         self._set_state("waiting_input")
                         registry.update(self.name, status="idle", session_id=msg.session_id)
@@ -351,11 +416,7 @@ class Session:
         # loop started for this turn. The slack-reply CLI can't do this (it
         # runs in a subprocess without the manager's loop registry), so the
         # indicator would otherwise refresh itself forever.
-        try:
-            from modastack.events.channels import stop_all_refresh_loops
-            stop_all_refresh_loops()
-        except Exception:
-            pass
+        self._stop_status_indicators()
 
         return self._last_response
 
@@ -374,12 +435,17 @@ class Session:
                 await asyncio.sleep(0.5)
 
         if self._state in ("stopped", "error"):
+            # Dropping the message means no turn runs, so clear any Slack
+            # "thinking…" indicator here — _drain_turn (which normally clears
+            # it) is never reached.
+            self._stop_status_indicators()
             if msg.wait:
                 self.inbox.respond(msg, f"session {self._state}")
             return
 
         if self._state != "waiting_input":
             log.warning(f"Session '{self.name}' never became ready for inbox message")
+            self._stop_status_indicators()
             if msg.wait:
                 self.inbox.respond(msg, "session not ready")
             return
@@ -403,6 +469,31 @@ class Session:
             )
             await self._client.query(msg.text)
             response = await self._drain_turn()
+
+            # Self-heal transient turn errors (529 Overloaded, rate limits):
+            # re-issue the same query with capped backoff so the triggering
+            # event is answered instead of dropped. Bounded so a persistently
+            # failing turn surfaces its error rather than looping forever.
+            attempt = 0
+            while (
+                self._last_is_error
+                and self._is_transient_turn_error()
+                and attempt < TURN_RETRY_MAX_ATTEMPTS
+                and self._state == "waiting_input"
+            ):
+                delay = TURN_RETRY_BASE * (2 ** attempt)
+                attempt += 1
+                log.warning(
+                    "Session '%s' turn hit transient error (api_status=%s); "
+                    "retry %d/%d after %.1fs",
+                    self.name, self._last_api_error_status, attempt,
+                    TURN_RETRY_MAX_ATTEMPTS, delay,
+                )
+                if delay:
+                    await asyncio.sleep(delay)
+                await self._client.query(msg.text)
+                response = await self._drain_turn()
+
             if msg.wait:
                 self.inbox.respond(msg, response)
         except Exception as e:
