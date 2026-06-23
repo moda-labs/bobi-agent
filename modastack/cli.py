@@ -226,6 +226,17 @@ def _run_from_config(project_path: Path, cfg: "Config",
         if key not in subscribe:
             subscribe.append(key)
 
+    # Subscribe to sub-agent lifecycle topics so a detached agent's
+    # completion/failure is delivered back to this entry point (MDS-65 RC#1).
+    # Without this, _emit_session_finished posts session.completed/failed that
+    # nothing consumes — completions reach the launcher only via blocking
+    # --wait, which pins a concurrency slot. Lifecycle events are delivered to
+    # the inbox like monitor findings; they are never an auto-dispatch trigger.
+    from modastack.events.subscriptions import lifecycle_subscription_keys
+    for key in lifecycle_subscription_keys():
+        if key not in subscribe:
+            subscribe.append(key)
+
     state_dir = paths.state_dir(project_path)
 
     from modastack.state_version import ensure_state_version
@@ -279,6 +290,24 @@ def _run_from_config(project_path: Path, cfg: "Config",
     session_name = _manager_session_name(project_path, role)
     task = build_startup_prompt(role, project_path, agent_name=agent_name,
                                 session_name=session_name)
+
+    # Dead-man reconcile on wake (MDS-65 §4.6): close any run stranded while no
+    # manager was alive — a crash recorded with no terminal event, a swallowed
+    # completion POST, or a run past its deadline. Each closed run re-emits an
+    # honest agent/session.{completed,failed} that the manager (subscribed just
+    # above) receives in its inbox, so the requester's thread is closed instead
+    # of hanging. Best-effort: a reconcile failure must never block startup.
+    try:
+        from modastack.reconcile import reconcile_sessions
+        # Exclude this manager's own session: the previous manager process's
+        # exit is not a sub-agent failure, and the new manager re-claims the
+        # entry just below.
+        reconciled = reconcile_sessions(exclude_names={session_name})
+        if reconciled:
+            log.info("Reconciled %d stranded run(s) on startup: %s",
+                     len(reconciled), [r["name"] for r in reconciled])
+    except Exception:
+        log.debug("Startup reconcile failed", exc_info=True)
 
     log.info(f"Modastack running for {project_path.name}")
     # The manager Session subscribes to inbox/<self> (always-on) plus the

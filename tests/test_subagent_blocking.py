@@ -617,7 +617,8 @@ class TestRunAgentSupervisedExceptions:
 class TestRunAgentSupervisedTracking:
     @pytest.mark.asyncio
     async def test_registry_updated_on_completion(self):
-        """Registry is updated to 'done' on successful completion."""
+        """Registry records the honest terminal status 'completed' on success
+        (MDS-65 RC#2 — never the old unconditional 'done')."""
         messages = [
             FakeResultMessage(session_id="sess-track", duration_ms=100,
                               total_cost_usd=0.01, num_turns=1),
@@ -647,25 +648,28 @@ class TestRunAgentSupervisedTracking:
                 timeout=60,
             )
 
-        # Registry updated to running, then done
+        # Registry updated to running, then the honest terminal status.
         mock_registry.update.assert_any_call(
             "agent-test-t1-spec", status="running", phase="spec", session_id="",
         )
-        mock_registry.update.assert_any_call(
-            "agent-test-t1-spec", status="done", phase="spec",
-            session_id="sess-track",
+        mock_registry.mark_terminal.assert_any_call(
+            "agent-test-t1-spec", "completed", error="",
+            session_id="sess-track", phase="spec",
         )
 
         # Session ID saved
         mock_save.assert_called_with("agent-test-t1-spec", "sess-track")
 
-        # Activity logged
-        mock_log.assert_any_call("stop", {"session_id": "sess-track"},
-                                 session="agent-test-t1-spec")
+        # Activity logged (now carries the terminal status)
+        mock_log.assert_any_call(
+            "stop", {"session_id": "sess-track", "status": "completed"},
+            session="agent-test-t1-spec",
+        )
 
     @pytest.mark.asyncio
     async def test_registry_updated_on_error(self):
-        """Registry is updated to 'error' on exception."""
+        """An unhandled executor exception records the honest terminal status
+        'crashed' (MDS-65 RC#2 — was the old 'error'), with the error persisted."""
         mock_module = MagicMock()
         mock_module.AssistantMessage = FakeAssistantMessage
         mock_module.ClaudeAgentOptions = MagicMock()
@@ -691,7 +695,10 @@ class TestRunAgentSupervisedTracking:
                 phase="implement", timeout=60,
             )
 
-        mock_registry.update.assert_any_call("agent-err-1-implement", status="error")
+        mock_registry.mark_terminal.assert_any_call(
+            "agent-err-1-implement", "crashed", error="boom",
+            session_id=None, phase="implement",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -728,6 +735,24 @@ class TestRunPhaseBlocking:
 
         assert result.success is False
         assert "failed to start" in result.error
+
+    def test_threads_requested_by_into_lifecycle_events(self):
+        """RC#4: run_phase_blocking must carry requested_by onto BOTH the
+        started and finished lifecycle emits — the phase path used to drop it,
+        so completions couldn't be routed back to the requester's thread."""
+        fake_cls = _make_fake_session_class(success=True, session_id="sess-rb")
+        rb = {"slack_user": "U9", "thread_ts": "777.0"}
+
+        with patch(SESSION_PATCH, side_effect=fake_cls), \
+             patch(f"{SDK_PATCH}._emit_session_started") as started, \
+             patch(f"{SDK_PATCH}._emit_session_finished") as finished:
+            run_phase_blocking(
+                run_key="RB-1", phase="implement", cwd="/tmp/test",
+                context="ctx", project="p", requested_by=rb,
+            )
+
+        assert started.call_args.kwargs["requested_by"] == rb
+        assert finished.call_args.kwargs["requested_by"] == rb
 
 
 # ---------------------------------------------------------------------------

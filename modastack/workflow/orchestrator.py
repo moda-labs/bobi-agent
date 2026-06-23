@@ -25,6 +25,7 @@ import yaml
 from modastack.sdk import (
     get_cli_path, get_registry, save_session_id, load_session_id,
     log_activity, SessionEntry, SessionRegistry,
+    TERMINAL_COMPLETED, TERMINAL_FAILED, ACTIVE_STATUSES,
 )
 from modastack.subagent import (
     AgentResult,
@@ -37,6 +38,19 @@ from modastack.workflow.variables import VariableContext
 log = logging.getLogger(__name__)
 
 MAX_HANDOFF_RETRIES = 2
+
+
+def _close_if_still_active(registry, session_name: str) -> None:
+    """Close a session as ``done`` ONLY if it is still in an active status.
+
+    ``_run_workflow_async`` now persists the honest terminal status in its
+    ``finally`` (completed/failed) or leaves the entry ``waiting`` on suspend, so
+    the caller must not blindly ``mark_done`` — that would clobber the honest
+    status with a lossy ``done`` (and drop ``emit_confirmed``). This only fires
+    as a defensive fallback if the entry was somehow left active (MDS-65 #3)."""
+    entry = registry.get(session_name)
+    if entry is None or entry.status in ACTIVE_STATUSES:
+        registry.mark_done(session_name)
 
 
 def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None = None,
@@ -164,6 +178,8 @@ def run_workflow(
         # hashing a repo checkout/worktree yields "" and silently disables
         # image rotation.
         image_hash=compute_manifest_hash(),
+        # Declared timeout for the dead-man reconciler's deadline (MDS-65 §4.6).
+        timeout=timeout,
     ))
 
     _emit_lifecycle_event("agent/workflow.started", {
@@ -210,7 +226,10 @@ def run_workflow(
             "text": f"Workflow {workflow.name} failed for {run_key}",
         }, blocking=True)
 
-    registry.mark_done(session_name)
+    # _run_workflow_async already persisted the honest terminal status (or left
+    # the entry "waiting" on suspend). Only fall back to mark_done if it somehow
+    # didn't — never clobber a completed/failed/waiting status with "done".
+    _close_if_still_active(registry, session_name)
 
     log.info(f"Workflow {workflow.name} {'completed' if success else 'failed'} "
              f"in {duration:.0f}s")
@@ -242,6 +261,11 @@ def resume_workflow(
     ctx = VariableContext()
     ctx.scopes = run.variable_scopes
 
+    # RC#4: requested_by was persisted on the run's variable scopes at suspend —
+    # thread it back so the resumed run's terminal session event still routes to
+    # the requester's thread (the resume path used to drop it).
+    requested_by = run.variable_scopes.get("requested_by", {}) or {}
+
     if event:
         ctx.set_scope("event", event.get("data", {}))
 
@@ -262,8 +286,8 @@ def resume_workflow(
     success = asyncio.run(
         _run_workflow_async(
             workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
-            run_key, session_name, registry, ctx, {}, timeout, interactive,
-            start_step=step_idx,
+            run_key, session_name, registry, ctx, requested_by, timeout,
+            interactive, start_step=step_idx,
         )
     )
 
@@ -286,7 +310,7 @@ def resume_workflow(
         }, blocking=True)
 
     run.save()
-    registry.mark_done(session_name)
+    _close_if_still_active(registry, session_name)
     log.info(f"Resumed workflow {workflow.name} {'completed' if success else 'failed'} "
              f"in {duration:.0f}s")
     return success
@@ -388,6 +412,19 @@ async def _run_workflow_async(
                 continue
             raise
 
+    # Terminal-emit outcome (MDS-65 RC#2). The `finally` emits the honest
+    # lifecycle event for this session: session.completed on success/suspend,
+    # session.failed on any failure path — never session.completed after a
+    # failure. Declared before the try so the finally always sees them even if
+    # an early statement raises.
+    run_failed = False
+    failure_error = ""
+    # A suspended (await) run is dormant, not terminal — it must NOT emit a
+    # terminal session event (the manager is now subscribed and would otherwise
+    # be told the agent "finished" while it waits) and must NOT be marked
+    # terminal in the registry (the reconciler leaves "waiting" alone).
+    suspended = False
+
     try:
 
         registry.update(session_name, status="running",
@@ -460,6 +497,7 @@ async def _run_workflow_async(
                     "text": f"Workflow suspended at {step.name}, waiting for '{step.await_event}'",
                 })
 
+                suspended = True
                 try:
                     await client.disconnect()
                 except Exception:
@@ -486,6 +524,7 @@ async def _run_workflow_async(
 
             if final_text is None:
                 failed_step = step.name
+                run_failed, failure_error = True, "connection lost"
                 _emit_step_failed(run_key, workflow.name, step.name,
                                   "connection lost")
                 return False
@@ -510,6 +549,7 @@ async def _run_workflow_async(
             if missing:
                 failed_step = step.name
                 error = f"Handoff missing required fields after retries: {missing}"
+                run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)
                 return False
 
@@ -538,6 +578,7 @@ async def _run_workflow_async(
 
     except Exception as e:
         log.error(f"Workflow error: {e}")
+        run_failed, failure_error = True, str(e)
         _emit_lifecycle_event("agent/workflow.failed", {
             "run_key": run_key,
             "workflow": workflow.name,
@@ -546,10 +587,39 @@ async def _run_workflow_async(
         }, blocking=True)
         return False
     finally:
-        _emit_lifecycle_event("agent/session.completed", {
-            "run_key": run_key, "role": role, "project": repo,
-            "text": f"{role or 'Agent'} finished {run_key}",
-        }, blocking=True)
+        # A suspended run is not terminal — skip the terminal emit + status
+        # write entirely (the agent/workflow.suspended event already fired and
+        # the entry stays "waiting" for resume).
+        if not suspended:
+            # RC#2: emit the HONEST terminal session event — session.failed
+            # (carrying the error) on any failure path, never session.completed
+            # right after workflow.failed. RC#4: carry requested_by so the
+            # launcher can route it to the requester's thread.
+            if run_failed:
+                landed = _emit_lifecycle_event("agent/session.failed", {
+                    "run_key": run_key, "role": role, "project": repo,
+                    "error": failure_error or "unknown error",
+                    "requested_by": requested_by or None,
+                    "text": f"{role or 'Agent'} failed on {run_key}: {failure_error}",
+                }, blocking=True)
+            else:
+                landed = _emit_lifecycle_event("agent/session.completed", {
+                    "run_key": run_key, "role": role, "project": repo,
+                    "requested_by": requested_by or None,
+                    "text": f"{role or 'Agent'} finished {run_key}",
+                }, blocking=True)
+            # RC#3: durably record the honest terminal status here, matching what
+            # was emitted, with emit_confirmed tracking whether the POST landed.
+            # This closes the crash window between this finally and the caller's
+            # close: if the process dies now, the durable record is already the
+            # correct terminal status (not a stale "running" the reconciler would
+            # mis-report as a crash), and an unconfirmed emit is re-sent later.
+            registry.mark_terminal(
+                session_name,
+                TERMINAL_FAILED if run_failed else TERMINAL_COMPLETED,
+                error=failure_error if run_failed else "",
+                emit_confirmed=bool(landed),
+            )
         try:
             await client.disconnect()
         except Exception:
