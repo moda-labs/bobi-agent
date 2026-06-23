@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.29.0 — 2026-06-23
+
+A stability release. The headline is **#443**: a single transient `529 Overloaded`
+on a turn permanently wedged a persistent session — the agent stayed alive but
+went deaf until a process restart. Turn-level API errors are now non-terminal and
+self-heal, so a momentary overload no longer bricks a running fleet.
+
+### Fixed
+- **A transient turn error no longer wedges a session (#443).** A single
+  `529 Overloaded` (or any `ResultMessage.is_error`) on a turn set the terminal
+  `error` state that nothing ever cleared: `_process_message` then silently
+  dropped every subsequent event while `is_alive()` reported the session dead, so
+  the agent stayed up but went deaf until a process restart — observed live on
+  `moda-eng-team` (director idle 2h15m after a 15:14 UTC 529). Turn-level API
+  errors are now non-terminal: the error is surfaced but the session returns to
+  `waiting_input` so the next event is served (the SDK client stays connected — the
+  failure is scoped to the turn). Transient statuses (408/409/429/5xx/529) get a
+  bounded in-band retry with exponential backoff so the triggering event
+  self-heals; non-transient 4xx recover without retrying. The Slack "thinking…"
+  refresh loop is now cleared on the dropped-message paths too, fixing the
+  indicator that refreshed forever (the visible symptom). Reproduced failing-first
+  by `tests/test_session.py::TestTurnErrorRecovery`.
+
+### Added
+- **Versioned immutable team packages (#440, Phase 1).** `build-team-tarballs.sh`
+  now also emits an immutable `<team>-<version>.tar.gz` alongside the rolling
+  `<team>.tar.gz`. A new `team-version.py` helper is the single authority on what
+  is pinnable (strict `MAJOR.MINOR.PATCH` only; absent/prerelease/malformed →
+  rolling-only). `publish-team-tarballs.sh` uploads the versioned tarball without
+  `--clobber` so immutability is fail-closed (a re-publish 422s and is skipped as a
+  no-op), and a new `check-team-versions.py` CI step asserts `registry.yaml` agrees
+  with each team's `agent.yaml` and that the pinned version is strict semver. This
+  is the publishing half only — inert at runtime; no consumer reads the new assets
+  yet (fetch/deploy land in later phases).
+- **`modastack deploy-init` scaffolds bring-your-own-repo CI (#439).** A new
+  command that turns the bring-your-own-repo setup (DEPLOYMENT.md §7.2 B) into one
+  step: from an agent-teams repo root it writes a standalone, actionlint-clean
+  `deploy-agent-teams.yml` (installs `modastack` from PyPI, pinned to the running
+  version) plus a `deployments/` skeleton, then prints the exact `fly`/`gh`
+  commands to wire `FLY_API_TOKEN` and the per-tenant GitHub Environment — with
+  each team's per-key secret list derived from its declared `${VAR}`s. Non-
+  destructive (`--force` to overwrite).
+
 ## 0.28.0 — 2026-06-22
 
 A stability release. The headline is **#409**: agent sessions (project leads and
