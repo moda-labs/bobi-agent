@@ -19,6 +19,9 @@ on:
       - "agents/**"
       - "tests/fixtures/smoke-team/**"
       - "scripts/build-team-tarballs.sh"
+      - "scripts/team-version.py"
+      - "scripts/check-team-versions.py"
+      - "scripts/publish-team-tarballs.sh"
       - ".github/workflows/team-packages.yml"
   pull_request:
     branches: [main]
@@ -31,6 +34,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check team version agreement (registry.yaml == agent.yaml)
+        # #440 Phase 1: registry.yaml is the authoritative "latest published"
+        # pointer; each team's agent.yaml is the source of the version. They
+        # must agree or the published "latest" lies (an unpinned install would
+        # resolve a version with no asset). Runs on PR + push. Kept here rather
+        # than in tests/test_packaging.py to avoid colliding with the open #438.
+        run: python3 scripts/check-team-versions.py
 
       - name: Build packages
         run: |
@@ -80,17 +91,18 @@ jobs:
           name: team-packages
           path: dist/teams
 
-      - name: Upload to the rolling 'teams-latest' release
+      - name: Upload to the 'teams-latest' release (rolling + immutable versioned)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Create the release once (idempotent), then clobber its assets so the
-          # download URLs always serve the latest main build.
+          # Create the release once (idempotent), then upload assets with split
+          # semantics: rolling <team>.tar.gz is clobbered (mutable latest
+          # pointer); immutable <team>-<version>.tar.gz is uploaded without
+          # --clobber and a re-publish of an existing version is a no-op skip.
           if ! gh release view teams-latest >/dev/null 2>&1; then
             gh release create teams-latest --prerelease \
               --title "Team packages (latest main)" \
-              --notes "Auto-published agent-team .tar.gz packages built from agents/ on each push to main. Pull one with --team-url / MODASTACK_TEAM_URL = https://github.com/${{ github.repository }}/releases/download/teams-latest/<team>.tar.gz"
+              --notes "Auto-published agent-team .tar.gz packages built from agents/ on each push to main. Rolling latest: https://github.com/${{ github.repository }}/releases/download/teams-latest/<team>.tar.gz — immutable pin: <team>-<version>.tar.gz"
           fi
-          gh release upload teams-latest dist/teams/*.tar.gz --clobber
-          echo "Published:"; ls -1 dist/teams/*.tar.gz
+          scripts/publish-team-tarballs.sh teams-latest dist/teams

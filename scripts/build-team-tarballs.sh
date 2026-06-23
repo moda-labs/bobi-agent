@@ -59,6 +59,19 @@ for dir in "${DIRS[@]}"; do
       -C "$parent" "$name" 2>/dev/null \
     || tar -czf "$OUT_ABS/$name.tar.gz" -C "$parent" "$name"
   echo "  $name -> $OUT/$name.tar.gz"
+
+  # Also emit the immutable, pinnable per-team package `<team>-<version>.tar.gz`
+  # (#440 Phase 1). It is a byte-for-byte copy of the rolling tarball at publish
+  # time — only the filename differs — so a pinned install gets exactly what the
+  # rolling one served. The version is read in Python (bash YAML parsing is
+  # brittle); a team with no `version:` gets only the rolling tarball (D-5).
+  version="$(python3 "$REPO_ROOT/scripts/team-version.py" "$dir")"
+  if [ -n "$version" ]; then
+    cp "$OUT_ABS/$name.tar.gz" "$OUT_ABS/$name-$version.tar.gz"
+    echo "  $name -> $OUT/$name-$version.tar.gz (versioned, immutable)"
+  else
+    echo "  warning: $name has no version in agent.yaml — rolling tarball only (not pinnable)" >&2
+  fi
 done
 
 echo "Built ${#DIRS[@]} team package(s) into $OUT/"
