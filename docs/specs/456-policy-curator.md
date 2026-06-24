@@ -22,6 +22,31 @@
 > ingests per run (the hard cap was output-only); (6) all five open questions are
 > **resolved** from the review's leans. Diff is in the spec body below.
 
+> **Revision 3 (2026-06-24)** — folds in the R2 review (three downstream issues
+> the now-concrete mechanics exposed). Changes:
+> (1) **blocking windowing fix** — the delta is windowed on **`messages.timestamp
+> > cursor` across all sessions**, not `conversations.started_at > cursor`.
+> `started_at` is write-once (`history.py:137–141`), so the long-lived
+> director/manager — the highest-signal transcript — is selected once and then
+> *never re-selected* no matter how many messages it accrues. Windowing on
+> per-message timestamp captures ongoing sessions (§3, new `messages_since`
+> reader, in-scope item 2, tests 8/9);
+> (2) **input-cap / cursor silent-skip fix** — the curator now ingests
+> **oldest-first up to budget** and advances the cursor only to the **newest
+> message in the oldest contiguous block actually ingested**, deferring the newest
+> overflow to the next run. The R2 combination (newest-first-drop + advance-to-max)
+> skipped the dropped older window *forever*; the spec now picks the direction
+> consciously, trading "recent is higher-signal" for cursor monotonicity /
+> no-silent-loss (§3, JSON contract, test 9);
+> (3) **passive-vs-active push gets a mechanism** — agents stay subscribed to
+> `policy.updated`; `events/drain.py` gains a **net-new drain-side filter** that
+> suppresses the inbox push for non-urgent `policy.updated` (the event still
+> publishes for observability; passive re-read is the next-prompt rebuild) and
+> pushes only when `urgent: true` (§4, in-scope item 5, new test 11);
+> (4) **seed bypasses the input cap** — the one-time INDEX.md seed uses a
+> one-shot budget above `MAX_CURATOR_INPUT_CHARS` so it doesn't truncate the very
+> content it exists to preserve (in-scope item 7, impl step 7). Diff in the body.
+
 ---
 
 # Spec: replace the append-only decision log with a curator-monitor → `policy.md` (#456)
@@ -75,11 +100,15 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
 
 - **New default monitor `policy-curator`**, fires on an interval.
 - On fire → dispatch an **out-of-band curator agent** (subagent executor) that:
-  1. reads **new agent transcripts since its last successful run** (incremental
-     watermark — a **dedicated curator cursor advanced only on success**, *not*
-     the monitor's `last_run`, which the scheduler clobbers at dispatch; see §3),
-     bounded by a **per-run input cap** so a busy team can't blow up the curator's
-     ingest cost,
+  1. reads **new transcript messages since its last successful run** — windowed
+     on **`messages.timestamp > cursor` across *all* sessions** (including
+     long-lived ongoing ones; *not* `conversations.started_at`, which is
+     write-once and would never re-select the persistent manager — see §3) —
+     against a **dedicated curator cursor advanced only on success**, *not* the
+     monitor's `last_run`, which the scheduler clobbers at dispatch; bounded by a
+     **per-run input cap** (ingest **oldest-first up to budget**, defer the newest
+     overflow to the next run) so a busy team can't blow up the curator's ingest
+     cost and no window is silently skipped,
   2. reconciles them against the **current `policy.md`**,
   3. **rewrites `policy.md` in place** (a full new document, never append) with
      durable learnings **that aren't already captured in the agent-team prose**
@@ -136,10 +165,12 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
    set, interval-configurable, dispatching an out-of-band curator agent. The
    *mechanism* is framework-level; the **curator prompt is team-overridable**
    (what counts as "durable" is domain-flavored — Q1).
-2. **Curator agent** path: read new transcripts since the **curator's own
-   success-advanced cursor** (not the scheduler's `last_run`), under a **per-run
-   input cap**, reconcile vs current `policy.md`, rewrite it in place under a hard
-   output size cap.
+2. **Curator agent** path: read new transcript **messages** (`messages.timestamp
+   > cursor` across *all* sessions, ongoing ones included — not
+   `conversations.started_at`) since the **curator's own success-advanced cursor**
+   (not the scheduler's `last_run`), ingesting **oldest-first under a per-run input
+   cap** and deferring the newest overflow, reconcile vs current `policy.md`,
+   rewrite it in place under a hard output size cap.
 3. **Two-section `policy.md` with distinct retention rules**: `## Facts`
    (refreshable/overwritten) and `## Decisions` (sticky/retained-unless-reversed),
    in one capped file. Curator contract distinguishes **lossless** ops from
@@ -150,12 +181,19 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
    summary, not just a finding verdict.
 5. **`policy.updated` completion event** published through the event server with
    a change summary. **Passive delivery by default** (agents re-read on next
-   prompt); active inbox push only for changes the curator flags urgent.
+   prompt); active inbox push only for changes the curator flags urgent. The
+   passive/active split is enforced by a **net-new drain-side filter** in
+   `events/drain.py`: agents stay subscribed to `policy.updated`, but the drain
+   suppresses the inbox push for a non-urgent `policy.updated` and pushes only
+   when `urgent: true` (§4).
 6. **Inject `policy.md` read-only** into agent prompts at the three current
    memory-injection sites, replacing the `## Decision Log` section.
 7. **One-time seed** of the first `policy.md` by distilling the existing
    `memory/<session>/INDEX.md` journal(s) (Q3 — resolved *seed once*; starting
-   empty discards real, not-all-re-derivable knowledge).
+   empty discards real, not-all-re-derivable knowledge). The seed **bypasses the
+   per-run `MAX_CURATOR_INPUT_CHARS`** (it distills the full ~127KB `INDEX.md` in
+   one shot) — capping the seed would truncate the very knowledge it exists to
+   preserve.
 8. **Remove the append-only decision log + rotation flush**: the
    `## Decision Log` injection, `memory.load_memory`/`format_memory_prompt` as a
    journal reader, and `session.py`'s `_do_flush_and_rotate` / `_verify_flush` /
@@ -259,9 +297,13 @@ to publish. A distinct marker keeps the verdict path untouched.
   framework with no topology opinions shouldn't hard-bake one team's notion of
   policy. The prompt instructs the agent to:
   1. Read the **curator cursor** (see watermark subsection) and enumerate
-     transcripts started/modified since then, **trimming the ingest to the
-     per-run input cap** (most-recent-first, oldest-over-budget dropped — and
-     noted in the summary).
+     transcript **messages with `timestamp > cursor` across all sessions**
+     (ongoing long-lived sessions included — *not* conversations whose
+     `started_at > cursor`), grouped by `session_id` for per-session context.
+     **Trim the ingest to the per-run input cap by ingesting oldest-first up to
+     budget** and deferring the newest over-budget messages to the next run
+     (noted in the summary) — see the watermark subsection for why this direction
+     (not newest-first-drop).
   2. Read the **current `.modastack/state/policy.md`** (both sections).
   3. Distill durable, reusable learnings **not already in** the team prose
      (role prompts, `tools/*.md`, `agent.md`) — promote only patterns seen
@@ -293,21 +335,44 @@ to publish. A distinct marker keeps the verdict path untouched.
        items for space; the summary must name them
        (`"dropped N still-valid decisions for space"`). **This is the trigger to
        raise the cap / build the decisions-spill** — v1 degrades *loudly*.
-     - `input_truncated: true` when the per-run input cap dropped transcripts
-       (so a busy interval is visible, not silently under-distilled).
+     - `input_truncated: true` when the per-run input cap **deferred** the newest
+       over-budget messages to the next run (cursor advanced only past the
+       contiguous ingested block, so nothing is skipped — see §3 watermark). The
+       summary names the deferred window so a busy interval is visible, not
+       silently under-distilled.
 
 #### Reading transcripts since the watermark — and bounding the input
 
 Transcripts are indexed in SQLite at `.modastack/state/history.db`
 (`history.py:16–18`) from the raw JSONL under the Claude projects dir. The
-curator uses the existing read API:
+`messages` table already carries a per-message `timestamp` column
+(`history.py:40`). The curator uses:
 
 - `history.index()` — incremental re-index (only new lines;
   `history.py:177–213`).
-- `history.conversations(limit=…)` — returns rows with `started_at`
-  (`history.py:259–278`); filter `started_at > cursor` for the delta.
+- **New `history.messages_since(cursor)`** — the delta the curator actually
+  needs: `SELECT * FROM messages WHERE timestamp > ? ORDER BY timestamp` (small
+  net-new query, mirrors `session_messages`/`conversations`), returning message
+  rows across **all** sessions, oldest-first. The curator groups the rows by
+  `session_id` to reconstruct per-session context.
 - `history.session_messages(session_id)` — full message list per session
-  (`history.py:281–294`).
+  (`history.py:281–294`), for pulling surrounding context once a session is in
+  the window.
+
+**Window on `messages.timestamp`, not `conversations.started_at` (blocking R2
+fix).** R2 windowed the delta with `conversations(...)` filtered on
+`started_at > cursor`. But `started_at` is written **once** — the
+`INSERT OR REPLACE … started_at` fires only `if not conv_exists`
+(`history.py:130, 137–141`) and is **never updated**. The director/manager runs
+as **one persistent, long-lived session**: it appears in `conversations` exactly
+once, with an old `started_at`, and `started_at > cursor` would **never
+re-select it** no matter how many thousands of messages it accrues — so the
+curator would distill ephemeral subagent sessions and **systematically miss the
+single session where most durable learning happens**. Fix: window on
+**`messages.timestamp > cursor` across all sessions** (the schema already carries
+per-message timestamps) via `messages_since(cursor)` — "messages since cursor,"
+not "conversations started since cursor." This also redefines what the cursor
+*is*: a **message timestamp**, not a conversation `started_at`.
 
 **Watermark — dedicated curator cursor, advanced on success (resolves Q4, and
 fixes a blocking bug in R1).** R1 proposed reusing the monitor's persisted
@@ -320,8 +385,11 @@ the delta collapses to ≈empty and it distills nothing. The watermark it actual
 needs (the *previous* run's time) has already been clobbered.
 
 Fix: the curator maintains its **own cursor** at
-`.modastack/state/policy_cursor` (ISO timestamp), and **advances it only after a
-successful rewrite** — to the max `started_at` it ingested. Properties:
+`.modastack/state/policy_cursor` (an ISO **message timestamp**), and **advances
+it only after a successful rewrite** — to the timestamp of the **newest message
+it actually ingested** (which, because it ingests oldest-first and contiguously
+from the cursor, is the upper edge of an unbroken block — see the input cap).
+Properties:
 
 - Reads the *previous* successful boundary, not its own dispatch time → the
   delta is real.
@@ -330,14 +398,35 @@ successful rewrite** — to the max `started_at` it ingested. Properties:
   of Q4).
 - Independent of how/when the scheduler touches `last_run`.
 
-**Per-run input cap (new — the hard cap was output-only).** The output (`policy.md`)
-is capped, but the curator *reads all new transcripts across all agents* each
-interval, and that input is large and variable-cost (the director alone is huge).
-Add `MAX_CURATOR_INPUT_CHARS` (or a most-recent-N message budget): the curator
-ingests newest-first up to the budget and drops the oldest overflow, setting
-`input_truncated: true` and naming the drop in the summary. This keeps a busy
-interval from blowing up curator cost and makes any under-distillation visible
-rather than silent.
+**Per-run input cap — ingest oldest-first (new; resolves an R2 silent-skip
+collision).** The output (`policy.md`) is capped, but the curator *reads all new
+messages across all sessions* each interval, and that input is large and
+variable-cost (the director alone is huge). Add `MAX_CURATOR_INPUT_CHARS` (a
+char/message budget). **Direction matters**, and R2's was wrong: R2 ingested
+**newest-first**, dropped the **oldest** overflow, *and* advanced the cursor to
+the max ingested timestamp — so on a busy interval the dropped older window fell
+**below** the advanced cursor and was **never re-read**. `input_truncated: true`
+was loud about *truncating* but silent about *skipping*, defeating the
+"dropped/failed window gets re-read next run" property the success-advanced
+cursor exists to provide.
+
+Fix — **ingest oldest-first up to the budget, and advance the cursor only to the
+newest message actually ingested**, leaving the newest over-budget messages for
+the next run:
+
+- The ingested block is contiguous from the cursor upward, so advancing to its
+  top edge **cannot skip** anything — the deferred newest overflow sits *above*
+  the new cursor and is re-read next run.
+- Set `input_truncated: true` and name the deferred window in the summary (so a
+  busy interval is visible, not silently under-distilled).
+
+**Conscious tradeoff (the tension R2 flagged):** recent learnings are
+higher-signal (argues newest-first), but cursor monotonicity / no-silent-loss
+requires oldest-first (you can only safely advance a single watermark past a
+*contiguous* ingested block). We choose **oldest-first** — never losing a window
+beats distilling the newest one a few hours sooner, and a shorter interval (Q2,
+6h) keeps the deferred lag small. We explicitly **do not** combine
+newest-first-drop with advance-to-max (the silent-skip combination).
 
 ### 4. Publishing `policy.updated` on completion
 
@@ -357,15 +446,38 @@ The scheduler already owns the single publish chokepoint
   prompt is rebuilt every rotation, §5/§6), so a routine distillation needs **no
   interruption** — pushing *"re-read and reconcile your in-flight plan now"* into
   every working agent's inbox every 6h interrupts everyone mid-task for a change
-  most of them don't need yet. So:
-  - **`urgent: false` (default):** publish the `policy.updated` event for
-    observability/logging, but **do not** push the disruptive inbox message —
-    agents pick the change up passively on their next prompt.
-  - **`urgent: true`:** also deliver the inbox message via the existing path (WS
-    client → `events/drain.py` batches → `inbox.push(Message(...))` →
-    `_inbox_loop`): *"policy.md updated — <summary>. Re-read
-    .modastack/state/policy.md and reconcile any in-flight plan."* The curator
-    sets `urgent` only for changes worth the interruption (e.g. a reversed
+  most of them don't need yet.
+
+  **The mechanism (R2 fix — the policy needed a seam).** The existing path is
+  event → subscription → `events/drain.py` → `inbox.push`: a *subscribed* agent
+  receives an event in its inbox whenever it publishes, and subscriptions are
+  per-topic, not per-event (`drain_loop` pushes **every** external event in a
+  batch to `inbox.push`, with no per-event field check — `drain.py`
+  `for e in external: … inbox.push(...)`). So "publish but don't push" has no
+  mechanism as written. We add one **net-new drain-side filter**:
+  - Agents **stay subscribed** to `policy.updated` (no change to
+    `monitor_subscription_keys` — the manager's monitor subscriptions already
+    cover it).
+  - `events/drain.py` gains a small filter: an external event of type
+    `policy.updated` (or `system/policy.updated`) whose payload `urgent` is not
+    truthy is **dropped before `inbox.push`** — it does not become an inbox
+    message. (It remains observable in the events feed / `modastack events`, so
+    the publish-for-observability property holds.) Passive pickup is the
+    **next-prompt rebuild** (§5/§6), independent of this event.
+  - This drain-side filter is **net-new** (currently unmentioned) and is the only
+    place the `urgent` policy is enforced. Specified here so implementation
+    doesn't fall back to the naive reading (publish the event → it pushes to
+    every subscribed inbox regardless of `urgent`, i.e. active-always).
+
+  So:
+  - **`urgent: false` (default):** the curator publishes `policy.updated` for
+    observability/logging; the drain filter suppresses the inbox push — agents
+    pick the change up passively on their next prompt.
+  - **`urgent: true`:** the drain passes it through and delivers the inbox message
+    via the existing path (WS client → `events/drain.py` batches →
+    `inbox.push(Message(...))` → `_inbox_loop`): *"policy.md updated — <summary>.
+    Re-read .modastack/state/policy.md and reconcile any in-flight plan."* The
+    curator sets `urgent` only for changes worth the interruption (e.g. a reversed
     decision that invalidates work in flight).
 - **Dedup caveat**: the scheduler's dedup keys on condition identity
   (`_reconcile` 367–395). A `policy.updated` with an identical summary two runs
@@ -481,16 +593,35 @@ Unit tests (`pytest tests/ --ignore=tests/integration/`):
    writes `policy.md` (doctor invariant check returns ok for a curator-written
    file, flags a foreign write).
 8. **Success-advanced cursor.** Drive a curator run; assert the cursor advances
-   to the max ingested `started_at` **only on success**, and that a run which
-   raises mid-distillation leaves the cursor unmoved so the next run re-reads the
-   same window (no skipped transcripts). Assert the curator reads the cursor, not
-   the scheduler's `last_run` (which the scheduler clobbers at dispatch).
-9. **Per-run input cap.** Seed more transcript than `MAX_CURATOR_INPUT_CHARS`;
-   assert the curator ingests newest-first up to the budget, drops the overflow,
-   and sets `input_truncated: true` with the drop named in the summary.
+   to the **newest ingested message timestamp** **only on success**, and that a
+   run which raises mid-distillation leaves the cursor unmoved so the next run
+   re-reads the same window (no skipped transcripts). Assert the curator reads the
+   cursor, not the scheduler's `last_run` (which the scheduler clobbers at
+   dispatch).
+8a. **Windowing selects a long-lived session (blocking R2 regression).** Seed
+   `history.db` with one **persistent** session whose `conversations.started_at`
+   is **older than the cursor** but which has **new `messages` after the cursor**,
+   plus a fresh ephemeral session. Assert the curator's delta (via
+   `messages_since(cursor)`) **includes the persistent session's new messages** —
+   i.e. windowing on `messages.timestamp`, not `conversations.started_at`, which
+   would have excluded the manager entirely.
+9. **Per-run input cap — oldest-first, no skip.** Seed more new-message volume
+   than `MAX_CURATOR_INPUT_CHARS` across the window; assert the curator ingests
+   **oldest-first** up to the budget, **defers** the newest overflow, sets
+   `input_truncated: true` with the deferred window named in the summary, and
+   advances the cursor **only to the newest ingested message** — then assert a
+   second run **re-reads the deferred overflow** (the silent-skip the R2 newest-
+   first-drop + advance-to-max combination would have caused never happens).
 10. **No silent lossy drop.** Force the curator over-cap with all-still-valid
    decisions; assert any drop of a still-valid item sets `lossy_drops > 0` and is
    named in the change summary (loud degradation), never a silent deletion.
+11. **Passive vs active delivery (drain-side filter).** Drive `events/drain.py`
+   with a real `policy.updated` envelope. Assert that with `urgent` absent/false
+   the drain **does not** call `inbox.push` for it (passive — suppressed before
+   delivery, event still observable), and that with `urgent: true` the same path
+   **does** push the "re-read policy.md" message to the inbox. This is the
+   regression test for the naive "publish → pushes to every subscribed inbox
+   regardless of urgent" reading the R2 review flagged.
 
 Integration (`tests/integration/`, real Claude session): a live curator run over
 a seeded transcript fixture produces a sane, capped `policy.md` with correctly
@@ -517,13 +648,17 @@ Build inside-out; each step builds + type-checks + passes tests on its own.
    dispatch (reusing `_default_spawn_check`). Default curator prompt
    (`prompts/curator.md`), **team-overridable** via the prompt-override path.
 5. **Curator completion publish + delivery gate.** On success+`updated`, publish
-   `system/policy.updated` with summary (bypassing `_reconcile` dedup); gate the
-   **active inbox push** on `urgent: true`, passive otherwise. Tests 3, 4.
-6. **Distillation contract: cursor + sections + caps.** Curator reads the
-   **success-advanced cursor** (not `last_run`), enumerates transcripts via
-   `history.*` under `MAX_CURATOR_INPUT_CHARS`, rewrites the two-section
-   `policy.md` under the retention + lossless/lossy rules, advances the cursor
-   only on success. Tests 1, 2, 2a, 2b, 7, 8, 9, 10.
+   `system/policy.updated` with summary (bypassing `_reconcile` dedup); add the
+   **net-new `events/drain.py` filter** that suppresses the inbox push for a
+   non-urgent `policy.updated` and pushes only on `urgent: true` (passive
+   otherwise). Tests 3, 4, 11.
+6. **Distillation contract: cursor + windowing + caps.** Add
+   `history.messages_since(cursor)`; the curator reads the **success-advanced
+   cursor** (a message timestamp, not `last_run`), enumerates **messages across
+   all sessions** since the cursor **oldest-first under `MAX_CURATOR_INPUT_CHARS`**
+   (deferring the newest overflow), rewrites the two-section `policy.md` under the
+   retention + lossless/lossy rules, and advances the cursor only on success to
+   the newest ingested message. Tests 1, 2, 2a, 2b, 7, 8, 8a, 9, 10.
 7. **One-time seed.** A guarded one-shot that distills the existing
    `memory/<session>/INDEX.md` journal(s) into the first `policy.md` (idempotent:
    no-op if `policy.md` already exists). Q3 = seed once.
