@@ -9,6 +9,8 @@ Covers the §6 verification plan of `docs/specs/416-tool-library.md`:
   * pin lint (no floating refs; `requires.fix` pin agrees with `build` pin),
   * the #452-style regression bar: `tool_library: [...]` composes byte-identical
     to the same team with those surfaces hand-written inline.
+  * the #473 dependency-gap guard: the shipped support-manager team, which
+    declares `venn_api_key`, actually bakes the `venn` CLI via `tool_library`.
 """
 
 from __future__ import annotations
@@ -252,3 +254,34 @@ def test_regression_byte_identical_to_inline(project, tmp_path):
     assert (out_tl / "agent.yaml").read_bytes() == (out_inline / "agent.yaml").read_bytes()
     assert (out_tl / "tools" / "codex.md").read_bytes() == (out_inline / "tools" / "codex.md").read_bytes()
     assert (out_tl / "tools" / "venn.md").read_bytes() == (out_inline / "tools" / "venn.md").read_bytes()
+
+
+# --- #473: shipped support-manager bakes venn (dependency-gap guard) ----------
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_support_manager_bakes_venn(tmp_path):
+    """The shipped support-manager team declares `venn_api_key`, so it MUST bake
+    the `venn` CLI: composing it yields the venn `requires` (check/fix) + `build`
+    (venv install of venn-cli + PATH symlink) + a tools/venn.md guide. Guards the
+    #473 gap — an API key with no binary to use it — from reopening. Fails if the
+    `tool_library: [venn]` line is dropped from agents/support-manager/agent.yaml."""
+    leaf = REPO_ROOT / "agents" / "support-manager"
+    chain = compose.resolve_chain(leaf, REPO_ROOT)
+    dest = tmp_path / "out_sm"
+    compose.compose(chain, dest)
+    cfg = _agent_yaml(dest)
+
+    # the key the gap was about is still declared, and is now backed by a binary
+    assert cfg.get("venn_api_key") == "${VENN_API_KEY}"
+    venn_reqs = [r for r in cfg.get("requires", []) if r.get("name") == "venn"]
+    assert len(venn_reqs) == 1, "support-manager must bake exactly one venn requires"
+    # build bakes the pinned binary onto PATH (so doctor can check + image has venn)
+    assert VENN_PIN in yaml.dump(cfg["build"])
+    # the guide ships so agents know how to invoke venn
+    assert (dest / "tools" / "venn.md").read_text() == \
+        (tool_library.CATALOG_DIR / "venn" / "guide.md").read_text()
+    # the opt-in key is consumed at compose, never emitted into the frozen image
+    assert "tool_library" not in cfg

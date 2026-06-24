@@ -32,6 +32,11 @@ services:
       api_key: ${LINEAR_API_KEY}
 
 # Email triage reads the support inbox through the Venn Gmail MCP.
+# Declaring venn_api_key means the team needs the `venn` CLI baked in, so adopt
+# the shared catalog entry (#416/#465): compose expands `tool_library: [venn]`
+# into the venn `requires` (check/fix) + `build` (isolated venv install of
+# venn-cli + PATH symlink) + a tools/venn.md guide. Auth via VENN_API_KEY.
+tool_library: [venn]
 venn_api_key: ${VENN_API_KEY}
 
 # PostHog: a read-only, project-scoped personal key
