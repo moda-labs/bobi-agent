@@ -240,6 +240,36 @@ old append-only decision log, injected read-only into every agent's prompt as
 passive by default (agents re-read on their next prompt), with an inbox push
 only for `urgent` changes. See `docs/specs/456-policy-curator.md`.
 
+### Recovery layers
+
+The director's liveness is defended in depth — each layer recovers a failure
+the one inside it structurally cannot (#464):
+
+```
+Fly Machines init (machine restart policy)     ← outermost backstop (process death)
+  └─ modastack supervise (self-heal watchdog)   ← restarts a wedged DIRECTOR
+       └─ modastack start (manager process)
+            └─ director session (claude subprocess)
+                 └─ stall-recovery (director→ENGINEER)  ← restarts wedged engineers
+```
+
+- **stall-recovery** runs inside the director and recovers stalled *engineer*
+  sessions; it cannot recover the director itself.
+- **`modastack supervise`** (`modastack/watchdog.py`) is the layer below the
+  director: the container entrypoint runs it as the parent, it spawns the
+  manager as a child, and it polls the `/health` endpoint's `manager` block
+  (`status` + server-derived `idle_seconds`). It restarts the manager **iff the
+  director is in an active turn state (`starting`/`running`) AND idle past
+  `WATCHDOG_STALL_THRESHOLD`** — so a healthy *idle* director (frozen
+  `last_activity` parked at `inbox.recv`) is never false-killed. Bounded retry +
+  backoff with shared crash-loop containment; on budget exhaustion it escalates
+  (loud log + optional Slack via `WATCHDOG_ALERT_CHANNEL`) and exits non-zero so
+  Fly restarts the machine. It runs no agent loop, so it cannot wedge from the
+  same cause. Tunables: `WATCHDOG_*` env vars. This is **defense-in-depth**, not
+  a replacement for #456/PR #460 (which bounds the one *known* rotation-reconnect
+  hang); the watchdog backstops *unknown* wedge classes. See
+  `docs/specs/464-manager-self-heal-watchdog.md`.
+
 ### Handoff contract
 
 Each workflow step writes a handoff to

@@ -160,5 +160,14 @@ fi
 # next image swap. Disable with MODASTACK_UI=0 in the Fly env. The dark instance
 # has no public route, so this exposes nothing — see DESIGN.md "Agent UI".
 export MODASTACK_UI="${MODASTACK_UI:-1}"
-log "Starting manager (user=${APP_USER}, project=${PROJECT_DIR}, home=${HOME}, claude_config=${CLAUDE_CONFIG_DIR})"
-exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_UI=${MODASTACK_UI}" modastack start --foreground "$@"
+log "Starting manager under self-heal watchdog (user=${APP_USER}, project=${PROJECT_DIR}, home=${HOME}, claude_config=${CLAUDE_CONFIG_DIR})"
+# #464: launch the manager under `modastack supervise` instead of directly.
+# The supervisor is the entrypoint process (parent); it spawns the manager as a
+# child, watches the director's progress via the health endpoint, and restarts
+# a wedged director from below — the one recovery layer stall-recovery cannot
+# provide. It runs no agent loop, so it cannot wedge from the same cause; on
+# restart-budget exhaustion it exits non-zero and Fly's machine restart policy
+# escalates. `healthcheck.sh` is unaffected (the manager child still writes the
+# port file). The forwarded `--foreground` keeps the manager a supervisable
+# child rather than letting it daemonize.
+exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_UI=${MODASTACK_UI}" modastack supervise -- --foreground "$@"
