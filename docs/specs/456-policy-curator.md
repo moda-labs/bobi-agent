@@ -112,6 +112,41 @@ wedge is the rotation **metric** (#454, separate, complementary). This ticket
 removes the **bloat source** and replaces it with a curated, bounded, team-scoped
 learning substrate.
 
+**The wedge has three independent mechanisms — this spec must close the one it
+straddles, not just the one it removes (2026-06-24 recurrence).** The director
+wedged *again* on **2026-06-24** and took another manual `fly machine restart` —
+this time on prod **already running 0.31.0** (i.e. *with* the #454 metric fix).
+That rules out the metric as the sole cause and separates three distinct
+mechanisms:
+
+| # | Mechanism | Disposition |
+|---|-----------|-------------|
+| 1 | Rotation **metric** over-count (#454) — false "rotation pending" | Fixed in v0.30.0; orthogonal — this spec correctly leaves it alone. |
+| 2 | Decision-log **bloat** aggravating the rotation reconnect | **Removed here** — the rebuilt prompt at rotation becomes a capped `policy.md`. |
+| 3 | **Unbounded / unrecoverable rotation reconnect** — the actual hang | **Must be closed here too** (in scope below) — it lives inside the very `_rotate()` §6 already edits. |
+
+Mechanism #3 is the structural defect. `_rotate()` does
+`disconnect() → _rebuild_system_prompt() → await connect() → await _drain_turn()`
+(`session.py` ~`_rotate`, lines 236–270), and **both `connect()` and the
+connect-turn `_drain_turn()` are unbounded** — no timeout, no recovery.
+`_drain_turn` loops `async for msg in receive_response()`; if the fresh `claude`
+subprocess never yields a `ResultMessage`, it blocks forever — `_rotation_count`
+never increments (it sits at `0`), the run loop never returns to `inbox.recv`,
+and every event (including a human's Slack message) queues unanswered while the
+"thinking…" indicator keeps refreshing. Removing the bloat (mechanism #2) only
+lowers the *probability* that the connect stalls; it does not bound or recover
+the stall. Notes on adjacent fixes that do **not** cover #3:
+
+- **#443** (`session.py:393`) clears `is_error` only when a `ResultMessage`
+  *arrives* carrying an error (e.g. a 529 on a steady-state turn). It does
+  nothing for the *never-receives-a-message* hang, and does not cover
+  `connect()` itself — so a 529 / network / subprocess stall *during the
+  rotation connect turn* still wedges post-#456 unless we bound it.
+- **No manager self-heal.** `stall-recovery` is director→engineer, so it cannot
+  fire when the *director* is the wedged party. Every residual wedge today =
+  manual restart + a human noticing. (A watchdog that covers *unknown* wedge
+  classes is real defense-in-depth but is **out of scope** here — see below.)
+
 ## Solution
 
 Replace the append-only decision log with a single, small, **rewritten-in-place**
@@ -222,11 +257,20 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
    per-run `MAX_CURATOR_INPUT_CHARS`** (it distills the full ~127KB `INDEX.md` in
    one shot) — capping the seed would truncate the very knowledge it exists to
    preserve.
-8. **Remove the append-only decision log + rotation flush**: the
-   `## Decision Log` injection, `memory.load_memory`/`format_memory_prompt` as a
-   journal reader, and `session.py`'s `_do_flush_and_rotate` / `_verify_flush` /
-   `_snapshot_index` flush machinery. Keep rotation itself (the client cycle);
-   only drop the append-on-rotation behavior.
+8. **Rework the rotation path** (`session.py`) — both halves touch the same
+   `_rotate()` surface:
+   - **Remove the append-only decision log + rotation flush**: the
+     `## Decision Log` injection, `memory.load_memory`/`format_memory_prompt` as a
+     journal reader, and `session.py`'s `_do_flush_and_rotate` / `_verify_flush` /
+     `_snapshot_index` flush machinery. Keep rotation itself (the client cycle);
+     only drop the append-on-rotation behavior.
+   - **Bound and recover the rotation reconnect** (mechanism #3, §6): wrap
+     `_rotate()`'s `connect()` + connect-turn `_drain_turn()` in
+     `asyncio.wait_for(ROTATION_RECONNECT_TIMEOUT)` (the flush turn already had a
+     timeout; the reconnect must too), bounded-retry on timeout/error, then fail
+     **loudly into a recoverable state** rather than a silent park. This is the
+     *only* in-scope half that touches the actual hang; removing the bloat alone
+     does not bound it.
 9. **Single-writer invariant**: only the curator writes `policy.md`.
 10. **Tests** (see Verification Plan), using real message/transcript shapes.
 
@@ -237,6 +281,15 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
   `modastack kb` subsystem is *not* involved.)
 - **No** change to the rotation **metric** — that is #454. This spec removes the
   bloat source; #454 fixes why rotation falsely fired. They ship independently.
+  (Bounding/recovering the rotation **reconnect** — mechanism #3 — *is* in scope,
+  item 8; it is a different surface from the metric.)
+- **No** manager self-heal watchdog in this ticket. A watchdog on the existing
+  health endpoint (`127.0.0.1:45985`) that restarts a *director* whose
+  `last_activity` stalls is the only thing that covers **unknown** wedge classes
+  (not just the three enumerated above), and is worth its own ticket as
+  defense-in-depth — but it is **separate follow-up, not blocking #456**.
+  Scoping it here would widen this PR past the curator + the rotation surface it
+  already owns.
 - **No** *ongoing* migration machinery for `INDEX.md` journals. There is a
   **one-time seed** at rollout (in scope, item 7) — a single distill of the
   current journal(s) into the first `policy.md` — but the old per-session journals
@@ -601,18 +654,67 @@ instead of the per-session journal:
 - `doctor.py:_check_memory` currently walks `memory/<agent>/INDEX.md`; repoint
   it at `policy.md` (size vs cap) or drop it for a `_check_policy`.
 
-### 6. Removing the rotation flush
+### 6. Reworking the rotation path: remove the flush, bound the reconnect
 
-In `session.py`, delete the append-on-rotation machinery and keep the
+Two changes on the same `session.py` rotation surface. The first removes the
+bloat-flush (mechanism #2); the second bounds and recovers the reconnect
+(mechanism #3 — the actual 2026-06-24 hang). Both ship in this PR because they
+edit the same `_rotate()` / idle-rotation code.
+
+**6a. Remove the append-on-rotation flush.** Delete the machinery and keep the
 lightweight client cycle:
 
 - Remove `_do_flush_and_rotate` (384–418), `_verify_flush` (109–135),
   `_snapshot_index` (137–151), and the flush-related rotation state
   (`_flush_snapshot_mtime` / `_flush_snapshot_hash`, 91–94).
 - In the idle-rotation path (377–379), call `_rotate()` directly when
-  `_rotate_pending` (no flush prompt). `_rotate` (153–221) stays — it cycles the
+  `_rotate_pending` (no flush prompt). `_rotate` stays — it cycles the
   SDK client and **rebuilds the system prompt**, which now re-reads `policy.md`.
 - Leave the rotation **trigger/metric** (302–308) alone — that's #454.
+
+**6b. Bound and recover the rotation reconnect.** The flush turn is already
+wrapped in `asyncio.wait_for(ROTATION_FLUSH_TIMEOUT)` (`session.py:585`), but the
+reconnect inside `_rotate()` is not: `await self._client.connect()` and the
+connect-turn `await self._drain_turn()` (`session.py` ~267–270) are both
+unbounded, and the `try/except` guarding the `_rotate()` call (`session.py:610`)
+catches *exceptions* but **cannot catch a hang** — an `await` that never returns
+simply never returns. Close it:
+
+1. **Bound the reconnect.** Wrap the reconnect work — `connect()` **and** the
+   first `_drain_turn()` (the system-prompt acknowledgment) — in
+   `asyncio.wait_for(..., timeout=ROTATION_RECONNECT_TIMEOUT)`. Add the constant
+   next to the existing rotation constants (`ROTATION_FLUSH_TIMEOUT = 180.0`,
+   `ROTATION_MAX_FLUSH_ATTEMPTS = 3`); a connect + single-ack turn is lighter
+   than a flush, so a smaller default (e.g. `ROTATION_RECONNECT_TIMEOUT = 120.0`)
+   is reasonable — it is a tuning number, not load-bearing.
+2. **Define on-timeout / on-error recovery.** On `asyncio.TimeoutError` or a
+   connect exception: **discard the timed-out client first** — `wait_for` cancels
+   the hung `connect()`/`receive_response()` await, but the partially-connected
+   `ClaudeSDKClient` (and its `claude` subprocess) must be `disconnect()`ed /
+   dropped before the next attempt so a stalled reconnect can't leak a subprocess
+   per retry — then **bounded retry** of the reconnect
+   (`ROTATION_MAX_RECONNECT_ATTEMPTS`, mirroring the flush attempt budget, with
+   backoff). On exhaustion, do **not** leave the session in the disconnected
+   state `_rotate()` created (`self._client = None` after the `disconnect()` at
+   ~252) and do **not** drop into the terminal `"error"` state (which deafens the
+   session — `_process_message` rejects every future message while state is
+   `"error"` and `is_alive()` reports it dead, the same trap #443 fixed). Instead
+   fail **loudly** (`log.error` + a `session.rotation_failed` activity/event) and
+   recover into a **usable** state: re-establish a connected client via the same
+   fresh-connect path `_run` uses (reconnect from the saved session id, falling
+   back to a fresh `resume=None` connect), so the session is addressable again.
+   Only if even that final recovery fails does the session surface terminally —
+   loudly, never a silent hang.
+3. **Confirm #443's error clearing reaches the reconnect drain.** The reconnect
+   reuses `_drain_turn`, so a `ResultMessage` that *arrives* with
+   `is_error=True` (e.g. a 529 on the connect turn) already routes through the
+   `session.py:393` branch that returns to `waiting_input` instead of `"error"`.
+   Make that explicit (it is the arrives-with-error case); the *never-arrives*
+   case is what step 1's timeout covers. The two together close both failure
+   shapes of the connect turn.
+
+The recovery path lives **inside** `_rotate()` / its caller so it cannot starve
+the run loop the way the unbounded `await` does today.
 
 ### 7. Single-writer invariant
 
@@ -683,6 +785,22 @@ Unit tests (`pytest tests/ --ignore=tests/integration/`):
 6. **Rotation no longer flushes.** Drive a rotation; assert no flush prompt is
    queried and `policy.md` is untouched by the rotation, while the rotated
    session's rebuilt prompt re-reads `policy.md`.
+6a. **Bounded, recoverable rotation reconnect (mechanism #3 — the 2026-06-24
+   wedge).** The regression test for the actual hang, in two shapes against a real
+   reconnect (no `MagicMock` that bypasses the await — the #454 lesson):
+   (a) *never-yields* — drive a rotation whose fresh connect turn **never yields a
+   `ResultMessage`** (a real client/transport stub whose `receive_response()`
+   blocks). Assert `_rotate()` **bounds the wait** at `ROTATION_RECONNECT_TIMEOUT`
+   (does not block forever), retries within `ROTATION_MAX_RECONNECT_ATTEMPTS`,
+   then **recovers** to an addressable, connected session — `is_alive()` stays
+   true, state is **not** terminal `"error"`, and a follow-up `inbox` message is
+   served — rather than wedging with `_rotation_count` stuck and the run loop off
+   `inbox.recv`.
+   (b) *arrives-with-529* — variant where the connect turn's `ResultMessage`
+   returns `is_error=True` / `api_error_status=529`. Assert the session clears the
+   error (the #443 path) and returns to ready, **not** terminal `"error"`.
+   Both assert the session ends **addressable and recoverable**, never silently
+   parked.
 7. **Single-writer.** Assert no framework path other than the curator dispatch
    writes `policy.md` (doctor invariant check returns ok for a curator-written
    file, flags a foreign write).
@@ -740,7 +858,11 @@ Integration (`tests/integration/`, real Claude session): a live curator run over
 a seeded transcript fixture produces a sane, capped `policy.md` with correctly
 sorted `## Facts` / `## Decisions`, retains an un-mentioned old decision, and the
 `policy.updated` event reaches a second running agent's inbox. This live variant
-is the **real** assertion behind unit test 2 (judgment, not plumbing).
+is the **real** assertion behind unit test 2 (judgment, not plumbing). A second
+integration variant drives a **real rotation against a stalled reconnect** (the
+fresh connect turn never completes) and asserts the session bounds the wait and
+recovers to addressable rather than wedging — the live counterpart to unit test
+6a, since the 2026-06-24 hang was in a real subprocess reconnect, not a mock.
 
 ## Implementation Plan
 
@@ -753,9 +875,15 @@ Build inside-out; each step builds + type-checks + passes tests on its own.
    old path still injected.)*
 2. **Injection swap.** Repoint the three injection sites + `doctor` at
    `policy.md`; rename the prompt section to `## Team Policy` (read-only). Test 5.
-3. **Remove rotation flush.** Delete `_do_flush_and_rotate` / `_verify_flush` /
-   `_snapshot_index`; idle-rotation calls `_rotate()` directly. Test 6. Delete
-   the now-dead `load_memory` journal reader + its tests.
+3. **Rework the rotation path (§6).** (a) Remove the flush: delete
+   `_do_flush_and_rotate` / `_verify_flush` / `_snapshot_index`; idle-rotation
+   calls `_rotate()` directly; delete the now-dead `load_memory` journal reader +
+   its tests. Test 6. (b) Bound the reconnect: wrap `_rotate()`'s `connect()` +
+   connect-turn `_drain_turn()` in `asyncio.wait_for(ROTATION_RECONNECT_TIMEOUT)`,
+   add `ROTATION_MAX_RECONNECT_ATTEMPTS` bounded retry, and recover into an
+   addressable connected client on exhaustion (never terminal `"error"`, never a
+   silent park); confirm the #443 `is_error` clearing covers the connect-turn
+   drain. Test 6a + the reconnect integration variant.
 4. **Curator monitor declaration + flavor.** Add `policy-curator` default
    monitor + the `curator: true` marker; scheduler routes it to the curator
    dispatch (reusing `_default_spawn_check`). Default curator prompt
@@ -820,10 +948,17 @@ All five are now decided from the review's leans; recorded here with rationale.
 
 ## Related
 
-- **#454** — rotation metric over-count (the actual cause of the wedge's false
-  over-cap). Complementary: #454 fixes *why rotation falsely fired*; this removes
-  the *bloat source* and gives the team a real learning substrate. Ship
-  independently.
+- **#454** — rotation metric over-count (wedge mechanism #1). Complementary:
+  #454 fixes *why rotation falsely fired*; this removes the *bloat source*
+  (mechanism #2) and bounds the *reconnect hang* (mechanism #3). Ship
+  independently of #454.
+- **#443** — turn-level API-error (529) clearing at `session.py:393`. This spec's
+  §6b reconnect hardening builds on it (confirms it covers the connect-turn
+  drain) and adds the orthogonal *never-receives-a-message* timeout it does not
+  cover.
+- **Manager self-heal watchdog** — a follow-up ticket (out of scope here) for a
+  health-endpoint watchdog that restarts a wedged *director* on a stalled
+  `last_activity`, covering **unknown** wedge classes beyond the three enumerated.
 - Mirrors the framework's own context-files pattern (index + read-on-demand) and
   Claude Code's memory model (curated, deduped, not a log).
 
