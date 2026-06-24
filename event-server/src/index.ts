@@ -11,6 +11,9 @@ import {
 	verifyGitHubSignature,
 	verifySlackSignature,
 	readBubbleAuthHeaders,
+	hasBubbleSignature,
+	hasPartialBubbleSignature,
+	authenticateBubble,
 	handleGitHubWebhook,
 	handleLinearWebhook,
 	handleSlackWebhook,
@@ -379,15 +382,54 @@ export default {
 		}
 
 		if (method === "POST" && path === "/slack/send") {
-			const body = await readJson(request);
-			if (!body) return Response.json({ error: "invalid JSON" }, { status: 400 });
-			return respond(await handleSlackSend(storage, body));
+			// Raw text so the bubble signature verifies over the exact wire bytes.
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			const bubble = await authenticateBubble(storage, ctx);
+			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
+			return respond(await handleSlackSend(storage, data, bubble.id));
 		}
 
 		if (method === "POST" && path === "/slack/workspaces") {
-			const body = await readJson(request);
-			if (!body) return Response.json({ error: "invalid JSON" }, { status: 400 });
-			return respond(await handleSlackWorkspaceRegister(storage, body));
+			// Raw text so an (optional) bubble signature verifies over exact bytes.
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			// Auth is OPTIONAL here: an unsigned registration still writes the
+			// global record (inbound self-reply loop prevention, kept for legacy
+			// clients). A signed one ALSO writes the bubble-scoped record that
+			// outbound /slack/send reads. A present-but-invalid signature is a
+			// malformed/forged request — reject rather than silently downgrade.
+			let bubbleId: string | undefined;
+			if (hasBubbleSignature(ctx)) {
+				const bubble = await authenticateBubble(storage, ctx);
+				if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
+				bubbleId = bubble.id;
+			} else if (hasPartialBubbleSignature(ctx)) {
+				return Response.json({ error: "forbidden" }, { status: 403 });
+			}
+			return respond(await handleSlackWorkspaceRegister(storage, data, bubbleId));
 		}
 
 		return new Response("Not Found", { status: 404 });

@@ -162,13 +162,43 @@ describe("event-server", () => {
 		expect(response.status).toBe(400);
 	});
 
-	it("rejects slack send without channel or text", async () => {
+	it("rejects slack send without channel or text (signed, reaches 400)", async () => {
+		const bubble = await mintBubble();
+		const body = JSON.stringify({ text: "hello" });
+		const headers = await bubbleHeaders(
+			bubble.bubble_id, bubble.bubble_key, "POST", "/slack/send", body,
+		);
+		const response = await SELF.fetch("https://example.com/slack/send", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body,
+		});
+		expect(response.status).toBe(400);
+	});
+
+	// #487: outbound send must be authenticated.
+	it("rejects unsigned slack send with 403", async () => {
 		const response = await SELF.fetch("https://example.com/slack/send", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ text: "hello" }),
+			body: JSON.stringify({ workspace: "T1", channel: "C1", text: "hello" }),
 		});
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(403);
+	});
+
+	it("rejects slack send with a bad signature (403)", async () => {
+		const bubble = await mintBubble();
+		const body = JSON.stringify({ workspace: "T1", channel: "C1", text: "hi" });
+		const headers = await bubbleHeaders(
+			bubble.bubble_id, bubble.bubble_key, "POST", "/slack/send", body,
+		);
+		headers["x-moda-signature"] = "deadbeef";
+		const response = await SELF.fetch("https://example.com/slack/send", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body,
+		});
+		expect(response.status).toBe(403);
 	});
 });
 
@@ -259,26 +289,28 @@ describe("cloudflare deployment deregistration", () => {
 
 describe("slack send error handling", () => {
 	it("returns 502 when slack API fetch fails", async () => {
-		// Register a workspace with a token so the handler reaches sendSlackMessage
+		const bubble = await mintBubble();
+		// Register a workspace SIGNED so the bubble-scoped record exists.
+		const regBody = JSON.stringify({ workspace_id: "T_FAIL", bot_token: "xoxb-fake-token" });
+		const regHeaders = await bubbleHeaders(
+			bubble.bubble_id, bubble.bubble_key, "POST", "/slack/workspaces", regBody,
+		);
 		const regResponse = await SELF.fetch("https://example.com/slack/workspaces", {
 			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				workspace_id: "T_FAIL",
-				bot_token: "xoxb-fake-token",
-			}),
+			headers: { "content-type": "application/json", ...regHeaders },
+			body: regBody,
 		});
 		expect(regResponse.status).toBe(200);
 
-		// Now send — the fetch to slack.com will fail in the test sandbox
+		// Now send (signed) — the fetch to slack.com will fail in the test sandbox
+		const sendBody = JSON.stringify({ workspace: "T_FAIL", channel: "C123", text: "hello" });
+		const sendHeaders = await bubbleHeaders(
+			bubble.bubble_id, bubble.bubble_key, "POST", "/slack/send", sendBody,
+		);
 		const response = await SELF.fetch("https://example.com/slack/send", {
 			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				workspace: "T_FAIL",
-				channel: "C123",
-				text: "hello",
-			}),
+			headers: { "content-type": "application/json", ...sendHeaders },
+			body: sendBody,
 		});
 
 		// Should get 502, not 500 — the try/catch maps fetch failures to 502
@@ -286,6 +318,39 @@ describe("slack send error handling", () => {
 		const body = await response.json() as { ok: boolean; error: string };
 		expect(body.ok).toBe(false);
 		expect(body.error).toBeTruthy();
+	});
+
+	// #487 end-to-end isolation through the Worker route: a workspace registered
+	// by bubble B cannot be used by bubble A.
+	it("does not let bubble A send through bubble B's workspace (400)", async () => {
+		const bubbleB = await mintBubble();
+		const bubbleA = await mintBubble();
+
+		// B registers T_ISO (signed → scoped to B).
+		const regBody = JSON.stringify({ workspace_id: "T_ISO", bot_token: "xoxb-B-token" });
+		const regHeaders = await bubbleHeaders(
+			bubbleB.bubble_id, bubbleB.bubble_key, "POST", "/slack/workspaces", regBody,
+		);
+		const reg = await SELF.fetch("https://example.com/slack/workspaces", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...regHeaders },
+			body: regBody,
+		});
+		expect(reg.status).toBe(200);
+
+		// A (valid signature, different bubble) tries to send through T_ISO → 400.
+		const sendBody = JSON.stringify({ workspace: "T_ISO", channel: "C1", text: "hi" });
+		const sendHeaders = await bubbleHeaders(
+			bubbleA.bubble_id, bubbleA.bubble_key, "POST", "/slack/send", sendBody,
+		);
+		const response = await SELF.fetch("https://example.com/slack/send", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...sendHeaders },
+			body: sendBody,
+		});
+		expect(response.status).toBe(400);
+		const body = await response.json() as { error: string };
+		expect(body.error).toContain("bot token");
 	});
 });
 

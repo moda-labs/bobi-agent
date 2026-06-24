@@ -1097,8 +1097,19 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     if has_external:
         # Register this agent's Slack workspace bot so the event server can skip
         # the bot's own messages — without this, an agent's Slack replies are
-        # re-ingested as new events and it loops on itself.
-        register_slack_workspaces(es_url, cfg)
+        # re-ingested as new events and it loops on itself. Sign the registration
+        # with the instance bubble so the server also stores the bubble-scoped
+        # record outbound /slack/send requires (#487). Best-effort: a failure to
+        # resolve the bubble must not block the (global) self-reply registration.
+        try:
+            _bubble = ensure_bubble(es_url, project_path)
+            register_slack_workspaces(
+                es_url, cfg,
+                bubble_id=_bubble["bubble_id"], bubble_key=_bubble["bubble_key"],
+            )
+        except Exception as e:
+            log.info("Signed Slack registration unavailable (%s) — unsigned", e)
+            register_slack_workspaces(es_url, cfg)
 
     # Dedicated queue per session: multiple clients can live in one process
     # (sequential workflow phases), and a shared queue would let one session's

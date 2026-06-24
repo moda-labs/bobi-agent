@@ -12,6 +12,9 @@ import {
 	verifyGitHubSignature,
 	verifySlackSignature,
 	readBubbleAuthHeaders,
+	hasBubbleSignature,
+	hasPartialBubbleSignature,
+	authenticateBubble,
 	handleGitHubWebhook,
 	handleLinearWebhook,
 	handleSlackWebhook,
@@ -414,14 +417,40 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		const body = await readBody(req);
 		const data = parseJson(body);
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
-		return respond(res, await handleSlackWorkspaceRegister(storage, data));
+		const ctx = readBubbleAuthHeaders(
+			(n) => req.headers[n] as string | undefined,
+			method,
+			url.pathname + url.search,
+			body,
+		);
+		// Auth is OPTIONAL: an unsigned registration still writes the global
+		// record (inbound self-reply loop prevention, kept for legacy clients);
+		// a signed one ALSO writes the bubble-scoped record outbound send reads.
+		// A present-but-invalid signature is rejected, never silently downgraded.
+		let bubbleId: string | undefined;
+		if (hasBubbleSignature(ctx)) {
+			const bubble = await authenticateBubble(storage, ctx);
+			if (!bubble) return json(res, { error: "forbidden" }, 403);
+			bubbleId = bubble.id;
+		} else if (hasPartialBubbleSignature(ctx)) {
+			return json(res, { error: "forbidden" }, 403);
+		}
+		return respond(res, await handleSlackWorkspaceRegister(storage, data, bubbleId));
 	}
 
 	if (method === "POST" && path === "/slack/send") {
 		const body = await readBody(req);
 		const data = parseJson(body);
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
-		return respond(res, await handleSlackSend(storage, data));
+		const ctx = readBubbleAuthHeaders(
+			(n) => req.headers[n] as string | undefined,
+			method,
+			url.pathname + url.search,
+			body,
+		);
+		const bubble = await authenticateBubble(storage, ctx);
+		if (!bubble) return json(res, { error: "forbidden" }, 403);
+		return respond(res, await handleSlackSend(storage, data, bubble.id));
 	}
 
 	res.writeHead(404);

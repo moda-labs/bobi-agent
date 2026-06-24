@@ -363,7 +363,8 @@ def _slack_app_id(token: str, bot_id: str) -> str:
     return ""
 
 
-def register_slack_workspaces(base_url: str, cfg) -> list[str]:
+def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
+                              bubble_key: str = "") -> list[str]:
     """Register the agent's Slack workspace(s) with the event server.
 
     The event server uses the registered ``bot_id`` to skip the bot's OWN
@@ -373,6 +374,13 @@ def register_slack_workspaces(base_url: str, cfg) -> list[str]:
     actually engages. Best-effort: logs and continues on any failure so a
     registration hiccup never blocks startup. Returns the workspace ids
     successfully registered.
+
+    When ``bubble_key`` is supplied the request is HMAC-signed (same scheme as
+    :func:`_post_register`). A signed registration tells the server to ALSO
+    store a bubble-scoped workspace record, which is the only credential
+    outbound ``POST /slack/send`` will accept (#487) — so this bubble can send
+    through its own Slack bot. The global record (inbound self-reply loop
+    prevention) is written either way, so an unsigned call still works.
     """
     from modastack import http as pooled
 
@@ -404,9 +412,21 @@ def register_slack_workspaces(base_url: str, cfg) -> list[str]:
             record["app_id"] = app_id
         if signing_secret:
             record["signing_secret"] = signing_secret
+        # Sign over the EXACT transmitted bytes (content=, not json=) when we
+        # hold a bubble key, so the server reproduces the HMAC and writes the
+        # bubble-scoped record outbound /slack/send requires. Unsigned otherwise
+        # (still writes the global self-reply record).
+        from modastack.events.signing import serialize_body, sign_headers
+        body = serialize_body(record)
+        headers = {"Content-Type": "application/json"}
+        if bubble_key:
+            headers.update(
+                sign_headers(bubble_id, bubble_key, "POST", "/slack/workspaces", body)
+            )
         pooled.post(
             f"{base_url}/slack/workspaces",
-            json=record,
+            content=body,
+            headers=headers,
             timeout=10.0,
         )
         log.info(
