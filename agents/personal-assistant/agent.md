@@ -1,4 +1,4 @@
-# personal-assistant-core
+# personal-assistant
 
 A portable, customizable **personal assistant** team. A single persistent
 **assistant** serves one principal: it reads and triages email, manages the
@@ -76,7 +76,7 @@ on others, making a purchase. Raise or lower that line per principal.
 ## Setup
 
 ```bash
-modastack install agents/personal-assistant-core   # copies the pack into
+modastack install agents/personal-assistant        # copies the pack into
                                                     # .modastack/, seeds
                                                     # workspace/, prompts for env vars
 modastack start                                     # runs the installed assistant

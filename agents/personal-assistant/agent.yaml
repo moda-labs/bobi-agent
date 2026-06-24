@@ -22,13 +22,24 @@ services:
   - name: slack
     events: true            # receive the principal's messages / @mentions / DMs
     required: true          # core service — block startup if unconfigured
-    # Optional: comma-separated channel IDs to scope this assistant to a
-    # specific channel or DM (so one bot can host several assistants).
-    # Empty = whole workspace. A personal assistant usually wants exactly
-    # one channel — its principal's DM or private channel.
-    channels: ${SLACK_CHANNELS}
+    # Optional: comma-separated *channel* IDs to scope this assistant to
+    # specific channels (so one shared bot can host several teams). Optional
+    # default so a DM-first assistant can leave it unset.
+    #
+    # IMPORTANT — do NOT put a DM id here. DMs are delivered on the bare
+    # workspace topic (slack:<team>), never on a channel-scoped topic
+    # (slack:<team>:<channel>) — see event-server/src/adapters/slack.ts. Set
+    # `channels`, and the agent subscribes ONLY to the scoped topics and never
+    # receives DMs. A DM-first assistant must leave this EMPTY (whole-workspace
+    # subscription) and rely on the bot only being in its principal's DM.
+    channels: ${SLACK_CHANNELS:-}
     credentials:
       bot_token: ${SLACK_BOT_TOKEN}
+      # App signing secret — registered with the event server so it can verify
+      # THIS app's inbound events by api_app_id. Required when this assistant
+      # shares a workspace with another bot (e.g. the eng team): each app signs
+      # with its own secret, so a single global secret would 401 one of them.
+      signing_secret: ${SLACK_SIGNING_SECRET}
 
 # Email, calendar, and tasks are reached through the bundled `venn` CLI. One
 # API key fronts the principal's Google account (Gmail + Google Calendar +
