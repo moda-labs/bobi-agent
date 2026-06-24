@@ -83,9 +83,15 @@ _RLIMIT_NPROC = 64                 # fork-bomb bound
 
 DEFAULT_APPROVAL = "auto"          # §3.4 gate decision (Zach): PROCEED-BUT-NOTIFY
 
+# [impl] Only bash is accepted. python3 was dropped from the spec's two-language
+# set: a `python3 -c '...'` call from bash is an arbitrary-code vector the binary
+# scan can't see, and a sound python sandbox needs far more than an AST denylist
+# (alias imports, Path.write_text, os.open, socket, importlib all bypass one).
+# bash (flat simple commands) + jq covers the read-only monitor need with a single
+# language we can validate soundly. Hardened because pre-approval was removed (§3.4)
+# and no adversarial review was available.
 VALID_SHEBANGS = {
     "#!/usr/bin/env bash": "bash",
-    "#!/usr/bin/env python3": "python3",
 }
 
 # Every external command in command position must be on this allowlist. Raw
@@ -98,8 +104,11 @@ VALID_SHEBANGS = {
 # reliably tell those from a benign substitution. jq/grep/cut/tr cover the
 # read-only text-shaping need without an exec/write vector. Hardened out because
 # the pre-approval gate was removed (§3.4) and no adversarial review was available.
+# python3 is deliberately absent: a bash `python3 -c '<arbitrary code>'` (or
+# `echo code | python3`) is a full arbitrary-code escape the per-command binary
+# scan can't catch, so the interpreter is not reachable from a validated script.
 SCRIPT_BINARY_ALLOWLIST = frozenset({
-    "venn", "gh", "jq", "python3", "cat", "echo", "printf",
+    "venn", "gh", "jq", "cat", "echo", "printf",
     "head", "tail", "sort", "uniq", "grep", "cut", "tr", "date",
 })
 
@@ -198,11 +207,22 @@ def _scan_unquoted(line: str) -> tuple[list[str], list[str]]:
             i += 1
             continue
         if dq:
-            cur.append(ch)
+            # Bash performs command substitution INSIDE double quotes, so the
+            # operator scan must run here too — only single quotes are a fully
+            # literal context. (`echo "$(curl evil)"` would otherwise pass.)
             if ch == "\\" and nxt:
-                cur.append(nxt)
+                cur.append(ch + nxt)
                 i += 2
                 continue
+            if ch == "`":
+                forbidden.append("command substitution (`) inside double quotes")
+                i += 1
+                continue
+            if ch == "$" and nxt == "(":
+                forbidden.append("command substitution $( inside double quotes")
+                i += 2
+                continue
+            cur.append(ch)
             if ch == '"':
                 dq = False
             i += 1
@@ -319,13 +339,21 @@ def _validate_curl(args: list[str], allow_http: bool, http_hosts) -> tuple[str, 
     """Validate a curl command. Returns (reason, host) — reason='' means ok."""
     if not allow_http:
         return "raw curl/wget is off by default (set script_cache.allow_http)", ""
+    # Reject any flag that lets curl carry a body / method / upload (exfil), write
+    # a file to disk (-o/-O), or pull options from a file that could re-introduce
+    # those (-K). Plain GETs only.
     write_flags = {"-X", "--request", "-d", "--data", "--data-raw", "--data-binary",
-                   "--data-urlencode", "-T", "--upload-file", "-F", "--form"}
+                   "--data-urlencode", "-T", "--upload-file", "-F", "--form",
+                   "-o", "--output", "-O", "--remote-name", "--remote-name-all",
+                   "-K", "--config", "--create-dirs"}
     url = ""
     for a in args:
         if a in write_flags or any(a.startswith(f + "=") for f in write_flags):
-            # -X GET is technically read-shaped, but any explicit method/body
-            # flag is rejected — keep the rule simple and total.
+            # -X GET is technically read-shaped, but any explicit method/body/
+            # output flag is rejected — keep the rule simple and total.
+            return f"curl write-shaped flag not allowed: {a}", ""
+        # short flags can be glued (e.g. -oFILE, -XPOST); catch those too
+        if len(a) > 2 and a[0] == "-" and a[1] != "-" and a[1] in ("o", "O", "X", "d", "T", "F", "K"):
             return f"curl write-shaped flag not allowed: {a}", ""
         if a.startswith("http://") or a.startswith("https://"):
             url = a
@@ -379,7 +407,7 @@ def _validate_bash(content: str, allow_http: bool, http_hosts) -> ValidationResu
                     or a.startswith("-o") and len(a) > 2 for a in args):
                 return ValidationResult(False, "sort -o/--output (file write) not allowed", "bash")
             if binary == "venn":
-                if "--confirm" in args:
+                if any(a == "--confirm" or a.startswith("--confirm=") for a in args):
                     return ValidationResult(False, "venn --confirm (write op) forbidden", "bash")
                 svc, tool = _venn_service_tool(args)
                 if svc or tool:
@@ -413,103 +441,35 @@ _GH_MUTATION_VERBS = {"create", "edit", "close", "merge", "delete", "comment",
 
 
 def _gh_mutation(args: list[str]) -> str:
-    """Return the offending verb if a gh invocation mutates state, else ''.
+    """Return the offending verb/flag if a gh invocation mutates state, else ''.
 
     gh's read verbs (view/list/status/checks) are fine; anything that writes is
-    rejected. ``gh api`` with a write method (-X / --method POST|...) is also
-    rejected."""
+    rejected. For ``gh api`` we must catch every write shape:
+      - an explicit non-GET/HEAD method in any form: ``-X POST``, ``--method POST``,
+        ``--method=POST``, ``-XPOST``;
+      - gh auto-promotes a request to POST whenever a field flag is present
+        (``-f`` / ``-F`` / ``--field`` / ``--raw-field`` / ``--input``), even with
+        no explicit method — so any of those on an ``api`` call is a write."""
     positionals = [a for a in args if not a.startswith("-")]
     for verb in positionals:
         if verb in _GH_MUTATION_VERBS:
             return verb
     if "api" in positionals:
+        field_flags = {"-f", "-F", "--field", "--raw-field", "--input"}
         for i, a in enumerate(args):
+            # explicit method, any spelling
             if a in ("-X", "--method") and i + 1 < len(args):
                 if args[i + 1].upper() not in ("GET", "HEAD"):
-                    return f"api -X {args[i + 1]}"
-    return ""
-
-
-# Python AST checks for python3 scripts.
-_PY_DENY_ATTR = {
-    ("os", "remove"), ("os", "unlink"), ("os", "rmdir"), ("os", "removedirs"),
-    ("os", "rename"), ("os", "replace"), ("os", "mkdir"), ("os", "makedirs"),
-    ("os", "chmod"), ("os", "chown"), ("os", "symlink"), ("os", "link"),
-    ("os", "truncate"), ("os", "system"), ("os", "popen"), ("os", "execv"),
-    ("os", "execve"), ("os", "execvp"), ("os", "fork"),
-    ("shutil", "rmtree"), ("shutil", "move"), ("shutil", "copy"),
-    ("shutil", "copy2"), ("shutil", "copyfile"), ("shutil", "copytree"),
-}
-_PY_DENY_NAMES = {"eval", "exec", "compile", "__import__"}
-
-
-def _validate_python(content: str) -> ValidationResult:
-    import ast
-    env = CapabilityEnvelope(binaries={"python3"})
-    try:
-        tree = ast.parse(content)
-    except SyntaxError as e:
-        return ValidationResult(False, f"python parse error: {e}", "python3")
-
-    for node in ast.walk(tree):
-        # open(..., 'w'|'a'|'x'|...)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "open":
-            mode = ""
-            if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-                mode = str(node.args[1].value)
-            for kw in node.keywords:
-                if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
-                    mode = str(kw.value.value)
-            if any(c in mode for c in ("w", "a", "x", "+")):
-                return ValidationResult(False, f"open() in write mode: {mode!r}", "python3")
-        # banned bare names
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _PY_DENY_NAMES:
-            return ValidationResult(False, f"banned call: {node.func.id}", "python3")
-        # banned module.attr calls
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            attr = node.func.attr
-            mod = node.func.value.id if isinstance(node.func.value, ast.Name) else ""
-            if (mod, attr) in _PY_DENY_ATTR:
-                return ValidationResult(False, f"banned call: {mod}.{attr}", "python3")
-            # subprocess.* must invoke a literal allowlisted binary
-            if mod == "subprocess" and attr in ("run", "call", "check_call",
-                                                "check_output", "Popen"):
-                reason = _validate_py_subprocess(node)
-                if reason:
-                    return ValidationResult(False, reason, "python3")
-                bin_name = _py_subprocess_binary(node)
-                if bin_name:
-                    env.binaries.add(bin_name)
-    return ValidationResult(True, "", "python3", env)
-
-
-def _py_subprocess_binary(node) -> str:
-    import ast
-    if not node.args:
-        return ""
-    first = node.args[0]
-    if isinstance(first, ast.List) and first.elts and isinstance(first.elts[0], ast.Constant):
-        return str(first.elts[0].value)
-    if isinstance(first, ast.Constant):
-        return str(first.value).split()[0] if first.value else ""
-    return ""
-
-
-def _validate_py_subprocess(node) -> str:
-    """A subprocess call must (a) not use shell=True and (b) name a literal,
-    allowlisted binary as its first command element. Anything dynamic is
-    refused — we can't statically reason about a computed argv."""
-    import ast
-    for kw in node.keywords:
-        if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value:
-            return "subprocess shell=True"
-    binary = _py_subprocess_binary(node)
-    if not binary:
-        return "subprocess with non-literal command"
-    if binary in _DENY_BINARIES and binary != "curl":
-        return f"subprocess denied binary: {binary}"
-    if binary not in SCRIPT_BINARY_ALLOWLIST and binary != "curl":
-        return f"subprocess binary not on allowlist: {binary}"
+                    return f"api method {args[i + 1]}"
+            if a.startswith("--method="):
+                if a.split("=", 1)[1].upper() not in ("GET", "HEAD"):
+                    return f"api {a}"
+            if a.startswith("-X") and len(a) > 2:
+                if a[2:].upper() not in ("GET", "HEAD"):
+                    return f"api {a}"
+            # field flags imply POST (gh auto-promotes)
+            if a in field_flags or any(a.startswith(f + "=") for f in field_flags):
+                return f"api write-field {a}"
     return ""
 
 
@@ -518,17 +478,15 @@ def validate_script(content: str, *, allow_http: bool = False,
     """Static validation gate (§3.2). A script must clear this before it is ever
     pinned or run unattended. Denylist-backstopped allowlist: unknown binary →
     reject; known binary used in a write-shaped way → reject; an unparseable or
-    construct-heavy script → reject (we validate only flat simple-command bash
-    and a restricted python3 AST)."""
+    construct-heavy script → reject (we validate only flat simple-command bash —
+    a script we can't parse into simple commands is rejected, not waved through)."""
     if not content or not content.strip():
         return ValidationResult(False, "empty script")
     first = content.splitlines()[0].strip()
     interp = VALID_SHEBANGS.get(first)
     if interp is None:
         return ValidationResult(False, f"disallowed/missing shebang: {first!r}")
-    if interp == "bash":
-        return _validate_bash(content, allow_http, http_hosts)
-    return _validate_python(content)
+    return _validate_bash(content, allow_http, http_hosts)
 
 
 # ---------------------------------------------------------------------------
@@ -556,17 +514,27 @@ def _rlimit_preexec():  # pragma: no cover - exercised in a child process
         _set(resource.RLIMIT_NPROC, _RLIMIT_NPROC)
 
 
-def run_sandboxed(script_path: Path, env: dict, timeout: int):
-    """Run a script in a disposable scratch sandbox (§3.3).
+def run_sandboxed(script_content: str, env: dict, timeout: int, *, name: str = "script"):
+    """Run script *bytes* in a disposable scratch sandbox (§3.3).
 
-    A fresh ``mkdtemp`` is the CWD and HOME/TMPDIR/XDG_* all point *into* it, so
-    tools that need a cache work but nothing relative escapes to the repo or the
-    real $HOME; a bounded ``RLIMIT_FSIZE`` (not zero — gh/venn legitimately write
+    Takes the script **content** (not a path) and writes it into a fresh
+    ``mkdtemp`` it owns, then executes that copy. This is deliberate: the caller
+    verifies the bytes (sha256 + re-validate) and hands those exact bytes here, so
+    the verified bytes are the executed bytes — closing the verify→exec TOCTOU
+    window (a path-based exec would re-open a file an attacker could swap, or
+    follow a symlink, between verification and exec).
+
+    The scratch is the CWD and HOME/TMPDIR/XDG_* all point *into* it, so tools
+    that need a cache work but nothing relative escapes to the repo or the real
+    $HOME; a bounded ``RLIMIT_FSIZE`` (not zero — gh/venn legitimately write
     caches) plus ``RLIMIT_AS``/``CPU``/``NPROC``/``CORE`` bound resource abuse;
     the whole scratch tree is deleted after the run. Returns a CompletedProcess,
     or None on timeout / OS error (treated as a failed run by the caller)."""
     scratch = Path(tempfile.mkdtemp(prefix="msc-"))
     try:
+        runner = scratch / f".{_safe_name(name)}.run.sh"
+        runner.write_text(script_content)
+        runner.chmod(runner.stat().st_mode | stat.S_IEXEC)
         senv = dict(env)
         senv["HOME"] = str(scratch)
         senv["TMPDIR"] = str(scratch)
@@ -577,7 +545,7 @@ def run_sandboxed(script_path: Path, env: dict, timeout: int):
                       env=senv, cwd=str(scratch))
         if os.name == "posix":
             kwargs["preexec_fn"] = _rlimit_preexec
-        return subprocess.run([str(script_path)], **kwargs)
+        return subprocess.run([str(runner)], **kwargs)
     except (subprocess.TimeoutExpired, OSError) as e:
         log.warning("script_cache sandbox run failed: %s", e)
         return None
@@ -626,8 +594,15 @@ def _load_trusted_state(name: str) -> dict:
 
 
 def _save_trusted_state(name: str, state: dict) -> None:
+    """Persist the trusted-state sidecar atomically (tmp write + os.replace), so a
+    crash or fleet-churn kill mid-write can't truncate it into corrupt JSON that
+    _load_trusted_state would discard (dropping the pinned sha256 + envelope =
+    losing the security baseline)."""
     try:
-        _state_path(name).write_text(json.dumps(state, indent=2))
+        p = _state_path(name)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        os.replace(tmp, p)
     except OSError as e:
         log.warning("script_cache %s: couldn't persist trusted state: %s", name, e)
 
@@ -727,14 +702,15 @@ def _build_generation_description(prompt: str, policy: dict) -> str:
         f"2. Propose a deterministic shell script that reproduces step 1 on "
         f"future runs and prints the same JSON list to stdout.\n\n"
         f"The script MUST:\n"
-        f"- start with '#!/usr/bin/env bash' then 'set -euo pipefail' "
-        f"(or be a '#!/usr/bin/env python3' script);\n"
+        f"- start with '#!/usr/bin/env bash' then 'set -euo pipefail' (bash only);\n"
         f"- use ONLY these binaries: {allowed};\n"
         f"- be read-only and side-effect free: no file writes/redirections, no "
         f"rm/mv/cp/mkdir/chmod, no sudo, no eval/exec/source, no command or "
-        f"process substitution in command position, no functions, no "
-        f"backgrounding, no package managers, no git mutation;\n"
+        f"process substitution ANYWHERE (not even inside double quotes), no "
+        f"functions, no backgrounding, no package managers, no git mutation;\n"
         f"- use 'venn tools execute' WITHOUT '--confirm' (read-only Venn only);\n"
+        f"- use only read-shaped 'gh' (view/list/api GET — never create/edit/"
+        f"comment/merge or 'gh api' with -f/-X);\n"
         f"- take no arguments and print ONLY the JSON list to stdout. {http}\n\n"
         f"It will be statically rejected and never run if it violates the above.\n\n"
         f"Output your verdict as a SINGLE final line of JSON in this form:\n"
@@ -844,18 +820,10 @@ def _write_header(script: str, monitor, fp: str, model: str = "") -> str:
 def _smoke_ok(content: str, env: dict, name: str) -> bool:
     """Run a candidate once in the sandbox and require parseable list output —
     rejects a script that exits 0 but prints garbage (§6.1)."""
-    tmp = _scripts_dir() / f".smoke-{_safe_name(name)}.sh"
-    try:
-        tmp.write_text(content)
-        tmp.chmod(tmp.stat().st_mode | stat.S_IEXEC)
-        cp = run_sandboxed(tmp, env, TOOL_TIMEOUT)
-        if cp is None or cp.returncode != 0:
-            return False
-        return _parse_items(cp.stdout, name) is not None
-    except OSError:
+    cp = run_sandboxed(content, env, TOOL_TIMEOUT, name=f"smoke-{name}")
+    if cp is None or cp.returncode != 0:
         return False
-    finally:
-        tmp.unlink(missing_ok=True)
+    return _parse_items(cp.stdout, name) is not None
 
 
 def _pin(name: str, content: str, monitor, fp: str, envelope: CapabilityEnvelope,
@@ -875,23 +843,28 @@ def _pin(name: str, content: str, monitor, fp: str, envelope: CapabilityEnvelope
     state["backoff_until"] = None
 
 
-def _verify_integrity(name: str, state: dict, allow_http: bool, http_hosts) -> bool:
-    """TOCTOU re-verify before an unattended run (§3.3): the on-disk sha256 must
-    match trusted state AND the script must still pass validation. A tampered or
-    mismatched script is refused (→ self-heal), never executed."""
+def _verify_integrity(name: str, state: dict, allow_http: bool, http_hosts) -> str | None:
+    """TOCTOU re-verify before an unattended run (§3.3): read the active script
+    ONCE, confirm its sha256 matches trusted state AND it still passes validation,
+    and return those exact bytes for the caller to execute. A tampered or
+    mismatched script returns None (→ self-heal), never executed.
+
+    Returning the verified bytes (rather than a bool) is what closes the TOCTOU
+    window: ``run_sandboxed`` executes this returned content, not a re-read of the
+    on-disk path that could be swapped between this check and exec."""
     active = _active_path(name)
     try:
         content = active.read_text()
     except OSError:
-        return False
+        return None
     if _sha256(content) != state.get("sha256"):
         log.warning("script_cache %s: on-disk hash mismatch — refusing (TOCTOU)", name)
-        return False
+        return None
     vr = validate_script(content, allow_http=allow_http, http_hosts=http_hosts)
     if not vr.ok:
         log.warning("script_cache %s: re-validation failed (%s) — refusing", name, vr.reason)
-        return False
-    return True
+        return None
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -968,11 +941,15 @@ def _run_active(monitor, state: dict, policy: dict, fp: str, env: dict,
             if pinned and (_now() - pinned).total_seconds() > parse_interval(max_age):
                 log.info("script_cache %s: max_age exceeded — regenerating", monitor.name)
                 return False
-        except (ValueError, Exception):
-            pass
-    if not _verify_integrity(monitor.name, state, policy["allow_http"], policy["http_hosts"]):
+        except Exception as e:
+            log.warning("script_cache %s: bad max_age %r (%s) — ignoring",
+                        monitor.name, max_age, e)
+    # Read + verify the bytes ONCE, then execute exactly those bytes (closes the
+    # verify→exec TOCTOU — run_sandboxed runs the verified content, not a re-read).
+    content = _verify_integrity(monitor.name, state, policy["allow_http"], policy["http_hosts"])
+    if content is None:
         return False
-    cp = run_sandboxed(active, env, TOOL_TIMEOUT)
+    cp = run_sandboxed(content, env, TOOL_TIMEOUT, name=monitor.name)
     if cp is None or cp.returncode != 0:
         log.info("script_cache %s: cached script failed — self-healing", monitor.name)
         return False
@@ -981,6 +958,9 @@ def _run_active(monitor, state: dict, policy: dict, fp: str, env: dict,
         log.info("script_cache %s: cached script printed garbage — self-healing", monitor.name)
         return False
     conditions = _items_to_conditions(items, id_field)
+    # A successful cached run is the breaker's reset signal (§5).
+    state["script_regen_fails"] = 0
+    state["backoff_until"] = None
     _record_tick(state, "cached", 0.0, returncode=0, conditions_count=len(conditions))
     log.info("script_cache %s: mode=cached cost=$0 (%d conditions)",
              monitor.name, len(conditions))
@@ -1002,14 +982,18 @@ def _self_heal(monitor, state: dict, policy: dict, fp: str, env: dict,
     mode = "first_gen" if not _active_path(monitor.name).exists() else "fallback_regen"
 
     candidate = gen.script
-    pinned = False
     if candidate and policy["approval"] != "off":
         vr = validate_script(candidate, allow_http=policy["allow_http"],
                              http_hosts=policy["http_hosts"])
         if vr.ok and _smoke_ok(candidate, env, monitor.name):
+            # A valid, smoke-passing candidate is NOT a regen failure — whether we
+            # pin it (auto / in-envelope) or queue it for review, generation
+            # succeeded, so the breaker resets (§5: reset on a successful pin; a
+            # queued-but-valid candidate is equally healthy).
+            state["script_regen_fails"] = 0
+            state["backoff_until"] = None
             if _should_pin(state, vr.envelope, policy["approval"]):
                 _pin(monitor.name, candidate, monitor, fp, vr.envelope, state)
-                pinned = True
                 _notify("monitor/script.first_run", monitor, {
                     "mode": mode, "approval": policy["approval"],
                     "summary": f"auto-pinned generated script for {monitor.name}",
@@ -1022,14 +1006,8 @@ def _self_heal(monitor, state: dict, policy: dict, fp: str, env: dict,
             reason = vr.reason if not vr.ok else "smoke run failed"
             log.warning("script_cache %s: candidate rejected (%s)", monitor.name, reason)
             _bump_failure(monitor.name, monitor, state, policy["on_persistent_failure"])
-    if not pinned:
-        _record_tick(state, mode, gen.cost_usd, returncode=0,
-                     conditions_count=len(conditions))
-    else:
-        _record_tick(state, mode, gen.cost_usd, returncode=0,
-                     conditions_count=len(conditions))
-        state["script_regen_fails"] = 0
-        state["backoff_until"] = None
+    _record_tick(state, mode, gen.cost_usd, returncode=0,
+                 conditions_count=len(conditions))
     return conditions
 
 
@@ -1132,15 +1110,21 @@ def script_cache(monitor, projects: list[Path]) -> list[Condition] | None:
                         monitor.name, monitor.name)
             return None
 
-        # Degraded backoff: when the breaker has tripped, only attempt a regen
-        # once the backoff window elapses — never hammer the agent every tick.
-        if _backoff_active(state):
-            log.info("script_cache %s: in regen backoff — skipping this tick", monitor.name)
-            return None
-
+        # Always try the cheap cached fast path first — the circuit breaker
+        # throttles only *regeneration*, never a still-valid pinned script. A
+        # cached hit also resets the breaker (in _run_active).
         result = _run_active(monitor, state, policy, fp, env, id_field)
         if result is not False:
-            return result  # cached hit (conditions) — fast path
+            return result  # cached hit (conditions)
+
+        # No usable cached script → we'd regenerate. When the breaker has tripped,
+        # gate regen behind the backoff window so we don't hammer the agent every
+        # tick; detection resumes (at reduced frequency) once it elapses (§5).
+        if _backoff_active(state):
+            log.info("script_cache %s: in regen backoff — skipping regen this tick",
+                     monitor.name)
+            return None
+
         return _self_heal(monitor, state, policy, fp, env, id_field, cwd)
     finally:
         _save_trusted_state(monitor.name, state)

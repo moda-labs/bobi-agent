@@ -6,7 +6,6 @@ These exercise the full check runner with the agent generation step injected
 
 import json
 import os
-import stat
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -78,46 +77,39 @@ def _state(scripts_dir, name="email-watch"):
 # ---------------------------------------------------------------------------
 
 class TestSandbox:
-    def _script(self, scripts_dir, body):
-        p = scripts_dir / "s.sh"
-        p.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body)
-        p.chmod(p.stat().st_mode | stat.S_IEXEC)
-        return p
+    def _content(self, body):
+        return "#!/usr/bin/env bash\nset -euo pipefail\n" + body
 
     def test_home_and_tmpdir_redirected_to_scratch(self, scripts_dir):
-        p = self._script(scripts_dir, "echo \"$HOME\"\n")
-        cp = run_sandboxed(p, dict(os.environ), 10)
+        cp = run_sandboxed(self._content("echo \"$HOME\"\n"), dict(os.environ), 10)
         assert cp is not None and cp.returncode == 0
         home = cp.stdout.strip()
-        assert home == os.environ.get("TMPDIR", home) or "msc-" in home
+        assert "msc-" in home  # HOME points into the disposable scratch
 
     def test_scratch_cleaned_up(self, scripts_dir):
-        p = self._script(scripts_dir, "pwd\n")
-        cp = run_sandboxed(p, dict(os.environ), 10)
+        cp = run_sandboxed(self._content("pwd\n"), dict(os.environ), 10)
         scratch = cp.stdout.strip()
         assert not Path(scratch).exists()  # rmtree'd in finally
 
     def test_relative_write_lands_in_scratch_not_cwd(self, scripts_dir):
-        # writing a relative file works (scratch is writable) but cannot escape
-        p = self._script(scripts_dir, "echo hi > out.txt && cat out.txt\n")
-        # note: this script has a redirect — sandbox still runs it (validator is
-        # the gate, not the sandbox); the point is it doesn't touch our CWD
+        # writing a relative file works (scratch is writable) but cannot escape;
+        # the sandbox runs even an unvalidated script (validator is the gate) —
+        # the point is it does not touch the manager's CWD
         before = set(os.listdir("."))
-        run_sandboxed(p, dict(os.environ), 10)
+        run_sandboxed(self._content("echo hi > out.txt && cat out.txt\n"),
+                      dict(os.environ), 10)
         assert set(os.listdir(".")) == before
 
     @pytest.mark.skipif(os.name != "posix", reason="RLIMIT is POSIX-only")
     def test_fsize_limit_blocks_large_write(self, scripts_dir):
         # a 50MB write exceeds the 10MB RLIMIT_FSIZE → script killed/fails
-        p = self._script(
-            scripts_dir,
-            "head -c 50000000 /dev/zero | tr '\\0' 'a' > big.txt\n")
-        cp = run_sandboxed(p, dict(os.environ), 20)
+        cp = run_sandboxed(
+            self._content("head -c 50000000 /dev/zero | tr '\\0' 'a' > big.txt\n"),
+            dict(os.environ), 20)
         assert cp is None or cp.returncode != 0
 
     def test_timeout_kills_sleeper(self, scripts_dir):
-        p = self._script(scripts_dir, "sleep 10\n")
-        cp = run_sandboxed(p, dict(os.environ), 1)
+        cp = run_sandboxed(self._content("sleep 10\n"), dict(os.environ), 1)
         assert cp is None  # TimeoutExpired → None
 
 

