@@ -292,11 +292,9 @@ handle, and watch `.modastack/state/manager.log`.
 
 ## Reference implementations
 
-- `agents/eng-team` (modastack repo) — multi-repo org: director entry
-  point, project leads, engineers; github + linear + slack.
+- `agents/eng-team-core` (modastack repo) — multi-repo org: director entry
+  point, project leads, engineers; github + slack with tool-agnostic seams
+  (Moda's house team derives from it via `from: eng-team-core`).
 - `agents/dogfood-content-review` (modastack repo) — single-repo content
   pipeline: manager entry point, researcher/editor/fact-checker roles,
   github + email via Venn, command monitor for inbound email.
-- `agents/market-research` (modastack repo) — research manager entry
-  point with three workers; slack + linear, workspace seeds for domain
-  context and feed lists, agent monitors for weekly cadence + RSS.

@@ -3,11 +3,5 @@ agents:
     version: "1.1.0"
     description: "Portable engineering org — director, project leads, engineers; GitHub + Slack with tool-agnostic seams. Derive a house team with `from: eng-team-core`."
   dogfood-content-review:
-    version: "1.1.0"
+    version: "1.2.0"
     description: "Knowledge base management — manager, researcher, editor, fact-checker coordinate to produce and verify documentation"
-  market-research:
-    version: "1.1.0"
-    description: "Market intelligence — research manager, topic researcher, landscape scanner, PMF navigator"
-  support-manager:
-    version: "1.0.0"
-    description: "Support triage — one agent watches PostHog + email, investigates, files Linear tickets for real issues, and reports daily"
