@@ -287,9 +287,9 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
   health endpoint (`127.0.0.1:45985`) that restarts a *director* whose
   `last_activity` stalls is the only thing that covers **unknown** wedge classes
   (not just the three enumerated above), and is worth its own ticket as
-  defense-in-depth — but it is **separate follow-up, not blocking #456**.
-  Scoping it here would widen this PR past the curator + the rotation surface it
-  already owns.
+  defense-in-depth — but it is **separate follow-up, not blocking #456**
+  (tracked in **#464**). Scoping it here would widen this PR past the curator +
+  the rotation surface it already owns.
 - **No** *ongoing* migration machinery for `INDEX.md` journals. There is a
   **one-time seed** at rollout (in scope, item 7) — a single distill of the
   current journal(s) into the first `policy.md` — but the old per-session journals
@@ -956,7 +956,7 @@ All five are now decided from the review's leans; recorded here with rationale.
   §6b reconnect hardening builds on it (confirms it covers the connect-turn
   drain) and adds the orthogonal *never-receives-a-message* timeout it does not
   cover.
-- **Manager self-heal watchdog** — a follow-up ticket (out of scope here) for a
+- **Manager self-heal watchdog** ([#464](https://github.com/moda-labs/modastack/issues/464)) — a follow-up ticket (out of scope here) for a
   health-endpoint watchdog that restarts a wedged *director* on a stalled
   `last_activity`, covering **unknown** wedge classes beyond the three enumerated.
 - Mirrors the framework's own context-files pattern (index + read-on-demand) and
