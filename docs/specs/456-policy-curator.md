@@ -47,6 +47,31 @@
 > one-shot budget above `MAX_CURATOR_INPUT_CHARS` so it doesn't truncate the very
 > content it exists to preserve (in-scope item 7, impl step 7). Diff in the body.
 
+> **Revision 4 (2026-06-24)** — folds in the R3 review (all three R2 fixes
+> confirmed closed; one fresh blocking hole + one hardening). Changes:
+> (1) **blocking cursor-key fix** — the R3 cursor was a message **timestamp**,
+> which is *not* a unique consumption key: tool-call turns write multiple
+> `messages` rows at the **identical** `timestamp` (and `line_number`)
+> (`history.py:149–161`), empty/absent timestamps are stored as `""`
+> (`history.py:132`) and sort below any real ts, and late-indexed old rows can
+> land below an advanced cursor — so a budget cut between tie-rows, a `""`-ts row,
+> or a late-indexed row gets **silently skipped forever** under `WHERE timestamp >
+> cursor`, the exact silent-skip class R3 just closed, reappearing one level
+> finer. Fix: make the cursor the table's **unique autoincrement `messages.id`**
+> (`INTEGER PRIMARY KEY AUTOINCREMENT`, `history.py:33`). Window `WHERE id >
+> cursor ORDER BY id`, ingest oldest-first by id, advance to the **last ingested
+> id**. Unique id → no tie; assigned regardless of ts value → empty-ts rows still
+> consumed; late-indexed old rows get a *high* id → still caught. The R3
+> oldest-first / defer-overflow semantics are **unchanged** — only the cursor KEY
+> moves from timestamp to id (§3, `messages_since(cursor)` signature, tests 8a/9);
+> (2) **oversized-single-message hardening** — a single message larger than
+> `MAX_CURATOR_INPUT_CHARS` would never fit and would stall the cursor forever
+> (the budget can't advance past it). The curator now **truncates** an oversized
+> single message (head+tail, with an elision marker) to fit, ingests it, advances
+> the cursor past it, and flags the truncation loudly (`oversized_truncated`) so
+> the stall is impossible and the lossy edit is visible (§3, JSON contract, test
+> 9a). Diff in the body.
+
 ---
 
 # Spec: replace the append-only decision log with a curator-monitor → `policy.md` (#456)
@@ -101,14 +126,15 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
 - **New default monitor `policy-curator`**, fires on an interval.
 - On fire → dispatch an **out-of-band curator agent** (subagent executor) that:
   1. reads **new transcript messages since its last successful run** — windowed
-     on **`messages.timestamp > cursor` across *all* sessions** (including
-     long-lived ongoing ones; *not* `conversations.started_at`, which is
-     write-once and would never re-select the persistent manager — see §3) —
-     against a **dedicated curator cursor advanced only on success**, *not* the
-     monitor's `last_run`, which the scheduler clobbers at dispatch; bounded by a
-     **per-run input cap** (ingest **oldest-first up to budget**, defer the newest
-     overflow to the next run) so a busy team can't blow up the curator's ingest
-     cost and no window is silently skipped,
+     on **`messages.id > cursor` across *all* sessions** (the cursor is the
+     unique autoincrement row id, *not* a message `timestamp`, which is non-unique
+     across tie-rows and sometimes empty; and *not* `conversations.started_at`,
+     which is write-once and would never re-select the persistent manager — see
+     §3) — against a **dedicated curator cursor advanced only on success**, *not*
+     the monitor's `last_run`, which the scheduler clobbers at dispatch; bounded
+     by a **per-run input cap** (ingest **oldest-first by id up to budget**, defer
+     the higher-id overflow to the next run) so a busy team can't blow up the
+     curator's ingest cost and no row is silently skipped,
   2. reconciles them against the **current `policy.md`**,
   3. **rewrites `policy.md` in place** (a full new document, never append) with
      durable learnings **that aren't already captured in the agent-team prose**
@@ -165,12 +191,14 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
    set, interval-configurable, dispatching an out-of-band curator agent. The
    *mechanism* is framework-level; the **curator prompt is team-overridable**
    (what counts as "durable" is domain-flavored — Q1).
-2. **Curator agent** path: read new transcript **messages** (`messages.timestamp
-   > cursor` across *all* sessions, ongoing ones included — not
-   `conversations.started_at`) since the **curator's own success-advanced cursor**
-   (not the scheduler's `last_run`), ingesting **oldest-first under a per-run input
-   cap** and deferring the newest overflow, reconcile vs current `policy.md`,
-   rewrite it in place under a hard output size cap.
+2. **Curator agent** path: read new transcript **messages** (`messages.id >
+   cursor` across *all* sessions, ongoing ones included — not
+   `conversations.started_at`; the cursor is the unique row id, not a timestamp)
+   since the **curator's own success-advanced cursor** (not the scheduler's
+   `last_run`), ingesting **oldest-first by id under a per-run input cap** and
+   deferring the higher-id overflow (truncating an oversized single message that
+   can't fit), reconcile vs current `policy.md`, rewrite it in place under a hard
+   output size cap.
 3. **Two-section `policy.md` with distinct retention rules**: `## Facts`
    (refreshable/overwritten) and `## Decisions` (sticky/retained-unless-reversed),
    in one capped file. Curator contract distinguishes **lossless** ops from
@@ -297,13 +325,15 @@ to publish. A distinct marker keeps the verdict path untouched.
   framework with no topology opinions shouldn't hard-bake one team's notion of
   policy. The prompt instructs the agent to:
   1. Read the **curator cursor** (see watermark subsection) and enumerate
-     transcript **messages with `timestamp > cursor` across all sessions**
+     transcript **messages with `id > cursor` across all sessions**
      (ongoing long-lived sessions included — *not* conversations whose
-     `started_at > cursor`), grouped by `session_id` for per-session context.
-     **Trim the ingest to the per-run input cap by ingesting oldest-first up to
-     budget** and deferring the newest over-budget messages to the next run
+     `started_at > cursor`; the cursor is the unique autoincrement row id, not a
+     timestamp), grouped by `session_id` for per-session context.
+     **Trim the ingest to the per-run input cap by ingesting oldest-first by id up
+     to budget** and deferring the higher-id over-budget messages to the next run
      (noted in the summary) — see the watermark subsection for why this direction
-     (not newest-first-drop).
+     (not highest-id-first-drop), and how an oversized single message is truncated
+     rather than allowed to stall the cursor.
   2. Read the **current `.modastack/state/policy.md`** (both sections).
   3. Distill durable, reusable learnings **not already in** the team prose
      (role prompts, `tools/*.md`, `agent.md`) — promote only patterns seen
@@ -327,7 +357,8 @@ to publish. A distinct marker keeps the verdict path untouched.
        space. Only when lossless compression still exceeds the cap.
   5. Emit a final JSON line with a short **change summary**:
      `{"success": true, "updated": true, "summary": "…", "bytes": N,
-     "urgent": false, "lossy_drops": 0, "input_truncated": false}`.
+     "urgent": false, "lossy_drops": 0, "input_truncated": false,
+     "oversized_truncated": 0}`.
      - `updated: false` when nothing durable changed (publishes nothing).
      - `urgent: true` only for changes worth interrupting in-flight agents →
        gates the **active inbox push** (passive re-read otherwise; see §4).
@@ -335,44 +366,88 @@ to publish. A distinct marker keeps the verdict path untouched.
        items for space; the summary must name them
        (`"dropped N still-valid decisions for space"`). **This is the trigger to
        raise the cap / build the decisions-spill** — v1 degrades *loudly*.
-     - `input_truncated: true` when the per-run input cap **deferred** the newest
-       over-budget messages to the next run (cursor advanced only past the
-       contiguous ingested block, so nothing is skipped — see §3 watermark). The
-       summary names the deferred window so a busy interval is visible, not
-       silently under-distilled.
+     - `input_truncated: true` when the per-run input cap **deferred** the
+       higher-id over-budget messages to the next run (cursor advanced only past
+       the contiguous ingested block of ids, so nothing is skipped — see §3
+       watermark). The summary names the deferred window (id range) so a busy
+       interval is visible, not silently under-distilled.
+     - `oversized_truncated: N` (> 0) means N single messages each exceeded
+       `MAX_CURATOR_INPUT_CHARS` on their own and were **head+tail truncated**
+       (with an elision marker) to fit, then ingested and passed by the cursor —
+       so an oversized message can never stall the watermark. The summary names
+       each truncated message (session + id) so the lossy edit is visible (see §3
+       input cap).
 
 #### Reading transcripts since the watermark — and bounding the input
 
 Transcripts are indexed in SQLite at `.modastack/state/history.db`
 (`history.py:16–18`) from the raw JSONL under the Claude projects dir. The
-`messages` table already carries a per-message `timestamp` column
-(`history.py:40`). The curator uses:
+`messages` table carries a unique **`id INTEGER PRIMARY KEY AUTOINCREMENT`**
+(`history.py:33`) plus a (non-unique, sometimes empty) per-message `timestamp`
+column (`history.py:40`). The curator uses:
 
 - `history.index()` — incremental re-index (only new lines;
   `history.py:177–213`).
 - **New `history.messages_since(cursor)`** — the delta the curator actually
-  needs: `SELECT * FROM messages WHERE timestamp > ? ORDER BY timestamp` (small
-  net-new query, mirrors `session_messages`/`conversations`), returning message
-  rows across **all** sessions, oldest-first. The curator groups the rows by
-  `session_id` to reconstruct per-session context.
+  needs, keyed on the **row id** (an integer cursor, not an ISO timestamp):
+  `SELECT * FROM messages WHERE id > ? ORDER BY id` (small net-new query, mirrors
+  `session_messages`/`conversations`), returning message rows across **all**
+  sessions, oldest-first by id. The curator groups the rows by `session_id` to
+  reconstruct per-session context.
 - `history.session_messages(session_id)` — full message list per session
   (`history.py:281–294`), for pulling surrounding context once a session is in
   the window.
 
-**Window on `messages.timestamp`, not `conversations.started_at` (blocking R2
-fix).** R2 windowed the delta with `conversations(...)` filtered on
-`started_at > cursor`. But `started_at` is written **once** — the
-`INSERT OR REPLACE … started_at` fires only `if not conv_exists`
-(`history.py:130, 137–141`) and is **never updated**. The director/manager runs
-as **one persistent, long-lived session**: it appears in `conversations` exactly
-once, with an old `started_at`, and `started_at > cursor` would **never
-re-select it** no matter how many thousands of messages it accrues — so the
-curator would distill ephemeral subagent sessions and **systematically miss the
-single session where most durable learning happens**. Fix: window on
-**`messages.timestamp > cursor` across all sessions** (the schema already carries
-per-message timestamps) via `messages_since(cursor)` — "messages since cursor,"
-not "conversations started since cursor." This also redefines what the cursor
-*is*: a **message timestamp**, not a conversation `started_at`.
+**Window on `messages` (not `conversations.started_at`), keyed on `messages.id`
+(not `timestamp`) — two distinct fixes.**
+
+*(R2 fix — window on messages, not conversations.)* R2 windowed the delta with
+`conversations(...)` filtered on `started_at > cursor`. But `started_at` is
+written **once** — the `INSERT OR REPLACE … started_at` fires only
+`if not conv_exists` (`history.py:130, 137–141`) and is **never updated**. The
+director/manager runs as **one persistent, long-lived session**: it appears in
+`conversations` exactly once, with an old `started_at`, and `started_at > cursor`
+would **never re-select it** no matter how many thousands of messages it accrues
+— so the curator would distill ephemeral subagent sessions and **systematically
+miss the single session where most durable learning happens**. Fix: window on the
+**`messages` table across all sessions** via `messages_since(cursor)` — "messages
+since cursor," not "conversations started since cursor."
+
+*(R3→R4 fix — key the cursor on `messages.id`, not `messages.timestamp`.)* R3
+made that cursor a **message timestamp**. But `timestamp` is **not a unique
+consumption key**, so `WHERE timestamp > cursor` reintroduces the silent-skip
+class one level finer:
+
+1. **Tie-rows at an identical timestamp.** A tool-using assistant turn writes
+   the text row **plus one row per tool call**, all with the **same `timestamp`
+   *and* `line_number`** (`history.py:149–161`). Ties are guaranteed for most
+   turns. If the oldest-first input cap cuts **between two rows sharing timestamp
+   T** (text ingested, sibling tool-call row deferred), advancing the cursor to T
+   makes the next run's `WHERE timestamp > T` **skip the deferred sibling
+   forever** — at exactly the budget boundary the cap exists to handle.
+2. **Empty timestamps permanently excluded.** `timestamp = msg.get("timestamp",
+   "")` (`history.py:132`) stores `""` when absent. `""` sorts below any real ts,
+   so once the cursor is non-empty a `""`-ts row never satisfies `> cursor` and is
+   dropped from every future window.
+3. **Late-indexed old rows slip below the watermark.** With concurrent sessions
+   indexed incrementally across files, a session flushed late can land messages
+   with timestamps *below* an already-advanced cursor → never selected by
+   `timestamp > cursor`.
+
+A `(timestamp, line_number)` composite does **not** fix this — the tie-rows share
+**both** columns. Fix: key the cursor on the table's unique monotonic
+**`messages.id`** (`INTEGER PRIMARY KEY AUTOINCREMENT`, `history.py:33`): window
+`WHERE id > cursor ORDER BY id`, advance to the **last id ingested**. This kills
+all three at once — unique id ⇒ no tie (the cap can cut anywhere and `id > cursor`
+still picks up the deferred row next run); id is assigned regardless of ts value
+⇒ empty/`""`-ts rows are still consumed; a late-indexed old row gets a *high* id
+(inserted later) ⇒ `id > cursor` still catches it. The cursor is a **consumption
+watermark** ("what have I read?"), which is what the curator needs — versus
+`timestamp`, a *content* attribute that is non-unique and sometimes absent. The
+only property lost is strict global chronological order **within** a window; since
+the curator groups by `session_id` and distills, completeness matters far more
+than cross-session time-ordering. This redefines what the cursor *is*: a
+**message row id**, not a timestamp or a conversation `started_at`.
 
 **Watermark — dedicated curator cursor, advanced on success (resolves Q4, and
 fixes a blocking bug in R1).** R1 proposed reusing the monitor's persisted
@@ -385,11 +460,11 @@ the delta collapses to ≈empty and it distills nothing. The watermark it actual
 needs (the *previous* run's time) has already been clobbered.
 
 Fix: the curator maintains its **own cursor** at
-`.modastack/state/policy_cursor` (an ISO **message timestamp**), and **advances
-it only after a successful rewrite** — to the timestamp of the **newest message
-it actually ingested** (which, because it ingests oldest-first and contiguously
-from the cursor, is the upper edge of an unbroken block — see the input cap).
-Properties:
+`.modastack/state/policy_cursor` (the integer **`messages.id`** of the last row
+it ingested, not an ISO timestamp), and **advances it only after a successful
+rewrite** — to the **highest id it actually ingested** (which, because it ingests
+oldest-first by id and contiguously from the cursor, is the upper edge of an
+unbroken block of ids — see the input cap). Properties:
 
 - Reads the *previous* successful boundary, not its own dispatch time → the
   delta is real.
@@ -398,7 +473,7 @@ Properties:
   of Q4).
 - Independent of how/when the scheduler touches `last_run`.
 
-**Per-run input cap — ingest oldest-first (new; resolves an R2 silent-skip
+**Per-run input cap — ingest oldest-first by id (resolves an R2 silent-skip
 collision).** The output (`policy.md`) is capped, but the curator *reads all new
 messages across all sessions* each interval, and that input is large and
 variable-cost (the director alone is huge). Add `MAX_CURATOR_INPUT_CHARS` (a
@@ -410,22 +485,38 @@ was loud about *truncating* but silent about *skipping*, defeating the
 "dropped/failed window gets re-read next run" property the success-advanced
 cursor exists to provide.
 
-Fix — **ingest oldest-first up to the budget, and advance the cursor only to the
-newest message actually ingested**, leaving the newest over-budget messages for
-the next run:
+Fix — **ingest oldest-first by id up to the budget, and advance the cursor only
+to the highest id actually ingested**, leaving the higher-id over-budget messages
+for the next run:
 
-- The ingested block is contiguous from the cursor upward, so advancing to its
-  top edge **cannot skip** anything — the deferred newest overflow sits *above*
-  the new cursor and is re-read next run.
-- Set `input_truncated: true` and name the deferred window in the summary (so a
+- The ingested block is contiguous from the cursor upward (a run of ids), so
+  advancing to its top id **cannot skip** anything — the deferred higher-id
+  overflow sits *above* the new cursor and is re-read next run.
+- Set `input_truncated: true` and name the deferred id range in the summary (so a
   busy interval is visible, not silently under-distilled).
+
+**Oversized single message (hardening — never stall the cursor).** The
+oldest-first rule assumes each message *eventually fits* in some run's budget. A
+**single** message larger than `MAX_CURATOR_INPUT_CHARS` breaks that assumption:
+it never fits, so a budget that "ingests until the next message would overflow"
+would ingest **zero** rows, advance the cursor **nowhere**, and re-hit the same
+oversized row every run — a permanent stall (and it is the *oldest* unread row,
+so everything behind it stalls too). Rule: when the **oldest unread** message
+alone exceeds the budget, **truncate it** to fit — keep a head+tail slice with an
+explicit elision marker (`… [truncated N chars] …`) — ingest the truncated form,
+**advance the cursor past its id**, and set `oversized_truncated += 1` naming the
+message (session + id) in the summary. Truncation is **lossy and loud** (it is
+the one place the input cap drops content rather than deferring it), but it
+guarantees forward progress; deferral is still preferred for every message that
+*can* fit in a future run. Only the single oldest message is force-truncated per
+run — normal overflow above it still defers.
 
 **Conscious tradeoff (the tension R2 flagged):** recent learnings are
 higher-signal (argues newest-first), but cursor monotonicity / no-silent-loss
 requires oldest-first (you can only safely advance a single watermark past a
-*contiguous* ingested block). We choose **oldest-first** — never losing a window
-beats distilling the newest one a few hours sooner, and a shorter interval (Q2,
-6h) keeps the deferred lag small. We explicitly **do not** combine
+*contiguous* ingested block of ids). We choose **oldest-first** — never losing a
+window beats distilling the newest one a few hours sooner, and a shorter interval
+(Q2, 6h) keeps the deferred lag small. We explicitly **do not** combine
 newest-first-drop with advance-to-max (the silent-skip combination).
 
 ### 4. Publishing `policy.updated` on completion
@@ -536,7 +627,10 @@ lightweight client cycle:
   which is a smaller risk.
 - Enforce in code where cheap: the policy loader is read-only; no framework code
   path other than the curator dispatch writes the file. Add a doctor check that
-  flags a `policy.md` mtime newer than the curator's cursor (i.e. a write not
+  flags a `policy.md` mtime newer than the **cursor file's** mtime (the cursor is
+  now an integer id, so compare the two files' modification times, not the cursor
+  *value*; the curator rewrites `policy.md` and advances `policy_cursor` together,
+  so a `policy.md` written *after* the last cursor advance is a write not
   attributable to the last curator run) as an invariant violation. **A soft
   doctor check is enough for v1 (resolves Q5)** — given the interval guard above,
   a hard write-guard is not worth the plumbing yet.
@@ -593,25 +687,44 @@ Unit tests (`pytest tests/ --ignore=tests/integration/`):
    writes `policy.md` (doctor invariant check returns ok for a curator-written
    file, flags a foreign write).
 8. **Success-advanced cursor.** Drive a curator run; assert the cursor advances
-   to the **newest ingested message timestamp** **only on success**, and that a
+   to the **highest ingested `messages.id`** **only on success**, and that a
    run which raises mid-distillation leaves the cursor unmoved so the next run
    re-reads the same window (no skipped transcripts). Assert the curator reads the
    cursor, not the scheduler's `last_run` (which the scheduler clobbers at
    dispatch).
-8a. **Windowing selects a long-lived session (blocking R2 regression).** Seed
-   `history.db` with one **persistent** session whose `conversations.started_at`
-   is **older than the cursor** but which has **new `messages` after the cursor**,
-   plus a fresh ephemeral session. Assert the curator's delta (via
-   `messages_since(cursor)`) **includes the persistent session's new messages** —
-   i.e. windowing on `messages.timestamp`, not `conversations.started_at`, which
-   would have excluded the manager entirely.
-9. **Per-run input cap — oldest-first, no skip.** Seed more new-message volume
-   than `MAX_CURATOR_INPUT_CHARS` across the window; assert the curator ingests
-   **oldest-first** up to the budget, **defers** the newest overflow, sets
-   `input_truncated: true` with the deferred window named in the summary, and
-   advances the cursor **only to the newest ingested message** — then assert a
-   second run **re-reads the deferred overflow** (the silent-skip the R2 newest-
-   first-drop + advance-to-max combination would have caused never happens).
+8a. **Windowing — id cursor, no tie-skip / no empty-ts-skip (blocking R2/R3
+   regression).** Two parts on the same `messages_since(cursor)` reader:
+   (a) *long-lived session* — seed `history.db` with one **persistent** session
+   whose `conversations.started_at` is **older than the cursor** but which has
+   **new `messages` after the cursor**, plus a fresh ephemeral session; assert the
+   delta **includes the persistent session's new messages** (windowing on
+   `messages`, not `conversations.started_at`, which would exclude the manager).
+   (b) *id is skip-free where timestamp was not* — seed a tool-using turn that
+   writes **multiple rows at the identical `timestamp`** (text + tool-call
+   siblings, as `index()` does) **and** at least one row with an **empty `""`
+   timestamp**; advance the cursor to a point that, under a `timestamp > cursor`
+   window, would drop a tie-sibling and the `""`-ts row. Assert that with the
+   **`id > cursor`** window **every** such row is selected — no tie-sibling and no
+   empty-timestamp row is skipped. This is the regression test for the R3
+   timestamp cursor the R4 review flagged.
+9. **Per-run input cap — oldest-first by id, no skip.** Seed more new-message
+   volume than `MAX_CURATOR_INPUT_CHARS` across the window; assert the curator
+   ingests **oldest-first by id** up to the budget, **defers** the higher-id
+   overflow, sets `input_truncated: true` with the deferred id range named in the
+   summary, and advances the cursor **only to the highest ingested id** — then
+   assert a second run **re-reads the deferred overflow** (the silent-skip the R2
+   newest-first-drop + advance-to-max combination would have caused never
+   happens). Include a tie case: seed sibling rows sharing one timestamp straddling
+   the budget boundary and assert the deferred sibling **is re-read** next run
+   (impossible to guarantee under a timestamp cursor).
+9a. **Oversized single message — truncate, don't stall.** Seed one message whose
+   content alone exceeds `MAX_CURATOR_INPUT_CHARS`, as the **oldest unread** row.
+   Assert the curator does **not** stall (it ingests a **head+tail-truncated**
+   form with the elision marker rather than ingesting zero rows), **advances the
+   cursor past that message's id**, and sets `oversized_truncated: 1` naming the
+   message (session + id) in the summary. Assert a second run does **not** re-hit
+   the same oversized row (the cursor moved past it) — i.e. the permanent-stall is
+   impossible.
 10. **No silent lossy drop.** Force the curator over-cap with all-still-valid
    decisions; assert any drop of a still-valid item sets `lossy_drops > 0` and is
    named in the change summary (loud degradation), never a silent deletion.
@@ -653,12 +766,15 @@ Build inside-out; each step builds + type-checks + passes tests on its own.
    non-urgent `policy.updated` and pushes only on `urgent: true` (passive
    otherwise). Tests 3, 4, 11.
 6. **Distillation contract: cursor + windowing + caps.** Add
-   `history.messages_since(cursor)`; the curator reads the **success-advanced
-   cursor** (a message timestamp, not `last_run`), enumerates **messages across
-   all sessions** since the cursor **oldest-first under `MAX_CURATOR_INPUT_CHARS`**
-   (deferring the newest overflow), rewrites the two-section `policy.md` under the
-   retention + lossless/lossy rules, and advances the cursor only on success to
-   the newest ingested message. Tests 1, 2, 2a, 2b, 7, 8, 8a, 9, 10.
+   `history.messages_since(cursor)` (keyed on **`messages.id`**: `WHERE id > ?
+   ORDER BY id`); the curator reads the **success-advanced cursor** (a
+   `messages.id`, not a timestamp and not `last_run`), enumerates **messages
+   across all sessions** since the cursor **oldest-first by id under
+   `MAX_CURATOR_INPUT_CHARS`** (deferring the higher-id overflow; truncating an
+   oversized oldest message that can't fit, `oversized_truncated`), rewrites the
+   two-section `policy.md` under the retention + lossless/lossy rules, and advances
+   the cursor only on success to the highest ingested id. Tests 1, 2, 2a, 2b, 7,
+   8, 8a, 9, 9a, 10.
 7. **One-time seed.** A guarded one-shot that distills the existing
    `memory/<session>/INDEX.md` journal(s) into the first `policy.md` (idempotent:
    no-op if `policy.md` already exists). Q3 = seed once.
@@ -684,9 +800,12 @@ All five are now decided from the review's leans; recorded here with rationale.
   starting empty discards real knowledge, and transcripts age/rotate so it is not
   all re-derivable. (In-scope item 7; impl step 7.)
 - **Q4 — watermark → RESOLVED by the §3 fix: dedicated curator cursor advanced
-  on success.** This was not a nicety — reusing `last_run` is *non-functional*
-  (the scheduler clobbers it at dispatch). The success-advanced cursor fixes both
-  the dispatch-time race and the mid-distillation-skip problem in one move.
+  on success, keyed on `messages.id`.** This was not a nicety — reusing `last_run`
+  is *non-functional* (the scheduler clobbers it at dispatch). The
+  success-advanced cursor fixes both the dispatch-time race and the
+  mid-distillation-skip problem in one move; keying it on the unique `messages.id`
+  (R4, not a message timestamp) closes the finer tie-row / empty-timestamp /
+  late-index skip class on top.
 - **Q5 — single-writer enforcement → RESOLVED: soft doctor check for v1.**
   Curator-vs-curator overlap is already prevented by the interval; the doctor
   check only guards *foreign* writes, a smaller risk. (§7.)
