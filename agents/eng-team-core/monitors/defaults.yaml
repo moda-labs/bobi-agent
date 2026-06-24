@@ -33,3 +33,15 @@ monitors:
     event: monitor/status.roundup_due
     notify: true
 
+  - name: policy-curator
+    description: >
+      Distill new agent transcripts since the last run into the team's
+      policy.md (#456). Runs out-of-band on an interval; the curator agent
+      works from a dedicated prompt (modastack/prompts/curator.md, team-
+      overridable) — this description is a human-readable label, not the
+      agent's working instructions. The `curator: true` marker routes this
+      monitor to the artifact-writing curator path, not the verdict path.
+    interval: 6h
+    event: system/policy.updated
+    curator: true
+
