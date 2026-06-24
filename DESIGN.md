@@ -425,6 +425,32 @@ inspecting proxies (Zscaler, etc.) whose root is in the keychain but not certifi
    editable source moved to a machine-wide `~/modastack-agents/` library, so it no
    longer sits one dotfile away from the project's `.modastack/` install target.
 
+## Agent UI (runtime dashboard — `modastack ui`)
+
+A second, separate surface from the `setup` wizard: a minimal dashboard for a
+*running* team. One card per active agent session (manager + workers, read from
+the on-disk session registry), and clicking a card opens a chat panel to talk to
+that agent directly. The chat is **blocking request/response** — a message goes
+out via `inbox.deliver(wait=True)` and the agent's full reply comes back as one
+block; there's no token-streaming surface to expose. It **reuses this design
+language verbatim**: warm light chrome for the roster + composer, the single dark
+CRT slab for the chat transcript (the machine writes in the dark), amber accent,
+mono labels, system fonts, no build step.
+
+- **Two run modes, one app.** Local (`modastack ui`) binds `127.0.0.1` + a
+  per-launch token and opens a browser, exactly like setup. In-container it's
+  **on by default** (the entrypoint sets `MODASTACK_UI=1`; disable with
+  `MODASTACK_UI=0`) — the manager binds the Fly **6PN** address in a daemon
+  thread, and `modastack ui <deployment>` resolves the app, reads the token off
+  the machine, runs `fly proxy`, and opens the browser. Being image behavior
+  (not a per-instance flag) means existing instances get it on their next deploy
+  — which is what lets the release canary gate on UI reachability.
+- **No public ingress.** The Fly box stays dark (no `[http_service]`); 6PN
+  reachability via `fly proxy` is the trust boundary, and a token (env
+  `MODASTACK_UI_TOKEN`, else auto-written to `.modastack/state/ui.token`) is
+  defense-in-depth. In both modes the browser talks to *localhost*, so the same
+  loopback Host guard + token check as setup applies unchanged.
+
 ## Decisions log
 | date | decision | rationale |
 |---|---|---|
@@ -450,5 +476,6 @@ inspecting proxies (Zscaler, etc.) whose root is in the keychain but not certifi
 | 2026-06-16 | **Modify asks which folder to scan** (`/api/teams`); tab always enabled; folder picker re-rooted at `$HOME`, absolute paths | teams can live anywhere; pick the scan dir even when the library is empty |
 | 2026-06-16 | **Server-disconnect overlay** (ping heartbeat + fetch/SSE failure) + **Escape closes popups** | the page must stop pretending to be live when the local server dies |
 | 2026-06-16 | **Branding reverted to `modastack`** in the shipping UI; `bobbi` rebrand deferred to the whole-codebase rename | don't ship `bobbi` ahead of the rename; also fixed wrong commands/paths (`.bobbi/`→`.modastack/`, `bobbi <cmd>`→`modastack <cmd>`) |
+| 2026-06-23 | **Runtime Agent UI (`modastack ui`)**: cards per live agent + blocking click-to-chat; reuses the setup design language | a running team had no visual surface; private-via-`fly proxy` keeps the Fly box dark (no public ingress) |
 | 2026-06-18 | **Connections cascade gains an `mcp` rung** (native → venn → mcp → custom); hosted MCPs from a static registry wire into `agent.yaml` `mcp_servers:` (MOD-203) | a service Venn doesn't cover often ships a hosted MCP — wire it in directly instead of dropping to a hand-authored guide; live-search + CLI rungs deferred |
 ```

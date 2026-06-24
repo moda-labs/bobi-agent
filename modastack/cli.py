@@ -261,6 +261,19 @@ def _run_from_config(project_path: Path, cfg: "Config",
     health_port = manager_health.start(state_dir, project_path.name)
     log.info("Manager health endpoint on port %d", health_port)
 
+    # --- Agent UI (opt-in via MODASTACK_UI) — a daemon-thread web dashboard
+    # for chatting with the live team. Binds the Fly 6PN address so an operator
+    # reaches it with `fly proxy`; never started unless explicitly enabled, so
+    # plain local `modastack start` opens no extra port. ---
+    if os.environ.get("MODASTACK_UI"):
+        try:
+            from modastack.agentui import server as agentui_server
+            ui_port = agentui_server.start_in_thread(project_path,
+                                                     state_dir=state_dir)
+            log.info("Agent UI on port %d (reach it with `fly proxy`)", ui_port)
+        except Exception as e:  # never let the UI take down the manager
+            log.warning("Agent UI failed to start: %s", e)
+
     log.info(f"Modastack starting for {project_path.name} (role={role})")
 
     has_monitors = (
@@ -941,6 +954,47 @@ def setup(model, resume):
 
     from modastack.setup import run_setup
     raise SystemExit(run_setup(project_path, model=model, resume=resume))
+
+
+@main.command()
+@click.argument("name", required=False)
+@click.option("--app", default=None,
+              help="Target Fly app directly (skip deployment-name resolution).")
+@click.option("--port", "local_port", default=None, type=int,
+              help="Local port for the tunnel (default: the remote UI port).")
+@click.option("--remote-port", default=None, type=int,
+              help="UI port inside the container (default: read from the instance, else 8080).")
+@click.option("--no-browser", is_flag=True, help="Don't open a browser window.")
+@click.option("--check", is_flag=True,
+              help="Remote: probe /api/agents through the tunnel once and exit (a smoke check).")
+def ui(name, app, local_port, remote_port, no_browser, check):
+    """View and chat with an agent team's agents in a web UI.
+
+    \b
+    Local team:   modastack ui
+    Deployed:     modastack ui <deployment>      # tunnels in via `fly proxy`
+                  modastack ui --app moda-eng-team
+
+    Local mode serves a card per active agent on 127.0.0.1 and talks to the
+    running team over the event server (so the team must already be started).
+    Remote mode resolves the Fly app, reads the UI port + token off the machine,
+    starts `fly proxy`, and opens the browser. Ctrl-C to stop.
+    """
+    # Remote mode: a deployment name or --app means "tunnel to a Fly instance".
+    if name or app:
+        from modastack.agentui import remote
+        raise SystemExit(remote.run(
+            name=name, app=app, local_port=local_port,
+            remote_port=remote_port, open_browser=not no_browser, check=check))
+
+    # Local mode: bind the registry + event-server root so the cross-process
+    # `deliver` behind the chat reaches the same team `modastack start` runs.
+    project_path = _detect_project_root()
+    from modastack.sdk import set_project_root
+    set_project_root(project_path)
+    from modastack.agentui import server as agentui_server
+    raise SystemExit(agentui_server.serve(
+        project_path, mode="local", open_browser=not no_browser))
 
 
 def _manager_session_name(project_path: Path, role: str | None = None) -> str:
