@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.33.0 — 2026-06-24
+
+Adds an installable **personal-assistant** team and makes `from:`-overlay teams
+fully deployable — an overlay can now bake its `tool_library` CLIs into the image
+and ship its per-principal `workspace/` to the instance. Also lands a
+manager self-heal watchdog, the policy-curator as a framework default, and the
+`eng-team-core` → `eng-team` rename.
+
+### Added
+- **`personal-assistant` team (#486).** A general-purpose, customizable personal
+  assistant: a single generalist `assistant` role managing email, calendar, and
+  to-dos through the bundled `venn` CLI over a Slack chat surface, with a
+  configurable autonomy line in `workspace/assistant-context.md`. Declares its
+  CLI via `tool_library: [venn]`. Derive a per-principal instance with
+  `from: personal-assistant`.
+- **`create-slack-bot` CLI (#486).** Renamed from `slack-manifest`; opens the
+  one-click app-create link in the browser and ships an `im:write` scope.
+- **Manager self-heal watchdog (#476, closes #464).** Defense-in-depth supervisor
+  that restarts a wedged manager child.
+- **Policy curator is now a framework default (#475, closes #471).** Opt-out.
+- **Self-learning `script_cache` monitor runner (#478, closes #327).**
+
+### Fixed
+- **`tool_library` CLIs now bake into deploy images (#486).** The team-deps
+  renderer read the raw leaf `agent.yaml`, so a team declaring its CLI via
+  `tool_library:` (no inline `build:`) got nothing baked — the dispatch
+  `requires:` gate then blocked every agent on the instance. The renderer now
+  reads the composed build (from:-chain + tool_library).
+- **`from:` overlays carry `workspace/` to the instance (#486).** The deploy
+  flatten now merges the chain's workspace (leaf-wins), so an overlay's
+  per-principal `assistant-context.md` reaches the box; local install seeds
+  leaf-first to match.
+
+### Changed
+- **`eng-team-core` → `eng-team` rename + relocated teams removed (#483, closes
+  #480).** The public engineering base is now `eng-team`; modernizes the dogfood
+  team to `tool_library`.
+- **`deploy-source` `max_concurrent_agents` default 4 → 8 (#482, closes #481).**
+
 ## 0.32.0 — 2026-06-24
 
 Ends the recurring eng-team **rotation wedge** at its root: the
