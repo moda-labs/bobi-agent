@@ -43,6 +43,26 @@
 > caveat that "current grants" means current *stored* grants, not live upstream
 > access (§4).
 
+> **Revision 3 (2026-06-24)** — folds in Zach's (`underminedsk`) PR #491 review
+> ("Spec is approved" + 4 inline answers). All four §9 questions are now
+> **resolved decisions** and the body is updated to match:
+> **(Q1)** enforcement is **strictly always-on**, **no** kill-switch / bypass
+> flag, and **all consumers are force-upgraded** to the grant-aware client
+> (coupled release; an old client is upgraded, not tolerated) — §2, §9.1.
+> **(Q2)** un-granted topics at registration are **hard-rejected** (`400
+> unauthorized_topics`, no index entries written), the client catching it and
+> surfacing a configuration error — replacing the prior skip-and-report — §3.4,
+> §3.6, §7 (test 5/10), §8, §9.2.
+> **(Q3)** the Linear probe **keeps team-key granularity** (`teams(filter:{key:{eq}})`);
+> the `linear:TEAM` topic format is left as-is (org-level fallback acceptable but
+> not adopted) — §3.2, §4, §9.3.
+> **(Q4)** the GitHub bar is **relaxed to the minimum read probe** (`GET /repos`
+> returns `2xx`); the Rev-2 `private || push` tightening is **dropped** — §3.2,
+> §7 (test 14), §9.4.
+> This **supersedes Revision 2 item (1)** (the GitHub hardening) and the
+> "registration-skip is operational" framing in item (3) (registration now
+> hard-rejects; delivery remains the fail-closed boundary).
+
 ---
 
 ## 1. Problem
@@ -90,8 +110,12 @@ Enforced at **both** layers so neither alone can be bypassed:
    delivery time, so a stale subscription-index entry (grant since revoked, or
    written before enforcement existed) can never bypass authorization.
 
-Back-compat is preserved by having the **client authorize its own resources at
-startup** with the credentials it already holds (it already auto-detects
+Enforcement is **strictly always-on** — there is **no** bypass/kill-switch flag
+(reviewer decision Q1, §9.1). Rather than tolerate pre-enforcement clients, **all
+consumers are force-upgraded** to the grant-aware client and shipped from the
+same coupled release, so an upgraded server only ever serves clients that
+authorize their resources. Continuity comes from that client **authorizing its
+own resources at startup** with the credentials it already holds (it auto-detects
 `github:owner/repo` from the git remote and `linear:TEAM` from the Linear API).
 A single-bubble local deployment authorizes its own repo/team and keeps working;
 a guessing bubble has no credential, cannot obtain a grant, and is blocked.
@@ -134,7 +158,7 @@ restart.
 
 | service | check | pass condition |
 |---|---|---|
-| `github` | `GET https://api.github.com/repos/{owner}/{repo}` with `Authorization: Bearer <credential>`, `User-Agent: modastack-event-server` | HTTP `2xx` **and** entitlement check (below) |
+| `github` | `GET https://api.github.com/repos/{owner}/{repo}` with `Authorization: Bearer <credential>`, `User-Agent: modastack-event-server` | HTTP `2xx` — the token can read the repo |
 | `linear` | GraphQL `POST https://api.linear.app/graphql`, `Authorization: <credential>`, query `{ teams(filter:{key:{eq:"TEAMKEY"}}){ nodes { id key organization { id } } } }` | a node with the requested key is returned |
 | `slack` | **converge on #487's flow** — no separate verify call (§6) | bubble-scoped workspace record (proving the bot token + signing secret) exists for this team |
 
@@ -142,20 +166,31 @@ Verification uses `fetch` (available in both the Worker and the Node runtime).
 A non-2xx, a network error, or a 404 (`owner/repo` not visible to the token)
 all ⇒ verification failure ⇒ `403`.
 
-**GitHub entitlement — beyond bare `2xx`.** `GET /repos/{owner}/{repo}` returns
-`2xx` for a *public* repo to **any** valid token (or even an over-permissioned
-one), so `2xx` alone would let any bubble grant itself a public repo's events.
-The response includes `private: bool` and a `permissions: {admin, push, pull}`
-object. The grant therefore requires `2xx` **and** (`private == true`
-**or** `permissions.push == true`) — i.e. either the repo is private (so read
-access is itself meaningful) or the token has more than drive-by pull access.
-**Recommended default; confirm in open Q4** — the issue's MVP says "require
-success," so this is a deliberate tightening.
+**GitHub bar — minimum probe that proves read access (resolved, Q4).** The bar
+is exactly **`GET /repos/{owner}/{repo}` returns `2xx`** — i.e. the token can
+read the repo. Per the reviewer (2026-06-24): *"to get webhooks from GitHub you
+should only need read access to that repo — whatever the minimum probe that
+guarantees it works."* So the Revision-2 tightening (additionally requiring
+`private == true` **or** `permissions.push == true`) is **dropped**: a readable
+repo is sufficient. This is sound because receiving a repo's webhook events
+requires the webhook to be **configured on the repo** (an admin/owner action);
+the event server only fans an inbound delivery to bubbles that hold a grant, and
+a grant requires the token to actually resolve the repo. A public repo being
+readable by many tokens is not a new exposure — no events flow unless someone
+with admin set up the webhook in the first place. We still read and ignore the
+`permissions`/`private` fields (no parsing requirement); only the `2xx`/non-`2xx`
+distinction gates the grant.
 
-**Linear** verification returns the team's `organization.id`; the team key is
-unique only *within* a workspace (see §4 known limitation). `resource` is
-validated as a non-empty team key before the call. GitHub `resource` is
-validated as `owner/repo` shape and **normalized** (§3.3) before the call.
+**Linear** verification keeps **team-key granularity** in the probe (reviewer
+decision Q3, §9.3): the `teams(filter:{key:{eq}})` query confirms the credential
+can actually see the *specific* team it claims, not merely that the token is
+valid org-wide. Zach: *"linear API keys are scoped to teams, so ideally we keep
+that granularity in the probe check"* — an org-level fallback is acknowledged as
+acceptable-but-not-adopted here. Verification returns the team's
+`organization.id`; the team key is unique only *within* a workspace (see §4 known
+limitation). `resource` is validated as a non-empty team key before the call.
+GitHub `resource` is validated as `owner/repo` shape and **normalized** (§3.3)
+before the call.
 
 ### 3.3 Storage shape
 
@@ -209,20 +244,23 @@ requested subscription where `isGlobalTopic(sub)` is true, check
 `hasResourceGrant(service, resource, bubble.id)`:
 
 - **grant present** → add to the subscription index as today.
-- **grant absent** → **skip** that one topic (do not write the index entry) and
-  return it in a `skipped_unauthorized: string[]` field on the response so the
-  client/caller can see what was withheld. Non-global topics are unaffected.
+- **grant absent** → **hard-reject the whole request** with `400` and a body
+  listing the unauthorized topics (`{error: "unauthorized_topics", topics:
+  string[]}`), writing **no** index entries for that request. Non-global topics
+  do not get a free pass via a partial write — the request is rejected as a unit
+  so the caller fixes the misconfiguration rather than silently running degraded.
 
-Skip (not hard-reject) is chosen so a deployment subscribing to a mix of
-authorized and unauthorized topics still registers its authorized + non-global
-topics rather than failing wholesale — and because the client's normal startup
-order (authorize → then register, §3.6) means a legitimately-authorized topic is
-never skipped. **This is not a fail-open hole:** the actual security boundary is
-**delivery** (§3.5), which re-checks the live grant for every event regardless
-of what the index says. A client that ignores `skipped_unauthorized` and
-*believes* it is subscribed simply receives nothing — fail-closed. Registration
-gating is the early/cheap layer; delivery is authoritative. (Open Q2 asks
-whether to hard-reject instead, for louder operational feedback.)
+**Hard-reject (reviewer decision Q2, §9.2).** Zach: *"hard-reject, as long as the
+error gets caught and can be bubbled up to the user as a mis-configuration of some
+sort."* So registration/update **fails loudly** with a `400` instead of the
+earlier skip-and-report: the client catches it and surfaces it as a configuration
+error (§3.6), which is louder operational feedback than a silently-withheld topic.
+The normal startup order (authorize → then register, §3.6) means a legitimately
+grant-backed topic is never rejected; a `400` therefore signals a real
+misconfiguration (missing/expired credential, undetected resource) worth
+surfacing. **Delivery (§3.5) remains the fail-closed security boundary**
+regardless — it re-checks the live grant for every event — so registration
+gating is the loud early layer and delivery is authoritative.
 
 The MINT path (`modastack start`'s first boot) registers `_bootstrap` and other
 non-global topics, which are never gated; global topics arrive after the bubble
@@ -260,10 +298,14 @@ New `authorize_resources(...)` in `modastack/events/server.py` (sits beside
 - For each detected global resource subscription (`github:owner/repo`,
   `linear:TEAM`), read the matching credential from `Config.credential(...)`
   (the same token the adapter used to detect the resource) and `POST
-  /resources/authorize` bubble-signed. Best-effort + logged per resource:
-  a single resource's failure (missing/expired token) must not abort startup;
-  that topic simply won't be subscribed/delivered, and the failure is logged
-  loudly (and surfaced in `skipped_unauthorized`).
+  /resources/authorize` bubble-signed. Logged per resource: a single resource's
+  authorize failure (missing/expired token) is logged loudly and that topic is
+  dropped from the subscription set the client then sends to `register()`, so a
+  known-unauthorized resource never reaches the registration call. If the server
+  nonetheless `400`s (an undetected/misconfigured resource slipped through), the
+  client **catches the `400` and surfaces its `topics` list as a configuration
+  error** — the user-facing "you asked to subscribe to X but the credential
+  can't read it" message — rather than swallowing it (reviewer decision Q2).
 - Slack continues to call `register_slack_workspaces` (already bubble-signs in
   #487); the server derives the slack grant from that (§6).
 
@@ -282,16 +324,20 @@ subscriptions — `modastack/inbox.py` (~L202-220), `modastack/subagent.py`
 
 **KV eventual consistency.** Cloudflare KV is eventually consistent; a grant
 written by `/resources/authorize` may not be globally visible the instant
-`register()` reads it, so the registration-layer check could transiently skip a
-just-authorized topic. Mitigations: (a) delivery (§3.5) is the authoritative
-gate and re-reads grants per event, so a missed registration only delays, never
-denies once propagated; (b) `authorize_resources()` and the subsequent
-`register()`/`update_subscriptions()` run in-process back-to-back, typically on
-the same PoP (read-your-writes within a PoP is the common case); (c) the client
-treats a global topic appearing in `skipped_unauthorized` *despite* a successful
-authorize as retryable (one bounded re-`update_subscriptions` after a short
-delay). The local Node adapter is strongly consistent (in-memory), so this is a
-Worker-only consideration.
+`register()` reads it, so the registration-layer check could transiently miss a
+just-authorized grant and `400` a topic that is in fact authorized. Because
+registration now **hard-rejects** (Q2), the client must not treat that `400` as a
+terminal misconfiguration on the first try: (a) delivery (§3.5) is the
+authoritative gate and re-reads grants per event, so the grant takes effect once
+propagated regardless of the registration outcome; (b) `authorize_resources()`
+and the subsequent `register()`/`update_subscriptions()` run in-process
+back-to-back, typically on the same PoP (read-your-writes within a PoP is the
+common case); (c) the client treats a `400` *for a topic it just successfully
+authorized* as **retryable** — one bounded re-`register`/`update_subscriptions`
+after a short delay before surfacing the configuration error to the user, which
+absorbs the propagation lag without hiding a genuine misconfiguration. The local
+Node adapter is strongly consistent (in-memory), so this is a Worker-only
+consideration.
 
 ## 4. Scope
 
@@ -300,7 +346,8 @@ Worker-only consideration.
 - GitHub + Linear upstream credential verification; Slack convergence onto
   #487's bubble-scoped workspace registration.
 - `ResourceGrant` storage (KV + in-memory), grant + per-bubble index.
-- Two-layer enforcement: registration/update skip-if-no-grant, delivery filter.
+- Two-layer enforcement: registration/update hard-reject-if-no-grant (`400`),
+  delivery filter.
 - Python `authorize_resources()` + wiring into the three startup call sites.
 - Tests (§7).
 
@@ -398,9 +445,11 @@ to delivery gating.
 2. GitHub verify: stubbed `fetch` 2xx ⇒ grant written; 404/401 ⇒ `403`, no grant.
 3. Linear verify: team key present in GraphQL result ⇒ grant; absent ⇒ `403`.
 4. Credential never appears in the stored record nor in any captured log line.
-5. **Registration:** bubble with a grant subscribing to `github:owner/repo` is
-   indexed; bubble without ⇒ topic skipped + listed in `skipped_unauthorized`;
-   non-global topics in the same request still register.
+5. **Registration hard-reject (Q2):** bubble with a grant subscribing to
+   `github:owner/repo` is indexed; bubble without ⇒ the whole request is rejected
+   `400` with `topics: ["github:owner/repo"]` and **no** index entries are written
+   (assert the non-global topics in the same request are *not* indexed either —
+   reject-as-a-unit); the client surfaces the `400` as a configuration error.
 6. **Delivery, the headline AC:** a `github:owner/repo` webhook is delivered
    only to deployments whose bubble holds the grant — a **stale index entry**
    for a grant-less bubble is **not** delivered to (inject the index entry
@@ -416,13 +465,19 @@ to delivery gating.
     and `update_subscriptions` namespaces from the *stored* record — so a
     deployment cannot be pointed at a victim bubble's grants. (Pins the #487
     invariant #488 relies on; assert it still holds post-rebase.)
-14. **GitHub public-repo tightening:** a `2xx` for a *public* repo with
-    `permissions.push == false` ⇒ no grant (and a private repo, or `push:true`,
-    ⇒ grant) — guards the §3.2 entitlement check.
+14. **GitHub minimal read bar (Q4):** a `2xx` from `GET /repos/{owner}/{repo}`
+    ⇒ grant, regardless of `private`/`permissions` (public repo with
+    `permissions.push == false` still grants); a `403`/`404`/non-`2xx` ⇒ no
+    grant. Guards the relaxed §3.2 bar (the Rev-2 `private || push` tightening is
+    dropped — no field parsing gates the grant).
 
 **Python (`pytest`, `tests/`):**
 10. `authorize_resources()` signs the request and posts per detected resource;
-    a missing credential for one resource logs + skips without aborting startup.
+    a missing credential for one resource logs + drops that topic from the set
+    sent to `register()` (so it never triggers a `400`) without aborting startup.
+    A `400 unauthorized_topics` from `register()` is caught and surfaced as a
+    configuration error (Q2), and a `400` for a *just-authorized* topic is
+    retried once before surfacing (KV-propagation case, §3.6).
 11. Startup order: `authorize_resources` runs before `register`, so a detected
     `github:`/`linear:` topic ends up subscribed (faked event server).
 12. **Single-bubble back-compat:** a local deployment that authorizes its own
@@ -438,7 +493,8 @@ to delivery gating.
 3. `index.ts` (KV) + `local.ts` (Map): implement the new adapter methods; wire
    `POST /resources/authorize` in both entry files (mirror #487's `/slack/send`).
 4. Enforcement layer 1 in `handleRegisterDeployment` /
-   `handleUpdateSubscriptions` + `skipped_unauthorized` response. (test 5)
+   `handleUpdateSubscriptions` — hard-reject `400 unauthorized_topics` (Q2),
+   writing no index entries for a rejected request. (test 5)
 5. Enforcement layer 2 in both `deliver()` implementations. (tests 6-7)
 6. Slack grant write in `handleSlackWorkspaceRegister`. (test 8)
 7. Python `authorize_resources()` in `events/server.py` + wire into `inbox.py`,
@@ -447,33 +503,41 @@ to delivery gating.
 9. Do **not** bump `VERSION` / `pyproject.toml` / `CHANGELOG.md` (modastack
    release policy). Open PR against `main`.
 
-## 9. Open questions for the reviewer
+## 9. Reviewer decisions (all four resolved — Zach `underminedsk`, PR #491 inline review, 2026-06-24)
 
-1. **Enforcement always-on vs. mode-gated, and rollout.** This spec makes
-   enforcement **always-on** and relies on client auto-authorize for back-compat
-   (no bypass flag — a bypass env is a security footgun). The issue's "Release
-   context" allows deferral when loopback-only; an always-on design satisfies
-   that case too (the loopback bubble authorizes itself). The one rollout risk
-   (codex #3): an **old client** pointed at an upgraded server, before it ships
-   `authorize_resources()`, silently loses `github:`/`linear:`/`slack:`
-   delivery. Mitigant: the client + event-server ship from the **same release**
-   (`release.yml` builds both), and F&F deployments are controlled, so the
-   upgraded server only ever sees grant-aware clients. **Recommended: always-on,
-   coupled release, no kill-switch.** Confirm — or do you want a
-   `REQUIRE_RESOURCE_GRANTS` flag (default on) purely as an incident break-glass?
-2. **Skip vs. hard-reject** unauthorized topics at registration. Spec picks
-   **skip + report** (§3.4); delivery is the fail-closed boundary regardless.
-   Codex argues hard-reject gives louder operational feedback. Confirm skip, or
-   switch to `400` listing the unauthorized topics.
-3. **Linear:** (a) confirm `teams(filter:{key:{eq}})` is the right accessibility
-   signal (vs. `viewer`/`organization`), or name a preferred query; (b) is the
-   `linear:TEAM` workspace-ambiguity (§4) acceptable for F&F, or should this
-   issue also move the topic to an org-scoped form (`linear:{orgId}:{team}`)?
-   That would widen scope into the adapter + topic contract.
-4. **GitHub entitlement bar (§3.2).** Spec tightens past the issue's bare
-   "require success" to `private == true || permissions.push`. Confirm that bar,
-   or specify the intended one (e.g. require `admin`, or accept any `2xx`
-   including public repos).
+1. **Enforcement always-on vs. mode-gated, and rollout. → RESOLVED (Zach,
+   2026-06-24):** *"enforcement should be strictly always on. Force upgrades from
+   all consumers."* Enforcement is **strictly always-on with no kill-switch /
+   bypass flag** (the proposed `REQUIRE_RESOURCE_GRANTS` break-glass is **not**
+   added — a bypass env is a security footgun). Rather than tolerate a
+   pre-enforcement client, **all consumers are force-upgraded** to the
+   grant-aware client, shipped from the same coupled release (`release.yml`
+   builds client + event-server together), so an upgraded server only ever serves
+   clients that authorize their resources. The loopback/F&F case is covered (the
+   loopback bubble authorizes itself). See §2.
+2. **Skip vs. hard-reject unauthorized topics at registration. → RESOLVED (Zach,
+   2026-06-24):** *"hard-reject, as long as the error gets caught and can be
+   bubbled up to the user as a mis-configuration of some sort."* Registration /
+   update now **hard-rejects** with `400 unauthorized_topics` (writing no index
+   entries) instead of the earlier skip-and-report; the client catches the `400`
+   and surfaces it as a configuration error, with a single bounded retry for the
+   KV-propagation case. Delivery (§3.5) stays the fail-closed boundary. See §3.4,
+   §3.6, §7 (test 5/10), §8.
+3. **Linear probe granularity. → RESOLVED (Zach, 2026-06-24):** *"linear API keys
+   are scoped to teams, so ideally we could keep that granularity in the probe
+   check. But falling back to org-level is probably fine too ... could be simpler
+   to maintain."* Decision: **keep the team-key probe** `teams(filter:{key:{eq}})`
+   (confirms access to the *specific* team), org-level fallback acknowledged as
+   acceptable-but-not-adopted. The `linear:TEAM` topic format is **left
+   unchanged** — the workspace-ambiguity stays a deferred §4 follow-up (not
+   widened into the topic contract here). See §3.2, §4.
+4. **GitHub entitlement bar (§3.2). → RESOLVED (Zach, 2026-06-24):** *"to get
+   webhooks from GitHub, you should only need read access to that repo. Whatever
+   the minimum amount of probe that we need to do to guarantee that it works."*
+   Decision: the bar is the **minimum read probe** — `GET /repos/{owner}/{repo}`
+   returns `2xx` (the token can read the repo). The Rev-2 `private == true ||
+   permissions.push` tightening is **dropped**; no field parsing gates the grant.
+   See §3.2, §7 (test 14).
 
 ---
 
