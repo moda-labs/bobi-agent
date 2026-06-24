@@ -44,7 +44,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_bubble_auth())
     results.append(_check_event_server())
     results.append(_check_recent_events())
-    results.append(_check_memory())
+    results.append(_check_policy())
 
     return results
 
@@ -363,43 +363,47 @@ def _check_recent_events() -> CheckResult:
                        detail=f"{total} events logged across {len(event_files)} file(s)")
 
 
-def _check_memory() -> CheckResult:
-    """Check agent decision logs — flag agents with empty current-state blocks."""
+def _check_policy() -> CheckResult:
+    """Check the team policy.md (#456): present, under cap, and not foreign-written.
+
+    The curator is the single writer. A soft single-writer guard (Q5): the
+    curator rewrites policy.md and advances policy_cursor together, so a
+    policy.md whose mtime is newer than the cursor file's mtime is a write not
+    attributable to the last curator run (a foreign writer). Flagged, not fatal.
+    """
+    from modastack.memory import MAX_POLICY_CHARS
     root = bound_root()
     if not root:
-        return CheckResult("Decision log", ok=True, detail="no project detected")
+        return CheckResult("Team policy", ok=True, detail="no project detected")
     from modastack import paths
-    memory_root = paths.state_path(root) / "memory"
-    if not memory_root.is_dir():
-        return CheckResult("Decision log", ok=True, detail="no decision logs yet")
+    policy = paths.policy_path(root)
+    if not policy.is_file():
+        return CheckResult("Team policy", ok=True,
+                           detail="no policy.md yet (curator seeds it on first run)")
 
-    agents = []
-    empty = []
-    for agent_dir in sorted(memory_root.iterdir()):
-        if not agent_dir.is_dir():
-            continue
-        agents.append(agent_dir.name)
-        index = agent_dir / "INDEX.md"
-        if not index.is_file():
-            empty.append(agent_dir.name)
-            continue
-        content = index.read_text().strip()
-        # Check if the YAML frontmatter block has any content
-        if content in ("", "---\n---", "---\n---\n"):
-            empty.append(agent_dir.name)
+    try:
+        size = len(policy.read_text())
+    except OSError as e:
+        return CheckResult("Team policy", ok=False, detail=f"unreadable policy.md: {e}")
 
-    if not agents:
-        return CheckResult("Decision log", ok=True, detail="no decision logs yet")
-
-    if empty:
-        shown = ", ".join(empty[:3]) + ("..." if len(empty) > 3 else "")
-        has_populated = len(agents) > len(empty)
+    if size > MAX_POLICY_CHARS:
         return CheckResult(
-            "Decision log",
-            ok=has_populated,  # only fail if ALL logs are empty (likely drift)
-            detail=f"{len(empty)} agent(s) with empty decision logs: {shown}",
-            hint="Agents should record decisions in .modastack/state/memory/<session>/INDEX.md")
+            "Team policy", ok=False,
+            detail=f"policy.md is {size} chars (over {MAX_POLICY_CHARS} cap)",
+            hint="The curator should keep policy.md under cap — check curator runs")
+
+    cursor = paths.policy_cursor_path(root)
+    if cursor.is_file():
+        try:
+            if policy.stat().st_mtime > cursor.stat().st_mtime + 1.0:
+                return CheckResult(
+                    "Team policy", ok=False,
+                    detail="policy.md modified after the last curator cursor advance "
+                           "— a non-curator write may have occurred",
+                    hint="Only the policy-curator should write policy.md (single-writer)")
+        except OSError:
+            pass
 
     return CheckResult(
-        "Decision log", ok=True,
-        detail=f"{len(agents)} agent(s) with decision logs")
+        "Team policy", ok=True,
+        detail=f"policy.md present ({size} chars, under {MAX_POLICY_CHARS} cap)")

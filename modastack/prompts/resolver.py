@@ -156,28 +156,29 @@ def build_startup_prompt(
 
     project = Path(project_path)
 
-    memory_section = ""
-    if session_name:
-        memory_section = _load_memory_section(project, session_name)
+    # Team policy is team-scoped (#456) — injected for every agent regardless of
+    # session. session_name is retained in the signature for back-compat but no
+    # longer selects a per-session journal.
+    policy_section = _load_policy_section(project)
 
     parts = [
         f"You are a modastack {role} for {project.name}. "
         f"Act directly using your tools.\n\n{prompt}",
     ]
-    if memory_section:
-        parts.append(memory_section)
+    if policy_section:
+        parts.append(policy_section)
     parts.append(f"## Available workflows\n\n{workflows}")
     return "\n\n".join(parts)
 
 
-def _load_memory_section(project: Path, session_name: str) -> str:
-    """Load the decision log for a session and format it for prompt injection."""
+def _load_policy_section(project: Path) -> str:
+    """Load the team policy.md and format it read-only for prompt injection (#456)."""
     try:
-        from modastack.memory import load_memory, format_memory_prompt
-        content = load_memory(paths.state_dir(project), session_name)
-        return format_memory_prompt(content)
+        from modastack.memory import load_policy, format_policy_prompt
+        content = load_policy(paths.state_path(project))
+        return format_policy_prompt(content)
     except Exception:
-        log.debug("Failed to load memory for %s", session_name, exc_info=True)
+        log.debug("Failed to load policy for %s", project, exc_info=True)
         return ""
 
 

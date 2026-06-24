@@ -307,21 +307,29 @@ class Session:
         log.info("Session '%s' rotated successfully (count=%d)", self.name, self._rotation_count)
 
     def _rebuild_system_prompt(self) -> dict:
-        """Rebuild the system prompt, reloading the decision log."""
+        """Rebuild the system prompt, reloading the team policy (#456).
+
+        A rotated session re-reads policy.md here — the passive pickup path for
+        a curator update (no inbox push needed for a routine distillation).
+        """
         try:
-            from modastack.subagent import _load_memory_for_session
-            memory_prompt = _load_memory_for_session(self.name)
-            if memory_prompt and isinstance(self._system_prompt, dict):
+            from modastack.subagent import _load_policy_prompt
+            policy_prompt = _load_policy_prompt()
+            if isinstance(self._system_prompt, dict):
                 base_append = self._system_prompt.get("append", "")
-                # Strip old decision log section if present
-                if "## Decision Log" in base_append:
-                    base_append = base_append.split("## Decision Log")[0].rstrip()
-                new_append = base_append
-                if memory_prompt:
-                    new_append = f"{base_append}\n\n{memory_prompt}" if base_append else memory_prompt
+                # Strip a previously-injected policy section so it isn't doubled
+                # across rotations.
+                if "## Team Policy" in base_append:
+                    base_append = base_append.split("## Team Policy")[0].rstrip()
+                if policy_prompt:
+                    new_append = (
+                        f"{base_append}\n\n{policy_prompt}" if base_append else policy_prompt
+                    )
+                else:
+                    new_append = base_append
                 return {**self._system_prompt, "append": new_append}
         except Exception:
-            log.debug("Failed to reload memory for '%s'", self.name, exc_info=True)
+            log.debug("Failed to reload policy for '%s'", self.name, exc_info=True)
         return self._system_prompt
 
     async def _drain_turn(self) -> str:

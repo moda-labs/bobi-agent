@@ -249,6 +249,24 @@ def manager_pid_path(root: Path | None = None) -> Path:
     return state_path(root) / "manager.pid"
 
 
+def policy_path(root: Path | None = None) -> Path:
+    """The team-scoped policy.md — the single curated learning substrate (#456).
+
+    Path only (no mkdir), safe for read-only contexts (prompt injection,
+    doctor probes). The curator is the sole writer; every working agent reads
+    it injected read-only. Replaces the per-session memory/<session>/INDEX.md
+    decision log."""
+    return state_path(root) / "policy.md"
+
+
+def policy_cursor_path(root: Path | None = None) -> Path:
+    """The curator's consumption watermark — the highest messages.id it has
+    ingested (#456). A plain integer, advanced only after a successful rewrite,
+    so a curator run that dies mid-distillation re-reads its window. Path only;
+    the curator ensures the parent exists when it writes."""
+    return state_path(root) / "policy_cursor"
+
+
 def sessions_dir(root: Path | None = None) -> Path:
     """Session registry directory (created on demand)."""
     d = modastack_dir(root) / "sessions"

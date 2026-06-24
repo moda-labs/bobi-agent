@@ -1,9 +1,14 @@
-"""Agent decision log (memory) — per-agent persistent notes store.
+"""Team policy (#456) and the legacy per-agent decision log.
 
-Each agent gets a memory directory at .modastack/state/memory/<session-name>/
-containing an INDEX.md (YAML current-state block + prose notes) and optional
-per-topic note files. The framework loads the index at every session start
-so decisions survive --fresh and session rotation.
+The team's durable, curated knowledge lives in a single, team-scoped
+``.modastack/state/policy.md`` — two sections (``## Facts`` / ``## Decisions``)
+maintained out-of-band by the policy-curator monitor and injected read-only into
+every agent's prompt. ``load_policy`` / ``format_policy_prompt`` are that path.
+
+The older per-session decision log (``memory/<session>/INDEX.md``, an append-only
+journal that bloated prompts and died with the agent) is being replaced by the
+above. ``memory_dir_for_session`` is retained so the one-time seed can distill the
+existing journals into the first policy.md.
 """
 
 from __future__ import annotations
@@ -13,10 +18,59 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# Hard cap on the injected policy doc so it stays small and bounded — the whole
+# point of #456 (the decision log it replaces grew to 127KB live and bloated
+# every prompt). The curator keeps policy.md under this; load_policy truncates
+# defensively as a backstop.
+MAX_POLICY_CHARS = 24_000
+
 # Cap on injected memory. Raised from 8KB to 32KB for context rotation:
 # the decision log is the primary continuity spine when sessions rotate,
 # so it needs room for accumulated operational state.
 MAX_MEMORY_CHARS = 32_000
+
+
+def load_policy(state_dir: Path) -> str:
+    """Load the team policy.md as one capped block, or "" when absent (#456).
+
+    Reads ``state_dir/policy.md`` (the two-section ``## Facts`` / ``## Decisions``
+    file the curator maintains), truncates at ``MAX_POLICY_CHARS`` as a backstop,
+    and returns "" if the file is missing or empty so callers can skip injection.
+    Read-only — working agents never write this file.
+    """
+    policy_file = state_dir / "policy.md"
+    try:
+        if not policy_file.is_file():
+            return ""
+        content = policy_file.read_text().strip()
+    except OSError:
+        log.debug("Failed to read policy.md at %s", policy_file, exc_info=True)
+        return ""
+    if not content:
+        return ""
+    if len(content) > MAX_POLICY_CHARS:
+        content = content[:MAX_POLICY_CHARS] + "\n\n[policy truncated]"
+    return content
+
+
+def format_policy_prompt(content: str) -> str:
+    """Wrap policy content in a read-only prompt section for injection (#456).
+
+    Returns "" for empty content so callers can skip injection. The section is
+    marked read-only: it is maintained out-of-band by the curator, not edited
+    by the working agent.
+    """
+    if not content:
+        return ""
+    return (
+        "## Team Policy\n\n"
+        "Below is the team's curated, durable policy (facts and decisions), "
+        "maintained out-of-band by the policy-curator. It is **read-only** — do "
+        "not edit it directly; the curator rewrites it from the team's "
+        "transcripts. Use it for continuity and to avoid re-litigating settled "
+        "decisions.\n\n"
+        f"{content}"
+    )
 
 
 def memory_dir_for_session(state_dir: Path, session_name: str) -> Path:
@@ -25,10 +79,12 @@ def memory_dir_for_session(state_dir: Path, session_name: str) -> Path:
 
 
 def load_memory(state_dir: Path, session_name: str) -> str:
-    """Load the memory index + notes for a session, formatted as text.
+    """Load a legacy decision-log index + notes for a session, as raw text.
 
-    Returns empty string if no memory exists. Truncates if content exceeds
-    MAX_MEMORY_CHARS to prevent prompt bloat.
+    No longer injected into prompts (#456 replaced that with the team policy).
+    Retained for the one-time policy seed, which distills the existing
+    memory/<session>/INDEX.md journal(s) into the first policy.md. Returns ""
+    when no journal exists; truncates at MAX_MEMORY_CHARS as a safety bound.
     """
     mem_dir = memory_dir_for_session(state_dir, session_name)
     if not mem_dir.is_dir():
@@ -60,29 +116,4 @@ def load_memory(state_dir: Path, session_name: str) -> str:
     combined = "\n\n".join(parts)
     if len(combined) > MAX_MEMORY_CHARS:
         combined = combined[:MAX_MEMORY_CHARS] + "\n\n[memory truncated]"
-    # Warn when the log is large relative to the cap — entering a rotation
-    # loop is likely if memory grows much further.
-    if len(combined) > MAX_MEMORY_CHARS // 2:
-        log.warning(
-            "Decision log for %s is %d chars (%.0f%% of %d cap) — "
-            "consider pruning to avoid prompt bloat",
-            session_name, len(combined),
-            100 * len(combined) / MAX_MEMORY_CHARS, MAX_MEMORY_CHARS,
-        )
     return combined
-
-
-def format_memory_prompt(content: str) -> str:
-    """Wrap memory content in a prompt section for injection.
-
-    Returns empty string if no content, so callers can skip injection.
-    """
-    if not content:
-        return ""
-    return (
-        "## Decision Log\n\n"
-        "Below is your persistent decision log from previous sessions. "
-        "It contains decisions you've made and context you've recorded. "
-        "Use it to maintain continuity.\n\n"
-        f"{content}"
-    )
