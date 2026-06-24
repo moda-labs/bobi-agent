@@ -302,6 +302,9 @@ ENV_VARS["MODASTACK_FLEET"]="$FLEET"
 # `modastack deploy <name>` stamps and reads this back to find the app for <name>.
 ENV_VARS["MODASTACK_INSTANCE"]="$INSTANCE"
 [ -n "$LOGIN_CHANNEL" ] && ENV_VARS["MODASTACK_LOGIN_CHANNEL"]="$LOGIN_CHANNEL"
+# NB: the agent UI is on by default in the container (docker-entrypoint.sh sets
+# MODASTACK_UI=1), so it is NOT a provisioned [env] flag. Set MODASTACK_UI=0 here
+# (or as a Fly env) only to disable it for an instance.
 
 # --- confirm ----------------------------------------------------------------
 echo

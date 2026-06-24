@@ -237,6 +237,16 @@ jobs:
             echo "::group::smoke $canary (functional ask)"
             FLY="$FLY" scripts/canary-smoke.sh "$canary"
             echo "::endgroup::"
+            # Agent-UI reachability gate: tunnel in exactly as `modastack ui
+            # <deployment>` does for an operator — resolve the app, read the UI
+            # token off the machine, `fly proxy`, GET /api/agents — and assert it
+            # answers. Proves the in-container UI is on, the 6PN bind works, the
+            # token is readable, and the proxy reaches it. `--check` is bounded
+            # (it never blocks) and `timeout` is a belt-and-suspenders cap so a
+            # stuck tunnel can't hang the release.
+            echo "::group::smoke $canary (agent UI reachable)"
+            timeout 150 modastack ui --app "$canary" --check
+            echo "::endgroup::"
           else
             echo "::warning::generic source is $generic_src (no '$canary' in the fleet) — published/rolled without a functional smoke."
           fi
