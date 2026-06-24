@@ -22,8 +22,24 @@ from modastack.brain.base import (
     BrainMessage,
     BrainSession,
     DeferredTool,
+    StreamDelta,
     TurnResult,
 )
+
+
+def _delta_text(event: Any) -> str:
+    """Pull the text out of one raw Anthropic streaming event, or ''.
+
+    The canonical home for the vendor-specific partial-stream shape
+    (``content_block_delta`` / ``text_delta``); ``setup.llm`` re-exports it.
+    """
+    if not isinstance(event, dict):
+        return ""
+    if event.get("type") == "content_block_delta":
+        delta = event.get("delta") or {}
+        if delta.get("type") == "text_delta":
+            return delta.get("text", "")
+    return ""
 
 
 class _ClaudeSession:
@@ -51,6 +67,14 @@ class _ClaudeSession:
 
     async def disconnect(self) -> None:
         await self._client.disconnect()
+
+    async def get_mcp_status(self) -> dict:
+        """Passthrough to the SDK's MCP status probe (preflight only).
+
+        Not part of the BrainSession protocol — an optional capability the MCP
+        preflight uses; brains without an equivalent simply won't offer it.
+        """
+        return await self._client.get_mcp_status()
 
     async def receive_response(self) -> AsyncIterator[BrainMessage]:
         """Translate one turn's SDK messages into normalized brain messages."""
@@ -131,11 +155,59 @@ class ClaudeBrain:
         extra = dict(options or {})
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
-        sdk_options = ClaudeAgentOptions(
+        kwargs = dict(cwd=cwd, cli_path=get_cli_path(), resume=resume, **extra)
+        # Only pass system_prompt when the caller set one — the MCP probe builds
+        # a session with no prompt, and forcing system_prompt=None would override
+        # the SDK's own default.
+        if system_prompt is not None:
+            kwargs["system_prompt"] = system_prompt
+        return _ClaudeSession(ClaudeAgentOptions(**kwargs))
+
+    async def stream_once(
+        self,
+        *,
+        system_prompt: Any,
+        user_prompt: str,
+        model: str | None = None,
+        cwd: str | None = None,
+        options: dict | None = None,
+    ) -> AsyncIterator[BrainMessage]:
+        """One-shot streaming completion (the stateless setup/digestion path).
+
+        No persistent session, no resume — a fresh ``query()`` per call, yielding
+        normalized ``StreamDelta`` partials, an ``AssistantText`` fallback (when
+        partials never arrive), and a closing ``TurnResult``.
+        """
+        from claude_agent_sdk import (
+            AssistantMessage,
+            ClaudeAgentOptions,
+            ResultMessage,
+            StreamEvent,
+            TextBlock,
+            query,
+        )
+
+        from modastack.sdk import get_cli_path
+
+        extra = dict(options or {})
+        extra.setdefault("permission_mode", "bypassPermissions")
+        extra.setdefault("include_partial_messages", True)
+        opts = ClaudeAgentOptions(
             cwd=cwd,
+            model=model,
             cli_path=get_cli_path(),
-            resume=resume,
             system_prompt=system_prompt,
             **extra,
         )
-        return _ClaudeSession(sdk_options)
+        async for msg in query(prompt=user_prompt, options=opts):
+            if isinstance(msg, StreamEvent):
+                yield StreamDelta(text=_delta_text(msg.event))
+            elif isinstance(msg, AssistantMessage):
+                yield AssistantText(
+                    text="\n".join(
+                        b.text for b in msg.content if isinstance(b, TextBlock)
+                    ),
+                    usage=getattr(msg, "usage", None),
+                )
+            elif isinstance(msg, ResultMessage):
+                yield _result_to_turn(msg)

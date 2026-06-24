@@ -23,7 +23,7 @@ from typing import Any
 import yaml
 
 from modastack.sdk import (
-    get_cli_path, get_registry, save_session_id, load_session_id,
+    get_registry, save_session_id, load_session_id,
     log_activity, SessionEntry, SessionRegistry,
     TERMINAL_COMPLETED, TERMINAL_FAILED, ACTIVE_STATUSES,
 )
@@ -331,15 +331,10 @@ async def _run_workflow_async(
     start_step: int = 0,
     role: str = "",
 ) -> bool:
-    """Async core: one ClaudeSDKClient session for all steps."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ClaudeSDKClient,
-        ResultMessage,
-        TextBlock,
-    )
+    """Async core: one brain session for all steps."""
+    from modastack.brain import get_brain
 
+    _brain = get_brain()
     saved_id = load_session_id(session_name)
     uses_worktree = any(s.worktree for s in workflow.steps)
 
@@ -347,20 +342,15 @@ async def _run_workflow_async(
 
     project_root = _find_project_root(cwd)
 
-    def _make_options(resume_id=None, agent_name=""):
+    def _make_session(resume_id=None, agent_name=""):
         agent_prompt = ""
         if agent_name:
             agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive=interactive)
         else:
             agent_prompt = resolve_agent_prompt("", project_root, interactive=interactive)
 
-        return ClaudeAgentOptions(
+        return _brain.make_session(
             cwd=cwd,
-            permission_mode="bypassPermissions",
-            max_turns=200,
-            cli_path=get_cli_path(),
-            resume=resume_id,
-            skills="all",
             system_prompt={
                 "type": "preset",
                 "preset": "claude_code",
@@ -375,6 +365,8 @@ async def _run_workflow_async(
                     + agent_prompt
                 ),
             },
+            resume=resume_id,
+            options={"max_turns": 200, "skills": "all"},
         )
 
     _emit_lifecycle_event("agent/session.started", {
@@ -393,7 +385,7 @@ async def _run_workflow_async(
     # Try resume, fall back to fresh session
     for attempt in range(2):
         resume_id = saved_id if attempt == 0 else None
-        client = ClaudeSDKClient(_make_options(resume_id, agent_name=first_agent))
+        client = _make_session(resume_id, agent_name=first_agent)
         try:
             initial_prompt = task if not resume_id else None
             await client.connect(initial_prompt)
@@ -628,18 +620,17 @@ async def _run_workflow_async(
 
 async def _drain_response(client, session_name: str, run_key: str) -> str | None:
     """Drain one turn of the agent's response. Returns final text or None."""
-    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+    from modastack.brain import AssistantText, TurnResult
 
     final_text = ""
     try:
         async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                text_parts = [b.text for b in msg.content if isinstance(b, TextBlock)]
-                if text_parts:
-                    final_text = "\n".join(text_parts)
+            if isinstance(msg, AssistantText):
+                if msg.text:
+                    final_text = msg.text
                     log_activity("response", {"text": final_text[:500]},
                                  session=session_name)
-            elif isinstance(msg, ResultMessage):
+            elif isinstance(msg, TurnResult):
                 save_session_id(session_name, msg.session_id)
                 log_activity("stop", {"session_id": msg.session_id},
                              session=session_name)

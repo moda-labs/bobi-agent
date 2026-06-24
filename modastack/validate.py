@@ -314,23 +314,24 @@ async def _async_probe_mcp(
     all_servers: dict[str, dict],
     project_path: Path,
 ) -> list[CheckResult]:
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-    from modastack.sdk import get_cli_path
+    from modastack.brain import get_brain
 
-    options = ClaudeAgentOptions(
+    # Build the probe session through the brain (Claude today). No system prompt
+    # — this is a connect-and-poll MCP probe, not a turn. ``get_mcp_status`` is a
+    # Claude-adapter capability (see #485 open Q4 on per-brain MCP discovery).
+    client = get_brain().make_session(
         cwd=str(project_path),
-        permission_mode="bypassPermissions",
-        cli_path=get_cli_path(),
-        mcp_servers=all_servers,
-        strict_mcp_config=True,
-        max_turns=0,
-        # Probe in the same environment agents are spawned in so preflight can
-        # never be green when the runtime PATH would fail to resolve a bare
-        # command (MDS-64).
-        env=agent_spawn_env(),
+        system_prompt=None,
+        options={
+            "mcp_servers": all_servers,
+            "strict_mcp_config": True,
+            "max_turns": 0,
+            # Probe in the same environment agents are spawned in so preflight can
+            # never be green when the runtime PATH would fail to resolve a bare
+            # command (MDS-64).
+            "env": agent_spawn_env(),
+        },
     )
-
-    client = ClaudeSDKClient(options)
     try:
         await client.connect()
         status = await client.get_mcp_status()

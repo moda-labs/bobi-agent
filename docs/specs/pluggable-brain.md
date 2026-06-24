@@ -243,28 +243,29 @@ in a throwaway `/tmp` dir. **All four contract points confirmed:**
 normalizable — Phase 1/2 are unblocked. Not yet tested (deferred to Phase 3):
 persistent `app-server` hot session, live mid-turn injection, context rotation.
 
-**Phase 1 — extract `BrainClient`, Claude as default (no behavior change). 🟡 IN
-PROGRESS.** Landed the `modastack/brain/` package — the provider-agnostic
-contract (`BrainSession`/`BrainFactory` protocols + normalized `AssistantText` /
+**Phase 1 — extract `BrainClient`, Claude as default (no behavior change). ✅
+DONE.** Landed the `modastack/brain/` package — the provider-agnostic contract
+(`BrainSession`/`BrainFactory` protocols + normalized `AssistantText` /
 `TurnResult` / `StreamDelta` / `BrainCost` / `DeferredTool`), a `get_brain(kind)`
 selector (default `claude`), and the `ClaudeBrain` adapter (behavior-preserving
-SDK translation, lazy `claude_agent_sdk` imports). **Keystone `session.py`
-migrated**: the manager loop now drives a `BrainSession` and consumes normalized
-messages — zero SDK types left in `session.py`. Full unit suite green (2258 +
-new `test_brain.py`); the two tests that injected raw SDK messages moved to the
-brain seam. **Latent bug found + preserved + tracked:** the SDK types
-`model_usage` as `dict[str, Any]`, but the legacy code iterates it as a
-list-of-objects, so real-run per-model cost attribution has always recorded
-empty model + 0 tokens. Preserved verbatim (zero-behavior-change) with a guard
-test; fixing the dict shape is a Phase-1 follow-up. **Remaining sites:**
-`subagent.py`, `workflow/orchestrator.py`, `setup/llm.py` (one-shot stream —
-needs the `StreamDelta` path), `validate.py` (`get_mcp_status` probe).
-
-Original scope: refactor the five integration sites behind the protocol;
-`ClaudeBrain` is the only
-adapter. Valuable on its own (decouples cost/provider, kills the preset-dict
-sprawl). Gated by the full existing test suite staying green + an
-`assert provider != hardcoded` style test.
+SDK translation, lazy `claude_agent_sdk` imports + a one-shot `stream_once` and a
+`get_mcp_status` capability). **All five integration sites migrated** —
+`session.py` (manager loop + rotation/recovery), `subagent.py` (supervised loop +
+deferrals), `workflow/orchestrator.py` (per-step drive), `setup/llm.py` (one-shot
+stream), `validate.py` (MCP probe). **`claude_agent_sdk` is now imported in
+exactly one place** (`brain/claude.py`), the sole exception being the
+Claude-specific `_make_defer_hook` (the `HookMatcher`/`AskUserQuestion` deferral
+— open Q5). Cost attribution now reads the brain's `provider`, not a hardcoded
+`"anthropic"`. **Full unit suite green: 2269 passed / 7 skipped** (2258 + 11 new
+`test_brain.py`); unit mocks moved from raw SDK messages to the brain seam (and
+the `get_cli_path` patches re-pointed to `modastack.sdk`, the adapter's read
+site). **Latent bug found + preserved + tracked:** the SDK types `model_usage`
+as `dict[str, Any]`, but the legacy code iterates it as a list-of-objects, so
+real-run per-model cost attribution has always recorded empty model + 0 tokens.
+Preserved verbatim (zero-behavior-change) with a guard test; fixing the dict
+shape is the one Phase-1 follow-up. **Deferred (Phase 2 cleanup):** normalize the
+`{"preset":"claude_code"}` system-prompt dicts to a plain string at the boundary
+(today passed opaquely); the call sites still build the preset dict.
 
 **Phase 2 — Codex on the stateless paths.** `CodexBrain` for sub-agents + workflow
 steps (where exec+resume fits naturally). Integration test: a workflow step

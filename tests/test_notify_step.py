@@ -336,7 +336,7 @@ class TestNotifyStepInWorkflow:
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch("modastack.workflow.orchestrator._execute_notify_step") as mock_notify, \
              patch("modastack.workflow.orchestrator._find_project_root", return_value=Path(tmp_path or "/tmp")), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(

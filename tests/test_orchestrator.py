@@ -285,7 +285,7 @@ class TestRunWorkflow:
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -387,7 +387,7 @@ class TestHonestTerminalEmit:
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: client_cls(),
                  ClaudeAgentOptions=MagicMock,
@@ -462,7 +462,7 @@ class TestAwaitStep:
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -526,7 +526,7 @@ class TestAwaitStep:
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -685,7 +685,7 @@ class TestQAPhase:
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -800,7 +800,7 @@ class TestResumeWorkflowTimestamps:
              patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
              patch("modastack.workflow.orchestrator.save_session_id"), \
              patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.workflow.orchestrator.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,

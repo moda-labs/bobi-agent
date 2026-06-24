@@ -101,7 +101,7 @@ async def _run(client, run_key, phase):
     with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
          patch(f"{SDK_PATCH}.save_session_id"), \
          patch(f"{SDK_PATCH}.log_activity"), \
-         patch(f"{SDK_PATCH}.get_cli_path", return_value="/usr/bin/claude"), \
+         patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
          patch.dict("sys.modules", {"claude_agent_sdk": _sdk_module(client)}):
         return await _run_agent_supervised(
             prompt="do it", cwd="/tmp", run_key=run_key, phase=phase, timeout=60,
