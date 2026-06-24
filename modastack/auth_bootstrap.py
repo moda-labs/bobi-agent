@@ -146,14 +146,20 @@ def _wait_for_code(project_path: Path, channel: str, timeout: float) -> str:
         )
     token = cfg.credential("slack", "bot_token")
 
+    # Resolve the bubble first so the Slack registration can be signed — a signed
+    # registration also creates the bubble-scoped record outbound send needs.
+    bubble = ensure_bubble(es_url, project_path)
+
     # Ensure the Worker holds the bot token so it ingests this channel's messages.
-    register_slack_workspaces(es_url, cfg)
+    register_slack_workspaces(
+        es_url, cfg,
+        bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+    )
     team_id, _ = _slack_auth_info(token)
     if not team_id:
         raise RuntimeError("could not resolve Slack team_id from bot_token.")
     topic = f"slack:{team_id}"
 
-    bubble = ensure_bubble(es_url, project_path)
     deployment_id, api_key = register(
         es_url, "login-bootstrap", [topic],
         bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],

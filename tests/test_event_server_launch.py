@@ -95,3 +95,94 @@ class TestEnsureRunningRemoteGuard:
         monkeypatch.setattr(es, "health", lambda *a, **k: {"status": "ok"})
         result = es.ensure_running(8080, project_path=tmp_path)
         assert result == "connected"
+
+
+# ---------------------------------------------------------------------------
+# Slack workspace registration signing (#487)
+# ---------------------------------------------------------------------------
+
+class _StubCfg:
+    """Minimal Config stand-in exposing the credentials used by registration."""
+
+    def __init__(self, creds):
+        self._creds = creds
+
+    def credential(self, service, key):
+        try:
+            return self._creds[(service, key)]
+        except KeyError as exc:
+            raise RuntimeError(f"no credential {service}.{key}") from exc
+
+
+def _capture_post(monkeypatch):
+    """Patch pooled.post + Slack lookups; return a dict the call records into."""
+    import modastack.http as pooled
+
+    captured: dict = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"ok": True}
+
+        return _Resp()
+
+    monkeypatch.setattr(pooled, "post", fake_post)
+    monkeypatch.setattr(es, "_slack_auth_info", lambda token: ("T_TEAM", "B_BOT"))
+    monkeypatch.setattr(es, "_slack_app_id", lambda token, bot_id: "A_APP")
+    return captured
+
+
+def test_slack_registration_signs_when_bubble_key_present(monkeypatch):
+    """A bubble-keyed registration carries x-moda-* headers and sends raw bytes
+    (content=), so the server reproduces the HMAC and writes the bubble-scoped
+    record outbound /slack/send needs (#487)."""
+    captured = _capture_post(monkeypatch)
+    cfg = _StubCfg({("slack", "bot_token"): "xoxb-tok",
+                    ("slack", "signing_secret"): "sek"})
+
+    result = es.register_slack_workspaces(
+        "http://localhost:8080", cfg,
+        bubble_id="bub_A", bubble_key="bkey_A",
+    )
+
+    assert result == ["T_TEAM"]
+    kwargs = captured["kwargs"]
+    # Raw bytes, never json= (which would re-serialize and break the signature).
+    assert "content" in kwargs and "json" not in kwargs
+    headers = kwargs["headers"]
+    assert headers["x-moda-bubble"] == "bub_A"
+    assert headers["x-moda-algo"] == "hmac-sha256"
+    assert headers["x-moda-signature"]
+
+    # The signature must verify over the EXACT transmitted bytes.
+    from modastack.events.signing import canonical_string
+    import hashlib
+    import hmac
+    msg = canonical_string(
+        headers["x-moda-timestamp"], headers["x-moda-nonce"],
+        "POST", "/slack/workspaces", kwargs["content"],
+    )
+    expected = hmac.new(b"bkey_A", msg.encode(), hashlib.sha256).hexdigest()
+    assert headers["x-moda-signature"] == expected
+
+
+def test_slack_registration_unsigned_without_bubble_key(monkeypatch):
+    """Without a bubble key the registration is unsigned — it still writes the
+    global self-reply record, so loop prevention keeps working for legacy
+    clients."""
+    captured = _capture_post(monkeypatch)
+    cfg = _StubCfg({("slack", "bot_token"): "xoxb-tok",
+                    ("slack", "signing_secret"): ""})
+
+    es.register_slack_workspaces("http://localhost:8080", cfg)
+
+    headers = captured["kwargs"]["headers"]
+    assert "x-moda-signature" not in headers
+    # Still raw bytes via content= (the body is serialized once regardless).
+    assert "content" in captured["kwargs"]

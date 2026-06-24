@@ -749,9 +749,22 @@ export async function handleTopicEvent(
 	return { status: 200, body: { delivered_to: delivered } };
 }
 
+// Storage key for a bubble-scoped Slack workspace registration. Outbound
+// /slack/send reads ONLY this key — never the bare global `slack_workspace:<id>`
+// that drives inbound self-reply — so one bubble can never send through a
+// workspace another bubble registered. With the KV adapter's `slack_workspace:`
+// prefix this yields `slack_workspace:${bubbleId}:${workspaceId}`.
+export function bubbleScopedWorkspaceKey(bubbleId: string, workspaceId: string): string {
+	return `${bubbleId}:${workspaceId}`;
+}
+
+// `bubbleId` is the AUTHENTICATED bubble (the entry files reject an unsigned or
+// bad-signature request with 403 before calling this). The Slack credentials
+// are looked up under that bubble's scope only — the outbound tenancy boundary.
 export async function handleSlackSend(
 	storage: StorageAdapter,
 	body: Record<string, unknown>,
+	bubbleId: string,
 ): Promise<HandlerResult> {
 	const channel = body.channel as string;
 	const text = body.text as string;
@@ -764,7 +777,11 @@ export async function handleSlackSend(
 		return { status: 400, body: { error: "no bot token for workspace" } };
 	}
 
-	const ws = await storage.getSlackWorkspace(workspaceId);
+	// Bubble-scoped lookup ONLY — no fallback to the global workspace store.
+	// A workspace registered by another bubble (or only inbound-registered) is
+	// absent here and returns the same opaque 400 as a truly unknown workspace,
+	// so an attacker can't probe which workspaces another bubble registered.
+	const ws = await storage.getSlackWorkspace(bubbleScopedWorkspaceKey(bubbleId, workspaceId));
 	if (!ws) {
 		return { status: 400, body: { error: "no bot token for workspace" } };
 	}
@@ -800,9 +817,15 @@ export async function handleSlackSend(
 	return { status: 200, body: { ok: true, ts: result.ts } };
 }
 
+// `bubbleId`, when present, is the AUTHENTICATED bubble that signed the
+// registration. The global record (bare workspaceId) is ALWAYS written so
+// inbound webhook self-reply loop prevention keeps working for any client —
+// signed or not. The bubble-scoped record is written ONLY for an authenticated
+// bubble, and is the only store outbound /slack/send reads.
 export async function handleSlackWorkspaceRegister(
 	storage: StorageAdapter,
 	body: Record<string, unknown>,
+	bubbleId?: string,
 ): Promise<HandlerResult> {
 	const workspaceId = body.workspace_id as string;
 	const botToken = body.bot_token as string;
@@ -842,35 +865,52 @@ export async function handleSlackWorkspaceRegister(
 
 	// UPSERT one entry into the per-app map — never overwrite the whole record,
 	// so a second bot registering the same workspace doesn't clobber the first.
-	const existing = await storage.getSlackWorkspace(workspaceId);
-	const bots: Record<string, SlackBotRecord> = { ...(existing?.bots ?? {}) };
-	// Migrate a pre-existing legacy single-bot record into the map.
-	if (existing?.bot_id && existing.bot_token && !bots[existing.bot_id]) {
-		bots[existing.bot_id] = { bot_token: existing.bot_token, bot_id: existing.bot_id };
-	}
-	// Key by api_app_id; fall back to bot_id when app_id couldn't be resolved
-	// (still unique per bot within a workspace, just not loop-safe across two
-	// bots that share a bot_id — which never happens).
-	const key = appId || botId || "default";
-	// MERGE, don't replace: a registration that omits a field (e.g. an older
-	// client that doesn't send signing_secret) must NOT wipe a value a previous
-	// registration set — otherwise every restart of such a client drops the
-	// per-app signing secret and the app's events fall back to the global secret
-	// and 401. Always refresh the bot_token (it may rotate); preserve the rest.
-	const prev = bots[key] ?? {};
-	bots[key] = {
-		bot_token: botToken,
-		bot_id: botId ?? prev.bot_id,
-		signing_secret: signingSecret ?? prev.signing_secret,
-		app_id: appId ?? prev.app_id,
+	// Pure: applied INDEPENDENTLY to the global and the bubble-scoped record so
+	// the two stores accrete in parallel and never alias.
+	const mergeBot = (existing: SlackWorkspaceRecord | null): SlackWorkspaceRecord => {
+		const bots: Record<string, SlackBotRecord> = { ...(existing?.bots ?? {}) };
+		// Migrate a pre-existing legacy single-bot record into the map.
+		if (existing?.bot_id && existing.bot_token && !bots[existing.bot_id]) {
+			bots[existing.bot_id] = { bot_token: existing.bot_token, bot_id: existing.bot_id };
+		}
+		// Key by api_app_id; fall back to bot_id when app_id couldn't be resolved
+		// (still unique per bot within a workspace, just not loop-safe across two
+		// bots that share a bot_id — which never happens).
+		const key = appId || botId || "default";
+		// MERGE, don't replace: a registration that omits a field (e.g. an older
+		// client that doesn't send signing_secret) must NOT wipe a value a previous
+		// registration set — otherwise every restart of such a client drops the
+		// per-app signing secret and the app's events fall back to the global secret
+		// and 401. Always refresh the bot_token (it may rotate); preserve the rest.
+		const prev = bots[key] ?? {};
+		bots[key] = {
+			bot_token: botToken,
+			bot_id: botId ?? prev.bot_id,
+			signing_secret: signingSecret ?? prev.signing_secret,
+			app_id: appId ?? prev.app_id,
+		};
+		return {
+			// Keep legacy fields reflecting the just-registered bot for back-compat
+			// readers; `bots` is authoritative.
+			bot_token: botToken,
+			bot_id: botId,
+			bots,
+		};
 	};
 
-	await storage.putSlackWorkspace(workspaceId, {
-		// Keep legacy fields reflecting the just-registered bot for back-compat
-		// readers; `bots` is authoritative.
-		bot_token: botToken,
-		bot_id: botId,
-		bots,
-	});
+	// Global record — drives inbound webhook self-reply loop prevention. ALWAYS
+	// written so a client that doesn't (yet) sign keeps loop prevention.
+	const globalExisting = await storage.getSlackWorkspace(workspaceId);
+	await storage.putSlackWorkspace(workspaceId, mergeBot(globalExisting));
+
+	// Bubble-scoped record — the ONLY store outbound /slack/send reads. Written
+	// only for an authenticated bubble, so that bubble (and no other) can send
+	// through this workspace.
+	if (bubbleId) {
+		const scopedKey = bubbleScopedWorkspaceKey(bubbleId, workspaceId);
+		const scopedExisting = await storage.getSlackWorkspace(scopedKey);
+		await storage.putSlackWorkspace(scopedKey, mergeBot(scopedExisting));
+	}
+
 	return { status: 200, body: { ok: true, workspace_id: workspaceId, bot_id: botId, app_id: appId } };
 }
