@@ -53,7 +53,7 @@ Agent teams become a **composable package ecosystem**. A team can declare
 `from: <base-team>` and inherit it, contributing only its delta — Docker-style
 composition at install/deploy time. Completes the modastack side of epic **#453**
 (Team distribution & composition): #446 (resolution) + #451 (merge) + the #452
-`eng-team-core` extraction. Ships the framework support the private
+`eng-team` extraction. Ships the framework support the private
 `moda-agent-teams` cutover needs.
 
 ### Added
@@ -76,11 +76,11 @@ composition at install/deploy time. Completes the modastack side of epic **#453*
   `modastack/compose.py`.
 
 ### Changed
-- **`eng-team` → pristine `eng-team-core` (#452).** The reference team is split
-  into a portable, **tool-agnostic** `eng-team-core` (GitHub issues + Slack, a
+- **`eng-team` → pristine `eng-team` (#452).** The reference team is split
+  into a portable, **tool-agnostic** `eng-team` (GitHub issues + Slack, a
   generic engineering lifecycle stated in terms of seams — your tracker, your
   review/test/QA gate) so any org can derive a house team with
-  `from: eng-team-core` instead of forking ~2,000 lines. Moda's operational team
+  `from: eng-team` instead of forking ~2,000 lines. Moda's operational team
   moves to a thin `moda-eng-team` overlay (Linear, the gstack/codex toolchain,
   TS/Next house style, release policy) in the private `moda-agent-teams` repo.
 - **Agent teams are no longer bundled into the framework wheel.** Teams are

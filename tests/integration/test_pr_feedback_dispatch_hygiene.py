@@ -7,7 +7,7 @@ into multiple engines that each filed a duplicate ticket (#416/#417/#418).
 This drives the REAL pipeline against the SHIPPED config (same approach as the
 #326 follow-up test):
 
-    real eng-team-core agent.yaml `auto_dispatch` rules
+    real eng-team agent.yaml `auto_dispatch` rules
         → EventReactor.from_config (with the bot's resolved github login)
         → drain_loop (the actual event-drain path)
         → launch_agent (mocked, so no live Claude session spawns)
@@ -35,7 +35,7 @@ from modastack.events.drain import drain_loop
 from modastack.events.reactor import EventReactor
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
-ENG_TEAM_AGENT_YAML = PACKAGE_ROOT / "agents" / "eng-team-core" / "agent.yaml"
+ENG_TEAM_AGENT_YAML = PACKAGE_ROOT / "agents" / "eng-team" / "agent.yaml"
 
 BOT_LOGIN = "modastack"
 
@@ -74,14 +74,14 @@ class _OneShotQueue:
 
 
 def _reactor_from_shipped_config():
-    """Build a reactor from the REAL eng-team-core auto_dispatch rules.
+    """Build a reactor from the REAL eng-team auto_dispatch rules.
 
     Threads in the bot's github login so the self-author guard is active —
     exactly how the live agent wires it (subagent._resolve_self_github_login).
     """
     cfg = yaml.safe_load(ENG_TEAM_AGENT_YAML.read_text())
     rules = cfg.get("auto_dispatch", [])
-    assert rules, "eng-team-core agent.yaml must define auto_dispatch rules"
+    assert rules, "eng-team agent.yaml must define auto_dispatch rules"
     # The shipped pr-feedback rules rely on the DEFAULT self-author skip (per
     # review, underminedsk) — they must NOT opt back in via allow_self_authored.
     pr_feedback = [r for r in rules if r.get("workflow") == "pr-feedback"]

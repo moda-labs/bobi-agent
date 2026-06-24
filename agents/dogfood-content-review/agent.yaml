@@ -1,7 +1,15 @@
-version: "1.1.0"
+version: "1.2.0"
 
 entry_point: manager
 chat: slack
+
+# Baked CLI tools from the framework catalog (#416). `venn` provides the
+# `venn` CLI the new-emails monitor shells out to (tools execute -s gmail …);
+# compose expands this into the `requires:` + `build:` that install venn-cli
+# into the team image and ships a `tools/venn.md` guide — one pinned
+# definition, reused across teams. The VENN_API_KEY credential stays declared
+# below; the catalog entry only provides the binary, not the secret.
+tool_library: [venn]
 
 # Cloud event server URL in production (.env), empty for an
 # auto-started local server (CI smoke tests, local dev).

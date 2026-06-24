@@ -270,7 +270,7 @@ class TestPrClosedWorkflow:
     """The pr-closed.yaml workflow parses correctly."""
 
     def test_pr_closed_workflow_loads(self):
-        wf_path = Path(__file__).parent.parent / "agents" / "eng-team-core" / "workflows" / "pr-closed.yaml"
+        wf_path = Path(__file__).parent.parent / "agents" / "eng-team" / "workflows" / "pr-closed.yaml"
         if not wf_path.exists():
             pytest.skip("pr-closed.yaml not yet created")
         wf = load_workflow(wf_path)

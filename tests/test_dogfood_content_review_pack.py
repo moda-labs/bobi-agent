@@ -26,7 +26,7 @@ class TestPackStructure:
     def test_agent_yaml_parses(self):
         cfg = yaml.safe_load((PACK_DIR / "agent.yaml").read_text())
         assert cfg["entry_point"] == "manager"
-        assert cfg["version"] == "1.1.0"
+        assert cfg["version"] == "1.2.0"
 
     def test_agent_md_exists(self):
         assert (PACK_DIR / "agent.md").exists()
@@ -179,5 +179,5 @@ class TestRegistryEntry:
         registry = yaml.safe_load(registry_path.read_text())
         assert "dogfood-content-review" in registry["agents"]
         entry = registry["agents"]["dogfood-content-review"]
-        assert entry["version"] == "1.1.0"
+        assert entry["version"] == "1.2.0"
         assert "description" in entry
