@@ -385,7 +385,7 @@ def test_build_rejects_path_based_from(tmp_path):
     team = _make_team(src, "overlay-team", "1.0.0")
     # Re-write agent.yaml to declare a path-based `from:`.
     (team / "agent.yaml").write_text(
-        'from: ../eng-team-core\nversion: "1.0.0"\nagent: demo\n')
+        'from: ../eng-team\nversion: "1.0.0"\nagent: demo\n')
     out = tmp_path / "dist"
     proc = _build(team, out)
     assert proc.returncode != 0
@@ -398,7 +398,7 @@ def test_build_allows_name_based_from(tmp_path):
     src = tmp_path / "src"
     team = _make_team(src, "overlay-team", "1.0.0")
     (team / "agent.yaml").write_text(
-        'from: eng-team-core@1.0.0\nversion: "1.0.0"\nagent: demo\n')
+        'from: eng-team@1.0.0\nversion: "1.0.0"\nagent: demo\n')
     out = tmp_path / "dist"
     proc = _build(team, out)
     assert proc.returncode == 0, proc.stdout + proc.stderr

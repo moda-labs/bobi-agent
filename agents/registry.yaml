@@ -1,7 +1,7 @@
 agents:
-  eng-team-core:
+  eng-team:
     version: "1.1.0"
-    description: "Portable engineering org — director, project leads, engineers; GitHub + Slack with tool-agnostic seams. Derive a house team with `from: eng-team-core`."
+    description: "Portable engineering org — director, project leads, engineers; GitHub + Slack with tool-agnostic seams. Derive a house team with `from: eng-team`."
   dogfood-content-review:
     version: "1.2.0"
     description: "Knowledge base management — manager, researcher, editor, fact-checker coordinate to produce and verify documentation"
