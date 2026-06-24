@@ -446,6 +446,17 @@ def _compose_structured_dir(chain: list[ResolvedLayer], dest: Path, sub: str,
     monitor_src: dict[str, str] = {}  # record name → contributing layer label(s)
     monitor_yaml_seen = False
 
+    # Framework-default monitors (#471) are seeded as the most-base layer, BEFORE
+    # any real team layer. Two consequences this ordering buys us: (1) a team's own
+    # same-named record overlays (and thus overrides) the framework default via the
+    # deep-merge-by-name path below, and (2) the seed sits at the front of the
+    # monitor order regardless of whether a team also declares it — which is what
+    # makes removing a team's now-redundant copy a byte-identical no-op. The seed
+    # is prunable like any inherited monitor (prune runs after this writes the file).
+    if sub == "monitors":
+        if _seed_framework_monitors(monitor_records, monitor_order, monitor_src):
+            monitor_yaml_seen = True
+
     for layer in chain:
         src = layer.dir / sub
         if not src.is_dir():
@@ -492,6 +503,23 @@ def _accumulate_monitors(f: Path, label: str, records: dict[str, dict],
             records[name] = dict(rec)
             order.append(name)
             src[name] = label
+
+
+def _seed_framework_monitors(records: dict[str, dict], order: list[str],
+                             src: dict[str, str]) -> bool:
+    """Seed framework-default monitor records (#471) as the most-base layer.
+
+    Loads `modastack/monitors/framework_defaults.yaml` and folds its records into
+    the accumulator *before* any real team layer, labelled ``framework``. Returns
+    True if anything was seeded (so the caller forces the defaults file to be
+    written even for a team that declares no monitors of its own). Missing/empty
+    framework defaults is a no-op, not an error.
+    """
+    from modastack.monitors import FRAMEWORK_DEFAULTS_PATH
+    if not FRAMEWORK_DEFAULTS_PATH.is_file():
+        return False
+    _accumulate_monitors(FRAMEWORK_DEFAULTS_PATH, "framework", records, order, src)
+    return bool(order)
 
 
 # --- agent.yaml deep-merge (§3.1) --------------------------------------------
