@@ -336,6 +336,33 @@ def _slack_auth_info(token: str) -> tuple[str, str]:
     return "", ""
 
 
+def _slack_app_id(token: str, bot_id: str) -> str:
+    """Resolve api_app_id from a bot id via bots.info.
+
+    ``auth.test`` does not return the app id, but the event server keys each
+    bot's record by ``api_app_id`` (the only id unique per app AND present on
+    every inbound event) so two bots can share one workspace. Best-effort.
+    """
+    if not bot_id:
+        return ""
+    from urllib.parse import quote
+
+    from modastack import http as pooled
+
+    try:
+        resp = pooled.get(
+            f"https://slack.com/api/bots.info?bot={quote(bot_id)}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
+        )
+        data = resp.json()
+        if data.get("ok"):
+            return (data.get("bot", {}) or {}).get("app_id", "") or ""
+    except Exception as e:  # best-effort — server can fall back to bot_id keying
+        log.debug("Slack bots.info failed during workspace registration: %s", e)
+    return ""
+
+
 def register_slack_workspaces(base_url: str, cfg) -> list[str]:
     """Register the agent's Slack workspace(s) with the event server.
 
@@ -355,24 +382,36 @@ def register_slack_workspaces(base_url: str, cfg) -> list[str]:
         token = ""
     if not token:
         return []
+    try:
+        signing_secret = cfg.credential("slack", "signing_secret")
+    except Exception:
+        signing_secret = ""
     team_id, bot_id = _slack_auth_info(token)
     if not team_id:
         return []
+    app_id = _slack_app_id(token, bot_id)
     try:
         # Send bot_id explicitly when known: the server's own auth.test
         # fallback is best-effort, and a registration without bot_id
         # silently disables self-reply filtering for the whole workspace.
+        # app_id keys the per-bot record so two bots can share a workspace
+        # without clobbering each other; signing_secret lets the server verify
+        # THIS app's inbound events (a second app signs with its own secret).
         record: dict = {"workspace_id": team_id, "bot_token": token}
         if bot_id:
             record["bot_id"] = bot_id
+        if app_id:
+            record["app_id"] = app_id
+        if signing_secret:
+            record["signing_secret"] = signing_secret
         pooled.post(
             f"{base_url}/slack/workspaces",
             json=record,
             timeout=10.0,
         )
         log.info(
-            "Registered Slack workspace %s with event server "
-            "(self-reply loop prevention)", team_id,
+            "Registered Slack workspace %s (app %s) with event server "
+            "(self-reply loop prevention)", team_id, app_id or "?",
         )
         return [team_id]
     except Exception as e:

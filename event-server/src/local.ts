@@ -21,6 +21,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	slackSigningSecretFor,
 	getAuthRejectionCounters,
 } from "./core";
 import {
@@ -344,10 +345,16 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			return json(res, { ok: true });
 		}
 
-		if (slackSigningSecret) {
+		// Per-app signing secret (by api_app_id), falling back to the global one.
+		const appSecret = await slackSigningSecretFor(
+			storage,
+			payload as Record<string, unknown>,
+			slackSigningSecret,
+		);
+		if (appSecret) {
 			const timestamp = (req.headers["x-slack-request-timestamp"] as string) || "";
 			const signature = (req.headers["x-slack-signature"] as string) || "";
-			const valid = await verifySlackSignature(slackSigningSecret, timestamp, body, signature);
+			const valid = await verifySlackSignature(appSecret, timestamp, body, signature);
 			if (!valid) return json(res, { error: "invalid signature" }, 401);
 		}
 

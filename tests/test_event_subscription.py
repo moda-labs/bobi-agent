@@ -339,9 +339,13 @@ def test_register_slack_workspaces_posts_bot_token():
         url = str(request.url)
         if "auth.test" in url:
             return httpx.Response(200, json={"ok": True, "team_id": "T0952", "bot_id": "BSELF"})
+        if "bots.info" in url:
+            assert "bot=BSELF" in url
+            return httpx.Response(200, json={"ok": True, "bot": {"app_id": "A0952"}})
         if url.endswith("/slack/workspaces"):
             captured.append({"url": url, "body": json.loads(request.content.decode())})
-            return httpx.Response(200, json={"ok": True, "workspace_id": "T0952", "bot_id": "BSELF"})
+            return httpx.Response(200, json={"ok": True, "workspace_id": "T0952",
+                                             "bot_id": "BSELF", "app_id": "A0952"})
         raise AssertionError(f"unexpected url {url}")
 
     transport = httpx.MockTransport(handler)
@@ -349,19 +353,25 @@ def test_register_slack_workspaces_posts_bot_token():
 
     with patch.object(pooled, '_client', mock_http):
         cfg = Config(services=[
-            ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
+            ServiceConfig(name="slack", credentials={
+                "bot_token": "xoxb-test",
+                "signing_secret": "shhh",
+            }),
         ])
         result = register_slack_workspaces("http://localhost:8080", cfg)
 
     assert result == ["T0952"]
     assert len(captured) == 1
     assert captured[0]["url"] == "http://localhost:8080/slack/workspaces"
-    # bot_id travels with the registration: relying on the server's own
-    # auth.test fallback left self-reply filtering silently disabled
-    # whenever that second lookup failed.
+    # bot_id + app_id + signing_secret travel with the registration. app_id keys
+    # the per-bot record so two bots can share a workspace; signing_secret lets
+    # the server verify THIS app's inbound events (a second app signs with its
+    # own secret, so a single global secret would 401 it).
     assert captured[0]["body"] == {"workspace_id": "T0952",
                                    "bot_token": "xoxb-test",
-                                   "bot_id": "BSELF"}
+                                   "bot_id": "BSELF",
+                                   "app_id": "A0952",
+                                   "signing_secret": "shhh"}
 
 
 def test_register_slack_workspaces_noop_without_token():

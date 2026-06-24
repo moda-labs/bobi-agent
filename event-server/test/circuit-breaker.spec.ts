@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
 	type NormalizedEvent,
+	normalizeSlackPayload,
 } from "../src/core";
 import {
 	isExemptFromBreaker,
@@ -225,6 +226,56 @@ describe("circuit-breaker", () => {
 				payload: {},
 			};
 			expect(isBotAuthored(event)).toBe(true);
+		});
+
+		// Regression (Slack self-spam incident 2026-06-24): the breaker must
+		// detect bot authorship on the event shape the REAL normalizer emits —
+		// a FLAT payload with bot_id, not the fictional nested `payload.event.bot_id`
+		// the other helpers hand-craft. Before the fix the normalizer stripped
+		// bot_id entirely, so every Slack event read as human and the breaker
+		// could never trip on a loop.
+		it("detects bot authorship on a real normalized slack event (flat payload bot_id)", () => {
+			const result = normalizeSlackPayload({
+				type: "event_callback",
+				team_id: "T123",
+				event: {
+					type: "message",
+					user: "U1",
+					bot_id: "B_THIRDPARTY",
+					channel: "C001",
+					channel_type: "channel",
+					thread_ts: "1700000000.000000",
+					text: "from another bot",
+					ts: "1700000001.000100",
+				},
+			}); // no selfBotId → not skipped, becomes a real normalized event
+			expect(result.event).not.toBeNull();
+			expect(isBotAuthored(result.event!)).toBe(true);
+		});
+
+		it("trips the breaker on repeated real normalized slack bot events", () => {
+			const depId = "dep-loop";
+			const make = () =>
+				normalizeSlackPayload({
+					type: "event_callback",
+					team_id: "T123",
+					event: {
+						type: "message",
+						user: "U1",
+						bot_id: "B_THIRDPARTY",
+						channel: "C001",
+						channel_type: "channel",
+						thread_ts: "1700000000.000000",
+						text: "spam",
+						ts: "1700000001.000100",
+					},
+				}).event!;
+			let tripped = false;
+			for (let i = 0; i < BREAKER_THRESHOLD; i++) {
+				const v = recordDelivery(depId, make());
+				if (v.justTripped || !v.allow) tripped = true;
+			}
+			expect(tripped).toBe(true);
 		});
 	});
 
