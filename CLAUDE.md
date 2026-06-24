@@ -53,7 +53,7 @@ modastack monitors add <name>     # add a monitor
 modastack monitors pause <name>   # disable a monitor
 modastack monitors remove <name>  # remove a user-added monitor
 modastack roles list              # list available agent roles
-modastack slack-manifest          # generate a Slack app manifest + one-click create link
+modastack create-slack-bot        # generate a Slack app manifest + one-click create link
 
 modastack kb create <name>        # create a named knowledge base
 modastack kb add <name> --file F  # index a file into a KB

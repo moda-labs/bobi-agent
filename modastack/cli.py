@@ -1516,7 +1516,7 @@ def slack_read_thread(workspace, channel, thread, limit, as_json):
         click.echo(f"\n{len(messages)} message(s)")
 
 
-@main.command("slack-manifest")
+@main.command("create-slack-bot")
 @click.option("--app-name", default="modastack agent",
               help="Display name for the Slack app")
 @click.option("--event-server", default="",
@@ -1528,8 +1528,9 @@ def slack_read_thread(workspace, channel, thread, limit, as_json):
               help="Write the manifest to a file instead of stdout")
 @click.option("--url/--no-url", "show_url", default=True,
               help="Print a one-click 'create from manifest' link")
-def slack_manifest(app_name, event_server, fmt, output, show_url):
-    """Generate a Slack app manifest wired to your event server.
+def create_slack_bot(app_name, event_server, fmt, output, show_url):
+    """Create a Slack app (bot) for modastack — generates the manifest and a
+    one-click create link.
 
     Every modastack Slack app needs the same scopes + events pointed at one
     request URL; this stamps them out from a template so a working app is one
@@ -1538,9 +1539,9 @@ def slack_manifest(app_name, event_server, fmt, output, show_url):
     Manifest API.
 
     Usage:
-        modastack slack-manifest
-        modastack slack-manifest --app-name "Eng Bot" --format json -o manifest.json
-        modastack slack-manifest --event-server https://my-worker.workers.dev
+        modastack create-slack-bot
+        modastack create-slack-bot --app-name "Eng Bot" --format json -o manifest.json
+        modastack create-slack-bot --event-server https://my-worker.workers.dev
     """
     from .slack_manifest import (
         create_app_url, manifest_to_json, render_manifest, webhook_url,

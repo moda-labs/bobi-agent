@@ -109,7 +109,7 @@ def test_cli_works_without_an_install_and_falls_back_to_cloud(tmp_path):
     error; it falls back to the modastack cloud event server."""
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        result = runner.invoke(main, ["slack-manifest", "--app-name", "Bot"])
+        result = runner.invoke(main, ["create-slack-bot", "--app-name", "Bot"])
     assert result.exit_code == 0, result.output
     assert f"{DEFAULT_EVENT_SERVER}/webhooks/slack" in result.output
     assert "api.slack.com/apps?new_app=1" in result.output
@@ -120,7 +120,7 @@ def test_cli_writes_json_file(tmp_path):
     out = tmp_path / "manifest.json"
     with runner.isolated_filesystem(temp_dir=tmp_path):
         result = runner.invoke(main, [
-            "slack-manifest", "--format", "json",
+            "create-slack-bot", "--format", "json",
             "--event-server", EVENT_SERVER, "-o", str(out), "--no-url",
         ])
     assert result.exit_code == 0, result.output

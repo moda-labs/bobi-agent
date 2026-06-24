@@ -11,7 +11,7 @@ hand-pick scopes or wire the event URL yourself.
 ## 1. Generate a manifest and create the app
 
 ```bash
-modastack slack-manifest --app-name "Agent Dispatch"
+modastack create-slack-bot --app-name "Agent Dispatch"
 ```
 
 This prints a Slack app manifest plus a one-click create link. The request URL
@@ -94,7 +94,7 @@ Useful if you live in the [Slack CLI](https://api.slack.com/automation/cli) or
 want to script app creation. Write the manifest to a file, then create from it:
 
 ```bash
-modastack slack-manifest --app-name "Agent Dispatch" --format json -o manifest.json
+modastack create-slack-bot --app-name "Agent Dispatch" --format json -o manifest.json
 
 # Validate, then create the app from the manifest:
 slack manifest validate --manifest manifest.json
@@ -113,7 +113,7 @@ event server), generate a manifest per tenant and POST it to the Slack
 a configuration token — no clicks:
 
 ```bash
-modastack slack-manifest --app-name "Tenant A" \
+modastack create-slack-bot --app-name "Tenant A" \
   --event-server https://modastack-events.modalabs.workers.dev \
   --format json -o tenant-a.json
 # then: POST tenant-a.json to apps.manifest.create with your config token
