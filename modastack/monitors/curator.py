@@ -171,10 +171,14 @@ def render_transcript(rows: list[dict]) -> str:
 
 
 def build_curator_task(prompt_template: str, transcript: str,
-                       current_policy: str, flags: dict) -> str:
+                       current_policy: str, flags: dict, seed: str = "") -> str:
     """Assemble the curator agent's task: the dedicated curator prompt, the
     current policy.md, and the rendered transcript delta. The agent does the
-    judgment and rewrites policy.md via Write, then prints the JSON summary."""
+    judgment and rewrites policy.md via Write, then prints the JSON summary.
+
+    ``seed`` (one-time, first run only) carries the legacy per-session decision
+    logs to distill into the first policy.md — see scheduler._spawn_curator.
+    """
     notes = []
     if flags.get("input_truncated"):
         lo, hi = flags.get("deferred_id_range") or (None, None)
@@ -187,6 +191,15 @@ def build_curator_task(prompt_template: str, transcript: str,
     notes_block = ("\n\nIngest notes (from the deterministic input cap):\n"
                    + "\n".join(notes)) if notes else ""
 
+    seed_block = (
+        f"\n\n=== ONE-TIME SEED: legacy decision-log journals ===\n"
+        f"This is the first curator run — there is no policy.md yet. The blocks "
+        f"below are the team's existing append-only decision logs. Distill their "
+        f"DURABLE facts and decisions into the first policy.md (same rules as the "
+        f"transcript delta: dedup, generalize, drop one-off operational detail). "
+        f"After this run the journals are never read again.\n\n{seed}"
+    ) if seed else ""
+
     return (
         f"{prompt_template}\n\n"
         f"=== CURRENT policy.md (rewrite this in full via Write) ===\n"
@@ -194,6 +207,7 @@ def build_curator_task(prompt_template: str, transcript: str,
         f"=== NEW TRANSCRIPT DELTA (since your last run) ===\n"
         f"{transcript or '(no new messages)'}"
         f"{notes_block}"
+        f"{seed_block}"
     )
 
 

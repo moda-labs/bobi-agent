@@ -663,10 +663,11 @@ class MonitorScheduler:
         cursor and publishes on success.
         """
         from modastack import history, paths
-        from modastack.memory import load_policy
+        from modastack.memory import collect_legacy_journals, load_policy
         from modastack.monitors import curator as curator_mod
 
         root = self._project_root(projects)
+        state_dir = paths.state_path(root)
         cursor_path = paths.policy_cursor_path(root)
         cursor = curator_mod.read_cursor(cursor_path)
 
@@ -676,24 +677,36 @@ class MonitorScheduler:
             log.warning("Curator transcript index failed for %s: %s", monitor.name, e)
 
         rows = history.messages_since(cursor)
-        if not rows:
-            log.info("Monitor %s due — no new transcript messages since cursor %d",
-                     monitor.name, cursor)
+
+        # One-time seed (#456): on the very first run (no policy.md yet) distill
+        # the existing per-session decision-log journals into the first policy.md
+        # so accumulated knowledge isn't discarded at rollout. Guarded on
+        # policy.md absence → idempotent: once written, the seed never re-fires.
+        seed = ""
+        if not paths.policy_path(root).is_file():
+            seed = collect_legacy_journals(state_dir, curator_mod.MAX_SEED_INPUT_CHARS)
+
+        if not rows and not seed:
+            log.info("Monitor %s due — no new transcript messages since cursor %d "
+                     "and nothing to seed", monitor.name, cursor)
             return
 
         ingested, highest_id, flags = curator_mod.select_messages(
             rows, curator_mod.MAX_CURATOR_INPUT_CHARS)
-        if highest_id is None:
+        if highest_id is None and not seed:
             log.info("Monitor %s: nothing ingestable this run", monitor.name)
             return
 
         transcript = curator_mod.render_transcript(ingested)
         try:
-            current_policy = load_policy(paths.state_path(root))
+            current_policy = load_policy(state_dir)
         except Exception:
             current_policy = ""
         task = curator_mod.build_curator_task(
-            self._load_curator_prompt(root), transcript, current_policy, flags)
+            self._load_curator_prompt(root), transcript, current_policy, flags, seed=seed)
+        if seed:
+            log.info("Monitor %s: seeding first policy.md from %d chars of legacy "
+                     "journals", monitor.name, len(seed))
 
         cwd = str(projects[0]) if projects else None
         log.info("Monitor %s due — spawning curator over %d new message(s) "
@@ -706,7 +719,7 @@ class MonitorScheduler:
         )
 
     def _on_curator_result(self, monitor, result: dict | None,
-                           highest_id: int, cursor_path: Path) -> None:
+                           highest_id: int | None, cursor_path: Path) -> None:
         """Waiter-thread callback for a finished curator run.
 
         Advances the cursor ONLY on success (a failed/indeterminate run leaves
@@ -721,11 +734,15 @@ class MonitorScheduler:
                         "NOT advanced, retrying next interval", monitor.name)
             return
 
-        try:
-            curator_mod.write_cursor(cursor_path, highest_id)
-        except OSError as e:
-            log.error("Monitor %s: failed to advance curator cursor: %s",
-                      monitor.name, e)
+        # A seed-only first run ingests no transcript rows (highest_id is None) —
+        # there is nothing to advance; the cursor stays at 0 and the next run
+        # reads the real transcript delta normally.
+        if highest_id is not None:
+            try:
+                curator_mod.write_cursor(cursor_path, highest_id)
+            except OSError as e:
+                log.error("Monitor %s: failed to advance curator cursor: %s",
+                          monitor.name, e)
 
         if result.get("lossy_drops"):
             log.warning("Monitor %s: curator made %s LOSSY drop(s) of still-valid "

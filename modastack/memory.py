@@ -117,3 +117,35 @@ def load_memory(state_dir: Path, session_name: str) -> str:
     if len(combined) > MAX_MEMORY_CHARS:
         combined = combined[:MAX_MEMORY_CHARS] + "\n\n[memory truncated]"
     return combined
+
+
+def collect_legacy_journals(state_dir: Path, budget: int) -> str:
+    """Gather all per-session decision-log journals for the one-time seed (#456).
+
+    Walks ``state_dir/memory/<session>/`` and concatenates each session's
+    ``load_memory`` text, capped at ``budget`` chars total. Returns "" when no
+    journals exist (a fresh team with nothing to seed). This feeds the curator's
+    first run so the existing ~127KB of accumulated knowledge is distilled into
+    the first ``policy.md`` rather than discarded; after ``policy.md`` exists the
+    seed never runs again (the caller guards on absence).
+    """
+    mem_root = state_dir / "memory"
+    if not mem_root.is_dir():
+        return ""
+
+    parts: list[str] = []
+    used = 0
+    for session_dir in sorted(p for p in mem_root.iterdir() if p.is_dir()):
+        text = load_memory(state_dir, session_dir.name).strip()
+        if not text:
+            continue
+        block = f"### legacy journal: {session_dir.name}\n\n{text}"
+        if used + len(block) > budget:
+            # Stop at the budget — the seed is a one-shot bounded by
+            # MAX_SEED_INPUT_CHARS, far above the journal's real size.
+            parts.append("\n[seed input truncated at budget — remaining journals omitted]")
+            break
+        parts.append(block)
+        used += len(block)
+
+    return "\n\n".join(parts)
