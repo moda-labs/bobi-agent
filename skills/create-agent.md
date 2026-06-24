@@ -118,6 +118,28 @@ itself is consumed — never written to the frozen `agent.yaml`. Use a `name` /
 packaging); `install --pinned` resolves the chain registry-only for reproducible
 CI/deploy. The pristine `eng-team-core` is the canonical base to derive from.
 
+### Opt-in tool library (`tool_library:`)
+
+Instead of hand-coordinating a baked CLI tool across three places — a `requires:`
+check/fix, a pinned `build:` fragment, and a `tools/<name>.md` guide — opt into a
+curated catalog entry **by name**:
+
+```yaml
+tool_library: [codex, venn]        # opt into baked CLI tools by id
+```
+
+At compose time each id expands into exactly those three surfaces (the entry's
+`requires` + `build` + its guide written to `tools/<id>.md`), then the normal
+merge runs — so a pin written once in the catalog **de-dupes to a single string**
+even when several layers reference the same tool. Available `cli` entries:
+**`codex`** (OpenAI Codex CLI), **`venn`** (external-service CLI), **`openai`**
+(image generation). The list **unions** across a `from:` chain (an overlay's
+`tool_library:` adds to the base's). Escape hatches: a team that ships its own
+`tools/<id>.md` or an explicit `requires:` entry for the same name **wins** — the
+catalog never clobbers a local declaration. `tool_library:` is consumed at
+compose and never written to the frozen `agent.yaml`. Catalog source +
+contribution guide: `modastack/tool_library/` and `docs/specs/416-tool-library.md`.
+
 ### agent.md
 
 ```markdown

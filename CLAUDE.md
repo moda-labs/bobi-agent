@@ -189,6 +189,16 @@ ROLE.md), not by dropping an override into `.modastack/`.
 every role's context. In a `from:` chain, later layers' tools override
 earlier ones by filename.
 
+**Tool library** (`tool_library:` in `agent.yaml`) is an opt-in catalog of
+baked CLI tools (`modastack/tool_library/`). A team lists entries by id
+(`tool_library: [codex, venn]`) and `compose.py` expands each into its
+`requires:` + `build:` + a `tools/<id>.md` guide at build time — one pinned
+definition + one guide, reusable across teams, with the pin de-duped to a
+single string across `from:` layers. Only `kind: cli` ships today (`codex`,
+`venn`, `openai`); `kind: mcp`/`skill` are reserved (#398/#428). A local
+`tools/<id>.md` or explicit `requires:` for the same name wins; the key is
+consumed at compose and never emitted. See `docs/specs/416-tool-library.md`.
+
 **Context** files in `context/` are team-shipped reference content
 (rubrics, methodology, examples). Installed frozen to
 `.modastack/context/`; agents get an index (path + first line) in their
