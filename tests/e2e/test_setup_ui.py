@@ -187,7 +187,7 @@ def test_chat_card_select_and_slack_setup(page, modastack_url):
     slack_btn.click()
     ov = page.locator("#secret-ov")
     expect(ov).to_be_visible()
-    expect(ov.locator(".steps li").first).to_contain_text("api.slack.com")
+    expect(ov.locator(".steps li").first).to_contain_text("slack-manifest")
     expect(ov.locator("input[data-secret='SLACK_BOT_TOKEN']")).to_be_visible()
 
     # Capture the bot token; the chat card then shows it saved with Copy/Edit.

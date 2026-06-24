@@ -314,6 +314,15 @@ def compose(chain: list[ResolvedLayer], dest: Path) -> Provenance:
         _compose_structured_dir(chain, dest, sub, prov)
     merged_yaml = _compose_agent_yaml(chain, prov)
 
+    # Expand opt-in tool-library refs (#416): splice each entry's requires/build
+    # into merged_yaml + write its tools/<name>.md guide, then drop the key. Runs
+    # AFTER the structured tools/ merge (so the local-wins guide check sees team
+    # files) and BEFORE prune (so a layer's prune: can still drop a tool guide).
+    # Local import avoids a module-level import cycle (tool_library imports the
+    # compose merge helpers).
+    from modastack import tool_library
+    tool_library.expand(merged_yaml, dest)
+
     # prune (§4) is applied after merge, across the frozen surfaces + agent.yaml.
     _apply_prune(chain, dest, merged_yaml, prov)
 
@@ -515,6 +524,12 @@ def _merge_agent_yaml(base: dict, overlay: dict, label: str,
             out[key] = _merge_build(out.get("build"), val)
         elif key == "auto_dispatch":
             out[key] = _merge_auto_dispatch(out.get("auto_dispatch"), val)
+        elif key == "tool_library":
+            # Opt-in tool catalog refs (#416): union across `from:` layers so an
+            # overlay's `tool_library:` ADDS to the base's instead of replacing it
+            # (the `else` last-wins branch would drop the base's entries).
+            # Consumed by tool_library.expand() in compose(), never emitted.
+            out[key] = _dedupe(list(out.get(key) or []) + list(val or []))
         else:
             out[key] = val  # scalars + anything else: last wins
         prov.record(f"agent.yaml:{key}", label)

@@ -25,6 +25,7 @@ from modastack.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from modastack.transient import is_transient_api_error
+from modastack.env import agent_spawn_env
 
 InputHandler = Callable[[str, dict[str, Any]], str]
 
@@ -897,8 +898,10 @@ def launch_agent(
     log_file = SessionRegistry.log_path(session_name)
     # Pin MODASTACK_ROOT so CLI commands run inside worktrees by the child
     # resolve to the real installation, not the worktree's checked-in
-    # agent.yaml (#247).
-    child_env = {**os.environ, "MODASTACK_ROOT": str(root)}
+    # agent.yaml (#247). agent_spawn_env() prepends the user-bin dirs to PATH
+    # so bare-name stdio MCP commands resolve at spawn the same way they do in
+    # preflight — the daemon's stripped PATH otherwise breaks them (MDS-64).
+    child_env = {**agent_spawn_env(), "MODASTACK_ROOT": str(root)}
     pid = _launch_detached(script, [args_json], log_file, env=child_env)
     registry.update(session_name, pid=pid)
 

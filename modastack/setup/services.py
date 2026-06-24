@@ -158,11 +158,13 @@ _NATIVE = [
         methods=(
             AuthMethod(
                 key="token", label="Bot token",
-                summary="Create a small Slack app and paste its bot token.",
+                summary="Create a Slack app from a manifest, paste its bot "
+                        "token.",
                 steps=(
-                    "Go to api.slack.com/apps → Create New App → From scratch.",
-                    "Under OAuth & Permissions, add bot scopes: chat:write, "
-                    "channels:history, channels:read, app_mentions:read.",
+                    "Run `modastack slack-manifest` and open the printed "
+                    "create link — scopes + events are prefilled.",
+                    "Or create from the manifest: api.slack.com/apps → Create "
+                    "New App → From a manifest.",
                     "Install to your workspace, then copy the Bot User OAuth "
                     "Token (starts xoxb-).",
                     "Invite the bot to a channel: /invite @your-bot.",

@@ -154,5 +154,11 @@ if [ "${MODASTACK_AUTH:-api_key}" = "subscription" ] \
 fi
 
 # --- 5. Hand off to the manager as the non-root user ------------------------
+# Agent UI on by default IN THE CONTAINER (the manager starts it on the private
+# 6PN; reach it with `modastack ui <deployment>` / `fly proxy`). It's image
+# behavior, not a per-instance flag, so existing instances pick it up on their
+# next image swap. Disable with MODASTACK_UI=0 in the Fly env. The dark instance
+# has no public route, so this exposes nothing — see DESIGN.md "Agent UI".
+export MODASTACK_UI="${MODASTACK_UI:-1}"
 log "Starting manager (user=${APP_USER}, project=${PROJECT_DIR}, home=${HOME}, claude_config=${CLAUDE_CONFIG_DIR})"
-exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" modastack start --foreground "$@"
+exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_UI=${MODASTACK_UI}" modastack start --foreground "$@"
