@@ -1048,6 +1048,38 @@ describe("handleSlackWebhook", () => {
 		expect(store.delivered).toHaveLength(0);
 	});
 
+	// Cross-app loop (incident 2026-06-24, take 2): when two of OUR bots share a
+	// channel, Slack delivers each bot's messages to BOTH apps' webhooks. A
+	// message authored by bot A arrives via bot B's webhook (api_app_id = B), so a
+	// self-filter keyed to the RECEIVING app (B) wouldn't recognise A as ours and
+	// would deliver it → loop. It must be skipped because A is one of OUR bots.
+	it("skips a message authored by any of our bots, even via another app's webhook", async () => {
+		const store = createMockStorage();
+		store.slackWorkspaces.set("T1", {
+			bots: {
+				A_old: { bot_token: "x1", bot_id: "B_old", app_id: "A_old" },
+				A_new: { bot_token: "x2", bot_id: "B_new", app_id: "A_new" },
+			},
+		});
+		// B_new authored it, but it arrives via A_old's webhook (api_app_id=A_old).
+		const result = await handleSlackWebhook(store, {
+			type: "event_callback",
+			team_id: "T1",
+			api_app_id: "A_old",
+			event: {
+				type: "message",
+				bot_id: "B_new",
+				channel: "C1",
+				channel_type: "channel",
+				thread_ts: "100.000",
+				text: "Evaluating…",
+				ts: "123",
+			},
+		});
+		expect(result.status).toBe(200);
+		expect(store.delivered).toHaveLength(0);
+	});
+
 	it("returns challenge for url_verification payload", async () => {
 		const store = createMockStorage();
 		const result = await handleSlackWebhook(store, {
