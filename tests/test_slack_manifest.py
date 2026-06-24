@@ -1,0 +1,131 @@
+"""Tests for slack_manifest — manifest rendering, JSON conversion, deep link.
+
+The manifest is the one source of truth for the scopes + events the modastack
+Slack adapter (event-server/src/adapters/slack.ts) consumes. These tests pin
+that the rendered manifest stays wired to the event server's /webhooks/slack
+path and carries every event the adapter normalizes.
+"""
+
+import json
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+import yaml
+from click.testing import CliRunner
+
+from modastack.cli import main
+from modastack.deploy import DEFAULT_EVENT_SERVER
+from modastack.slack_manifest import (
+    WEBHOOK_PATH,
+    create_app_url,
+    manifest_to_dict,
+    manifest_to_json,
+    render_manifest,
+    webhook_url,
+)
+
+EVENT_SERVER = "https://my-worker.workers.dev"
+
+# Every event the Slack adapter turns into a modastack event must be subscribed.
+EXPECTED_BOT_EVENTS = {
+    "app_mention",       # -> slack.mention
+    "message.im",        # -> slack.dm
+    "message.mpim",      # -> slack.dm
+    "message.channels",  # -> slack.thread_reply (public)
+    "message.groups",    # -> slack.thread_reply (private)
+}
+
+# Scopes those events require, plus the scopes the outbound CLI tools need.
+EXPECTED_BOT_SCOPES = {
+    "app_mentions:read", "channels:history", "channels:read", "chat:write",
+    "files:read", "files:write", "groups:history", "im:history", "im:read",
+    "mpim:history", "users:read",
+}
+
+
+def test_render_substitutes_name_and_request_url():
+    out = render_manifest("Eng Bot", EVENT_SERVER)
+    data = yaml.safe_load(out)
+    assert data["display_information"]["name"] == "Eng Bot"
+    assert data["features"]["bot_user"]["display_name"] == "Eng Bot"
+    assert (
+        data["settings"]["event_subscriptions"]["request_url"]
+        == f"{EVENT_SERVER}/webhooks/slack"
+    )
+
+
+def test_render_strips_trailing_slash_on_event_server():
+    data = manifest_to_dict(render_manifest("Bot", EVENT_SERVER + "/"))
+    assert (
+        data["settings"]["event_subscriptions"]["request_url"]
+        == f"{EVENT_SERVER}/webhooks/slack"
+    )
+
+
+def test_request_url_uses_webhook_path_constant():
+    assert webhook_url(EVENT_SERVER) == EVENT_SERVER + WEBHOOK_PATH
+    assert webhook_url(EVENT_SERVER + "/") == EVENT_SERVER + WEBHOOK_PATH
+
+
+def test_manifest_carries_all_adapter_events():
+    data = manifest_to_dict(render_manifest("Bot", EVENT_SERVER))
+    events = set(data["settings"]["event_subscriptions"]["bot_events"])
+    assert events == EXPECTED_BOT_EVENTS
+
+
+def test_manifest_carries_required_scopes():
+    data = manifest_to_dict(render_manifest("Bot", EVENT_SERVER))
+    scopes = set(data["oauth_config"]["scopes"]["bot"])
+    assert scopes == EXPECTED_BOT_SCOPES
+
+
+def test_manifest_uses_http_events_not_socket_mode():
+    data = manifest_to_dict(render_manifest("Bot", EVENT_SERVER))
+    assert data["settings"]["socket_mode_enabled"] is False
+
+
+def test_manifest_to_json_roundtrips_to_same_dict():
+    rendered = render_manifest("Bot", EVENT_SERVER)
+    assert json.loads(manifest_to_json(rendered)) == manifest_to_dict(rendered)
+
+
+def test_create_app_url_embeds_valid_manifest_json():
+    rendered = render_manifest("Eng Bot", EVENT_SERVER)
+    url = create_app_url(rendered)
+    parsed = urlparse(url)
+    assert parsed.netloc == "api.slack.com"
+    qs = parse_qs(parsed.query)
+    assert qs["new_app"] == ["1"]
+    manifest = json.loads(qs["manifest_json"][0])
+    assert manifest["display_information"]["name"] == "Eng Bot"
+    assert (
+        manifest["settings"]["event_subscriptions"]["request_url"]
+        == f"{EVENT_SERVER}/webhooks/slack"
+    )
+
+
+def test_cli_works_without_an_install_and_falls_back_to_cloud(tmp_path):
+    """The command must run before `modastack install` exists — no root, no
+    error; it falls back to the modastack cloud event server."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, ["slack-manifest", "--app-name", "Bot"])
+    assert result.exit_code == 0, result.output
+    assert f"{DEFAULT_EVENT_SERVER}/webhooks/slack" in result.output
+    assert "api.slack.com/apps?new_app=1" in result.output
+
+
+def test_cli_writes_json_file(tmp_path):
+    runner = CliRunner()
+    out = tmp_path / "manifest.json"
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, [
+            "slack-manifest", "--format", "json",
+            "--event-server", EVENT_SERVER, "-o", str(out), "--no-url",
+        ])
+    assert result.exit_code == 0, result.output
+    data = json.loads(out.read_text())
+    assert (
+        data["settings"]["event_subscriptions"]["request_url"]
+        == f"{EVENT_SERVER}/webhooks/slack"
+    )

@@ -327,18 +327,21 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	}
 
 	if (method === "POST" && path === "/webhooks/slack") {
-		if (req.headers["x-slack-retry-num"]) {
-			return json(res, { ok: true });
-		}
-
 		const body = await readBody(req);
 		const payload = parseJson(body);
 		if (!payload) return json(res, { error: "invalid JSON" }, 400);
 
-		// url_verification must be handled before signature check —
-		// Slack's url_verification request does not include signing headers.
+		// url_verification must be handled before BOTH the retry short-circuit
+		// and the signature check: it carries no signing headers, and Slack
+		// retries a failed handshake with x-slack-retry-num set — so swallowing
+		// retries here would leave the request URL permanently unverified.
 		if ((payload as Record<string, unknown>).type === "url_verification") {
 			return json(res, { challenge: (payload as Record<string, unknown>).challenge });
+		}
+
+		// Dedup retried EVENT deliveries so the agent doesn't double-process.
+		if (req.headers["x-slack-retry-num"]) {
+			return json(res, { ok: true });
 		}
 
 		if (slackSigningSecret) {
