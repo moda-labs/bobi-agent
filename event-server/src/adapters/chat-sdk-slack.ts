@@ -90,12 +90,16 @@ export function bridgeSlackWebhook(
 	const topics: string[] = [];
 	if (teamId) topics.push(`slack:${teamId}`);
 
+	const botId = (innerEvent.bot_id as string) || "";
+
 	const fields: Record<string, string | number | boolean> = {};
 	if (userId) fields.user_id = userId;
 	if (channel) fields.channel = channel;
 	if (channelType) fields.channel_type = channelType;
 	if (ts) fields.ts = ts;
 	if (threadTs) fields.thread_ts = threadTs;
+	// Preserve bot_id so the circuit breaker can detect bot authorship.
+	if (botId) fields.bot_id = botId;
 
 	return {
 		event: {
@@ -115,6 +119,7 @@ export function bridgeSlackWebhook(
 				text: rawText,
 				ts,
 				thread_ts: threadTs,
+				...(botId ? { bot_id: botId } : {}),
 			},
 		},
 		skip: false,

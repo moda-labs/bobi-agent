@@ -20,6 +20,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	slackSigningSecretFor,
 	getAuthRejectionCounters,
 } from "./core";
 import {
@@ -269,10 +270,15 @@ export default {
 				return Response.json({ ok: true });
 			}
 
-			if (env.SLACK_SIGNING_SECRET) {
+			// Verify against the AUTHORING app's signing secret (resolved by
+			// api_app_id), falling back to the global secret for legacy single-app
+			// deployments. A second app in the workspace signs with its OWN secret;
+			// validating only the global one 401'd it (and dropped its login DM).
+			const signingSecret = await slackSigningSecretFor(storage, payload, env.SLACK_SIGNING_SECRET || "");
+			if (signingSecret) {
 				const timestamp = request.headers.get("x-slack-request-timestamp") || "";
 				const signature = request.headers.get("x-slack-signature") || "";
-				const valid = await verifySlackSignature(env.SLACK_SIGNING_SECRET, timestamp, body, signature);
+				const valid = await verifySlackSignature(signingSecret, timestamp, body, signature);
 				if (!valid) {
 					return Response.json({ error: "invalid signature" }, { status: 401 });
 				}

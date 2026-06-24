@@ -29,6 +29,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	resolveSlackSigningSecret,
 } from "../src/core";
 
 describe("normalizeGitHubPayload", () => {
@@ -353,6 +354,51 @@ describe("normalizeSlackPayload", () => {
 		expect(result.skip).toBe(false);
 		expect(result.event).not.toBeNull();
 		expect(result.event!.type).toBe("slack.mention");
+	});
+
+	// Multi-bot workspace (Slack self-spam incident 2026-06-24): the self-filter
+	// must accept a SET of our own bot ids, not a single id — two bots can share
+	// one workspace, each serving a different team.
+	it("skips own bot when bot_id is one of several self ids", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				bot_id: "B2",
+				channel: "C456",
+				channel_type: "channel",
+				thread_ts: "100.000",
+				text: "bot two",
+				ts: "123",
+			},
+		}, new Set(["B1", "B2"]));
+		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
+	});
+
+	it("passes through a third-party bot not in the self set, preserving bot_id", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				bot_id: "B_OTHER",
+				channel: "C456",
+				channel_type: "channel",
+				thread_ts: "100.000",
+				text: "third party",
+				ts: "123",
+			},
+		}, new Set(["B1", "B2"]));
+		expect(result.skip).toBe(false);
+		expect(result.event).not.toBeNull();
+		// bot_id must survive onto the normalized event so the circuit breaker
+		// can recognise bot authorship (it reads payload.bot_id).
+		expect((result.event!.payload as Record<string, unknown>).bot_id).toBe("B_OTHER");
+		expect(result.event!.fields!.bot_id).toBe("B_OTHER");
 	});
 
 	it("skips non-threaded channel messages", () => {
@@ -1002,6 +1048,38 @@ describe("handleSlackWebhook", () => {
 		expect(store.delivered).toHaveLength(0);
 	});
 
+	// Cross-app loop (incident 2026-06-24, take 2): when two of OUR bots share a
+	// channel, Slack delivers each bot's messages to BOTH apps' webhooks. A
+	// message authored by bot A arrives via bot B's webhook (api_app_id = B), so a
+	// self-filter keyed to the RECEIVING app (B) wouldn't recognise A as ours and
+	// would deliver it → loop. It must be skipped because A is one of OUR bots.
+	it("skips a message authored by any of our bots, even via another app's webhook", async () => {
+		const store = createMockStorage();
+		store.slackWorkspaces.set("T1", {
+			bots: {
+				A_old: { bot_token: "x1", bot_id: "B_old", app_id: "A_old" },
+				A_new: { bot_token: "x2", bot_id: "B_new", app_id: "A_new" },
+			},
+		});
+		// B_new authored it, but it arrives via A_old's webhook (api_app_id=A_old).
+		const result = await handleSlackWebhook(store, {
+			type: "event_callback",
+			team_id: "T1",
+			api_app_id: "A_old",
+			event: {
+				type: "message",
+				bot_id: "B_new",
+				channel: "C1",
+				channel_type: "channel",
+				thread_ts: "100.000",
+				text: "Evaluating…",
+				ts: "123",
+			},
+		});
+		expect(result.status).toBe(200);
+		expect(store.delivered).toHaveLength(0);
+	});
+
 	it("returns challenge for url_verification payload", async () => {
 		const store = createMockStorage();
 		const result = await handleSlackWebhook(store, {
@@ -1010,6 +1088,43 @@ describe("handleSlackWebhook", () => {
 		});
 		expect(result.status).toBe(200);
 		expect((result.body as Record<string, string>).challenge).toBe("test-challenge");
+	});
+
+	// Multi-bot workspace (incident 2026-06-24): two bots registered in one
+	// workspace must EACH have their own messages filtered. The record is keyed
+	// by api_app_id, so the second bot to register no longer clobbers the first.
+	it("filters either bot's messages when the workspace has multiple registered bots", async () => {
+		const store = createMockStorage();
+		store.slackWorkspaces.set("T123", {
+			bots: {
+				A1: { bot_token: "xoxb-1", bot_id: "B1", app_id: "A1" },
+				A2: { bot_token: "xoxb-2", bot_id: "B2", app_id: "A2" },
+			},
+		});
+
+		const fromBot = async (appId: string, bid: string) =>
+			handleSlackWebhook(store, {
+				type: "event_callback",
+				team_id: "T123",
+				api_app_id: appId,
+				event: {
+					type: "message",
+					user: "U1",
+					bot_id: bid,
+					channel: "C456",
+					channel_type: "channel",
+					thread_ts: "100.000",
+					text: "loop",
+					ts: "123",
+				},
+			});
+
+		await fromBot("A1", "B1"); // bot 1's own message, via bot 1's app webhook
+		await fromBot("A2", "B2"); // bot 2's own message, via bot 2's app webhook
+		expect(store.delivered).toHaveLength(0); // both self bots filtered
+
+		await fromBot("A1", "B_THIRDPARTY"); // a third-party bot seen by app 1
+		expect(store.delivered).toHaveLength(1); // passes through
 	});
 });
 
@@ -1399,6 +1514,86 @@ describe("handleSlackWorkspaceRegister", () => {
 		expect(body.bot_id).toBe("B_EXPLICIT");
 		const ws = store.slackWorkspaces.get("T_EXPLICIT");
 		expect(ws?.bot_id).toBe("B_EXPLICIT");
+	});
+
+	// Incident 2026-06-24: a second bot registering the same workspace must NOT
+	// clobber the first. Both bots accrete into the api_app_id-keyed map, and
+	// BOTH stay self-filtered (so neither loops on its own messages).
+	it("registering a second bot does not clobber the first", async () => {
+		const store = createMockStorage();
+		await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1", bot_token: "xoxb-1", bot_id: "B1", app_id: "A1",
+			signing_secret: "sec-1",
+		});
+		await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1", bot_token: "xoxb-2", bot_id: "B2", app_id: "A2",
+			signing_secret: "sec-2",
+		});
+
+		const ws = store.slackWorkspaces.get("T1");
+		expect(ws?.bots?.A1?.bot_id).toBe("B1");
+		expect(ws?.bots?.A1?.bot_token).toBe("xoxb-1");
+		expect(ws?.bots?.A2?.bot_id).toBe("B2");
+		expect(ws?.bots?.A2?.signing_secret).toBe("sec-2");
+
+		// The first bot's own messages are still filtered after the second registers.
+		const result = await handleSlackWebhook(store, {
+			type: "event_callback",
+			team_id: "T1",
+			api_app_id: "A1",
+			event: {
+				type: "message",
+				user: "U1",
+				bot_id: "B1",
+				channel: "C1",
+				channel_type: "channel",
+				thread_ts: "100.000",
+				text: "should be filtered",
+				ts: "123",
+			},
+		});
+		expect(result.status).toBe(200);
+		expect(store.delivered).toHaveLength(0);
+	});
+
+	// Regression: a re-registration that OMITS signing_secret (e.g. an older
+	// client that doesn't send it) must NOT wipe a previously-stored secret —
+	// otherwise every restart of that client drops the per-app secret and the
+	// app's real events 401 against the global fallback.
+	it("preserves an existing signing_secret when a later registration omits it", async () => {
+		const store = createMockStorage();
+		await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1", bot_token: "x1", bot_id: "B1", app_id: "A1", signing_secret: "sec-1",
+		});
+		// Older client re-registers the same app (same resolved app_id) WITHOUT a secret.
+		await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1", bot_token: "x1-rotated", bot_id: "B1", app_id: "A1",
+		});
+		const ws = store.slackWorkspaces.get("T1");
+		expect(ws?.bots?.A1?.signing_secret).toBe("sec-1");      // preserved
+		expect(ws?.bots?.A1?.bot_token).toBe("x1-rotated");      // token refreshed
+	});
+});
+
+describe("resolveSlackSigningSecret", () => {
+	it("uses the authoring app's per-app secret", () => {
+		const ws = {
+			bots: {
+				A1: { bot_token: "x1", bot_id: "B1", signing_secret: "sec-1", app_id: "A1" },
+				A2: { bot_token: "x2", bot_id: "B2", signing_secret: "sec-2", app_id: "A2" },
+			},
+		};
+		expect(resolveSlackSigningSecret(ws, { api_app_id: "A2" }, "global")).toBe("sec-2");
+	});
+
+	it("falls back to the global secret for an unregistered app", () => {
+		const ws = { bots: { A1: { bot_token: "x1", bot_id: "B1", app_id: "A1" } } };
+		expect(resolveSlackSigningSecret(ws, { api_app_id: "A_UNKNOWN" }, "global")).toBe("global");
+	});
+
+	it("falls back to the global secret for a legacy single-bot record", () => {
+		const ws = { bot_token: "x", bot_id: "BSELF" };
+		expect(resolveSlackSigningSecret(ws, { api_app_id: "A1" }, "global")).toBe("global");
 	});
 });
 
