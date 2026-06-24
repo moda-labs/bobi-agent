@@ -2413,8 +2413,28 @@ def monitor_list():
         status = "active" if m.enabled else "paused"
         scope = Path(m.project).name if m.project else "all projects"
         runner = m.check or "manager"
+        suffix = _script_cache_summary(m) if m.check == "script_cache" else ""
         click.echo(f"  {m.name:22s} {tier:16s} {m.interval:>5s}  {status:7s} "
-                   f"{scope:16s} {m.event:30s} [{runner}]")
+                   f"{scope:16s} {m.event:30s} [{runner}]{suffix}")
+
+
+def _script_cache_summary(monitor) -> str:
+    """A compact `mode + cumulative savings` suffix for a script_cache monitor,
+    read from its trusted-state sidecar (#327 observability)."""
+    try:
+        from .monitors.script_cache_checks import _load_trusted_state
+        st = _load_trusted_state(monitor.name)
+        if not st:
+            return "  (no runs yet)"
+        cached = st.get("cached_runs", 0)
+        fallback = st.get("fallback_runs", 0)
+        spent = st.get("total_agent_cost_usd", 0.0)
+        avg = (spent / fallback) if fallback else 0.0
+        saved = cached * avg  # cached ticks would each have cost ~one agent run
+        return (f"  mode={st.get('last_mode', '?')} cached={cached} "
+                f"agent={fallback} spent=${spent:.4f} saved~${saved:.4f}")
+    except Exception:
+        return ""
 
 
 @monitors.command("add")
@@ -2541,6 +2561,63 @@ def monitor_remove(name):
         raise SystemExit(1)
     else:
         click.echo(f"No monitor named '{name}' found in a writable tier.", err=True)
+        raise SystemExit(1)
+
+
+def _find_monitor(name: str, project_path):
+    """Resolve a monitor by name from the effective registry, or None."""
+    from .monitors.registry import MonitorRegistry
+    registry = MonitorRegistry.load(project_path=project_path)
+    for m in registry.effective_monitors():
+        if m.name == name:
+            return m
+    return None
+
+
+@monitors.command("recache")
+@click.argument("name")
+def monitor_recache(name):
+    """Invalidate a script_cache monitor's cached script (forces regeneration).
+
+    Usage:
+        modastack monitors recache unread-emails
+    """
+    from .monitors.script_cache_checks import recache
+
+    project_path = _detect_project_root()
+    m = _find_monitor(name, project_path)
+    if m is None:
+        click.echo(f"No monitor named '{name}' found.", err=True)
+        raise SystemExit(1)
+    if m.check != "script_cache":
+        click.echo(f"'{name}' is not a script_cache monitor (check={m.check}).", err=True)
+        raise SystemExit(1)
+    recache(m)
+    click.echo(f"Invalidated cached script for '{name}' — next tick regenerates.")
+
+
+@monitors.command("approve-script")
+@click.argument("name")
+def monitor_approve_script(name):
+    """Promote a script_cache monitor's pending script to active (review mode).
+
+    Usage:
+        modastack monitors approve-script unread-emails
+    """
+    from .monitors.script_cache_checks import approve_pending
+
+    project_path = _detect_project_root()
+    m = _find_monitor(name, project_path)
+    if m is None:
+        click.echo(f"No monitor named '{name}' found.", err=True)
+        raise SystemExit(1)
+    if m.check != "script_cache":
+        click.echo(f"'{name}' is not a script_cache monitor (check={m.check}).", err=True)
+        raise SystemExit(1)
+    if approve_pending(m):
+        click.echo(f"Approved + pinned the pending script for '{name}'.")
+    else:
+        click.echo(f"No valid pending script to approve for '{name}'.", err=True)
         raise SystemExit(1)
 
 
