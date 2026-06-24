@@ -408,6 +408,32 @@ describe("cloudflare deployment deregistration", () => {
 // The live two-instance events.jsonl check remains the final sign-off; this
 // proves the Worker side end to end (register → ingest → match → count).
 // ---------------------------------------------------------------------------
+describe("slack url_verification handshake", () => {
+	async function verify(headers: Record<string, string>): Promise<Response> {
+		return SELF.fetch("https://example.com/webhooks/slack", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body: JSON.stringify({ type: "url_verification", challenge: "abc123" }),
+		});
+	}
+
+	it("echoes the challenge on the first attempt", async () => {
+		const res = await verify({});
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ challenge: "abc123" });
+	});
+
+	// Regression: the x-slack-retry-num short-circuit (event dedup) ran before
+	// the url_verification handler, so a RETRIED handshake got {ok:true} with no
+	// challenge and could never verify — leaving the request URL stuck unless a
+	// human triggered a fresh (non-retry) attempt from the dashboard.
+	it("still echoes the challenge when the handshake is retried", async () => {
+		const res = await verify({ "x-slack-retry-num": "1" });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ challenge: "abc123" });
+	});
+});
+
 describe("#341 targeted routing — no cross-delivery", () => {
 	let uniq = 0;
 	const id = (p: string) => `${p}_${Date.now()}_${uniq++}`;
