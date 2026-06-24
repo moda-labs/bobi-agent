@@ -101,6 +101,11 @@ class TestStartupPromptInjection:
         roles_dir.mkdir(parents=True)
         (roles_dir / "ROLE.md").write_text("# Director\nYou direct things.")
 
+    # The base prompt now *describes* the read-only ## Team Policy block, so its
+    # bare heading appears even with no policy.md. The dynamically-injected block
+    # is identified by its distinctive lead-in line instead.
+    INJECTED_MARKER = "Below is the team's curated, durable policy"
+
     def test_injects_team_policy(self, tmp_path):
         from modastack.prompts.resolver import build_startup_prompt
         self._install_role(tmp_path)
@@ -109,7 +114,7 @@ class TestStartupPromptInjection:
                              "Chose squash merges.")
         result = build_startup_prompt("director", tmp_path, agent_name="test",
                                       session_name="moda-director-tmp")
-        assert "## Team Policy" in result
+        assert self.INJECTED_MARKER in result
         assert "This repo uses GitHub." in result
         assert "squash merges" in result
         assert "## Decision Log" not in result
@@ -118,7 +123,7 @@ class TestStartupPromptInjection:
         from modastack.prompts.resolver import build_startup_prompt
         self._install_role(tmp_path)
         result = build_startup_prompt("director", tmp_path, agent_name="test")
-        assert "## Team Policy" not in result
+        assert self.INJECTED_MARKER not in result
         assert "## Decision Log" not in result
 
 

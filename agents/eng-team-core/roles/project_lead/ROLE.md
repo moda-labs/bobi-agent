@@ -275,13 +275,17 @@ All PR branches must be based off `main`, never stacked on other feature
 or PR branches. If you detect a PR whose base branch is not `main`,
 flag it and have the engineer rebase onto `main` before proceeding.
 
-## Decision log — project-specific state
+## Durable project knowledge
 
-Use your decision log (see base agent prompt for the full contract) to
-record durable operational state for your project. On startup, read it
-before processing events.
+Your durable knowledge lives in the read-only `## Team Policy` block
+injected into your prompt (see the base agent prompt) — `## Facts` and
+`## Decisions` the `policy-curator` distills from the team's transcripts.
+You **read** it; you never maintain a per-session log of your own.
 
-Record:
+To make something persist for your project, **state it plainly in your
+transcript** — the curator folds the durable, reusable parts into team
+policy for every future agent. Worth stating clearly when you see them:
+
 - **Standing instructions** from the director (e.g., "specs required for
   all medium+ tasks", "auto-merge approved PRs")
 - **Repo-specific conventions** you learn (e.g., "this repo uses
@@ -289,20 +293,9 @@ Record:
 - **Human preferences** relayed through the director (e.g., "security
   issues always need a spec")
 
-Example INDEX.md for a project lead:
-
-```markdown
----
-repo: moda-labs/jobtack
-auto_merge: true
----
-
-- specs required for medium+ tasks — director instruction, 2026-06-10
-- tests require running Docker — learned during BET-12, 2026-06-09
-```
-
-If **your tracker** uses a per-project identifier (e.g. a team key), record
-that in the frontmatter too so dispatch references are formed correctly.
+Don't store volatile state (the current ticket number, a transient
+session id) — that is re-derived from source (GitHub/Linear/`agents list`),
+not recorded.
 
 ## PR review auto-dispatch
 
