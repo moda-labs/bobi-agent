@@ -230,6 +230,16 @@ through the event server, like any other event. A description-only
 monitor's check agent runs out-of-band, only observes, and returns a
 verdict; the scheduler converts it to conditions and publishes.
 
+The **`policy-curator`** (`curator: true`) is the one flavor whose check
+agent **writes an artifact** instead of returning a verdict: it distills new
+agent transcripts (windowed on `messages.id` since a success-advanced cursor,
+under a per-run input cap) into the team-scoped, capped, rewritten-in-place
+`.modastack/state/policy.md` — the curated learning substrate that replaces the
+old append-only decision log, injected read-only into every agent's prompt as
+`## Team Policy`. On a rewrite it publishes `policy.updated`; delivery is
+passive by default (agents re-read on their next prompt), with an inbox push
+only for `urgent` changes. See `docs/specs/456-policy-curator.md`.
+
 ### Handoff contract
 
 Each workflow step writes a handoff to
