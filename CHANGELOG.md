@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.32.0 — 2026-06-24
+
+Ends the recurring eng-team **rotation wedge** at its root: the
+agent-maintained decision log is gone, replaced by a curated `policy.md`. Also
+makes a Slack workspace safe for **more than one modastack bot** (the
+self-reply spam loop), and adds a **reusable tool library** plus a **web UI**
+for a running team.
+
+### Added
+- **Policy curator replaces the decision log (#460, closes #456).** The
+  append-only, agent-written decision log — the root cause of the recurring
+  context-rotation wedge — is replaced by a `policy-curator` monitor
+  (`curator: true`) that distills new transcripts into a team-scoped, capped,
+  rewritten-in-place `.modastack/state/policy.md`, injected read-only into every
+  agent's prompt as `## Team Policy`. Agents no longer write their own log;
+  durable knowledge persists via transcript → curator → policy. Publishes
+  `policy.updated` (passive re-read by default, inbox push only for `urgent`).
+  eng-team `director`/`project_lead` role prompts migrated to the model. See
+  `docs/specs/456-policy-curator.md`.
+- **Reusable tool library (#465, #416).** `tool_library:` in `agent.yaml` is an
+  opt-in catalog of baked CLI tools (`modastack/tool_library/`). A team lists
+  entries by id (`tool_library: [codex, venn]`) and `compose.py` expands each
+  into its `requires:` + `build:` + a `tools/<id>.md` guide at build time — one
+  pinned definition, reusable across teams, de-duped across `from:` layers. Ships
+  `codex`, `venn`, `openai` (`kind: cli`). See `docs/specs/416-tool-library.md`.
+- **Web UI for a running agent team (#461).** Cards for each agent with
+  click-to-chat against the live team.
+- **Slack app factory (#462).** A manifest generator + one-click create link for
+  standing up a dedicated Slack app, plus a `url_verification` retry fix.
+
+### Fixed
+- **Multiple Slack bots per workspace (#466, #467, #468).** Two modastack bots in
+  one workspace clobbered each other's self-filter (event server keyed Slack
+  state by `team_id`, last-writer-wins) → bots replied to their own placeholders,
+  a runaway spam loop. Re-keyed Slack state by `api_app_id` with per-app signing
+  secrets and a `bot_id`-aware circuit breaker (#466); workspace registration now
+  **merges** rather than **replaces** per-app records, so a secret-less
+  re-register can't wipe a live signing secret (#467); and the self-filter skips
+  **any** of the workspace's bots, not just the receiving app's, closing the
+  cross-app loop (#468).
+- **stdio MCP preflight (#463, MDS-63/MDS-64).** Fixed a poll race and an env
+  mismatch in the stdio MCP server preflight.
+
+### Changed
+- **Ticket state reconciled + `/sync-tickets`.** `docs/TICKET_STATE.md` brought
+  in line with live issues, with a `/sync-tickets` helper to keep it current.
+
 ## 0.31.0 — 2026-06-23
 
 Agent teams become a **composable package ecosystem**. A team can declare
