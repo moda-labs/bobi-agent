@@ -2,7 +2,7 @@
 """Reject a team that cannot be published, before it is packaged (#446 §7.1).
 
 A team's `from:` may be a registry ref (`name` / `name@version`) or a path
-override (`../eng-team-core`, `/abs`, `~/x`). A path override is **local-only** —
+override (`../eng-team`, `/abs`, `~/x`). A path override is **local-only** —
 a consumer's checkout has no such path, so a published tarball carrying one is
 broken on arrival. Mirroring Go `replace` / Cargo `[patch]` (which never leak
 into published artifacts), packaging must reject it.

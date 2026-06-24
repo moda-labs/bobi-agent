@@ -97,7 +97,7 @@ Instead of forking a whole team, a team can declare `from: <base-team>` and
 contribute only its delta:
 
 ```yaml
-from: eng-team-core@1.0.0          # or `eng-team-core` for latest, or ../path
+from: eng-team@1.0.0          # or `eng-team` for latest, or ../path
 version: "1.1.0"
 services:
   - {name: linear, required: true, credentials: {api_key: ${LINEAR_API_KEY}}}
@@ -116,7 +116,7 @@ with a `prune:` block (`prune: {tools: [codex], roles: [some_role]}`). `from:`
 itself is consumed — never written to the frozen `agent.yaml`. Use a `name` /
 `name@version` ref to publish (a path ref is local-only and rejected at
 packaging); `install --pinned` resolves the chain registry-only for reproducible
-CI/deploy. The pristine `eng-team-core` is the canonical base to derive from.
+CI/deploy. The pristine `eng-team` is the canonical base to derive from.
 
 ### Opt-in tool library (`tool_library:`)
 

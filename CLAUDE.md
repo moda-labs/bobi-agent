@@ -124,7 +124,7 @@ skills/                           # Claude Code skill files (also in modastack/s
 
 agents/                           # Agent teams (portable agent definitions)
 ├── registry.yaml                 # Local team index
-└── eng-team-core/                 # Pristine, portable engineering org (reference impl)
+└── eng-team/                 # Pristine, portable engineering org (reference impl)
     ├── agent.yaml                # Team config (entry point, services, credentials)
     ├── agent.md                  # Shared base prompt for all roles
     ├── roles/                    # Role-specific prompts (folder format)
@@ -138,7 +138,7 @@ agents/                           # Agent teams (portable agent definitions)
     │   └── ...
     └── monitors/                 # Background checks
         └── defaults.yaml
-                                  # Moda's house team = `from: eng-team-core` +
+                                  # Moda's house team = `from: eng-team` +
                                   # overlay, in the private moda-agent-teams repo.
 
 .modastack/                       # Per-project installed agent + runtime state
@@ -177,8 +177,8 @@ workflows, monitors, agent.yaml) **deep-merge by key** (`build` deps accrete,
 `prune:` removes inherited items). Nothing downstream learns about layers — the
 runtime resolver reads only the frozen output. `install --pinned` resolves
 registry-only at locked versions for reproducible CI/deploy. The pristine
-`agents/eng-team-core/` is the public base; Moda's house team is
-`from: eng-team-core` + an overlay in the private `moda-agent-teams` repo.
+`agents/eng-team/` is the public base; Moda's house team is
+`from: eng-team` + an overlay in the private `moda-agent-teams` repo.
 
 **Role prompts** are read by the runtime resolver from the frozen
 `<project>/.modastack/roles/<role>/ROLE.md` — which is now compose **output**.

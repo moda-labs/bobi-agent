@@ -338,7 +338,7 @@ def test_prune_nothing_warns(project):
 
 # --- framework-default monitors (#471) ---------------------------------------
 
-# An eng-team-core-shaped policy-curator record, byte-identical to what the
+# An eng-team-shaped policy-curator record, byte-identical to what the
 # framework now seeds (modastack/monitors/framework_defaults.yaml). Used to prove
 # that removing a team's own copy is a no-op.
 _POLICY_CURATOR_RECORD = (
@@ -407,7 +407,7 @@ def test_framework_curator_team_override_wins(project):
 
 def test_removing_team_curator_entry_is_byte_identical(project):
     # Acceptance (#471 decision 4): the live eng-team must be neutral before/after
-    # removing the eng-team-core policy-curator entry. Compose an eng-team-shaped
+    # removing the eng-team policy-curator entry. Compose an eng-team-shaped
     # team WITH and WITHOUT the redundant record; the monitor files must be equal.
     other = ("monitors:\n"
              "  - {name: pr-conflict-check, interval: 15m, check: pr_conflicts}\n"
@@ -499,21 +499,21 @@ def test_deploy_resolve_team_dir_passthrough_no_from(project):
     assert out == src.resolve()  # unchanged when there's no `from:`
 
 
-# --- #452 acceptance: eng-team-core standalone + a synthetic outside-org overlay
+# --- #452 acceptance: eng-team standalone + a synthetic outside-org overlay
 
 
 REPO = Path(__file__).resolve().parents[1]
-ENG_TEAM_CORE = REPO / "agents" / "eng-team-core"
+ENG_TEAM_CORE = REPO / "agents" / "eng-team"
 
 
 def test_eng_team_core_installs_standalone(tmp_path):
-    """eng-team-core composes on its own (no `from:`) — GitHub + Slack only,
+    """eng-team composes on its own (no `from:`) — GitHub + Slack only,
     generic tool-agnostic seams. Proves the pristine base is a usable team."""
     proj = tmp_path
     (proj / "agents").mkdir()
-    shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team-core")
-    chain = compose.resolve_chain(proj / "agents" / "eng-team-core", proj)
-    assert [l.dir.name for l in chain] == ["eng-team-core"]
+    shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team")
+    chain = compose.resolve_chain(proj / "agents" / "eng-team", proj)
+    assert [l.dir.name for l in chain] == ["eng-team"]
     dest = proj / ".modastack"
     compose.compose(chain, dest)
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())
@@ -527,22 +527,22 @@ def test_eng_team_core_installs_standalone(tmp_path):
 
 
 def test_synthetic_outside_org_overlay_composes(tmp_path):
-    """A third org reuses eng-team-core without forking: `from: eng-team-core`
+    """A third org reuses eng-team without forking: `from: eng-team`
     + a thin overlay (no gstack, a Jira-flavored tracker note, Go house style).
     Proves cross-org reuse is append-only (#452 §6)."""
     proj = tmp_path
     (proj / "agents").mkdir()
-    shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team-core")
+    shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team")
     acme = proj / "agents" / "acme-eng-team"
     _write(acme / "agent.yaml",
-           'from: eng-team-core@1.1.0\nversion: "0.1.0"\n'
+           'from: eng-team@1.1.0\nversion: "0.1.0"\n'
            'services:\n  - {name: jira, required: true}\n'
            'build:\n  npm: [some-linter]\n')
     _write(acme / "roles" / "engineer" / "ROLE.md",
            "## Acme house bindings\nUse Jira for tracking; Go/Rust house style.")
     _write(acme / "tools" / "jira.md", "jira guide")
     chain = compose.resolve_chain(acme, proj)
-    assert [l.dir.name for l in chain] == ["eng-team-core", "acme-eng-team"]
+    assert [l.dir.name for l in chain] == ["eng-team", "acme-eng-team"]
     dest = proj / ".modastack"
     compose.compose(chain, dest)
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())

@@ -5,7 +5,7 @@
 # of the `from:` chain at compose time, so a team's own record of the same name
 # overrides them and a team's `prune:` can opt out. See compose._seed_framework_monitors.
 #
-# Keep `policy-curator` here byte-identical to what eng-team-core used to declare
+# Keep `policy-curator` here byte-identical to what eng-team used to declare
 # — the neutrality test (test_compose) asserts removing the team entry is a no-op.
 monitors:
   - name: policy-curator

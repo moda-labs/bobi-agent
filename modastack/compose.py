@@ -720,7 +720,7 @@ def reject_path_from(agent_yaml: Path) -> None:
     """Reject a path-based `from:` when packaging a team for publication (§7.1).
 
     A path ref is a local-only override — a consumer's checkout has no
-    `../eng-team-core`, so a published tarball carrying one is broken. Mirrors
+    `../eng-team`, so a published tarball carrying one is broken. Mirrors
     Go `replace` / Cargo `[patch]` never leaking into published artifacts. The
     publishable forms are `name` / `name@version`."""
     try:
