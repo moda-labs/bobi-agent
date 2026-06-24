@@ -835,7 +835,18 @@ export async function handleSlackWorkspaceRegister(
 	// (still unique per bot within a workspace, just not loop-safe across two
 	// bots that share a bot_id — which never happens).
 	const key = appId || botId || "default";
-	bots[key] = { bot_token: botToken, bot_id: botId, signing_secret: signingSecret, app_id: appId };
+	// MERGE, don't replace: a registration that omits a field (e.g. an older
+	// client that doesn't send signing_secret) must NOT wipe a value a previous
+	// registration set — otherwise every restart of such a client drops the
+	// per-app signing secret and the app's events fall back to the global secret
+	// and 401. Always refresh the bot_token (it may rotate); preserve the rest.
+	const prev = bots[key] ?? {};
+	bots[key] = {
+		bot_token: botToken,
+		bot_id: botId ?? prev.bot_id,
+		signing_secret: signingSecret ?? prev.signing_secret,
+		app_id: appId ?? prev.app_id,
+	};
 
 	await storage.putSlackWorkspace(workspaceId, {
 		// Keep legacy fields reflecting the just-registered bot for back-compat

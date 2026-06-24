@@ -1523,6 +1523,24 @@ describe("handleSlackWorkspaceRegister", () => {
 		expect(result.status).toBe(200);
 		expect(store.delivered).toHaveLength(0);
 	});
+
+	// Regression: a re-registration that OMITS signing_secret (e.g. an older
+	// client that doesn't send it) must NOT wipe a previously-stored secret —
+	// otherwise every restart of that client drops the per-app secret and the
+	// app's real events 401 against the global fallback.
+	it("preserves an existing signing_secret when a later registration omits it", async () => {
+		const store = createMockStorage();
+		await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1", bot_token: "x1", bot_id: "B1", app_id: "A1", signing_secret: "sec-1",
+		});
+		// Older client re-registers the same app (same resolved app_id) WITHOUT a secret.
+		await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1", bot_token: "x1-rotated", bot_id: "B1", app_id: "A1",
+		});
+		const ws = store.slackWorkspaces.get("T1");
+		expect(ws?.bots?.A1?.signing_secret).toBe("sec-1");      // preserved
+		expect(ws?.bots?.A1?.bot_token).toBe("x1-rotated");      // token refreshed
+	});
 });
 
 describe("resolveSlackSigningSecret", () => {
