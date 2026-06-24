@@ -199,8 +199,9 @@ Defaults (all overridable via env / `agent.yaml`; see D2):
 | `WATCHDOG_POLL_INTERVAL` | `30s` | Cheap localhost GET; 30s bounds detection latency without busy-looping. |
 | `WATCHDOG_STALL_THRESHOLD` | `600s` (10 min) | A *single turn* (even a long tool-running one) that has made **zero** registry progress for 10 min while `status` is active is pathological — real turns bump `last_activity` via `record_cost`/`update` far more often. Generous enough to never trip a slow-but-live turn. |
 | `WATCHDOG_CONFIRM_POLLS` | `2` | Require N consecutive stalled reads before acting — debounces a single slow sample or a `last_activity` write racing the poll. |
-| `WATCHDOG_MAX_RESTARTS` | `3` per `WATCHDOG_RESTART_WINDOW` (`1800s`) | Bound restarts so a genuinely-broken build can't restart-loop silently. |
-| `WATCHDOG_BACKOFF` | `30s → 60s → 120s` | Space restarts; give a restart time to settle before re-arming. |
+| `WATCHDOG_MAX_RESTARTS` | `3` per `WATCHDOG_RESTART_WINDOW` (`1800s`) | Bound restarts so a genuinely-broken build can't restart-loop silently. **One shared budget for _both_ restart paths** (wedge-restart and crash-relaunch — see §6). |
+| `WATCHDOG_BACKOFF` | `30s → 60s → 120s` | Space restarts; give a restart time to settle before re-arming. Applies to crash-relaunch too, so a fast crash cannot tight-loop. |
+| `WATCHDOG_MIN_HEALTHY_UPTIME` | `120s` | A child that exits/wedges **before** reaching this uptime is a *fast crash* — counted to the budget immediately (no "the build was basically working" credit). See §6. |
 
 Behavior:
 
@@ -268,6 +269,69 @@ That is **deferred to v2** (D6) to keep v1 small and false-kill-proof; the
 `inbox.recv` timeout (`session.py:372`) makes a pure idle-loop hang unlikely
 today. Flag for Zach if he wants it in v1.
 
+### 6. Crash-loop containment (answering Zach's review)
+
+> *"Do we need protection against crash restart loops? Or is it because the
+> length is long enough (10+ minutes) crash restarting is acceptable? … If we
+> do detect crash/restart, it's not clear what we would do about it."* — R1
+> review, [comment 4792397284](https://github.com/moda-labs/modastack/pull/476#issuecomment-4792397284)
+
+Good catch — these are **two distinct restart paths**, and only one of them is
+gated by the 10-minute stall threshold. The 10-min length makes a *wedge* loop
+benign; it does **not** protect the *crash* path. So yes, we need explicit
+crash-loop protection, and it's a small addition rather than a redesign:
+
+| Path | Trigger | Time gate | Loop risk |
+|------|---------|-----------|-----------|
+| **Wedge-restart** (§3, §B.4) | active-state + `idle_seconds > 600s` | **10 min** per restart | **Low** — even a pathological loop restarts at most ~once / (10 min + backoff). The threshold *is* the protection here, so your second guess is right for this path. |
+| **Crash-relaunch** (§B.5) | manager child exits on its own | **none** — fires on child death | **High** — a manager that dies at boot (bad config, import error, unbound port) could be relaunched in a tight loop within seconds. |
+
+**So the answer to "do we need protection": yes, for the crash path — the
+stall threshold doesn't cover it.** Three mechanisms, all already cheap given
+the supervisor design:
+
+1. **Shared bounded budget.** `WATCHDOG_MAX_RESTARTS` (3 / 1800s) counts **both**
+   paths against one counter. A crash loop burns the budget just like a wedge
+   loop — it cannot get unlimited free relaunches.
+2. **Backoff on the crash path too.** Crash-relaunch obeys the same
+   `WATCHDOG_BACKOFF` (`30s → 60s → 120s`), so even within budget a fast crash
+   can't hammer-relaunch — minimum ~30s between attempts. This is the bit the
+   original §B.5 left implicit; it's now explicit.
+3. **Fast-crash detection (`WATCHDOG_MIN_HEALTHY_UPTIME`, 120s).** A child that
+   exits before it has been *healthy* (reached addressable / `/health` served)
+   for 120s is classified a **fast crash** and counted to the budget with **no
+   credit** — it never "earned" a fresh window. A child that ran healthy for
+   hours and *then* crashes once is a transient and gets a normal relaunch
+   without eating into the loop budget (the window naturally ages out).
+
+**"What do we do about it" — the honest part.** A watchdog **cannot fix** a
+crash-looping build; restarting a broken binary just produces the same crash.
+So the design's job is explicitly **not** "keep trying" — it is **stop masking
+the breakage and escalate**:
+
+- On budget exhaustion (whether from wedges or fast crashes) the supervisor
+  logs `error` **loudly** with the restart history and **exits non-zero**.
+- A non-zero supervisor exit → **Fly machine restart policy** takes over. Fly
+  applies its *own* machine-level restart backoff, so the outer loop is slow and
+  Fly's crash-loop guard (`max_restarts` / exponential backoff on the machine)
+  becomes the final containment — a persistently broken build ends up *parked by
+  Fly*, visibly down, rather than silently thrashing.
+- **Residual, stated honestly:** the in-container budget window resets per
+  container life, so each Fly machine restart hands the fresh supervisor a fresh
+  budget. Ultimate containment of a *persistent* crash loop is therefore Fly's
+  machine-restart backoff **plus a human** reading the loud logs — which is
+  correct, because the only real fix for a crash-looping build is a human
+  rollback/redeploy, not another restart. The optional D7 "announce a restart to
+  humans" follow-up is the natural place to make that escalation active
+  (post to Slack on budget exhaustion) rather than log-only; **recommend pulling
+  the budget-exhaustion announcement into v1** on the strength of this review
+  (see D7).
+
+Net: the threshold protects the wedge path (your instinct was right there); the
+shared budget + crash-path backoff + fast-crash detection protect the crash
+path; and on exhaustion we deliberately escalate to Fly + a human instead of
+restarting into the same wall.
+
 ---
 
 ## Open decisions (recommendations inline — for Zach)
@@ -290,10 +354,24 @@ today. Flag for Zach if he wants it in v1.
 - **D6 — Cover `status="idle"` wedges in v1?** No (recommended) — defer the
   pending-work signal to v2 (see §5). Yes only if Zach wants belt-and-suspenders
   now; it adds inbox-queue-depth plumbing to the payload.
-- **D7 — Announce a restart to humans?** Out of scope for v1 core (recommended):
-  stdout/Fly-log only. Optional follow-up — the watchdog drops a marker the
-  rebooted director reads to self-announce in Slack ("recovered from a wedge at
-  T"), so a human learns *after* recovery instead of *instead of* it.
+- **D7 — Announce a restart to humans?** Two sub-questions after the R1 review:
+  - *Routine single restarts* — out of scope for v1 core (recommended):
+    stdout/Fly-log only. Optional follow-up — the watchdog drops a marker the
+    rebooted director reads to self-announce in Slack ("recovered from a wedge
+    at T"), so a human learns *after* recovery instead of *instead of* it.
+  - *Budget exhaustion / crash-loop* — **recommend pulling into v1** (changed on
+    the strength of the crash-loop review, §6): when the bounded budget is
+    exhausted, post a loud Slack message *before* the non-zero exit, so the
+    escalation is active rather than buried in Fly logs. This is the concrete
+    "what we do about a detected crash loop." Cheap (one message on the
+    already-loud error path) and directly answers the reviewer's "it's not clear
+    what we'd do about it."
+- **D8 — Crash-loop containment shape (NEW, from R1 review).** Shared budget +
+  crash-path backoff + `WATCHDOG_MIN_HEALTHY_UPTIME` fast-crash detection
+  (recommended, §6) vs a separate crash-only counter vs rely on Fly's
+  machine-level backoff alone. Rec: the shared-budget approach — one mental model
+  for both loop types, and Fly stays the *outer* backstop rather than the only
+  one.
 
 ---
 
@@ -307,7 +385,9 @@ today. Flag for Zach if he wants it in v1.
 - New `modastack/watchdog.py` + `modastack supervise` CLI command: spawn-manage
   the manager child, poll health, apply the active-state+stall discriminator,
   bounded restart with backoff and loud logging, SIGTERM propagation, non-zero
-  exit on budget exhaustion.
+  exit on budget exhaustion. Includes **crash-loop containment** (§6): the
+  crash-relaunch path shares the bounded budget + backoff and uses
+  `WATCHDOG_MIN_HEALTHY_UPTIME` fast-crash classification.
 - Entrypoint switch: `exec … modastack supervise -- --foreground "$@"`.
 - Tests: the acceptance integration test + unit tests for the discriminator,
   the bounded-retry/backoff state machine, and the payload.
@@ -361,7 +441,12 @@ today. Flag for Zach if he wants it in v1.
 4. Restart: `SIGTERM` child → wait grace (e.g. 10s) → `SIGKILL` if alive →
    relaunch. Increment the windowed restart counter; apply backoff.
 5. If the manager child exits on its own (crash), relaunch it too (the
-   supervisor doubles as a crash-restarter) — same bounded budget.
+   supervisor doubles as a crash-restarter) — but through the **same** bounded
+   budget **and** backoff as the wedge path, with fast-crash classification
+   (§6): a child that exits before `WATCHDOG_MIN_HEALTHY_UPTIME` of healthy
+   uptime counts to the loop budget; one that ran healthy and then crashed gets
+   a normal relaunch. This is what stops a boot-crashing build from
+   tight-looping.
 6. On `SIGTERM` to the supervisor: forward to child, wait, exit 0.
 7. On restart-budget exhaustion: `log.error(...)`, exit non-zero.
 
@@ -407,6 +492,14 @@ lesson, reinforced by Zach's R5):
 6. Health payload: `manager` block present, `idle_seconds` derived correctly,
    `sessions` unchanged, missing-entry guard.
 7. Connection-failure path: N failed `/health` probes → restart.
+8. **Crash-loop containment** (§6, from the R1 review): a stub manager that
+   **exits immediately** on every launch (fast crash, never reaches
+   `MIN_HEALTHY_UPTIME`). Assert the supervisor (a) relaunches with backoff (not
+   a tight loop — successive launches are spaced), (b) counts each fast crash to
+   the shared budget, (c) exits **non-zero** after `MAX_RESTARTS`, and (d) does
+   **not** loop forever. Complement: a stub that runs healthy past
+   `MIN_HEALTHY_UPTIME` then crashes once is relaunched **without** tripping the
+   loop budget.
 
 ---
 
