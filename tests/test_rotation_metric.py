@@ -335,3 +335,81 @@ async def test_rotation_reconnect_clears_error_on_arrives_with_529(
     assert s.detect_state() == "waiting_input"
     assert s.detect_state() != "error"
     assert s._rotation_count == 1  # rotation completed, not wedged at 0
+
+
+class _ConnectHangsClient:
+    """A client whose ``connect()`` itself blocks forever — the *literal* #472
+    shape: "a hung fresh Claude Code SDK ``connect()``". Distinct from
+    ``_HangingClient`` (connect() returns fast, the connect-turn drain hangs).
+
+    Every client this test builds hangs in connect(), so even the final
+    fresh-connect recovery in ``_recover_rotation_failure`` cannot complete —
+    the session must surface *terminally* (loud raise + "error" state) within
+    the timeout budget rather than hang forever."""
+
+    instances = 0
+
+    def __init__(self, options=None):
+        type(self).instances += 1
+        self.disconnected = False
+
+    async def connect(self):
+        # Never returns — the connect() hang the wedge was made of. The
+        # asyncio.wait_for in _attempt_reconnect / _recover_rotation_failure
+        # is the only thing that can unstick this; without it _rotate() blocks
+        # forever and the run loop never returns to inbox.recv.
+        await asyncio.Event().wait()
+
+    async def disconnect(self):
+        self.disconnected = True
+
+    async def receive_response(self):
+        yield  # pragma: no cover - connect() never returns, drain never runs
+
+
+@pytest.mark.asyncio
+async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
+    modastack_install, monkeypatch
+):
+    """#472 (the literal connect()-hang shape): a fresh ``connect()`` that hangs
+    forever must NOT wedge ``_rotate()``. Every bounded reconnect attempt times
+    out, and because the final fresh-connect recovery's ``connect()`` hangs too,
+    the session surfaces *terminally* — a loud raise + the "error" state, never
+    an infinite hang with ``rotation_count`` pinned at 0.
+
+    This pins the variant the other reconnect tests don't: ``_HangingClient``
+    lets connect() return and hangs the drain (so connect-only recovery
+    succeeds → graceful); here connect() itself is the hang (so recovery can't
+    succeed → terminal-but-bounded). Both are bounded by the same
+    ``asyncio.wait_for``; removing it hangs this test forever.
+    """
+    import claude_agent_sdk
+    from modastack import session as session_mod
+
+    _ConnectHangsClient.instances = 0
+    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _ConnectHangsClient)
+    # Tiny bounds so the whole attempt → backoff → recovery budget is a fraction
+    # of a second, well inside the 5s outer guard below.
+    monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_TIMEOUT", 0.05)
+    monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_BACKOFF", 0.0)
+    monkeypatch.setattr(session_mod, "ROTATION_MAX_RECONNECT_ATTEMPTS", 2)
+
+    s = Session(name="test-connect-hang", cwd=str(modastack_install.repo_path))
+    s._input_ready = asyncio.Event()
+    s._client = None  # nothing to disconnect
+
+    # Bounded: _rotate() must RAISE (terminal) well within the outer guard
+    # rather than block forever. The outer wait_for(5.0) is the regression
+    # tripwire — if the bound were removed, this would trip at 5s instead of
+    # the inner ~0.15s terminal raise.
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(s._rotate(), timeout=5.0)
+
+    # Terminal-but-loud: error state set by _recover_rotation_failure, no
+    # addressable client left behind, rotation never falsely counted.
+    assert s.detect_state() == "error"
+    assert s._client is None
+    assert s._rotation_count == 0
+    # 2 bounded reconnect attempts + 1 final recovery client = 3 built; proves
+    # the loop didn't hang on the first connect().
+    assert _ConnectHangsClient.instances == 3
