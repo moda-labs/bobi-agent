@@ -49,9 +49,77 @@ export interface BubbleRecord {
 	created_at?: string;
 }
 
-export interface SlackWorkspaceRecord {
+export interface SlackBotRecord {
 	bot_token: string;
 	bot_id?: string;
+	/** App-level signing secret — inbound events from this app are verified with it. */
+	signing_secret?: string;
+	/** Slack api_app_id; the map key, repeated here for convenience. */
+	app_id?: string;
+}
+
+export interface SlackWorkspaceRecord {
+	// Legacy single-bot fields (pre-multi-bot records). Kept so an existing
+	// deployment keeps working WITHOUT re-registering — `getSlackBotForApp`
+	// read-migrates them. `bots` is authoritative once present.
+	bot_token?: string;
+	bot_id?: string;
+	// Multi-bot: api_app_id -> per-bot record. Keyed by api_app_id (NOT team_id
+	// or bot_id) because two bots in one workspace share a team_id, and human
+	// events carry no bot_id — api_app_id is the only identifier that is unique
+	// per app AND present on every inbound event_callback. Keying by team_id
+	// alone is what let a second bot clobber the first (self-spam incident
+	// 2026-06-24).
+	bots?: Record<string, SlackBotRecord>;
+}
+
+/**
+ * Resolve the per-bot record for an inbound event's api_app_id, with
+ * read-migration so pre-multi-bot single-bot records still resolve.
+ */
+export function getSlackBotForApp(
+	ws: SlackWorkspaceRecord | null | undefined,
+	apiAppId: string,
+): SlackBotRecord | null {
+	if (!ws) return null;
+	if (apiAppId && ws.bots && ws.bots[apiAppId]) return ws.bots[apiAppId];
+	// Single registered bot: use it even if api_app_id is absent/unmatched
+	// (defensive — a client may not have sourced api_app_id).
+	if (ws.bots) {
+		const vals = Object.values(ws.bots);
+		if (vals.length === 1) return vals[0];
+	}
+	// Legacy single-bot fields.
+	if (ws.bot_token || ws.bot_id) {
+		return { bot_token: ws.bot_token ?? "", bot_id: ws.bot_id };
+	}
+	return null;
+}
+
+/**
+ * The signing secret to verify an inbound Slack webhook with: the authoring
+ * app's per-app secret if registered, else the global fallback (legacy
+ * single-app deployments). Keeps single-app working without a redeploy.
+ */
+export function resolveSlackSigningSecret(
+	ws: SlackWorkspaceRecord | null | undefined,
+	payload: Record<string, unknown>,
+	fallback: string,
+): string {
+	const apiAppId = (payload.api_app_id as string) || "";
+	const rec = getSlackBotForApp(ws, apiAppId);
+	return rec?.signing_secret || fallback || "";
+}
+
+/** Storage-aware convenience: load the workspace then resolve the signing secret. */
+export async function slackSigningSecretFor(
+	storage: StorageAdapter,
+	payload: Record<string, unknown>,
+	fallback: string,
+): Promise<string> {
+	const teamId = (payload.team_id as string) || "";
+	const ws = teamId ? await storage.getSlackWorkspace(teamId) : null;
+	return resolveSlackSigningSecret(ws, payload, fallback);
 }
 
 export interface StorageAdapter {
@@ -487,10 +555,14 @@ export async function handleSlackWebhook(
 	payload: Record<string, unknown>,
 ): Promise<HandlerResult> {
 	const teamId = (payload.team_id as string) || "";
+	const apiAppId = (payload.api_app_id as string) || "";
 	let selfBotId: string | undefined;
 	if (teamId) {
 		const ws = await storage.getSlackWorkspace(teamId);
-		if (ws) selfBotId = ws.bot_id;
+		// Resolve THIS app's own bot id (keyed by api_app_id) so its messages —
+		// and only its own — are skipped. A second bot in the workspace no longer
+		// hides this one's id.
+		selfBotId = getSlackBotForApp(ws, apiAppId)?.bot_id;
 	}
 
 	const result = normalizeSlackWebhook(payload, selfBotId);
@@ -680,9 +752,28 @@ export async function handleSlackSend(
 		return { status: 400, body: { error: "no bot token for workspace" } };
 	}
 
+	// Pick the sending bot's token: by app_id, then bot_id, then the single
+	// registered bot, then the legacy workspace token. With several bots in a
+	// workspace, "the workspace's bot_token" is ambiguous.
+	const appId = (body.app_id as string) || "";
+	const botId = (body.bot_id as string) || "";
+	let botToken = ws.bot_token || "";
+	if (appId && ws.bots?.[appId]) {
+		botToken = ws.bots[appId].bot_token;
+	} else if (botId && ws.bots) {
+		const match = Object.values(ws.bots).find((b) => b.bot_id === botId);
+		if (match) botToken = match.bot_token;
+	} else if (!botToken && ws.bots) {
+		const vals = Object.values(ws.bots);
+		if (vals.length >= 1) botToken = vals[0].bot_token;
+	}
+	if (!botToken) {
+		return { status: 400, body: { error: "no bot token for workspace" } };
+	}
+
 	let result;
 	try {
-		result = await sendSlackMessage(ws.bot_token, channel, text, body.thread_ts as string | undefined);
+		result = await sendSlackMessage(botToken, channel, text, body.thread_ts as string | undefined);
 	} catch (err) {
 		return { status: 502, body: { ok: false, error: String(err) } };
 	}
@@ -702,23 +793,56 @@ export async function handleSlackWorkspaceRegister(
 		return { status: 400, body: { error: "workspace_id and bot_token required" } };
 	}
 
-	// Accept an explicit bot_id when the caller already knows it (e.g. tests,
-	// or a Python client that resolved it locally).  Fall back to auth.test.
+	// Accept explicit bot_id/app_id when the caller already resolved them (e.g.
+	// tests, or a Python client). Fall back to auth.test (bot_id) and
+	// bots.info (app_id) — auth.test does NOT return app_id.
 	let botId = (body.bot_id as string) || undefined;
+	let appId = (body.app_id as string) || undefined;
+	const signingSecret = (body.signing_secret as string) || undefined;
 	if (!botId) {
 		try {
 			const resp = await fetch("https://slack.com/api/auth.test", {
 				headers: { Authorization: `Bearer ${botToken}` },
 			});
 			const data = (await resp.json()) as Record<string, unknown>;
-			if (data.ok) {
-				botId = data.bot_id as string;
-			}
+			if (data.ok) botId = data.bot_id as string;
 		} catch {
 			// best-effort — self-loop filtering degrades gracefully without bot_id
 		}
 	}
+	if (!appId && botId) {
+		try {
+			const resp = await fetch(
+				`https://slack.com/api/bots.info?bot=${encodeURIComponent(botId)}`,
+				{ headers: { Authorization: `Bearer ${botToken}` } },
+			);
+			const data = (await resp.json()) as Record<string, unknown>;
+			if (data.ok) appId = (data.bot as Record<string, unknown>)?.app_id as string;
+		} catch {
+			// best-effort — falls back to bot_id-keyed storage below
+		}
+	}
 
-	await storage.putSlackWorkspace(workspaceId, { bot_token: botToken, bot_id: botId });
-	return { status: 200, body: { ok: true, workspace_id: workspaceId, bot_id: botId } };
+	// UPSERT one entry into the per-app map — never overwrite the whole record,
+	// so a second bot registering the same workspace doesn't clobber the first.
+	const existing = await storage.getSlackWorkspace(workspaceId);
+	const bots: Record<string, SlackBotRecord> = { ...(existing?.bots ?? {}) };
+	// Migrate a pre-existing legacy single-bot record into the map.
+	if (existing?.bot_id && existing.bot_token && !bots[existing.bot_id]) {
+		bots[existing.bot_id] = { bot_token: existing.bot_token, bot_id: existing.bot_id };
+	}
+	// Key by api_app_id; fall back to bot_id when app_id couldn't be resolved
+	// (still unique per bot within a workspace, just not loop-safe across two
+	// bots that share a bot_id — which never happens).
+	const key = appId || botId || "default";
+	bots[key] = { bot_token: botToken, bot_id: botId, signing_secret: signingSecret, app_id: appId };
+
+	await storage.putSlackWorkspace(workspaceId, {
+		// Keep legacy fields reflecting the just-registered bot for back-compat
+		// readers; `bots` is authoritative.
+		bot_token: botToken,
+		bot_id: botId,
+		bots,
+	});
+	return { status: 200, body: { ok: true, workspace_id: workspaceId, bot_id: botId, app_id: appId } };
 }

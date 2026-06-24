@@ -2,7 +2,12 @@ import type { NormalizedEvent, SlackNormalizationResult } from "../core";
 
 export function normalizeSlackWebhook(
 	payload: Record<string, unknown>,
-	selfBotId?: string,
+	// A workspace may host SEVERAL of our bots (one per team), so the self-filter
+	// takes a SET of our bot ids — not one. A single id meant the second bot to
+	// register clobbered the first, and the first then looped on its own messages
+	// (self-spam incident 2026-06-24). A bare string is still accepted for
+	// back-compat with single-bot callers/tests.
+	selfBotIds?: string | Iterable<string>,
 ): SlackNormalizationResult {
 	if (payload.type === "url_verification") {
 		return { event: null, challenge: payload.challenge as string, skip: true };
@@ -19,9 +24,16 @@ export function normalizeSlackWebhook(
 		return { event: null, skip: true };
 	}
 
-	// Only filter our own bot's messages to prevent loops.
-	// Messages from other bots (e.g. user-level Slack apps) pass through.
-	if (event.bot_id && selfBotId && event.bot_id === selfBotId) {
+	const botId = (event.bot_id as string) || "";
+
+	// Filter messages authored by ANY of OUR bots in this workspace — both to
+	// stop a bot looping on itself and to stop two of our bots looping on each
+	// other. Messages from third-party bots (not ours) pass through.
+	const selfSet =
+		typeof selfBotIds === "string"
+			? new Set([selfBotIds])
+			: new Set(selfBotIds ?? []);
+	if (botId && selfSet.has(botId)) {
 		return { event: null, skip: true };
 	}
 
@@ -84,6 +96,11 @@ export function normalizeSlackWebhook(
 	if (channelType) fields.channel_type = channelType;
 	if (ts) fields.ts = ts;
 	if (threadTs) fields.thread_ts = threadTs;
+	// Carry bot_id through so the circuit breaker can recognise bot-authored
+	// events (it reads payload.bot_id). Stripping it here is what blinded the
+	// breaker to Slack loops. This only ever survives for THIRD-PARTY bots —
+	// our own bots are filtered above.
+	if (botId) fields.bot_id = botId;
 	if (files.length > 0) fields.files = JSON.stringify(files);
 
 	return {
@@ -104,6 +121,7 @@ export function normalizeSlackWebhook(
 				text: rawText,
 				ts,
 				thread_ts: threadTs,
+				...(botId ? { bot_id: botId } : {}),
 				...(files.length > 0 ? { files } : {}),
 			},
 		},

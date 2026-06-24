@@ -25,6 +25,10 @@ services:
     channels: ${SLACK_CHANNELS}
     credentials:
       bot_token: ${SLACK_BOT_TOKEN}
+      # App signing secret. Registered with the event server so it can verify
+      # THIS app's inbound events by api_app_id — required for several bots to
+      # share one workspace (each app signs with its own secret).
+      signing_secret: ${SLACK_SIGNING_SECRET}
 
 # Host-level dependencies. Checked by `modastack doctor` and enforced
 # at dispatch time — agents cannot launch if a required dep is broken.
