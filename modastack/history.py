@@ -294,6 +294,38 @@ def session_messages(session_id: str) -> list[dict]:
     return results
 
 
+def messages_since(cursor: int, limit: int | None = None) -> list[dict]:
+    """Return indexed messages with ``id > cursor``, oldest-first by row id.
+
+    The delta the policy-curator (#456) ingests each run, across *all*
+    sessions. Keyed on the table's unique autoincrement ``messages.id`` — NOT a
+    message ``timestamp`` (non-unique across tool-call tie-rows, sometimes
+    empty) and NOT ``conversations.started_at`` (write-once, so a long-lived
+    director/manager would never be re-selected). ``id`` is a true consumption
+    watermark: assigned to every row regardless of timestamp value, monotonic,
+    and unique — so a budget cut between rows, an empty-timestamp row, or a
+    late-indexed old row is still picked up on a later run by ``id > cursor``.
+
+    The caller groups the returned rows by ``session_id`` to reconstruct
+    per-session context. ``limit`` bounds the row count (an over-fetch guard);
+    the curator's char/message budget is applied on top of this.
+    """
+    if not _db_path().exists():
+        return []
+
+    conn = sqlite3.connect(str(_db_path()))
+    conn.row_factory = sqlite3.Row
+    sql = "SELECT * FROM messages WHERE id > ? ORDER BY id"
+    params: list = [int(cursor)]
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    rows = conn.execute(sql, params).fetchall()
+    results = [dict(r) for r in rows]
+    conn.close()
+    return results
+
+
 def context_for_events(events: list[dict], max_results: int = 5) -> str:
     """Search history for context relevant to a batch of events.
 

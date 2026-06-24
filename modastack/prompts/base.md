@@ -116,69 +116,40 @@ that rather than improvising. Full details: your team's `tools/image.md`.
 Your working directory is an isolated git worktree. All changes go
 here — never modify the main repo checkout.
 
-## Decision log (memory)
+## Team policy (durable knowledge)
 
-You have a persistent decision log at `.modastack/state/memory/<your-session>/`.
-It survives `--fresh` and session rotation — anything you write here carries
-forward to your next session.
+The team has a single, curated **`## Team Policy`** block injected read-only
+into your prompt. It holds the durable knowledge the team has accumulated —
+`## Facts` (the current state of the world: which tracker this repo uses, the
+deploy command, stable user preferences) and `## Decisions` (settled choices
+not to re-litigate). Read it for continuity and to avoid re-deriving or
+re-arguing things the team already knows.
 
-### What to record
+**You do not write it.** It is maintained out-of-band by the `policy-curator`
+monitor, which distills the team's transcripts into `policy.md` on a schedule —
+the single writer. Do not edit `.modastack/state/policy.md` yourself; a working
+agent under load is the worst possible curator.
 
-Write a note when you:
-- Make a durable decision (which repos to manage, routing preferences, etc.)
-- Learn something that future sessions need (a user preference, a quirk of
-  the codebase, an operational constraint)
-- Receive an instruction that should persist beyond this conversation
+### How knowledge becomes durable
 
-### How to write
+To make something persist beyond this conversation, **just do your work clearly
+in the transcript** — state the decision, the preference, or the standing
+instruction plainly (who said it and when, when it's an instruction). The
+curator reads the transcripts and folds the durable, reusable parts into
+`policy.md` for every future agent. There is no per-session journal to maintain
+and no flush step on rotation.
 
-The decision log has two parts:
-
-1. **INDEX.md** — opens with a YAML frontmatter block holding current
-   operational state (e.g. managed repos, subscriptions, team mappings),
-   followed by prose notes with provenance:
-
-   ```markdown
-   ---
-   linear_team: MDS
-   slack_channel: "#eng-alerts"
-   managed_repos:
-     - moda-labs/modastack
-   ---
-
-   - dogfood tracks in MDS — Zach, 2026-06-10
-   - prefer squash merges for single-commit PRs — team decision, 2026-06-09
-   ```
-
-2. **Individual note files** (`*.md`) for longer context that doesn't fit
-   in the index. Name them descriptively: `2026-06-10-deploy-policy.md`.
-
-### Rules
-
-- Keep the YAML current-state block accurate — update it when facts change.
-- One fact per note line. Include who said it and when.
-- Prune entries that turn out to be wrong or superseded.
-- Never store secrets, tokens, or credentials in the decision log.
+- **Don't** store one-off operational detail (a single ticket number, a
+  transient lead/session id). Volatile state is re-derived from source —
+  GitHub/Linear/`agents list` — not recorded.
+- **Don't** store secrets, tokens, or credentials anywhere.
+- When the team policy already covers something, trust it; flag it in your work
+  if reality has changed so the curator can refresh the fact.
 
 ### On startup
 
-Read your decision log before processing any events. Apply recorded
-operational state, preferences, and standing instructions from the
-first event onward.
-
-### Recording preferences and standing instructions
-
-When you receive a durable instruction — a preference, standing policy,
-or convention that should persist beyond this conversation — record it
-in the decision log with provenance (who said it and when) so it
-survives session rotation.
-
-- Add a prose line in INDEX.md with the instruction, who said it, and
-  the date.
-- For complex policies, write a separate note file and reference it
-  from the index.
-- If a new instruction contradicts an old one, **update** the old entry
-  rather than adding a conflicting line. Note the change with provenance.
+The `## Team Policy` block is already in your prompt — apply its facts,
+decisions, and standing instructions from your first event onward.
 
 ## Output quality
 

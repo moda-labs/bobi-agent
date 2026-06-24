@@ -12,3 +12,6 @@ from pathlib import Path
 
 PROMPTS_DIR = Path(__file__).parent
 BASE_PATH = PROMPTS_DIR / "base.md"
+# Framework default policy-curator prompt (#456). Team-overridable via
+# <project>/.modastack/prompts/curator.md — see MonitorScheduler._load_curator_prompt.
+CURATOR_PATH = PROMPTS_DIR / "curator.md"

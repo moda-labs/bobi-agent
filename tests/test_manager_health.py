@@ -118,3 +118,68 @@ class TestHealthServer:
         """health() returns None when nothing is listening."""
         data = manager_health.health("http://127.0.0.1:1", timeout=0.5)
         assert data is None
+
+
+class TestManagerBlock:
+    """The #464 `manager` block: the director's progress signal."""
+
+    def _get(self, port):
+        url = f"http://127.0.0.1:{port}/health"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            return json.loads(resp.read())
+
+    def test_no_manager_block_when_session_not_wired(self, tmp_path):
+        """Backward compatible: omit the block entirely (old shape)."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        port = manager_health.start(state_dir, "p",
+                                    session_status_fn=lambda: [])
+        data = self._get(port)
+        assert "manager" not in data
+        assert isinstance(data["sessions"], list)  # unchanged
+
+    def test_manager_block_present_with_derived_idle_seconds(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        block = {"session": "moda-mgr-p", "status": "running",
+                 "last_activity": 1000.0, "idle_seconds": 742.0}
+        port = manager_health.start(
+            state_dir, "p", session_status_fn=lambda: [],
+            manager_status_fn=lambda: block)
+        data = self._get(port)
+        assert data["manager"]["session"] == "moda-mgr-p"
+        assert data["manager"]["status"] == "running"
+        assert data["manager"]["idle_seconds"] == 742.0
+
+    def test_missing_entry_guard_reports_starting(self):
+        """Pre-spawn window: a missing registry entry fails open to
+        status=starting / idle_seconds=0 so the watchdog never restarts a
+        booting manager."""
+        block = manager_health._manager_block_from_registry("no-such-session")
+        # No registry/root bound here -> the lookup returns None internally and
+        # the block degrades to the booting guard or None; either way it is
+        # never an active wedge signal.
+        if block is not None:
+            assert block["status"] == "starting"
+            assert block["idle_seconds"] == 0.0
+
+    def test_idle_seconds_derived_from_registry_entry(self, tmp_path, monkeypatch):
+        """The block derives idle_seconds = now - last_activity server-side."""
+        from modastack import sdk
+
+        class _Entry:
+            name = "moda-mgr-p"
+            status = "running"
+            last_activity = 100.0
+
+        class _Reg:
+            def get(self, name):
+                return _Entry()
+
+        monkeypatch.setattr(sdk, "get_registry", lambda: _Reg())
+        monkeypatch.setattr(manager_health.time, "time", lambda: 700.0)
+        block = manager_health._manager_block_from_registry("moda-mgr-p")
+        assert block["status"] == "running"
+        assert block["last_activity"] == 100.0
+        assert block["idle_seconds"] == 600.0

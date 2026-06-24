@@ -9,11 +9,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from modastack.env import agent_spawn_env
+
 log = logging.getLogger(__name__)
+
+# Stdio MCP servers spawn a subprocess and run their MCP `initialize` handshake
+# (~1–2s), so a single status read catches them mid-spawn in the `pending`
+# window and false-fails them (MDS-63). Poll until each target server leaves
+# `pending`, bounded by a hard ~10s ceiling (0.5s × 20).
+MCP_PROBE_POLL_INTERVAL = 0.5
+MCP_PROBE_MAX_POLLS = 20
 
 
 def supports_unicode(stream=None) -> bool:
@@ -195,11 +205,26 @@ def _check_venn_services(cfg) -> list[CheckResult]:
     return checks
 
 
+def _is_bare_command(command) -> bool:
+    """True if *command* is a bare executable name resolved via PATH.
+
+    A bare name (no directory component, not absolute) is the MDS-64 footgun:
+    it resolves in the rich foreground shell at preflight but historically not
+    under the daemon's stripped PATH at agent spawn. With agent_spawn_env() the
+    runtime now resolves it too, so this is a non-blocking ⚠ heads-up, not a
+    failure.
+    """
+    if not isinstance(command, str) or not command:
+        return False
+    return not os.path.isabs(command) and os.path.basename(command) == command
+
+
 def _check_mcp_servers(cfg, project_path: Path) -> list[CheckResult]:
     if not cfg.mcp_servers:
         return []
 
     checks = []
+    probe_names = []
     for name, server_cfg in cfg.mcp_servers.items():
         server_type = server_cfg.get("type", "stdio")
 
@@ -212,42 +237,83 @@ def _check_mcp_servers(cfg, project_path: Path) -> list[CheckResult]:
                 ))
                 continue
         elif server_type == "stdio":
-            if not server_cfg.get("command"):
+            command = server_cfg.get("command")
+            if not command:
                 checks.append(CheckResult(
                     name, ok=False,
                     detail="mcp — missing command",
                     hint=f"Set mcp_servers.{name}.command in agent.yaml",
                 ))
                 continue
+            # D-64c: non-blocking warning on bare-name stdio commands.
+            if _is_bare_command(command):
+                checks.append(CheckResult(
+                    name, ok=False,
+                    detail=f"mcp — '{command}' is a bare command name (resolved via PATH)",
+                    hint="Agents resolve it via ~/.local/bin; use an absolute "
+                         "path to be PATH-independent",
+                    required=False,
+                ))
 
-        check = _probe_mcp_server(name, cfg.mcp_servers, project_path)
-        checks.append(check)
+        probe_names.append(name)
+
+    # D-63b: one connect()/poll loop judges every server, bounding latency.
+    if probe_names:
+        checks.extend(_probe_mcp_servers(probe_names, cfg.mcp_servers, project_path))
 
     return checks
 
 
-def _probe_mcp_server(
-    name: str,
+def _probe_mcp_servers(
+    names: list[str],
     all_servers: dict[str, dict],
     project_path: Path,
-) -> CheckResult:
-    """Connect to an MCP server via the Claude SDK and verify it lists tools."""
+) -> list[CheckResult]:
+    """Connect once via the Claude SDK and judge every named server."""
     try:
-        result = asyncio.run(_async_probe_mcp(name, all_servers, project_path))
-        return result
+        return asyncio.run(_async_probe_mcp(names, all_servers, project_path))
     except Exception as e:
+        return [
+            CheckResult(
+                name, ok=False,
+                detail=f"mcp — probe failed: {e}",
+                hint="Check server URL/command and credentials",
+            )
+            for name in names
+        ]
+
+
+def _judge_mcp_server(name: str, srv: dict | None) -> CheckResult:
+    """Turn one server's status snapshot into a CheckResult (unchanged semantics)."""
+    if srv is None:
+        return CheckResult(name, ok=False, detail="mcp — server not found")
+
+    srv_status = srv.get("status", "unknown")
+    if srv_status == "connected":
+        tools = srv.get("tools", [])
+        return CheckResult(name, ok=True, detail=f"mcp, {len(tools)} tools")
+    elif srv_status == "needs-auth":
         return CheckResult(
             name, ok=False,
-            detail=f"mcp — probe failed: {e}",
+            detail="mcp — authentication required",
+            hint="Check credentials in agent.yaml",
+        )
+    elif srv_status == "failed":
+        error = srv.get("error", "unknown error")
+        return CheckResult(
+            name, ok=False,
+            detail=f"mcp — {error}",
             hint="Check server URL/command and credentials",
         )
+    else:
+        return CheckResult(name, ok=False, detail=f"mcp — {srv_status}")
 
 
 async def _async_probe_mcp(
-    name: str,
+    names: list[str],
     all_servers: dict[str, dict],
     project_path: Path,
-) -> CheckResult:
+) -> list[CheckResult]:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
     from modastack.sdk import get_cli_path
 
@@ -258,6 +324,10 @@ async def _async_probe_mcp(
         mcp_servers=all_servers,
         strict_mcp_config=True,
         max_turns=0,
+        # Probe in the same environment agents are spawned in so preflight can
+        # never be green when the runtime PATH would fail to resolve a bare
+        # command (MDS-64).
+        env=agent_spawn_env(),
     )
 
     client = ClaudeSDKClient(options)
@@ -265,40 +335,24 @@ async def _async_probe_mcp(
         await client.connect()
         status = await client.get_mcp_status()
 
-        for server in status.get("mcpServers", []):
-            if server.get("name") != name:
-                continue
+        # MDS-63: poll until every target server leaves the `pending` spawn
+        # window (or the bounded budget elapses). Servers that genuinely
+        # failed / need-auth report on the first non-pending poll, so real
+        # failures add no latency.
+        targets = set(names)
+        for _ in range(MCP_PROBE_MAX_POLLS):
+            servers = {s.get("name"): s for s in status.get("mcpServers", [])}
+            still_pending = [
+                n for n in targets
+                if servers.get(n) is None or servers[n].get("status") == "pending"
+            ]
+            if not still_pending:
+                break
+            await asyncio.sleep(MCP_PROBE_POLL_INTERVAL)
+            status = await client.get_mcp_status()
 
-            srv_status = server.get("status", "unknown")
-            if srv_status == "connected":
-                tools = server.get("tools", [])
-                return CheckResult(
-                    name, ok=True,
-                    detail=f"mcp, {len(tools)} tools",
-                )
-            elif srv_status == "needs-auth":
-                return CheckResult(
-                    name, ok=False,
-                    detail="mcp — authentication required",
-                    hint="Check credentials in agent.yaml",
-                )
-            elif srv_status == "failed":
-                error = server.get("error", "unknown error")
-                return CheckResult(
-                    name, ok=False,
-                    detail=f"mcp — {error}",
-                    hint="Check server URL/command and credentials",
-                )
-            else:
-                return CheckResult(
-                    name, ok=False,
-                    detail=f"mcp — {srv_status}",
-                )
-
-        return CheckResult(
-            name, ok=False,
-            detail="mcp — server not found",
-        )
+        servers = {s.get("name"): s for s in status.get("mcpServers", [])}
+        return [_judge_mcp_server(name, servers.get(name)) for name in names]
     finally:
         try:
             await client.disconnect()

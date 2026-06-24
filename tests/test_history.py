@@ -19,6 +19,7 @@ from modastack.history import (
     context_for_events,
     conversations,
     index,
+    messages_since,
     search,
     session_messages,
 )
@@ -604,3 +605,102 @@ class TestContextForEvents:
         ]
         ctx = context_for_events(events)
         assert ctx.count("dedupe_target_word") == 1
+
+
+# ---------------------------------------------------------------------------
+# messages_since — the policy-curator delta cursor (#456)
+# ---------------------------------------------------------------------------
+
+class TestMessagesSince:
+    """Window on messages.id, not conversations.started_at and not timestamp.
+
+    These are the R2/R3/R4 regressions: the curator must re-select a long-lived
+    session's new messages, and an id cursor must be skip-free where a timestamp
+    cursor was not (tool-call tie-rows + empty-timestamp rows)."""
+
+    def test_empty_when_no_db(self, projects_dir):
+        # No index() run yet → no db file → empty, never raises.
+        assert messages_since(0) == []
+
+    def test_includes_new_messages_of_a_long_lived_session(self, projects_dir):
+        # A persistent session started long ago, plus a fresh ephemeral one.
+        proj = projects_dir / "-Users-alice-dev"
+        proj.mkdir()
+        persistent = proj / "director-persistent.jsonl"
+        _write_jsonl(persistent, [
+            _user_msg("old kickoff", timestamp="2020-01-01T00:00:00"),
+        ])
+        index()
+
+        # Cursor = everything indexed so far (the director's old started_at row).
+        cursor = max(m["id"] for m in session_messages("director-persistent"))
+
+        # The persistent session accrues NEW messages; a fresh session appears.
+        with persistent.open("a") as f:
+            f.write(json.dumps(_assistant_msg(
+                "fresh durable learning", timestamp="2026-06-24T10:00:00")) + "\n")
+        eph = proj / "ephemeral.jsonl"
+        _write_jsonl(eph, [
+            _user_msg("ephemeral task", timestamp="2026-06-24T11:00:00"),
+        ])
+        index()
+
+        delta = messages_since(cursor)
+        sids = {m["session_id"] for m in delta}
+        # Windowing on messages.id picks up the persistent session's new rows —
+        # a started_at>cursor window would exclude it forever (write-once).
+        assert "director-persistent" in sids
+        assert "ephemeral" in sids
+        assert any("fresh durable learning" in (m["content"] or "") for m in delta)
+        # The old kickoff row (<= cursor) is NOT re-read.
+        assert all(m["id"] > cursor for m in delta)
+
+    def test_id_cursor_selects_tie_rows_and_empty_timestamp(self, projects_dir):
+        # A tool-using turn writes a text row + tool-call sibling rows ALL at the
+        # identical timestamp, plus a row with an empty/absent timestamp. Under a
+        # `timestamp > cursor` window a tie-sibling and the empty-ts row would be
+        # skipped forever; the id cursor must select every one.
+        proj = projects_dir / "-Users-bob-dev"
+        proj.mkdir()
+        T = "2026-06-24T00:00:00"
+        _write_jsonl(proj / "tooluse.jsonl", [
+            _user_msg("kick off", timestamp=T),
+            _tool_msg([
+                {"type": "text", "text": "calling tools"},
+                {"type": "tool_use", "name": "Bash", "input": {"cmd": "ls"}},
+                {"type": "tool_use", "name": "Read", "input": {"path": "x"}},
+            ], timestamp=T),
+            # No timestamp key at all → stored as "" (sorts below any real ts).
+            _assistant_msg("no-timestamp tail"),
+        ])
+        index()
+
+        rows = session_messages("tooluse")
+        # The tie group: the text row + its two tool siblings share timestamp T.
+        tie_ts = [r for r in rows if r["timestamp"] == T and r["type"] == "assistant"]
+        assert len(tie_ts) >= 3  # text + 2 tool-call rows, all at T
+        empty_ts = [r for r in rows if r["timestamp"] == ""]
+        assert empty_ts and empty_ts[0]["content"] == "no-timestamp tail"
+
+        # Cursor just below the first tie-row id: a timestamp cursor (= T) would
+        # drop the sibling tool rows (== T, not > T) and the ""-ts row (never > T).
+        first_tie_id = min(r["id"] for r in tie_ts)
+        cursor = first_tie_id - 1
+
+        delta_ids = {m["id"] for m in messages_since(cursor)}
+        # Every tie-sibling AND the empty-timestamp row is selected by id > cursor.
+        for r in tie_ts:
+            assert r["id"] in delta_ids
+        assert empty_ts[0]["id"] in delta_ids
+
+    def test_oldest_first_and_limit(self, projects_dir):
+        proj = projects_dir / "-Users-c-dev"
+        proj.mkdir()
+        _write_jsonl(proj / "s.jsonl", [
+            _user_msg(f"m{i}", timestamp=f"2026-06-24T00:0{i}:00") for i in range(5)
+        ])
+        index()
+        delta = messages_since(0)
+        ids = [m["id"] for m in delta]
+        assert ids == sorted(ids)  # oldest-first by id
+        assert len(messages_since(0, limit=2)) == 2

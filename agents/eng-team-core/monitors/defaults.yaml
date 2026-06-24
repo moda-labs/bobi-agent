@@ -33,3 +33,9 @@ monitors:
     event: monitor/status.roundup_due
     notify: true
 
+  # NOTE: policy-curator is no longer declared here. It is a FRAMEWORK DEFAULT
+  # (#471) — seeded into every composed team image from
+  # modastack/monitors/framework_defaults.yaml, opt-out via `prune:`. Removing it
+  # here is byte-neutral for the composed set (the framework seeds an identical
+  # record); a test asserts that. Re-adding it here would be redundant.
+

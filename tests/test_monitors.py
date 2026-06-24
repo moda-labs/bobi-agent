@@ -220,10 +220,14 @@ class TestDefaultsPath:
 
 # === Install copies built-in defaults ===
 
-class TestInstallNoFrameworkFallback:
-    def test_install_does_not_inject_framework_monitors(self, tmp_path):
-        """When a pack has no monitors/ directory, install must NOT inject
-        framework-bundled monitors — only the pack's own monitors resolve."""
+class TestInstallFrameworkCuratorDefault:
+    """policy-curator is a framework default (#471): seeded into EVERY composed
+    team image. A pack ships no other framework monitors — only `policy-curator`
+    is injected, and the pack's own monitors still resolve on top of it."""
+
+    def test_install_injects_only_the_framework_curator(self, tmp_path):
+        """A pack with no monitors/ directory still gets exactly the framework
+        policy-curator default (and nothing else) — opt-out is via `prune:`."""
         from modastack.cli import _install_pack
 
         pack = tmp_path / "minimal-pack"
@@ -236,12 +240,16 @@ class TestInstallNoFrameworkFallback:
         _install_pack(pack, project)
 
         defaults = project / ".modastack" / "monitors" / "defaults.yaml"
-        assert not defaults.exists(), (
-            "Install must not create monitor defaults when pack ships none"
+        assert defaults.exists()
+        raw = yaml.safe_load(defaults.read_text())
+        names = [m["name"] for m in raw["monitors"]]
+        assert names == ["policy-curator"], (
+            f"Only the framework curator should be injected, got: {names}"
         )
 
-    def test_install_uses_only_pack_monitors(self, tmp_path):
-        """When a pack ships its own monitors/, only those are installed."""
+    def test_install_pack_monitors_resolve_on_top_of_curator(self, tmp_path):
+        """When a pack ships its own monitors/, they compose ON TOP of the
+        framework curator (curator first, as the base layer)."""
         from modastack.cli import _install_pack
 
         pack = tmp_path / "full-pack"
@@ -262,8 +270,8 @@ class TestInstallNoFrameworkFallback:
         assert defaults.exists()
         raw = yaml.safe_load(defaults.read_text())
         names = [m["name"] for m in raw["monitors"]]
-        assert names == ["custom-check"], (
-            f"Only pack monitors should be installed, got: {names}"
+        assert names == ["policy-curator", "custom-check"], (
+            f"Framework curator + pack monitors expected, got: {names}"
         )
 
 

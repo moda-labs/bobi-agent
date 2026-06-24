@@ -1,0 +1,19 @@
+# OpenAI image CLI — opt-in via `tool_library: [openai]` (#416, kind: cli).
+# The `openai` Python CLI provides `openai images generate` (#397). Pure-Python
+# wheel, no arch split. The pin lives ONCE; compose's build de-dupe collapses
+# repeats across `from:` layers. `python3-venv` de-dupes against `venn`'s apt.
+kind: cli
+requires:
+  - name: openai
+    why: "Generate images with `openai images generate` via the OpenAI CLI (tools/openai.md). Auth via OPENAI_API_KEY."
+    check: "command -v openai >/dev/null 2>&1 && openai --version >/dev/null 2>&1"
+    fix: "python3 -m venv /opt/openai-cli && /opt/openai-cli/bin/pip install openai==2.43.0 && ln -sf /opt/openai-cli/bin/openai /usr/local/bin/openai && echo 'Set OPENAI_API_KEY in .modastack/.env'"
+build:
+  # Isolated venv so the CLI's deps never collide with the framework's, then
+  # symlink the entrypoint onto PATH.
+  apt: [python3-venv]
+  run_root:
+    - >-
+      python3 -m venv /opt/openai-cli &&
+      /opt/openai-cli/bin/pip install --no-cache-dir openai==2.43.0 &&
+      ln -sf /opt/openai-cli/bin/openai /usr/local/bin/openai
