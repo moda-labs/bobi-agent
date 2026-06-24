@@ -9,6 +9,19 @@
 > decision log and its rotation flush as the riskiest part: it touches the
 > session rotation path that wedged the director live on 2026-06-23.
 
+> **Revision 2 (2026-06-24)** — folds in the review on the spec PR. Changes:
+> (1) **blocking watermark fix** — the curator gets a *dedicated cursor advanced
+> on success*, because the scheduler clobbers `last_run` at dispatch (§3, Q4);
+> (2) the durable doc is **decomposed by retention semantics** into `## Facts`
+> (refreshable) and `## Decisions` (sticky) — two sections in the one capped
+> file, with a new "decisions survive rewrite" invariant + test;
+> (3) the cap is treated as **lossless-by-design** — the curator separates
+> lossless from lossy ops and **surfaces any lossy drop loudly** in the change
+> summary; (4) completion delivery is **passive by default** (active inbox push
+> reserved for urgent changes); (5) a **curator input cap** bounds what it
+> ingests per run (the hard cap was output-only); (6) all five open questions are
+> **resolved** from the review's leans. Diff is in the spec body below.
+
 ---
 
 # Spec: replace the append-only decision log with a curator-monitor → `policy.md` (#456)
@@ -62,19 +75,43 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
 
 - **New default monitor `policy-curator`**, fires on an interval.
 - On fire → dispatch an **out-of-band curator agent** (subagent executor) that:
-  1. reads **new agent transcripts since its last run** (incremental
-     watermark; v1 approximates "since last run" by the monitor's persisted
-     `last_run`),
+  1. reads **new agent transcripts since its last successful run** (incremental
+     watermark — a **dedicated curator cursor advanced only on success**, *not*
+     the monitor's `last_run`, which the scheduler clobbers at dispatch; see §3),
+     bounded by a **per-run input cap** so a busy team can't blow up the curator's
+     ingest cost,
   2. reconciles them against the **current `policy.md`**,
   3. **rewrites `policy.md` in place** (a full new document, never append) with
      durable learnings **that aren't already captured in the agent-team prose**
      (role prompts / tool guides / `agent.md`), under a **hard size cap** so it
      stays injectable.
+- **`policy.md` is decomposed by retention semantics, not by document type.**
+  One capped file, two sections the curator maintains under distinct rules:
+  - **`## Facts`** — *refreshable* state of the world (this repo uses GitHub not
+    Linear, the deploy command, user preferences). Falsifiable; **overwritten**
+    when reality changes.
+  - **`## Decisions`** — *sticky* choices ("chose A over B, don't re-litigate").
+    **Retained across rewrites unless explicitly reversed** in a later transcript.
+
+  This takes the facts-vs-decisions distinction (different retention rules) while
+  deliberately **not** importing a per-type-document model (no SNAPSHOT / TASKS /
+  LOG files): volatile state is re-derived from source, and a "log" is just the
+  append-only decision log under a new name. Sections promote to their own files
+  only if one outgrows the shared cap (not in v1).
+- The cap is **lossless by design at the expected operating point** (see §3 and
+  the Verification Plan): durable, deduped, generalized knowledge **plateaus**,
+  so the cap is a tuning number above that plateau, not a knowledge-shredder. The
+  curator separates **lossless** ops (dedup, generalize, evict falsified facts,
+  evict superseded decisions) from **lossy** ops (drop a *still-valid* decision
+  for space) and **never drops silently** — a lossy drop is surfaced in the
+  change summary so we see the day the cap needs raising.
 - On completion → **publish a `policy.updated` event** through the event server
-  → delivered to working agents' inboxes so they **re-read the policy** (and
-  reconcile any in-flight plan against it), instead of only picking it up
-  passively on their next injected prompt. The event carries a short summary of
-  what changed.
+  carrying a short change summary. Delivery is **passive by default**: working
+  agents already re-read `policy.md` on their next injected prompt (rebuilt every
+  rotation), so the common case needs no interruption. **Active inbox push**
+  ("re-read and reconcile any in-flight plan now") is **reserved for changes the
+  curator marks urgent** — it interrupts every working agent mid-task, which is
+  the wrong default for a routine distillation.
 - `policy.md` is **injected read-only into every agent's prompt**, exactly where
   the decision log used to go.
 
@@ -96,24 +133,36 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
 ### In scope
 
 1. **New default monitor `policy-curator`** in the framework's default monitor
-   set, interval-configurable, dispatching an out-of-band curator agent.
-2. **Curator agent** path: read new transcripts since `last_run`, reconcile vs
-   current `policy.md`, rewrite it in place under a hard size cap.
-3. **Curator writes an artifact** — the one genuinely-new monitor seam. The
+   set, interval-configurable, dispatching an out-of-band curator agent. The
+   *mechanism* is framework-level; the **curator prompt is team-overridable**
+   (what counts as "durable" is domain-flavored — Q1).
+2. **Curator agent** path: read new transcripts since the **curator's own
+   success-advanced cursor** (not the scheduler's `last_run`), under a **per-run
+   input cap**, reconcile vs current `policy.md`, rewrite it in place under a hard
+   output size cap.
+3. **Two-section `policy.md` with distinct retention rules**: `## Facts`
+   (refreshable/overwritten) and `## Decisions` (sticky/retained-unless-reversed),
+   in one capped file. Curator contract distinguishes **lossless** ops from
+   **lossy** ops and surfaces any lossy drop in the change summary (no silent
+   loss).
+4. **Curator writes an artifact** — the one genuinely-new monitor seam. The
    scheduler must accept a check-agent that produces a file + an optional change
    summary, not just a finding verdict.
-4. **`policy.updated` completion event** published through the event server with
-   a change summary, delivered to working agents' inboxes; agents re-read
-   `policy.md` on receipt.
-5. **Inject `policy.md` read-only** into agent prompts at the three current
+5. **`policy.updated` completion event** published through the event server with
+   a change summary. **Passive delivery by default** (agents re-read on next
+   prompt); active inbox push only for changes the curator flags urgent.
+6. **Inject `policy.md` read-only** into agent prompts at the three current
    memory-injection sites, replacing the `## Decision Log` section.
-6. **Remove the append-only decision log + rotation flush**: the
+7. **One-time seed** of the first `policy.md` by distilling the existing
+   `memory/<session>/INDEX.md` journal(s) (Q3 — resolved *seed once*; starting
+   empty discards real, not-all-re-derivable knowledge).
+8. **Remove the append-only decision log + rotation flush**: the
    `## Decision Log` injection, `memory.load_memory`/`format_memory_prompt` as a
    journal reader, and `session.py`'s `_do_flush_and_rotate` / `_verify_flush` /
    `_snapshot_index` flush machinery. Keep rotation itself (the client cycle);
    only drop the append-on-rotation behavior.
-7. **Single-writer invariant**: only the curator writes `policy.md`.
-8. **Tests** (see Verification Plan), using real message/transcript shapes.
+9. **Single-writer invariant**: only the curator writes `policy.md`.
+10. **Tests** (see Verification Plan), using real message/transcript shapes.
 
 ### Out of scope (explicit MVP guardrails)
 
@@ -122,10 +171,19 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
   `modastack kb` subsystem is *not* involved.)
 - **No** change to the rotation **metric** — that is #454. This spec removes the
   bloat source; #454 fixes why rotation falsely fired. They ship independently.
-- **No** migration of existing `INDEX.md` journals into `policy.md`. On rollout
-  the old per-session journals are simply no longer injected (and may be deleted
-  by ops); `policy.md` starts empty and the curator fills it from transcripts.
-  *(Open question Q3 — confirm we don't want a one-time seed.)*
+- **No** *ongoing* migration machinery for `INDEX.md` journals. There is a
+  **one-time seed** at rollout (in scope, item 7) — a single distill of the
+  current journal(s) into the first `policy.md` — but the old per-session journals
+  are not read again after that; thereafter the curator fills `policy.md` from
+  transcripts. (Reverses R1's earlier "start empty" stance per the review.)
+- **No** per-type *document* model (no SNAPSHOT / TASKS / LOG files). The
+  facts-vs-decisions split is **two sections in one capped file**, not separate
+  files — separate files reintroduce per-type schema, cap-splitting, and
+  injection multiplication, all explicit MVP non-goals. Sections graduate to
+  files only if one outgrows the shared cap (not v1).
+- **No** decisions-spill archive in v1. The curator *signals* (in the change
+  summary) the day it is forced into a lossy drop; building the read-on-demand
+  spill is deferred until that signal actually fires.
 - **No** per-agent or per-role policy files. One **team-scoped** `policy.md`.
 
 ## Technical Approach
@@ -138,6 +196,20 @@ release v0.31.0).
 - Path: **`.modastack/state/policy.md`** (single, team-scoped, not under
   `memory/<session>/`). Add `policy_path()` to `modastack/paths.py` returning
   `state_dir() / "policy.md"`.
+- **Structure: two fixed sections in the one file**, written and parsed as plain
+  markdown headings (no schema, no frontmatter):
+
+  ```markdown
+  ## Facts
+  <refreshable, falsifiable state of the world — overwritten when reality changes>
+
+  ## Decisions
+  <sticky choices — retained across rewrites unless explicitly reversed>
+  ```
+
+  The curator owns both. The whole file is still capped (`MAX_POLICY_CHARS`)
+  and injected as one block; the sections only carry *different curator rules*
+  (below), not different files or schemas.
 - The existing `.modastack/state/memory/` tree is **no longer read** for prompt
   injection. The directory mechanics in `memory.py` may be reused for reading
   `policy.md`, but the per-session journal semantics are removed.
@@ -181,21 +253,50 @@ to publish. A distinct marker keeps the verdict path untouched.
   plumbing.
 - The curator's working instructions come from a **dedicated curator prompt**
   (new `modastack/prompts/curator.md`, or a framework role), not from the
-  monitor `description`. The prompt instructs the agent to:
-  1. Read the persisted watermark (`last_run` for `policy-curator` in
-     `monitor_state.json`) and enumerate transcripts started/modified since
-     then.
-  2. Read the **current `.modastack/state/policy.md`**.
+  monitor `description`. **The prompt is team-overridable** (Q1): the framework
+  ships a default `curator.md`, and a team may replace it via the normal
+  prompt-override path — "what counts as durable" is domain-flavored and a
+  framework with no topology opinions shouldn't hard-bake one team's notion of
+  policy. The prompt instructs the agent to:
+  1. Read the **curator cursor** (see watermark subsection) and enumerate
+     transcripts started/modified since then, **trimming the ingest to the
+     per-run input cap** (most-recent-first, oldest-over-budget dropped — and
+     noted in the summary).
+  2. Read the **current `.modastack/state/policy.md`** (both sections).
   3. Distill durable, reusable learnings **not already in** the team prose
      (role prompts, `tools/*.md`, `agent.md`) — promote only patterns seen
-     across runs, never one-off operational details.
+     across runs, never one-off operational details — and **file each into the
+     right section** under its retention rule:
+     - **`## Facts`** — refreshable. **Overwrite** a fact when the transcript
+       delta shows reality changed; **evict** a fact the delta falsifies. Facts
+       are not accreted; the latest true value replaces the old one.
+     - **`## Decisions`** — sticky. **Carry every existing decision forward**
+       into the rewrite **unless** the delta explicitly reverses/supersedes it.
+       A decision absent from the recent window is **retained, not dropped** —
+       this is the whole point of the bucket (an old "chose A over B" that's not
+       re-mentioned must not silently vanish and get re-litigated).
   4. **Rewrite `policy.md` in full** via `Write` (never append), staying under
-     `MAX_POLICY_CHARS`.
+     `MAX_POLICY_CHARS`. Classify every removal:
+     - **Lossless** (always allowed): dedup duplicates, generalize N specifics
+       into one principle, evict a **falsified** fact, evict a **superseded**
+       decision. These are compression toward the information-theoretic minimum,
+       not loss.
+     - **Lossy** (last resort only): drop a **still-valid** decision purely for
+       space. Only when lossless compression still exceeds the cap.
   5. Emit a final JSON line with a short **change summary**:
-     `{"success": true, "updated": true, "summary": "…", "bytes": N}`
-     (`updated: false` when nothing durable changed).
+     `{"success": true, "updated": true, "summary": "…", "bytes": N,
+     "urgent": false, "lossy_drops": 0, "input_truncated": false}`.
+     - `updated: false` when nothing durable changed (publishes nothing).
+     - `urgent: true` only for changes worth interrupting in-flight agents →
+       gates the **active inbox push** (passive re-read otherwise; see §4).
+     - `lossy_drops: N` (> 0) means the curator was forced to drop still-valid
+       items for space; the summary must name them
+       (`"dropped N still-valid decisions for space"`). **This is the trigger to
+       raise the cap / build the decisions-spill** — v1 degrades *loudly*.
+     - `input_truncated: true` when the per-run input cap dropped transcripts
+       (so a busy interval is visible, not silently under-distilled).
 
-#### Reading transcripts since the watermark
+#### Reading transcripts since the watermark — and bounding the input
 
 Transcripts are indexed in SQLite at `.modastack/state/history.db`
 (`history.py:16–18`) from the raw JSONL under the Claude projects dir. The
@@ -204,15 +305,39 @@ curator uses the existing read API:
 - `history.index()` — incremental re-index (only new lines;
   `history.py:177–213`).
 - `history.conversations(limit=…)` — returns rows with `started_at`
-  (`history.py:259–278`); filter `started_at > last_run` for the delta.
+  (`history.py:259–278`); filter `started_at > cursor` for the delta.
 - `history.session_messages(session_id)` — full message list per session
   (`history.py:281–294`).
 
-v1 watermark = the monitor's persisted `last_run` (ISO string) already written
-by the scheduler (`scheduler.py:364`). The curator does **not** maintain its own
-cursor file; it reads `last_run` and trusts the scheduler to advance it after
-the run. *(Q4: should the curator advance the watermark only on a successful
-rewrite, to avoid skipping transcripts when a run dies mid-distillation?)*
+**Watermark — dedicated curator cursor, advanced on success (resolves Q4, and
+fixes a blocking bug in R1).** R1 proposed reusing the monitor's persisted
+`last_run`. That **does not work** against the real scheduler: `run_monitor`
+dispatches the curator async via `_spawn_check` (`scheduler.py:405`) and then
+writes `last_run = now` **synchronously, at dispatch** (`scheduler.py:411–412`),
+*before* the curator subprocess has started. So a curator that read `last_run`
+to compute "transcripts since last run" would read **its own dispatch time** —
+the delta collapses to ≈empty and it distills nothing. The watermark it actually
+needs (the *previous* run's time) has already been clobbered.
+
+Fix: the curator maintains its **own cursor** at
+`.modastack/state/policy_cursor` (ISO timestamp), and **advances it only after a
+successful rewrite** — to the max `started_at` it ingested. Properties:
+
+- Reads the *previous* successful boundary, not its own dispatch time → the
+  delta is real.
+- A run that **dies mid-distillation** does not advance the cursor, so the next
+  run re-reads that window → **no transcripts skipped forever** (the other half
+  of Q4).
+- Independent of how/when the scheduler touches `last_run`.
+
+**Per-run input cap (new — the hard cap was output-only).** The output (`policy.md`)
+is capped, but the curator *reads all new transcripts across all agents* each
+interval, and that input is large and variable-cost (the director alone is huge).
+Add `MAX_CURATOR_INPUT_CHARS` (or a most-recent-N message budget): the curator
+ingests newest-first up to the budget and drops the oldest overflow, setting
+`input_truncated: true` and naming the drop in the summary. This keeps a busy
+interval from blowing up curator cost and makes any under-distillation visible
+rather than silent.
 
 ### 4. Publishing `policy.updated` on completion
 
@@ -227,11 +352,21 @@ The scheduler already owns the single publish chokepoint
   the bare topic `policy.updated` and the source-qualified `system/policy.updated`
   (`subscriptions.py:monitor_subscription_keys` 45–68), so the manager's monitor
   subscriptions already cover it via `monitor_subscription_keys([monitor.event])`.
-- Delivery to inboxes is the existing path: WS client → `events/drain.py`
-  batches → `inbox.push(Message(...))` → session `_inbox_loop` surfaces it to
-  the agent (`session.py` inbox loop). Working agents see a message like
-  *"policy.md updated — <summary>. Re-read .modastack/state/policy.md and
-  reconcile any in-flight plan."*
+- **Delivery is passive by default; active push is opt-in per update.** Working
+  agents already re-read `policy.md` on their next injected prompt (the system
+  prompt is rebuilt every rotation, §5/§6), so a routine distillation needs **no
+  interruption** — pushing *"re-read and reconcile your in-flight plan now"* into
+  every working agent's inbox every 6h interrupts everyone mid-task for a change
+  most of them don't need yet. So:
+  - **`urgent: false` (default):** publish the `policy.updated` event for
+    observability/logging, but **do not** push the disruptive inbox message —
+    agents pick the change up passively on their next prompt.
+  - **`urgent: true`:** also deliver the inbox message via the existing path (WS
+    client → `events/drain.py` batches → `inbox.push(Message(...))` →
+    `_inbox_loop`): *"policy.md updated — <summary>. Re-read
+    .modastack/state/policy.md and reconcile any in-flight plan."* The curator
+    sets `urgent` only for changes worth the interruption (e.g. a reversed
+    decision that invalidates work in flight).
 - **Dedup caveat**: the scheduler's dedup keys on condition identity
   (`_reconcile` 367–395). A `policy.updated` with an identical summary two runs
   in a row must still deliver. Either give each curator event a unique key
@@ -281,11 +416,18 @@ lightweight client cycle:
 - Only the curator agent writes `.modastack/state/policy.md`. Working agents get
   it injected as **read-only** (prompt wording + it is not in any working
   agent's task instructions to edit it).
+- **Curator-vs-curator concurrency is already guarded by the interval, not the
+  doctor check.** `last_run` advances at dispatch (`scheduler.py:411`), so a
+  second `policy-curator` cannot fire until the interval elapses — two curators
+  overlap only if one run *exceeds* its own interval. The doctor check below is
+  therefore about a *foreign* writer (some other process touching `policy.md`),
+  which is a smaller risk.
 - Enforce in code where cheap: the policy loader is read-only; no framework code
   path other than the curator dispatch writes the file. Add a doctor check that
-  flags a `policy.md` mtime newer than the last curator `last_run` as an
-  invariant violation. *(Q5: is a soft doctor check enough, or do we want a hard
-  guard?)*
+  flags a `policy.md` mtime newer than the curator's cursor (i.e. a write not
+  attributable to the last curator run) as an invariant violation. **A soft
+  doctor check is enough for v1 (resolves Q5)** — given the interval guard above,
+  a hard write-guard is not worth the plumbing yet.
 
 ## Verification Plan
 
@@ -306,9 +448,22 @@ Unit tests (`pytest tests/ --ignore=tests/integration/`):
 2. **One-off does NOT get promoted.** Feed a transcript containing a single
    ephemeral operational detail (one ticket number, one transient lead) plus a
    recurring durable pattern. Assert the durable pattern lands in `policy.md` and
-   the one-off does not. *(Curator-agent behavior; in unit form this asserts the
-   curator prompt/contract via a stubbed model response with the real verdict
-   shape, with a live-model integration variant.)*
+   the one-off does not. **Caveat — in unit form this tests plumbing, not
+   judgment:** with a stubbed model response (real verdict shape) it only proves
+   the curator wires its output through correctly; it asserts the *stub*, not the
+   curation decision (the #454 trap). **The real assertion is the live-model
+   integration variant** (below); the unit test is explicitly the plumbing check.
+2a. **Decisions survive a rewrite over a window that doesn't mention them.**
+   Seed `policy.md` with an old decision ("chose A over B"). Run a curator pass
+   over a transcript delta that **never mentions** that decision. Assert the
+   decision is **still present** in the rewritten `## Decisions` section
+   (retained-unless-reversed). Then run a pass over a delta that **explicitly
+   reverses** it and assert it is removed. This is the regression test for the
+   "rewrite silently drops an un-mentioned old decision → it gets re-litigated"
+   failure the decisions bucket exists to prevent.
+2b. **Facts are refreshed, not accreted.** Seed a fact ("deploy via X"); feed a
+   delta showing it changed ("deploy via Y"). Assert `## Facts` holds **only** Y
+   (overwrite), not both.
 3. **Completion event fires and is delivered.** On a successful curator run with
    `updated: true`, assert `post_event("system/policy.updated", …)` is called
    with a change summary, and that a subscriber on `policy.updated` /
@@ -325,18 +480,33 @@ Unit tests (`pytest tests/ --ignore=tests/integration/`):
 7. **Single-writer.** Assert no framework path other than the curator dispatch
    writes `policy.md` (doctor invariant check returns ok for a curator-written
    file, flags a foreign write).
+8. **Success-advanced cursor.** Drive a curator run; assert the cursor advances
+   to the max ingested `started_at` **only on success**, and that a run which
+   raises mid-distillation leaves the cursor unmoved so the next run re-reads the
+   same window (no skipped transcripts). Assert the curator reads the cursor, not
+   the scheduler's `last_run` (which the scheduler clobbers at dispatch).
+9. **Per-run input cap.** Seed more transcript than `MAX_CURATOR_INPUT_CHARS`;
+   assert the curator ingests newest-first up to the budget, drops the overflow,
+   and sets `input_truncated: true` with the drop named in the summary.
+10. **No silent lossy drop.** Force the curator over-cap with all-still-valid
+   decisions; assert any drop of a still-valid item sets `lossy_drops > 0` and is
+   named in the change summary (loud degradation), never a silent deletion.
 
 Integration (`tests/integration/`, real Claude session): a live curator run over
-a seeded transcript fixture produces a sane, capped `policy.md` and the
-`policy.updated` event reaches a second running agent's inbox.
+a seeded transcript fixture produces a sane, capped `policy.md` with correctly
+sorted `## Facts` / `## Decisions`, retains an un-mentioned old decision, and the
+`policy.updated` event reaches a second running agent's inbox. This live variant
+is the **real** assertion behind unit test 2 (judgment, not plumbing).
 
 ## Implementation Plan
 
 Build inside-out; each step builds + type-checks + passes tests on its own.
 
-1. **Paths + policy doc primitives.** `paths.policy_path()`; `memory.py`
-   `load_policy` / `format_policy_prompt` + `MAX_POLICY_CHARS`. Tests for load +
-   truncation. *(No behavior change yet — old path still injected.)*
+1. **Paths + policy doc primitives.** `paths.policy_path()`,
+   `paths.policy_cursor_path()`; `memory.py` `load_policy` /
+   `format_policy_prompt` + `MAX_POLICY_CHARS`. Load reads the two-section file
+   as one capped block. Tests for load + truncation. *(No behavior change yet —
+   old path still injected.)*
 2. **Injection swap.** Repoint the three injection sites + `doctor` at
    `policy.md`; rename the prompt section to `## Team Policy` (read-only). Test 5.
 3. **Remove rotation flush.** Delete `_do_flush_and_rotate` / `_verify_flush` /
@@ -344,35 +514,55 @@ Build inside-out; each step builds + type-checks + passes tests on its own.
    the now-dead `load_memory` journal reader + its tests.
 4. **Curator monitor declaration + flavor.** Add `policy-curator` default
    monitor + the `curator: true` marker; scheduler routes it to the curator
-   dispatch (reusing `_default_spawn_check`). Curator prompt
-   (`prompts/curator.md`).
-5. **Curator completion publish.** On success+`updated`, publish
-   `system/policy.updated` with summary (bypassing `_reconcile` dedup). Tests
-   3, 4.
-6. **Distillation contract + watermark.** Curator reads `last_run`, enumerates
-   transcripts via `history.*`, rewrites `policy.md`. Tests 1, 2, 7.
-7. **Integration test + docs.** Live curator run; update CLAUDE.md (Monitors +
+   dispatch (reusing `_default_spawn_check`). Default curator prompt
+   (`prompts/curator.md`), **team-overridable** via the prompt-override path.
+5. **Curator completion publish + delivery gate.** On success+`updated`, publish
+   `system/policy.updated` with summary (bypassing `_reconcile` dedup); gate the
+   **active inbox push** on `urgent: true`, passive otherwise. Tests 3, 4.
+6. **Distillation contract: cursor + sections + caps.** Curator reads the
+   **success-advanced cursor** (not `last_run`), enumerates transcripts via
+   `history.*` under `MAX_CURATOR_INPUT_CHARS`, rewrites the two-section
+   `policy.md` under the retention + lossless/lossy rules, advances the cursor
+   only on success. Tests 1, 2, 2a, 2b, 7, 8, 9, 10.
+7. **One-time seed.** A guarded one-shot that distills the existing
+   `memory/<session>/INDEX.md` journal(s) into the first `policy.md` (idempotent:
+   no-op if `policy.md` already exists). Q3 = seed once.
+8. **Integration test + docs.** Live curator run; update CLAUDE.md (Monitors +
    the removed Decision Log mention) and `DESIGN.md`/skills references to the
    memory model.
 
-## Open Questions (for human review)
+## Open Questions — resolved in the review (R2)
 
-- **Q1 — framework default vs eng-team default.** Should `policy-curator` ship
-  as a *framework-level* default monitor (every team gets it) or as an
-  eng-team default in `agents/eng-team/monitors/defaults.yaml`? The issue says
-  "new **default** monitor"; recommended: framework-level so any team compounds,
-  but it adds a curator-prompt dependency to every team. **Needs a call.**
-- **Q2 — default interval.** Issue says "interval-configurable" without a
-  default. Recommend **6h** (cheap, flat cost, distills a few times a day).
-  Confirm.
-- **Q3 — one-time seed from existing `INDEX.md`?** Out of scope as written
-  (start empty). Confirm we don't want a one-time distill of the current 127KB
-  journal into the first `policy.md`.
-- **Q4 — watermark advance on failure.** Advance `last_run` always (scheduler
-  default) or only on a successful rewrite (avoid skipping transcripts when a
-  curator run dies mid-distillation)? Recommend advance-on-success.
-- **Q5 — single-writer enforcement strength.** Soft doctor check vs a hard guard
-  on `policy.md` writes. Recommend soft check for v1.
+All five are now decided from the review's leans; recorded here with rationale.
+
+- **Q1 — framework default vs eng-team default → RESOLVED: framework mechanism,
+  team-overridable prompt.** Ship the *mechanism* (curator flavor, injection,
+  completion event) framework-level so any team compounds, but make the
+  **curator prompt team-overridable** — "what counts as durable" is
+  domain-flavored, and a framework that prides itself on no topology opinions
+  shouldn't hard-bake one team's notion of policy. (§3, in-scope item 1.)
+- **Q2 — default interval → RESOLVED: 6h to start.** Cheap, flat output cost,
+  distills a few times a day. Note it interacts with **input** cost — see the
+  per-run input cap (§3); a shorter interval means smaller deltas per run.
+- **Q3 — one-time seed → RESOLVED: yes, seed once.** Distill the existing
+  `INDEX.md` journal(s) into the first `policy.md` rather than starting empty —
+  starting empty discards real knowledge, and transcripts age/rotate so it is not
+  all re-derivable. (In-scope item 7; impl step 7.)
+- **Q4 — watermark → RESOLVED by the §3 fix: dedicated curator cursor advanced
+  on success.** This was not a nicety — reusing `last_run` is *non-functional*
+  (the scheduler clobbers it at dispatch). The success-advanced cursor fixes both
+  the dispatch-time race and the mid-distillation-skip problem in one move.
+- **Q5 — single-writer enforcement → RESOLVED: soft doctor check for v1.**
+  Curator-vs-curator overlap is already prevented by the interval; the doctor
+  check only guards *foreign* writes, a smaller risk. (§7.)
+
+### One deferred lever (not a blocker)
+- **Decisions-spill archive.** The only bucket that can genuinely outgrow a cap
+  is accreting **still-valid** decisions. v1 does **not** build the read-on-demand
+  spill — it builds the **signal** (`lossy_drops` in the change summary). When
+  that signal first fires, spill the oldest/least-relevant decisions to an indexed
+  archive (still retrievable) rather than deleting them. Build-the-signal-now,
+  build-the-spill-when-it-fires.
 
 ## Related
 
