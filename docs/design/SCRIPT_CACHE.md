@@ -1,13 +1,41 @@
 # Self-Learning `script_cache` Monitor Runner
 
-Status: **spec, pending human approval.** Issue: #327 · Builds on PR #294
-(`tool_poll`/`venn_poll` + script-cache foundation) · Linear MDS-52 (epic),
-MDS-53.
+Status: **spec approved (Zach, PR #478 Gate-1) — IMPLEMENTED on `agent/327`.**
+Issue: #327 · Builds on PR #294 (`tool_poll`/`venn_poll` + script-cache
+foundation) · Linear MDS-52 (epic), MDS-53.
 
 > This document is the design spec for #327 and is a **superset** of the issue.
-> It is committed to the same branch as the implementation (unified spec+impl
-> PR) but **no implementation lands until a human approves the security model
-> in §3 and the open decision in §3.4.**
+> The security model in §3 was approved, with the §3.4 open decision resolved by
+> the reviewer to **PROCEED-BUT-NOTIFY** (see §3.4). Implementation notes that
+> diverge from the original draft are called out inline with **[impl]**.
+
+> **[impl] §3.4 gate decision (Zach): PROCEED-BUT-NOTIFY.** Generated scripts
+> **auto-run** (hands-off) — there is **no human pre-approval gate** by default
+> (`approval` defaults to `auto`, not `review`). The safety trade is a **real
+> post-hoc notification** on every first run of a generated script: a
+> `monitor/script.first_run` event on the same wire every finding uses (→ manager
+> → the human's Slack), plus an observable record (the per-monitor trusted-state
+> sidecar's `notifications` log + a structured log line), plus a best-effort
+> direct Slack message when `script_cache.notify_channel` + `SLACK_BOT_TOKEN` are
+> configured. Because the pre-approval gate is removed, the **other** defense
+> layers are load-bearing and kept strict: static validator, runtime sandbox,
+> pinned trusted-hash + capability envelope, TOCTOU re-verify, cache
+> invalidation, one-agent-call-per-tick budget + cross-tick circuit breaker.
+> `review` and `off` remain available as opt-in policies.
+
+> **[impl] Trusted state lives in a per-monitor sidecar, not `monitor_state.json`.**
+> The scheduler rewrites `monitor_state.json` wholesale from an in-memory dict
+> every tick, so a check runner writing the same file would be clobbered (a race).
+> The content `sha256` + capability envelope + observability counters therefore
+> live in `.modastack/state/scripts/<name>.state.json`, co-located with the
+> script they protect. The §3.3 TOCTOU check and §3.4 envelope check read from
+> this sidecar (still "trusted state", just a dedicated file).
+
+> **[impl] Adversarial review unavailable.** Both codex (#479, 401 fleet-wide)
+> and aichat (no gateway configured) were down, so there was **no automated
+> red-team pass** on the security surface. Compensated with thorough validator /
+> sandbox / TOCTOU / breaker / notify unit tests (121 cases) + careful manual
+> self-review; flagged in the PR body.
 
 ---
 
