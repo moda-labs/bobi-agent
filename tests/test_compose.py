@@ -447,7 +447,7 @@ def test_synthetic_outside_org_overlay_composes(tmp_path):
     shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team-core")
     acme = proj / "agents" / "acme-eng-team"
     _write(acme / "agent.yaml",
-           'from: eng-team-core@1.0.0\nversion: "0.1.0"\n'
+           'from: eng-team-core@1.1.0\nversion: "0.1.0"\n'
            'services:\n  - {name: jira, required: true}\n'
            'build:\n  npm: [some-linter]\n')
     _write(acme / "roles" / "engineer" / "ROLE.md",
