@@ -39,7 +39,7 @@ EXPECTED_BOT_EVENTS = {
 EXPECTED_BOT_SCOPES = {
     "app_mentions:read", "channels:history", "channels:read", "chat:write",
     "files:read", "files:write", "groups:history", "im:history", "im:read",
-    "mpim:history", "users:read",
+    "im:write", "mpim:history", "users:read",
 }
 
 

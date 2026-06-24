@@ -29,6 +29,8 @@ oauth_config:
       - groups:history       # read + thread replies in private channels
       - im:history           # direct messages to the bot
       - im:read              # list DM conversations
+      - im:write             # open/start a DM — proactive messages to a user
+                             # (briefings, nudges, subscription login link)
       - mpim:history         # multi-person DMs
       - users:read           # resolve user names
 settings:
