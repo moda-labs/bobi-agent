@@ -97,6 +97,22 @@ export function getSlackBotForApp(
 }
 
 /**
+ * Every bot id we own in this workspace, across ALL registered apps (+ legacy).
+ * The self-reply filter skips a message authored by ANY of these — not just the
+ * RECEIVING app's bot. When two of our apps share a channel, Slack delivers each
+ * app's events to BOTH apps' webhooks, so one bot's message arrives via the
+ * other bot's webhook (a different api_app_id); keying "self" to the receiving
+ * app alone let that message through and it looped.
+ */
+export function workspaceBotIds(ws: SlackWorkspaceRecord | null | undefined): Set<string> {
+	const ids = new Set<string>();
+	if (!ws) return ids;
+	if (ws.bots) for (const b of Object.values(ws.bots)) if (b.bot_id) ids.add(b.bot_id);
+	if (ws.bot_id) ids.add(ws.bot_id);
+	return ids;
+}
+
+/**
  * The signing secret to verify an inbound Slack webhook with: the authoring
  * app's per-app secret if registered, else the global fallback (legacy
  * single-app deployments). Keeps single-app working without a redeploy.
@@ -555,17 +571,18 @@ export async function handleSlackWebhook(
 	payload: Record<string, unknown>,
 ): Promise<HandlerResult> {
 	const teamId = (payload.team_id as string) || "";
-	const apiAppId = (payload.api_app_id as string) || "";
-	let selfBotId: string | undefined;
+	let selfBotIds: Set<string> | undefined;
 	if (teamId) {
 		const ws = await storage.getSlackWorkspace(teamId);
-		// Resolve THIS app's own bot id (keyed by api_app_id) so its messages —
-		// and only its own — are skipped. A second bot in the workspace no longer
-		// hides this one's id.
-		selfBotId = getSlackBotForApp(ws, apiAppId)?.bot_id;
+		// Skip messages authored by ANY of our bots in this workspace — not just
+		// the bot of the app that received this webhook. Two of our apps in one
+		// channel each receive the other's messages (with their own api_app_id),
+		// so a per-receiving-app "self" id let one bot's message loop in via the
+		// other's webhook.
+		selfBotIds = workspaceBotIds(ws);
 	}
 
-	const result = normalizeSlackWebhook(payload, selfBotId);
+	const result = normalizeSlackWebhook(payload, selfBotIds);
 
 	if (result.challenge !== undefined) {
 		return { status: 200, body: { challenge: result.challenge } };
