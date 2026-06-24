@@ -31,13 +31,17 @@ log = logging.getLogger(__name__)
 # Default rotation cap — absolute context-fill tokens, not a window fraction.
 DEFAULT_ROTATION_TOKEN_CAP = 275_000
 
-# Rotation robustness bounds (#454). An over-cap session MUST shed context, so
-# rotation can never hang on a slow flush or no-op-livelock on an unchanged
-# decision log. The flush turn is wrapped in a hard timeout; after a bounded
-# number of flush attempts we rotate unconditionally rather than re-injecting
-# flush prompts forever (each one only grows context further over-cap).
-ROTATION_FLUSH_TIMEOUT = 180.0
-ROTATION_MAX_FLUSH_ATTEMPTS = 3
+# Rotation reconnect bounds (#456, wedge mechanism #3). Rotation cycles the SDK
+# client: disconnect → rebuild prompt → connect → drain the connect turn. Both
+# the connect() and that first drain are network/subprocess work that can hang
+# indefinitely with no timeout — the actual 2026-06-23/24 director wedge. We
+# wrap the reconnect in a hard timeout, retry a bounded number of times, then
+# recover into an addressable connected client rather than a silent park. A
+# connect + single ack turn is lighter than the old flush turn, so a smaller
+# timeout suffices; these are tuning numbers, not load-bearing.
+ROTATION_RECONNECT_TIMEOUT = 120.0
+ROTATION_MAX_RECONNECT_ATTEMPTS = 3
+ROTATION_RECONNECT_BACKOFF = 2.0
 
 # Control sentinel for `modastack compact` (#433). Delivered as an inbox
 # message body; the run loop recognizes it, flags rotation, and never forwards
@@ -139,17 +143,12 @@ class Session:
         self._total_duration_ms = 0
         self._total_turns = 0
 
-        # Context rotation state (Steps 1-4, #273)
+        # Context rotation state (Steps 1-4, #273). Rotation now cycles the
+        # client directly (no decision-log flush — #456 removed it); the only
+        # rotation work is the bounded, recoverable reconnect (#456 mech #3).
         self._rotate_pending = False
-        # Manual `compact` bypasses the no-op-flush guard (rotate even if the
-        # decision log didn't change — the durable INDEX.md is already there).
-        self._rotate_force = False
         self._rotate_reason = "context_cap"
         self._rotation_count = 0
-        # Bounded flush attempts so over-cap rotation can't no-op-livelock (#454).
-        self._rotate_attempts = 0
-        self._flush_snapshot_mtime = 0.0
-        self._flush_snapshot_hash = ""
 
     def detect_state(self) -> str:
         return self._state
@@ -189,49 +188,57 @@ class Session:
     # Context rotation (Steps 1, 4 — #273)
     # -----------------------------------------------------------------
 
-    def _verify_flush(self) -> bool:
-        """Check that the decision log changed after a flush prompt.
+    def _rotation_options(self):
+        """Fresh-connect ClaudeAgentOptions for a rotation reconnect."""
+        from claude_agent_sdk import ClaudeAgentOptions
+        return ClaudeAgentOptions(
+            cwd=self.cwd,
+            permission_mode="bypassPermissions",
+            cli_path=get_cli_path(),
+            system_prompt=self._system_prompt,
+            **self._extra_options,
+        )
 
-        Returns True if INDEX.md was modified (mtime or content hash
-        changed), False if the flush was a no-op.
+    async def _safe_disconnect(self, client) -> None:
+        """Disconnect a client, swallowing errors — used to discard a hung or
+        partially-connected client so a stalled reconnect can't leak a `claude`
+        subprocess per retry."""
+        try:
+            await client.disconnect()
+        except Exception:
+            log.debug("Disconnect raised for '%s' during rotation", self.name,
+                      exc_info=True)
+
+    async def _attempt_reconnect(self) -> None:
+        """One bounded reconnect attempt: fresh client → connect → drain the
+        connect turn, all under ROTATION_RECONNECT_TIMEOUT.
+
+        Raises asyncio.TimeoutError (the hang the wedge was made of) or a connect
+        exception on failure; on either, the freshly-built client is discarded
+        before the exception propagates so the caller can retry cleanly.
         """
-        try:
-            from modastack import paths
-            from modastack.memory import memory_dir_for_session
-            index = memory_dir_for_session(paths.state_dir(), self.name) / "INDEX.md"
-            if not index.is_file():
-                return False
-            new_mtime = index.stat().st_mtime
-            new_hash = hashlib.md5(index.read_bytes()).hexdigest()
-            changed = (
-                new_mtime != self._flush_snapshot_mtime
-                or new_hash != self._flush_snapshot_hash
-            )
-            if not changed:
-                log.warning(
-                    "Flush no-op for '%s' — INDEX.md unchanged, skipping rotation",
-                    self.name,
-                )
-            return changed
-        except Exception:
-            log.debug("Flush verification failed for '%s'", self.name, exc_info=True)
-            return False
+        from claude_agent_sdk import ClaudeSDKClient
 
-    def _snapshot_index(self) -> None:
-        """Capture INDEX.md mtime + content hash before injecting flush prompt."""
+        client = ClaudeSDKClient(self._rotation_options())
+
+        async def _connect_and_drain() -> None:
+            await client.connect()
+            # Publish the client only after connect() returns so a hung connect
+            # never leaves a half-live client addressable; _drain_turn reads it.
+            self._client = client
+            await self._drain_turn()
+
         try:
-            from modastack import paths
-            from modastack.memory import memory_dir_for_session
-            index = memory_dir_for_session(paths.state_dir(), self.name) / "INDEX.md"
-            if index.is_file():
-                self._flush_snapshot_mtime = index.stat().st_mtime
-                self._flush_snapshot_hash = hashlib.md5(index.read_bytes()).hexdigest()
-            else:
-                self._flush_snapshot_mtime = 0.0
-                self._flush_snapshot_hash = ""
-        except Exception:
-            self._flush_snapshot_mtime = 0.0
-            self._flush_snapshot_hash = ""
+            await asyncio.wait_for(
+                _connect_and_drain(), timeout=ROTATION_RECONNECT_TIMEOUT
+            )
+        except BaseException:
+            # wait_for cancels the hung connect()/receive_response() await, but
+            # the partially-connected client + its subprocess must be dropped.
+            await self._safe_disconnect(client)
+            if self._client is client:
+                self._client = None
+            raise
 
     async def _rotate(self) -> None:
         """Lightweight client cycle — keep inbox alive, only swap the SDK client.
@@ -239,39 +246,59 @@ class Session:
         Does NOT call stop()/start() which would tear down the inbox and the
         event subscription (WS client + drain thread). Only cycles self._client,
         so the session stays addressable across a rotation.
-        """
-        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
+        The reconnect is bounded and recoverable (#456 mechanism #3): the
+        connect + connect-turn drain are wrapped in a timeout and retried a
+        bounded number of times; if every attempt fails the session recovers
+        into an addressable connected client rather than hanging forever or
+        dropping into the terminal "error" state that would deafen it (#443).
+        Raises only if even that final recovery fails — loudly, never silently.
+        """
         log.info("Rotating session '%s' (rotation #%d)", self.name, self._rotation_count + 1)
 
-        # Clear saved session ID so next connect is fresh
+        # Clear saved session ID so the reconnect is fresh.
         save_session_id(self.name, "")
 
-        # Disconnect old client
+        # Disconnect old client.
         if self._client:
-            await self._client.disconnect()
+            await self._safe_disconnect(self._client)
             self._client = None
 
-        # Rebuild system prompt — reloads the decision log
+        # Rebuild system prompt — reloads the team policy (#456).
         self._system_prompt = self._rebuild_system_prompt()
 
-        # Create fresh client with resume=None
-        options = ClaudeAgentOptions(
-            cwd=self.cwd,
-            permission_mode="bypassPermissions",
-            cli_path=get_cli_path(),
-            system_prompt=self._system_prompt,
-            **self._extra_options,
-        )
-        self._client = ClaudeSDKClient(options)
-        await self._client.connect()
+        # Bounded, recoverable reconnect.
+        last_err: BaseException | None = None
+        reconnected = False
+        for attempt in range(1, ROTATION_MAX_RECONNECT_ATTEMPTS + 1):
+            try:
+                await self._attempt_reconnect()
+                reconnected = True
+                break
+            except asyncio.TimeoutError as e:
+                last_err = e
+                log.error(
+                    "Rotation reconnect for '%s' timed out after %.0fs "
+                    "(attempt %d/%d)",
+                    self.name, ROTATION_RECONNECT_TIMEOUT, attempt,
+                    ROTATION_MAX_RECONNECT_ATTEMPTS,
+                )
+            except Exception as e:
+                last_err = e
+                log.error(
+                    "Rotation reconnect for '%s' failed (attempt %d/%d): %s",
+                    self.name, attempt, ROTATION_MAX_RECONNECT_ATTEMPTS, e,
+                )
+            if attempt < ROTATION_MAX_RECONNECT_ATTEMPTS:
+                await asyncio.sleep(ROTATION_RECONNECT_BACKOFF * attempt)
 
-        # Drain the connect turn (system prompt acknowledgment)
-        await self._drain_turn()
+        if not reconnected:
+            # Exhausted — recover into an addressable state (or surface
+            # terminally if even that fails). Raises on terminal failure.
+            await self._recover_rotation_failure(last_err)
 
         self._rotate_pending = False
         reason = self._rotate_reason
-        self._rotate_force = False
         self._rotate_reason = "context_cap"
         self._rotation_count += 1
 
@@ -306,22 +333,96 @@ class Session:
         registry.update(self.name, status="idle", rotation_count=self._rotation_count)
         log.info("Session '%s' rotated successfully (count=%d)", self.name, self._rotation_count)
 
-    def _rebuild_system_prompt(self) -> dict:
-        """Rebuild the system prompt, reloading the decision log."""
+    async def _recover_rotation_failure(self, err: BaseException | None) -> None:
+        """Recover after the bounded reconnect exhausted its attempts (#456 #3).
+
+        Fails loudly (log.error + a session.rotation_failed activity/event) and
+        then re-establishes a connected client via a fresh connect so the
+        session is addressable again — NOT left in the disconnected state
+        _rotate() created (self._client is None) and NOT dropped into the
+        terminal "error" state that deafens the session (#443). Only if even
+        this final fresh connect fails does the session surface terminally —
+        loudly, never a silent hang.
+        """
+        from claude_agent_sdk import ClaudeSDKClient
+
+        log.error(
+            "Rotation reconnect exhausted for '%s' after %d attempts: %s — "
+            "attempting fresh-connect recovery",
+            self.name, ROTATION_MAX_RECONNECT_ATTEMPTS, err,
+        )
         try:
-            from modastack.subagent import _load_memory_for_session
-            memory_prompt = _load_memory_for_session(self.name)
-            if memory_prompt and isinstance(self._system_prompt, dict):
+            log_activity(
+                "rotation_failed",
+                {"attempts": ROTATION_MAX_RECONNECT_ATTEMPTS, "error": str(err)},
+                session=self.name,
+            )
+            from modastack.events.client import _log_event
+            _log_event(
+                {
+                    "type": "session.rotation_failed",
+                    "source": "modastack",
+                    "payload": {
+                        "session": self.name,
+                        "attempts": ROTATION_MAX_RECONNECT_ATTEMPTS,
+                        "error": str(err),
+                    },
+                },
+                session_id=self.name,
+            )
+        except Exception:
+            pass
+
+        # Final recovery: a fresh connected client (resume=None — the saved id
+        # was already cleared at the top of _rotate). No connect-prompt, so this
+        # connect cannot hang on receive_response; bound it anyway.
+        client = ClaudeSDKClient(self._rotation_options())
+        try:
+            await asyncio.wait_for(
+                client.connect(), timeout=ROTATION_RECONNECT_TIMEOUT
+            )
+        except BaseException as e2:
+            await self._safe_disconnect(client)
+            log.error(
+                "Final rotation recovery failed for '%s': %s — surfacing terminally",
+                self.name, e2,
+            )
+            self._client = None
+            self._set_state("error")
+            get_registry().update(self.name, status="error")
+            raise
+        self._client = client
+        self._set_state("waiting_input")
+        get_registry().update(self.name, status="idle")
+        log.warning(
+            "Session '%s' recovered to a fresh connected client after a failed "
+            "rotation — addressable, not wedged", self.name,
+        )
+
+    def _rebuild_system_prompt(self) -> dict:
+        """Rebuild the system prompt, reloading the team policy (#456).
+
+        A rotated session re-reads policy.md here — the passive pickup path for
+        a curator update (no inbox push needed for a routine distillation).
+        """
+        try:
+            from modastack.subagent import _load_policy_prompt
+            policy_prompt = _load_policy_prompt()
+            if isinstance(self._system_prompt, dict):
                 base_append = self._system_prompt.get("append", "")
-                # Strip old decision log section if present
-                if "## Decision Log" in base_append:
-                    base_append = base_append.split("## Decision Log")[0].rstrip()
-                new_append = base_append
-                if memory_prompt:
-                    new_append = f"{base_append}\n\n{memory_prompt}" if base_append else memory_prompt
+                # Strip a previously-injected policy section so it isn't doubled
+                # across rotations.
+                if "## Team Policy" in base_append:
+                    base_append = base_append.split("## Team Policy")[0].rstrip()
+                if policy_prompt:
+                    new_append = (
+                        f"{base_append}\n\n{policy_prompt}" if base_append else policy_prompt
+                    )
+                else:
+                    new_append = base_append
                 return {**self._system_prompt, "append": new_append}
         except Exception:
-            log.debug("Failed to reload memory for '%s'", self.name, exc_info=True)
+            log.debug("Failed to reload policy for '%s'", self.name, exc_info=True)
         return self._system_prompt
 
     async def _drain_turn(self) -> str:
@@ -430,13 +531,12 @@ class Session:
                                 "rotation pending",
                                 self.name, context_tokens, self._rotation_token_cap,
                             )
+                            # Over-cap is non-negotiable: the session MUST shed
+                            # context. With the decision-log flush removed (#456),
+                            # a pending rotation now just cycles the client at the
+                            # next idle — nothing to no-op-livelock on.
                             self._rotate_pending = True
                             self._rotate_reason = "context_cap"
-                            # Over-cap is non-negotiable: the session MUST shed
-                            # context. Force-compact so a no-op/unchanged
-                            # decision log can't block rotation (#454 wedge) —
-                            # same bypass `modastack compact` uses.
-                            self._rotate_force = True
         except Exception as e:
             log.error(f"Drain failed for '{self.name}': {e}")
             self._set_state("error")
@@ -485,7 +585,6 @@ class Session:
         if msg.text == COMPACT_SENTINEL:
             log.info("Session '%s' received compact request — rotation pending", self.name)
             self._rotate_pending = True
-            self._rotate_force = True
             self._rotate_reason = "manual"
             if msg.wait:
                 self.inbox.respond(msg, "compaction requested; rotating at next idle")
@@ -542,83 +641,22 @@ class Session:
             if msg is None:
                 if self._keep_alive and self._keep_alive.is_set():
                     break
-                # Step 3: Act at idle — rotate when pending and queue is empty
+                # Act at idle — rotate when pending and the queue is empty. The
+                # decision-log flush is gone (#456); rotation is now just the
+                # bounded, recoverable client cycle in _rotate().
                 if self._rotate_pending and self.inbox._queue.empty():
-                    await self._do_flush_and_rotate()
+                    try:
+                        await self._rotate()
+                    except Exception as e:
+                        # _rotate only raises when even fresh-connect recovery
+                        # failed (it already surfaced the error + set state).
+                        # Clear the pending flag so the idle loop doesn't spin.
+                        log.error("Rotation failed terminally for '%s': %s",
+                                  self.name, e, exc_info=True)
+                        self._rotate_pending = False
                 continue
 
             await self._process_message(msg)
-
-    async def _do_flush_and_rotate(self) -> None:
-        """Flush the decision log, then rotate.
-
-        Over-cap rotation is non-negotiable: the session is past the context
-        cap and MUST shed context, so a no-op or failing flush can never block
-        it (the #454 wedge — auto-rotation logged "Flush no-op … skipping
-        rotation" and never self-healed). The flush is best-effort continuity;
-        rotation is mandatory. A hard flush timeout + a bounded attempt budget
-        guarantee forward progress — no hang, no no-op-livelock.
-        """
-        self._rotate_attempts += 1
-        forced = self._rotate_force
-        log.info(
-            "Session '%s' idle with rotation pending (attempt %d, force=%s) — "
-            "flushing decision log",
-            self.name, self._rotate_attempts, forced,
-        )
-
-        # Step 4: Snapshot INDEX.md before flush
-        self._snapshot_index()
-
-        # Inject flush prompt to ask the agent to save its decision log
-        flush_prompt = (
-            "SYSTEM: Context rotation imminent. Your conversation is approaching "
-            "the context limit. Before rotation, update your decision log at "
-            ".modastack/state/memory/{session}/ — write any important decisions, "
-            "context, or operational state to INDEX.md that you'll need after "
-            "restart. Be thorough: this is your only continuity mechanism."
-        ).format(session=self.name)
-
-        # Bound the flush turn so a hung/slow flush can't deadlock rotation.
-        flush_ok = False
-        try:
-            await asyncio.wait_for(
-                self._run_flush_turn(flush_prompt), timeout=ROTATION_FLUSH_TIMEOUT
-            )
-            flush_ok = True
-        except asyncio.TimeoutError:
-            log.warning(
-                "Flush turn timed out for '%s' after %.0fs — rotating anyway",
-                self.name, ROTATION_FLUSH_TIMEOUT,
-            )
-        except Exception as e:
-            log.warning("Flush prompt failed for '%s': %s", self.name, e)
-
-        # Decide whether to rotate. A verified flush always rotates. A no-op,
-        # timed-out, or failed flush rotates anyway when the rotation is forced
-        # (over-cap or manual `compact`), or once the bounded attempt budget is
-        # spent — we never re-inject flush prompts forever (each only grows
-        # context further over-cap). Only a transient failure on a *non-forced*
-        # rotation within budget defers to the next idle cycle.
-        verified = flush_ok and self._verify_flush()
-        must_rotate = (
-            verified or forced or self._rotate_attempts >= ROTATION_MAX_FLUSH_ATTEMPTS
-        )
-        if not must_rotate:
-            return
-
-        try:
-            await self._rotate()
-        except Exception as e:
-            log.error("Rotation failed for '%s': %s", self.name, e, exc_info=True)
-            self._rotate_pending = False  # Don't retry indefinitely
-        finally:
-            self._rotate_attempts = 0
-
-    async def _run_flush_turn(self, flush_prompt: str) -> None:
-        """Inject the flush prompt and drain its turn (wrapped by a timeout)."""
-        await self._client.query(flush_prompt)
-        await self._drain_turn()
 
     async def _run(self, startup_prompt: str | None = None) -> None:
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient

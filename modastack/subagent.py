@@ -435,9 +435,9 @@ def run_phase_blocking(
         f"You are a {label} agent working on issue #{run_key}, "
         f"phase: {phase}. Follow the skill file instructions exactly."
     )
-    memory_prompt = _load_memory_for_session(name)
-    if memory_prompt:
-        append_text += "\n\n" + memory_prompt
+    policy_prompt = _load_policy_prompt()
+    if policy_prompt:
+        append_text += "\n\n" + policy_prompt
 
     # Pass through any user-declared MCP servers from config so workflow
     # step agents also have access to them.
@@ -496,19 +496,20 @@ def _resolve_project_name(cwd: str) -> str:
     return Path(cwd).name or cwd
 
 
-def _load_memory_for_session(session_name: str) -> str:
-    """Load the decision log for a session, returning formatted prompt text.
+def _load_policy_prompt() -> str:
+    """Load the team policy.md, returning read-only formatted prompt text (#456).
 
-    Returns empty string if no memory exists. Never raises — memory loading
-    is best-effort and must not block session startup.
+    Team-scoped — the same curated policy for every session. Returns empty
+    string when policy.md is absent. Never raises — policy loading is
+    best-effort and must not block session startup.
     """
     try:
         from modastack import paths
-        from modastack.memory import load_memory, format_memory_prompt
-        content = load_memory(paths.state_dir(), session_name)
-        return format_memory_prompt(content)
+        from modastack.memory import load_policy, format_policy_prompt
+        content = load_policy(paths.state_path())
+        return format_policy_prompt(content)
     except Exception:
-        log.debug("Failed to load memory for %s", session_name, exc_info=True)
+        log.debug("Failed to load policy", exc_info=True)
         return ""
 
 
@@ -564,13 +565,13 @@ def spawn_adhoc(
     if role_prompt:
         append_parts.append(role_prompt)
 
-    # Inject decision log (memory) so the session has continuity.
+    # Inject the team policy (#456) so the session has continuity.
     # Skip if the task prompt already contains it (e.g. entry-point agent
-    # where build_startup_prompt() already injected memory).
-    if "## Decision Log" not in task:
-        memory_prompt = _load_memory_for_session(run_key)
-        if memory_prompt:
-            append_parts.append(memory_prompt)
+    # where build_startup_prompt() already injected the policy).
+    if "## Team Policy" not in task:
+        policy_prompt = _load_policy_prompt()
+        if policy_prompt:
+            append_parts.append(policy_prompt)
 
     # Resolve MCP servers: caller-supplied override, else config-declared.
     # Done here so all spawn paths (CLI, workflow, subagent) go through one
