@@ -396,6 +396,11 @@ def _flatten_if_chained(project_path: Path, team_dir: Path) -> Path:
     if staged.exists():
         shutil.rmtree(staged)
     compose.compose(chain, staged)
+    # compose() doesn't freeze workspace/ (it's the seed-if-absent surface for a
+    # local install), but the flat tarball IS what reaches the instance — so carry
+    # the chain's merged workspace (leaf-wins) so an overlay's per-principal
+    # assistant-context.md actually ships.
+    compose.merge_workspace(chain, staged)
     # Preserve the leaf's directory name so the app/tarball naming is unchanged.
     cfg = compose._read_agent_yaml(staged)
     cfg.setdefault("agent", team_dir.name)

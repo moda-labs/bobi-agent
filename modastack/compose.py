@@ -331,6 +331,30 @@ def compose(chain: list[ResolvedLayer], dest: Path) -> Provenance:
     return prov
 
 
+def merge_workspace(chain: list[ResolvedLayer], dest: Path) -> None:
+    """Merge each layer's `workspace/` (base→leaf, LEAF-wins) into `dest/workspace`.
+
+    Deliberately NOT part of `compose()` — for a LOCAL install, workspace is the
+    seed-if-absent surface (user-owned, never frozen; see `compose()` and
+    `test_workspace_not_frozen`). But the DEPLOY flatten has to carry the overlay's
+    per-principal workspace (e.g. a personal-assistant overlay's `assistant-context.md`)
+    so it rides the single flat tarball to the instance — the box only ever sees the
+    flattened team and can't resolve the chain. Later layers overwrite earlier ones,
+    so the leaf (overlay) wins for a shared filename while base-only files still land.
+    """
+    for layer in chain:  # base → leaf; a later layer overwrites → leaf wins
+        src = layer.dir / "workspace"
+        if not src.is_dir():
+            continue
+        for f in sorted(src.rglob("*")):
+            target = dest / "workspace" / f.relative_to(src)
+            if f.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, target)
+
+
 # --- prose rule (§2) ---------------------------------------------------------
 
 

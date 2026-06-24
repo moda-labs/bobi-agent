@@ -538,9 +538,11 @@ def _install_pack(pack_dir: Path, project_path: Path,
 
     prov = _compose.compose(chain, dest)
 
-    # Seed workspace from every layer, base → leaf (first-writer-wins), so a base
-    # team's templates seed unless the overlay supplies its own.
-    for layer in chain:
+    # Seed workspace leaf → base (seed-if-absent), so an overlay's own template
+    # wins and the base only fills files the overlay doesn't supply. (Mirrors the
+    # deploy flatten's leaf-wins merge_workspace; user edits already on disk are
+    # never overwritten regardless of order.)
+    for layer in reversed(chain):
         _seed_workspace(layer.dir, project_path)
 
     # The leaf's directory name is the installed agent name (the team a user
