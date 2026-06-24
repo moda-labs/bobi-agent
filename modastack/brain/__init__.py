@@ -14,6 +14,8 @@ kind to its factory; Phase 1 ships only ``claude``.
 
 from __future__ import annotations
 
+import os
+
 from modastack.brain.base import (
     AssistantText,
     BrainCost,
@@ -34,15 +36,32 @@ _BRAINS: dict[str, BrainFactory] = {
 
 DEFAULT_BRAIN = "claude"
 
+# Env var carrying the team's configured brain kind. Set once at the agent
+# process entry from ``agent.yaml`` ``brain.kind`` (see ``set_process_brain``)
+# so it propagates to subprocess agents — the same pattern as ``MODASTACK_AUTH``.
+BRAIN_ENV = "MODASTACK_BRAIN"
+
+
+def set_process_brain(kind: str | None) -> None:
+    """Record the team's brain kind for this process tree (and its children).
+
+    A no-op for an empty/None kind (keeps the framework default). An explicit
+    ``MODASTACK_BRAIN`` already in the environment is left untouched so an
+    operator override wins over agent.yaml.
+    """
+    if kind and not os.environ.get(BRAIN_ENV):
+        os.environ[BRAIN_ENV] = kind
+
 
 def get_brain(kind: str | None = None) -> BrainFactory:
-    """Resolve a brain kind to its factory (defaults to ``claude``).
+    """Resolve a brain kind to its factory.
 
-    Raises ``ValueError`` for an unknown kind so a typo in ``agent.yaml``
-    ``brain.kind`` fails loud at session construction rather than silently
-    falling back.
+    Precedence: explicit ``kind`` arg → ``MODASTACK_BRAIN`` env (the team's
+    configured brain) → ``claude``. Raises ``ValueError`` for an unknown kind so
+    a typo in ``agent.yaml`` ``brain.kind`` fails loud at session construction
+    rather than silently falling back.
     """
-    name = kind or DEFAULT_BRAIN
+    name = kind or os.environ.get(BRAIN_ENV) or DEFAULT_BRAIN
     try:
         return _BRAINS[name]
     except KeyError:
@@ -63,5 +82,7 @@ __all__ = [
     "StreamDelta",
     "TurnResult",
     "DEFAULT_BRAIN",
+    "BRAIN_ENV",
     "get_brain",
+    "set_process_brain",
 ]

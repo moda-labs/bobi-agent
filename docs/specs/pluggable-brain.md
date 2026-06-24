@@ -283,6 +283,62 @@ than Grok-as-model).
 
 ---
 
+## 5b. Brain selection + headless subscription auth (landed 2026-06-24)
+
+**Brain selection in `agent.yaml`. ✅ DONE.** A team picks its brain with a
+top-level block:
+
+```yaml
+brain:
+  kind: codex        # claude (default) | codex | …
+  model: gpt-5-codex # optional override (parsed; threading deferred)
+```
+
+`Config` parses `brain` + exposes `brain_kind`. At the agent process entry
+(`cli._run_from_config`) `set_process_brain(cfg.brain_kind)` exports
+`MODASTACK_BRAIN`, which `get_brain()` reads (precedence: explicit arg →
+`MODASTACK_BRAIN` → `claude`) — so the choice propagates to in-process and
+subprocess agents with zero churn at the call sites, exactly like
+`MODASTACK_AUTH`. An unknown kind fails loud at session construction.
+
+**Codex subscription auth on a headless box. ✅ FEASIBLE + bootstrap core
+landed.** Verified empirically: `codex login --device-auth` prints a fixed
+device URL (`https://auth.openai.com/codex/device`) + a one-time code
+(`XXXX-XXXXX`) and then **polls** until the human authorizes — no code is pasted
+back (unlike Claude's flow). `~/.codex/auth.json` carries a `refresh_token`, so
+it self-renews — a once-per-machine ceremony like Claude (§6.1).
+
+`auth_bootstrap.py` is now **brain-aware** (a per-kind `SubscriptionLogin` spec:
+login command, credential path, the API key that would shadow OAuth, and the
+flow shape). Two flows:
+- **Claude — `paste_back`:** scrape URL → post to Slack → human pastes the code
+  back over the event bus → write to the pty. (unchanged)
+- **Codex — `device_poll`:** scrape URL **and** code → post both to Slack → wait
+  for the CLI to poll-authorize → verify `~/.codex/auth.json`.
+
+Driven by `MODASTACK_BRAIN`/`brain.kind`; credential path, shadow-key guard
+(`OPENAI_API_KEY` for codex), and the login CLI all follow the brain. Unit-tested
+(`tests/test_auth_bootstrap.py`: codex credential path, URL+code scrape, the full
+device-poll bootstrap, and the `OPENAI_API_KEY`-shadow refusal); the Claude path
+is byte-for-byte preserved.
+
+**Remaining deploy-side wiring (Phase 2, lands with `CodexBrain`).** Deliberately
+*not* done now — it edits live production infra (`deploy.py`, the Fly fleet, the
+#385 reconcile) and can't be e2e-tested without a real ChatGPT login on a box, so
+it should land + be tested alongside the consuming brain, not speculatively:
+1. `docker-entrypoint.sh`: brain-aware credential dir (`/data/codex` ↔ `~/.codex`
+   symlink), the `auth.json` first-boot check, and the `OPENAI_API_KEY`-absence
+   guard (today all hardcoded to Claude/`CLAUDE_CONFIG_DIR`/`.credentials.json`).
+2. `deploy.py`: resolve the team's `brain.kind`; make the api_key *required* key
+   and the subscription *forbidden* key the brain's (`OPENAI_API_KEY` vs
+   `ANTHROPIC_API_KEY`); export `MODASTACK_BRAIN` into the container env so the
+   entrypoint can branch.
+3. (Alternative to the device-flow for codex: provision `~/.codex/auth.json`
+   directly as a volume file — the refresh token keeps it alive — if an
+   interactive Slack ceremony is unwanted.)
+
+---
+
 ## 6. Open questions
 
 1. **Manager loop for non-persistent brains.** Is a cold-start-per-turn manager

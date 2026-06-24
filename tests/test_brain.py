@@ -6,6 +6,8 @@ normalization: SDK ``AssistantMessage``/``ResultMessage`` → normalized
 deferred-tool translation the call sites rely on.
 """
 
+import os
+
 import pytest
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
@@ -37,6 +39,53 @@ def test_explicit_claude_kind():
 def test_unknown_brain_kind_fails_loud():
     with pytest.raises(ValueError, match="unknown brain kind"):
         get_brain("gpt-9")
+
+
+def test_get_brain_resolves_from_env(monkeypatch):
+    """An explicit kind wins; otherwise MODASTACK_BRAIN; otherwise the default."""
+    from modastack.brain import BRAIN_ENV
+
+    monkeypatch.setenv(BRAIN_ENV, "claude")
+    assert get_brain().name == "claude"          # env supplies it
+    assert get_brain("claude").name == "claude"  # explicit arg also fine
+    monkeypatch.delenv(BRAIN_ENV, raising=False)
+    assert get_brain().name == "claude"          # falls back to DEFAULT_BRAIN
+
+
+def test_set_process_brain():
+    from modastack.brain import BRAIN_ENV, set_process_brain
+
+    # set_process_brain mutates os.environ directly (so it propagates to child
+    # processes), so monkeypatch can't track it — save/restore explicitly.
+    saved = os.environ.pop(BRAIN_ENV, None)
+    try:
+        set_process_brain("")          # empty → no-op (keep framework default)
+        assert BRAIN_ENV not in os.environ
+        set_process_brain("codex")     # sets it
+        assert os.environ[BRAIN_ENV] == "codex"
+        set_process_brain("claude")    # an already-set env is NOT overridden
+        assert os.environ[BRAIN_ENV] == "codex"
+    finally:
+        if saved is None:
+            os.environ.pop(BRAIN_ENV, None)
+        else:
+            os.environ[BRAIN_ENV] = saved
+
+
+def test_config_parses_brain(tmp_path):
+    """agent.yaml `brain:` round-trips into Config + the brain_kind helper."""
+    from modastack.config import Config
+
+    (tmp_path / ".modastack").mkdir()
+    (tmp_path / ".modastack" / "agent.yaml").write_text(
+        "agent: t\nbrain:\n  kind: codex\n  model: gpt-5-codex\n"
+    )
+    cfg = Config.load(tmp_path)
+    assert cfg.brain == {"kind": "codex", "model": "gpt-5-codex"}
+    assert cfg.brain_kind == "codex"
+    # Absent brain → empty + the framework default downstream.
+    (tmp_path / ".modastack" / "agent.yaml").write_text("agent: t\n")
+    assert Config.load(tmp_path).brain_kind == ""
 
 
 # --- ResultMessage → TurnResult normalization ------------------------------

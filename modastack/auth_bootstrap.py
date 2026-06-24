@@ -1,16 +1,22 @@
-"""Subscription-login bootstrap (containerized-23 / #343).
+"""Subscription-login bootstrap (containerized-23 / #343; brain-aware in #485).
 
 At container first boot in subscription auth mode with no credentials on the
-volume, drive ``claude auth login --claudeai`` under a pty: scrape the OAuth
-URL, post it to a private Slack channel via the bot token already in env, then
-wait for the human to paste the auth code back — which arrives as a Slack
-message event over the event bus — and write it into the pty. Refresh-token
-rotation makes this a once-per-machine ceremony (CONTAINERIZED_INSTANCES.md
-§6.1); the manual fallback is ``fly ssh console`` + ``claude auth login``.
+volume, drive the brain's login CLI under a pty, scrape the sign-in URL, post it
+to a private Slack channel via the bot token already in env, and land the OAuth
+credentials on the volume. Two flow shapes, picked per brain:
 
-The live round-trip needs a real Worker + Slack and is exercised in the
-deployed environment (alongside C10/C12). The mechanism here is unit-tested
-with the pty, the Slack post, and the event source faked — see
+- **Claude** (``claude auth login --claudeai``, *paste-back*): scrape the URL,
+  post it, wait for the human to paste the auth code back — which arrives as a
+  Slack message event over the event bus — and write it into the pty.
+- **Codex** (``codex login --device-auth``, *device-poll*): scrape the sign-in
+  URL **and** the one-time code, post both, then just wait — the CLI polls the
+  token endpoint until the human authorizes; nothing is pasted back.
+
+Refresh-token rotation makes this a once-per-machine ceremony
+(CONTAINERIZED_INSTANCES.md §6.1); the manual fallback is ``fly ssh console`` +
+the brain's login command. The live round-trip needs a real Worker + Slack and
+is exercised in the deployed environment; the mechanism here is unit-tested with
+the pty, the Slack post, and the event source faked — see
 tests/test_auth_bootstrap.py.
 """
 from __future__ import annotations
@@ -21,16 +27,14 @@ import re
 import select
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
+from modastack.brain import BRAIN_ENV, set_process_brain
 from modastack.config import Config
 from modastack.slack import post_slack_message
 
 log = logging.getLogger(__name__)
-
-# The login URL claude prints, e.g.
-# https://claude.com/cai/oauth/authorize?code=true&client_id=...
-_URL_RE = re.compile(r"https://\S+/oauth/authorize\S+")
 
 # Env var naming the private Slack channel to post the login URL into. A
 # private channel is a hard requirement (§6.1, C23): the code is single-use but
@@ -38,10 +42,52 @@ _URL_RE = re.compile(r"https://\S+/oauth/authorize\S+")
 LOGIN_CHANNEL_ENV = "MODASTACK_LOGIN_CHANNEL"
 
 
+@dataclass(frozen=True)
+class SubscriptionLogin:
+    """How one brain performs an interactive subscription login on a headless box."""
+
+    kind: str
+    login_cmd: tuple[str, ...]       # the CLI that drives the OAuth flow
+    creds_relpath: tuple[str, ...]   # OAuth credential file, relative to $HOME
+    shadow_env: str                  # the API key that would silently outrank subscription auth
+    flow: str                        # "paste_back" (claude) | "device_poll" (codex)
+    url_re: re.Pattern               # scrape the sign-in URL from pty output
+    code_re: "re.Pattern | None" = None  # device_poll: also scrape the one-time code
+
+
+_SPECS: dict[str, SubscriptionLogin] = {
+    "claude": SubscriptionLogin(
+        kind="claude",
+        login_cmd=("claude", "auth", "login", "--claudeai"),
+        creds_relpath=(".claude", ".credentials.json"),
+        shadow_env="ANTHROPIC_API_KEY",
+        flow="paste_back",
+        # e.g. https://claude.com/cai/oauth/authorize?code=true&client_id=...
+        url_re=re.compile(r"https://\S+/oauth/authorize\S+"),
+    ),
+    "codex": SubscriptionLogin(
+        kind="codex",
+        login_cmd=("codex", "login", "--device-auth"),
+        creds_relpath=(".codex", "auth.json"),
+        shadow_env="OPENAI_API_KEY",
+        flow="device_poll",
+        # Codex prints a fixed device URL + a one-time code "XXXX-XXXXX".
+        url_re=re.compile(r"https://auth\.openai\.com/codex/device\S*"),
+        code_re=re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{5})\b"),
+    ),
+}
+
+
+def _active_spec() -> SubscriptionLogin:
+    """The login spec for this process's brain (``MODASTACK_BRAIN``; default claude)."""
+    kind = os.environ.get(BRAIN_ENV) or "claude"
+    return _SPECS.get(kind, _SPECS["claude"])
+
+
 def credentials_path(home: Path | None = None) -> Path:
-    """Path to the Claude subscription OAuth credentials on the volume."""
+    """Path to the active brain's subscription OAuth credentials on the volume."""
     base = home or Path(os.environ.get("HOME", str(Path.home())))
-    return Path(base) / ".claude" / ".credentials.json"
+    return Path(base, *_active_spec().creds_relpath)
 
 
 def credentials_exist(home: Path | None = None) -> bool:
@@ -58,17 +104,18 @@ def needs_bootstrap(home: Path | None = None) -> bool:
 # --- pty driver -------------------------------------------------------------
 
 def _spawn_login(home: Path) -> tuple[subprocess.Popen, int]:
-    """Spawn ``claude auth login --claudeai`` on a pty. Returns (proc, master_fd)."""
+    """Spawn the active brain's login CLI on a pty. Returns (proc, master_fd)."""
     import pty
 
+    spec = _active_spec()
     master, slave = pty.openpty()
     env = dict(os.environ)
     env["HOME"] = str(home)
-    # ANTHROPIC_API_KEY silently outranks subscription creds (§6.1) — never let
-    # it leak into the login subprocess.
-    env.pop("ANTHROPIC_API_KEY", None)
+    # The provider API key silently outranks subscription creds (§6.1) — never
+    # let it leak into the login subprocess.
+    env.pop(spec.shadow_env, None)
     proc = subprocess.Popen(
-        ["claude", "auth", "login", "--claudeai"],
+        list(spec.login_cmd),
         stdin=slave, stdout=slave, stderr=slave,
         env=env, start_new_session=True, close_fds=True,
     )
@@ -76,10 +123,15 @@ def _spawn_login(home: Path) -> tuple[subprocess.Popen, int]:
     return proc, master
 
 
-def _read_until_url(master_fd: int, timeout: float) -> str:
-    """Read pty output until the OAuth URL appears; return it."""
+def _scrape_login(
+    master_fd: int, timeout: float, spec: SubscriptionLogin
+) -> tuple[str, str | None]:
+    """Read pty output until the sign-in URL (and, for ``device_poll``, the
+    one-time code) appear. Returns ``(url, code|None)``."""
     deadline = time.monotonic() + timeout
     buf = ""
+    url: str | None = None
+    code: str | None = None
     while time.monotonic() < deadline:
         ready, _, _ = select.select([master_fd], [], [], 1.0)
         if master_fd not in ready:
@@ -91,10 +143,26 @@ def _read_until_url(master_fd: int, timeout: float) -> str:
         if not chunk:
             break
         buf += chunk.decode("utf-8", "replace")
-        match = _URL_RE.search(buf)
-        if match:
-            return match.group(0)
-    raise TimeoutError(f"did not see the claude login URL within {timeout:.0f}s")
+        if url is None:
+            m = spec.url_re.search(buf)
+            if m:
+                url = m.group(0)
+        if spec.code_re is not None and code is None:
+            m = spec.code_re.search(buf)
+            if m:
+                code = m.group(1)
+        if url is not None and (spec.code_re is None or code is not None):
+            return url, code
+    want = "URL/code" if spec.code_re is not None else "URL"
+    raise TimeoutError(
+        f"did not see the {spec.kind} login {want} within {timeout:.0f}s"
+    )
+
+
+def _read_until_url(master_fd: int, timeout: float) -> str:
+    """Read pty output until the active brain's sign-in URL appears; return it."""
+    url, _ = _scrape_login(master_fd, timeout, _active_spec())
+    return url
 
 
 def _write_line(master_fd: int, text: str) -> None:
@@ -192,16 +260,26 @@ def run_bootstrap(
     spawn_login=None,
     post_message=None,
     wait_for_code=None,
+    scrape_login=None,
 ) -> bool:
     """Drive the full subscription login. Returns True if credentials landed.
 
-    The pty spawn, Slack post, and event-bus wait are injectable so the
-    orchestration is unit-testable without a real claude binary, Slack, or
-    Worker.
+    The brain is resolved from ``agent.yaml`` ``brain.kind`` (so the right login
+    CLID/flow/credential path is used). The pty spawn, Slack post, code scrape,
+    and event-bus wait are injectable so the orchestration is unit-testable
+    without a real CLI, Slack, or Worker.
     """
     spawn_login = spawn_login or _spawn_login
     post_message = post_message or post_slack_message
     wait_for_code = wait_for_code or _wait_for_code
+    scrape_login = scrape_login or _scrape_login
+
+    # Resolve the team's brain so credential path, login command, and flow are
+    # all the right ones. Loading cfg here also seeds MODASTACK_BRAIN for the
+    # spec lookups below (and the spawned login subprocess).
+    cfg = Config.load(project_path)
+    set_process_brain(cfg.brain_kind)
+    spec = _active_spec()
 
     home = Path(os.environ.get("HOME", str(Path.home())))
     if credentials_exist(home):
@@ -209,13 +287,12 @@ def run_bootstrap(
                  credentials_path(home))
         return True
 
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    if os.environ.get(spec.shadow_env):
         raise RuntimeError(
-            "ANTHROPIC_API_KEY is set; it overrides subscription auth. "
+            f"{spec.shadow_env} is set; it overrides subscription auth. "
             "Unset it before subscription login."
         )
 
-    cfg = Config.load(project_path)
     token = cfg.credential("slack", "bot_token")
     if not token:
         raise RuntimeError(
@@ -228,22 +305,44 @@ def run_bootstrap(
             "login URL into."
         )
 
+    login_cmd_str = " ".join(spec.login_cmd)
     proc, master = spawn_login(home)
     try:
-        url = _read_until_url(master, url_timeout)
-        log.info("Captured login URL; posting to Slack channel %s.", channel)
-        post_message(
-            token, channel,
-            "🔐 *modastack subscription login*\n"
-            "Open this URL, authorize, then paste the code back "
-            "*in this channel*:\n" + url,
-        )
-        code = wait_for_code(project_path, channel, timeout)
-        _write_line(master, code)
-        try:
-            proc.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            log.warning("claude login did not exit within 60s after the code.")
+        if spec.flow == "paste_back":
+            # Claude: scrape the URL, post it, wait for the human to paste the
+            # code back over Slack, write it into the pty.
+            url = _read_until_url(master, url_timeout)
+            log.info("Captured login URL; posting to Slack channel %s.", channel)
+            post_message(
+                token, channel,
+                "🔐 *modastack subscription login*\n"
+                "Open this URL, authorize, then paste the code back "
+                "*in this channel*:\n" + url,
+            )
+            code = wait_for_code(project_path, channel, timeout)
+            _write_line(master, code)
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                log.warning("login did not exit within 60s after the code.")
+        else:
+            # Codex device-poll: scrape the URL **and** the one-time code, post
+            # both, then just wait — the CLI polls until the human authorizes;
+            # nothing is pasted back.
+            url, code = scrape_login(master, url_timeout, spec)
+            log.info("Captured device URL + code; posting to Slack channel %s.",
+                     channel)
+            post_message(
+                token, channel,
+                "🔐 *modastack subscription login*\n"
+                f"Open *{url}* and enter this one-time code:\n"
+                f"`{code}`\n_Waiting for you to authorize…_",
+            )
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                log.warning("device login was not authorized within %.0fs.",
+                            timeout)
     finally:
         try:
             os.close(master)
@@ -257,7 +356,7 @@ def run_bootstrap(
         "✅ Subscription login complete — starting up."
         if ok else
         "❌ Login failed — no credentials were written. Fallback: "
-        "`fly ssh console` then `claude auth login --claudeai`."
+        f"`fly ssh console` then `{login_cmd_str}`."
     )
     try:
         post_message(token, channel, result_msg)

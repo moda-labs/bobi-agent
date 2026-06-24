@@ -234,3 +234,89 @@ def test_run_bootstrap_requires_channel(slack_config, monkeypatch):
     monkeypatch.delenv(ab.LOGIN_CHANNEL_ENV, raising=False)
     with pytest.raises(RuntimeError, match="MODASTACK_LOGIN_CHANNEL"):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
+
+
+# --- Codex brain: device-auth (poll) flow (#485) ----------------------------
+
+def test_credentials_path_for_codex(tmp_path, monkeypatch):
+    from modastack.brain import BRAIN_ENV
+
+    monkeypatch.setenv(BRAIN_ENV, "codex")
+    assert ab.credentials_path(tmp_path) == tmp_path / ".codex" / "auth.json"
+
+
+def test_scrape_login_codex_gets_url_and_code():
+    """Drive _scrape_login against a pty fed the real `codex login --device-auth`
+    output — it must lift both the device URL and the one-time code."""
+    import pty
+
+    sample = (
+        "Follow these steps to sign in with ChatGPT using device code:\r\n"
+        "1. Open this link in your browser and sign in to your account\r\n"
+        "   https://auth.openai.com/codex/device\r\n"
+        "2. Enter this one-time code (expires in 15 minutes)\r\n"
+        "   5RAR-HF15T\r\n"
+    )
+    master, slave = pty.openpty()
+    os.write(slave, sample.encode())
+    try:
+        url, code = ab._scrape_login(master, 5, ab._SPECS["codex"])
+    finally:
+        os.close(slave)
+        os.close(master)
+    assert url == "https://auth.openai.com/codex/device"
+    assert code == "5RAR-HF15T"
+
+
+def test_run_bootstrap_codex_device_poll(slack_config, monkeypatch):
+    """Codex flow: scrape URL + code, post both, wait for the CLI to poll-auth,
+    then verify auth.json landed — no code is pasted back."""
+    from modastack.brain import BRAIN_ENV
+
+    monkeypatch.setenv(BRAIN_ENV, "codex")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    posts = []
+    creds = os.path.join(os.environ["HOME"], ".codex", "auth.json")
+
+    class FakeProc:
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            # The CLI polls, the human authorizes, codex writes auth.json.
+            os.makedirs(os.path.dirname(creds), exist_ok=True)
+            with open(creds, "w") as f:
+                f.write("{}")
+            return 0
+
+    def fake_spawn(home):
+        return FakeProc(), -1
+
+    def fake_scrape(fd, timeout, spec):
+        return "https://auth.openai.com/codex/device", "5RAR-HF15T"
+
+    def fake_post(token, channel, text):
+        posts.append((token, channel, text))
+
+    ok = ab.run_bootstrap(
+        slack_config,
+        spawn_login=fake_spawn,
+        post_message=fake_post,
+        scrape_login=fake_scrape,
+    )
+    assert ok is True
+    # The prompt post carries BOTH the device URL and the one-time code.
+    assert any("codex/device" in p[2] and "5RAR-HF15T" in p[2] for p in posts)
+    assert any("complete" in p[2] for p in posts)
+    assert all(p[1] == "C-LOGIN" for p in posts)
+
+
+def test_run_bootstrap_codex_refuses_with_openai_key(slack_config, monkeypatch):
+    """In codex subscription mode OPENAI_API_KEY would shadow the OAuth creds."""
+    from modastack.brain import BRAIN_ENV
+
+    monkeypatch.setenv(BRAIN_ENV, "codex")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-x")
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        ab.run_bootstrap(slack_config, spawn_login=lambda h: None)

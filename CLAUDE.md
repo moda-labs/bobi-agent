@@ -257,6 +257,8 @@ project is fully self-contained.
 
 - `.modastack/agent.yaml` — check-in-able. Declares agent, roles,
   services, entry point, monitors. Secrets use `${ENV_VAR}` references.
+  Optional `brain: {kind: claude|codex|…}` picks the agent brain (#485;
+  default claude).
 - `.modastack/.env` — gitignored. Holds `SLACK_BOT_TOKEN`,
   `LINEAR_API_KEY`, `VENN_API_KEY`, etc. Created by `modastack install`.
 - `.modastack/roles/`, `tools/`, `workflows/`, `monitors/` — installed

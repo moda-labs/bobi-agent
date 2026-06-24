@@ -204,6 +204,10 @@ def _run_from_config(project_path: Path, cfg: "Config",
     from modastack.sdk import set_project_root
     set_project_root(project_path)
 
+    # Select the team's agent brain (#485) for this process and its subagents.
+    from modastack.brain import set_process_brain
+    set_process_brain(cfg.brain_kind)
+
     agent_name = cfg.agent
     role = cfg.entry_point or "manager"
 
