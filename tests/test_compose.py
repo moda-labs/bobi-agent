@@ -458,6 +458,36 @@ def test_workspace_not_frozen(project):
     assert not (dest / "workspace").exists()  # never frozen into the image
 
 
+def test_merge_workspace_leaf_wins(project):
+    # compose() never freezes workspace (above), but the DEPLOY flatten must carry
+    # the overlay's per-principal workspace (e.g. assistant-context.md) to the
+    # instance. merge_workspace copies base→leaf with LEAF-wins.
+    _team(project, "core", 'version: "1.0.0"\n',
+          workspace={"assistant-context.md": "BASE", "shared.md": "base-only"})
+    leaf = _team(project, "over", 'from: core\nversion: "2.0.0"\n',
+                 workspace={"assistant-context.md": "OVERLAY"})
+    chain = compose.resolve_chain(leaf, project)
+    dest = project / "out"
+    compose.merge_workspace(chain, dest)
+    # leaf overrides the base for the same file ...
+    assert (dest / "workspace" / "assistant-context.md").read_text() == "OVERLAY"
+    # ... and a base-only file still lands.
+    assert (dest / "workspace" / "shared.md").read_text() == "base-only"
+
+
+def test_deploy_flatten_carries_overlay_workspace(project):
+    # The real deploy-path regression: a `from:` overlay's workspace must ride the
+    # flattened tarball, else the per-principal assistant-context.md never reaches
+    # the box (and the assistant runs context-less).
+    from modastack import deploy
+    _team(project, "pa", 'version: "1.0.0"\nentry_point: assistant\n',
+          workspace={"assistant-context.md": "TEMPLATE"})
+    _team(project, "zpa", 'from: pa\nversion: "1.0.0"\nentry_point: assistant\n',
+          workspace={"assistant-context.md": "ZACHS"})
+    flat = deploy.resolve_team_dir(project, "zpa")
+    assert (flat / "workspace" / "assistant-context.md").read_text() == "ZACHS"
+
+
 # --- publish guard (#446 §7.1) -----------------------------------------------
 
 

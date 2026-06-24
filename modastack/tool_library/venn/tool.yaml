@@ -1,6 +1,6 @@
 # Venn CLI — opt-in via `tool_library: [venn]` (#416, kind: cli).
 # Sourced from the inline venn `requires`/`build` that lived in
-# `agents/personal-assistant-core/agent.yaml`; collapsed here to one pinned
+# `agents/personal-assistant/agent.yaml`; collapsed here to one pinned
 # definition. The pin lives ONCE; compose's build de-dupe collapses repeats.
 kind: cli
 requires:

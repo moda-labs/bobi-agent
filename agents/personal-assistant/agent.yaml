@@ -1,0 +1,63 @@
+version: "1.0.0"
+
+# Entry point role for `modastack start`.
+entry_point: assistant
+chat: slack
+max_concurrent_agents: 3
+
+# Cloud event server URL in production (.env), empty for an
+# auto-started local server.
+event_server: ${MODASTACK_EVENT_SERVER}
+
+# The assistant talks to its principal on a chat surface (Slack by
+# default) and reaches the real world — email, calendar, tasks — through
+# Venn, which fronts the principal's connected Google account (Gmail +
+# Google Calendar to start). The chat surface is the only native event
+# source; everything Venn-backed is read on demand or polled by a monitor.
+#
+# Credentials go INLINE under each service (`credentials:`) — that is where
+# the framework reads them (Slack workspace auto-detection calls `auth.test`
+# with the service's bot_token).
+services:
+  - name: slack
+    events: true            # receive the principal's messages / @mentions / DMs
+    required: true          # core service — block startup if unconfigured
+    # Optional: comma-separated *channel* IDs to scope this assistant to
+    # specific channels (so one shared bot can host several teams). Optional
+    # default so a DM-first assistant can leave it unset.
+    #
+    # IMPORTANT — do NOT put a DM id here. DMs are delivered on the bare
+    # workspace topic (slack:<team>), never on a channel-scoped topic
+    # (slack:<team>:<channel>) — see event-server/src/adapters/slack.ts. Set
+    # `channels`, and the agent subscribes ONLY to the scoped topics and never
+    # receives DMs. A DM-first assistant must leave this EMPTY (whole-workspace
+    # subscription) and rely on the bot only being in its principal's DM.
+    channels: ${SLACK_CHANNELS:-}
+    credentials:
+      bot_token: ${SLACK_BOT_TOKEN}
+      # App signing secret — registered with the event server so it can verify
+      # THIS app's inbound events by api_app_id. Required when this assistant
+      # shares a workspace with another bot (e.g. the eng team): each app signs
+      # with its own secret, so a single global secret would 401 one of them.
+      signing_secret: ${SLACK_SIGNING_SECRET}
+
+# Email, calendar, and tasks are reached through the bundled `venn` CLI. One
+# API key fronts the principal's Google account (Gmail + Google Calendar +
+# Google Tasks); the category tool guides (tools/email.md, tools/calendar.md,
+# tools/tasks.md) carry the policy for each, and tools/venn.md the shared CLI
+# mechanics. Swapping Gmail for Outlook, or Google Tasks for Todoist, is a
+# connector change on venn.ai — the role prompt and category guides stay the
+# same.
+venn_api_key: ${VENN_API_KEY}
+
+# The `venn` CLI is an opt-in entry in the framework tool library (#416). One
+# line pulls in the whole bundle — the `doctor`/dispatch `requires:` check, the
+# pinned container `build:` bake (its own venv at /opt/venn-cli, symlinked onto
+# PATH), and the catalog's `tools/venn.md` guide — with the `venn-cli==0.2.0`
+# pin written ONCE in the catalog (modastack/tool_library/venn/tool.yaml).
+#
+# This team's own tools/venn.md wins over the catalog guide (compose is
+# local-first for guides), so the PA-specific policy there — the reads-vs-writes
+# autonomy gate, fail-closed behavior, the category-guide references — is kept.
+tool_library:
+  - venn

@@ -396,6 +396,11 @@ def _flatten_if_chained(project_path: Path, team_dir: Path) -> Path:
     if staged.exists():
         shutil.rmtree(staged)
     compose.compose(chain, staged)
+    # compose() doesn't freeze workspace/ (it's the seed-if-absent surface for a
+    # local install), but the flat tarball IS what reaches the instance — so carry
+    # the chain's merged workspace (leaf-wins) so an overlay's per-principal
+    # assistant-context.md actually ships.
+    compose.merge_workspace(chain, staged)
     # Preserve the leaf's directory name so the app/tarball naming is unchanged.
     cfg = compose._read_agent_yaml(staged)
     cfg.setdefault("agent", team_dir.name)
@@ -909,8 +914,15 @@ def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
         if cfg.team_version:
             raise
         return None
-    from modastack.build_render import load_team_config, render_team_deps_script
-    tcfg = load_team_config(team_dir)
+    from modastack.build_render import (
+        load_composed_team_config,
+        render_team_deps_script,
+    )
+    # Read the COMPOSED build (from: chain + tool_library expansion), not the raw
+    # leaf — a team may declare its baked CLI via `tool_library:` with no inline
+    # build: (#416). Reading raw would skip the bake and leave the requires gate
+    # failing on the box.
+    tcfg = load_composed_team_config(team_dir, project_path)
     spec = tcfg.build
     if spec is None or not (spec.apt or spec.npm or spec.run_root or spec.run
                             or spec.verify_requires):
@@ -938,8 +950,9 @@ def _local_team_deps_hash(project_path: Path, cfg: DeployConfig) -> str:
         if cfg.team_version:  # a pin must hard-fail, not silently hash-as-generic
             raise
         return ""
-    from modastack.build_render import load_team_config, team_deps_hash
-    spec = load_team_config(team_dir).build
+    from modastack.build_render import load_composed_team_config, team_deps_hash
+    # Composed build (tool_library + from: chain) — must match the renderer above.
+    spec = load_composed_team_config(team_dir, project_path).build
     if spec is None or not (spec.apt or spec.npm or spec.run_root or spec.run
                             or spec.verify_requires):
         return ""

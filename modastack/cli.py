@@ -538,9 +538,11 @@ def _install_pack(pack_dir: Path, project_path: Path,
 
     prov = _compose.compose(chain, dest)
 
-    # Seed workspace from every layer, base → leaf (first-writer-wins), so a base
-    # team's templates seed unless the overlay supplies its own.
-    for layer in chain:
+    # Seed workspace leaf → base (seed-if-absent), so an overlay's own template
+    # wins and the base only fills files the overlay doesn't supply. (Mirrors the
+    # deploy flatten's leaf-wins merge_workspace; user edits already on disk are
+    # never overwritten regardless of order.)
+    for layer in reversed(chain):
         _seed_workspace(layer.dir, project_path)
 
     # The leaf's directory name is the installed agent name (the team a user
@@ -1557,7 +1559,7 @@ def slack_read_thread(workspace, channel, thread, limit, as_json):
         click.echo(f"\n{len(messages)} message(s)")
 
 
-@main.command("slack-manifest")
+@main.command("create-slack-bot")
 @click.option("--app-name", default="modastack agent",
               help="Display name for the Slack app")
 @click.option("--event-server", default="",
@@ -1569,19 +1571,25 @@ def slack_read_thread(workspace, channel, thread, limit, as_json):
               help="Write the manifest to a file instead of stdout")
 @click.option("--url/--no-url", "show_url", default=True,
               help="Print a one-click 'create from manifest' link")
-def slack_manifest(app_name, event_server, fmt, output, show_url):
-    """Generate a Slack app manifest wired to your event server.
+@click.option("--open/--no-open", "open_browser", default=None,
+              help="Open the one-click create link in your browser "
+                   "(default: when run interactively; use --no-open for "
+                   "headless/CI)")
+def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser):
+    """Create a Slack app (bot) for modastack — generates the manifest and a
+    one-click create link, and opens it in your browser.
 
     Every modastack Slack app needs the same scopes + events pointed at one
     request URL; this stamps them out from a template so a working app is one
-    step away — paste the printed link, feed the file to the Slack CLI
+    step away — click the link it opens, feed the file to the Slack CLI
     (`slack create <name> --manifest manifest.json`), or POST it to the App
     Manifest API.
 
     Usage:
-        modastack slack-manifest
-        modastack slack-manifest --app-name "Eng Bot" --format json -o manifest.json
-        modastack slack-manifest --event-server https://my-worker.workers.dev
+        modastack create-slack-bot
+        modastack create-slack-bot --app-name "Eng Bot" --format json -o manifest.json
+        modastack create-slack-bot --event-server https://my-worker.workers.dev
+        modastack create-slack-bot --no-open                # just print the link
     """
     from .slack_manifest import (
         create_app_url, manifest_to_json, render_manifest, webhook_url,
@@ -1612,10 +1620,21 @@ def slack_manifest(app_name, event_server, fmt, output, show_url):
         click.echo(rendered)
 
     if show_url:
+        create_url = create_app_url(manifest_yaml)
         click.echo("")
         click.echo(f"Request URL:  {webhook_url(event_server)}")
         click.echo("Create the app in one click:")
-        click.echo(f"  {create_app_url(manifest_yaml)}")
+        click.echo(f"  {create_url}")
+        # Open the browser by default when interactive; --open/--no-open
+        # forces either way. The default (None) stays quiet under pipes, CI,
+        # and the test runner so it never tries to launch a browser there.
+        should_open = (
+            open_browser if open_browser is not None else sys.stdout.isatty()
+        )
+        if should_open:
+            click.launch(create_url)
+            click.echo("")
+            click.echo("Opened the create page in your browser.")
 
 
 @main.group()

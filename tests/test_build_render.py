@@ -35,6 +35,33 @@ ENG_TEAM = """
 """
 
 
+def test_composed_loader_bakes_tool_library_cli(tmp_path):
+    """A team that declares its CLI via `tool_library:` (#416) instead of an
+    inline `build:` must STILL bake that CLI into the deploy image.
+
+    Regression for the personal-assistant/venn deploy bug: the team-deps renderer
+    read the RAW leaf agent.yaml, which has no `build:` after migrating venn to
+    `tool_library: [venn]`, so venn was never baked. On the box the dispatch-time
+    `requires: venn` gate then failed and blocked EVERY agent (no replies). The
+    renderer must read the COMPOSED build, which includes tool_library expansion.
+    """
+    team = tmp_path / "agents" / "pa"
+    team.mkdir(parents=True)
+    (team / "agent.yaml").write_text(dedent("""
+        agent: pa
+        tool_library:
+          - venn
+    """))
+    # The raw load sees no build: — this is the latent bug surface.
+    assert load_team_config(team).build is None
+    # The composed load expands the catalog venn entry into a real build: spec.
+    cfg = build_render.load_composed_team_config(team, tmp_path)
+    assert cfg.build is not None
+    script = render_team_deps_script(cfg)
+    assert "venn-cli==0.2.0" in script   # the pin from the catalog entry
+    assert "/opt/venn-cli" in script     # the isolated venv install
+
+
 def test_renders_apt_npm_run_verify(tmp_path):
     script = render_team_deps_script(_team(tmp_path, ENG_TEAM))
     assert script.startswith("#!/usr/bin/env bash")
