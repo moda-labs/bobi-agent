@@ -17,7 +17,10 @@ from __future__ import annotations
 import pathlib
 import sys
 
-from modastack.build_render import load_team_config, render_team_deps_script
+from modastack.build_render import (
+    load_composed_team_config,
+    render_team_deps_script,
+)
 from modastack.deploy import DeployError, load_deploy_config
 
 
@@ -36,14 +39,18 @@ def main(argv: list[str]) -> int:
     team_dir = root / "agents" / cfg.team
     if not (team_dir / "agent.yaml").exists():
         return 0
-    spec = load_team_config(team_dir).build
+    # Composed config: expands the from: chain + tool_library entries (#416) so a
+    # team that bakes its CLI via `tool_library:` still rebuilds its own image on
+    # a framework release (instead of being rolled the generic image).
+    tcfg = load_composed_team_config(team_dir, root)
+    spec = tcfg.build
     if spec is None or not (
         spec.apt or spec.npm or spec.run_root or spec.run or spec.verify_requires
     ):
         return 0  # generic — deploys on the shared base image
     out = root / "dist" / "team-deps" / f"{cfg.team}.sh"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_team_deps_script(load_team_config(team_dir)))
+    out.write_text(render_team_deps_script(tcfg))
     print(out.as_posix())
     return 0
 

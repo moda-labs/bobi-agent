@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+import tempfile
 from pathlib import Path
 
 from modastack.config import BuildSpec, Config
@@ -183,6 +184,30 @@ def load_team_config(team_dir: Path) -> Config:
     if not agent_yaml.exists():
         raise FileNotFoundError(f"no agent.yaml in {team_dir}")
     return Config._parse(agent_yaml)
+
+
+def load_composed_team_config(team_dir: Path, project_path: Path) -> Config:
+    """Like `load_team_config`, but returns the COMPOSED config.
+
+    The deploy image bakes what the team *composes to*, not what its raw leaf
+    agent.yaml literally says: the `from:` chain is merged and `tool_library:`
+    entries (#416) are expanded into `requires:`/`build:`. The team-deps renderer
+    MUST read this — a team that declares its CLI via `tool_library: [venn]`
+    carries no inline `build:` on the leaf, so a raw read would bake nothing,
+    the binary would be missing on the box, and the dispatch-time `requires`
+    gate would block every agent (the personal-assistant/venn deploy bug).
+
+    Composes into a throwaway dir and parses the frozen agent.yaml.
+    """
+    # Local import: compose → tool_library → compose forms a cycle that only a
+    # function-level import breaks (mirrors compose.py's own local import).
+    from modastack.compose import compose, resolve_chain
+
+    chain = resolve_chain(team_dir, project_path)
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "composed"
+        compose(chain, dest)
+        return Config._parse(dest / "agent.yaml")
 
 
 def _main(argv: list[str] | None = None) -> int:
