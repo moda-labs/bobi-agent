@@ -1,0 +1,160 @@
+"""Unit tests for the Codex brain adapter (epic #485, Phase 2 MVP).
+
+The ``codex exec`` subprocess is replaced with a fake runner that replays a
+scripted NDJSON event stream, so the conversion to normalized brain messages,
+the resume/thread handling, usage mapping, and error paths are exercised without
+a real codex binary.
+"""
+
+import pytest
+
+from modastack.brain import get_brain
+from modastack.brain.base import AssistantText, TurnResult
+from modastack.brain.codex import CodexBrain, _CodexSession, _instructions, _map_usage
+
+
+def _runner_of(events, sink=None):
+    """A fake codex runner: records (argv, cwd) and replays `events`."""
+    async def _run(argv, cwd):
+        if sink is not None:
+            sink.append((argv, cwd))
+        for ev in events:
+            yield ev
+    return _run
+
+
+async def _drain(session):
+    return [m async for m in session.receive_response()]
+
+
+# --- registry / factory -----------------------------------------------------
+
+def test_codex_registered():
+    b = get_brain("codex")
+    assert isinstance(b, CodexBrain)
+    assert b.provider == "openai"
+
+
+def test_instructions_extraction():
+    assert _instructions({"preset": "x", "append": "be good"}) == "be good"
+    assert _instructions("raw text") == "raw text"
+    assert _instructions(None) == ""
+
+
+def test_usage_mapping_uses_codex_keys():
+    m = _map_usage({"input_tokens": 5, "cached_input_tokens": 100,
+                    "output_tokens": 7})
+    assert m == {
+        "input_tokens": 5,
+        "cache_read_input_tokens": 100,   # codex's cached_input_tokens
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 7,
+    }
+
+
+# --- happy turn -------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_turn_converts_messages_and_captures_thread():
+    events = [
+        {"type": "thread.started", "thread_id": "th-1"},
+        {"type": "turn.started"},
+        {"type": "item.completed",
+         "item": {"id": "i0", "type": "agent_message", "text": "working"}},
+        {"type": "item.completed",
+         "item": {"id": "i1", "type": "file_change", "changes": []}},
+        {"type": "item.completed",
+         "item": {"id": "i2", "type": "agent_message", "text": "done."}},
+        {"type": "turn.completed",
+         "usage": {"input_tokens": 2, "cached_input_tokens": 1000,
+                   "output_tokens": 9}},
+    ]
+    s = _CodexSession(cwd="/tmp/x", instructions="SYS", runner=_runner_of(events))
+    await s.connect("hello")
+    out = await _drain(s)
+
+    texts = [m.text for m in out if isinstance(m, AssistantText) and m.text]
+    assert texts == ["working", "done."]          # file_change is dropped
+    # The text-less assistant message carries the turn usage for rotation.
+    usage_msgs = [m for m in out if isinstance(m, AssistantText) and m.usage]
+    assert usage_msgs[0].usage["cache_read_input_tokens"] == 1000
+    result = out[-1]
+    assert isinstance(result, TurnResult)
+    assert result.session_id == "th-1"
+    assert result.is_error is False
+    assert result.costs[0].input_tokens == 1002   # input + cached
+    assert s._thread_id == "th-1"
+
+
+@pytest.mark.asyncio
+async def test_fresh_turn_prepends_instructions_then_resume_does_not():
+    sink = []
+    events = [
+        {"type": "thread.started", "thread_id": "th-9"},
+        {"type": "turn.completed", "usage": {}},
+    ]
+    s = _CodexSession(cwd="/w", instructions="SYSTEM", runner=_runner_of(events, sink))
+    await s.connect("first")
+    await _drain(s)
+    # Fresh thread: instructions prepended, plain `codex exec` (no resume).
+    fresh_argv = sink[0][0]
+    assert fresh_argv[:2] == ["codex", "exec"]
+    assert "resume" not in fresh_argv
+    assert fresh_argv[-1] == "SYSTEM\n\nfirst"
+    assert sink[0][1] == "/w"
+
+    # Next turn resumes the captured thread and does NOT re-send instructions.
+    await s.query("second")
+    await _drain(s)
+    resume_argv = sink[1][0]
+    assert resume_argv[:4] == ["codex", "exec", "resume", "th-9"]
+    assert resume_argv[-1] == "second"
+
+
+@pytest.mark.asyncio
+async def test_no_pending_input_yields_noop_result():
+    """A reconnect-style drain with nothing queued must still yield a result."""
+    s = _CodexSession(cwd="/w", instructions="", resume="th-keep",
+                      runner=_runner_of([]))
+    out = await _drain(s)
+    assert len(out) == 1
+    assert isinstance(out[0], TurnResult)
+    assert out[0].session_id == "th-keep"
+    assert out[0].is_error is False
+
+
+@pytest.mark.asyncio
+async def test_turn_failed_surfaces_error():
+    events = [
+        {"type": "thread.started", "thread_id": "th-e"},
+        {"type": "turn.failed", "error": {"message": "model overloaded"}},
+    ]
+    s = _CodexSession(cwd="/w", instructions="", runner=_runner_of(events))
+    await s.connect("go")
+    out = await _drain(s)
+    assert isinstance(out[-1], TurnResult)
+    assert out[-1].is_error is True
+    assert out[-1].result_text == "model overloaded"
+
+
+@pytest.mark.asyncio
+async def test_stream_ends_without_terminal_is_error():
+    events = [{"type": "thread.started", "thread_id": "th-x"}]  # no turn.completed
+    s = _CodexSession(cwd="/w", instructions="", runner=_runner_of(events))
+    await s.connect("go")
+    out = await _drain(s)
+    assert out[-1].is_error is True
+    assert "without completing" in out[-1].result_text
+
+
+@pytest.mark.asyncio
+async def test_model_override_adds_flag():
+    sink = []
+    events = [{"type": "turn.completed", "usage": {}}]
+    b = CodexBrain()
+    s = b.make_session(cwd="/w", system_prompt={"append": "S"},
+                       options={"model": "gpt-5-codex"})
+    s._runner = _runner_of(events, sink)
+    await s.connect("hi")
+    await _drain(s)
+    assert "-m" in sink[0][0] and "gpt-5-codex" in sink[0][0]

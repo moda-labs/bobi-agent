@@ -27,11 +27,13 @@ from modastack.brain.base import (
     TurnResult,
 )
 from modastack.brain.claude import ClaudeBrain
+from modastack.brain.codex import CodexBrain
 
-# Registry of available brains by kind. Phase 1: claude only. Codex/Gemini/Grok
-# adapters register here as they land (#485 phases 2–4).
+# Registry of available brains by kind. Gemini/Grok adapters register here as
+# they land (#485 phase 4).
 _BRAINS: dict[str, BrainFactory] = {
     "claude": ClaudeBrain(),
+    "codex": CodexBrain(),
 }
 
 DEFAULT_BRAIN = "claude"
@@ -78,6 +80,7 @@ __all__ = [
     "BrainMessage",
     "BrainSession",
     "ClaudeBrain",
+    "CodexBrain",
     "DeferredTool",
     "StreamDelta",
     "TurnResult",
