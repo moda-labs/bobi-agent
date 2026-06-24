@@ -149,7 +149,7 @@ single-bot record so `modabot` keeps working without a redeploy.
       `signing_secret: ${SLACK_SIGNING_SECRET}`; deploy materializes it as a Fly
       secret (`--env-file` reconcile already handles `${VAR}` refs).
 - [x] `auth_bootstrap._wait_for_code` inherits it via the same register call.
-- [ ] Already landed in `agents/personal-assistant-core`: `channels:
+- [ ] Already landed in `agents/personal-assistant`: `channels:
       ${SLACK_CHANNELS:-}` (optional) + a comment that a **DM id must never** go
       in `SLACK_CHANNELS` (DMs ride the bare `slack:<team>` topic, not the
       channel-scoped one — `adapters/slack.ts:59`).

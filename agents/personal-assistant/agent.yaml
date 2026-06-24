@@ -50,28 +50,14 @@ services:
 # same.
 venn_api_key: ${VENN_API_KEY}
 
-# Host-level dependency. Checked by `modastack doctor` and enforced at
-# dispatch time — the assistant cannot launch without the `venn` CLI, since
-# email / calendar / tasks all run through it.
-requires:
-  - name: venn
-    why: "Venn CLI — the connector to the principal's email / calendar / tasks (tools/venn.md). Auth via VENN_API_KEY in the environment."
-    check: "command -v venn >/dev/null 2>&1 && venn --version >/dev/null 2>&1"
-    fix: "uv tool install venn-cli  (or pip install venn-cli); set VENN_API_KEY in .modastack/.env"
-
-# Container build: bake the `venn` CLI into the team image so a dark Fly
-# instance can actually reach email/calendar/tasks (the bare base ships no
-# venn, and a headless container has no TTY to install it interactively).
-# venn-cli is on PyPI — install it into its own venv so its deps never collide
-# with the framework venv at /opt/venv, then symlink the entrypoint onto PATH.
-# Pinned; bump deliberately. `verify: requires` re-runs the check above at
-# build, failing CI if venn didn't land on PATH.
-build:
-  apt: [python3-venv]
-  run_root:
-    - >-
-      python3 -m venv /opt/venn-cli &&
-      /opt/venn-cli/bin/pip install --no-cache-dir "venn-cli==0.2.0" &&
-      ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn &&
-      venn --version
-  verify: requires
+# The `venn` CLI is an opt-in entry in the framework tool library (#416). One
+# line pulls in the whole bundle — the `doctor`/dispatch `requires:` check, the
+# pinned container `build:` bake (its own venv at /opt/venn-cli, symlinked onto
+# PATH), and the catalog's `tools/venn.md` guide — with the `venn-cli==0.2.0`
+# pin written ONCE in the catalog (modastack/tool_library/venn/tool.yaml).
+#
+# This team's own tools/venn.md wins over the catalog guide (compose is
+# local-first for guides), so the PA-specific policy there — the reads-vs-writes
+# autonomy gate, fail-closed behavior, the category-guide references — is kept.
+tool_library:
+  - venn
