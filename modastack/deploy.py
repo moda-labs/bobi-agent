@@ -104,6 +104,10 @@ class DeployConfig:
     # (a GitHub Environment, etc. — a hint the orchestration layer materializes).
     secrets_env: str = ""
     secrets_env_file: str = ""
+    # The team's agent brain (#485), resolved from the team's agent.yaml
+    # `brain.kind` at load. Drives the auth key (api_key/subscription) and the
+    # MODASTACK_BRAIN the entrypoint reads. "" = claude (the framework default).
+    brain: str = ""
 
     @property
     def delivery(self) -> str:
@@ -235,7 +239,34 @@ def load_deploy_config(project_path: Path, name: str,
         secrets_env_file=str(merged.get("secrets_env_file", "") or ""),
     )
     cfg.validate()
+    # Resolve the team's brain from its agent.yaml (local teams only; a team-url
+    # package isn't on disk → "" → claude on the box).
+    cfg.brain = _team_brain_kind(project_path, cfg)
     return cfg
+
+
+# --- brain / auth-key resolution --------------------------------------------
+
+# The provider API key that authenticates a brain in api_key mode (and that
+# would silently shadow subscription OAuth, so it's forbidden there).
+_BRAIN_API_KEY = {"claude": "ANTHROPIC_API_KEY", "codex": "OPENAI_API_KEY"}
+
+
+def _brain_api_key(kind: str) -> str:
+    """The auth/shadow API-key name for a brain kind (defaults to Claude's)."""
+    return _BRAIN_API_KEY.get(kind or "claude", "ANTHROPIC_API_KEY")
+
+
+def _team_brain_kind(project_path: Path, cfg: "DeployConfig") -> str:
+    """The team's `brain.kind` from its agent.yaml, or "" (team-url / unset)."""
+    if not cfg.team:
+        return ""
+    try:
+        from modastack import compose
+        raw = compose._read_agent_yaml(resolve_team_dir(project_path, cfg.team))
+        return str((raw.get("brain") or {}).get("kind", "") or "")
+    except Exception:
+        return ""
 
 
 # --- repo + package resolution ----------------------------------------------
@@ -498,7 +529,7 @@ def _secret_sets(cfg: DeployConfig,
     MODASTACK_* refs are instance identity the provisioner stamps into [env] from
     flags — never secrets — so they're excluded from both sets.
     """
-    auth_req = ["ANTHROPIC_API_KEY"] if cfg.auth == "api_key" else []
+    auth_req = [_brain_api_key(cfg.brain)] if cfg.auth == "api_key" else []
     if not cfg.team:
         return (auth_req, None)  # team-url: package not local
     y = resolve_team_dir(project_path, cfg.team) / "agent.yaml"
@@ -563,11 +594,12 @@ def resolve_secret_values(cfg: DeployConfig, project_path: Path,
         if var not in values and var in os.environ:
             values[var] = os.environ[var]
 
-    # Subscription mode: ANTHROPIC_API_KEY silently outranks the OAuth creds and
-    # bills the API instead — it must be entirely absent (§6.1).
-    if cfg.auth == "subscription" and values.get("ANTHROPIC_API_KEY"):
+    # Subscription mode: the provider API key silently outranks the OAuth creds
+    # and bills the API instead — it must be entirely absent (§6.1).
+    auth_key = _brain_api_key(cfg.brain)
+    if cfg.auth == "subscription" and values.get(auth_key):
         raise DeployError(
-            f"deployment '{cfg.name}' is auth=subscription but ANTHROPIC_API_KEY "
+            f"deployment '{cfg.name}' is auth=subscription but {auth_key} "
             "is present in its secrets — remove it (it overrides subscription auth)."
         )
 
@@ -885,6 +917,8 @@ def _provision_args(cfg: DeployConfig, env_file: Path) -> list[str]:
         args += ["--login-channel", cfg.login_channel]
     if cfg.claude_version:
         args += ["--claude-version", cfg.claude_version]
+    if cfg.brain:
+        args += ["--brain", cfg.brain]
     return args
 
 

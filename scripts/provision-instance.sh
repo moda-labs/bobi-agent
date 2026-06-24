@@ -133,7 +133,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="" TEAM="" TEAM_URL="" BLANK="0" ENV_FILE="" AUTH="api_key" FLEET="" INSTANCE=""
 EVENT_SERVER="$DEFAULT_EVENT_SERVER"
 REGION="iad" ORG="" VOLUME_SIZE="15" MEMORY="4gb" CPUS="2"
-LOGIN_CHANNEL="" CLAUDE_VERSION="" VOLUME_NAME="data" ASSUME_YES="0"
+LOGIN_CHANNEL="" CLAUDE_VERSION="" VOLUME_NAME="data" ASSUME_YES="0" BRAIN=""
 # Build context + Dockerfile default to the repo (source build); `modastack
 # deploy` overrides them to a packaged context (Dockerfile.pypi, PyPI install)
 # in binary mode, so deploy needs no checkout. --build-arg K=V is repeatable.
@@ -167,6 +167,7 @@ while [ $# -gt 0 ]; do
     --memory) MEMORY="$2"; shift 2;;
     --cpus) CPUS="$2"; shift 2;;
     --login-channel) LOGIN_CHANNEL="$2"; shift 2;;
+    --brain) BRAIN="$2"; shift 2;;
     --claude-version) CLAUDE_VERSION="$2"; shift 2;;
     --volume-name) VOLUME_NAME="$2"; shift 2;;
     --build-context) BUILD_CONTEXT="$2"; shift 2;;
@@ -237,6 +238,16 @@ case "$AUTH" in
   *) fatal "--auth must be api_key or subscription (got '$AUTH').";;
 esac
 
+# The brain (#485) decides which provider API key authenticates (api_key mode) or
+# would shadow subscription OAuth, and which login the first-boot bootstrap runs.
+case "${BRAIN:-claude}" in
+  ""|claude) AUTH_KEY="ANTHROPIC_API_KEY"
+             LOGIN_FALLBACK_CMD="env CLAUDE_CONFIG_DIR=/data/claude claude auth login --claudeai";;
+  codex)     AUTH_KEY="OPENAI_API_KEY"
+             LOGIN_FALLBACK_CMD="env CODEX_HOME=/data/codex codex login --device-auth";;
+  *) fatal "--brain must be claude or codex (got '$BRAIN').";;
+esac
+
 # Mirror the server-side bubble-mint guard so we fail fast with a clear message:
 # minting transmits the bubble key once, so a cleartext remote URL is refused.
 case "$EVENT_SERVER" in
@@ -255,7 +266,7 @@ fi
 # Everything else is sensitive → fly secrets. Flag-provided identity wins.
 declare -a SECRET_ARGS=()
 declare -A ENV_FROM_FILE=()
-HAS_ANTHROPIC_KEY="0"
+HAS_AUTH_KEY="0"
 while IFS= read -r line || [ -n "$line" ]; do
   line="${line%$'\r'}"                          # tolerate CRLF
   case "$line" in ''|'#'*) continue;; esac
@@ -267,21 +278,21 @@ while IFS= read -r line || [ -n "$line" ]; do
     ENV_FROM_FILE["$key"]="$val"
     continue
   fi
-  [ "$key" = "ANTHROPIC_API_KEY" ] && HAS_ANTHROPIC_KEY="1"
+  [ "$key" = "$AUTH_KEY" ] && HAS_AUTH_KEY="1"
   SECRET_ARGS+=("$key=$val")
 done < "$ENV_FILE"
 
 # --- auth-mode invariants (§6.1) --------------------------------------------
 if [ "$AUTH" = "api_key" ]; then
-  [ "$HAS_ANTHROPIC_KEY" = "1" ] \
-    || fatal "--auth api_key but ANTHROPIC_API_KEY is missing from $ENV_FILE."
+  [ "$HAS_AUTH_KEY" = "1" ] \
+    || fatal "--auth api_key but $AUTH_KEY is missing from $ENV_FILE."
 else
-  # subscription: ANTHROPIC_API_KEY silently outranks subscription OAuth creds and
-  # bills the API instead — it must be entirely absent (§6.1).
-  [ "$HAS_ANTHROPIC_KEY" = "0" ] \
-    || fatal "--auth subscription but ANTHROPIC_API_KEY is in $ENV_FILE. Remove it (it overrides subscription auth)."
+  # subscription: the provider API key silently outranks subscription OAuth creds
+  # and bills the API instead — it must be entirely absent (§6.1).
+  [ "$HAS_AUTH_KEY" = "0" ] \
+    || fatal "--auth subscription but $AUTH_KEY is in $ENV_FILE. Remove it (it overrides subscription auth)."
   [ -n "$LOGIN_CHANNEL" ] || [ -n "${ENV_FROM_FILE[MODASTACK_LOGIN_CHANNEL]:-}" ] \
-    || log "WARNING: subscription mode without --login-channel. First-boot login (C23) will have no Slack channel; fall back to: $FLY ssh console -a $APP --command 'env CLAUDE_CONFIG_DIR=/data/claude claude auth login --claudeai'"
+    || log "WARNING: subscription mode without --login-channel. First-boot login (C23) will have no Slack channel; fall back to: $FLY ssh console -a $APP --command '$LOGIN_FALLBACK_CMD'"
 fi
 
 # --- assemble the instance's [env] identity ---------------------------------
@@ -302,6 +313,9 @@ ENV_VARS["MODASTACK_FLEET"]="$FLEET"
 # `modastack deploy <name>` stamps and reads this back to find the app for <name>.
 ENV_VARS["MODASTACK_INSTANCE"]="$INSTANCE"
 [ -n "$LOGIN_CHANNEL" ] && ENV_VARS["MODASTACK_LOGIN_CHANNEL"]="$LOGIN_CHANNEL"
+# The agent brain (#485): the entrypoint reads it to branch credential dir +
+# first-boot login; get_brain() reads it to select the runtime adapter.
+[ -n "$BRAIN" ] && ENV_VARS["MODASTACK_BRAIN"]="$BRAIN"
 # NB: the agent UI is on by default in the container (docker-entrypoint.sh sets
 # MODASTACK_UI=1), so it is NOT a provisioned [env] flag. Set MODASTACK_UI=0 here
 # (or as a Fly env) only to disable it for an instance.

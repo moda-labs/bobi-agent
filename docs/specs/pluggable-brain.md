@@ -322,20 +322,29 @@ Driven by `MODASTACK_BRAIN`/`brain.kind`; credential path, shadow-key guard
 device-poll bootstrap, and the `OPENAI_API_KEY`-shadow refusal); the Claude path
 is byte-for-byte preserved.
 
-**Remaining deploy-side wiring (Phase 2, lands with `CodexBrain`).** Deliberately
-*not* done now — it edits live production infra (`deploy.py`, the Fly fleet, the
-#385 reconcile) and can't be e2e-tested without a real ChatGPT login on a box, so
-it should land + be tested alongside the consuming brain, not speculatively:
-1. `docker-entrypoint.sh`: brain-aware credential dir (`/data/codex` ↔ `~/.codex`
-   symlink), the `auth.json` first-boot check, and the `OPENAI_API_KEY`-absence
-   guard (today all hardcoded to Claude/`CLAUDE_CONFIG_DIR`/`.credentials.json`).
-2. `deploy.py`: resolve the team's `brain.kind`; make the api_key *required* key
-   and the subscription *forbidden* key the brain's (`OPENAI_API_KEY` vs
-   `ANTHROPIC_API_KEY`); export `MODASTACK_BRAIN` into the container env so the
-   entrypoint can branch.
-3. (Alternative to the device-flow for codex: provision `~/.codex/auth.json`
-   directly as a volume file — the refresh token keeps it alive — if an
-   interactive Slack ceremony is unwanted.)
+**Deploy-side wiring. ✅ DONE (2026-06-24).** Landed alongside the `CodexBrain`,
+unit-tested + shellcheck-clean:
+1. `docker-entrypoint.sh`: reads `MODASTACK_BRAIN`; brain-aware shadow-key guard
+   (`OPENAI_API_KEY` for codex via indirect expansion), a `~/.codex` → `/data/codex`
+   volume symlink (mirrors the `~/.claude` → `CLAUDE_CONFIG_DIR` link) so the
+   ChatGPT subscription survives a redeploy, and the first-boot check now waits on
+   the brain's credential file (`auth.json` vs `.credentials.json`).
+2. `deploy.py`: `DeployConfig.brain` resolved from the team's `agent.yaml`
+   `brain.kind`; the api_key *required* and subscription *forbidden* key are the
+   brain's (`_brain_api_key`); `--brain` flows to the provisioner.
+3. `provision-instance.sh`: `--brain` arg → `MODASTACK_BRAIN` in the instance
+   `[env]`; brain-aware auth-key invariants + login fallback hint.
+
+**MVP deployment created:** `agents/codex-test/` (minimal Slack-only single-manager
+team, `brain: {kind: codex}` + `tool_library: [codex]`) and
+`deployments/codex-test.yaml` (app `ci-codex-test`, `auth: subscription`). Deploy
+is `modastack deploy codex-test --login-channel <private-channel>` once a Slack
+app + a Fly app + the ChatGPT device login are in place — the first boot runs the
+codex device-auth bootstrap.
+
+(Alternative to the device-flow: provision `~/.codex/auth.json` directly as a
+volume file — the refresh token keeps it alive — if an interactive Slack ceremony
+is unwanted.)
 
 ---
 

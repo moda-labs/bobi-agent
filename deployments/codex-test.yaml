@@ -1,0 +1,13 @@
+# Throwaway MVP deployment: a Codex-brained agent on a dedicated Fly app (#485).
+# App name = <fleet>-<name> = ci-codex-test (fleet from deployments/defaults.yaml).
+#
+# ChatGPT-subscription auth: NO OPENAI_API_KEY in secrets — first boot runs the
+# codex device-auth login bootstrap (posts the URL + code to login_channel; you
+# authorize, and auth.json lands on the volume). Set login_channel to a PRIVATE
+# Slack channel ID before deploying (the single-use code grants the login).
+team: codex-test
+auth: subscription
+login_channel: ""        # <-- set to a private Slack channel ID (e.g. C0XXXXXXX)
+memory: 1gb
+cpus: 1
+volume_size: 3

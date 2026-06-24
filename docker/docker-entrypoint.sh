@@ -25,20 +25,41 @@ PROJECT_DIR="${MODASTACK_PROJECT:-${DATA_DIR}/project}"
 export HOME="${MODASTACK_HOME:-/home/modastack}"
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-${DATA_DIR}/claude}"
 
+# The agent brain (#485). Decides the provider API key (api_key/subscription),
+# the durable OAuth credential dir on the volume, and the credential file the
+# first-boot subscription bootstrap waits for. Default claude.
+export MODASTACK_BRAIN="${MODASTACK_BRAIN:-claude}"
+case "$MODASTACK_BRAIN" in
+  codex)
+    BRAIN_SHADOW_KEY="OPENAI_API_KEY"
+    BRAIN_CRED_DIR="${DATA_DIR}/codex"      # ~/.codex symlinks here
+    BRAIN_HOME_LINK="${HOME}/.codex"
+    BRAIN_CRED_FILE="auth.json"
+    ;;
+  *)  # claude (default): durable state already lives under CLAUDE_CONFIG_DIR
+    BRAIN_SHADOW_KEY="ANTHROPIC_API_KEY"
+    BRAIN_CRED_DIR="${CLAUDE_CONFIG_DIR}"
+    BRAIN_HOME_LINK="${HOME}/.claude"
+    BRAIN_CRED_FILE=".credentials.json"
+    ;;
+esac
+
 log() { echo "[entrypoint] $*"; }
 fatal() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
 
 # --- 1. Validate auth mode BEFORE touching the volume (§6.1) -----------------
+# The provider API key is brain-specific (ANTHROPIC_API_KEY / OPENAI_API_KEY);
+# ${!BRAIN_SHADOW_KEY} is its live value via bash indirect expansion.
 case "${MODASTACK_AUTH:-api_key}" in
   api_key)
-    [ -n "${ANTHROPIC_API_KEY:-}" ] \
-      || fatal "MODASTACK_AUTH=api_key but ANTHROPIC_API_KEY is unset."
+    [ -n "${!BRAIN_SHADOW_KEY:-}" ] \
+      || fatal "MODASTACK_AUTH=api_key but ${BRAIN_SHADOW_KEY} is unset."
     ;;
   subscription)
-    # ANTHROPIC_API_KEY silently outranks subscription OAuth creds and bills the
-    # API instead — it must be entirely absent in this mode (§6.1).
-    [ -z "${ANTHROPIC_API_KEY:-}" ] \
-      || fatal "MODASTACK_AUTH=subscription but ANTHROPIC_API_KEY is set; it overrides subscription auth. Unset it."
+    # The provider API key silently outranks subscription OAuth creds and bills
+    # the API instead — it must be entirely absent in this mode (§6.1).
+    [ -z "${!BRAIN_SHADOW_KEY:-}" ] \
+      || fatal "MODASTACK_AUTH=subscription but ${BRAIN_SHADOW_KEY} is set; it overrides subscription auth. Unset it."
     ;;
   *)
     fatal "unknown MODASTACK_AUTH='${MODASTACK_AUTH}' (expected api_key|subscription)."
@@ -89,12 +110,27 @@ if [ "$(readlink "${HOME}/.claude" 2>/dev/null)" != "${CLAUDE_CONFIG_DIR}" ]; th
   ln -s "${CLAUDE_CONFIG_DIR}" "${HOME}/.claude"
 fi
 
+# --- 2c. Codex's durable OAuth dir on the volume (#485) ----------------------
+# Same idea for codex: ~/.codex (where `codex login`/`codex exec` keep auth.json)
+# points at a volume dir so the ChatGPT subscription survives a redeploy. claude
+# already gets this via CLAUDE_CONFIG_DIR above; codex has no config-dir override,
+# so we symlink the home dir directly.
+if [ "${MODASTACK_BRAIN}" = "codex" ]; then
+  mkdir -p "${BRAIN_CRED_DIR}"
+  chown "${APP_USER}:${APP_USER}" "${BRAIN_CRED_DIR}"
+  if [ "$(readlink "${BRAIN_HOME_LINK}" 2>/dev/null)" != "${BRAIN_CRED_DIR}" ]; then
+    log "Pointing ${BRAIN_HOME_LINK} -> ${BRAIN_CRED_DIR} (durable codex creds on volume)"
+    rm -rf "${BRAIN_HOME_LINK}"
+    ln -s "${BRAIN_CRED_DIR}" "${BRAIN_HOME_LINK}"
+  fi
+fi
+
 cd "${PROJECT_DIR}"
 
 # Carry HOME (the image home — gosu would otherwise reset it from passwd, which
 # is the same path here, but be explicit) and CLAUDE_CONFIG_DIR (the volume dir
 # holding durable creds/transcripts) into every privilege drop.
-as_app() { gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "$@"; }
+as_app() { gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_BRAIN=${MODASTACK_BRAIN}" "$@"; }
 
 # --- 3. First boot: install a team if the volume has no agent (C9 hardens) ---
 # Team source precedence: a public MODASTACK_TEAM_URL (fetched at boot — the
@@ -148,8 +184,8 @@ fi
 # Idempotent: a no-op once the credentials exist. They live under
 # CLAUDE_CONFIG_DIR (the volume), not HOME — that's the durable state we keep.
 if [ "${MODASTACK_AUTH:-api_key}" = "subscription" ] \
-   && [ ! -f "${CLAUDE_CONFIG_DIR}/.credentials.json" ]; then
-  log "Subscription mode, no credentials on volume — running login bootstrap"
+   && [ ! -f "${BRAIN_CRED_DIR}/${BRAIN_CRED_FILE}" ]; then
+  log "Subscription mode, no ${MODASTACK_BRAIN} credentials on volume — running login bootstrap"
   as_app modastack login-bootstrap
 fi
 
@@ -161,4 +197,4 @@ fi
 # has no public route, so this exposes nothing — see DESIGN.md "Agent UI".
 export MODASTACK_UI="${MODASTACK_UI:-1}"
 log "Starting manager (user=${APP_USER}, project=${PROJECT_DIR}, home=${HOME}, claude_config=${CLAUDE_CONFIG_DIR})"
-exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_UI=${MODASTACK_UI}" modastack start --foreground "$@"
+exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_BRAIN=${MODASTACK_BRAIN}" "MODASTACK_UI=${MODASTACK_UI}" modastack start --foreground "$@"

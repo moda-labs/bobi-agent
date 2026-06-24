@@ -1,0 +1,30 @@
+version: "0.1.0"
+agent: codex-test
+entry_point: manager
+chat: slack
+
+# The agent brain (#485): drive this team's agents with OpenAI Codex instead of
+# Claude Code. This is the MVP deployment that proves a Codex-brained agent runs
+# end-to-end on a headless Fly instance with ChatGPT-subscription auth.
+brain:
+  kind: codex
+
+# Cloud event server URL in production (stamped into [env] from the deploy flag).
+event_server: ${MODASTACK_EVENT_SERVER}
+
+# Bake the codex CLI into the image — the Codex brain shells out to `codex exec`.
+tool_library: [codex]
+
+services:
+  - name: slack
+    events: true
+    required: true          # the manager is reachable over Slack
+    # Optional comma-separated channel IDs to scope the bot. Empty = whole workspace.
+    channels: ${SLACK_CHANNELS}
+    credentials:
+      bot_token: ${SLACK_BOT_TOKEN}
+      signing_secret: ${SLACK_SIGNING_SECRET}
+
+build:
+  # nodejs/npm are the base the tool_library `codex` npm install composes onto.
+  apt: [nodejs, npm]
