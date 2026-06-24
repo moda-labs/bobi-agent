@@ -1,0 +1,56 @@
+# Background monitors for the personal-assistant pack.
+#
+# None has a native `check:` runner — each is evaluated by a short-lived
+# check agent that reads the description, looks through Venn, and posts its
+# event. Override, retime, or disable any of these in your repo's
+# .modastack/monitors.yaml. The two watch monitors are proactive but gated
+# hard against noise and silent during the principal's quiet hours; pause
+# them for a purely reactive assistant.
+monitors:
+  # The morning briefing. Time-of-day + timezone — retime to the principal's
+  # morning in .modastack/monitors.yaml (and match the tz to their context).
+  - name: daily-briefing
+    description: >
+      It is the morning-briefing cadence. Always emit the briefing event so
+      the assistant launches the daily-briefing workflow and posts the
+      principal's morning briefing. This is an unconditional daily tick — do
+      not evaluate whether anything changed; just fire. The workflow itself
+      holds until the start of the principal's day if quiet hours are still
+      in effect.
+    at: ["07:00"]
+    tz: America/Los_Angeles
+    event: monitor/assistant.daily_briefing
+    notify: true
+
+  # Surface imminent events and invites needing a response. Gated against
+  # noise: only genuinely actionable items, never inside quiet hours.
+  - name: calendar-watch
+    description: >
+      Read the principal's calendar through Venn (the <gcal> server_id in
+      assistant-context.md; see tools/calendar.md). Emit the event ONLY for
+      genuinely actionable items: (a) an event starting soon that needs prep
+      or a heads-up the principal hasn't already been told about, or (b) a
+      newly received invite still awaiting their response. Include the event
+      title, time, attendees, and whether a response is needed. Do NOT emit
+      for routine recurring events the principal clearly expects, anything
+      already surfaced this day, or anything inside their quiet hours
+      (assistant-context.md) — emit nothing then. If Venn is unreachable,
+      emit nothing and note the gap.
+    interval: 30m
+    event: monitor/assistant.calendar
+
+  # Surface only genuinely important new email — high bar to avoid noise.
+  - name: inbox-watch
+    description: >
+      Read the principal's inbox through Venn (the <gmail> server_id in
+      assistant-context.md; see tools/email.md). Apply the importance bar in
+      assistant-context.md and emit the event ONLY for mail that genuinely
+      warrants interrupting the principal: a message from one of their key
+      people, or a clearly time-sensitive/urgent thread addressed to them.
+      Drop newsletters, promotions, automated notifications, and anything
+      that can wait for the daily briefing — emit nothing for those. Include
+      the sender, subject, a one-line summary, and the message link. One
+      thread is one signal; do not emit per reply. Never inside quiet hours.
+      If Venn is unreachable, emit nothing and note the gap.
+    interval: 15m
+    event: monitor/assistant.inbox

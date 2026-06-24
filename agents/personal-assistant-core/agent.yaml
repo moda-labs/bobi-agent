@@ -1,0 +1,66 @@
+version: "1.0.0"
+
+# Entry point role for `modastack start`.
+entry_point: assistant
+chat: slack
+max_concurrent_agents: 3
+
+# Cloud event server URL in production (.env), empty for an
+# auto-started local server.
+event_server: ${MODASTACK_EVENT_SERVER}
+
+# The assistant talks to its principal on a chat surface (Slack by
+# default) and reaches the real world — email, calendar, tasks — through
+# Venn, which fronts the principal's connected Google account (Gmail +
+# Google Calendar to start). The chat surface is the only native event
+# source; everything Venn-backed is read on demand or polled by a monitor.
+#
+# Credentials go INLINE under each service (`credentials:`) — that is where
+# the framework reads them (Slack workspace auto-detection calls `auth.test`
+# with the service's bot_token).
+services:
+  - name: slack
+    events: true            # receive the principal's messages / @mentions / DMs
+    required: true          # core service — block startup if unconfigured
+    # Optional: comma-separated channel IDs to scope this assistant to a
+    # specific channel or DM (so one bot can host several assistants).
+    # Empty = whole workspace. A personal assistant usually wants exactly
+    # one channel — its principal's DM or private channel.
+    channels: ${SLACK_CHANNELS}
+    credentials:
+      bot_token: ${SLACK_BOT_TOKEN}
+
+# Email, calendar, and tasks are reached through the bundled `venn` CLI. One
+# API key fronts the principal's Google account (Gmail + Google Calendar +
+# Google Tasks); the category tool guides (tools/email.md, tools/calendar.md,
+# tools/tasks.md) carry the policy for each, and tools/venn.md the shared CLI
+# mechanics. Swapping Gmail for Outlook, or Google Tasks for Todoist, is a
+# connector change on venn.ai — the role prompt and category guides stay the
+# same.
+venn_api_key: ${VENN_API_KEY}
+
+# Host-level dependency. Checked by `modastack doctor` and enforced at
+# dispatch time — the assistant cannot launch without the `venn` CLI, since
+# email / calendar / tasks all run through it.
+requires:
+  - name: venn
+    why: "Venn CLI — the connector to the principal's email / calendar / tasks (tools/venn.md). Auth via VENN_API_KEY in the environment."
+    check: "command -v venn >/dev/null 2>&1 && venn --version >/dev/null 2>&1"
+    fix: "uv tool install venn-cli  (or pip install venn-cli); set VENN_API_KEY in .modastack/.env"
+
+# Container build: bake the `venn` CLI into the team image so a dark Fly
+# instance can actually reach email/calendar/tasks (the bare base ships no
+# venn, and a headless container has no TTY to install it interactively).
+# venn-cli is on PyPI — install it into its own venv so its deps never collide
+# with the framework venv at /opt/venv, then symlink the entrypoint onto PATH.
+# Pinned; bump deliberately. `verify: requires` re-runs the check above at
+# build, failing CI if venn didn't land on PATH.
+build:
+  apt: [python3-venv]
+  run_root:
+    - >-
+      python3 -m venv /opt/venn-cli &&
+      /opt/venn-cli/bin/pip install --no-cache-dir "venn-cli==0.2.0" &&
+      ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn &&
+      venn --version
+  verify: requires

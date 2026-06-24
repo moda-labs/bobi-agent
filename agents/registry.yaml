@@ -11,3 +11,6 @@ agents:
   support-manager:
     version: "1.0.0"
     description: "Support triage — one agent watches PostHog + email, investigates, files Linear tickets for real issues, and reports daily"
+  personal-assistant-core:
+    version: "1.0.0"
+    description: "Personal assistant — one agent manages email, calendar, and to-dos via Venn (Gmail + Google Calendar), posts a daily briefing, and acts within a customizable autonomy line. Customize who-you-are and how-you-like-things in workspace/assistant-context.md."

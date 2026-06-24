@@ -1,0 +1,32 @@
+name: daily-briefing
+trigger: When the daily-briefing monitor fires (the morning cadence).
+description: >
+  Compile and post the principal's morning briefing — today's schedule,
+  the email that needs a reply, and what's due — in the briefing voice
+  from assistant-context.md. Respects quiet hours.
+
+steps:
+  - name: gather
+    agent: assistant
+    prompt: |
+      Follow the "daily briefing" instructions in your role prompt, gather
+      step. Read-only through Venn, pull today's picture: today's calendar
+      events in order (flag prep/decisions needed), the few emails that
+      genuinely need a reply per the importance bar in assistant-context.md,
+      and the tasks due today or overdue. If it's currently inside the
+      principal's quiet hours, hold until the start of their day.
+    handoff:
+      required: [schedule, needs_reply, due_today]
+    timeout: 900
+
+  - name: post
+    agent: assistant
+    prompt: |
+      Compose and post the briefing per your role prompt: a one-line
+      headline, then Schedule / Needs a reply / Due today, then one closing
+      line on anything worth getting ahead of. Post to the principal's
+      configured chat channel (tools/chat.md). If there's genuinely nothing
+      on, post the one-line "clear day" instead of padding.
+    handoff:
+      required: [briefing_posted]
+    timeout: 600
