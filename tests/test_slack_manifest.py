@@ -129,3 +129,40 @@ def test_cli_writes_json_file(tmp_path):
         data["settings"]["event_subscriptions"]["request_url"]
         == f"{EVENT_SERVER}/webhooks/slack"
     )
+
+
+def test_cli_open_launches_browser(monkeypatch, tmp_path):
+    """--open opens the one-click create link in the browser."""
+    launched = []
+    monkeypatch.setattr("click.launch", lambda url: launched.append(url))
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, ["create-slack-bot", "--open"])
+    assert result.exit_code == 0, result.output
+    assert len(launched) == 1
+    assert "api.slack.com/apps?new_app=1" in launched[0]
+    assert "Opened the create page in your browser." in result.output
+
+
+def test_cli_no_open_does_not_launch(monkeypatch, tmp_path):
+    """--no-open prints the link but never touches the browser."""
+    launched = []
+    monkeypatch.setattr("click.launch", lambda url: launched.append(url))
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, ["create-slack-bot", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert launched == []
+    assert "api.slack.com/apps?new_app=1" in result.output
+
+
+def test_cli_default_stays_quiet_when_not_a_tty(monkeypatch, tmp_path):
+    """Default (no flag) must not launch a browser under the test runner /
+    pipes / CI — only when stdout is an interactive terminal."""
+    launched = []
+    monkeypatch.setattr("click.launch", lambda url: launched.append(url))
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, ["create-slack-bot", "--app-name", "Bot"])
+    assert result.exit_code == 0, result.output
+    assert launched == []
