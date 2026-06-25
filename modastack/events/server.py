@@ -189,6 +189,146 @@ class BubbleRejected(Exception):
     should re-mint and re-join."""
 
 
+class UnauthorizedTopics(Exception):
+    """A register / update was rejected (400) because one or more GLOBAL resource
+    topics lack a server-verified grant for this bubble (#488). Carries the
+    offending ``topics`` so the caller can surface a configuration error."""
+
+    def __init__(self, topics: list[str]):
+        self.topics = topics
+        super().__init__(f"unauthorized resource topics: {topics}")
+
+
+# Map each global topic service to the (config service, credential key) that
+# unlocks it. Slack is absent — it authorizes via the signed workspace
+# registration (register_slack_workspaces), not /resources/authorize.
+_RESOURCE_CRED_KEYS = {"github": ("github", "token"), "linear": ("linear", "api_key")}
+
+
+def _authorize_one_resource(base_url: str, service: str, resource: str,
+                            credential: str, bubble_id: str, bubble_key: str) -> bool:
+    """POST /resources/authorize for a single resource. Returns True iff the
+    server granted (200). The credential is signed-over and transmitted but is
+    NEVER logged here (the server stores only the grant)."""
+    from modastack import http as pooled
+    from modastack.events.signing import serialize_body, sign_headers
+
+    body = serialize_body({"service": service, "resource": resource, "credential": credential})
+    headers = {"Content-Type": "application/json"}
+    headers.update(sign_headers(bubble_id, bubble_key, "POST", "/resources/authorize", body))
+    resp = pooled.post(
+        f"{base_url}/resources/authorize",
+        content=body,
+        headers=headers,
+        timeout=10.0,
+    )
+    return resp.status_code == 200
+
+
+def _seed_test_resource_grant(base_url: str, service: str, resource: str,
+                              bubble_id: str, bubble_key: str) -> bool:
+    """Seed a resource grant through the event server's test-only endpoint.
+
+    This is used only by integration tests that run a black-box event server
+    without live GitHub/Linear/Slack credentials. The server route is disabled
+    unless it was started with a matching test secret.
+    """
+    from modastack import http as pooled
+    from modastack.events.signing import serialize_body, sign_headers
+
+    secret = os.environ.get("MODASTACK_ES_TEST_GRANTS_SECRET", "")
+    if not secret:
+        return False
+    body = serialize_body({"grants": [{"service": service, "resource": resource}]})
+    headers = {"Content-Type": "application/json", "x-moda-test-secret": secret}
+    headers.update(sign_headers(bubble_id, bubble_key, "POST", "/__test/resource-grants", body))
+    resp = pooled.post(
+        f"{base_url}/__test/resource-grants",
+        content=body,
+        headers=headers,
+        timeout=5.0,
+    )
+    return resp.status_code == 200
+
+
+def authorize_resources(base_url: str, cfg, subscribe: list[str],
+                        bubble_id: str, bubble_key: str,
+                        *, filter_unauthorized: bool = True) -> list[str]:
+    """Obtain a bubble-scoped resource grant for each global ``github:``/``linear:``
+    topic in ``subscribe`` so the subsequent ``register`` / ``update_subscriptions``
+    passes the server's #488 grant check.
+
+    By default, returns the subset of ``subscribe`` that is safe to register:
+    every non-global topic, every ``slack:`` topic (authorized out-of-band by
+    :func:`register_slack_workspaces`), and every ``github:``/``linear:`` topic
+    we successfully authorized. A topic whose credential is MISSING or REJECTED
+    by the upstream is logged LOUDLY and DROPPED, so it never triggers the
+    server's hard-reject during fresh registration.
+
+    When ``filter_unauthorized`` is false, authorization is still attempted, but
+    unverified topics are kept. This is used for saved deployments: the server
+    may already hold a no-expiry grant from an earlier start, so replacing the
+    deployment's subscriptions with a filtered list would silently unsubscribe a
+    valid existing deployment. The server remains authoritative and will reject
+    the update if the grant is truly absent.
+    """
+    if not (bubble_id and bubble_key):
+        return list(subscribe)  # can't sign — leave the set unchanged
+
+    kept: list[str] = []
+    for sub in subscribe:
+        service = sub.split(":", 1)[0] if ":" in sub else ""
+        if service in ("github", "linear", "slack") and ":" in sub:
+            resource = sub.split(":", 1)[1]
+            try:
+                if _seed_test_resource_grant(base_url, service, resource, bubble_id, bubble_key):
+                    kept.append(sub)
+                    continue
+            except Exception as e:
+                log.debug("Test resource-grant seed failed for %r: %s", sub, e)
+        if service not in _RESOURCE_CRED_KEYS:
+            kept.append(sub)  # non-global, or slack (granted via workspace reg)
+            continue
+        resource = sub.split(":", 1)[1]
+        cfg_service, cred_key = _RESOURCE_CRED_KEYS[service]
+        try:
+            credential = cfg.credential(cfg_service, cred_key)
+        except Exception:
+            credential = ""
+        if not credential:
+            action = "dropping it from" if filter_unauthorized else "keeping it in"
+            log.warning(
+                "No %s credential to authorize %r — %s this "
+                "session's subscriptions (a resource grant is required, #488)",
+                service, sub, action,
+            )
+            if not filter_unauthorized:
+                kept.append(sub)
+            continue
+        try:
+            granted = _authorize_one_resource(
+                base_url, service, resource, credential, bubble_id, bubble_key,
+            )
+        except Exception as e:  # transport hiccup — drop, never block startup
+            action = "dropping" if filter_unauthorized else "keeping"
+            log.warning("Resource authorize failed for %r: %s — %s", sub, e, action)
+            if not filter_unauthorized:
+                kept.append(sub)
+            continue
+        if granted:
+            kept.append(sub)
+        else:
+            action = "dropping from" if filter_unauthorized else "keeping in"
+            log.warning(
+                "Event server denied a resource grant for %r — the configured "
+                "%s credential cannot read it; %s subscriptions (#488)",
+                sub, service, action,
+            )
+            if not filter_unauthorized:
+                kept.append(sub)
+    return kept
+
+
 def _post_register(base_url: str, name: str, subscriptions: list[str],
                    bubble_id: str = "", bubble_key: str = "") -> dict:
     """POST /deployments. MINT when no bubble_key (server generates a bubble +
@@ -214,15 +354,42 @@ def _post_register(base_url: str, name: str, subscriptions: list[str],
     )
     if resp.status_code == 403:
         raise BubbleRejected(f"join rejected for bubble {bubble_id}")
+    if resp.status_code == 400:
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and data.get("error") == "unauthorized_topics":
+            raise UnauthorizedTopics(list(data.get("topics") or []))
     return resp.json()
 
 
 def register(base_url: str, name: str, subscriptions: list[str],
-             bubble_id: str = "", bubble_key: str = "") -> tuple[str, str]:
+             bubble_id: str = "", bubble_key: str = "",
+             _retry_unauthorized: bool = True) -> tuple[str, str]:
     """JOIN a deployment into the instance's bubble. Returns (deployment_id,
     api_key). Callers pass the bubble credential from :func:`ensure_bubble`;
-    the bubble must already exist (mint happens only in ensure_bubble)."""
-    result = _post_register(base_url, name, subscriptions, bubble_id, bubble_key)
+    the bubble must already exist (mint happens only in ensure_bubble).
+
+    On a ``400 unauthorized_topics`` (#488) — which, after a successful
+    :func:`authorize_resources`, almost always means Cloudflare KV has not yet
+    propagated a just-written grant — retry ONCE after a short delay before
+    surfacing the configuration error, so transient propagation lag does not
+    look like a misconfiguration.
+    """
+    try:
+        result = _post_register(base_url, name, subscriptions, bubble_id, bubble_key)
+    except UnauthorizedTopics as e:
+        if _retry_unauthorized:
+            time.sleep(0.5)  # absorb KV read-your-writes propagation lag
+            return register(base_url, name, subscriptions, bubble_id, bubble_key,
+                            _retry_unauthorized=False)
+        log.error(
+            "Event server rejected subscriptions as unauthorized — no resource "
+            "grant for %s. Check the upstream credential for these resources (#488).",
+            e.topics,
+        )
+        raise
     return result["deployment_id"], result["api_key"]
 
 

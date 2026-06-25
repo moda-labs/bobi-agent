@@ -1,8 +1,70 @@
 import { SELF, env } from "cloudflare:test";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import worker from "../src/index";
-import { buildBubbleSignature } from "../src/core";
+import { buildBubbleSignature, parseGlobalTopic } from "../src/core";
 import { INTERNAL_HEADER, internalWebSocketRequest } from "../src/internal-auth";
+
+afterEach(() => vi.unstubAllGlobals());
+
+function stubSlackFetch(teamId: string, botId = "B1", appId = "A1", chat: "ok" | "fail" = "ok") {
+	vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+		const u = String(url);
+		if (u.includes("/auth.test")) {
+			return Response.json({ ok: true, team_id: teamId, bot_id: botId });
+		}
+		if (u.includes("/bots.info")) {
+			return Response.json({ ok: true, bot: { app_id: appId } });
+		}
+		if (u.includes("/chat.postMessage")) {
+			if (chat === "fail") throw new Error("slack unavailable");
+			return Response.json({ ok: true, ts: "1.2" });
+		}
+		return Response.json({ ok: true });
+	}));
+}
+
+// Seed a resource grant directly in KV (bypassing upstream verification) so a
+// deployment can legitimately subscribe to a global topic under #488. The grant
+// is keyed by the topic's parsed {service, resource} — for slack, parseGlobalTopic
+// reduces `slack:team:channel` to the team id, matching how the gate looks it up.
+async function seedGrant(topic: string, bubbleId: string): Promise<void> {
+	const parsed = parseGlobalTopic(topic);
+	if (!parsed) throw new Error(`not a global topic: ${topic}`);
+	await env.EVENTS.put(
+		`resource_grant:${parsed.service}:${parsed.resource}:${bubbleId}`,
+		JSON.stringify({
+			id: `grant-${parsed.service}-${parsed.resource}-${bubbleId}`,
+			account_id: null,
+			bubble_id: bubbleId,
+			service: parsed.service,
+			resource: parsed.resource,
+			granted_by: "upstream_token_verification",
+			created_at: "2026-01-01T00:00:00Z",
+			expires_at: null,
+		}),
+	);
+}
+
+// Mint a bubble, grant every requested global topic, then JOIN-register a
+// deployment subscribing to them — the grant-aware analogue of mintBubble for
+// the #488 enforcement world.
+let _depCounter = 0;
+async function deploymentWithGrants(subscriptions: string[]): Promise<MintedBubble> {
+	const b = await mintBubble(["_bootstrap"]);
+	for (const s of subscriptions) {
+		if (parseGlobalTopic(s)) await seedGrant(s, b.bubble_id);
+	}
+	const body = JSON.stringify({ name: `dep-${Date.now()}-${_depCounter++}`, subscriptions });
+	const headers = await bubbleHeaders(b.bubble_id, b.bubble_key, "POST", "/deployments", body);
+	const res = await SELF.fetch("https://example.com/deployments", {
+		method: "POST",
+		headers: { "content-type": "application/json", ...headers },
+		body,
+	});
+	if (res.status !== 201) throw new Error(`deploymentWithGrants failed: ${res.status}`);
+	const reg = (await res.json()) as { deployment_id: string; api_key: string };
+	return { ...reg, bubble_id: b.bubble_id, bubble_key: b.bubble_key };
+}
 
 // ---------------------------------------------------------------------------
 // Bubble-signing helpers (mirrors core.spec.ts helpers but for HTTP-level
@@ -291,6 +353,7 @@ describe("cloudflare deployment deregistration", () => {
 describe("slack send error handling", () => {
 	it("returns 502 when slack API fetch fails", async () => {
 		const bubble = await mintBubble();
+		stubSlackFetch("T_FAIL", "B_FAIL", "A_FAIL", "fail");
 		// Register a workspace SIGNED so the bubble-scoped record exists.
 		const regBody = JSON.stringify({ workspace_id: "T_FAIL", bot_token: "xoxb-fake-token" });
 		const regHeaders = await bubbleHeaders(
@@ -326,6 +389,7 @@ describe("slack send error handling", () => {
 	it("does not let bubble A send through bubble B's workspace (400)", async () => {
 		const bubbleB = await mintBubble();
 		const bubbleA = await mintBubble();
+		stubSlackFetch("T_ISO", "B_ISO", "A_ISO");
 
 		// B registers T_ISO (signed → scoped to B).
 		const regBody = JSON.stringify({ workspace_id: "T_ISO", bot_token: "xoxb-B-token" });
@@ -427,17 +491,8 @@ describe("github webhook signature verification", () => {
 
 describe("cloudflare deployment deregistration", () => {
 	it("DELETE removes deployment from KV and returns 200", async () => {
-		// Register a deployment to get credentials
-		const regRes = await SELF.fetch("https://example.com/deployments", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				name: "to-delete",
-				subscriptions: ["github:org/repo"],
-			}),
-		});
-		expect(regRes.status).toBe(201);
-		const { deployment_id, api_key } = await regRes.json() as MintedBubble;
+		// Register a deployment to get credentials (grant-backed global topic).
+		const { deployment_id, api_key } = await deploymentWithGrants(["github:org/repo"]);
 
 		// DELETE the deployment
 		const delRes = await SELF.fetch(`https://example.com/deployments/${deployment_id}`, {
@@ -553,8 +608,8 @@ describe("#341 targeted routing — no cross-delivery", () => {
 		const team = id("T");
 		const eng = id("C_ENG");
 		const sup = id("C_SUP");
-		await mintBubble([`slack:${team}:${eng}`]);   // team A scoped to eng
-		await mintBubble([`slack:${team}:${sup}`]);   // team B scoped to support
+		await deploymentWithGrants([`slack:${team}:${eng}`]);   // team A scoped to eng
+		await deploymentWithGrants([`slack:${team}:${sup}`]);   // team B scoped to support
 
 		expect(await slackMessage(team, eng)).toBe(1);   // only team A
 		expect(await slackMessage(team, sup)).toBe(1);   // only team B
@@ -564,15 +619,15 @@ describe("#341 targeted routing — no cross-delivery", () => {
 
 	it("slack: a whole-workspace subscriber is the explicit broadcast opt-in", async () => {
 		const team = id("T");
-		await mintBubble([`slack:${team}`]);  // bare workspace key = every channel
+		await deploymentWithGrants([`slack:${team}`]);  // bare workspace key = every channel
 		expect(await slackMessage(team, id("C_ANY"))).toBe(1);
 		expect(await slackMessage(team, id("C_ELSE"))).toBe(1);
 	});
 
 	it("github: an event reaches only that repo's subscriber", async () => {
 		const org = id("org");
-		await mintBubble([`github:${org}/repo-a`]);
-		await mintBubble([`github:${org}/repo-b`]);
+		await deploymentWithGrants([`github:${org}/repo-a`]);
+		await deploymentWithGrants([`github:${org}/repo-b`]);
 
 		expect(await githubIssue(`${org}/repo-a`)).toBe(1);   // only repo-a sub
 		expect(await githubIssue(`${org}/repo-b`)).toBe(1);   // only repo-b sub
@@ -664,7 +719,7 @@ describe("#489 internal DeploymentSession auth", () => {
 	});
 
 	it("all deliver branches add internal auth, including loop-detected and drained events", async () => {
-		const bubble = await mintBubble(["slack:T_AUTH:C_AUTH"]);
+		const bubble = await deploymentWithGrants(["slack:T_AUTH:C_AUTH"]);
 		const slackEvent = (text: string, ts: string, botAuthored = false) => SELF.fetch("https://example.com/webhooks/slack", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -762,5 +817,175 @@ describe("#489 internal DeploymentSession auth", () => {
 		expect(source.default).not.toMatch(/return stub\.fetch\(\s*internalEventRequest/);
 		expect(source.default).toContain("fetchDeploymentSession(");
 		expect(source.default).toContain("stub.fetch(internalWebSocketRequest");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #488 — resource-grant authorization through the Worker (KV) routes.
+// ---------------------------------------------------------------------------
+describe("#488 resource-grant authorization (route + delivery)", () => {
+	let seq = 0;
+
+	async function githubIssue(repo: string): Promise<number> {
+		const res = await SELF.fetch("https://example.com/webhooks/github", {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"x-github-event": "issues",
+				"x-github-delivery": `dlv-${seq++}`,
+			},
+			body: JSON.stringify({
+				action: "opened",
+				repository: { full_name: repo },
+				sender: { login: "u" },
+				issue: { number: 1, title: "t", state: "open", html_url: `https://github.com/${repo}/issues/1` },
+			}),
+		});
+		expect(res.status).toBe(200);
+		return (await res.json() as { delivered_to: number }).delivered_to;
+	}
+
+	it("rejects an unsigned /resources/authorize with 403 (mandatory auth, test 1)", async () => {
+		const res = await SELF.fetch("https://example.com/resources/authorize", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ service: "github", resource: "org/repo", credential: "ghp_x" }),
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("rejects /resources/authorize with a bad signature (403, test 1)", async () => {
+		const b = await mintBubble(["_bootstrap"]);
+		const body = JSON.stringify({ service: "github", resource: "org/repo", credential: "ghp_x" });
+		const headers = await bubbleHeaders(b.bubble_id, b.bubble_key, "POST", "/resources/authorize", body);
+		headers["x-moda-signature"] = "deadbeef";
+		const res = await SELF.fetch("https://example.com/resources/authorize", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body,
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("registration hard-rejects an ungranted global topic (400 unauthorized_topics, test 5)", async () => {
+		const b = await mintBubble(["_bootstrap"]);
+		const repo = `org/reject-${seq++}`;
+		const body = JSON.stringify({ name: `d-${seq++}`, subscriptions: [`github:${repo}`] });
+		const headers = await bubbleHeaders(b.bubble_id, b.bubble_key, "POST", "/deployments", body);
+		const res = await SELF.fetch("https://example.com/deployments", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body,
+		});
+		expect(res.status).toBe(400);
+		const j = await res.json() as { error: string; topics: string[] };
+		expect(j.error).toBe("unauthorized_topics");
+		expect(j.topics).toEqual([`github:${repo}`]);
+	});
+
+	it("delivery drops a STALE index entry for a grant-less bubble (headline AC, test 6)", async () => {
+		const repo = `org${seq++}/repo`;
+		// A legitimately granted + registered deployment.
+		await deploymentWithGrants([`github:${repo}`]);
+
+		// Inject a STALE subscription-index entry directly into KV: a second
+		// deployment in a DIFFERENT bubble that holds NO grant (simulating an
+		// entry written before enforcement, or a forged one).
+		const staleBubble = `bub_stale_${seq++}`;
+		const staleId = `dep_stale_${seq++}`;
+		await env.EVENTS.put(`deployment_id:${staleId}`, JSON.stringify({
+			id: staleId, name: "stale", api_key: `k_${staleId}`, bubble_id: staleBubble,
+			subscriptions: [`github:${repo}`],
+		}));
+		const subKey = `subscriptions:github:${repo}`;
+		const existing = await env.EVENTS.get(subKey);
+		const ids: string[] = existing ? JSON.parse(existing) : [];
+		ids.push(staleId);
+		await env.EVENTS.put(subKey, JSON.stringify(ids));
+
+		// Only the granted deployment receives the event — the stale entry is dropped.
+		expect(await githubIssue(repo)).toBe(1);
+	});
+
+	it("multi-bubble: two granted bubbles both receive; a third without a grant gets none (test 7)", async () => {
+		const repo = `org${seq++}/repo`;
+		await deploymentWithGrants([`github:${repo}`]); // bubble 1
+		await deploymentWithGrants([`github:${repo}`]); // bubble 2
+
+		// A third bubble subscribes via a stale index entry but holds no grant.
+		const staleId = `dep_nogrant_${seq++}`;
+		await env.EVENTS.put(`deployment_id:${staleId}`, JSON.stringify({
+			id: staleId, name: "nogrant", api_key: `k_${staleId}`, bubble_id: `bub_ng_${seq++}`,
+			subscriptions: [`github:${repo}`],
+		}));
+		const subKey = `subscriptions:github:${repo}`;
+		const existing = await env.EVENTS.get(subKey);
+		const ids: string[] = existing ? JSON.parse(existing) : [];
+		ids.push(staleId);
+		await env.EVENTS.put(subKey, JSON.stringify(ids));
+
+		expect(await githubIssue(repo)).toBe(2); // exactly the two granted bubbles
+	}, 15_000);
+
+	it("slack: a signed workspace registration writes the slack grant, gating delivery (test 8)", async () => {
+		const b = await mintBubble(["_bootstrap"]);
+		const team = `T_GRANT_${seq++}`;
+		const chan = `C_${seq++}`;
+		stubSlackFetch(team, "B1", "A1");
+
+		// Signed workspace registration → writes the slack grant for this bubble.
+		const regBody = JSON.stringify({ workspace_id: team, bot_token: "xoxb-x", bot_id: "B1", app_id: "A1" });
+		const regHeaders = await bubbleHeaders(b.bubble_id, b.bubble_key, "POST", "/slack/workspaces", regBody);
+		const reg = await SELF.fetch("https://example.com/slack/workspaces", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...regHeaders },
+			body: regBody,
+		});
+		expect(reg.status).toBe(200);
+
+		// JOIN-register a deployment subscribing to the channel topic — passes the
+		// gate because the signed registration already granted slack:{team}.
+		const depBody = JSON.stringify({ name: `slackdep-${seq++}`, subscriptions: [`slack:${team}:${chan}`] });
+		const depHeaders = await bubbleHeaders(b.bubble_id, b.bubble_key, "POST", "/deployments", depBody);
+		const depRes = await SELF.fetch("https://example.com/deployments", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...depHeaders },
+			body: depBody,
+		});
+		expect(depRes.status).toBe(201);
+
+		// An inbound slack message to that channel is delivered to the granted dep.
+		const msg = await SELF.fetch("https://example.com/webhooks/slack", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				type: "event_callback", team_id: team,
+				event: { type: "app_mention", channel: chan, user: "U1", text: "hi", ts: `170${seq++}.0001` },
+			}),
+		});
+		expect(msg.status).toBe(200);
+		expect((await msg.json() as { delivered_to: number }).delivered_to).toBe(1);
+	});
+
+	it("slack: signed workspace registration denies a token for a different team", async () => {
+		const b = await mintBubble(["_bootstrap"]);
+		stubSlackFetch("T_OTHER", "B1", "A1");
+		const regBody = JSON.stringify({ workspace_id: "T_VICTIM", bot_token: "xoxb-fake", bot_id: "B_FAKE", app_id: "A_FAKE" });
+		const regHeaders = await bubbleHeaders(b.bubble_id, b.bubble_key, "POST", "/slack/workspaces", regBody);
+		const reg = await SELF.fetch("https://example.com/slack/workspaces", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...regHeaders },
+			body: regBody,
+		});
+		expect(reg.status).toBe(403);
+
+		const depBody = JSON.stringify({ name: `slack-denied-${seq++}`, subscriptions: ["slack:T_VICTIM:C1"] });
+		const depHeaders = await bubbleHeaders(b.bubble_id, b.bubble_key, "POST", "/deployments", depBody);
+		const depRes = await SELF.fetch("https://example.com/deployments", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...depHeaders },
+			body: depBody,
+		});
+		expect(depRes.status).toBe(400);
 	});
 });
