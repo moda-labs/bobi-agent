@@ -41,6 +41,12 @@ log = logging.getLogger(__name__)
 # grants the login to whoever pastes it first.
 LOGIN_CHANNEL_ENV = "MODASTACK_LOGIN_CHANNEL"
 
+# ANSI escape sequences. codex/claude colorize their login output, and a color
+# code (e.g. ESC[94m) sits directly before the one-time code — which breaks a
+# ``\b`` anchor in the code regex (the trailing 'm' touches the code with no word
+# boundary). Strip these before matching the URL/code.
+_ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
 
 @dataclass(frozen=True)
 class SubscriptionLogin:
@@ -143,12 +149,13 @@ def _scrape_login(
         if not chunk:
             break
         buf += chunk.decode("utf-8", "replace")
+        clean = _ANSI_RE.sub("", buf)
         if url is None:
-            m = spec.url_re.search(buf)
+            m = spec.url_re.search(clean)
             if m:
                 url = m.group(0)
         if spec.code_re is not None and code is None:
-            m = spec.code_re.search(buf)
+            m = spec.code_re.search(clean)
             if m:
                 code = m.group(1)
         if url is not None and (spec.code_re is None or code is not None):

@@ -12,9 +12,6 @@ brain:
 # Cloud event server URL in production (stamped into [env] from the deploy flag).
 event_server: ${MODASTACK_EVENT_SERVER}
 
-# Bake the codex CLI into the image — the Codex brain shells out to `codex exec`.
-tool_library: [codex]
-
 services:
   - name: slack
     events: true
@@ -27,5 +24,9 @@ services:
       signing_secret: ${SLACK_SIGNING_SECRET}
 
 build:
-  # nodejs/npm are the base the tool_library `codex` npm install composes onto.
+  # nodejs/npm + the codex CLI the Codex brain shells out to. Declared directly
+  # (not via tool_library: [codex]) because a STANDALONE team — no `from:` — does
+  # not get its tool_library expanded into the image build today (the deploy only
+  # composes `from:` chains). Tracked as a #485 follow-up.
   apt: [nodejs, npm]
+  npm: ["@openai/codex@0.142.0"]

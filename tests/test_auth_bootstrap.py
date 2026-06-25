@@ -247,15 +247,20 @@ def test_credentials_path_for_codex(tmp_path, monkeypatch):
 
 def test_scrape_login_codex_gets_url_and_code():
     """Drive _scrape_login against a pty fed the real `codex login --device-auth`
-    output — it must lift both the device URL and the one-time code."""
+    output — it must lift both the device URL and the one-time code.
+
+    The output is ANSI-colored (codex wraps the URL/code in color codes); the
+    code regex's \\b anchor breaks when ESC[94m sits directly before the code, so
+    the scraper must strip ANSI first. Regression for the live ci-codex-test boot
+    ("did not see the codex login URL/code within 120s")."""
     import pty
 
     sample = (
-        "Follow these steps to sign in with ChatGPT using device code:\r\n"
+        "Welcome to Codex [\x1b[90mv0.142.0\x1b[0m]\r\n"
         "1. Open this link in your browser and sign in to your account\r\n"
-        "   https://auth.openai.com/codex/device\r\n"
-        "2. Enter this one-time code (expires in 15 minutes)\r\n"
-        "   5RAR-HF15T\r\n"
+        "   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\r\n"
+        "2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\r\n"
+        "   \x1b[94m5RAR-HF15T\x1b[0m\r\n"
     )
     master, slave = pty.openpty()
     os.write(slave, sample.encode())
