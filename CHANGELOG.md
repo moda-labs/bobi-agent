@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.34.3 — 2026-06-25
+
+Bugfix release for Codex-backed managers handling large streamed responses.
+
+### Fixed
+- **Large Codex JSON stream events (#505).** Raises the Codex subprocess stream
+  limit so large single-line `codex exec --json` events do not crash the
+  manager session with `Separator is not found, and chunk exceed the limit`.
+
 ## 0.34.2 — 2026-06-25
 
 Bugfix release for Slack routing and event subscription recovery in the
