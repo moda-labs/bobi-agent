@@ -106,6 +106,17 @@ def test_secrets_nested_mapping_is_flattened(repo):
     assert cfg.secrets_env_file == "./x.env"
 
 
+def test_structured_im_login_channel_is_normalized(repo):
+    (repo / "deployments" / "x.yaml").write_text(
+        "team-url: https://r/x.tar.gz\n"
+        "login_channel:\n"
+        "  type: im\n"
+        "  user: zachkozick\n"
+    )
+    cfg = D.load_deploy_config(repo, "x")
+    assert cfg.login_channel == "@zachkozick"
+
+
 # --- validation --------------------------------------------------------------
 
 def test_no_team_source_is_an_error(repo):
