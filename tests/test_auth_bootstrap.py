@@ -236,6 +236,94 @@ def test_run_bootstrap_requires_channel(slack_config, monkeypatch):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
 
 
+def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, monkeypatch):
+    import modastack.events.client as client_mod
+    import modastack.events.server as server_mod
+
+    registered = {}
+
+    monkeypatch.setattr(
+        server_mod,
+        "ensure_bubble",
+        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
+    )
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", lambda *a, **k: ["T123"])
+    monkeypatch.setattr(server_mod, "_slack_auth_info", lambda token: ("T123", "B123"))
+    monkeypatch.setattr(server_mod, "_slack_app_id", lambda token, bot_id: "A123")
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        registered["topics"] = topics
+        return "dep", "api-key"
+
+    monkeypatch.setattr(server_mod, "register", fake_register)
+
+    class FakeClient:
+        def __init__(self, es_url, deployment_id, api_key, queue):
+            self.queue = queue
+
+        def start(self):
+            self.queue.put({
+                "source": "slack",
+                "text": "the-code",
+                "fields": {"channel": "D0LOGIN"},
+            })
+
+        def wait_connected(self, timeout):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(client_mod, "EventServerClient", FakeClient)
+
+    assert ab._wait_for_code(slack_config, "D0LOGIN", timeout=1) == "the-code"
+    assert registered["topics"] == ["slack:T123:app:A123"]
+
+
+def test_wait_for_code_falls_back_to_legacy_slack_topic(slack_config, monkeypatch):
+    import modastack.events.client as client_mod
+    import modastack.events.server as server_mod
+
+    registered = {}
+
+    monkeypatch.setattr(
+        server_mod,
+        "ensure_bubble",
+        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
+    )
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", lambda *a, **k: ["T123"])
+    monkeypatch.setattr(server_mod, "_slack_auth_info", lambda token: ("T123", ""))
+    monkeypatch.setattr(server_mod, "_slack_app_id", lambda token, bot_id: "")
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        registered["topics"] = topics
+        return "dep", "api-key"
+
+    monkeypatch.setattr(server_mod, "register", fake_register)
+
+    class FakeClient:
+        def __init__(self, es_url, deployment_id, api_key, queue):
+            self.queue = queue
+
+        def start(self):
+            self.queue.put({
+                "source": "slack",
+                "text": "the-code",
+                "fields": {"channel": "D0LOGIN"},
+            })
+
+        def wait_connected(self, timeout):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(client_mod, "EventServerClient", FakeClient)
+
+    assert ab._wait_for_code(slack_config, "D0LOGIN", timeout=1) == "the-code"
+    assert registered["topics"] == ["slack:T123"]
+
+
 # --- Codex brain: device-auth (poll) flow (#485) ----------------------------
 
 def test_credentials_path_for_codex(tmp_path, monkeypatch):

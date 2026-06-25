@@ -192,6 +192,21 @@ def _load_yaml_dict(path: Path) -> dict:
     return data
 
 
+def _normalize_login_channel(value) -> str:
+    """Normalize deploy login_channel config to the env-var string form."""
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        channel_type = str(value.get("type", "")).strip().lower()
+        if channel_type != "im":
+            raise DeployError("structured login_channel only supports `type: im`.")
+        user = str(value.get("user", "")).strip()
+        if not user:
+            raise DeployError("login_channel with `type: im` requires `user:`.")
+        return user if user.startswith("@") else f"@{user}"
+    return str(value)
+
+
 def load_deploy_config(project_path: Path, name: str,
                        overrides: dict | None = None) -> DeployConfig:
     """Resolve one deployment's config by the precedence chain:
@@ -231,7 +246,7 @@ def load_deploy_config(project_path: Path, name: str,
         volume_size=int(merged.get("volume_size")),
         auth=str(merged.get("auth")),
         event_server=str(merged.get("event_server")),
-        login_channel=str(merged.get("login_channel", "") or ""),
+        login_channel=_normalize_login_channel(merged.get("login_channel", "")),
         claude_version=str(merged.get("claude_version", "") or ""),
         org=str(merged.get("org", "") or ""),
         volume_name=str(merged.get("volume_name", "data") or "data"),
