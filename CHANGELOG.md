@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.34.1 — 2026-06-25
+
+Bugfix release for the Codex-backed Fly fleet cutover.
+
+### Fixed
+- **Codex shell PATH in containers (#500).** Exposes `modastack` from both
+  `/usr/local/bin` and `/home/modastack/.local/bin`, covering Codex tool shells
+  that sanitize `PATH` and drop `/opt/venv/bin`.
+- **Slack app cross-delivery (#503, fixes #502).** Slack events and
+  subscriptions now use app-qualified topics (`slack:<team>:app:<app>` and
+  app+channel variants), so Bobbers, eng-team, and other bots in the same Slack
+  workspace do not receive each other's DMs after redeploy.
+- **Fly volume secret drift (#503, fixes #501).** Existing-app deploy reconcile
+  now syncs resolved secret values into `/data/project/.modastack/.env` and
+  removes pruned keys from that file, preventing tool shells that lose inherited
+  env from falling back to stale volume credentials.
+
 ## 0.34.0 — 2026-06-24
 
 Adds the pluggable agent brain layer so a team can run on Claude Code or Codex

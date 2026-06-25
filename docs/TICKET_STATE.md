@@ -7,7 +7,8 @@ blocked vs. ready, and which one-offs are ready to hand to the `modastack` bot.
 moves tracks, update it here in the same session. This file is the single place
 to get the lay of the land without re-reading every issue.
 
-- **Last reviewed:** 2026-06-25 (**19 open issues** — filed live Codex fleet incident follow-ups: **#501** stale persisted `.modastack/.env` secrets on Fly volumes can make tool shells use the wrong Slack bot, and **#502** workspace-level Slack DM routing can cross-deliver inbound events between bots. #501 is outbound credential drift; #502 is inbound webhook routing isolation.)
+- **Last reviewed:** 2026-06-25 (**23 open issues after closing #501/#502** — 0.34.1 bugfix release cut from #500/#503. **Closed:** #501 stale persisted `.modastack/.env` secrets on Fly volumes, and #502 Slack workspace-level DM cross-delivery between bots. Both shipped in PR #503; #500 shipped the Codex shell PATH fix.)
+- **Prev reviewed:** 2026-06-25 (**25 open issues** — filed live Codex fleet incident follow-ups: **#501** stale persisted `.modastack/.env` secrets on Fly volumes can make tool shells use the wrong Slack bot, and **#502** workspace-level Slack DM routing can cross-deliver inbound events between bots. #501 is outbound credential drift; #502 is inbound webhook routing isolation.)
 - **Prev reviewed:** 2026-06-24 (**17 open issues** — filed **epic #485 "Pluggable agent brain"** (Claude/Codex/Gemini/Grok behind one `BrainClient`; spec `pluggable-brain.md`; Phase 0 Codex spike done). Self-contained epic — work breakdown is in-issue checkboxes, no child tickets. New track added to "Tracks at a glance".)
 - **Prev reviewed:** 2026-06-24 (**16 open issues** — full table reconciliation against `gh issue list` + Linear. Header had been bumped for the #453 cutover but the body tables still showed the 2026-06-22 state; this pass fixes that. **Closed since last real table refresh, moved to "Recently closed":** #285, #397, #403, #411, #412, #417, #418, #425, #426, #433, #443, #454 — i.e. the **CLI-first cleanup track, the Codex track, and the Reliability track are all DONE**. **New tracks added:** Tool/Capability library (#416 cli, #428 skill, #398 mcp) and a curator-monitor one-off (#456, assigned to `modastack`). **Linear sync gap flagged:** MDS-47/48/49 still Backlog but their GitHub twins (#285, #363) are closed — they describe the retired gateway-harness/MCP-shim architecture; epic MDS-42 likely needs re-scoping.)
 - **Prev reviewed:** 2026-06-24 (15 open issues. **Epic #453 "Team distribution & composition" — ✅ DONE + CUTOVER LIVE**; #440/#446/#451/#452/#453 all CLOSED. modastack 0.31.0 ships `from:` composition; live `moda-eng-team` runs the composed team. _(prior:_ **PR [#457](https://github.com/moda-labs/modastack/pull/457)** (`epic-453-team-compose`). #446 + #451 = the `from:` compose mechanism (`modastack/compose.py`: resolution local-always-wins + fail-fast + `--pinned`; merge prose-concat + structured-deep-merge; deploy flatten; publish guard; 34 tests). #452 = pristine `agents/eng-team-core` extracted + monolith `agents/eng-team` DELETED + tests re-pointed; **regression bar met** (composed moda-eng-team ≡ today's eng-team). Overlay `moda-eng-team` (`from: eng-team-core`) committed to **private moda-agent-teams** branch `moda-eng-team-overlay` (additive; live app untouched). Full unit suite green (2116). **Remaining = the release-gated CUTOVER**: merge #457 → cut a modastack release (publishes `eng-team-core@1.0.0` to the registry) → merge the moda-agent-teams overlay PR → flip `deployments/eng-team.yaml` to `team: moda-eng-team` + delete the private monolith + deploy. Specs: `team-from-resolution.md`, `team-compose-merge.md`, `eng-team-core-split.md`.)
@@ -25,7 +26,7 @@ to get the lay of the land without re-reading every issue.
 | Chat SDK / ChannelAdapter | Multi-issue (#190) | #201 → #202, #203, #204 | ⛔ Blocked on spike #191; #201 is the gate |
 | Tool / Capability library | NEW | #416 (cli) → #428 (skill); #398 (mcp) | 🟡 #416 is the foundation (catalog format + resolver); #428/#398 are the skill/mcp spokes. **Successor to the now-closed CLI-first track.** |
 | Release pipeline (release.yml) | — | #427 | 🔴 design (library↔event-server protocol compat); #426 closed |
-| Live fleet incidents | NEW | #501, #502 | 🔴 investigation/fix design — Codex-switched Fly bots exposed stale volume secrets and Slack cross-delivery between apps in one workspace |
+| Live fleet incidents | NEW | #501, #502 | ✅ **FIXED in PR #503 / release 0.34.1** — Codex-switched Fly bots exposed stale volume secrets and Slack cross-delivery between apps in one workspace |
 | Knowledge / curation | NEW | #456 | 🟢 **Assigned to `modastack`** — replace append-only decision log with curator-monitor → `policy.md` (filed off the 2026-06-23 director wedge) |
 | Team distribution & composition | **Epic (#453)** | #440 → #446 → #451 → #452 | ✅ **DONE — CUTOVER COMPLETE & LIVE 2026-06-24.** PR #457 (`7709b76`) + **modastack 0.31.0 released** (compose on PyPI). moda-agent-teams **PR #3 merged**, `MODASTACK_VERSION→0.31.0`, deploy dispatched (`only=eng-team`, `rebuild=true`) → live `moda-eng-team` reconciled onto the composed team. Behavioral identity confirmed live. |
 | CLI-first connection cleanup | Sequence | #397 → #403 | ✅ **DONE** — #397 (image→CLI) + #403 (inject.py shim deleted) both CLOSED 2026-06-22 |
@@ -55,8 +56,8 @@ apps in one workspace.
 
 | Issue | What | Status |
 |---|---|---|
-| #501 | Deploy reconcile leaves stale `.modastack/.env` secrets on Fly volume | 🟡 **OPEN — fix in progress.** Existing-app deploy now syncs reconciled Fly secrets into `/data/project/.modastack/.env` and removes pruned keys from that file. |
-| #502 | Slack workspace-level DM routing can cross-deliver events between bots | 🟡 **OPEN — fix in progress.** Slack events and subscriptions now use app-qualified topics (`slack:<team>:app:<app>`) so DMs route to the matching Slack app. |
+| #501 | Deploy reconcile leaves stale `.modastack/.env` secrets on Fly volume | ✅ **CLOSED — fixed in PR #503 / release 0.34.1.** Existing-app deploy now syncs reconciled Fly secrets into `/data/project/.modastack/.env` and removes pruned keys from that file. |
+| #502 | Slack workspace-level DM routing can cross-deliver events between bots | ✅ **CLOSED — fixed in PR #503 / release 0.34.1.** Slack events and subscriptions now use app-qualified topics (`slack:<team>:app:<app>`) so DMs route to the matching Slack app. |
 
 ## Team distribution & composition — epic #453 ✅ DONE (2026-06-24)
 
@@ -159,8 +160,6 @@ unresolved design decision, verifiable without infra/credentials the bot lacks.*
 | #428 | Tool library `kind: skill` spoke | Depends on #416's catalog shape; supply-chain (SHA-pin + scanning) open |
 | #398 | First-class MCP support (`kind: mcp`) | Design-heavy; needs a plan |
 | #427 | library ↔ event-server protocol compat | Design-first; N-1 compat + canary-against-new-server |
-| #501 | Stale `.modastack/.env` secrets on Fly volumes | Fix in progress; verify live deploy refreshes volume env after release |
-| #502 | Slack app cross-delivery on workspace-level DM topics | Fix in progress; verify Bobbers and eng-team only receive their own app events after redeploy |
 | #327 | Self-learning script-cache monitor | Large feature, unresolved design (sandboxing, cache invalidation, retry budgets); must define its own Axis-1 mechanism (per #363/#396) |
 
 ---
