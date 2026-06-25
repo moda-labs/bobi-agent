@@ -6,11 +6,18 @@ the resume/thread handling, usage mapping, and error paths are exercised without
 a real codex binary.
 """
 
+import sys
+
 import pytest
 
 from modastack.brain import get_brain
 from modastack.brain.base import AssistantText, TurnResult
-from modastack.brain.codex import CodexBrain, _CodexSession, _instructions
+from modastack.brain.codex import (
+    CodexBrain,
+    _CodexSession,
+    _instructions,
+    _spawn_codex,
+)
 
 
 def _runner_of(events, sink=None):
@@ -124,6 +131,23 @@ async def test_turn_failed_surfaces_error():
     assert isinstance(out[-1], TurnResult)
     assert out[-1].is_error is True
     assert out[-1].result_text == "model overloaded"
+
+
+@pytest.mark.asyncio
+async def test_spawn_codex_accepts_large_ndjson_events(tmp_path):
+    """Codex can emit one JSON event line larger than asyncio's 64 KiB default."""
+    script = (
+        "import json\n"
+        "print(json.dumps({'type': 'item.completed', 'item': "
+        "{'type': 'agent_message', 'text': 'x' * 70000}}), flush=True)\n"
+        "print(json.dumps({'type': 'turn.completed', 'usage': {}}), flush=True)\n"
+    )
+
+    events = [ev async for ev in _spawn_codex([sys.executable, "-c", script], str(tmp_path))]
+
+    assert events[0]["type"] == "item.completed"
+    assert events[0]["item"]["text"] == "x" * 70000
+    assert events[1]["type"] == "turn.completed"
 
 
 @pytest.mark.asyncio

@@ -42,6 +42,12 @@ _EXEC_FLAGS = (
     "--dangerously-bypass-approvals-and-sandbox",
 )
 
+# Codex emits one JSON object per line, and a single item.completed event can
+# carry a large assistant message. asyncio's default subprocess stream limit is
+# only 64 KiB, which turns a healthy long NDJSON event into a ValueError from
+# StreamReader.readline().
+_CODEX_STREAM_LIMIT = 16 * 1024 * 1024
+
 
 def _instructions(system_prompt: Any) -> str:
     """Extract the agent instructions from a brain system_prompt.
@@ -75,6 +81,7 @@ async def _spawn_codex(argv: list[str], cwd: str) -> AsyncIterator[dict]:
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        limit=_CODEX_STREAM_LIMIT,
     )
     assert proc.stdout is not None
     try:
