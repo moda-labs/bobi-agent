@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { constantTimeEqual, type NormalizedEvent, namespaceSubKey } from "./core";
-import { INTERNAL_HEADER } from "./internal-auth";
+import { INTERNAL_HEADER, internalSecretFromWebSocketProtocols } from "./internal-auth";
 
 interface Env {
 	EVENTS: KVNamespace;
@@ -37,7 +37,8 @@ export class DeploymentSession extends DurableObject<Env> {
 
 	override async fetch(request: Request): Promise<Response> {
 		const expected = this.env.INTERNAL_DO_SECRET;
-		const provided = request.headers.get(INTERNAL_HEADER);
+		const provided = request.headers.get(INTERNAL_HEADER)
+			|| internalSecretFromWebSocketProtocols(request.headers.get("Sec-WebSocket-Protocol"));
 		if (!expected || !provided || !constantTimeEqual(provided, expected)) {
 			return new Response(null, { status: 403 });
 		}

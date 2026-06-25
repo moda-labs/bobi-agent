@@ -2,7 +2,12 @@ import { SELF, env } from "cloudflare:test";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import worker from "../src/index";
 import { buildBubbleSignature, parseGlobalTopic } from "../src/core";
-import { INTERNAL_HEADER, internalWebSocketRequest } from "../src/internal-auth";
+import {
+	INTERNAL_HEADER,
+	INTERNAL_WS_PROTOCOL_PREFIX,
+	internalWebSocketProtocol,
+	internalWebSocketRequest,
+} from "../src/internal-auth";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -702,6 +707,33 @@ describe("#489 internal DeploymentSession auth", () => {
 		expect(event.status).toBe(200);
 	});
 
+	it("accepts direct DO websocket upgrades with the internal subprotocol token", async () => {
+		const deploymentId = "direct-good-ws-protocol";
+		const stub = directStub(deploymentId);
+		const init = await stub.fetch(
+			new Request("https://internal/init", {
+				method: "POST",
+				headers: { [INTERNAL_HEADER]: env.INTERNAL_DO_SECRET },
+				body: JSON.stringify({ deployment_id: deploymentId, subscriptions: [] }),
+			}),
+		);
+		expect(init.status).toBe(200);
+
+		const response = await stub.fetch(
+			new Request(`https://internal/deployments/${deploymentId}/subscribe`, {
+				headers: {
+					Upgrade: "websocket",
+					"Sec-WebSocket-Protocol": internalWebSocketProtocol(env.INTERNAL_DO_SECRET),
+				},
+			}),
+		);
+
+		expect(response.status).toBe(101);
+		expect(response.webSocket).toBeTruthy();
+		response.webSocket?.accept();
+		response.webSocket?.close();
+	});
+
 	it("worker-mediated /init and delivery still reach the DO", async () => {
 		const bubble = await mintBubble(["internal-auth:topic"]);
 		const payload = JSON.stringify({ source: "test", payload: { ok: true } });
@@ -768,11 +800,14 @@ describe("#489 internal DeploymentSession auth", () => {
 
 		expect(request.url).toBe("https://example.com/deployments/dep-1/subscribe?last_seen=2");
 		expect(request.headers.get("Upgrade")).toBe("websocket");
-		expect(request.headers.get(INTERNAL_HEADER)).toBe("secret-value");
+		const protocol = request.headers.get("Sec-WebSocket-Protocol") || "";
+		expect(protocol.startsWith(INTERNAL_WS_PROTOCOL_PREFIX)).toBe(true);
+		expect(protocol).not.toContain("secret-value");
+		expect(request.headers.get(INTERNAL_HEADER)).toBeNull();
 		expect(request.headers.get("Authorization")).toBeNull();
 		expect(request.headers.get("Cookie")).toBeNull();
 		expect(Array.from(request.headers.keys()).sort()).toEqual([
-			INTERNAL_HEADER,
+			"sec-websocket-protocol",
 			"upgrade",
 		].sort());
 	});
