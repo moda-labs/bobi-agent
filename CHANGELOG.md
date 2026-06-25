@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.34.2 — 2026-06-25
+
+Bugfix release for Slack routing and event subscription recovery in the
+Codex-backed Fly fleet.
+
+### Fixed
+- **Slack app topic isolation follow-up (#504).** Slack webhooks with
+  `api_app_id` now fan out only to app-qualified topics, preventing stale
+  workspace/channel subscriptions from cross-delivering events between bots.
+- **Stale event-server credentials (#504).** A saved deployment key that gets a
+  403 during subscription sync now triggers re-registration instead of leaving
+  the manager connected with a dead WebSocket key.
+- **Subscription cleanup on upgrade (#504).** Subscription updates can replace
+  the desired topic set, removing legacy Slack topics such as `slack:<team>`
+  after a deployment moves to `slack:<team>:app:<app>`.
+- **Slack webhook URL verification (#504).** The Worker accepts both
+  `/webhooks/slack` and `/webhooks/slack/` for Slack request URL verification.
+
 ## 0.34.1 — 2026-06-25
 
 Bugfix release for the Codex-backed Fly fleet cutover.
