@@ -49,6 +49,26 @@ configure_brain_paths() {
   esac
 }
 
+validate_auth_mode() {
+  # The provider API key is brain-specific (ANTHROPIC_API_KEY / OPENAI_API_KEY);
+  # ${!BRAIN_SHADOW_KEY} is its live value via bash indirect expansion.
+  case "${MODASTACK_AUTH:-api_key}" in
+    api_key)
+      [ -n "${!BRAIN_SHADOW_KEY:-}" ] \
+        || fatal "MODASTACK_AUTH=api_key but ${BRAIN_SHADOW_KEY} is unset."
+      ;;
+    subscription)
+      # The provider API key silently outranks subscription OAuth creds and bills
+      # the API instead — it must be entirely absent in this mode (§6.1).
+      [ -z "${!BRAIN_SHADOW_KEY:-}" ] \
+        || fatal "MODASTACK_AUTH=subscription but ${BRAIN_SHADOW_KEY} is set; it overrides subscription auth. Unset it."
+      ;;
+    *)
+      fatal "unknown MODASTACK_AUTH='${MODASTACK_AUTH}' (expected api_key|subscription)."
+      ;;
+  esac
+}
+
 resolve_configured_brain() {
   [ -z "${MODASTACK_BRAIN:-}" ] || return 0
   [ -f "${PROJECT_DIR}/.modastack/agent.yaml" ] || return 0
@@ -72,6 +92,14 @@ configure_brain_paths
 
 log() { echo "[entrypoint] $*"; }
 fatal() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
+
+AUTH_VALIDATED=0
+if [ -n "${MODASTACK_BRAIN:-}" ] \
+   || [ -f "${PROJECT_DIR}/.modastack/agent.yaml" ] \
+   || { [ -z "${MODASTACK_TEAM_URL:-}" ] && [ -z "${MODASTACK_TEAM:-}" ]; }; then
+  validate_auth_mode
+  AUTH_VALIDATED=1
+fi
 
 # --- 1. Prepare the volume (root) -------------------------------------------
 # Only the durable dirs live on the volume: the project root and Claude's config
@@ -182,23 +210,13 @@ resolve_configured_brain
 configure_brain_paths
 
 # --- 3. Validate auth mode --------------------------------------------------
-# The provider API key is brain-specific (ANTHROPIC_API_KEY / OPENAI_API_KEY);
-# ${!BRAIN_SHADOW_KEY} is its live value via bash indirect expansion.
-case "${MODASTACK_AUTH:-api_key}" in
-  api_key)
-    [ -n "${!BRAIN_SHADOW_KEY:-}" ] \
-      || fatal "MODASTACK_AUTH=api_key but ${BRAIN_SHADOW_KEY} is unset."
-    ;;
-  subscription)
-    # The provider API key silently outranks subscription OAuth creds and bills
-    # the API instead — it must be entirely absent in this mode (§6.1).
-    [ -z "${!BRAIN_SHADOW_KEY:-}" ] \
-      || fatal "MODASTACK_AUTH=subscription but ${BRAIN_SHADOW_KEY} is set; it overrides subscription auth. Unset it."
-    ;;
-  *)
-    fatal "unknown MODASTACK_AUTH='${MODASTACK_AUTH}' (expected api_key|subscription)."
-    ;;
-esac
+# First-boot team installs can define ``brain.kind`` in agent.yaml, so their
+# shadow-key check may need to wait until after install. Blank/no-team boots and
+# existing installs validate before the wait-for-team loop so auth mistakes fail
+# fast instead of hanging as a blank instance.
+if [ "${AUTH_VALIDATED}" != "1" ]; then
+  validate_auth_mode
+fi
 
 # --- 3b. Codex's durable OAuth dir on the volume (#485) ---------------------
 # Same idea for codex: ~/.codex (where `codex login`/`codex exec` keep auth.json)
