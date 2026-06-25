@@ -107,8 +107,8 @@ Add `INTERNAL_DO_SECRET: string` to the module-local `interface Env` in **both**
   fixed dev value `INTERNAL_DO_SECRET: "test-internal-secret"` in
   `vitest.config.mts`, and augment `test/env.d.ts`'s `ProvidedEnv` with
   `INTERNAL_DO_SECRET: string` so tests typecheck. For a manually-run local
-  Worker (`wrangler dev`), the value comes from `.dev.vars` /
-  `MODASTACK_ES_INTERNAL_SECRET`; this is dev-only and never committed.
+  Worker (`wrangler dev`), use the same canonical `INTERNAL_DO_SECRET` name in
+  `.dev.vars`; this is dev-only and never committed.
 
 ### 2. Worker → DO header
 

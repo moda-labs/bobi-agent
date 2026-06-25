@@ -50,13 +50,15 @@ server is used.
     resource topics by tenant/bubble after proving each integration can still
     route correctly.
 
-- [ ] Add Worker-to-Durable-Object internal authentication.
-  - Current risk: the Durable Object accepts `/init`, `/event`, and websocket
-    upgrade requests without an internal shared-secret check.
+- [x] Add Worker-to-Durable-Object internal authentication.
+  - Fixed by #489: the Worker adds `x-modastack-internal` on all
+    Worker-to-DO calls, and the Durable Object rejects `/init`, `/event`, and
+    websocket upgrade requests without a valid internal shared-secret check.
   - Code: `event-server/src/deployment-session.ts`,
     `event-server/src/index.ts::createKVStorage`.
-  - Expected fix: Worker adds an internal auth header on DO calls; DO rejects
-    missing/invalid internal auth.
+  - Secret handling: `INTERNAL_DO_SECRET` is a Cloudflare Worker secret only
+    (`wrangler secret put INTERNAL_DO_SECRET`); do not propagate it to Fly,
+    Bubble, agent-team env, or `.modastack/.env`.
 
 - [ ] Add public admission control for `POST /deployments`.
   - Current risk: unsigned deployment minting is fine for bootstrap, but public
