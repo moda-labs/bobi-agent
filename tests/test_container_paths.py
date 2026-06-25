@@ -21,6 +21,7 @@ import pytest
 from modastack import sdk
 
 PACKAGE_ROOT = Path(sdk.__file__).resolve().parent
+REPO_ROOT = PACKAGE_ROOT.parent
 
 
 class TestClaudeCliResolution:
@@ -80,3 +81,12 @@ class TestNoUnguardedMacosPaths:
             if not guarded:
                 offenders.append(f"{py.relative_to(PACKAGE_ROOT.parent)}:{lineno}: {line.strip()}")
         assert not offenders, "unguarded macOS-absolute paths:\n" + "\n".join(offenders)
+
+
+class TestContainerCliPath:
+    def test_modastack_cli_is_on_codex_sanitized_path(self):
+        """Codex tool shells keep /usr/local/bin but may drop /opt/venv/bin."""
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+        assert "> /usr/local/bin/modastack" in dockerfile
+        assert "/home/modastack/.local/bin/modastack" in dockerfile
+        assert 'exec /opt/venv/bin/modastack "$@"' in dockerfile
