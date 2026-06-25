@@ -330,7 +330,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		return respond(res, await handleLinearWebhook(storage, payload));
 	}
 
-	if (method === "POST" && path === "/webhooks/slack") {
+	if (method === "POST" && (path === "/webhooks/slack" || path === "/webhooks/slack/")) {
 		const body = await readBody(req);
 		const payload = parseJson(body);
 		if (!payload) return json(res, { error: "invalid JSON" }, 400);
