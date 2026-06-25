@@ -477,6 +477,27 @@ class TestRunAgentEntryRootBinding:
         assert os.environ[BRAIN_ENV] == "codex"
 
     @patch("modastack.subagent.spawn_adhoc")
+    def test_clears_stale_process_brain_when_passed_root_has_default_brain(
+        self, mock_spawn, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr("modastack.paths._root", None)
+        monkeypatch.setenv("MODASTACK_BRAIN", "codex")
+        root = tmp_path / "dev"
+        repo = root / "jobtack"
+        (root / ".modastack").mkdir(parents=True)
+        (root / ".modastack" / "agent.yaml").write_text("name: t\n")
+        repo.mkdir()
+
+        from modastack.brain import BRAIN_ENV
+        from modastack.subagent import _run_agent_entry
+        _run_agent_entry({
+            "task": "t", "cwd": str(repo), "root": str(root),
+            "workflow_name": "adhoc", "persistent": True, "subscribe": [],
+        })
+
+        assert BRAIN_ENV not in os.environ
+
+    @patch("modastack.subagent.spawn_adhoc")
     def test_missing_root_is_a_spawner_bug(self, mock_spawn, tmp_path,
                                            monkeypatch):
         """An args blob without a root fails loudly — the child never

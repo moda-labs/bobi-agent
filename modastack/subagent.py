@@ -25,7 +25,11 @@ from modastack.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from modastack.transient import is_transient_api_error
-from modastack.env import agent_spawn_env
+from modastack.env import (
+    _configured_brain_kind,
+    agent_spawn_env,
+    child_agent_env,
+)
 
 InputHandler = Callable[[str, dict[str, Any]], str]
 
@@ -651,15 +655,6 @@ def _launch_detached(script: str, args: list[str], log_file: Path,
     return proc.pid
 
 
-def _configured_brain_kind(root: Path) -> str:
-    """Return the team's configured brain kind from the installation root."""
-    try:
-        from modastack.config import Config
-        return Config.load(root).brain_kind
-    except Exception:
-        return ""
-
-
 # ---------------------------------------------------------------------------
 # Requires: dispatch-time preflight gate
 # ---------------------------------------------------------------------------
@@ -898,15 +893,10 @@ def launch_agent(
     ))
 
     log_file = SessionRegistry.log_path(session_name)
-    # Pin MODASTACK_ROOT so CLI commands run inside worktrees by the child
-    # resolve to the real installation, not the worktree's checked-in
-    # agent.yaml (#247). agent_spawn_env() prepends the user-bin dirs to PATH
-    # so bare-name stdio MCP commands resolve at spawn the same way they do in
-    # preflight — the daemon's stripped PATH otherwise breaks them (MDS-64).
-    child_env = {**agent_spawn_env(), "MODASTACK_ROOT": str(root)}
-    brain_kind = _configured_brain_kind(root)
-    if brain_kind:
-        child_env["MODASTACK_BRAIN"] = brain_kind
+    # child_agent_env() is the single parent-to-child propagation contract:
+    # identity, brain selection, tool PATH, and credential material all flow
+    # through one helper instead of one-off launch-site patches.
+    child_env = child_agent_env(root)
     pid = _launch_detached(script, [args_json], log_file, env=child_env)
     registry.update(session_name, pid=pid)
 
@@ -1215,10 +1205,12 @@ def _run_agent_entry(args: dict) -> None:
             f"(no .modastack/agent.yaml) — refusing to run with an unverified "
             f"identity."
         )
-    brain_kind = _configured_brain_kind(project_root)
+    from modastack.brain import BRAIN_ENV
+    brain_kind = _configured_brain_kind(project_root, os.environ)
     if brain_kind:
-        from modastack.brain import BRAIN_ENV
         os.environ[BRAIN_ENV] = brain_kind
+    else:
+        os.environ.pop(BRAIN_ENV, None)
 
     # Subscription is owned by the Session now: every Session subscribes to
     # inbox/<self> on start, and extra topics (the persistent agent's
