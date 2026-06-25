@@ -57,18 +57,6 @@ def _instructions(system_prompt: Any) -> str:
     return ""
 
 
-def _map_usage(u: dict) -> dict:
-    """Codex ``turn.completed.usage`` → the token dict session.py's rotation
-    metric expects (input + cache_read + cache_creation)."""
-    return {
-        "input_tokens": u.get("input_tokens", 0) or 0,
-        # Codex calls the cached prefix ``cached_input_tokens``.
-        "cache_read_input_tokens": u.get("cached_input_tokens", 0) or 0,
-        "cache_creation_input_tokens": 0,
-        "output_tokens": u.get("output_tokens", 0) or 0,
-    }
-
-
 def _costs(u: dict, model: str) -> list[BrainCost]:
     inp = (u.get("input_tokens", 0) or 0) + (u.get("cached_input_tokens", 0) or 0)
     return [BrainCost(model=model or "codex", input_tokens=inp,
@@ -177,9 +165,15 @@ class _CodexSession:
                     yield AssistantText(text=item["text"])
             elif etype == "turn.completed":
                 usage = ev.get("usage") or {}
-                # Carry the turn usage on a text-less assistant message so the
-                # rotation metric sees it (Codex has no per-message usage).
-                yield AssistantText(text="", usage=_map_usage(usage))
+                # Deliberately do NOT feed codex usage to the manager's context-
+                # rotation metric. codex exec reports a per-turn AGGREGATE (summed
+                # across internal model calls), which over-counts context fill by
+                # an order of magnitude (observed 900K–1.2M live) and triggers a
+                # rotation STORM — the manager resets the thread almost every turn,
+                # losing continuity. Codex manages its own context window
+                # (auto-compaction), so the manager keeps one stable thread. Cost
+                # attribution still uses the usage. (#485 follow-up: a turn-count
+                # rotation if unbounded rollout growth ever becomes an issue.)
                 yield TurnResult(
                     session_id=self._thread_id or "",
                     costs=_costs(usage, self._model),

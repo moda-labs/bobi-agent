@@ -346,8 +346,10 @@ def run_bootstrap(
             post_message(
                 token, channel,
                 "🔐 *modastack subscription login*\n"
-                f"Open *{url}* and enter this one-time code:\n"
-                f"`{code}`\n_Waiting for you to authorize…_",
+                "Open this link, sign in, then enter the one-time code:\n"
+                f"{url}\n"
+                f"Code: `{code}`\n"
+                "_Waiting for you to authorize…_",
             )
             try:
                 proc.wait(timeout=timeout)

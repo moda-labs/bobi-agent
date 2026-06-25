@@ -10,7 +10,7 @@ import pytest
 
 from modastack.brain import get_brain
 from modastack.brain.base import AssistantText, TurnResult
-from modastack.brain.codex import CodexBrain, _CodexSession, _instructions, _map_usage
+from modastack.brain.codex import CodexBrain, _CodexSession, _instructions
 
 
 def _runner_of(events, sink=None):
@@ -41,17 +41,6 @@ def test_instructions_extraction():
     assert _instructions(None) == ""
 
 
-def test_usage_mapping_uses_codex_keys():
-    m = _map_usage({"input_tokens": 5, "cached_input_tokens": 100,
-                    "output_tokens": 7})
-    assert m == {
-        "input_tokens": 5,
-        "cache_read_input_tokens": 100,   # codex's cached_input_tokens
-        "cache_creation_input_tokens": 0,
-        "output_tokens": 7,
-    }
-
-
 # --- happy turn -------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -75,9 +64,9 @@ async def test_turn_converts_messages_and_captures_thread():
 
     texts = [m.text for m in out if isinstance(m, AssistantText) and m.text]
     assert texts == ["working", "done."]          # file_change is dropped
-    # The text-less assistant message carries the turn usage for rotation.
-    usage_msgs = [m for m in out if isinstance(m, AssistantText) and m.usage]
-    assert usage_msgs[0].usage["cache_read_input_tokens"] == 1000
+    # Codex usage must NOT reach the rotation metric (no usage-carrying message):
+    # its per-turn aggregate storms rotation. Cost still rides the TurnResult. #485
+    assert not any(isinstance(m, AssistantText) and m.usage for m in out)
     result = out[-1]
     assert isinstance(result, TurnResult)
     assert result.session_id == "th-1"
