@@ -319,7 +319,8 @@ async def _async_probe_mcp(
     # Build the probe session through the brain (Claude today). No system prompt
     # — this is a connect-and-poll MCP probe, not a turn. ``get_mcp_status`` is a
     # Claude-adapter capability (see #485 open Q4 on per-brain MCP discovery).
-    client = get_brain().make_session(
+    brain = get_brain()
+    client = brain.make_session(
         cwd=str(project_path),
         system_prompt=None,
         options={
@@ -332,9 +333,20 @@ async def _async_probe_mcp(
             "env": agent_spawn_env(),
         },
     )
+    get_mcp_status = getattr(client, "get_mcp_status", None)
+    if get_mcp_status is None:
+        return [
+            CheckResult(
+                name, ok=False,
+                detail=f"mcp — status probe not supported for {brain.name} brain",
+                hint="MCP startup will be left to the agent runtime.",
+                required=False,
+            )
+            for name in names
+        ]
     try:
         await client.connect()
-        status = await client.get_mcp_status()
+        status = await get_mcp_status()
 
         # MDS-63: poll until every target server leaves the `pending` spawn
         # window (or the bounded budget elapses). Servers that genuinely
@@ -350,7 +362,7 @@ async def _async_probe_mcp(
             if not still_pending:
                 break
             await asyncio.sleep(MCP_PROBE_POLL_INTERVAL)
-            status = await client.get_mcp_status()
+            status = await get_mcp_status()
 
         servers = {s.get("name"): s for s in status.get("mcpServers", [])}
         return [_judge_mcp_server(name, servers.get(name)) for name in names]

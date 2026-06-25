@@ -89,25 +89,25 @@ class TestContextRotation:
         cache_read (tiny input_tokens) must still trip the cap.
 
         Post-#454 the metric is measured from a SINGLE representative API
-        call — the last AssistantMessage's per-call usage — NOT the
-        ResultMessage's turn aggregate. So the over-cap usage shape the
-        deployed manager actually emitted (~424K cached, 2 fresh) lives on a
-        real AssistantMessage (not a MagicMock, which fails the isinstance
-        gate). Single-call fill = 2 + 422_468 + 1_262 = 423_732 >= 275_000 →
-        rotation must arm.
+        call — the last AssistantText's per-call usage — NOT the TurnResult's
+        turn aggregate. So the over-cap usage shape the deployed manager
+        actually emitted (~424K cached, 2 fresh) lives on the normalized
+        AssistantText produced by the brain adapter. Single-call fill =
+        2 + 422_468 + 1_262 = 423_732 >= 275_000 → rotation must arm.
         """
-        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+        from modastack.brain import AssistantText, TurnResult
 
         class _Client:
+            provider = "anthropic"
+
             async def query(self, text):
                 pass
 
             async def receive_response(self):
                 # The one representative API call carries the warm, cache-heavy
                 # single-call usage — this is what the corrected metric reads.
-                yield AssistantMessage(
-                    content=[TextBlock(text="step")],
-                    model="claude-opus-4-8",
+                yield AssistantText(
+                    text="step",
                     usage={
                         "input_tokens": 2,
                         "cache_read_input_tokens": 422_468,
@@ -115,19 +115,14 @@ class TestContextRotation:
                         "output_tokens": 3_432,
                     },
                 )
-                # The ResultMessage closes the turn; its aggregate usage is no
-                # longer the rotation signal (it over-counts cache_read ×N).
-                yield ResultMessage(
-                    subtype="success", duration_ms=1, duration_api_ms=1,
-                    is_error=False, num_turns=1, session_id="sess-1",
+                # The TurnResult closes the turn; aggregate usage is no longer
+                # the rotation signal (it over-counts cache_read xN).
+                yield TurnResult(
+                    session_id="sess-1",
+                    is_error=False,
                     total_cost_usd=0.01,
-                    usage={
-                        "input_tokens": 2,
-                        "cache_read_input_tokens": 422_468,
-                        "cache_creation_input_tokens": 1_262,
-                        "output_tokens": 3_432,
-                    },
-                    model_usage={"claude-opus-4-8": {"input_tokens": 2}},
+                    duration_ms=1,
+                    num_turns=1,
                 )
 
         s = Session(

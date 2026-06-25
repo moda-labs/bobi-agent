@@ -36,11 +36,34 @@ class _FakeClient:
         return self._snapshots[0]
 
 
+class _FakeBrainWithoutMcpStatus:
+    name = "codex"
+    provider = "openai"
+
+    def make_session(self, **kwargs):
+        class Session:
+            async def connect(self):
+                raise AssertionError("unsupported MCP probe should not connect")
+
+            async def disconnect(self):
+                raise AssertionError("unsupported MCP probe should not disconnect")
+
+        return Session()
+
+
+class _FakeClaudeBrain:
+    name = "claude"
+    provider = "anthropic"
+
+    def make_session(self, **kwargs):
+        return _FakeClient(kwargs.get("options"))
+
+
 def _install_fake_client(monkeypatch, snapshots, interval=0.0):
-    import claude_agent_sdk
+    import modastack.brain
 
     _FakeClient.SNAPSHOTS = snapshots
-    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _FakeClient)
+    monkeypatch.setattr(modastack.brain, "get_brain", lambda: _FakeClaudeBrain())
     monkeypatch.setattr("modastack.sdk.get_cli_path", lambda: "claude")
     # Don't actually sleep between polls.
     monkeypatch.setattr(validate, "MCP_PROBE_POLL_INTERVAL", interval)
@@ -119,6 +142,24 @@ class TestPollRace:
         assert len(results) == 2
         assert {r.name for r in results} == {"a", "b"}
         assert sum(created) == 1  # one client, not one-per-server
+
+    def test_brain_without_mcp_status_warns_without_blocking(
+        self, monkeypatch, tmp_path
+    ):
+        import modastack.brain
+
+        monkeypatch.setattr(
+            modastack.brain, "get_brain",
+            lambda: _FakeBrainWithoutMcpStatus(),
+        )
+        results = asyncio.run(
+            _async_probe_mcp(["x"], {"x": {"type": "stdio",
+                             "command": "/abs/x"}}, tmp_path)
+        )
+        assert len(results) == 1
+        assert results[0].ok is False
+        assert results[0].required is False
+        assert "not supported for codex brain" in results[0].detail
 
 
 class TestBareNameWarning:
