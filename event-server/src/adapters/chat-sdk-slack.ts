@@ -82,13 +82,22 @@ export function bridgeSlackWebhook(
 
 	// Extract fields — identical to our existing normalizer
 	const teamId = (raw.team_id as string) || "";
+	const appId = (raw.api_app_id as string) || "";
 	const channel = (innerEvent.channel as string) || "";
 	const userId = (innerEvent.user as string) || "";
 	const rawText = ((innerEvent.text as string) || "").slice(0, 4000);
 	const ts = (innerEvent.ts as string) || "";
+	const isDm = channelType === "im" || channelType === "mpim";
 
 	const topics: string[] = [];
-	if (teamId) topics.push(`slack:${teamId}`);
+	if (teamId) {
+		if (appId) topics.push(`slack:${teamId}:app:${appId}`);
+		topics.push(`slack:${teamId}`);
+		if (channel && !isDm) {
+			if (appId) topics.push(`slack:${teamId}:app:${appId}:${channel}`);
+			topics.push(`slack:${teamId}:${channel}`);
+		}
+	}
 
 	const botId = (innerEvent.bot_id as string) || "";
 
@@ -96,6 +105,7 @@ export function bridgeSlackWebhook(
 	if (userId) fields.user_id = userId;
 	if (channel) fields.channel = channel;
 	if (channelType) fields.channel_type = channelType;
+	if (appId) fields.api_app_id = appId;
 	if (ts) fields.ts = ts;
 	if (threadTs) fields.thread_ts = threadTs;
 	// Preserve bot_id so the circuit breaker can detect bot authorship.

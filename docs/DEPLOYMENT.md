@@ -650,19 +650,21 @@ event only to subscribers of the topics it carries (`events/subscriptions.py`
 builds the keys; the Worker matches them in `subscriptionKeysForEvent` / `deliver`).
 
 **The contract — scope each team:**
-- **Slack:** set `channels:` on the team's slack service (`agent.yaml`). The
-  detector then subscribes per channel (`slack:<TEAM>:<CHANNEL>`) and the Worker
-  routes each message only to that channel's team. IDs (`C0ABC123`) or names
-  (`#support`) both work (names resolve via the Slack API). With **no** `channels:`
-  a team subscribes to the bare workspace (`slack:<TEAM>`) and receives **every**
-  channel — the explicit whole-workspace opt-in. So: give each team disjoint
-  channels, and don't leave a second team on the bare workspace key.
+- **Slack:** the detector resolves the bot's `api_app_id` and subscribes to
+  app-qualified topics (`slack:<TEAM>:app:<APP>`). Set `channels:` on the
+  team's slack service (`agent.yaml`) when a bot should only handle specific
+  channels; the detector then subscribes per app+channel
+  (`slack:<TEAM>:app:<APP>:<CHANNEL>`). IDs (`C0ABC123`) or names (`#support`)
+  both work (names resolve via the Slack API). If the app id cannot be resolved,
+  the detector falls back to legacy workspace/channel keys for single-bot
+  compatibility.
 - **GitHub:** already per-repo (`github:<org>/<repo>`), auto-detected from each
   repo's remote — a director watching a parent dir detects each child repo. An
   org webhook fans out only to the repo's subscriber, never the whole org.
-- **DMs** stay workspace-level (a DM isn't a real channel) — with a shared bot a
-  DM reaches every whole-workspace subscriber. Per-team DM routing is deferred
-  (the org-level router; see the cross-tenant note below).
+- **DMs** are app-scoped, not channel-scoped: a DM event carries
+  `api_app_id`, so it routes to `slack:<TEAM>:app:<APP>`. That keeps Bobbers,
+  eng-team, and other bots in the same Slack workspace from receiving each
+  other's DMs.
 
 **Isolation proof:** end-to-end no-cross-delivery tests in
 `event-server/test/index.spec.ts` (two deployments, disjoint channels/repos →

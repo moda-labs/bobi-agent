@@ -174,18 +174,20 @@ def _resolve_channel_names(token: str, channels: list[str]) -> list[str]:
     return [ch for ch in resolved if ch is not None]
 
 
-def _slack_keys(team_id: str, channels: list[str]) -> list[str]:
+def _slack_keys(team_id: str, channels: list[str],
+                app_id: str = "") -> list[str]:
     """Build Slack subscription keys for a workspace.
 
-    With channels configured, subscribe per-channel (`slack:TEAM:CHANNEL`)
-    so multiple teams can share one bot/workspace, split by channel. Without,
-    subscribe to the whole workspace (`slack:TEAM`).
+    When the app id is known, subscribe app-qualified so multiple Slack apps in
+    one workspace do not receive each other's DMs. With channels configured,
+    also scope to the channel.
     """
     if not team_id:
         return []
+    prefix = f"slack:{team_id}:app:{app_id}" if app_id else f"slack:{team_id}"
     if channels:
-        return [f"slack:{team_id}:{ch}" for ch in channels]
-    return [f"slack:{team_id}"]
+        return [f"{prefix}:{ch}" for ch in channels]
+    return [prefix]
 
 
 def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
@@ -213,7 +215,12 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
         if data.get("ok") and data.get("team_id"):
             if channels:
                 channels = _resolve_channel_names(token, channels)
-            keys = _slack_keys(data["team_id"], channels)
+            try:
+                from modastack.events.server import _slack_app_id
+                app_id = _slack_app_id(token, data.get("bot_id", "") or "")
+            except Exception:
+                app_id = ""
+            keys = _slack_keys(data["team_id"], channels, app_id)
             log.info(
                 f"Auto-detected Slack workspace {data['team_id']}; "
                 f"subscribing: {keys}"

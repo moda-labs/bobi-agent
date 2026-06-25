@@ -1020,6 +1020,58 @@ describe("handleSlackWebhook", () => {
 		expect(await store.deliver(store.delivered[0])).toBe(1);
 	});
 
+	it("routes Slack DMs to the matching app-qualified subscription only", async () => {
+		const store = createMockStorage();
+		await store.addSubscription("slack:T123:app:A_BOBBERS", "bobbers");
+		await store.addSubscription("slack:T123:app:A_ENG_TEAM", "eng-team");
+
+		const result = await handleSlackWebhook(store, {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A_BOBBERS",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "D456",
+				channel_type: "im",
+				text: "are you alive?",
+				ts: "123",
+			},
+		});
+
+		expect(result.status).toBe(200);
+		expect((result.body as Record<string, number>).delivered_to).toBe(1);
+		expect(store.delivered[0].topics).toContain("slack:T123:app:A_BOBBERS");
+		expect(store.delivered[0].topics).toContain("slack:T123");
+		expect(store.deliveredTo[0].ids).toEqual(["bobbers"]);
+	});
+
+	it("routes Slack channel events by app and channel when both are present", async () => {
+		const store = createMockStorage();
+		await store.addSubscription("slack:T123:app:A_ENG_TEAM:CENG", "eng-team");
+		await store.addSubscription("slack:T123:app:A_BOBBERS:CENG", "bobbers");
+
+		const result = await handleSlackWebhook(store, {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A_ENG_TEAM",
+			event: {
+				type: "app_mention",
+				user: "U123",
+				channel: "CENG",
+				channel_type: "channel",
+				text: "<@UENG> status?",
+				ts: "123",
+			},
+		});
+
+		expect(result.status).toBe(200);
+		expect((result.body as Record<string, number>).delivered_to).toBe(1);
+		expect(store.delivered[0].topics).toContain("slack:T123:app:A_ENG_TEAM:CENG");
+		expect(store.delivered[0].topics).toContain("slack:T123:CENG");
+		expect(store.deliveredTo[0].ids).toEqual(["eng-team"]);
+	});
+
 	it("returns ok for non-event_callback types without delivering", async () => {
 		const store = createMockStorage();
 		const result = await handleSlackWebhook(store, { type: "app_rate_limited" });

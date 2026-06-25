@@ -1,11 +1,11 @@
 # Multi-bot Slack support in the event server
 
-**Status:** core implemented (2026-06-24) — loop-safety + per-app signing +
-multi-bot registration landed with tests; rollout (Worker deploy + secrets +
-bobbers redeploy) pending. Cross-talk routing (#4) deferred — see Implementation
-notes. **Tickets:** #239 (auth-v2 / multitenant Slack), #215 (per-deployment
-identities). Related loop-safety: #232 (batch dedup), #299, #463 (the incident
-thread).
+**Status:** core implemented (2026-06-24); app-qualified Slack routing added
+2026-06-25 after live Bobbers/eng-team cross-delivery evidence (#502). Loop
+safety, per-app signing, multi-bot registration, and app-qualified inbound
+topics are covered by tests. **Tickets:** #239 (auth-v2 / multitenant Slack),
+#215 (per-deployment identities), #502 (Slack app cross-delivery). Related
+loop-safety: #232 (batch dedup), #299, #463 (the incident thread).
 
 ## Implementation notes (2026-06-24)
 
@@ -19,12 +19,14 @@ original design, both keeping the spec's intent:
    app's own id, which a second bot can no longer clobber. Avoids needing
    `DeploymentRecord.identities` plumbing for the loop fix. The breaker (now
    `bot_id`-aware) is the per-conversation backstop.
-2. **Cross-talk (#4) deferred.** It does not bite the live topology: `modabot`
-   is channel-scoped (`slack:<team>:<chan>`) and `bobbers` is DM-only, so they
-   share no channel/DM and never receive each other's events. A full fix
-   (app-qualified topics + per-app subscription) is a larger routing change;
-   tracked as follow-up, not required for the incident or for the two teams to
-   coexist.
+2. **Cross-talk (#4) fixed by app-qualified topics.** Slack webhooks carry
+   `api_app_id`, so normalized events now include
+   `slack:<team>:app:<app>` and, for channel messages,
+   `slack:<team>:app:<app>:<channel>`. The Python detector resolves the same
+   app id from the bot token and subscribes deployments to those app-qualified
+   keys. Legacy `slack:<team>` / `slack:<team>:<channel>` topics are still
+   emitted for single-bot compatibility while upgraded deployments move off
+   the bare workspace topic.
 
 Storage record is now `team_id → { bots: { [api_app_id]: { bot_token, bot_id,
 signing_secret, app_id } }, …legacy }` with read-migration of the old
@@ -128,9 +130,11 @@ single-bot record so `modabot` keeps working without a redeploy.
       output (not the fictional nested shape) through `recordDelivery`.
 
 ### Routing (cross-talk)
-- [ ] **DEFERRED** (follow-up). Does not bite the live topology (modabot
-      channel-scoped, bobbers DM-only). Full fix = app-qualified topics +
-      per-app subscription. See Implementation notes.
+- [x] `normalizeSlackWebhook` emits app-qualified topics:
+      `slack:<team>:app:<app>` and `slack:<team>:app:<app>:<channel>`.
+- [x] Slack subscription discovery resolves `api_app_id` from `bots.info` and
+      subscribes to the matching app-qualified topic.
+- [x] Legacy bare workspace/channel topics remain for single-bot compatibility.
 
 ### Outbound send
 - [x] `handleSlackSend`: selects the bot_token by `app_id` → `bot_id` → single
@@ -149,10 +153,9 @@ single-bot record so `modabot` keeps working without a redeploy.
       `signing_secret: ${SLACK_SIGNING_SECRET}`; deploy materializes it as a Fly
       secret (`--env-file` reconcile already handles `${VAR}` refs).
 - [x] `auth_bootstrap._wait_for_code` inherits it via the same register call.
-- [ ] Already landed in `agents/personal-assistant`: `channels:
-      ${SLACK_CHANNELS:-}` (optional) + a comment that a **DM id must never** go
-      in `SLACK_CHANNELS` (DMs ride the bare `slack:<team>` topic, not the
-      channel-scoped one — `adapters/slack.ts:59`).
+- [x] Already landed in `agents/personal-assistant`: `channels:
+      ${SLACK_CHANNELS:-}` (optional). DMs now route through the app-qualified
+      workspace topic, not a DM conversation id.
 
 ## Tests (write failing-first, per CLAUDE.md)
 
@@ -168,7 +171,8 @@ tests used a shape the live adapter never emits):
       existing `index.spec` signature tests.
 - [x] Breaker trips on a bot-authored loop using REAL normalizer output once
       `bot_id` is preserved. (`circuit-breaker.spec.ts`)
-- [ ] **Cross-delivery (esp. DMs)** — deferred with the routing fix above.
+- [x] Cross-delivery (esp. DMs): two app-qualified subscribers in one workspace
+      only receive the event for their own `api_app_id`.
 
 ## Notes / recovery
 
