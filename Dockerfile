@@ -229,6 +229,15 @@ RUN bash /tmp/team-deps.sh && rm -f /tmp/team-deps.sh
 # rebuild is just this copy plus the thin layers below — seconds, not minutes.
 # Root-owned, world-readable.
 COPY --from=builder /opt/venv /opt/venv
+# Codex tool shells sanitize PATH and drop /opt/venv/bin. Surface the
+# framework CLI in both user-local and system bins so agents can call
+# `modastack` by bare name from Codex's current shell.
+RUN mkdir -p /home/modastack/.local/bin \
+    && printf '%s\n' '#!/bin/sh' 'exec /opt/venv/bin/modastack "$@"' \
+        > /usr/local/bin/modastack \
+    && cp /usr/local/bin/modastack /home/modastack/.local/bin/modastack \
+    && chown modastack:modastack /home/modastack/.local/bin/modastack \
+    && chmod +x /usr/local/bin/modastack /home/modastack/.local/bin/modastack
 
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker/healthcheck.sh /usr/local/bin/healthcheck.sh
