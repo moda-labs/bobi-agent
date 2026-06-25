@@ -99,6 +99,16 @@ class TestAgents:
         assert flags == {"moda-manager-proj": True,
                          "eng-1-impl": False, "eng-2-review": False}
 
+    def test_manager_is_pinned_first(self, project):
+        mgr = _entry("moda-manager-proj", role="manager", started_at=30)
+        w1 = _entry("eng-1-impl", role="engineer", started_at=10)
+        w2 = _entry("eng-2-review", role="engineer", started_at=20)
+        c = _client(project, entries=(w1, w2, mgr),
+                    manager_name="moda-manager-proj")
+        agents = c.get("/api/agents").json()["agents"]
+        assert [a["name"] for a in agents] == \
+            ["moda-manager-proj", "eng-1-impl", "eng-2-review"]
+
     def test_card_shape(self, project):
         e = _entry("eng-1", role="engineer", title="t", phase="implement",
                    status="running", model="claude-sonnet-4-6",
@@ -182,6 +192,44 @@ class TestChat:
     def test_messages_rejects_unsafe_name(self, project):
         c = _client(project)
         assert c.get("/api/agents/..%2f..%2fetc/messages").status_code == 404
+
+    def test_messages_unknown_agent_404(self, project):
+        c = _client(project)
+        assert c.get("/api/agents/ghost/messages").status_code == 404
+
+    def test_messages_read_claude_transcript(self, project, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        transcript_dir = home / ".claude" / "projects" / "-data-project"
+        transcript_dir.mkdir(parents=True)
+        (transcript_dir / "sess-123.jsonl").write_text(
+            "\n".join([
+                '{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}',
+                '{"type":"assistant","message":{"content":[{"type":"text","text":"hi back"}]}}',
+                '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}',
+            ])
+        )
+        monkeypatch.setenv("HOME", str(home))
+
+        c = _client(project, entries=(
+            _entry("eng-1", session_id="sess-123"),
+        ))
+        assert c.get("/api/agents/eng-1/messages").json() == {
+            "messages": [
+                {"role": "user", "text": "hello"},
+                {"role": "agent", "text": "hi back"},
+            ]
+        }
+
+    def test_messages_fall_back_to_webui_log(self, project):
+        c = _client(project, entries=(_entry("eng-1", session_id="missing"),),
+                    deliver_fn=lambda *a, **k: (True, "a reply"))
+        c.post("/api/chat", json={"agent": "eng-1", "text": "hello"})
+        assert c.get("/api/agents/eng-1/messages").json() == {
+            "messages": [
+                {"role": "user", "text": "hello"},
+                {"role": "agent", "text": "a reply"},
+            ]
+        }
 
     def test_chat_handler_is_sync(self):
         # A sync def lets FastAPI threadpool the blocking deliver(wait=True) so
