@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.34.9 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.8 canary run.
+
+### Fixed
+- **Production WebSocket upgrade preservation.** The Worker now wraps the
+  original public WebSocket upgrade request when forwarding to
+  `DeploymentSession`, changing only the internal URL token. This preserves
+  Cloudflare's production upgrade metadata while still authenticating the
+  Worker-to-Durable-Object hop.
+- **Internal Durable Object WebSocket auth on Cloudflare.** Includes the 0.34.8
+  private query-token fallback for Worker-created WebSocket requests.
+- **Public WebSocket auth on Cloudflare.** Includes the 0.34.7 deployment-key
+  subprotocol fallback for public event clients.
+
 ## 0.34.8 — 2026-06-25
 
 Bugfix release that supersedes the failed 0.34.7 canary run.

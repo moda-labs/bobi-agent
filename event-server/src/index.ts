@@ -374,7 +374,7 @@ export default {
 
 			const doId = env.DEPLOYMENT_SESSION.idFromName(deploymentId);
 			const stub = env.DEPLOYMENT_SESSION.get(doId);
-			return stub.fetch(internalWebSocketRequest(env, request.url));
+			return stub.fetch(internalWebSocketRequest(env, request));
 		}
 
 		if (method === "PUT" && path.startsWith("/deployments/") && path.endsWith("/subscriptions")) {

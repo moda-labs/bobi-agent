@@ -15,14 +15,14 @@ export function internalEventRequest(env: InternalEnv, url: string, body: string
 	});
 }
 
-export function internalWebSocketRequest(env: InternalEnv, url: string): Request {
-	const internalUrl = new URL(url);
+export function internalWebSocketRequest(env: InternalEnv, source: Request | string): Request {
+	const originalUrl = typeof source === "string" ? source : source.url;
+	const internalUrl = new URL(originalUrl);
 	internalUrl.searchParams.set(INTERNAL_WS_QUERY_PARAM, env.INTERNAL_DO_SECRET);
-	return new Request(internalUrl.toString(), {
-		headers: {
-			Upgrade: "websocket",
-		},
-	});
+	if (typeof source !== "string") {
+		return new Request(internalUrl.toString(), source);
+	}
+	return new Request(internalUrl.toString(), { headers: { Upgrade: "websocket" } });
 }
 
 export function internalWebSocketProtocol(secret: string): string {

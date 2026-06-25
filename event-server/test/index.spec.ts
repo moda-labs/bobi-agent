@@ -841,6 +841,31 @@ describe("#489 internal DeploymentSession auth", () => {
 		].sort());
 	});
 
+	it("websocket subscribe can wrap the original upgrade request for production DO fetch", async () => {
+		const original = new Request(
+			"https://example.com/deployments/dep-1/subscribe?last_seen=2",
+			{
+				headers: {
+					authorization: "Bearer client-key",
+					cookie: "session=client-cookie",
+					Upgrade: "websocket",
+				},
+			},
+		);
+		const request = internalWebSocketRequest(
+			{ INTERNAL_DO_SECRET: "secret-value" },
+			original,
+		);
+
+		const url = new URL(request.url);
+		expect(url.origin + url.pathname).toBe("https://example.com/deployments/dep-1/subscribe");
+		expect(url.searchParams.get("last_seen")).toBe("2");
+		expect(url.searchParams.get(INTERNAL_WS_QUERY_PARAM)).toBe("secret-value");
+		expect(request.headers.get("Upgrade")).toBe("websocket");
+		expect(request.headers.get("Authorization")).toBe("Bearer client-key");
+		expect(request.headers.get("Cookie")).toBe("session=client-cookie");
+	});
+
 	it("worker-mediated websocket subscribe succeeds when the client sends ambient auth", async () => {
 		const bubble = await mintBubble(["ws:auth"]);
 		const response = await SELF.fetch(

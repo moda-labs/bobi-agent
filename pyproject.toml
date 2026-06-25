@@ -1,6 +1,6 @@
 [project]
 name = "modastack"
-version = "0.34.8"
+version = "0.34.9"
 description = "Build teams of event-driven AI agents"
 requires-python = ">=3.11"
 license = "MIT"
