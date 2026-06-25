@@ -340,6 +340,78 @@ describe("normalizeSlackPayload", () => {
 		expect(result.event!.fields!.thread_ts).toBe("123.000");
 	});
 
+	it("skips message-channel duplicate when thread reply mentions our bot user", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOT> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		}, undefined, new Set(["UBOT"]));
+		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
+	});
+
+	it("skips message-channel duplicate with Slack's labeled mention form", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOT|eng-bot> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		}, undefined, new Set(["UBOT"]));
+		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
+	});
+
+	it("matches bot user mentions literally", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOTX> should not match",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		}, undefined, new Set(["UBOT."]));
+		expect(result.skip).toBe(false);
+		expect(result.event!.type).toBe("slack.thread_reply");
+	});
+
+	it("keeps thread replies that mention someone other than our bot user", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UOTHER> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		}, undefined, new Set(["UBOT"]));
+		expect(result.skip).toBe(false);
+		expect(result.event!.type).toBe("slack.thread_reply");
+	});
+
 	it("skips own bot messages when selfBotId matches", () => {
 		const result = normalizeSlackPayload({
 			type: "event_callback",
@@ -1211,6 +1283,125 @@ describe("handleSlackWebhook", () => {
 		expect(store.delivered).toHaveLength(0);
 	});
 
+	it("deduplicates app_mention against the matching message.channels event", async () => {
+		const store = createMockStorage();
+		store.slackWorkspaces.set("T123", {
+			bots: {
+				A123: {
+					bot_token: "xoxb-test",
+					bot_id: "BSELF",
+					bot_user_id: "UBOT",
+					app_id: "A123",
+				},
+			},
+		});
+
+		const mentionPayload = {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A123",
+			event: {
+				type: "app_mention",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOT> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		};
+		const messagePayload = {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOT> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		};
+
+		const mention = await handleSlackWebhook(store, mentionPayload);
+		const message = await handleSlackWebhook(store, messagePayload);
+
+		expect(mention.status).toBe(200);
+		expect(message.status).toBe(200);
+		expect(store.delivered).toHaveLength(1);
+		expect(store.delivered[0].type).toBe("slack.mention");
+	});
+
+	it("does not deduplicate a message mentioning another app's bot user", async () => {
+		const store = createMockStorage();
+		store.slackWorkspaces.set("T123", {
+			bots: {
+				A_ENG: {
+					bot_token: "xoxb-eng",
+					bot_id: "B_ENG",
+					bot_user_id: "UENG",
+					app_id: "A_ENG",
+				},
+				A_SUPPORT: {
+					bot_token: "xoxb-support",
+					bot_id: "B_SUPPORT",
+					bot_user_id: "USUPPORT",
+					app_id: "A_SUPPORT",
+				},
+			},
+		});
+
+		await handleSlackWebhook(store, {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A_ENG",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@USUPPORT> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		});
+
+		expect(store.delivered).toHaveLength(1);
+		expect(store.delivered[0].type).toBe("slack.thread_reply");
+	});
+
+	it("deduplicates with a single bot record even when api_app_id does not match its key", async () => {
+		const store = createMockStorage();
+		store.slackWorkspaces.set("T123", {
+			bots: {
+				BSELF: {
+					bot_token: "xoxb-test",
+					bot_id: "BSELF",
+					bot_user_id: "UBOT",
+				},
+			},
+		});
+
+		await handleSlackWebhook(store, {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A_UNKNOWN",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOT> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		});
+
+		expect(store.delivered).toHaveLength(0);
+	});
+
 	it("returns challenge for url_verification payload", async () => {
 		const store = createMockStorage();
 		const result = await handleSlackWebhook(store, {
@@ -1740,12 +1931,15 @@ describe("handleSlackWorkspaceRegister", () => {
 			workspace_id: "T_EXPLICIT",
 			bot_token: "xoxb-test",
 			bot_id: "B_EXPLICIT",
+			bot_user_id: "U_EXPLICIT",
 		});
 		expect(result.status).toBe(200);
 		const body = result.body as Record<string, unknown>;
 		expect(body.bot_id).toBe("B_EXPLICIT");
+		expect(body.bot_user_id).toBe("U_EXPLICIT");
 		const ws = store.slackWorkspaces.get("T_EXPLICIT");
 		expect(ws?.bot_id).toBe("B_EXPLICIT");
+		expect(ws?.bots?.B_EXPLICIT?.bot_user_id).toBe("U_EXPLICIT");
 	});
 
 	// #487: an UNSIGNED registration writes only the global self-reply record —
@@ -1828,7 +2022,12 @@ describe("handleSlackWorkspaceRegister", () => {
 	it("preserves an existing signing_secret when a later registration omits it", async () => {
 		const store = createMockStorage();
 		await handleSlackWorkspaceRegister(store, {
-			workspace_id: "T1", bot_token: "x1", bot_id: "B1", app_id: "A1", signing_secret: "sec-1",
+			workspace_id: "T1",
+			bot_token: "x1",
+			bot_id: "B1",
+			bot_user_id: "U1",
+			app_id: "A1",
+			signing_secret: "sec-1",
 		});
 		// Older client re-registers the same app (same resolved app_id) WITHOUT a secret.
 		await handleSlackWorkspaceRegister(store, {
@@ -1836,6 +2035,7 @@ describe("handleSlackWorkspaceRegister", () => {
 		});
 		const ws = store.slackWorkspaces.get("T1");
 		expect(ws?.bots?.A1?.signing_secret).toBe("sec-1");      // preserved
+		expect(ws?.bots?.A1?.bot_user_id).toBe("U1");            // preserved
 		expect(ws?.bots?.A1?.bot_token).toBe("x1-rotated");      // token refreshed
 	});
 });

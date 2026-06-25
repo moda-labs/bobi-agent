@@ -76,6 +76,7 @@ export interface ResourceGrant {
 export interface SlackBotRecord {
 	bot_token: string;
 	bot_id?: string;
+	bot_user_id?: string;
 	/** App-level signing secret — inbound events from this app are verified with it. */
 	signing_secret?: string;
 	/** Slack api_app_id; the map key, repeated here for convenience. */
@@ -133,6 +134,30 @@ export function workspaceBotIds(ws: SlackWorkspaceRecord | null | undefined): Se
 	if (!ws) return ids;
 	if (ws.bots) for (const b of Object.values(ws.bots)) if (b.bot_id) ids.add(b.bot_id);
 	if (ws.bot_id) ids.add(ws.bot_id);
+	return ids;
+}
+
+/**
+ * Slack user ids for bot users belonging to the receiving app. Slack emits a
+ * channel mention as both app_mention and message.*, and only the app_mention
+ * should reach chat delivery; otherwise the drain posts two placeholders for
+ * one ts. Self-authorship filtering is workspace-wide; mention dedupe must stay
+ * app-scoped so one bot does not swallow thread replies mentioning another.
+ */
+export function workspaceBotUserIds(
+	ws: SlackWorkspaceRecord | null | undefined,
+	apiAppId: string,
+): Set<string> {
+	const ids = new Set<string>();
+	if (!ws?.bots) return ids;
+	if (apiAppId && ws.bots[apiAppId]?.bot_user_id) {
+		ids.add(ws.bots[apiAppId].bot_user_id);
+		return ids;
+	}
+	const bots = Object.values(ws.bots);
+	if (bots.length === 1 && bots[0].bot_user_id) {
+		ids.add(bots[0].bot_user_id);
+	}
 	return ids;
 }
 
@@ -639,7 +664,9 @@ export async function handleSlackWebhook(
 	payload: Record<string, unknown>,
 ): Promise<HandlerResult> {
 	const teamId = (payload.team_id as string) || "";
+	const apiAppId = (payload.api_app_id as string) || "";
 	let selfBotIds: Set<string> | undefined;
+	let selfBotUserIds: Set<string> | undefined;
 	if (teamId) {
 		const ws = await storage.getSlackWorkspace(teamId);
 		// Skip messages authored by ANY of our bots in this workspace — not just
@@ -648,9 +675,10 @@ export async function handleSlackWebhook(
 		// so a per-receiving-app "self" id let one bot's message loop in via the
 		// other's webhook.
 		selfBotIds = workspaceBotIds(ws);
+		selfBotUserIds = workspaceBotUserIds(ws, apiAppId);
 	}
 
-	const result = normalizeSlackWebhook(payload, selfBotIds);
+	const result = normalizeSlackWebhook(payload, selfBotIds, selfBotUserIds);
 
 	if (result.challenge !== undefined) {
 		return { status: 200, body: { challenge: result.challenge } };
@@ -1166,6 +1194,7 @@ export async function handleSlackWorkspaceRegister(
 	// tests, or a Python client). Fall back to auth.test (bot_id) and
 	// bots.info (app_id) — auth.test does NOT return app_id.
 	let botId = (body.bot_id as string) || undefined;
+	let botUserId = (body.bot_user_id as string) || undefined;
 	let appId = (body.app_id as string) || undefined;
 	const signingSecret = (body.signing_secret as string) || undefined;
 	if (bubbleId) {
@@ -1187,7 +1216,10 @@ export async function handleSlackWorkspaceRegister(
 				headers: { Authorization: `Bearer ${botToken}` },
 			});
 			const data = (await resp.json()) as Record<string, unknown>;
-			if (data.ok) botId = data.bot_id as string;
+			if (data.ok) {
+				botId = data.bot_id as string;
+				botUserId = (data.user_id as string) || botUserId;
+			}
 		} catch {
 			// best-effort — self-loop filtering degrades gracefully without bot_id
 		}
@@ -1228,6 +1260,7 @@ export async function handleSlackWorkspaceRegister(
 		bots[key] = {
 			bot_token: botToken,
 			bot_id: botId ?? prev.bot_id,
+			bot_user_id: botUserId ?? prev.bot_user_id,
 			signing_secret: signingSecret ?? prev.signing_secret,
 			app_id: appId ?? prev.app_id,
 		};
@@ -1270,5 +1303,8 @@ export async function handleSlackWorkspaceRegister(
 		});
 	}
 
-	return { status: 200, body: { ok: true, workspace_id: workspaceId, bot_id: botId, app_id: appId } };
+	return {
+		status: 200,
+		body: { ok: true, workspace_id: workspaceId, bot_id: botId, bot_user_id: botUserId, app_id: appId },
+	};
 }
