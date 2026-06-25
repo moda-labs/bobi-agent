@@ -201,7 +201,9 @@ class TestHarnessEndpoint:
         # CLI present but not authed: we DON'T pre-block (auth is unreliable to
         # detect) — we let the call run and, only if it fails, turn the cryptic
         # transport error into an actionable login hint.
+        import shutil
         from modastack.setup import harness
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
         monkeypatch.setattr(harness, "harness_status", lambda model=None:
             harness.HarnessStatus(
                 agent="Claude Code", model="default", cli_present=True,
@@ -224,7 +226,9 @@ class TestHarnessEndpoint:
             self, project, monkeypatch):
         # A working (authed) harness that hits a transient error must NOT be
         # told to log in — that would be a misleading false alarm.
+        import shutil
         from modastack.setup import harness
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
         monkeypatch.setattr(harness, "harness_status", lambda model=None:
             harness.HarnessStatus(
                 agent="Claude Code", model="default", cli_present=True,
@@ -802,7 +806,13 @@ class TestPanelEdits:
     def _stub_probe(self, monkeypatch, *, run_result):
         """Fake probe: a propose call (call_name=None) lists tools + a suggestion;
         a run call (call_name=...) returns the given run_result."""
+        import shutil
         import modastack.setup.mcp_probe as mcp_probe
+
+        # The connection-test path is pure Python (mcp_probe), but /api/message
+        # gates on the CLI being present first. Simulate a present CLI so these
+        # tests don't depend on `claude` being installed on the runner.
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
 
         async def fake_probe(entry, proj, *, call_name=None, **kw):
             if call_name is None:
