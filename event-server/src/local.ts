@@ -1,4 +1,5 @@
 import http from "node:http";
+import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
 	type NormalizedEvent,
@@ -6,9 +7,12 @@ import {
 	type DeploymentRecord,
 	type BubbleRecord,
 	type SlackWorkspaceRecord,
+	type ResourceGrant,
 	type HandlerResult,
 	subscriptionKeysForEvent,
 	namespaceSubKey,
+	admittedDeploymentIds,
+	handleAuthorizeResource,
 	verifyGitHubSignature,
 	verifySlackSignature,
 	readBubbleAuthHeaders,
@@ -24,6 +28,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	handleTestSeedResourceGrants,
 	slackSigningSecretFor,
 	getAuthRejectionCounters,
 } from "./core";
@@ -70,9 +75,13 @@ const apiKeyIndex = new Map<string, string>();
 const subscriptionIndex = new Map<string, Set<string>>();
 const bubbles = new Map<string, BubbleRecord>();
 const slackWorkspaces = new Map<string, SlackWorkspaceRecord>();
+// Resource grants (#488), keyed `service:resource:bubbleId`. In-memory and
+// strongly consistent, so the Worker's KV-propagation race never applies here.
+const resourceGrants = new Map<string, ResourceGrant>();
 
 const webhookSecret = process.env.MODASTACK_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.MODASTACK_ES_SLACK_SIGNING_SECRET || "";
+const testGrantsSecret = process.env.MODASTACK_ES_TEST_GRANTS_SECRET || "";
 
 // ---------------------------------------------------------------------------
 // Map-based storage adapter
@@ -106,6 +115,26 @@ const storage: StorageAdapter = {
 			}
 		}
 		return null;
+	},
+
+	async getDeploymentById(id: string): Promise<DeploymentRecord | null> {
+		const dep = deployments.get(id);
+		if (!dep) return null;
+		return {
+			id: dep.id,
+			name: dep.name,
+			api_key: dep.apiKey,
+			bubble_id: dep.bubbleId,
+			subscriptions: [...dep.subscriptions],
+		};
+	},
+
+	async putResourceGrant(grant: ResourceGrant): Promise<void> {
+		resourceGrants.set(`${grant.service}:${grant.resource}:${grant.bubble_id}`, grant);
+	},
+
+	async hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean> {
+		return resourceGrants.has(`${service}:${resource}:${bubbleId}`);
 	},
 
 	async putDeployment(record: DeploymentRecord): Promise<void> {
@@ -163,13 +192,14 @@ const storage: StorageAdapter = {
 	},
 
 	async deliver(event: NormalizedEvent): Promise<number> {
-		const keys = subscriptionKeysForEvent(event);
-		const depIds = new Set<string>();
-		for (const key of keys) {
-			for (const id of subscriptionIndex.get(key) || []) {
-				depIds.add(id);
-			}
-		}
+		// Enforcement layer 2 (#488): grant-filter GLOBAL topics at delivery so a
+		// stale subscription-index entry for an un-granted bubble is dropped here
+		// (the authoritative, fail-closed boundary).
+		const depIds = await admittedDeploymentIds(
+			storage,
+			event,
+			async (key) => subscriptionIndex.get(key) ?? [],
+		);
 
 		const exempt = isExemptFromBreaker(event);
 
@@ -453,6 +483,41 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		return respond(res, await handleSlackSend(storage, data, bubble.id));
 	}
 
+	if (method === "POST" && path === "/resources/authorize") {
+		// Mandatory bubble auth; the credential in the body is verified once and
+		// never persisted/logged (mirrors /slack/send wiring).
+		const body = await readBody(req);
+		const data = parseJson(body);
+		if (!data) return json(res, { error: "invalid JSON" }, 400);
+		const ctx = readBubbleAuthHeaders(
+			(n) => req.headers[n] as string | undefined,
+			method,
+			url.pathname + url.search,
+			body,
+		);
+		const bubble = await authenticateBubble(storage, ctx);
+		if (!bubble) return json(res, { error: "forbidden" }, 403);
+		return respond(res, await handleAuthorizeResource(storage, data, bubble.id));
+	}
+
+	if (method === "POST" && path === "/__test/resource-grants" && testGrantsSecret) {
+		if (req.headers["x-moda-test-secret"] !== testGrantsSecret) {
+			return json(res, { error: "not found" }, 404);
+		}
+		const body = await readBody(req);
+		const data = parseJson(body);
+		if (!data) return json(res, { error: "invalid JSON" }, 400);
+		const ctx = readBubbleAuthHeaders(
+			(n) => req.headers[n] as string | undefined,
+			method,
+			url.pathname + url.search,
+			body,
+		);
+		const bubble = await authenticateBubble(storage, ctx);
+		if (!bubble) return json(res, { error: "not found" }, 404);
+		return respond(res, await handleTestSeedResourceGrants(storage, data, bubble.id));
+	}
+
 	res.writeHead(404);
 	res.end("Not Found");
 }
@@ -461,7 +526,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 // WebSocket upgrade — transport-specific (node ws)
 // ---------------------------------------------------------------------------
 
-function handleUpgrade(req: http.IncomingMessage, socket: import("node:net").Socket, head: Buffer, wss: WebSocketServer) {
+function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer, wss: WebSocketServer) {
 	const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 	const match = url.pathname.match(/^\/deployments\/([^/]+)\/subscribe$/);
 	if (!match) {

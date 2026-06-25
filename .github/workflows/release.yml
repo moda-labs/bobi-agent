@@ -19,9 +19,9 @@ name: Release
 #                                digest for generic instances; a TEAM-FLAVORED app
 #                                (a `build:` spec, C24 #368) rebuilds its OWN image
 #                                from the wheel + its TEAM_DEPS hook.
-#   5. deploy-teams              needs roll-fleet → reconcile each deployment's
-#                                package CONTENT + SECRETS onto the rolled image, by
-#                                CALLING deploy-agent-teams.yml (workflow_call).
+#   5. deploy-teams              needs roll-fleet + update-homebrew → reconcile
+#                                each deployment's package CONTENT + SECRETS onto
+#                                the rolled image after the Homebrew bottle smoke.
 #
 # Why the canary is built from the WHEEL, not source: it then proves the exact
 # artifact we publish actually boots and answers — catching wheel/sdist packaging
@@ -425,6 +425,10 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
+
       - name: Extract version from the release tag
         id: version
         # Prefer the Release's tag; fall back to the ref name for a manual dispatch.
@@ -440,6 +444,11 @@ jobs:
           event-type: pypi-release
           client-payload: '{"version": "${{ steps.version.outputs.version }}"}'
 
+      - name: Smoke Homebrew bottle URLs
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: scripts/smoke-homebrew-bottles.sh "${{ steps.version.outputs.version }}"
+
   # --------------------------------------------------------------------------
   # Reconcile each deployment's package CONTENT + SECRETS onto the freshly-rolled
   # image — the FINAL release step. Image FIRST (roll-fleet), packages/secrets
@@ -449,7 +458,7 @@ jobs:
   # secrets; `ref` pins the reconcile to the released commit.
   deploy-teams:
     name: Deploy team packages + secrets
-    needs: roll-fleet
+    needs: [roll-fleet, update-homebrew]
     uses: ./.github/workflows/deploy-agent-teams.yml
     secrets: inherit
     with:

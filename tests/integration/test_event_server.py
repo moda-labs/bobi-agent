@@ -25,6 +25,7 @@ import pytest
 import websocket
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
+TEST_GRANTS_SECRET = "modastack-integration-test-grants"
 
 
 def _free_port() -> int:
@@ -41,6 +42,26 @@ def _post_json(url: str, data: dict, headers: dict | None = None) -> dict:
     req = urllib.request.Request(url, data=payload, headers=hdrs)
     with urllib.request.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read())
+
+
+def _seed_resource_grants(
+    base_url: str,
+    bubble_id: str,
+    bubble_key: str,
+    grants: list[dict],
+) -> None:
+    from modastack.events.signing import serialize_body, sign_headers
+
+    body = serialize_body({"grants": grants})
+    headers = {"Content-Type": "application/json", "x-moda-test-secret": TEST_GRANTS_SECRET}
+    headers.update(sign_headers(bubble_id, bubble_key, "POST", "/__test/resource-grants", body))
+    req = urllib.request.Request(
+        f"{base_url}/__test/resource-grants",
+        data=body.encode(),
+        headers=headers,
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        json.loads(resp.read())
 
 
 def _get_json(url: str) -> dict:
@@ -99,7 +120,11 @@ def _start_local_server(modastack_env):
     for attempt in range(3):
         port = _free_port()
         base_url = f"http://localhost:{port}"
-        ensure_running(port, project_path=modastack_env.project_path)
+        ensure_running(
+            port,
+            project_path=modastack_env.project_path,
+            extra_env={"MODASTACK_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET},
+        )
 
         if _wait_healthy(base_url, timeout=10):
             break
@@ -128,6 +153,8 @@ def _start_local_server(modastack_env):
 
 def _start_wrangler_server():
     """Start wrangler dev on a free port, return (base_url, port, cleanup)."""
+    import fcntl
+
     es_dir = PACKAGE_ROOT / "event-server"
 
     # Ensure node_modules exist
@@ -137,35 +164,88 @@ def _start_wrangler_server():
             cwd=str(es_dir), check=True, capture_output=True, timeout=120,
         )
 
-    port = _free_port()
-    base_url = f"http://localhost:{port}"
-
-    log_path = es_dir / f".wrangler-test-{port}.log"
-    log_file = open(log_path, "w")
-
-    proc = subprocess.Popen(
-        [
-            str(es_dir / "node_modules" / ".bin" / "wrangler"),
-            "dev",
-            f"--port={port}",
-        ],
-        cwd=str(es_dir),
-        stdout=log_file,
-        stderr=log_file,
-        start_new_session=True,
-    )
-
-    if not _wait_healthy(base_url, timeout=30):
-        log_file.close()
+    lock_path = es_dir / ".dev.vars.test.lock"
+    lock_file = open(lock_path, "w")
+    lock_deadline = time.monotonic() + 180
+    while True:
         try:
-            log_text = log_path.read_text()
-        except Exception:
-            log_text = "(unreadable)"
-        proc.kill()
-        proc.wait()
-        raise RuntimeError(
-            f"wrangler dev failed to start on port {port}.\nLog:\n{log_text}"
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= lock_deadline:
+                lock_file.close()
+                raise RuntimeError("timed out waiting for wrangler .dev.vars test lock")
+            time.sleep(0.2)
+
+    dev_vars_path = es_dir / ".dev.vars"
+    original_dev_vars = dev_vars_path.read_text() if dev_vars_path.exists() else None
+    dev_vars_lines = (original_dev_vars or "").splitlines()
+    test_secrets = {
+        "INTERNAL_DO_SECRET": "test-internal-secret",
+        "TEST_GRANTS_SECRET": TEST_GRANTS_SECRET,
+    }
+    for key, value in test_secrets.items():
+        secret_line = f"{key}={value}"
+        for idx, line in enumerate(dev_vars_lines):
+            if line.startswith(f"{key}="):
+                dev_vars_lines[idx] = secret_line
+                break
+        else:
+            dev_vars_lines.append(secret_line)
+    dev_vars_path.write_text("\n".join(dev_vars_lines) + "\n")
+
+    restored_dev_vars = False
+
+    def _restore_dev_vars():
+        nonlocal restored_dev_vars
+        if restored_dev_vars:
+            return
+        if original_dev_vars is None:
+            dev_vars_path.unlink(missing_ok=True)
+        else:
+            dev_vars_path.write_text(original_dev_vars)
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
+        lock_path.unlink(missing_ok=True)
+        restored_dev_vars = True
+
+    log_file = None
+    try:
+        port = _free_port()
+        base_url = f"http://localhost:{port}"
+
+        log_path = es_dir / f".wrangler-test-{port}.log"
+        log_file = open(log_path, "w")
+
+        proc = subprocess.Popen(
+            [
+                str(es_dir / "node_modules" / ".bin" / "wrangler"),
+                "dev",
+                f"--port={port}",
+            ],
+            cwd=str(es_dir),
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
         )
+
+        if not _wait_healthy(base_url, timeout=30):
+            log_file.close()
+            try:
+                log_text = log_path.read_text()
+            except Exception:
+                log_text = "(unreadable)"
+            proc.kill()
+            proc.wait()
+            _restore_dev_vars()
+            raise RuntimeError(
+                f"wrangler dev failed to start on port {port}.\nLog:\n{log_text}"
+            )
+    except Exception:
+        if log_file and not log_file.closed:
+            log_file.close()
+        _restore_dev_vars()
+        raise
 
     def _cleanup():
         try:
@@ -176,6 +256,7 @@ def _start_wrangler_server():
             proc.wait()
         log_file.close()
         log_path.unlink(missing_ok=True)
+        _restore_dev_vars()
 
     return base_url, port, _cleanup
 
@@ -207,10 +288,22 @@ def _skip_local_only_on_wrangler(request, event_server):
 def deployment(event_server):
     """Register a deployment and return (base_url, deployment_id, api_key)."""
     base_url, _port, _backend = event_server
-    result = _post_json(f"{base_url}/deployments", {
-        "name": "test-deploy",
-        "subscriptions": ["github:test-org/test-repo", "linear:TEST", "slack:T_TEST"],
-    })
+    bootstrap = _register(base_url, "test-deploy-bootstrap", ["_bootstrap"])
+    _seed_resource_grants(
+        base_url,
+        bootstrap["bubble_id"],
+        bootstrap["bubble_key"],
+        [
+            {"service": "github", "resource": "test-org/test-repo"},
+            {"service": "linear", "resource": "TEST"},
+            {"service": "slack", "resource": "T_TEST"},
+        ],
+    )
+    result = _register(base_url, "test-deploy", [
+        "github:test-org/test-repo",
+        "linear:TEST",
+        "slack:T_TEST",
+    ], bootstrap["bubble_id"], bootstrap["bubble_key"])
     return base_url, result["deployment_id"], result["api_key"]
 
 
@@ -225,10 +318,20 @@ class TestEventServerLifecycle:
 
     def test_register_deployment(self, event_server):
         base_url, *_ = event_server
-        result = _post_json(f"{base_url}/deployments", {
-            "name": "lifecycle-test",
-            "subscriptions": ["github:test-org/test-repo"],
-        })
+        bootstrap = _register(base_url, "lifecycle-bootstrap", ["_bootstrap"])
+        _seed_resource_grants(
+            base_url,
+            bootstrap["bubble_id"],
+            bootstrap["bubble_key"],
+            [{"service": "github", "resource": "test-org/test-repo"}],
+        )
+        result = _register(
+            base_url,
+            "lifecycle-test",
+            ["github:test-org/test-repo"],
+            bootstrap["bubble_id"],
+            bootstrap["bubble_key"],
+        )
         assert "deployment_id" in result
         assert "api_key" in result
         assert result["api_key"].startswith("moda_")
@@ -236,10 +339,20 @@ class TestEventServerLifecycle:
     @pytest.mark.local_only
     def test_health_shows_deployment_count(self, event_server):
         base_url, *_ = event_server
-        _post_json(f"{base_url}/deployments", {
-            "name": "count-test",
-            "subscriptions": ["github:some-org/some-repo"],
-        })
+        bootstrap = _register(base_url, "count-bootstrap", ["_bootstrap"])
+        _seed_resource_grants(
+            base_url,
+            bootstrap["bubble_id"],
+            bootstrap["bubble_key"],
+            [{"service": "github", "resource": "some-org/some-repo"}],
+        )
+        _register(
+            base_url,
+            "count-test",
+            ["github:some-org/some-repo"],
+            bootstrap["bubble_id"],
+            bootstrap["bubble_key"],
+        )
         data = _get_json(f"{base_url}/health")
         assert data["deployments"] >= 1
 
@@ -358,16 +471,27 @@ class TestSlackSelfReplyLoop:
     def deployment_with_workspace(self, event_server):
         """Register a deployment + workspace with a known bot_id."""
         base_url, *_ = event_server
-        dep = _post_json(f"{base_url}/deployments", {
-            "name": "self-loop-test",
-            "subscriptions": ["slack:T_SELF"],
-        })
+        bootstrap = _register(base_url, "self-loop-bootstrap", ["_bootstrap"])
+        _seed_resource_grants(
+            base_url,
+            bootstrap["bubble_id"],
+            bootstrap["bubble_key"],
+            [{"service": "slack", "resource": "T_SELF"}],
+        )
+        dep = _register(
+            base_url,
+            "self-loop-test",
+            ["slack:T_SELF"],
+            bootstrap["bubble_id"],
+            bootstrap["bubble_key"],
+        )
         dep_id, api_key = dep["deployment_id"], dep["api_key"]
         # Register workspace with explicit bot_id (skips auth.test)
         ws = _post_json(f"{base_url}/slack/workspaces", {
             "workspace_id": "T_SELF",
             "bot_token": "xoxb-fake-for-test",
             "bot_id": "B_SELF",
+            "app_id": "A_SELF",
         })
         assert ws["bot_id"] == "B_SELF"
         return base_url, dep_id, api_key
@@ -862,13 +986,37 @@ class TestBubbleIsolation:
         assert ei.value.code == 403
 
     def test_webhook_fans_out_across_bubbles(self, event_server):
-        """ACCEPTED v1 behavior (#239): inbound webhooks are GLOBAL — they reach
-        subscribers in ANY bubble. This is the documented cross-tenant hole that
-        keeps Slack/GitHub working pre-#239. Locked as a test so a future change
-        that closes it is a conscious decision, not a silent break."""
+        """Inbound webhooks remain GLOBAL, but #488 now admits only bubbles with
+        an explicit resource grant for the topic."""
         base_url, *_ = event_server
-        a = _register(base_url, "a", ["github:shared/repo"])
-        b = _register(base_url, "b", ["github:shared/repo"])
+        a_boot = _register(base_url, "a-bootstrap", ["_bootstrap"])
+        b_boot = _register(base_url, "b-bootstrap", ["_bootstrap"])
+        _seed_resource_grants(
+            base_url,
+            a_boot["bubble_id"],
+            a_boot["bubble_key"],
+            [{"service": "github", "resource": "shared/repo"}],
+        )
+        _seed_resource_grants(
+            base_url,
+            b_boot["bubble_id"],
+            b_boot["bubble_key"],
+            [{"service": "github", "resource": "shared/repo"}],
+        )
+        a = _register(
+            base_url,
+            "a",
+            ["github:shared/repo"],
+            a_boot["bubble_id"],
+            a_boot["bubble_key"],
+        )
+        b = _register(
+            base_url,
+            "b",
+            ["github:shared/repo"],
+            b_boot["bubble_id"],
+            b_boot["bubble_key"],
+        )
         assert a["bubble_id"] != b["bubble_id"]
 
         evA, rA, tA = _live_subscriber(base_url, a["deployment_id"], a["api_key"])
