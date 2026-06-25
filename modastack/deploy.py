@@ -259,13 +259,15 @@ def _brain_api_key(kind: str) -> str:
 
 
 def _team_brain_kind(project_path: Path, cfg: "DeployConfig") -> str:
-    """The team's `brain.kind` from its agent.yaml, or "" (team-url / unset)."""
+    """The composed team's `brain.kind`, or "" (team-url / unset)."""
     if not cfg.team:
         return ""
     try:
-        from modastack import compose
-        raw = compose._read_agent_yaml(resolve_team_dir(project_path, cfg.team))
-        return str((raw.get("brain") or {}).get("kind", "") or "")
+        from modastack.build_render import load_composed_team_config
+        return load_composed_team_config(
+            resolve_team_dir(project_path, cfg.team),
+            project_path,
+        ).brain_kind
     except Exception:
         return ""
 

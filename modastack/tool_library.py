@@ -32,7 +32,7 @@ from typing import Callable
 
 import yaml
 
-from modastack.compose import ComposeError, _merge_build
+from modastack.compose import ComposeError, _dedupe, _merge_build
 
 # Catalog root — one directory per entry, the directory name IS the entry id.
 CATALOG_DIR = Path(__file__).parent / "tool_library"
@@ -149,7 +149,7 @@ def expand(merged_yaml: dict, dest: Path) -> None:
     Idempotent and pure over inputs: an empty/absent `tool_library` is a no-op.
     `tool_library` is consumed at compose, never emitted (like `from`/`prune`).
     """
-    names = merged_yaml.get("tool_library") or []
+    names = _library_names_for_config(merged_yaml)
     for name in names:
         entry = load_entry(name)
         expander = EXPANDERS.get(entry.kind)
@@ -161,3 +161,38 @@ def expand(merged_yaml: dict, dest: Path) -> None:
                 f"{hint}")
         expander(entry, merged_yaml, dest)
     merged_yaml.pop("tool_library", None)
+
+
+def _library_names_for_config(merged_yaml: dict) -> list[str]:
+    """Return explicit tool-library names plus brain-implied entries.
+
+    `brain.kind: codex` needs the Codex CLI available for auth bootstrap and turn
+    execution, so it is equivalent to an implicit `tool_library: [codex]`.
+    Explicit `tool_library: [codex]` still de-dupes through the same path. If a
+    team has already declared its own Codex check/build, treat that as the local
+    override and do not add the implicit catalog pin.
+    """
+    names = list(merged_yaml.get("tool_library") or [])
+    brain = merged_yaml.get("brain") or {}
+    kind = str(brain.get("kind", "") or "") if isinstance(brain, dict) else ""
+    if (
+        kind == "codex"
+        and "codex" not in names
+        and not _has_codex_override(merged_yaml)
+    ):
+        names.append("codex")
+    return _dedupe(names)
+
+
+def _has_codex_override(merged_yaml: dict) -> bool:
+    requires = merged_yaml.get("requires") or []
+    if any(isinstance(r, dict) and r.get("name") == "codex" for r in requires):
+        return True
+    build = merged_yaml.get("build") or {}
+    if not isinstance(build, dict):
+        return False
+    values = []
+    for key in ("npm", "run_root", "run"):
+        raw = build.get(key) or []
+        values.extend(raw if isinstance(raw, list) else [raw])
+    return any("codex" in str(v) for v in values)
