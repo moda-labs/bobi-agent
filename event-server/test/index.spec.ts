@@ -7,6 +7,7 @@ import {
 	INTERNAL_WS_PROTOCOL_PREFIX,
 	internalWebSocketProtocol,
 	internalWebSocketRequest,
+	publicBearerWebSocketProtocol,
 } from "../src/internal-auth";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -820,6 +821,24 @@ describe("#489 internal DeploymentSession auth", () => {
 				headers: {
 					authorization: `Bearer ${bubble.api_key}`,
 					cookie: "session=client-cookie",
+					Upgrade: "websocket",
+				},
+			},
+		);
+
+		expect(response.status).toBe(101);
+		expect(response.webSocket).toBeTruthy();
+		response.webSocket?.accept();
+		response.webSocket?.close();
+	});
+
+	it("worker-mediated websocket subscribe accepts bearer auth in a public subprotocol", async () => {
+		const bubble = await mintBubble(["ws:protocol-auth"]);
+		const response = await SELF.fetch(
+			`https://example.com/deployments/${bubble.deployment_id}/subscribe`,
+			{
+				headers: {
+					"Sec-WebSocket-Protocol": publicBearerWebSocketProtocol(bubble.api_key),
 					Upgrade: "websocket",
 				},
 			},

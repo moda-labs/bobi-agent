@@ -24,7 +24,7 @@ import time
 
 import pytest
 
-from modastack.events.client import EventServerClient
+from modastack.events.client import EventServerClient, _ws_bearer_subprotocol
 
 
 class FakeWebSocketApp:
@@ -38,8 +38,10 @@ class FakeWebSocketApp:
     """
 
     def __init__(self, url, header=None, on_message=None, on_open=None,
-                 on_error=None, on_close=None):
+                 on_error=None, on_close=None, **kwargs):
         self.url = url
+        self.header = header
+        self.kwargs = kwargs
         self.on_message = on_message
         self.on_open = on_open
         self.on_error = on_error
@@ -116,6 +118,26 @@ def _wait_until(predicate, timeout=5.0, interval=0.02):
             return True
         time.sleep(interval)
     return predicate()
+
+
+def test_client_sends_public_bearer_subprotocol(tmp_path, monkeypatch):
+    factory = _Factory()
+    monkeypatch.setattr("websocket.WebSocketApp", factory)
+
+    client = _fast_client(tmp_path)
+    try:
+        client.start()
+        assert _wait_until(lambda: factory.connections, timeout=1)
+    finally:
+        client.stop()
+
+    assert factory.connections
+    assert factory.connections[0].header == {
+        "Authorization": "Bearer key-1",
+    }
+    assert factory.connections[0].kwargs["subprotocols"] == [
+        _ws_bearer_subprotocol("key-1"),
+    ]
 
 
 class TestDeafManagerSelfHeal:

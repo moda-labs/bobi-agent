@@ -37,7 +37,7 @@ import {
 	conversationKey,
 	buildLoopDetectedEvent,
 } from "./circuit-breaker";
-import { internalEventRequest, internalWebSocketRequest } from "./internal-auth";
+import { internalEventRequest, internalWebSocketRequest, publicBearerFromWebSocketProtocols } from "./internal-auth";
 
 interface Env {
 	EVENTS: KVNamespace;
@@ -359,10 +359,14 @@ export default {
 			const deploymentId = match[1];
 
 			const authHeader = request.headers.get("authorization");
-			if (!authHeader?.startsWith("Bearer ")) {
+			const bearerFromHeader = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : "";
+			const bearerFromProtocol = publicBearerFromWebSocketProtocols(
+				request.headers.get("sec-websocket-protocol"),
+			) || "";
+			const apiKey = bearerFromHeader || bearerFromProtocol;
+			if (!apiKey) {
 				return new Response("Unauthorized", { status: 401 });
 			}
-			const apiKey = authHeader.slice(7);
 			const deployment = await authenticateDeployment(storage, apiKey, deploymentId);
 			if (!deployment) {
 				return new Response("Invalid API key", { status: 403 });

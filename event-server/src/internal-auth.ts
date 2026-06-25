@@ -1,5 +1,6 @@
 export const INTERNAL_HEADER = "x-modastack-internal";
 export const INTERNAL_WS_PROTOCOL_PREFIX = "modastack-internal.";
+export const PUBLIC_WS_BEARER_PROTOCOL_PREFIX = "modastack-bearer.";
 
 interface InternalEnv {
 	INTERNAL_DO_SECRET: string;
@@ -27,11 +28,23 @@ export function internalWebSocketProtocol(secret: string): string {
 }
 
 export function internalSecretFromWebSocketProtocols(header: string | null): string | null {
+	return valueFromWebSocketProtocols(header, INTERNAL_WS_PROTOCOL_PREFIX);
+}
+
+export function publicBearerWebSocketProtocol(apiKey: string): string {
+	return `${PUBLIC_WS_BEARER_PROTOCOL_PREFIX}${base64UrlEncode(apiKey)}`;
+}
+
+export function publicBearerFromWebSocketProtocols(header: string | null): string | null {
+	return valueFromWebSocketProtocols(header, PUBLIC_WS_BEARER_PROTOCOL_PREFIX);
+}
+
+function valueFromWebSocketProtocols(header: string | null, prefix: string): string | null {
 	if (!header) return null;
 	for (const part of header.split(",")) {
 		const token = part.trim();
-		if (!token.startsWith(INTERNAL_WS_PROTOCOL_PREFIX)) continue;
-		return base64UrlDecode(token.slice(INTERNAL_WS_PROTOCOL_PREFIX.length));
+		if (!token.startsWith(prefix)) continue;
+		return base64UrlDecode(token.slice(prefix.length));
 	}
 	return null;
 }
