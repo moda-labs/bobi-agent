@@ -1211,15 +1211,15 @@ class TestIntro:
 
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         c = _client(SetupState(), project)
-        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team-core",
-                                       "location": "modastack/eng-team-core"})
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team",
+                                       "location": "modastack/eng-team"})
         assert r.status_code == 200
         d = r.json()
         assert d["stage"] == "design"
         # Registry-derived teams use the non-lossy edit path (mode "open").
         assert d["mode"] == "open"
         assert d["spec"]["goal"]
-        assert (project / "modastack" / "eng-team-core" / "agent.yaml").is_file()
+        assert (project / "modastack" / "eng-team" / "agent.yaml").is_file()
 
     def test_start_registry_refuses_to_clobber_an_existing_team(self, project, home):
         # Selecting a (bundled/registry) template into a location already holding

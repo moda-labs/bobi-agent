@@ -53,7 +53,7 @@ modastack monitors add <name>     # add a monitor
 modastack monitors pause <name>   # disable a monitor
 modastack monitors remove <name>  # remove a user-added monitor
 modastack roles list              # list available agent roles
-modastack slack-manifest          # generate a Slack app manifest + one-click create link
+modastack create-slack-bot        # generate a Slack app manifest + one-click create link
 
 modastack kb create <name>        # create a named knowledge base
 modastack kb add <name> --file F  # index a file into a KB
@@ -127,7 +127,7 @@ skills/                           # Claude Code skill files (also in modastack/s
 
 agents/                           # Agent teams (portable agent definitions)
 ├── registry.yaml                 # Local team index
-└── eng-team-core/                 # Pristine, portable engineering org (reference impl)
+└── eng-team/                 # Pristine, portable engineering org (reference impl)
     ├── agent.yaml                # Team config (entry point, services, credentials)
     ├── agent.md                  # Shared base prompt for all roles
     ├── roles/                    # Role-specific prompts (folder format)
@@ -141,7 +141,7 @@ agents/                           # Agent teams (portable agent definitions)
     │   └── ...
     └── monitors/                 # Background checks
         └── defaults.yaml
-                                  # Moda's house team = `from: eng-team-core` +
+                                  # Moda's house team = `from: eng-team` +
                                   # overlay, in the private moda-agent-teams repo.
 
 .modastack/                       # Per-project installed agent + runtime state
@@ -180,8 +180,8 @@ workflows, monitors, agent.yaml) **deep-merge by key** (`build` deps accrete,
 `prune:` removes inherited items). Nothing downstream learns about layers — the
 runtime resolver reads only the frozen output. `install --pinned` resolves
 registry-only at locked versions for reproducible CI/deploy. The pristine
-`agents/eng-team-core/` is the public base; Moda's house team is
-`from: eng-team-core` + an overlay in the private `moda-agent-teams` repo.
+`agents/eng-team/` is the public base; Moda's house team is
+`from: eng-team` + an overlay in the private `moda-agent-teams` repo.
 
 **Role prompts** are read by the runtime resolver from the frozen
 `<project>/.modastack/roles/<role>/ROLE.md` — which is now compose **output**.
@@ -242,6 +242,36 @@ old append-only decision log, injected read-only into every agent's prompt as
 `## Team Policy`. On a rewrite it publishes `policy.updated`; delivery is
 passive by default (agents re-read on their next prompt), with an inbox push
 only for `urgent` changes. See `docs/specs/456-policy-curator.md`.
+
+### Recovery layers
+
+The director's liveness is defended in depth — each layer recovers a failure
+the one inside it structurally cannot (#464):
+
+```
+Fly Machines init (machine restart policy)     ← outermost backstop (process death)
+  └─ modastack supervise (self-heal watchdog)   ← restarts a wedged DIRECTOR
+       └─ modastack start (manager process)
+            └─ director session (claude subprocess)
+                 └─ stall-recovery (director→ENGINEER)  ← restarts wedged engineers
+```
+
+- **stall-recovery** runs inside the director and recovers stalled *engineer*
+  sessions; it cannot recover the director itself.
+- **`modastack supervise`** (`modastack/watchdog.py`) is the layer below the
+  director: the container entrypoint runs it as the parent, it spawns the
+  manager as a child, and it polls the `/health` endpoint's `manager` block
+  (`status` + server-derived `idle_seconds`). It restarts the manager **iff the
+  director is in an active turn state (`starting`/`running`) AND idle past
+  `WATCHDOG_STALL_THRESHOLD`** — so a healthy *idle* director (frozen
+  `last_activity` parked at `inbox.recv`) is never false-killed. Bounded retry +
+  backoff with shared crash-loop containment; on budget exhaustion it escalates
+  (loud log + optional Slack via `WATCHDOG_ALERT_CHANNEL`) and exits non-zero so
+  Fly restarts the machine. It runs no agent loop, so it cannot wedge from the
+  same cause. Tunables: `WATCHDOG_*` env vars. This is **defense-in-depth**, not
+  a replacement for #456/PR #460 (which bounds the one *known* rotation-reconnect
+  hang); the watchdog backstops *unknown* wedge classes. See
+  `docs/specs/464-manager-self-heal-watchdog.md`.
 
 ### Handoff contract
 

@@ -1,0 +1,14 @@
+name: adhoc
+trigger: >
+  For any open-ended ask, question, or one-off that doesn't fit the
+  request or daily-briefing workflows — research, a quick look-up, "what
+  do you think about…".
+description: >
+  Open-ended task with no structured pipeline. Use for research,
+  questions, and one-offs. For anything that touches the principal's
+  email / calendar / tasks, prefer the `request` workflow.
+
+steps:
+  - name: task
+    agent: assistant
+    prompt: "${{input.task}}"

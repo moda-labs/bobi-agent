@@ -161,7 +161,7 @@ _NATIVE = [
                 summary="Create a Slack app from a manifest, paste its bot "
                         "token.",
                 steps=(
-                    "Run `modastack slack-manifest` and open the printed "
+                    "Run `modastack create-slack-bot` and open the printed "
                     "create link — scopes + events are prefilled.",
                     "Or create from the manifest: api.slack.com/apps → Create "
                     "New App → From a manifest.",

@@ -14,11 +14,11 @@ import pytest
 import yaml
 
 # The pristine, in-repo reference team. These constraints are generic (they
-# apply to any eng org), so they're validated against eng-team-core. The Moda
+# apply to any eng org), so they're validated against eng-team. The Moda
 # house bindings (codex as the adversarial reviewer, Linear) live in the private
 # moda-eng-team overlay and are validated there.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ENG_TEAM = REPO_ROOT / "agents" / "eng-team-core"
+ENG_TEAM = REPO_ROOT / "agents" / "eng-team"
 LEAD_PROMPT = ENG_TEAM / "roles" / "project_lead" / "ROLE.md"
 ENGINEER_PROMPT = ENG_TEAM / "roles" / "engineer" / "ROLE.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
@@ -165,7 +165,7 @@ class TestReleaseTimeOnlyVersionConvention:
     The *engineer-prompt* side of this guard (telling the engineer to revert
     `/ship`'s version/changelog bump) is Moda house policy and lives in the
     private moda-eng-team overlay engineer role — it is validated there, not
-    against the pristine eng-team-core.
+    against the pristine eng-team.
     """
 
     def test_contributor_docs_state_convention(self):
@@ -182,7 +182,7 @@ class TestReleaseTimeOnlyVersionConvention:
 
 
 class TestAdversarialReviewStep:
-    """eng-team-core must wire a tool-agnostic adversarial-review seam.
+    """eng-team must wire a tool-agnostic adversarial-review seam.
 
     A `plan_review` step in issue-lifecycle runs the engineer's *adversarial
     review gate* (a generic seam — the overlay binds it to a concrete tool like

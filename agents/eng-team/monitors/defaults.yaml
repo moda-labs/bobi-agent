@@ -1,0 +1,41 @@
+# Built-in monitor defaults — shipped with modastack.
+#
+# READ-ONLY at runtime. The manager never writes here.
+# Override or disable in your repo's .modastack/monitors.yaml.
+monitors:
+  - name: pr-conflict-check
+    description: Check open PRs across all registered repos for merge conflicts
+    interval: 15m
+    event: monitor/pr.conflict_detected
+    check: pr_conflicts
+
+  - name: stale-pr-check
+    description: Flag open PRs with no activity in 48 hours
+    interval: 1h
+    event: monitor/pr.stale
+    check: stale_prs
+
+  - name: disk-free-check
+    description: Alert when disk usage exceeds threshold (prevents disk-full incidents)
+    interval: 5m
+    event: monitor/system.disk_low
+    check: disk_free
+    threshold_pct: 85
+
+  - name: team-status-roundup
+    description: >
+      Twice-daily status roundup. The director pings every project lead
+      for a full report on their repo — in-progress tickets, open PRs,
+      open issues, CI failures, blockers — aggregates the responses, and
+      reports the org-wide picture to the human on Slack.
+    at: ["06:00", "18:00"]
+    tz: America/Los_Angeles
+    event: monitor/status.roundup_due
+    notify: true
+
+  # NOTE: policy-curator is no longer declared here. It is a FRAMEWORK DEFAULT
+  # (#471) — seeded into every composed team image from
+  # modastack/monitors/framework_defaults.yaml, opt-out via `prune:`. Removing it
+  # here is byte-neutral for the composed set (the framework seeds an identical
+  # record); a test asserts that. Re-adding it here would be redundant.
+

@@ -13,7 +13,15 @@ override earlier ones by `name`):
   2. Project-specific   — <project>/.modastack/monitors.yaml
 """
 
+from pathlib import Path
+
 from .schema import Monitor, parse_interval
 from .registry import MonitorRegistry
 
-__all__ = ["Monitor", "parse_interval", "MonitorRegistry"]
+# Framework-default monitors (#471), seeded into every composed team image as the
+# most-base layer of the `from:` chain — see compose._seed_framework_monitors.
+# Team-overridable (a same-named record wins) and prunable (opt-out). Ships as
+# package data the same way prompts/curator.md does.
+FRAMEWORK_DEFAULTS_PATH = Path(__file__).parent / "framework_defaults.yaml"
+
+__all__ = ["Monitor", "parse_interval", "MonitorRegistry", "FRAMEWORK_DEFAULTS_PATH"]

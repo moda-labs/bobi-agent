@@ -17,9 +17,9 @@ Baking a CLI tool into a team today requires **three hand-coordinated places tha
 The pin lives in **two** of them and must be bumped in lockstep. Concretely, in the `moda-eng-team` overlay:
 
 - **codex** — `@openai/codex@<ver>` appears in both `requires.fix` (the `npm install -g …` line) and `build.npm`.
-- **venn** — `venn-cli==<ver>` appears in both `requires.fix` and the `build.run_root` venv install (`agents/personal-assistant-core/agent.yaml`).
+- **venn** — `venn-cli==<ver>` appears in both `requires.fix` and the `build.run_root` venv install (`agents/personal-assistant/agent.yaml`).
 
-Two strings, one truth, no enforcement that they agree. The same tool re-declared in another team (venn across `support-manager` / `personal-assistant-core`; the #397 image CLI) repeats the whole three-place dance from scratch. (gstack repeats it too — a commit SHA in both `requires.fix` and `build.run` — but it's the `kind: skill` case handled by #428.)
+Two strings, one truth, no enforcement that they agree. The same tool re-declared in another team (venn across `support-manager` / `personal-assistant`; the #397 image CLI) repeats the whole three-place dance from scratch. (gstack repeats it too — a commit SHA in both `requires.fix` and `build.run` — but it's the `kind: skill` case handled by #428.)
 
 A library entry collapses this to **one pinned definition + one guide, opted into by name** — reusable across teams, with the pin written exactly once.
 
@@ -207,7 +207,7 @@ Per CLAUDE.md (**production pattern ⇒ test gap**): tests-first, each failing o
 6. **Docs**: `skills/create-agent.md` + `CLAUDE.md` (agent-teams section) document `tool_library:`.
 7. `/review`; unit + integration; **no** `VERSION`/`CHANGELOG.md`/`pyproject.toml` version bump (release-time only).
 8. **Follow-ups (separate tickets/PRs):**
-   - This repo: flip `personal-assistant-core` (and `support-manager`) from inline venn `requires`/`build` to `tool_library: [venn]`. Zero-rework — the §6 regression bar proves it.
+   - This repo: flip `personal-assistant` (and `support-manager`) from inline venn `requires`/`build` to `tool_library: [venn]`. Zero-rework — the §6 regression bar proves it.
    - `moda-agent-teams` (private): flip `moda-eng-team` overlay's codex `requires`/`build` to `tool_library: [codex]`.
    - **gstack** lands as the canonical `kind: skill` entry under **#428**.
    - #428/#398 consume this catalog shape for `kind: skill` / `kind: mcp`.

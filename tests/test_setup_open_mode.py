@@ -16,7 +16,7 @@ def test_list_registry_teams_flags_official(monkeypatch, tmp_path):
     # bundled starter templates so the assertions are about the registry path.
     monkeypatch.setattr(open_mode, "list_bundled_templates", lambda: [])
     monkeypatch.setattr(registry, "list_remote", lambda project: [
-        {"name": "eng-team-core", "description": "Portable eng org",
+        {"name": "eng-team", "description": "Portable eng org",
          "registry": registry.DEFAULT_REPO},
         {"name": "third-party", "description": "From elsewhere",
          "registry": "someone/their-repo"},
@@ -27,7 +27,7 @@ def test_list_registry_teams_flags_official(monkeypatch, tmp_path):
 
     teams = {t["name"]: t for t in open_mode.list_registry_teams(tmp_path)}
 
-    assert teams["eng-team-core"]["official"] is True
+    assert teams["eng-team"]["official"] is True
     assert teams["third-party"]["official"] is False
     assert teams["cached-team"]["official"] is False
     # The flag is always present so the UI never reads `undefined`.

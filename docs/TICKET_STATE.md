@@ -51,18 +51,18 @@ forking). Same arc as a package manager: package → resolve → compose → std
 Supersedes the old "workspace/config/eject, no overlay" stance (composition over forking).
 
 **Shipped:** modastack 0.31.0 (`modastack/compose.py` `from:` resolution + merge);
-`eng-team-core@1.0.0` published as the public base; live `moda-eng-team`
-(`from: eng-team-core` + Moda overlay, in private `moda-agent-teams`) reconciled onto
+`eng-team@1.0.0` published as the public base; live `moda-eng-team`
+(`from: eng-team` + Moda overlay, in private `moda-agent-teams`) reconciled onto
 the composed team and **behaviorally identical** to the old monolith. All five issues
 CLOSED. Specs (historical): `docs/specs/team-from-resolution.md` (#446),
-`team-compose-merge.md` (#451), `eng-team-core-split.md` (#452).
+`team-compose-merge.md` (#451), `eng-team-split.md` (#452).
 
 | Issue | Stage | What | Status |
 |---|---|---|---|
 | #440 | Package | Versioned per-team tarballs (`name@version`) registry install + deploy | ✅ **Phase 1 (#442) + Phase 2 (#448) MERGED to main** — foundation landed. Interface: `registry.fetch(name, version=)` + `_split_ref` (exact `name@version` or "latest", **not semver ranges**) |
 | #446 | Resolve | `from:` resolution: local-always-wins + fail-fast + `--pinned` | ✅ **MERGED (PR #457)** — `modastack/compose.py` `resolve_chain`/`resolve_team_ref`; Cargo-quality fail-fast; cycle/depth guards; compose-lock; deploy `resolve_team_dir` flattens on the host; publish guard `scripts/check-publishable.py` |
 | #451 | Compose | Merge semantics: prose concat-in-order; structured deep-merge by key; `replace:` hatch; `prune:` | ✅ **MERGED (PR #457)** — `compose.compose()`; prose concat + `replace:`; agent.yaml deep-merge (services/requires by name, build append+dedupe, auto_dispatch id-keyed); `prune:`; provenance; install clears only contributed surfaces; 38 tests |
-| #452 | Std lib | Extract pristine `eng-team-core` (→ public modastack) + `moda-eng-team` overlay (→ private moda-agent-teams) | 🟡 **modastack side MERGED (PR #457) — cutover pending** — `agents/eng-team-core` extracted, monolith deleted, tests re-pointed, teams de-bundled from the wheel, regression bar met; overlay on private moda-agent-teams **PR #3**. Live flip release-gated: cut a modastack release (publishes eng-team-core@1.0.0) → merge PR #3 → flip `deployments/eng-team.yaml` to `team: moda-eng-team` + delete private monolith + deploy |
+| #452 | Std lib | Extract pristine `eng-team` (→ public modastack) + `moda-eng-team` overlay (→ private moda-agent-teams) | 🟡 **modastack side MERGED (PR #457) — cutover pending** — `agents/eng-team` extracted, monolith deleted, tests re-pointed, teams de-bundled from the wheel, regression bar met; overlay on private moda-agent-teams **PR #3**. Live flip release-gated: cut a modastack release (publishes eng-team@1.0.0) → merge PR #3 → flip `deployments/eng-team.yaml` to `team: moda-eng-team` + delete private monolith + deploy |
 
 ## Multitenant — epic #395 ⏸️
 
@@ -153,7 +153,7 @@ unresolved design decision, verifiable without infra/credentials the bot lacks.*
 
 | Issue | Resolution |
 |---|---|
-| #453 / #440 / #446 / #451 / #452 | **Epic: Team distribution & composition** — `from:` inheritance + compose merge + `eng-team-core` split. modastack 0.31.0; cutover LIVE. All CLOSED 2026-06-24. |
+| #453 / #440 / #446 / #451 / #452 | **Epic: Team distribution & composition** — `from:` inheritance + compose merge + `eng-team` split. modastack 0.31.0; cutover LIVE. All CLOSED 2026-06-24. |
 | #454 | Rotation metric over-counted (summed cache_read across a turn) → false "rotation pending" + wedge — fixed in v0.30.0, prod rolled. CLOSED 2026-06-23. |
 | #443 | Transient 529/turn error permanently wedged a session (deaf until restart) — CLOSED 2026-06-23. |
 | #425 | Resumed manager session could wedge (deaf to inbox while reporting "ready") — CLOSED 2026-06-22. |

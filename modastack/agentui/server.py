@@ -28,6 +28,7 @@ so Starlette's TestClient drives it with no live team and no event server.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 from pathlib import Path
@@ -83,6 +84,80 @@ def append_chat(project: Path, name: str, role: str, text: str) -> None:
         f.write(json.dumps({"role": role, "text": text, "ts": time.time()}) + "\n")
 
 
+# --- Claude transcript replay -------------------------------------------
+# The UI's durable source of truth is the Claude Code JSONL transcript. The
+# webui-chat log above is only a local fallback for cases where a transcript
+# cannot be resolved yet.
+
+def _extract_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "\n".join(p for p in parts if p)
+    return ""
+
+
+def _claude_projects_dirs() -> list[Path]:
+    dirs = []
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    if cfg:
+        dirs.append(Path(cfg) / "projects")
+    dirs.append(Path.home() / ".claude" / "projects")
+
+    seen = set()
+    out = []
+    for d in dirs:
+        key = str(d)
+        if key not in seen:
+            seen.add(key)
+            out.append(d)
+    return out
+
+
+def _transcript_path(session_id: str) -> Path | None:
+    if not session_id:
+        return None
+    for projects in _claude_projects_dirs():
+        if not projects.exists():
+            continue
+        for project_dir in projects.iterdir():
+            if not project_dir.is_dir():
+                continue
+            candidate = project_dir / f"{session_id}.jsonl"
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def read_transcript_messages(session_id: str,
+                             limit: int = CHAT_HISTORY_LIMIT) -> list[dict]:
+    path = _transcript_path(session_id)
+    if not path:
+        return []
+
+    out = []
+    for line in path.read_text().splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        msg_type = obj.get("type", "")
+        if msg_type not in ("human", "user", "assistant"):
+            continue
+        text = _extract_text(obj.get("message", {}).get("content", "")).strip()
+        if not text:
+            continue
+        role = "agent" if msg_type == "assistant" else "user"
+        out.append({"role": role, "text": text})
+    return out[-limit:]
+
+
 # --- serialization -------------------------------------------------------
 
 def serialize_card(entry, *, manager_name: str = "") -> dict:
@@ -104,6 +179,11 @@ def serialize_card(entry, *, manager_name: str = "") -> dict:
         "last_activity": entry.last_activity,
         "is_manager": bool(manager_name) and entry.name == manager_name,
     }
+
+
+def ordered_agents(entries, *, manager_name: str = "") -> list:
+    return sorted(entries, key=lambda e: (0 if manager_name and e.name == manager_name else 1,
+                                         e.started_at or 0))
 
 
 def _resolve_manager_name(project: Path) -> str:
@@ -187,7 +267,7 @@ def build_app(project: Path, *, token: str, registry_fn=None, deliver_fn=None,
     @app.get("/api/agents")
     def agents() -> dict:
         return {"agents": [serialize_card(e, manager_name=mgr)
-                           for e in _active()]}
+                           for e in ordered_agents(_active(), manager_name=mgr)]}
 
     @app.get("/api/agents/{name}")
     def agent_detail(name: str) -> JSONResponse:
@@ -200,7 +280,22 @@ def build_app(project: Path, *, token: str, registry_fn=None, deliver_fn=None,
     def agent_messages(name: str) -> JSONResponse:
         if not _safe_name(name):
             return JSONResponse({"error": "bad name"}, status_code=404)
-        return JSONResponse({"messages": read_chat(project, name)})
+        entry = next((e for e in _active() if e.name == name), None)
+        if not entry:
+            return JSONResponse({"error": "unknown agent"}, status_code=404)
+
+        session_id = entry.session_id
+        if not session_id:
+            try:
+                from modastack.sdk import load_session_id
+                session_id = load_session_id(name)
+            except Exception:
+                session_id = ""
+
+        messages = read_transcript_messages(session_id)
+        if not messages:
+            messages = read_chat(project, name)
+        return JSONResponse({"messages": messages})
 
     # --- chat (blocking request/response) ------------------------------
     # Sync `def` on purpose: FastAPI runs it in a threadpool, so the blocking

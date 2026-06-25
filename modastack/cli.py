@@ -273,7 +273,10 @@ def _run_from_config(project_path: Path, cfg: "Config",
     # --- Health endpoint (always started; essential in foreground/container
     # mode for liveness probes, useful in daemon mode for doctor checks) ---
     from modastack import manager_health
-    health_port = manager_health.start(state_dir, project_path.name)
+    health_port = manager_health.start(
+        state_dir, project_path.name,
+        manager_session=_manager_session_name(project_path, role),
+    )
     log.info("Manager health endpoint on port %d", health_port)
 
     # --- Agent UI (opt-in via MODASTACK_UI) — a daemon-thread web dashboard
@@ -459,6 +462,44 @@ def start(foreground, fresh, subscribe):
         _print_startup_info(project_path, proc.pid, log_file)
 
 
+@main.command(context_settings={"ignore_unknown_options": True})
+@click.argument("start_args", nargs=-1, type=click.UNPROCESSED)
+def supervise(start_args):
+    """Run the manager under the self-heal watchdog (#464).
+
+    Spawns `modastack start <args>` as a child, polls the manager health
+    endpoint, and restarts a wedged director with bounded retry, backoff, loud
+    logging and fail-open safety — the one recovery layer below the director
+    that `stall-recovery` (director→engineer) structurally cannot provide.
+
+    Used as the container entrypoint:
+
+        modastack supervise -- --foreground
+
+    Everything after `--` is forwarded verbatim to `modastack start` (the
+    `--foreground` flag is required so the manager stays a supervisable child
+    and does not daemonize out from under the supervisor). Tunables are env
+    vars (WATCHDOG_*); on restart-budget exhaustion the supervisor exits
+    non-zero so Fly's machine restart policy escalates.
+    """
+    from modastack.watchdog import Supervisor, WatchdogConfig
+
+    project_path = _detect_project_root()
+    # click consumes the `--` separator, but strip a stray one defensively.
+    args = [a for a in start_args if a != "--"]
+
+    # Container/foreground mode: log to stdout/stderr only (mirror `start`).
+    root = logging.getLogger()
+    root.handlers = [h for h in root.handlers
+                     if not isinstance(h, logging.FileHandler)]
+
+    log = logging.getLogger(__name__)
+    log.info("watchdog: supervising `modastack start %s`", " ".join(args))
+    supervisor = Supervisor(args, WatchdogConfig.from_env(),
+                            project_root=project_path)
+    raise SystemExit(supervisor.run())
+
+
 def _install_pack(pack_dir: Path, project_path: Path,
                   local_source: bool = True, *, pinned: bool = False) -> None:
     """Compose the pack's `from:` chain into .modastack/ for runtime use.
@@ -501,9 +542,11 @@ def _install_pack(pack_dir: Path, project_path: Path,
 
     prov = _compose.compose(chain, dest)
 
-    # Seed workspace from every layer, base → leaf (first-writer-wins), so a base
-    # team's templates seed unless the overlay supplies its own.
-    for layer in chain:
+    # Seed workspace leaf → base (seed-if-absent), so an overlay's own template
+    # wins and the base only fills files the overlay doesn't supply. (Mirrors the
+    # deploy flatten's leaf-wins merge_workspace; user edits already on disk are
+    # never overwritten regardless of order.)
+    for layer in reversed(chain):
         _seed_workspace(layer.dir, project_path)
 
     # The leaf's directory name is the installed agent name (the team a user
@@ -1520,7 +1563,7 @@ def slack_read_thread(workspace, channel, thread, limit, as_json):
         click.echo(f"\n{len(messages)} message(s)")
 
 
-@main.command("slack-manifest")
+@main.command("create-slack-bot")
 @click.option("--app-name", default="modastack agent",
               help="Display name for the Slack app")
 @click.option("--event-server", default="",
@@ -1532,19 +1575,25 @@ def slack_read_thread(workspace, channel, thread, limit, as_json):
               help="Write the manifest to a file instead of stdout")
 @click.option("--url/--no-url", "show_url", default=True,
               help="Print a one-click 'create from manifest' link")
-def slack_manifest(app_name, event_server, fmt, output, show_url):
-    """Generate a Slack app manifest wired to your event server.
+@click.option("--open/--no-open", "open_browser", default=None,
+              help="Open the one-click create link in your browser "
+                   "(default: when run interactively; use --no-open for "
+                   "headless/CI)")
+def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser):
+    """Create a Slack app (bot) for modastack — generates the manifest and a
+    one-click create link, and opens it in your browser.
 
     Every modastack Slack app needs the same scopes + events pointed at one
     request URL; this stamps them out from a template so a working app is one
-    step away — paste the printed link, feed the file to the Slack CLI
+    step away — click the link it opens, feed the file to the Slack CLI
     (`slack create <name> --manifest manifest.json`), or POST it to the App
     Manifest API.
 
     Usage:
-        modastack slack-manifest
-        modastack slack-manifest --app-name "Eng Bot" --format json -o manifest.json
-        modastack slack-manifest --event-server https://my-worker.workers.dev
+        modastack create-slack-bot
+        modastack create-slack-bot --app-name "Eng Bot" --format json -o manifest.json
+        modastack create-slack-bot --event-server https://my-worker.workers.dev
+        modastack create-slack-bot --no-open                # just print the link
     """
     from .slack_manifest import (
         create_app_url, manifest_to_json, render_manifest, webhook_url,
@@ -1575,10 +1624,21 @@ def slack_manifest(app_name, event_server, fmt, output, show_url):
         click.echo(rendered)
 
     if show_url:
+        create_url = create_app_url(manifest_yaml)
         click.echo("")
         click.echo(f"Request URL:  {webhook_url(event_server)}")
         click.echo("Create the app in one click:")
-        click.echo(f"  {create_app_url(manifest_yaml)}")
+        click.echo(f"  {create_url}")
+        # Open the browser by default when interactive; --open/--no-open
+        # forces either way. The default (None) stays quiet under pipes, CI,
+        # and the test runner so it never tries to launch a browser there.
+        should_open = (
+            open_browser if open_browser is not None else sys.stdout.isatty()
+        )
+        if should_open:
+            click.launch(create_url)
+            click.echo("")
+            click.echo("Opened the create page in your browser.")
 
 
 @main.group()
@@ -2376,8 +2436,28 @@ def monitor_list():
         status = "active" if m.enabled else "paused"
         scope = Path(m.project).name if m.project else "all projects"
         runner = m.check or "manager"
+        suffix = _script_cache_summary(m) if m.check == "script_cache" else ""
         click.echo(f"  {m.name:22s} {tier:16s} {m.interval:>5s}  {status:7s} "
-                   f"{scope:16s} {m.event:30s} [{runner}]")
+                   f"{scope:16s} {m.event:30s} [{runner}]{suffix}")
+
+
+def _script_cache_summary(monitor) -> str:
+    """A compact `mode + cumulative savings` suffix for a script_cache monitor,
+    read from its trusted-state sidecar (#327 observability)."""
+    try:
+        from .monitors.script_cache_checks import _load_trusted_state
+        st = _load_trusted_state(monitor.name)
+        if not st:
+            return "  (no runs yet)"
+        cached = st.get("cached_runs", 0)
+        fallback = st.get("fallback_runs", 0)
+        spent = st.get("total_agent_cost_usd", 0.0)
+        avg = (spent / fallback) if fallback else 0.0
+        saved = cached * avg  # cached ticks would each have cost ~one agent run
+        return (f"  mode={st.get('last_mode', '?')} cached={cached} "
+                f"agent={fallback} spent=${spent:.4f} saved~${saved:.4f}")
+    except Exception:
+        return ""
 
 
 @monitors.command("add")
@@ -2504,6 +2584,63 @@ def monitor_remove(name):
         raise SystemExit(1)
     else:
         click.echo(f"No monitor named '{name}' found in a writable tier.", err=True)
+        raise SystemExit(1)
+
+
+def _find_monitor(name: str, project_path):
+    """Resolve a monitor by name from the effective registry, or None."""
+    from .monitors.registry import MonitorRegistry
+    registry = MonitorRegistry.load(project_path=project_path)
+    for m in registry.effective_monitors():
+        if m.name == name:
+            return m
+    return None
+
+
+@monitors.command("recache")
+@click.argument("name")
+def monitor_recache(name):
+    """Invalidate a script_cache monitor's cached script (forces regeneration).
+
+    Usage:
+        modastack monitors recache unread-emails
+    """
+    from .monitors.script_cache_checks import recache
+
+    project_path = _detect_project_root()
+    m = _find_monitor(name, project_path)
+    if m is None:
+        click.echo(f"No monitor named '{name}' found.", err=True)
+        raise SystemExit(1)
+    if m.check != "script_cache":
+        click.echo(f"'{name}' is not a script_cache monitor (check={m.check}).", err=True)
+        raise SystemExit(1)
+    recache(m)
+    click.echo(f"Invalidated cached script for '{name}' — next tick regenerates.")
+
+
+@monitors.command("approve-script")
+@click.argument("name")
+def monitor_approve_script(name):
+    """Promote a script_cache monitor's pending script to active (review mode).
+
+    Usage:
+        modastack monitors approve-script unread-emails
+    """
+    from .monitors.script_cache_checks import approve_pending
+
+    project_path = _detect_project_root()
+    m = _find_monitor(name, project_path)
+    if m is None:
+        click.echo(f"No monitor named '{name}' found.", err=True)
+        raise SystemExit(1)
+    if m.check != "script_cache":
+        click.echo(f"'{name}' is not a script_cache monitor (check={m.check}).", err=True)
+        raise SystemExit(1)
+    if approve_pending(m):
+        click.echo(f"Approved + pinned the pending script for '{name}'.")
+    else:
+        click.echo(f"No valid pending script to approve for '{name}'.", err=True)
         raise SystemExit(1)
 
 

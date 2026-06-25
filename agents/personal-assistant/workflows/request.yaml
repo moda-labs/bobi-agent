@@ -1,0 +1,46 @@
+name: request
+trigger: >
+  When the principal asks the assistant to do something that touches their
+  email, calendar, or to-do list — reply to someone, schedule or move a
+  meeting, add a reminder, summarize the inbox, find a time.
+description: >
+  The core assistant pipeline. Understand the ask, gather the context it
+  needs read-only across email / calendar / tasks, then either act or —
+  for anything outbound or irreversible — draft it and confirm before
+  sending, per the autonomy line in assistant-context.md. Reports the
+  outcome in the principal's thread.
+
+steps:
+  - name: plan
+    agent: assistant
+    prompt: |
+      Follow the "Phase 1 — Understand and plan" and "Phase 2 — Gather"
+      instructions in your role prompt for this request:
+
+      ${{input.task}}
+
+      Restate the ask, resolve references against the context file and
+      thread, decide which categories it touches and whether any part is
+      outbound/irreversible, then gather (read-only) exactly what the action
+      needs. If something required is missing and you can't infer it, ask
+      once in-thread and stop.
+    handoff:
+      required: [understanding, categories, is_outbound, plan]
+      optional: [gathered, conflicts, blocked_on]
+    timeout: 900
+
+  - name: act
+    agent: assistant
+    prompt: |
+      Follow the "Phase 3 — Act, or draft and confirm" and "Phase 4 — Report
+      back" instructions in your role prompt.
+
+      Apply the autonomy line: act directly on read-only / self-only work;
+      for anything that leaves the account or reaches another person, do the
+      work but draft-and-confirm instead of executing — show the exact draft
+      or change in-thread and stop. Then report the outcome (done, or held
+      for confirmation) in the principal's thread.
+    handoff:
+      required: [delivered]
+      optional: [action_taken, awaiting_confirmation]
+    timeout: 1200

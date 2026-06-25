@@ -68,13 +68,26 @@ Severity is "if/when the relevant mode is exposed", not current F&F exposure.
   yet reject duplicates.
 - **Fix:** Short-TTL seen-set of `(bubble_id, nonce)` over the 300s window; reject dups.
 
-### S6. `/slack/send` and `/slack/workspaces` are unauthenticated
+### S6. `/slack/send` outbound — CLOSED (#487); `/slack/workspaces` global write still open
 - **Severity:** High (if server reachable) · **Reachable now:** No on loopback
-- **Where:** `core.ts` `handleSlackSend` / `handleSlackWorkspaceRegister`; both
-  backends route them unsigned. Pre-existing; left working so Slack keeps functioning.
-- **Risk:** Anyone who can reach the server can post arbitrary Slack messages to any
-  registered workspace, or overwrite a workspace's stored bot token.
-- **Fix:** Bubble-scope + sign these routes; scope the workspace token store per bubble.
+- **Where:** `core.ts` `handleSlackSend` / `handleSlackWorkspaceRegister`.
+- **Outbound send (CLOSED, #487):** `POST /slack/send` now requires a valid bubble
+  HMAC signature in both backends and resolves the Slack token ONLY under the
+  authenticated bubble's scope (`slack_workspace:${bubbleId}:${workspaceId}`), with
+  no fallback to the global store. One bubble can no longer puppet another bubble's
+  registered workspace.
+- **Remaining (open):** `POST /slack/workspaces` still accepts UNSIGNED registration
+  and always writes the GLOBAL `slack_workspace:${workspaceId}` record (deliberate —
+  inbound webhook self-reply loop prevention reads that record and must keep working
+  for clients that don't yet sign). It trusts caller-supplied `workspace_id` /
+  `bot_id` / `app_id` / `signing_secret`, so a reachable attacker can still poison the
+  GLOBAL record used for inbound Slack signature resolution + self-reply filtering
+  (it can NOT make outbound `/slack/send` use that token). This is the inbound
+  half of the surface — close it with inbound subscription/registration auth (#239),
+  not by breaking the legacy unsigned self-reply registration.
+- **Also deferred:** replay dedup within the 300s window (see S5) applies to the now-signed
+  `/slack/send` too; and the global+scoped registration write is non-atomic RMW (a
+  pre-existing property — concurrent same-workspace registrations can race).
 
 ### S7. api_key remains a transmitted bearer credential
 - **Severity:** Low–Med · **Reachable now:** loopback only

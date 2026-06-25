@@ -6,7 +6,7 @@ follow-ups are silently dropped.
 
 This drives the REAL pipeline against the SHIPPED config:
 
-    real eng-team-core agent.yaml `auto_dispatch` rules
+    real eng-team agent.yaml `auto_dispatch` rules
         → EventReactor.from_config
         → drain_loop (the actual event-drain path)
         → launch_agent (mocked, so no live Claude session spawns)
@@ -34,7 +34,7 @@ from modastack.events.drain import drain_loop
 from modastack.events.reactor import EventReactor
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
-ENG_TEAM_AGENT_YAML = PACKAGE_ROOT / "agents" / "eng-team-core" / "agent.yaml"
+ENG_TEAM_AGENT_YAML = PACKAGE_ROOT / "agents" / "eng-team" / "agent.yaml"
 
 
 def _wait_calls(mock, n, timeout=2.0):
@@ -71,10 +71,10 @@ class _OneShotQueue:
 
 
 def _reactor_from_shipped_config():
-    """Build a reactor from the REAL eng-team-core auto_dispatch rules."""
+    """Build a reactor from the REAL eng-team auto_dispatch rules."""
     cfg = yaml.safe_load(ENG_TEAM_AGENT_YAML.read_text())
     rules = cfg.get("auto_dispatch", [])
-    assert rules, "eng-team-core agent.yaml must define auto_dispatch rules"
+    assert rules, "eng-team agent.yaml must define auto_dispatch rules"
     return EventReactor.from_config(rules, cwd="/tmp/proj-326")
 
 
