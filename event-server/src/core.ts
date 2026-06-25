@@ -49,6 +49,30 @@ export interface BubbleRecord {
 	created_at?: string;
 }
 
+// A server-verified grant that a bubble may subscribe to / receive a global
+// webhook resource topic (#488). The event server verifies an upstream
+// credential ONCE (GitHub repo read / Linear team read / Slack workspace
+// registration) and stores ONLY this grant — never the credential. The grant,
+// not the subscription index, is the source of truth at delivery time.
+//
+// Shaped now for the future account system so we never bake "bubble == user":
+// `account_id` is null in the MVP (an account layer fills it later) and a grant
+// is keyed by `bubble_id`.
+export interface ResourceGrant {
+	id: string;
+	account_id: string | null; // null in MVP; account layer fills it later
+	bubble_id: string;
+	service: "github" | "linear" | "slack";
+	resource: string;
+	granted_by: "upstream_token_verification";
+	// Linear: the team's organization id, recorded so a future fix can
+	// disambiguate the workspace-ambiguous `linear:TEAM` topic (#488 §4). Null
+	// / absent for github + slack.
+	organization_id?: string | null;
+	created_at: string;
+	expires_at: string | null; // null = no expiry in MVP (not enforced yet)
+}
+
 export interface SlackBotRecord {
 	bot_token: string;
 	bot_id?: string;
@@ -151,6 +175,11 @@ export interface StorageAdapter {
 	getSlackWorkspace(workspaceId: string): Promise<SlackWorkspaceRecord | null>;
 	putSlackWorkspace(workspaceId: string, record: SlackWorkspaceRecord): Promise<void>;
 	initDeploymentSession(deploymentId: string, subscriptions: string[]): Promise<void>;
+	// Resource grants (#488). `getDeploymentById` is needed by the delivery
+	// filter to resolve a candidate's bubble before checking its grant.
+	putResourceGrant(grant: ResourceGrant): Promise<void>;
+	hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean>;
+	getDeploymentById(id: string): Promise<DeploymentRecord | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +261,45 @@ const GLOBAL_TOPIC_PREFIXES = ["github:", "linear:", "slack:"];
 
 export function isGlobalTopic(key: string): boolean {
 	return GLOBAL_TOPIC_PREFIXES.some((p) => key.startsWith(p));
+}
+
+// Normalize a resource string so the grant key and the topic never diverge on
+// case/alias (#488 §3.3). github `owner/repo` is lowercased and a trailing
+// `.git` stripped (matching the git-remote slug the adapter produces); linear
+// team keys and slack team ids are left verbatim (case-significant upstream).
+// Applied IDENTICALLY at authorize time and at topic parsing.
+export function normalizeResource(service: string, resource: string): string {
+	let r = resource.trim();
+	if (service === "github") {
+		r = r.toLowerCase();
+		if (r.endsWith(".git")) r = r.slice(0, -4);
+	}
+	return r;
+}
+
+// Parse a GLOBAL topic key into its {service, resource} for a grant lookup —
+// the inverse of how topics are built, and the single helper both enforcement
+// layers (registration + delivery) use so they can never disagree. Split on the
+// FIRST `:` (github `owner/repo` and linear keys never contain a `:`). Slack
+// topics may be `slack:{team}` OR `slack:{team}:{channel}`; the grant is keyed
+// on the TEAM id, so the channel segment is dropped here. Returns null for a
+// non-global or malformed key.
+export function parseGlobalTopic(key: string): { service: string; resource: string } | null {
+	if (!isGlobalTopic(key)) return null;
+	const idx = key.indexOf(":");
+	if (idx <= 0) return null;
+	const service = key.slice(0, idx);
+	let resource = key.slice(idx + 1);
+	if (!resource) return null;
+	// Slack channel-scoped topic — the grant gates the whole team, so reduce
+	// `team:channel` to `team` before normalizing.
+	if (service === "slack") {
+		const c = resource.indexOf(":");
+		if (c >= 0) resource = resource.slice(0, c);
+	}
+	resource = normalizeResource(service, resource);
+	if (!resource) return null;
+	return { service, resource };
 }
 
 // The single source of truth for bubble namespacing — used identically when
@@ -638,6 +706,17 @@ export async function handleRegisterDeployment(
 		bubble = authed;
 	}
 
+	// Enforcement layer 1 (#488): every GLOBAL resource topic in the request must
+	// have a matching grant for this bubble. Hard-reject the WHOLE request (no
+	// partial write) so the client surfaces a configuration error rather than
+	// silently running degraded (reviewer decision Q2). Delivery (§3.5) remains
+	// the fail-closed boundary regardless. Non-global topics are never gated, so
+	// the bootstrap MINT (`_bootstrap`) is unaffected.
+	const unauthorized = await unauthorizedGlobalTopics(storage, bubble.id, subscriptions);
+	if (unauthorized.length) {
+		return { status: 400, body: { error: "unauthorized_topics", topics: unauthorized } };
+	}
+
 	// Supersede any prior deployment with the same name in this bubble — a
 	// re-register (e.g. after losing deployment_state.json or a --fresh start)
 	// must not leave a stale deployment in the subscription index, otherwise
@@ -697,6 +776,15 @@ export async function handleUpdateSubscriptions(
 	}
 	if (replaceSubs === undefined && !addSubs?.length) {
 		return { status: 400, body: { error: "add[] or replace[] required" } };
+	}
+	const newSubs = replaceSubs !== undefined ? replaceSubs : addSubs!;
+
+	// Enforcement layer 1 (#488): same grant gate as registration — a global
+	// resource topic added here needs a matching grant for the deployment's
+	// bubble. Reject the whole update (no partial write) on any ungranted topic.
+	const unauthorized = await unauthorizedGlobalTopics(storage, deployment.bubble_id, newSubs);
+	if (unauthorized.length) {
+		return { status: 400, body: { error: "unauthorized_topics", topics: unauthorized } };
 	}
 
 	// Namespace from the AUTHENTICATED deployment record's bubble — never from a
@@ -770,10 +858,187 @@ export async function handleTopicEvent(
 ): Promise<HandlerResult> {
 	const bubble = await authenticateBubble(storage, ctx);
 	if (!bubble) return { status: 403, body: { error: "forbidden" } };
+	if (body.repo || body.team_key || body.workspace) {
+		return { status: 400, body: { error: "global routing fields are webhook-only" } };
+	}
 
 	const event = createTopicEvent(topic, body, bubble.id);
 	const delivered = await storage.deliver(event);
 	return { status: 200, body: { delivered_to: delivered } };
+}
+
+// ---------------------------------------------------------------------------
+// Resource grants (#488) — verify an upstream credential ONCE, store a grant.
+// ---------------------------------------------------------------------------
+
+// Upstream hosts are fixed constants, NEVER client-supplied (SSRF guard).
+const GITHUB_API = "https://api.github.com";
+const LINEAR_API = "https://api.linear.app/graphql";
+
+export interface VerifyResult {
+	ok: boolean;
+	// Linear: the team's organization id (recorded in the grant for the future
+	// `linear:TEAM` disambiguation, §4). Undefined for github.
+	organizationId?: string | null;
+}
+
+// GitHub bar (resolved, Q4): the MINIMUM read probe — `GET /repos/{owner}/{repo}`
+// returns 2xx means the token can read the repo, which is all webhook delivery
+// needs. We deliberately do NOT parse `private`/`permissions` (the Rev-2
+// tightening was dropped); only the 2xx/non-2xx distinction gates the grant.
+async function verifyGitHubAccess(resource: string, credential: string): Promise<VerifyResult> {
+	const resp = await fetch(`${GITHUB_API}/repos/${resource}`, {
+		headers: {
+			Authorization: `Bearer ${credential}`,
+			"User-Agent": "modastack-event-server",
+			Accept: "application/vnd.github+json",
+		},
+	});
+	return { ok: resp.ok };
+}
+
+// Linear (Q3): keep TEAM-KEY granularity — confirm the credential can see the
+// SPECIFIC team it claims, not merely that the token is valid org-wide. Records
+// the team's organization id for the future disambiguation (§4).
+async function verifyLinearAccess(resource: string, credential: string): Promise<VerifyResult> {
+	// `resource` is validated against a strict charset by the caller before this
+	// runs, so it cannot break out of the GraphQL string literal.
+	const query = `{ teams(filter:{key:{eq:"${resource}"}}){ nodes { id key organization { id } } } }`;
+	const resp = await fetch(LINEAR_API, {
+		method: "POST",
+		headers: { Authorization: credential, "Content-Type": "application/json" },
+		body: JSON.stringify({ query }),
+	});
+	if (!resp.ok) return { ok: false };
+	const data = (await resp.json()) as {
+		data?: { teams?: { nodes?: Array<{ key?: string; organization?: { id?: string } }> } };
+	};
+	const nodes = data?.data?.teams?.nodes ?? [];
+	const match = Array.isArray(nodes) ? nodes.find((n) => n?.key === resource) : undefined;
+	if (!match) return { ok: false };
+	return { ok: true, organizationId: match.organization?.id ?? null };
+}
+
+// A linear team key as it appears in a topic — uppercase alnum plus `-`/`_`.
+// Anchored so a malicious `resource` can never inject into the GraphQL string.
+const LINEAR_KEY_RE = /^[A-Za-z0-9_-]+$/;
+// owner/repo shape (each segment non-empty, no extra slashes).
+const GITHUB_SLUG_RE = /^[^/\s]+\/[^/\s]+$/;
+
+// POST /resources/authorize handler. `bubbleId` is the AUTHENTICATED bubble —
+// the entry file rejects an unsigned / partial / bad-signature request with an
+// opaque 403 BEFORE calling this (mandatory auth, mirroring how /slack/send is
+// wired). Verifies the upstream credential once, then stores ONLY a grant.
+//
+// The credential is NEVER logged and NEVER stored: the route is excluded from
+// body logging, and a verification failure logs `{service, reason}` only.
+export async function handleAuthorizeResource(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	const service = typeof body.service === "string" ? body.service : "";
+	const rawResource = typeof body.resource === "string" ? body.resource.trim() : "";
+	const credential = typeof body.credential === "string" ? body.credential : "";
+
+	// Slack authorizes via the bubble-signed /slack/workspaces registration
+	// (§6) — there is no separate verify call — so only github/linear reach here.
+	if ((service !== "github" && service !== "linear") || !rawResource || !credential) {
+		return { status: 400, body: { error: "invalid_request" } };
+	}
+
+	const resource = normalizeResource(service, rawResource);
+	if (service === "github" && !GITHUB_SLUG_RE.test(resource)) {
+		return { status: 400, body: { error: "invalid_request" } };
+	}
+	if (service === "linear" && !LINEAR_KEY_RE.test(resource)) {
+		return { status: 400, body: { error: "invalid_request" } };
+	}
+
+	let result: VerifyResult;
+	try {
+		result = service === "github"
+			? await verifyGitHubAccess(resource, credential)
+			: await verifyLinearAccess(resource, credential);
+	} catch (err) {
+		// Reason only — NEVER the credential or the raw body.
+		console.warn(`resource authorize error: service=${service} reason=${String(err)}`);
+		return { status: 403, body: { error: "forbidden" } };
+	}
+
+	if (!result.ok) {
+		console.warn(`resource authorize denied: service=${service}`);
+		return { status: 403, body: { error: "forbidden" } };
+	}
+
+	const grant: ResourceGrant = {
+		id: `${service}:${resource}:${bubbleId}`,
+		account_id: null,
+		bubble_id: bubbleId,
+		service,
+		resource,
+		granted_by: "upstream_token_verification",
+		organization_id: result.organizationId ?? null,
+		created_at: new Date().toISOString(),
+		expires_at: null,
+	};
+	await storage.putResourceGrant(grant);
+	return { status: 200, body: { ok: true } };
+}
+
+// The global resource topics in `subs` that the bubble does NOT currently hold a
+// grant for (#488 enforcement layer 1). A malformed global key (no parseable
+// service/resource) counts as unauthorized. Non-global topics are ignored.
+export async function unauthorizedGlobalTopics(
+	storage: StorageAdapter,
+	bubbleId: string,
+	subs: string[],
+): Promise<string[]> {
+	const bad: string[] = [];
+	for (const sub of subs) {
+		if (!isGlobalTopic(sub)) continue;
+		const parsed = parseGlobalTopic(sub);
+		if (!parsed) {
+			bad.push(sub);
+			continue;
+		}
+		if (!(await storage.hasResourceGrant(parsed.service, parsed.resource, bubbleId))) {
+			bad.push(sub);
+		}
+	}
+	return bad;
+}
+
+// Resolve the deployment IDs an event should fan out to, applying the #488
+// resource-grant filter to GLOBAL topics. `subscribersForKey` returns the
+// subscriber ids the runtime has indexed for a subscription key. A non-global
+// key admits every subscriber (the common bubble-scoped path pays nothing); a
+// global key admits a subscriber ONLY if its bubble currently holds a matching
+// grant — so a stale index entry for a revoked / never-granted bubble is dropped
+// (fail-closed; delivery is the authoritative boundary, §3.5).
+export async function admittedDeploymentIds(
+	storage: StorageAdapter,
+	event: NormalizedEvent,
+	subscribersForKey: (key: string) => Promise<Iterable<string>>,
+): Promise<Set<string>> {
+	const admitted = new Set<string>();
+	for (const key of subscriptionKeysForEvent(event)) {
+		const ids = await subscribersForKey(key);
+		if (isGlobalTopic(key)) {
+			const parsed = parseGlobalTopic(key);
+			if (!parsed) continue;
+			for (const id of ids) {
+				if (admitted.has(id)) continue;
+				const dep = await storage.getDeploymentById(id);
+				if (dep && (await storage.hasResourceGrant(parsed.service, parsed.resource, dep.bubble_id))) {
+					admitted.add(id);
+				}
+			}
+		} else {
+			for (const id of ids) admitted.add(id);
+		}
+	}
+	return admitted;
 }
 
 // Storage key for a bubble-scoped Slack workspace registration. Outbound
@@ -866,7 +1131,20 @@ export async function handleSlackWorkspaceRegister(
 	let botId = (body.bot_id as string) || undefined;
 	let appId = (body.app_id as string) || undefined;
 	const signingSecret = (body.signing_secret as string) || undefined;
-	if (!botId) {
+	if (bubbleId) {
+		try {
+			const resp = await fetch("https://slack.com/api/auth.test", {
+				headers: { Authorization: `Bearer ${botToken}` },
+			});
+			const data = (await resp.json()) as Record<string, unknown>;
+			if (!data.ok || data.team_id !== workspaceId) {
+				return { status: 403, body: { error: "forbidden" } };
+			}
+			if (data.bot_id) botId = data.bot_id as string;
+		} catch {
+			return { status: 403, body: { error: "forbidden" } };
+		}
+	} else if (!botId) {
 		try {
 			const resp = await fetch("https://slack.com/api/auth.test", {
 				headers: { Authorization: `Bearer ${botToken}` },
@@ -937,6 +1215,22 @@ export async function handleSlackWorkspaceRegister(
 		const scopedKey = bubbleScopedWorkspaceKey(bubbleId, workspaceId);
 		const scopedExisting = await storage.getSlackWorkspace(scopedKey);
 		await storage.putSlackWorkspace(scopedKey, mergeBot(scopedExisting));
+
+		// Slack convergence (#488 §6): the signed registration — proving
+		// possession of the bot token + signing secret — IS the proof of access,
+		// so it doubles as the slack resource grant. `slack:{teamId}` inbound
+		// delivery is then grant-filtered exactly like github/linear. Idempotent.
+		await storage.putResourceGrant({
+			id: `slack:${workspaceId}:${bubbleId}`,
+			account_id: null,
+			bubble_id: bubbleId,
+			service: "slack",
+			resource: workspaceId,
+			granted_by: "upstream_token_verification",
+			organization_id: null,
+			created_at: new Date().toISOString(),
+			expires_at: null,
+		});
 	}
 
 	return { status: 200, body: { ok: true, workspace_id: workspaceId, bot_id: botId, app_id: appId } };

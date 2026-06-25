@@ -4,10 +4,13 @@ import {
 	type DeploymentRecord,
 	type BubbleRecord,
 	type SlackWorkspaceRecord,
+	type ResourceGrant,
 	type NormalizedEvent,
 	type HandlerResult,
 	authenticateDeployment,
 	subscriptionKeysForEvent,
+	admittedDeploymentIds,
+	handleAuthorizeResource,
 	verifyGitHubSignature,
 	verifySlackSignature,
 	readBubbleAuthHeaders,
@@ -46,7 +49,7 @@ interface Env {
 // ---------------------------------------------------------------------------
 
 function createKVStorage(env: Env): StorageAdapter {
-	return {
+	const adapter: StorageAdapter = {
 		async getDeploymentByApiKey(apiKey: string): Promise<DeploymentRecord | null> {
 			const data = await env.EVENTS.get(`deployments:${apiKey}`);
 			return data ? JSON.parse(data) : null;
@@ -55,6 +58,31 @@ function createKVStorage(env: Env): StorageAdapter {
 		async getDeploymentByName(name: string, bubbleId: string): Promise<DeploymentRecord | null> {
 			const data = await env.EVENTS.get(`deployment_name:${bubbleId}:${name}`);
 			return data ? JSON.parse(data) : null;
+		},
+
+		async getDeploymentById(id: string): Promise<DeploymentRecord | null> {
+			const data = await env.EVENTS.get(`deployment_id:${id}`);
+			return data ? JSON.parse(data) : null;
+		},
+
+		async putResourceGrant(grant: ResourceGrant): Promise<void> {
+			await env.EVENTS.put(
+				`resource_grant:${grant.service}:${grant.resource}:${grant.bubble_id}`,
+				JSON.stringify(grant),
+			);
+			// Per-bubble index for deregister/observability (best-effort accrete).
+			const idxKey = `resource_grants_for_bubble:${grant.bubble_id}`;
+			const existing = await env.EVENTS.get(idxKey);
+			const ids: string[] = existing ? JSON.parse(existing) : [];
+			if (!ids.includes(grant.id)) {
+				ids.push(grant.id);
+				await env.EVENTS.put(idxKey, JSON.stringify(ids));
+			}
+		},
+
+		async hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean> {
+			const data = await env.EVENTS.get(`resource_grant:${service}:${resource}:${bubbleId}`);
+			return data !== null;
 		},
 
 		async putDeployment(deployment: DeploymentRecord): Promise<void> {
@@ -103,16 +131,14 @@ function createKVStorage(env: Env): StorageAdapter {
 		},
 
 		async deliver(event: NormalizedEvent): Promise<number> {
-			const keys = subscriptionKeysForEvent(event);
-			const ids = new Set<string>();
-			const lookups = await Promise.all(
-				keys.map((k) => env.EVENTS.get(`subscriptions:${k}`)),
-			);
-			for (const data of lookups) {
-				if (data) {
-					for (const id of JSON.parse(data)) ids.add(id);
-				}
-			}
+			// Enforcement layer 2 (#488): admittedDeploymentIds applies the live
+			// resource-grant filter to GLOBAL topics, so a stale subscription-index
+			// entry for a bubble that no longer (or never) held a grant is dropped
+			// here — delivery is the authoritative, fail-closed boundary.
+			const ids = await admittedDeploymentIds(adapter, event, async (k) => {
+				const data = await env.EVENTS.get(`subscriptions:${k}`);
+				return data ? (JSON.parse(data) as string[]) : [];
+			});
 
 			const exempt = isExemptFromBreaker(event);
 			const allowedIds: string[] = [];
@@ -185,6 +211,7 @@ function createKVStorage(env: Env): StorageAdapter {
 			);
 		},
 	};
+	return adapter;
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +426,29 @@ export default {
 			const bubble = await authenticateBubble(storage, ctx);
 			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
 			return respond(await handleSlackSend(storage, data, bubble.id));
+		}
+
+		if (method === "POST" && path === "/resources/authorize") {
+			// Raw text so the bubble signature verifies over the exact wire bytes.
+			// Auth is MANDATORY (no legacy unsigned caller) — mirror /slack/send.
+			// The credential in the body is verified once and never persisted; the
+			// route is deliberately excluded from any body logging.
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			const bubble = await authenticateBubble(storage, ctx);
+			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
+			return respond(await handleAuthorizeResource(storage, data, bubble.id));
 		}
 
 		if (method === "POST" && path === "/slack/workspaces") {
