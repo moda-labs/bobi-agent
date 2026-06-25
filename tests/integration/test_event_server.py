@@ -128,6 +128,8 @@ def _start_local_server(modastack_env):
 
 def _start_wrangler_server():
     """Start wrangler dev on a free port, return (base_url, port, cleanup)."""
+    import fcntl
+
     es_dir = PACKAGE_ROOT / "event-server"
 
     # Ensure node_modules exist
@@ -137,35 +139,83 @@ def _start_wrangler_server():
             cwd=str(es_dir), check=True, capture_output=True, timeout=120,
         )
 
-    port = _free_port()
-    base_url = f"http://localhost:{port}"
-
-    log_path = es_dir / f".wrangler-test-{port}.log"
-    log_file = open(log_path, "w")
-
-    proc = subprocess.Popen(
-        [
-            str(es_dir / "node_modules" / ".bin" / "wrangler"),
-            "dev",
-            f"--port={port}",
-        ],
-        cwd=str(es_dir),
-        stdout=log_file,
-        stderr=log_file,
-        start_new_session=True,
-    )
-
-    if not _wait_healthy(base_url, timeout=30):
-        log_file.close()
+    lock_path = es_dir / ".dev.vars.test.lock"
+    lock_file = open(lock_path, "w")
+    lock_deadline = time.monotonic() + 180
+    while True:
         try:
-            log_text = log_path.read_text()
-        except Exception:
-            log_text = "(unreadable)"
-        proc.kill()
-        proc.wait()
-        raise RuntimeError(
-            f"wrangler dev failed to start on port {port}.\nLog:\n{log_text}"
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= lock_deadline:
+                lock_file.close()
+                raise RuntimeError("timed out waiting for wrangler .dev.vars test lock")
+            time.sleep(0.2)
+
+    dev_vars_path = es_dir / ".dev.vars"
+    original_dev_vars = dev_vars_path.read_text() if dev_vars_path.exists() else None
+    dev_vars_lines = (original_dev_vars or "").splitlines()
+    secret_line = "INTERNAL_DO_SECRET=test-internal-secret"
+    for idx, line in enumerate(dev_vars_lines):
+        if line.startswith("INTERNAL_DO_SECRET="):
+            dev_vars_lines[idx] = secret_line
+            break
+    else:
+        dev_vars_lines.append(secret_line)
+    dev_vars_path.write_text("\n".join(dev_vars_lines) + "\n")
+
+    restored_dev_vars = False
+
+    def _restore_dev_vars():
+        nonlocal restored_dev_vars
+        if restored_dev_vars:
+            return
+        if original_dev_vars is None:
+            dev_vars_path.unlink(missing_ok=True)
+        else:
+            dev_vars_path.write_text(original_dev_vars)
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
+        lock_path.unlink(missing_ok=True)
+        restored_dev_vars = True
+
+    log_file = None
+    try:
+        port = _free_port()
+        base_url = f"http://localhost:{port}"
+
+        log_path = es_dir / f".wrangler-test-{port}.log"
+        log_file = open(log_path, "w")
+
+        proc = subprocess.Popen(
+            [
+                str(es_dir / "node_modules" / ".bin" / "wrangler"),
+                "dev",
+                f"--port={port}",
+            ],
+            cwd=str(es_dir),
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
         )
+
+        if not _wait_healthy(base_url, timeout=30):
+            log_file.close()
+            try:
+                log_text = log_path.read_text()
+            except Exception:
+                log_text = "(unreadable)"
+            proc.kill()
+            proc.wait()
+            _restore_dev_vars()
+            raise RuntimeError(
+                f"wrangler dev failed to start on port {port}.\nLog:\n{log_text}"
+            )
+    except Exception:
+        if log_file and not log_file.closed:
+            log_file.close()
+        _restore_dev_vars()
+        raise
 
     def _cleanup():
         try:
@@ -176,6 +226,7 @@ def _start_wrangler_server():
             proc.wait()
         log_file.close()
         log_path.unlink(missing_ok=True)
+        _restore_dev_vars()
 
     return base_url, port, _cleanup
 

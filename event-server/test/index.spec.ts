@@ -1,7 +1,8 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker, { INTERNAL_HEADER, internalWebSocketRequest } from "../src/index";
+import worker from "../src/index";
 import { buildBubbleSignature } from "../src/core";
+import { INTERNAL_HEADER, internalWebSocketRequest } from "../src/internal-auth";
 
 // ---------------------------------------------------------------------------
 // Bubble-signing helpers (mirrors core.spec.ts helpers but for HTTP-level

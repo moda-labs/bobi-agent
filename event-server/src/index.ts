@@ -1,5 +1,4 @@
 export { DeploymentSession } from "./deployment-session";
-export { INTERNAL_HEADER, internalWebSocketRequest } from "./internal-auth";
 import {
 	type StorageAdapter,
 	type DeploymentRecord,
