@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.35.0 — 2026-06-25
+
+Setup onboarding cleanup for release (MOD-221): make the agent harness visible
+and give clear local-vs-cloud deployment guidance.
+
+### Added
+- **Harness status on the welcome screen.** Shows which agent runs your team
+  (Claude Code + model) and whether it's authenticated, with a copyable
+  `claude auth login` command and a Re-check button when it isn't. A new
+  `modastack/setup/harness.py` detects the CLI and auth (env key, on-disk
+  creds, or the macOS keychain) behind a `GET /api/harness` endpoint.
+- **Local vs cloud finalization.** The "All set" screen now presents two
+  explicit deployment paths — local (`modastack start`) and cloud (the Fly
+  provisioner + `docs/CONTAINER.md`) — replacing the placeholder cloud link.
+
+### Changed
+- **`/api/message` harness backstop.** An un-installed CLI now blocks with a
+  clear install message; a failed turn on an un-authed harness surfaces an
+  actionable login hint instead of a cryptic transport error. Error strings
+  are redacted before reaching the SSE stream and history.
+- **Full-width scroll** on the create and finished screens (the content no
+  longer scrolls inside a narrow left column).
+
+### Removed
+- **"Start it for me" button + `/api/run-start`.** Users run `modastack start`
+  in their own terminal.
+
 ## 0.34.3 — 2026-06-25
 
 Bugfix release for Codex-backed managers handling large streamed responses.
