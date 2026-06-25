@@ -10,6 +10,11 @@ export default defineWorkersConfig({
 				// Tests are independent enough not to need per-test rollback.
 				isolatedStorage: false,
 				wrangler: { configPath: "./wrangler.jsonc" },
+				miniflare: {
+					bindings: {
+						INTERNAL_DO_SECRET: "test-internal-secret",
+					},
+				},
 			},
 		},
 	},

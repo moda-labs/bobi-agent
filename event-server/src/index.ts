@@ -37,10 +37,12 @@ import {
 	conversationKey,
 	buildLoopDetectedEvent,
 } from "./circuit-breaker";
+import { internalEventRequest, internalWebSocketRequest } from "./internal-auth";
 
 interface Env {
 	EVENTS: KVNamespace;
 	DEPLOYMENT_SESSION: DurableObjectNamespace;
+	INTERNAL_DO_SECRET: string;
 	WEBHOOK_SECRET?: string;
 	SLACK_SIGNING_SECRET?: string;
 	TEST_GRANTS_SECRET?: string;
@@ -144,6 +146,7 @@ function createKVStorage(env: Env): StorageAdapter {
 
 			const exempt = isExemptFromBreaker(event);
 			const allowedIds: string[] = [];
+			const sideDeliveries: Promise<Response>[] = [];
 
 			for (const depId of ids) {
 				if (!exempt) {
@@ -153,12 +156,10 @@ function createKVStorage(env: Env): StorageAdapter {
 						const loopEvent = buildLoopDetectedEvent(depId, convKey, event);
 						const loopDoId = env.DEPLOYMENT_SESSION.idFromName(depId);
 						const loopStub = env.DEPLOYMENT_SESSION.get(loopDoId);
-						loopStub.fetch(
-							new Request("https://internal/event", {
-								method: "POST",
-								body: JSON.stringify(loopEvent),
-							}),
-						);
+						sideDeliveries.push(fetchDeploymentSession(
+							loopStub,
+							internalEventRequest(env, "https://internal/event", JSON.stringify(loopEvent)),
+						));
 					}
 					if (!verdict.allow) continue;
 
@@ -167,28 +168,27 @@ function createKVStorage(env: Env): StorageAdapter {
 					for (const paused of drained) {
 						const pDoId = env.DEPLOYMENT_SESSION.idFromName(depId);
 						const pStub = env.DEPLOYMENT_SESSION.get(pDoId);
-						pStub.fetch(
-							new Request("https://internal/event", {
-								method: "POST",
-								body: JSON.stringify(paused),
-							}),
-						);
+						sideDeliveries.push(fetchDeploymentSession(
+							pStub,
+							internalEventRequest(env, "https://internal/event", JSON.stringify(paused)),
+						));
 					}
 				}
 				allowedIds.push(depId);
 			}
 
 			await Promise.all(
-				allowedIds.map((depId) => {
-					const doId = env.DEPLOYMENT_SESSION.idFromName(depId);
-					const stub = env.DEPLOYMENT_SESSION.get(doId);
-					return stub.fetch(
-						new Request("https://internal/event", {
-							method: "POST",
-							body: JSON.stringify(event),
-						}),
-					);
-				}),
+				[
+					...sideDeliveries,
+					...allowedIds.map((depId) => {
+						const doId = env.DEPLOYMENT_SESSION.idFromName(depId);
+						const stub = env.DEPLOYMENT_SESSION.get(doId);
+						return fetchDeploymentSession(
+							stub,
+							internalEventRequest(env, "https://internal/event", JSON.stringify(event)),
+						);
+					}),
+				],
 			);
 			return allowedIds.length;
 		},
@@ -205,11 +205,13 @@ function createKVStorage(env: Env): StorageAdapter {
 		async initDeploymentSession(deploymentId: string, subscriptions: string[]): Promise<void> {
 			const doId = env.DEPLOYMENT_SESSION.idFromName(deploymentId);
 			const stub = env.DEPLOYMENT_SESSION.get(doId);
-			await stub.fetch(
-				new Request("https://internal/init", {
-					method: "POST",
-					body: JSON.stringify({ deployment_id: deploymentId, subscriptions }),
-				}),
+			await fetchDeploymentSession(
+				stub,
+				internalEventRequest(
+					env,
+					"https://internal/init",
+					JSON.stringify({ deployment_id: deploymentId, subscriptions }),
+				),
 			);
 		},
 	};
@@ -222,6 +224,18 @@ function createKVStorage(env: Env): StorageAdapter {
 
 function respond(result: HandlerResult): Response {
 	return Response.json(result.body, { status: result.status });
+}
+
+async function fetchDeploymentSession(
+	session: DurableObjectStub,
+	internalRequest: Request,
+	expectedStatus = 200,
+): Promise<Response> {
+	const response = await session.fetch(internalRequest);
+	if (response.status !== expectedStatus) {
+		throw new Error(`DeploymentSession fetch failed with status ${response.status}`);
+	}
+	return response;
 }
 
 async function readJson(request: Request): Promise<Record<string, unknown> | null> {
@@ -356,7 +370,7 @@ export default {
 
 			const doId = env.DEPLOYMENT_SESSION.idFromName(deploymentId);
 			const stub = env.DEPLOYMENT_SESSION.get(doId);
-			return stub.fetch(request);
+			return stub.fetch(internalWebSocketRequest(env, request.url));
 		}
 
 		if (method === "PUT" && path.startsWith("/deployments/") && path.endsWith("/subscriptions")) {

@@ -2,6 +2,7 @@ import { SELF, env } from "cloudflare:test";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import worker from "../src/index";
 import { buildBubbleSignature, parseGlobalTopic } from "../src/core";
+import { INTERNAL_HEADER, internalWebSocketRequest } from "../src/internal-auth";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -632,6 +633,190 @@ describe("#341 targeted routing — no cross-delivery", () => {
 		expect(await githubIssue(`${org}/repo-b`)).toBe(1);   // only repo-b sub
 		// a repo nobody scoped to → delivered to nobody
 		expect(await githubIssue(`${org}/repo-c`)).toBe(0);
+	});
+});
+
+describe("#489 internal DeploymentSession auth", () => {
+	const directStub = (deploymentId: string) => {
+		const doId = env.DEPLOYMENT_SESSION.idFromName(deploymentId);
+		return env.DEPLOYMENT_SESSION.get(doId);
+	};
+
+	it("rejects direct DO /init without the internal header", async () => {
+		const response = await directStub("direct-missing-init").fetch(
+			new Request("https://internal/init", {
+				method: "POST",
+				body: JSON.stringify({ deployment_id: "direct-missing-init", subscriptions: [] }),
+			}),
+		);
+
+		expect(response.status).toBe(403);
+		expect(await response.text()).toBe("");
+	});
+
+	it("rejects direct DO /event with the wrong internal header before parsing JSON", async () => {
+		const response = await directStub("direct-bad-event").fetch(
+			new Request("https://internal/event", {
+				method: "POST",
+				headers: { [INTERNAL_HEADER]: "wrong-secret" },
+				body: "{not-json",
+			}),
+		);
+
+		expect(response.status).toBe(403);
+		expect(await response.text()).toBe("");
+	});
+
+	it("rejects direct DO websocket upgrades without the internal header", async () => {
+		const response = await directStub("direct-missing-ws").fetch(
+			new Request("https://internal/deployments/direct-missing-ws/subscribe", {
+				headers: { Upgrade: "websocket" },
+			}),
+		);
+
+		expect(response.status).toBe(403);
+	});
+
+	it("accepts direct DO /init and /event with the internal header", async () => {
+		const stub = directStub("direct-good");
+		const init = await stub.fetch(
+			new Request("https://internal/init", {
+				method: "POST",
+				headers: { [INTERNAL_HEADER]: env.INTERNAL_DO_SECRET },
+				body: JSON.stringify({ deployment_id: "direct-good", subscriptions: ["test:topic"] }),
+			}),
+		);
+		expect(init.status).toBe(200);
+
+		const event = await stub.fetch(
+			new Request("https://internal/event", {
+				method: "POST",
+				headers: { [INTERNAL_HEADER]: env.INTERNAL_DO_SECRET },
+				body: JSON.stringify({
+					source: "test",
+					topic: "test:topic",
+					payload: { ok: true },
+				}),
+			}),
+		);
+		expect(event.status).toBe(200);
+	});
+
+	it("worker-mediated /init and delivery still reach the DO", async () => {
+		const bubble = await mintBubble(["internal-auth:topic"]);
+		const payload = JSON.stringify({ source: "test", payload: { ok: true } });
+		const path = "/events/internal-auth:topic";
+		const headers = await bubbleHeaders(bubble.bubble_id, bubble.bubble_key, "POST", path, payload);
+
+		const response = await SELF.fetch(`https://example.com${path}`, {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body: payload,
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ delivered_to: 1 });
+	});
+
+	it("all deliver branches add internal auth, including loop-detected and drained events", async () => {
+		const bubble = await deploymentWithGrants(["slack:T_AUTH:C_AUTH"]);
+		const slackEvent = (text: string, ts: string, botAuthored = false) => SELF.fetch("https://example.com/webhooks/slack", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				type: "event_callback",
+				team_id: "T_AUTH",
+				event: {
+					type: "app_mention",
+					channel: "C_AUTH",
+					user: "U_AUTH",
+					text,
+					ts,
+					thread_ts: "17000000.000000",
+					...(botAuthored ? { bot_id: "B_AUTH" } : {}),
+				},
+			}),
+		});
+
+		for (let i = 0; i < 7; i++) {
+			const response = await slackEvent("repeat", `1700000${i}.000100`, true);
+			expect(response.status).toBe(200);
+		}
+
+		const unpause = await slackEvent("new human input", "17000008.000100");
+		expect(unpause.status).toBe(200);
+
+		const storedEvents = await Promise.all(
+			Array.from({ length: 10 }, async (_, i) => {
+				const data = await env.EVENTS.get(`events:${bubble.deployment_id}:${i + 1}`);
+				return data ? JSON.parse(data) as { type: string } : null;
+			}),
+		);
+		const storedTypes = storedEvents
+			.filter((event): event is { type: string } => event !== null)
+			.map((event) => event.type);
+
+		expect(storedTypes).toContain("system.loop_detected");
+		expect(storedTypes.filter((type) => type === "slack.mention")).toHaveLength(8);
+	});
+
+	it("websocket subscribe builds a fresh internal request without client auth headers", async () => {
+		const request = internalWebSocketRequest(
+			{ INTERNAL_DO_SECRET: "secret-value" },
+			"https://example.com/deployments/dep-1/subscribe?last_seen=2",
+		);
+
+		expect(request.url).toBe("https://example.com/deployments/dep-1/subscribe?last_seen=2");
+		expect(request.headers.get("Upgrade")).toBe("websocket");
+		expect(request.headers.get(INTERNAL_HEADER)).toBe("secret-value");
+		expect(request.headers.get("Authorization")).toBeNull();
+		expect(request.headers.get("Cookie")).toBeNull();
+		expect(Array.from(request.headers.keys()).sort()).toEqual([
+			INTERNAL_HEADER,
+			"upgrade",
+		].sort());
+	});
+
+	it("worker-mediated websocket subscribe succeeds when the client sends ambient auth", async () => {
+		const bubble = await mintBubble(["ws:auth"]);
+		const response = await SELF.fetch(
+			`https://example.com/deployments/${bubble.deployment_id}/subscribe`,
+			{
+				headers: {
+					authorization: `Bearer ${bubble.api_key}`,
+					cookie: "session=client-cookie",
+					Upgrade: "websocket",
+				},
+			},
+		);
+
+		expect(response.status).toBe(101);
+		expect(response.webSocket).toBeTruthy();
+		response.webSocket?.accept();
+		response.webSocket?.close();
+	});
+
+	it("fails closed when INTERNAL_DO_SECRET is unset", async () => {
+		const envWithoutSecret = { ...env, INTERNAL_DO_SECRET: "" };
+		await expect(worker.fetch(
+			new Request("https://example.com/deployments", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ name: "missing-secret", subscriptions: ["missing:secret"] }),
+			}),
+			envWithoutSecret,
+			{} as ExecutionContext,
+		)).rejects.toThrow("DeploymentSession fetch failed with status 403");
+	});
+
+	it("does not proxy raw client requests to DeploymentSession", async () => {
+		// @ts-expect-error Vite supplies ?raw imports in the Vitest transform.
+		const source = await import("../src/index?raw");
+		expect(source.default).not.toMatch(/stub\.fetch\(\s*request\s*\)/);
+		expect(source.default).not.toMatch(/(?:loopStub|pStub)\.fetch\(/);
+		expect(source.default).not.toMatch(/return stub\.fetch\(\s*internalEventRequest/);
+		expect(source.default).toContain("fetchDeploymentSession(");
+		expect(source.default).toContain("stub.fetch(internalWebSocketRequest");
 	});
 });
 
