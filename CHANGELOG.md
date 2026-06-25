@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.34.6 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.5 canary run.
+
+### Fixed
+- **Release ordering for event-server hotfixes.** The release workflow now
+  deploys the Cloudflare event server before the canary smoke, while still
+  keeping PyPI publish and fleet roll gated behind the canary. This lets
+  server-side event-bus fixes be validated by the canary instead of being
+  blocked by the older live Worker.
+- **Codex CLI auto-bake (#511, fixes #498).** Teams configured with
+  `brain.kind: codex` now automatically bake the Codex CLI even when the team
+  omits an explicit `tool_library: [codex]`, removing a deploy-time footgun for
+  Codex-backed managers.
+- **Worker-to-Durable-Object WebSocket auth.** The Worker now authenticates
+  internal WebSocket upgrades to `DeploymentSession` through a WebSocket
+  subprotocol token, with the existing internal header retained for HTTP
+  `/init` and `/event` calls. This fixes deployed managers that could register
+  and update subscriptions successfully but then received repeated `403
+  Forbidden` WebSocket handshakes and missed Slack events.
+
 ## 0.34.5 — 2026-06-25
 
 Bugfix release for the event-server WebSocket auth path introduced in 0.34.4.
