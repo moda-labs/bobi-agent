@@ -474,8 +474,8 @@ describe("cloudflare deployment deregistration", () => {
 // proves the Worker side end to end (register → ingest → match → count).
 // ---------------------------------------------------------------------------
 describe("slack url_verification handshake", () => {
-	async function verify(headers: Record<string, string>): Promise<Response> {
-		return SELF.fetch("https://example.com/webhooks/slack", {
+	async function verify(headers: Record<string, string>, path = "/webhooks/slack"): Promise<Response> {
+		return SELF.fetch(`https://example.com${path}`, {
 			method: "POST",
 			headers: { "content-type": "application/json", ...headers },
 			body: JSON.stringify({ type: "url_verification", challenge: "abc123" }),
@@ -484,6 +484,12 @@ describe("slack url_verification handshake", () => {
 
 	it("echoes the challenge on the first attempt", async () => {
 		const res = await verify({});
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ challenge: "abc123" });
+	});
+
+	it("echoes the challenge with a trailing slash", async () => {
+		const res = await verify({}, "/webhooks/slack/");
 		expect(res.status).toBe(200);
 		expect(await res.json()).toEqual({ challenge: "abc123" });
 	});

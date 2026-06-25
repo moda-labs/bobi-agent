@@ -138,6 +138,7 @@ def test_saved_state_uses_put_not_register(mock_register,
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 1
     assert str(put_reqs[0].url) == f"{REMOTE_URL}/deployments/dep-3/subscriptions"
+    assert json.loads(put_reqs[0].content) == {"replace": ["github:o/r"]}
     assert mock_client.call_args.kwargs["deployment_id"] == "dep-3"
 
 
@@ -171,6 +172,36 @@ def test_failed_put_falls_back_to_register(mock_register,
     mock_register.assert_called_once()
     saved = json.loads(_state_file(project).read_text())
     assert saved["deployment_id"] == "dep-new"
+
+
+@patch("modastack.events.drain.drain_loop")
+@patch("modastack.events.client.EventServerClient")
+@patch("modastack.events.server.register")
+def test_forbidden_put_response_falls_back_to_register(mock_register,
+                                                       mock_client, _drain,
+                                                       project):
+    """A 403 subscription update response means the saved api_key is stale."""
+    state = _state_file(project)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-old", "api_key": "key-old"}))
+    _create_bubble(project)
+    mock_register.return_value = ("dep-new", "key-new")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return httpx.Response(403, text="Invalid API key", request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    transport = httpx.MockTransport(handler)
+    mock_http = httpx.Client(transport=transport)
+
+    with patch.object(pooled, '_client', mock_http):
+        _start_event_subscription("sess", ["github:o/r"], project)
+
+    mock_register.assert_called_once()
+    saved = json.loads(_state_file(project).read_text())
+    assert saved == {"deployment_id": "dep-new", "api_key": "key-new"}
+    assert mock_client.call_args.kwargs["deployment_id"] == "dep-new"
 
 
 # --- Pre-bubble upgrade (stale deployment_state, no bubble.json) -------------

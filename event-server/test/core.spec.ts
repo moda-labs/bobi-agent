@@ -1041,8 +1041,7 @@ describe("handleSlackWebhook", () => {
 
 		expect(result.status).toBe(200);
 		expect((result.body as Record<string, number>).delivered_to).toBe(1);
-		expect(store.delivered[0].topics).toContain("slack:T123:app:A_BOBBERS");
-		expect(store.delivered[0].topics).toContain("slack:T123");
+		expect(store.delivered[0].topics).toEqual(["slack:T123:app:A_BOBBERS"]);
 		expect(store.deliveredTo[0].ids).toEqual(["bobbers"]);
 	});
 
@@ -1067,8 +1066,39 @@ describe("handleSlackWebhook", () => {
 
 		expect(result.status).toBe(200);
 		expect((result.body as Record<string, number>).delivered_to).toBe(1);
-		expect(store.delivered[0].topics).toContain("slack:T123:app:A_ENG_TEAM:CENG");
-		expect(store.delivered[0].topics).toContain("slack:T123:CENG");
+		expect(store.delivered[0].topics).toEqual([
+			"slack:T123:app:A_ENG_TEAM",
+			"slack:T123:app:A_ENG_TEAM:CENG",
+		]);
+		expect(store.deliveredTo[0].ids).toEqual(["eng-team"]);
+	});
+
+	it("does not deliver app-identified Slack events to stale legacy workspace subscriptions", async () => {
+		const store = createMockStorage();
+		await store.addSubscription("slack:T123", "bobbers-stale-legacy");
+		await store.addSubscription("slack:T123:CENG", "bobbers-stale-channel");
+		await store.addSubscription("slack:T123:app:A_ENG_TEAM:CENG", "eng-team");
+
+		const result = await handleSlackWebhook(store, {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A_ENG_TEAM",
+			event: {
+				type: "app_mention",
+				user: "U123",
+				channel: "CENG",
+				channel_type: "channel",
+				text: "<@UENG> status?",
+				ts: "123",
+			},
+		});
+
+		expect(result.status).toBe(200);
+		expect((result.body as Record<string, number>).delivered_to).toBe(1);
+		expect(store.delivered[0].topics).toEqual([
+			"slack:T123:app:A_ENG_TEAM",
+			"slack:T123:app:A_ENG_TEAM:CENG",
+		]);
 		expect(store.deliveredTo[0].ids).toEqual(["eng-team"]);
 	});
 
@@ -1376,13 +1406,36 @@ describe("handleUpdateSubscriptions", () => {
 		expect(body.subscriptions).toHaveLength(2);
 	});
 
+	it("replaces stale subscriptions and removes old index entries", async () => {
+		const store = createMockStorage();
+		const dep: DeploymentRecord = {
+			id: "d1", name: "test", api_key: "key1", bubble_id: "bub_test",
+			subscriptions: ["inbox/test", "slack:T1"],
+		};
+		store.deployments.set("d1", dep);
+		store.apiKeyIndex.set("key1", "d1");
+		store.subscriptions.set("bub_test:inbox/test", new Set(["d1"]));
+		store.subscriptions.set("slack:T1", new Set(["d1"]));
+
+		const result = await handleUpdateSubscriptions(store, "d1", "key1", {
+			replace: ["inbox/test", "slack:T1:app:A1"],
+		});
+		expect(result.status).toBe(200);
+		const body = result.body as { subscriptions: string[]; added: number; removed: number };
+		expect(body.subscriptions).toEqual(["inbox/test", "slack:T1:app:A1"]);
+		expect(body.added).toBe(1);
+		expect(body.removed).toBe(1);
+		expect(store.subscriptions.get("slack:T1")).toBeUndefined();
+		expect(store.subscriptions.get("slack:T1:app:A1")?.has("d1")).toBe(true);
+	});
+
 	it("rejects unauthorized requests", async () => {
 		const store = createMockStorage();
 		const result = await handleUpdateSubscriptions(store, "d1", "bad-key", { add: ["foo"] });
 		expect(result.status).toBe(403);
 	});
 
-	it("rejects empty add array", async () => {
+	it("rejects empty subscription updates", async () => {
 		const store = createMockStorage();
 		const dep: DeploymentRecord = { id: "d1", name: "test", api_key: "key1", bubble_id: "bub_test", subscriptions: [] };
 		store.deployments.set("d1", dep);
@@ -1390,6 +1443,8 @@ describe("handleUpdateSubscriptions", () => {
 
 		const result = await handleUpdateSubscriptions(store, "d1", "key1", { add: [] });
 		expect(result.status).toBe(400);
+		const replaceResult = await handleUpdateSubscriptions(store, "d1", "key1", { replace: [] });
+		expect(replaceResult.status).toBe(400);
 	});
 
 	it("persists updated deployment via putDeployment", async () => {

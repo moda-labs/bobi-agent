@@ -250,7 +250,7 @@ export default {
 			return respond(await handleLinearWebhook(storage, payload));
 		}
 
-		if (method === "POST" && path === "/webhooks/slack") {
+		if (method === "POST" && (path === "/webhooks/slack" || path === "/webhooks/slack/")) {
 			const body = await request.text();
 
 			let payload: Record<string, unknown>;

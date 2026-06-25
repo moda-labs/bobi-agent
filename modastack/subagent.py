@@ -1067,15 +1067,16 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         # deployment; state is per-session by construction.
         from modastack import http as pooled
         try:
-            pooled.put(
+            resp = pooled.put(
                 f"{es_url}/deployments/{es_deployment}/subscriptions",
-                json={"add": subscribe},
+                json={"replace": subscribe},
                 headers={
                     "Authorization": f"Bearer {es_key}",
                     "Content-Type": "application/json",
                 },
                 timeout=10.0,
             )
+            resp.raise_for_status()
         except Exception as e:
             log.info("Subscription update failed (%s) — re-registering", e)
             es_deployment, es_key = _register_with_retry(es_url)
@@ -1120,7 +1121,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         from modastack import http as pooled
         pooled.put(
             f"{es_url}/deployments/{es_deployment}/subscriptions",
-            json={"add": subscribe},
+            json={"replace": subscribe},
             headers={
                 "Authorization": f"Bearer {es_key}",
                 "Content-Type": "application/json",

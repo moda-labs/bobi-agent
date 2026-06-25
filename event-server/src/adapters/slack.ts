@@ -63,16 +63,24 @@ export function normalizeSlackWebhook(
 
 	const topics: string[] = [];
 	if (teamId) {
-		if (appId) topics.push(`slack:${teamId}:app:${appId}`);
-		topics.push(`slack:${teamId}`);
+		if (appId) {
+			topics.push(`slack:${teamId}:app:${appId}`);
+		} else {
+			topics.push(`slack:${teamId}`);
+		}
 		// Channel-scoped topic so multiple teams can share one workspace/bot,
 		// each subscribing only to its own channel(s). App-qualified topics keep
 		// two apps in the same workspace from receiving each other's DMs.
-		// The legacy workspace/channel topics stay for existing single-bot
-		// deployments until they re-register with app-qualified subscriptions.
+		// Legacy workspace/channel topics are emitted only when Slack omits
+		// api_app_id. Once app_id is present, emitting both app-qualified and
+		// legacy topics lets stale legacy subscriptions cross-deliver events
+		// between apps in the same workspace.
 		if (channel && !isDm) {
-			if (appId) topics.push(`slack:${teamId}:app:${appId}:${channel}`);
-			topics.push(`slack:${teamId}:${channel}`);
+			if (appId) {
+				topics.push(`slack:${teamId}:app:${appId}:${channel}`);
+			} else {
+				topics.push(`slack:${teamId}:${channel}`);
+			}
 		}
 	}
 

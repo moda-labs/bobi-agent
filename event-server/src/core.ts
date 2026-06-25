@@ -690,16 +690,43 @@ export async function handleUpdateSubscriptions(
 	const deployment = await authenticateDeployment(storage, apiKey, deploymentId);
 	if (!deployment) return { status: 403, body: { error: "unauthorized" } };
 
-	const newSubs = body.add as string[] | undefined;
-	if (!newSubs?.length) {
-		return { status: 400, body: { error: "add[] required" } };
+	const replaceSubs = body.replace as string[] | undefined;
+	const addSubs = body.add as string[] | undefined;
+	if (replaceSubs !== undefined && !replaceSubs.length) {
+		return { status: 400, body: { error: "replace[] must not be empty" } };
+	}
+	if (replaceSubs === undefined && !addSubs?.length) {
+		return { status: 400, body: { error: "add[] or replace[] required" } };
 	}
 
 	// Namespace from the AUTHENTICATED deployment record's bubble — never from a
 	// client-supplied bubble_id — so update-subscriptions can't escape the
 	// deployment's bubble. Same keying as registration (namespaceSubKey).
+	if (replaceSubs !== undefined) {
+		const desired = [...new Set(replaceSubs)];
+		const desiredSet = new Set(desired);
+		let removed = 0;
+		let added = 0;
+		for (const sub of deployment.subscriptions) {
+			if (!desiredSet.has(sub)) {
+				await storage.removeSubscription(
+					namespaceSubKey(deployment.bubble_id, sub),
+					deploymentId,
+				);
+				removed++;
+			}
+		}
+		for (const sub of desired) {
+			if (!deployment.subscriptions.includes(sub)) added++;
+			await storage.addSubscription(namespaceSubKey(deployment.bubble_id, sub), deploymentId);
+		}
+		deployment.subscriptions = desired;
+		await storage.putDeployment(deployment);
+		return { status: 200, body: { subscriptions: deployment.subscriptions, added, removed } };
+	}
+
 	let added = 0;
-	for (const sub of newSubs) {
+	for (const sub of addSubs!) {
 		if (!deployment.subscriptions.includes(sub)) {
 			deployment.subscriptions.push(sub);
 			added++;
