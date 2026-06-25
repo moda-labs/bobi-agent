@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.34.12 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.11 canary run.
+
+### Fixed
+- **Internal Durable Object POST auth on Cloudflare.** Worker-to-DO `/init` and
+  `/event` requests now include the internal auth token as a private query
+  parameter in addition to the existing internal header. This matches the
+  production-safe WebSocket fallback and fixes `POST /deployments` returning
+  `500 Internal Server Error` while `modastack ask` tried to open a temporary
+  reply channel for the canary smoke.
+- **WebSocket transport fixes.** Includes the 0.34.10 and 0.34.11 fixes for
+  production WebSocket upgrades and protocol negotiation.
+
 ## 0.34.11 — 2026-06-25
 
 Bugfix release that supersedes the failed 0.34.10 canary run.
