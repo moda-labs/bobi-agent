@@ -318,8 +318,8 @@ def deregister(base_url: str, deployment_id: str, api_key: str) -> bool:
         return False
 
 
-def _slack_auth_info(token: str) -> tuple[str, str]:
-    """Resolve (team_id, bot_id) from a bot token via auth.test."""
+def _slack_auth_info(token: str) -> tuple[str, str, str]:
+    """Resolve (team_id, bot_id, bot_user_id) from a bot token via auth.test."""
     from modastack import http as pooled
 
     try:
@@ -330,10 +330,14 @@ def _slack_auth_info(token: str) -> tuple[str, str]:
         )
         data = resp.json()
         if data.get("ok"):
-            return data.get("team_id", "") or "", data.get("bot_id", "") or ""
+            return (
+                data.get("team_id", "") or "",
+                data.get("bot_id", "") or "",
+                data.get("user_id", "") or "",
+            )
     except Exception as e:  # best-effort — never block startup
         log.debug("Slack auth.test failed during workspace registration: %s", e)
-    return "", ""
+    return "", "", ""
 
 
 def _slack_app_id(token: str, bot_id: str) -> str:
@@ -394,7 +398,7 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         signing_secret = cfg.credential("slack", "signing_secret")
     except Exception:
         signing_secret = ""
-    team_id, bot_id = _slack_auth_info(token)
+    team_id, bot_id, bot_user_id = _slack_auth_info(token)
     if not team_id:
         return []
     app_id = _slack_app_id(token, bot_id)
@@ -408,6 +412,8 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         record: dict = {"workspace_id": team_id, "bot_token": token}
         if bot_id:
             record["bot_id"] = bot_id
+        if bot_user_id:
+            record["bot_user_id"] = bot_user_id
         if app_id:
             record["app_id"] = app_id
         if signing_secret:
