@@ -77,6 +77,7 @@ def test_composed_loader_bakes_codex_cli_for_codex_brain(tmp_path):
     cfg = build_render.load_composed_team_config(team, tmp_path)
     assert cfg.build is not None
     script = render_team_deps_script(cfg)
+    assert "apt-get install -y --no-install-recommends nodejs npm" in script
     assert "npm install -g @openai/codex@0.142.0" in script
     assert any(r.name == "codex" for r in cfg.requires)
 

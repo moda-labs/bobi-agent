@@ -88,6 +88,7 @@ def test_expansion_basics(project):
     cfg = _agent_yaml(dest)
 
     assert any(r["name"] == "codex" for r in cfg["requires"])
+    assert cfg["build"]["apt"] == ["nodejs", "npm"]
     assert CODEX_PIN in cfg["build"]["npm"]
     guide = (tool_library.CATALOG_DIR / "codex" / "guide.md").read_text()
     assert (dest / "tools" / "codex.md").read_text() == guide
@@ -110,6 +111,7 @@ def test_codex_brain_implicitly_expands_codex_tool(project):
     cfg = _agent_yaml(dest)
 
     assert any(r["name"] == "codex" for r in cfg["requires"])
+    assert cfg["build"]["apt"] == ["nodejs", "npm"]
     assert CODEX_PIN in cfg["build"]["npm"]
     assert "tool_library" not in cfg
     guide = (tool_library.CATALOG_DIR / "codex" / "guide.md").read_text()
@@ -281,8 +283,8 @@ requires:
     check: "command -v venn >/dev/null 2>&1 && venn --help >/dev/null 2>&1"
     fix: "python3 -m venv /opt/venn-cli && /opt/venn-cli/bin/pip install venn-cli==0.2.0 && ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn && echo 'Set VENN_API_KEY in .modastack/.env'"
 build:
+  apt: [nodejs, npm, python3-venv]
   npm: ["@openai/codex@0.142.0"]
-  apt: [python3-venv]
   run_root:
     - >-
       python3 -m venv /opt/venn-cli &&

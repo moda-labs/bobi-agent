@@ -8,4 +8,5 @@ requires:                       # spliced into agent.yaml `requires:` (list-merg
     check: "command -v codex >/dev/null 2>&1 && { test -n \"${OPENAI_API_KEY:-}\" || codex --version >/dev/null 2>&1; }"
     fix: "npm install -g @openai/codex@0.142.0 && (codex auth login || echo 'Set OPENAI_API_KEY in .modastack/.env')"
 build:                          # spliced into agent.yaml `build:` (list-accrete + de-dupe)
+  apt: [nodejs, npm]
   npm: ["@openai/codex@0.142.0"]
