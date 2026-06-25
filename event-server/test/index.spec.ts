@@ -6,6 +6,7 @@ import {
 	INTERNAL_HEADER,
 	INTERNAL_WS_QUERY_PARAM,
 	INTERNAL_WS_PROTOCOL_PREFIX,
+	internalEventRequest,
 	internalWebSocketProtocol,
 	internalWebSocketRequest,
 	publicBearerWebSocketProtocol,
@@ -842,6 +843,20 @@ describe("#489 internal DeploymentSession auth", () => {
 		expect(Array.from(request.headers.keys()).sort()).toEqual([
 			"upgrade",
 		].sort());
+	});
+
+	it("internal POST requests include header and query auth for production DO fetch", async () => {
+		const request = internalEventRequest(
+			{ INTERNAL_DO_SECRET: "secret-value" },
+			"https://internal/init",
+			JSON.stringify({ ok: true }),
+		);
+
+		const url = new URL(request.url);
+		expect(url.origin + url.pathname).toBe("https://internal/init");
+		expect(url.searchParams.get(INTERNAL_WS_QUERY_PARAM)).toBe("secret-value");
+		expect(request.headers.get(INTERNAL_HEADER)).toBe("secret-value");
+		expect(await request.text()).toBe(JSON.stringify({ ok: true }));
 	});
 
 	it("websocket subscribe can wrap the original upgrade request for production DO fetch", async () => {

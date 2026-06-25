@@ -8,7 +8,9 @@ interface InternalEnv {
 }
 
 export function internalEventRequest(env: InternalEnv, url: string, body: string): Request {
-	return new Request(url, {
+	const internalUrl = new URL(url);
+	internalUrl.searchParams.set(INTERNAL_WS_QUERY_PARAM, env.INTERNAL_DO_SECRET);
+	return new Request(internalUrl.toString(), {
 		method: "POST",
 		headers: { [INTERNAL_HEADER]: env.INTERNAL_DO_SECRET },
 		body,
