@@ -651,6 +651,15 @@ def _launch_detached(script: str, args: list[str], log_file: Path,
     return proc.pid
 
 
+def _configured_brain_kind(root: Path) -> str:
+    """Return the team's configured brain kind from the installation root."""
+    try:
+        from modastack.config import Config
+        return Config.load(root).brain_kind
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Requires: dispatch-time preflight gate
 # ---------------------------------------------------------------------------
@@ -895,6 +904,9 @@ def launch_agent(
     # so bare-name stdio MCP commands resolve at spawn the same way they do in
     # preflight — the daemon's stripped PATH otherwise breaks them (MDS-64).
     child_env = {**agent_spawn_env(), "MODASTACK_ROOT": str(root)}
+    brain_kind = _configured_brain_kind(root)
+    if brain_kind:
+        child_env["MODASTACK_BRAIN"] = brain_kind
     pid = _launch_detached(script, [args_json], log_file, env=child_env)
     registry.update(session_name, pid=pid)
 
@@ -1235,6 +1247,10 @@ def _run_agent_entry(args: dict) -> None:
             f"(no .modastack/agent.yaml) — refusing to run with an unverified "
             f"identity."
         )
+    brain_kind = _configured_brain_kind(project_root)
+    if brain_kind:
+        from modastack.brain import BRAIN_ENV
+        os.environ[BRAIN_ENV] = brain_kind
 
     # Subscription is owned by the Session now: every Session subscribes to
     # inbox/<self> on start, and extra topics (the persistent agent's
