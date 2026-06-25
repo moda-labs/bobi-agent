@@ -12,7 +12,40 @@ shell yet fail to spawn under the daemon's stripped PATH.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _configured_brain_kind(root: Path, env: dict[str, str] | None = None) -> str:
+    """Return the team's configured brain kind from the installation root."""
+    try:
+        import yaml
+        raw = yaml.safe_load(
+            (root / ".modastack" / "agent.yaml").read_text()
+        ) or {}
+    except Exception:
+        return ""
+    brain = raw.get("brain", {})
+    if not isinstance(brain, dict):
+        return ""
+    kind = str(brain.get("kind", "") or "")
+    if not kind:
+        return ""
+    lookup = os.environ if env is None else env
+    return _ENV_VAR_RE.sub(lambda m: lookup.get(m.group(1), ""), kind)
+
+
+def _load_dotenv_into(env: dict[str, str], root: Path) -> None:
+    """Merge ``.modastack/.env`` into *env* without overriding parent values."""
+    try:
+        from modastack.config import parse_env_file
+        values = parse_env_file(root / ".modastack" / ".env")
+    except Exception:
+        return
+    for key, value in values.items():
+        env.setdefault(key, value)
 
 
 def _user_bin_dirs() -> list[str]:
@@ -48,4 +81,39 @@ def agent_spawn_env(base: dict[str, str] | None = None) -> dict[str, str]:
             seen.add(p)
             ordered.append(p)
     env["PATH"] = os.pathsep.join(ordered)
+    return env
+
+
+def child_agent_env(root: Path, base: dict[str, str] | None = None) -> dict[str, str]:
+    """Return the full environment contract for a launched child agent.
+
+    The contract is intentionally centralized here:
+
+    - inherit the parent runtime environment so tool configuration and ambient
+      credentials (``OPENAI_API_KEY``, ``VENN_API_KEY``, ``GH_TOKEN``, etc.)
+      follow child agents;
+    - merge the installed team's ``.modastack/.env`` for credentials captured
+      during setup, without overriding explicit parent process values;
+    - normalize ``PATH`` through :func:`agent_spawn_env`, keeping MCP preflight
+      and runtime tool lookup identical;
+    - pin identity with the current installation ``MODASTACK_ROOT``;
+    - override stale parent ``MODASTACK_BRAIN`` with the installed team's
+      configured ``brain.kind`` when present.
+
+    Stale parent identity values are never inherited: ``MODASTACK_ROOT`` is
+    always rewritten to *root*, and ``MODASTACK_BRAIN`` is rewritten when the
+    installed team declares a brain.
+    """
+    resolved_root = root.resolve()
+    env = agent_spawn_env(base)
+    _load_dotenv_into(env, resolved_root)
+    env["MODASTACK_ROOT"] = str(resolved_root)
+
+    from modastack.brain import BRAIN_ENV
+
+    brain_kind = _configured_brain_kind(resolved_root, env)
+    if brain_kind:
+        env[BRAIN_ENV] = brain_kind
+    else:
+        env.pop(BRAIN_ENV, None)
     return env
