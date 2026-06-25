@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -745,6 +746,39 @@ def fly_secrets_unset(app: str, keys: list[str]) -> None:
     _run([_fly_bin(), "secrets", "unset", "-a", app, *keys])
 
 
+def sync_volume_env(app: str, values: dict[str, str],
+                    unset: list[str] | None = None) -> None:
+    """Merge reconciled secrets into the instance volume's .modastack/.env.
+
+    Fly secrets update the process environment, but the mounted project volume
+    can still hold an older .modastack/.env. Tool shells that lose inherited env
+    then fall back to stale credentials. Push the resolved values over stdin so
+    secret values never appear in argv or logs.
+    """
+    unset = unset or []
+    if not values and not unset:
+        return
+    script = (
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "from modastack.config import parse_env_file, write_env_file\n"
+        "payload = json.load(sys.stdin)\n"
+        "path = Path('/data/project/.modastack/.env')\n"
+        "vals = parse_env_file(path)\n"
+        "vals.update(payload.get('set', {}))\n"
+        "for key in payload.get('unset', []):\n"
+        "    vals.pop(key, None)\n"
+        "write_env_file(path, vals)\n"
+        "os.chmod(path, 0o600)\n"
+    )
+    payload = json.dumps({"set": values, "unset": unset}).encode()
+    _run([
+        _fly_bin(), "ssh", "console", "-a", app, "-C",
+        "gosu modastack env HOME=/home/modastack "
+        f"/opt/venv/bin/python -c {shlex.quote(script)}",
+    ], input_bytes=payload, secret=True)
+
+
 # --- Fly onboarding preflight (guide a newcomer — or an agent — to a deployable
 #     Fly account before we spend minutes building an image) ------------------
 
@@ -1098,9 +1132,10 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
         values = resolve_secret_values(cfg, project_path, live=live)
         # On an existing app, apply secret deltas + prune undeclared directly (the
         # plain-update path never re-runs the provisioner, so secrets land here).
+        volume_env_pruned: list[str] = []
         if app_exists:
-            reconcile_live_secrets(cfg, project_path, app, values, live or set(),
-                                   prune=prune)
+            _, volume_env_pruned = reconcile_live_secrets(
+                cfg, project_path, app, values, live or set(), prune=prune)
         env_file = Path(tmp) / "instance.env"
         write_env_file(env_file, values)
         try:
@@ -1180,6 +1215,9 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
             else:
                 log.info("updating instance '%s' in place (team-url)...", app)
                 update_team_url(app, cfg.team_url)
+
+        if app_exists:
+            sync_volume_env(app, values, volume_env_pruned)
 
     return cfg
 

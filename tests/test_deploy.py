@@ -9,6 +9,7 @@ The workflow STRUCTURE (thin-client asserts) is in test_gitops_c22.py.
 """
 
 import logging
+import json
 import os
 import tarfile
 from pathlib import Path
@@ -373,6 +374,33 @@ def test_outage_unset_required_secret_is_restored_on_update(repo, recorder, monk
     assert all(c["secret"] for c in sets)  # secret args logged redacted
 
 
+def test_existing_app_syncs_reconciled_secrets_to_volume_env(repo, recorder,
+                                                            monkeypatch):
+    """A rotated Fly secret must also refresh the persisted volume .env. Codex
+    tool shells can lose inherited env and fall back to .modastack/.env, so Fly
+    secrets alone are not enough (#501)."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
+    monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
+    monkeypatch.setattr(D, "_fly_machine_ids", lambda app: ["m1"])
+    monkeypatch.setattr(D, "fly_secrets_list", lambda app: {
+        "SLACK_BOT_TOKEN", "ANTHROPIC_API_KEY"})
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-new")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+
+    D.deploy(repo, "eng-team")
+
+    syncs = [
+        c for c in recorder
+        if "ssh" in c["cmd"] and "/opt/venv/bin/python -c" in " ".join(c["cmd"])
+    ]
+    assert syncs, "expected deploy to refresh /data/project/.modastack/.env"
+    payload = json.loads(syncs[0]["input"].decode())
+    assert payload["set"]["SLACK_BOT_TOKEN"] == "xoxb-new"
+    assert payload["set"]["ANTHROPIC_API_KEY"] == "sk-ant"
+    assert payload["unset"] == []
+    assert syncs[0]["secret"] is True
+
+
 def test_prune_removes_undeclared_live_secret(repo, recorder, monkeypatch):
     """A live, non-MODASTACK_ secret absent from the declared set is pruned; the
     declared keys and MODASTACK_* identity are left alone."""
@@ -390,6 +418,13 @@ def test_prune_removes_undeclared_live_secret(repo, recorder, monkeypatch):
     assert "STALE_KEY" in flat
     assert "MODASTACK_FLEET" not in flat   # identity — never pruned
     assert "SLACK_BOT_TOKEN" not in flat   # declared — kept
+    syncs = [
+        c for c in recorder
+        if "ssh" in c["cmd"] and "/opt/venv/bin/python -c" in " ".join(c["cmd"])
+    ]
+    assert syncs, "expected pruned keys to be removed from volume .env"
+    payload = json.loads(syncs[0]["input"].decode())
+    assert payload["unset"] == ["STALE_KEY"]
 
 
 def test_no_prune_override_skips_pruning(repo, recorder, monkeypatch):

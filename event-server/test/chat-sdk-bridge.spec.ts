@@ -126,7 +126,7 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 		expect(event.source).toBe("slack");
 		expect(event.type).toBe("slack.mention");
 		expect(event.delivery).toBe("chat");
-		expect(event.topics).toEqual(["slack:T0952RZRZ0X"]);
+		expect(event.topics).toEqual(["slack:T0952RZRZ0X", "slack:T0952RZRZ0X:C456CHAN"]);
 		expect(event.text).toContain("check the deploy");
 	});
 
@@ -223,8 +223,30 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 describe("bridge parity with existing normalizeSlackWebhook", () => {
 	it("produces identical topic routing keys", () => {
 		const result = bridgeSlackWebhook(mentionPayload());
-		// Our existing normalizer produces ["slack:T0952RZRZ0X"]
-		expect(result.event!.topics).toEqual(["slack:T0952RZRZ0X"]);
+		expect(result.event!.topics).toEqual(["slack:T0952RZRZ0X", "slack:T0952RZRZ0X:C456CHAN"]);
+	});
+
+	it("emits app-qualified topics when Slack includes api_app_id", () => {
+		const body = JSON.stringify({
+			type: "event_callback",
+			team_id: "T0952RZRZ0X",
+			api_app_id: "A0952APP",
+			event_id: "Ev01ABC",
+			event: {
+				type: "message",
+				user: "U123USER",
+				channel: "D789DM",
+				channel_type: "im",
+				text: "what's the status?",
+				ts: "1718100001.000200",
+			},
+		});
+		const result = bridgeSlackWebhook(body);
+		expect(result.event!.topics).toEqual([
+			"slack:T0952RZRZ0X:app:A0952APP",
+			"slack:T0952RZRZ0X",
+		]);
+		expect(result.event!.fields!.api_app_id).toBe("A0952APP");
 	});
 
 	it("uses event_id as the envelope id", () => {

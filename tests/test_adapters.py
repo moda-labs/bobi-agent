@@ -87,6 +87,28 @@ class TestSlackDetector:
             keys = detect("slack", tmp_path, cfg)
         assert keys == ["slack:T123ABC"]
 
+    def test_detect_with_token_uses_app_qualified_topic(self, tmp_path):
+        responses = [
+            _mock_httpx_response({"ok": True, "team_id": "T123ABC", "bot_id": "B123"}),
+            _mock_httpx_response({"ok": True, "bot": {"app_id": "A123"}}),
+        ]
+        call_idx = iter(range(len(responses)))
+
+        def _handler(request):
+            assert ("auth.test" in str(request.url)
+                    or "bots.info?bot=B123" in str(request.url))
+            return responses[next(call_idx)]
+
+        transport = httpx.MockTransport(_handler)
+        mock_client = httpx.Client(transport=transport)
+
+        with patch.object(pooled, '_client', mock_client):
+            cfg = Config(services=[
+                ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
+            ])
+            keys = detect("slack", tmp_path, cfg)
+        assert keys == ["slack:T123ABC:app:A123"]
+
     def test_detect_without_token(self, tmp_path):
         cfg = Config(services=[ServiceConfig(name="slack")])
         keys = detect("slack", tmp_path, cfg)
@@ -110,6 +132,30 @@ class TestSlackDetector:
             keys = detect("slack", tmp_path, cfg)
         # per-channel keys, not the whole workspace
         assert keys == ["slack:T123ABC:C0SUPPORT", "slack:T123ABC:C0ALERTS"]
+
+    def test_detect_scopes_configured_channels_to_app(self, tmp_path):
+        responses = [
+            _mock_httpx_response({"ok": True, "team_id": "T123ABC", "bot_id": "B123"}),
+            _mock_httpx_response({"ok": True, "bot": {"app_id": "A123"}}),
+        ]
+        call_idx = iter(range(len(responses)))
+
+        def _handler(request):
+            return responses[next(call_idx)]
+
+        transport = httpx.MockTransport(_handler)
+        mock_client = httpx.Client(transport=transport)
+
+        with patch.object(pooled, '_client', mock_client):
+            cfg = Config(services=[
+                ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"},
+                              channels=["C0SUPPORT", "C0ALERTS"]),
+            ])
+            keys = detect("slack", tmp_path, cfg)
+        assert keys == [
+            "slack:T123ABC:app:A123:C0SUPPORT",
+            "slack:T123ABC:app:A123:C0ALERTS",
+        ]
 
     def test_detect_resolves_channel_names_to_ids(self, tmp_path):
         """End-to-end: human-readable channel names get resolved via Slack API."""
@@ -202,6 +248,8 @@ def test_slack_keys_helper():
     from modastack.events.adapters import _slack_keys
     assert _slack_keys("T1", []) == ["slack:T1"]
     assert _slack_keys("T1", ["C1", "C2"]) == ["slack:T1:C1", "slack:T1:C2"]
+    assert _slack_keys("T1", [], "A1") == ["slack:T1:app:A1"]
+    assert _slack_keys("T1", ["C1"], "A1") == ["slack:T1:app:A1:C1"]
     assert _slack_keys("", ["C1"]) == []
 
 

@@ -53,6 +53,7 @@ export function normalizeSlackWebhook(
 	}
 
 	const teamId = (payload.team_id as string) || "";
+	const appId = (payload.api_app_id as string) || "";
 	const channel = (event.channel as string) || "";
 	const userId = (event.user as string) || "";
 	const rawText = ((event.text as string) || "").slice(0, 4000);
@@ -62,13 +63,17 @@ export function normalizeSlackWebhook(
 
 	const topics: string[] = [];
 	if (teamId) {
+		if (appId) topics.push(`slack:${teamId}:app:${appId}`);
 		topics.push(`slack:${teamId}`);
 		// Channel-scoped topic so multiple teams can share one workspace/bot,
-		// each subscribing only to its own channel(s). The workspace-level
-		// topic above stays for teams that want every message. DMs are NOT
-		// real channels (the id is a DM conversation), so they stay
-		// workspace-level only.
-		if (channel && !isDm) topics.push(`slack:${teamId}:${channel}`);
+		// each subscribing only to its own channel(s). App-qualified topics keep
+		// two apps in the same workspace from receiving each other's DMs.
+		// The legacy workspace/channel topics stay for existing single-bot
+		// deployments until they re-register with app-qualified subscriptions.
+		if (channel && !isDm) {
+			if (appId) topics.push(`slack:${teamId}:app:${appId}:${channel}`);
+			topics.push(`slack:${teamId}:${channel}`);
+		}
 	}
 
 	// Extract file attachments (images, documents, etc.) from the event.
@@ -94,6 +99,7 @@ export function normalizeSlackWebhook(
 	if (userId) fields.user_id = userId;
 	if (channel) fields.channel = channel;
 	if (channelType) fields.channel_type = channelType;
+	if (appId) fields.api_app_id = appId;
 	if (ts) fields.ts = ts;
 	if (threadTs) fields.thread_ts = threadTs;
 	// Carry bot_id through so the circuit breaker can recognise bot-authored
