@@ -30,6 +30,7 @@ import pytest
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 
 DM_TEXT = "did the jobtack tickets stall? #39 and #97"
+TEST_GRANTS_SECRET = "modastack-integration-test-grants"
 
 DRIVER = '''\
 """One agent session's event subscription, exactly as _run_agent_entry wires it."""
@@ -98,7 +99,11 @@ def iso_project(tmp_path):
         f"agent: iso-test\nentry_point: manager\nevent_server: {base_url}\n"
     )
 
-    ensure_running(port, project_path=project)
+    ensure_running(
+        port,
+        project_path=project,
+        extra_env={"MODASTACK_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET},
+    )
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if health(base_url):
@@ -130,7 +135,11 @@ def session_proc(tmp_path):
             [sys.executable, str(driver_path), str(project), session,
              json.dumps(subs), str(out)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT)},
+            env={
+                **os.environ,
+                "PYTHONPATH": str(PACKAGE_ROOT),
+                "MODASTACK_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET,
+            },
         )
         procs.append(proc)
 
@@ -146,6 +155,10 @@ def session_proc(tmp_path):
             if "Event client connected" in line:
                 connected = True
                 break
+        if not connected and proc.poll() is not None:
+            rest = proc.stdout.read()
+            if rest:
+                lines.append(rest)
         assert connected, (
             f"session {session} never connected to the event server:\n"
             + "".join(lines[-20:])

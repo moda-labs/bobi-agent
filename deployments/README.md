@@ -25,7 +25,14 @@ memory: 8gb
 cpus: 2
 volume_size: 15
 auth: subscription          # api_key (default) | subscription
-login_channel: C0PRIVATE    # subscription mode: first-boot Slack login (C23)
+# subscription mode: first-boot Slack login destination:
+#   "#ops-private"          private/public channel name
+#   "@zachkozick"           bot DM with a user in the bot token workspace
+#   "C0PRIVATE"/"D0DM..."   raw Slack channel ID, still supported
+login_channel: "#ops-private"
+# login_channel:
+#   type: im
+#   user: zachkozick
 claude_version: 2.1.89      # pin the baked-in claude CLI
 
 secrets:

@@ -4,10 +4,13 @@ import {
 	type DeploymentRecord,
 	type BubbleRecord,
 	type SlackWorkspaceRecord,
+	type ResourceGrant,
 	type NormalizedEvent,
 	type HandlerResult,
 	authenticateDeployment,
 	subscriptionKeysForEvent,
+	admittedDeploymentIds,
+	handleAuthorizeResource,
 	verifyGitHubSignature,
 	verifySlackSignature,
 	readBubbleAuthHeaders,
@@ -23,6 +26,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	handleTestSeedResourceGrants,
 	slackSigningSecretFor,
 	getAuthRejectionCounters,
 } from "./core";
@@ -33,12 +37,15 @@ import {
 	conversationKey,
 	buildLoopDetectedEvent,
 } from "./circuit-breaker";
+import { internalEventRequest, internalWebSocketRequest } from "./internal-auth";
 
 interface Env {
 	EVENTS: KVNamespace;
 	DEPLOYMENT_SESSION: DurableObjectNamespace;
+	INTERNAL_DO_SECRET: string;
 	WEBHOOK_SECRET?: string;
 	SLACK_SIGNING_SECRET?: string;
+	TEST_GRANTS_SECRET?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,7 +53,7 @@ interface Env {
 // ---------------------------------------------------------------------------
 
 function createKVStorage(env: Env): StorageAdapter {
-	return {
+	const adapter: StorageAdapter = {
 		async getDeploymentByApiKey(apiKey: string): Promise<DeploymentRecord | null> {
 			const data = await env.EVENTS.get(`deployments:${apiKey}`);
 			return data ? JSON.parse(data) : null;
@@ -55,6 +62,31 @@ function createKVStorage(env: Env): StorageAdapter {
 		async getDeploymentByName(name: string, bubbleId: string): Promise<DeploymentRecord | null> {
 			const data = await env.EVENTS.get(`deployment_name:${bubbleId}:${name}`);
 			return data ? JSON.parse(data) : null;
+		},
+
+		async getDeploymentById(id: string): Promise<DeploymentRecord | null> {
+			const data = await env.EVENTS.get(`deployment_id:${id}`);
+			return data ? JSON.parse(data) : null;
+		},
+
+		async putResourceGrant(grant: ResourceGrant): Promise<void> {
+			await env.EVENTS.put(
+				`resource_grant:${grant.service}:${grant.resource}:${grant.bubble_id}`,
+				JSON.stringify(grant),
+			);
+			// Per-bubble index for deregister/observability (best-effort accrete).
+			const idxKey = `resource_grants_for_bubble:${grant.bubble_id}`;
+			const existing = await env.EVENTS.get(idxKey);
+			const ids: string[] = existing ? JSON.parse(existing) : [];
+			if (!ids.includes(grant.id)) {
+				ids.push(grant.id);
+				await env.EVENTS.put(idxKey, JSON.stringify(ids));
+			}
+		},
+
+		async hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean> {
+			const data = await env.EVENTS.get(`resource_grant:${service}:${resource}:${bubbleId}`);
+			return data !== null;
 		},
 
 		async putDeployment(deployment: DeploymentRecord): Promise<void> {
@@ -103,19 +135,18 @@ function createKVStorage(env: Env): StorageAdapter {
 		},
 
 		async deliver(event: NormalizedEvent): Promise<number> {
-			const keys = subscriptionKeysForEvent(event);
-			const ids = new Set<string>();
-			const lookups = await Promise.all(
-				keys.map((k) => env.EVENTS.get(`subscriptions:${k}`)),
-			);
-			for (const data of lookups) {
-				if (data) {
-					for (const id of JSON.parse(data)) ids.add(id);
-				}
-			}
+			// Enforcement layer 2 (#488): admittedDeploymentIds applies the live
+			// resource-grant filter to GLOBAL topics, so a stale subscription-index
+			// entry for a bubble that no longer (or never) held a grant is dropped
+			// here — delivery is the authoritative, fail-closed boundary.
+			const ids = await admittedDeploymentIds(adapter, event, async (k) => {
+				const data = await env.EVENTS.get(`subscriptions:${k}`);
+				return data ? (JSON.parse(data) as string[]) : [];
+			});
 
 			const exempt = isExemptFromBreaker(event);
 			const allowedIds: string[] = [];
+			const sideDeliveries: Promise<Response>[] = [];
 
 			for (const depId of ids) {
 				if (!exempt) {
@@ -125,12 +156,10 @@ function createKVStorage(env: Env): StorageAdapter {
 						const loopEvent = buildLoopDetectedEvent(depId, convKey, event);
 						const loopDoId = env.DEPLOYMENT_SESSION.idFromName(depId);
 						const loopStub = env.DEPLOYMENT_SESSION.get(loopDoId);
-						loopStub.fetch(
-							new Request("https://internal/event", {
-								method: "POST",
-								body: JSON.stringify(loopEvent),
-							}),
-						);
+						sideDeliveries.push(fetchDeploymentSession(
+							loopStub,
+							internalEventRequest(env, "https://internal/event", JSON.stringify(loopEvent)),
+						));
 					}
 					if (!verdict.allow) continue;
 
@@ -139,28 +168,27 @@ function createKVStorage(env: Env): StorageAdapter {
 					for (const paused of drained) {
 						const pDoId = env.DEPLOYMENT_SESSION.idFromName(depId);
 						const pStub = env.DEPLOYMENT_SESSION.get(pDoId);
-						pStub.fetch(
-							new Request("https://internal/event", {
-								method: "POST",
-								body: JSON.stringify(paused),
-							}),
-						);
+						sideDeliveries.push(fetchDeploymentSession(
+							pStub,
+							internalEventRequest(env, "https://internal/event", JSON.stringify(paused)),
+						));
 					}
 				}
 				allowedIds.push(depId);
 			}
 
 			await Promise.all(
-				allowedIds.map((depId) => {
-					const doId = env.DEPLOYMENT_SESSION.idFromName(depId);
-					const stub = env.DEPLOYMENT_SESSION.get(doId);
-					return stub.fetch(
-						new Request("https://internal/event", {
-							method: "POST",
-							body: JSON.stringify(event),
-						}),
-					);
-				}),
+				[
+					...sideDeliveries,
+					...allowedIds.map((depId) => {
+						const doId = env.DEPLOYMENT_SESSION.idFromName(depId);
+						const stub = env.DEPLOYMENT_SESSION.get(doId);
+						return fetchDeploymentSession(
+							stub,
+							internalEventRequest(env, "https://internal/event", JSON.stringify(event)),
+						);
+					}),
+				],
 			);
 			return allowedIds.length;
 		},
@@ -177,14 +205,17 @@ function createKVStorage(env: Env): StorageAdapter {
 		async initDeploymentSession(deploymentId: string, subscriptions: string[]): Promise<void> {
 			const doId = env.DEPLOYMENT_SESSION.idFromName(deploymentId);
 			const stub = env.DEPLOYMENT_SESSION.get(doId);
-			await stub.fetch(
-				new Request("https://internal/init", {
-					method: "POST",
-					body: JSON.stringify({ deployment_id: deploymentId, subscriptions }),
-				}),
+			await fetchDeploymentSession(
+				stub,
+				internalEventRequest(
+					env,
+					"https://internal/init",
+					JSON.stringify({ deployment_id: deploymentId, subscriptions }),
+				),
 			);
 		},
 	};
+	return adapter;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +224,18 @@ function createKVStorage(env: Env): StorageAdapter {
 
 function respond(result: HandlerResult): Response {
 	return Response.json(result.body, { status: result.status });
+}
+
+async function fetchDeploymentSession(
+	session: DurableObjectStub,
+	internalRequest: Request,
+	expectedStatus = 200,
+): Promise<Response> {
+	const response = await session.fetch(internalRequest);
+	if (response.status !== expectedStatus) {
+		throw new Error(`DeploymentSession fetch failed with status ${response.status}`);
+	}
+	return response;
 }
 
 async function readJson(request: Request): Promise<Record<string, unknown> | null> {
@@ -327,7 +370,7 @@ export default {
 
 			const doId = env.DEPLOYMENT_SESSION.idFromName(deploymentId);
 			const stub = env.DEPLOYMENT_SESSION.get(doId);
-			return stub.fetch(request);
+			return stub.fetch(internalWebSocketRequest(env, request.url));
 		}
 
 		if (method === "PUT" && path.startsWith("/deployments/") && path.endsWith("/subscriptions")) {
@@ -399,6 +442,51 @@ export default {
 			const bubble = await authenticateBubble(storage, ctx);
 			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
 			return respond(await handleSlackSend(storage, data, bubble.id));
+		}
+
+		if (method === "POST" && path === "/resources/authorize") {
+			// Raw text so the bubble signature verifies over the exact wire bytes.
+			// Auth is MANDATORY (no legacy unsigned caller) — mirror /slack/send.
+			// The credential in the body is verified once and never persisted; the
+			// route is deliberately excluded from any body logging.
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			const bubble = await authenticateBubble(storage, ctx);
+			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
+			return respond(await handleAuthorizeResource(storage, data, bubble.id));
+		}
+
+		if (method === "POST" && path === "/__test/resource-grants" && env.TEST_GRANTS_SECRET) {
+			if (request.headers.get("x-moda-test-secret") !== env.TEST_GRANTS_SECRET) {
+				return Response.json({ error: "not found" }, { status: 404 });
+			}
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			const bubble = await authenticateBubble(storage, ctx);
+			if (!bubble) return Response.json({ error: "not found" }, { status: 404 });
+			return respond(await handleTestSeedResourceGrants(storage, data, bubble.id));
 		}
 
 		if (method === "POST" && path === "/slack/workspaces") {

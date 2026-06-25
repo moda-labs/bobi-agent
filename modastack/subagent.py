@@ -651,6 +651,15 @@ def _launch_detached(script: str, args: list[str], log_file: Path,
     return proc.pid
 
 
+def _configured_brain_kind(root: Path) -> str:
+    """Return the team's configured brain kind from the installation root."""
+    try:
+        from modastack.config import Config
+        return Config.load(root).brain_kind
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Requires: dispatch-time preflight gate
 # ---------------------------------------------------------------------------
@@ -895,6 +904,9 @@ def launch_agent(
     # so bare-name stdio MCP commands resolve at spawn the same way they do in
     # preflight — the daemon's stripped PATH otherwise breaks them (MDS-64).
     child_env = {**agent_spawn_env(), "MODASTACK_ROOT": str(root)}
+    brain_kind = _configured_brain_kind(root)
+    if brain_kind:
+        child_env["MODASTACK_BRAIN"] = brain_kind
     pid = _launch_detached(script, [args_json], log_file, env=child_env)
     registry.update(session_name, pid=pid)
 
@@ -991,15 +1003,41 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from modastack.events.drain import drain_loop
     from modastack.events.server import (
         ensure_running, ensure_bubble, register, register_slack_workspaces,
-        BubbleRejected,
+        authorize_resources, BubbleRejected,
     )
 
     cfg = Config.load(project_path)
     es_url = cfg.event_server_url
+    # A session that subscribes to anything beyond its own inbox ingests external
+    # resources (the manager). Only such a session registers the Slack bot and
+    # runs the auto-dispatch reactor; an inbox-only worker skips both. Computed
+    # up front because #488 resource authorization (below) runs BEFORE register.
+    has_external = any(not k.startswith("inbox/") for k in subscribe)
     state = load_deployment_state(project_path, session_name)
     es_key = state.get("api_key", "")
     es_deployment = state.get("deployment_id", "")
     cursor_path = session_cursor_path(project_path, session_name)
+
+    def _authorize_subscriptions(url: str, bubble: dict) -> list[str]:
+        """#488: obtain resource grants BEFORE register/PUT so the server's grant
+        check passes. The signed Slack registration writes BOTH the bubble-scoped
+        outbound record (#487) and the slack resource grant; github/linear are
+        authorized via /resources/authorize. Returns ``subscribe`` filtered to
+        drop any global topic we could not authorize (so register/PUT is never
+        hard-rejected for a topic we already know is unbacked)."""
+        if has_external:
+            # Best-effort: a Slack registration hiccup must not block the rest.
+            try:
+                register_slack_workspaces(
+                    url, cfg,
+                    bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+                )
+            except Exception as e:
+                log.info("Signed Slack registration unavailable (%s) — unsigned", e)
+                register_slack_workspaces(url, cfg)
+        return authorize_resources(
+            url, cfg, subscribe, bubble["bubble_id"], bubble["bubble_key"],
+        )
 
     def _register_with_retry(url: str, attempts: int = register_attempts) -> tuple[str, str]:
         last_err: Exception | None = None
@@ -1009,16 +1047,18 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                 # lock-protected, by whichever register fires first). If the
                 # server forgot the bubble (restart), re-mint and re-join.
                 bubble = ensure_bubble(url, project_path)
+                authorized = _authorize_subscriptions(url, bubble)
                 try:
                     dep, key = register(
-                        url, session_name, subscribe,
+                        url, session_name, authorized,
                         bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
                     )
                 except BubbleRejected:
                     bubble = ensure_bubble(url, project_path,
                                            force_remint_of=bubble["bubble_id"])
+                    authorized = _authorize_subscriptions(url, bubble)
                     dep, key = register(
-                        url, session_name, subscribe,
+                        url, session_name, authorized,
                         bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
                     )
                 save_deployment_state(project_path, session_name, dep, key)
@@ -1064,12 +1104,33 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     else:
         # This session restarting with its own saved deployment — sync any
         # new subscription keys onto it. Never PUT to another session's
-        # deployment; state is per-session by construction.
+        # deployment; state is per-session by construction. Authorize resource
+        # grants first (#488) so a global topic added here is not hard-rejected;
+        # a github/linear topic we can't authorize is dropped from the PUT.
+        try:
+            _bubble = ensure_bubble(es_url, project_path)
+            if has_external:
+                try:
+                    register_slack_workspaces(
+                        es_url, cfg,
+                        bubble_id=_bubble["bubble_id"], bubble_key=_bubble["bubble_key"],
+                    )
+                except Exception as e:
+                    log.info("Signed Slack registration unavailable (%s) — unsigned", e)
+                    register_slack_workspaces(es_url, cfg)
+            authorized = authorize_resources(
+                es_url, cfg, subscribe,
+                _bubble["bubble_id"], _bubble["bubble_key"],
+                filter_unauthorized=False,
+            )
+        except Exception as e:
+            log.info("Pre-PUT resource authorization unavailable (%s)", e)
+            authorized = subscribe
         from modastack import http as pooled
         try:
             resp = pooled.put(
                 f"{es_url}/deployments/{es_deployment}/subscriptions",
-                json={"replace": subscribe},
+                json={"replace": authorized},
                 headers={
                     "Authorization": f"Bearer {es_key}",
                     "Content-Type": "application/json",
@@ -1081,28 +1142,11 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             log.info("Subscription update failed (%s) — re-registering", e)
             es_deployment, es_key = _register_with_retry(es_url)
 
-    # A session that subscribes to anything beyond its own inbox ingests
-    # external resources (the manager). Only such a session needs Slack-bot
-    # registration and the auto-dispatch reactor; an inbox-only worker skips
-    # both, avoiding pointless per-session churn.
-    has_external = any(not k.startswith("inbox/") for k in subscribe)
-
-    if has_external:
-        # Register this agent's Slack workspace bot so the event server can skip
-        # the bot's own messages — without this, an agent's Slack replies are
-        # re-ingested as new events and it loops on itself. Sign the registration
-        # with the instance bubble so the server also stores the bubble-scoped
-        # record outbound /slack/send requires (#487). Best-effort: a failure to
-        # resolve the bubble must not block the (global) self-reply registration.
-        try:
-            _bubble = ensure_bubble(es_url, project_path)
-            register_slack_workspaces(
-                es_url, cfg,
-                bubble_id=_bubble["bubble_id"], bubble_key=_bubble["bubble_key"],
-            )
-        except Exception as e:
-            log.info("Signed Slack registration unavailable (%s) — unsigned", e)
-            register_slack_workspaces(es_url, cfg)
+    # Note: Slack-bot registration (signed, also writing the #487 outbound record
+    # and the #488 slack grant) now happens in `_authorize_subscriptions` BEFORE
+    # register/PUT, so a `slack:` subscription has its grant by the time the
+    # server checks it. The auto-dispatch reactor (also has_external) is wired
+    # below, after the client connects.
 
     # Dedicated queue per session: multiple clients can live in one process
     # (sequential workflow phases), and a shared queue would let one session's
@@ -1203,6 +1247,10 @@ def _run_agent_entry(args: dict) -> None:
             f"(no .modastack/agent.yaml) — refusing to run with an unverified "
             f"identity."
         )
+    brain_kind = _configured_brain_kind(project_root)
+    if brain_kind:
+        from modastack.brain import BRAIN_ENV
+        os.environ[BRAIN_ENV] = brain_kind
 
     # Subscription is owned by the Session now: every Session subscribes to
     # inbox/<self> on start, and extra topics (the persistent agent's

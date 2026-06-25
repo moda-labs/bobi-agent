@@ -226,6 +226,44 @@ fi
 if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
   mkdir -p "${BRAIN_CRED_DIR}"
   chown "${APP_USER}:${APP_USER}" "${BRAIN_CRED_DIR}"
+  if [ -d /opt/modastack/skills ]; then
+    log "Linking baked team skills into ${BRAIN_CRED_DIR}/skills for codex"
+    mkdir -p "${BRAIN_CRED_DIR}/skills"
+    chown "${APP_USER}:${APP_USER}" "${BRAIN_CRED_DIR}/skills"
+    for existing_skill in "${BRAIN_CRED_DIR}/skills"/*; do
+      [ -L "${existing_skill}" ] || continue
+      existing_target="$(readlink "${existing_skill}")"
+      case "${existing_target}" in
+        /opt/modastack/skills/*)
+          if [ ! -e "${existing_target}" ]; then
+            log "Removing stale baked codex skill link ${existing_skill}"
+            rm -f "${existing_skill}"
+          fi
+          ;;
+      esac
+    done
+    for skill_path in /opt/modastack/skills/*; do
+      [ -e "${skill_path}" ] || continue
+      skill_name="$(basename "${skill_path}")"
+      skill_dest="${BRAIN_CRED_DIR}/skills/${skill_name}"
+      if [ -e "${skill_dest}" ] || [ -L "${skill_dest}" ]; then
+        if [ -L "${skill_dest}" ]; then
+          skill_dest_target="$(readlink "${skill_dest}")"
+          case "${skill_dest_target}" in
+            /opt/modastack/skills/*) ;;
+            *)
+              log "Leaving existing codex skill link at ${skill_dest}; baked skill ${skill_name} not linked"
+              continue
+              ;;
+          esac
+        else
+          log "Leaving existing codex skill at ${skill_dest}; baked skill ${skill_name} not linked"
+          continue
+        fi
+      fi
+      ln -sfnT "${skill_path}" "${skill_dest}"
+    done
+  fi
   if [ "$(readlink "${BRAIN_HOME_LINK}" 2>/dev/null)" != "${BRAIN_CRED_DIR}" ]; then
     log "Pointing ${BRAIN_HOME_LINK} -> ${BRAIN_CRED_DIR} (durable codex creds on volume)"
     rm -rf "${BRAIN_HOME_LINK}"

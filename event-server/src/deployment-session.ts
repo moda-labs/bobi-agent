@@ -1,8 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { type NormalizedEvent, namespaceSubKey } from "./core";
+import { constantTimeEqual, type NormalizedEvent, namespaceSubKey } from "./core";
+import { INTERNAL_HEADER } from "./internal-auth";
 
 interface Env {
 	EVENTS: KVNamespace;
+	INTERNAL_DO_SECRET: string;
 }
 
 type StoredEvent = NormalizedEvent & { seq: number };
@@ -34,6 +36,12 @@ export class DeploymentSession extends DurableObject<Env> {
 	}
 
 	override async fetch(request: Request): Promise<Response> {
+		const expected = this.env.INTERNAL_DO_SECRET;
+		const provided = request.headers.get(INTERNAL_HEADER);
+		if (!expected || !provided || !constantTimeEqual(provided, expected)) {
+			return new Response(null, { status: 403 });
+		}
+
 		const url = new URL(request.url);
 
 		if (url.pathname === "/event" && request.method === "POST") {
