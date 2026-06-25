@@ -54,6 +54,8 @@ SYNTH_TEAM = """
 BAKED_SKILL = "/opt/modastack/skills/faketool/SKILL.md"
 CONFIG_SKILL = "/data/claude/skills/faketool/SKILL.md"
 HOME_SKILL = "/home/modastack/.claude/skills/faketool/SKILL.md"
+CODEX_CONFIG_SKILL = "/data/codex/skills/faketool/SKILL.md"
+CODEX_HOME_SKILL = "/home/modastack/.codex/skills/faketool/SKILL.md"
 
 
 def _docker_ok() -> bool:
@@ -183,6 +185,65 @@ def test_runtime_home_fully_coincides_with_config_dir(team_image: str):
                     "mkdir -p /data/claude/projects && echo hi > /data/claude/projects/probe.txt "
                     "&& cat /home/modastack/.claude/projects/probe.txt")
         assert seam.stdout.strip() == "hi", seam.stdout + seam.stderr
+    finally:
+        _run("docker", "rm", "-f", cname)
+        _run("docker", "volume", "rm", "-f", vol)
+
+
+@requires_docker
+@pytest.mark.timeout(2500)
+def test_codex_runtime_sees_baked_team_skills(team_image: str):
+    """Codex sessions look under their durable home (/data/codex), not Claude's
+    config dir. The entrypoint must surface the same baked team skills there so
+    issue-lifecycle gates such as review/qa/browse resolve without replacing
+    Codex's own skills tree.
+    """
+    vol = "modastack-teamtest-codex-vol"
+    cname = "modastack-teamtest-codex"
+    _run("docker", "rm", "-f", cname)
+    _run("docker", "volume", "rm", "-f", vol)
+    _run("docker", "volume", "create", vol)
+    try:
+        seed = _run("docker", "run", "--rm", "-v", f"{vol}:/data",
+                    "--entrypoint", "sh", team_image, "-c",
+                    "mkdir -p /data/project/.modastack /data/codex/skills/.system/existing "
+                    "/data/custom-review "
+                    "&& printf 'agent: pytest-team\\nbrain:\\n  kind: codex\\n' > /data/project/.modastack/agent.yaml "
+                    "&& echo keep > /data/codex/skills/.system/existing/SKILL.md "
+                    "&& ln -s /data/custom-review /data/codex/skills/review "
+                    "&& ln -s /opt/modastack/skills/removed-old /data/codex/skills/removed-old")
+        assert seed.returncode == 0, seed.stdout + seed.stderr
+
+        up = _run(
+            "docker", "run", "-d", "--name", cname,
+            "-v", f"{vol}:/data",
+            "-e", "OPENAI_API_KEY=sk-not-real",
+            "-e", "MODASTACK_AUTH=api_key",
+            team_image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        resolved = False
+        for _ in range(30):
+            chk = _run("docker", "exec", cname, "test", "-e", CODEX_HOME_SKILL)
+            if chk.returncode == 0:
+                resolved = True
+                break
+            time.sleep(1)
+        logs = _run("docker", "logs", cname).stdout + _run("docker", "logs", cname).stderr
+        assert resolved, f"skill never resolved via ~/.codex.\nLogs:\n{logs[-3000:]}"
+
+        both = _run("docker", "exec", cname, "sh", "-c",
+                    f"test -e {CODEX_CONFIG_SKILL} && test -e {CODEX_HOME_SKILL} "
+                    "&& test -e /data/codex/skills/.system/existing/SKILL.md "
+                    "&& ! test -L /data/codex/skills/removed-old && echo OK")
+        assert "OK" in both.stdout, both.stdout + both.stderr
+        link = _run("docker", "exec", cname, "readlink", "/home/modastack/.codex")
+        assert link.stdout.strip() == "/data/codex", link.stdout
+        skills_link = _run("docker", "exec", cname, "readlink", "/data/codex/skills/faketool")
+        assert skills_link.stdout.strip() == "/opt/modastack/skills/faketool", skills_link.stdout
+        custom_link = _run("docker", "exec", cname, "readlink", "/data/codex/skills/review")
+        assert custom_link.stdout.strip() == "/data/custom-review", custom_link.stdout
     finally:
         _run("docker", "rm", "-f", cname)
         _run("docker", "volume", "rm", "-f", vol)
