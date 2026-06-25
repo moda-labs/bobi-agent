@@ -304,6 +304,10 @@ def run_bootstrap(
             f"{LOGIN_CHANNEL_ENV} is unset — need a private channel to post the "
             "login URL into."
         )
+    # Accept a readable '#name' in the config; resolve to the ID the post + the
+    # event-bus filter both need.
+    from modastack.slack import resolve_channel_id
+    channel = resolve_channel_id(token, channel)
 
     login_cmd_str = " ".join(spec.login_cmd)
     proc, master = spawn_login(home)

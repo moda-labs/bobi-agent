@@ -157,7 +157,7 @@ def slack_config(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv(ab.LOGIN_CHANNEL_ENV, "C-LOGIN")
+    monkeypatch.setenv(ab.LOGIN_CHANNEL_ENV, "C0LOGIN42")
     return project
 
 
@@ -205,7 +205,7 @@ def test_run_bootstrap_happy_path(slack_config, monkeypatch):
     # First post = URL prompt; final post = success.
     assert any("oauth/authorize" in p[2] for p in posts)
     assert any("complete" in p[2] for p in posts)
-    assert all(p[1] == "C-LOGIN" for p in posts)
+    assert all(p[1] == "C0LOGIN42" for p in posts)
 
 
 def test_run_bootstrap_skips_when_creds_present(slack_config, monkeypatch):
@@ -309,7 +309,7 @@ def test_run_bootstrap_codex_device_poll(slack_config, monkeypatch):
     # The prompt post carries BOTH the device URL and the one-time code.
     assert any("codex/device" in p[2] and "5RAR-HF15T" in p[2] for p in posts)
     assert any("complete" in p[2] for p in posts)
-    assert all(p[1] == "C-LOGIN" for p in posts)
+    assert all(p[1] == "C0LOGIN42" for p in posts)
 
 
 def test_run_bootstrap_codex_refuses_with_openai_key(slack_config, monkeypatch):

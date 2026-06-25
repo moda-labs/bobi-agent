@@ -19,8 +19,9 @@ services:
   - name: slack
     events: true
     required: true          # the manager is reachable over Slack
-    # Optional comma-separated channel IDs to scope the bot. Empty = whole workspace.
-    channels: ${SLACK_CHANNELS}
+    # Optional comma-separated channel IDs to scope the bot. Empty = whole
+    # workspace (the `:-` keeps it from being a required deploy secret).
+    channels: ${SLACK_CHANNELS:-}
     credentials:
       bot_token: ${SLACK_BOT_TOKEN}
       signing_secret: ${SLACK_SIGNING_SECRET}
