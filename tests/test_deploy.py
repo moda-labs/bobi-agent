@@ -256,6 +256,65 @@ def test_subscription_mode_rejects_anthropic_key(repo, tmp_path):
         D.resolve_env_file(cfg, repo, tmp_path)
 
 
+# --- brain-aware auth (#485) -------------------------------------------------
+
+def _codex_team(repo):
+    """Add a local codex-brained team to the repo fixture."""
+    pkg = repo / "agents" / "codex-team"
+    pkg.mkdir(parents=True)
+    pkg.joinpath("agent.yaml").write_text(
+        "agent: codex-team\nbrain:\n  kind: codex\nslack_token: ${SLACK_BOT_TOKEN}\n"
+    )
+
+
+def test_brain_api_key_mapping():
+    assert D._brain_api_key("codex") == "OPENAI_API_KEY"
+    assert D._brain_api_key("claude") == "ANTHROPIC_API_KEY"
+    assert D._brain_api_key("") == "ANTHROPIC_API_KEY"  # default
+
+
+def test_brain_kind_resolved_from_team_agent_yaml(repo):
+    _codex_team(repo)
+    (repo / "deployments" / "ct.yaml").write_text("team: codex-team\n")
+    cfg = D.load_deploy_config(repo, "ct")
+    assert cfg.brain == "codex"
+
+
+def test_codex_api_key_mode_requires_openai_key(repo, tmp_path, monkeypatch):
+    _codex_team(repo)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    ef = tmp_path / "ct.env"
+    ef.write_text("SLACK_BOT_TOKEN=xoxb\n")  # no OPENAI_API_KEY
+    (repo / "deployments" / "ct.yaml").write_text("team: codex-team\nauth: api_key\n")
+    cfg = D.load_deploy_config(repo, "ct", {"secrets_env_file": str(ef)})
+    with pytest.raises(D.DeployError, match="missing required secret"):
+        D.resolve_env_file(cfg, repo, tmp_path)
+    # With the OpenAI key present it resolves cleanly.
+    ef.write_text("SLACK_BOT_TOKEN=xoxb\nOPENAI_API_KEY=sk-openai\n")
+    out = D.resolve_env_file(cfg, repo, tmp_path)
+    assert "OPENAI_API_KEY=sk-openai" in out.read_text()
+
+
+def test_codex_subscription_rejects_openai_key(repo, tmp_path):
+    _codex_team(repo)
+    ef = tmp_path / "sub.env"
+    ef.write_text("SLACK_BOT_TOKEN=xoxb\nOPENAI_API_KEY=sk-openai\n")
+    (repo / "deployments" / "ct.yaml").write_text(
+        "team: codex-team\nauth: subscription\n"
+    )
+    cfg = D.load_deploy_config(repo, "ct", {"secrets_env_file": str(ef)})
+    with pytest.raises(D.DeployError, match="OPENAI_API_KEY"):
+        D.resolve_env_file(cfg, repo, tmp_path)
+
+
+def test_codex_brain_passed_to_provisioner(repo):
+    _codex_team(repo)
+    (repo / "deployments" / "ct.yaml").write_text("team: codex-team\n")
+    cfg = D.load_deploy_config(repo, "ct")
+    args = D._provision_args(cfg, Path("/tmp/x.env"))
+    assert "--brain" in args and "codex" in args
+
+
 # --- secret reconcile against live Fly (#385) --------------------------------
 
 def test_declared_filter_drops_undeclared_keys_with_warning(repo, tmp_path, caplog):

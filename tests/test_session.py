@@ -9,8 +9,8 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
-from claude_agent_sdk import ResultMessage
 
+from modastack.brain import TurnResult
 from modastack.inbox import Message
 from modastack.session import Session
 
@@ -260,18 +260,15 @@ class TestSubscriptionResilience:
 
 
 def _result(is_error, api_error_status=None, session_id="sess-1"):
-    """A minimal ResultMessage as the SDK emits at the end of a turn."""
-    return ResultMessage(
-        subtype="success",
-        duration_ms=10,
-        duration_api_ms=5,
-        is_error=is_error,
-        num_turns=1,
+    """A normalized end-of-turn result, as a brain adapter yields it."""
+    return TurnResult(
         session_id=session_id,
-        total_cost_usd=0.0,
-        usage={},
-        result="API Error: 529 Overloaded" if is_error else "ok",
+        is_error=is_error,
         api_error_status=api_error_status,
+        total_cost_usd=0.0,
+        duration_ms=10,
+        num_turns=1,
+        result_text="API Error: 529 Overloaded" if is_error else "ok",
     )
 
 
@@ -284,6 +281,8 @@ def _streaming_client(session, batches):
     """
 
     class FakeClient:
+        provider = "anthropic"
+
         def __init__(self):
             self.queries: list[str] = []
             self._batches = [list(b) for b in batches]

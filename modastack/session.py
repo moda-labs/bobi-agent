@@ -1,7 +1,11 @@
-"""Unified session — Claude Code client with an inbox.
+"""Unified session — a pluggable agent brain with an inbox.
 
-Every session is identical: a ClaudeSDKClient connected to an inbox
-drain loop. Each session subscribes to its own ``inbox/<self>`` topic on the
+Every session is identical: a :class:`~modastack.brain.BrainSession` (Claude
+Code by default; see epic #485) connected to an inbox drain loop. The session
+drives the brain through the provider-agnostic ``connect`` / ``query`` /
+``receive_response`` / ``disconnect`` contract and consumes normalized
+``AssistantText`` / ``TurnResult`` messages — never a vendor SDK's classes.
+Each session subscribes to its own ``inbox/<self>`` topic on the
 event server and injects arriving messages into the Claude session in order.
 The only difference between a "manager" and an "agent" is what extra topics it
 subscribes to (the manager also subscribes to external resource topics).
@@ -16,9 +20,9 @@ import os
 import threading
 from pathlib import Path
 
+from modastack.brain import AssistantText, TurnResult, get_brain
 from modastack.inbox import Inbox, Message
 from modastack.sdk import (
-    get_cli_path,
     save_session_id,
     load_session_id,
     log_activity,
@@ -124,6 +128,9 @@ class Session:
         self._rotation_token_cap = opts.pop("rotation_token_cap", DEFAULT_ROTATION_TOKEN_CAP)
         self._extra_options = opts
 
+        # The agent brain (Claude Code by default). A factory: every fresh
+        # connect/rotation/recovery builds a new BrainSession from it (#485).
+        self._brain = get_brain()
         self._client = None
         self._subscription = None
         self._sub_retry_stop = threading.Event()
@@ -188,15 +195,19 @@ class Session:
     # Context rotation (Steps 1, 4 — #273)
     # -----------------------------------------------------------------
 
-    def _rotation_options(self):
-        """Fresh-connect ClaudeAgentOptions for a rotation reconnect."""
-        from claude_agent_sdk import ClaudeAgentOptions
-        return ClaudeAgentOptions(
+    def _make_brain_session(self, resume: str | None = None):
+        """Build a fresh brain session (boot, rotation reconnect, recovery).
+
+        ``resume=None`` yields a clean fresh-connect session; pass a saved id to
+        resume. Brain-specific extras (skills, max_turns, mcp_servers, …) ride
+        ``_extra_options``; the adapter supplies the shared defaults
+        (``permission_mode``, ``cli_path``).
+        """
+        return self._brain.make_session(
             cwd=self.cwd,
-            permission_mode="bypassPermissions",
-            cli_path=get_cli_path(),
             system_prompt=self._system_prompt,
-            **self._extra_options,
+            resume=resume,
+            options=self._extra_options,
         )
 
     async def _safe_disconnect(self, client) -> None:
@@ -217,9 +228,7 @@ class Session:
         exception on failure; on either, the freshly-built client is discarded
         before the exception propagates so the caller can retry cleanly.
         """
-        from claude_agent_sdk import ClaudeSDKClient
-
-        client = ClaudeSDKClient(self._rotation_options())
+        client = self._make_brain_session(resume=None)
 
         async def _connect_and_drain() -> None:
             await client.connect()
@@ -344,8 +353,6 @@ class Session:
         this final fresh connect fails does the session surface terminally —
         loudly, never a silent hang.
         """
-        from claude_agent_sdk import ClaudeSDKClient
-
         log.error(
             "Rotation reconnect exhausted for '%s' after %d attempts: %s — "
             "attempting fresh-connect recovery",
@@ -376,7 +383,7 @@ class Session:
         # Final recovery: a fresh connected client (resume=None — the saved id
         # was already cleared at the top of _rotate). No connect-prompt, so this
         # connect cannot hang on receive_response; bound it anyway.
-        client = ClaudeSDKClient(self._rotation_options())
+        client = self._make_brain_session(resume=None)
         try:
             await asyncio.wait_for(
                 client.connect(), timeout=ROTATION_RECONNECT_TIMEOUT
@@ -426,8 +433,6 @@ class Session:
         return self._system_prompt
 
     async def _drain_turn(self) -> str:
-        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
-
         self._last_response = ""
         if self._input_ready:
             self._input_ready.clear()
@@ -446,14 +451,11 @@ class Session:
 
         try:
             async for msg in self._client.receive_response():
-                if isinstance(msg, AssistantMessage):
+                if isinstance(msg, AssistantText):
                     if msg.usage is not None:
                         last_assistant_usage = msg.usage
-                    text_parts = [
-                        b.text for b in msg.content if isinstance(b, TextBlock)
-                    ]
-                    if text_parts:
-                        self._last_response = "\n".join(text_parts)
+                    if msg.text:
+                        self._last_response = msg.text
                         log_activity(
                             "response",
                             {"text": self._last_response[:500]},
@@ -464,33 +466,31 @@ class Session:
                                 self._on_response(self._last_response)
                             except Exception:
                                 pass
-                elif isinstance(msg, ResultMessage):
+                elif isinstance(msg, TurnResult):
                     save_session_id(self.name, msg.session_id)
                     self._last_is_error = msg.is_error
                     cost = msg.total_cost_usd or 0.0
                     self._total_cost_usd += cost
                     self._total_duration_ms += msg.duration_ms
                     self._total_turns += msg.num_turns
-                    # Record cost with model_usage breakdown
-                    model_usage = getattr(msg, "model_usage", None)
-                    if cost > 0 or model_usage:
+                    # Record cost with the brain's normalized per-model usage
+                    # breakdown, attributed to the brain's provider (not a
+                    # hardcoded "anthropic" — #485).
+                    if cost > 0 or msg.costs:
                         model = ""
                         input_tokens = 0
                         output_tokens = 0
-                        if model_usage:
-                            for m in (model_usage if isinstance(model_usage, list) else [model_usage]):
-                                model = getattr(m, "model", "") or model
-                                input_tokens += getattr(m, "input_tokens", 0) or 0
-                                output_tokens += getattr(m, "output_tokens", 0) or 0
+                        for c in msg.costs:
+                            model = c.model or model
+                            input_tokens += c.input_tokens
+                            output_tokens += c.output_tokens
                         registry.record_cost(
                             self.name, cost, model=model,
-                            provider="anthropic",
+                            provider=getattr(self._client, "provider", "anthropic"),
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
                         )
-                    self._last_api_error_status = getattr(
-                        msg, "api_error_status", None
-                    )
+                    self._last_api_error_status = msg.api_error_status
                     if msg.is_error:
                         # A turn-level API error (e.g. 529 Overloaded, rate
                         # limit) is transient and scoped to this turn — the SDK
@@ -659,21 +659,10 @@ class Session:
             await self._process_message(msg)
 
     async def _run(self, startup_prompt: str | None = None) -> None:
-        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-
         saved_id = load_session_id(self.name)
         resume_id = saved_id or None
 
-        options = ClaudeAgentOptions(
-            cwd=self.cwd,
-            permission_mode="bypassPermissions",
-            cli_path=get_cli_path(),
-            resume=resume_id,
-            system_prompt=self._system_prompt,
-            **self._extra_options,
-        )
-
-        self._client = ClaudeSDKClient(options)
+        self._client = self._make_brain_session(resume=resume_id)
 
         try:
             connect_prompt = startup_prompt if not resume_id else None
@@ -682,14 +671,7 @@ class Session:
             if resume_id:
                 log.warning(f"Resume failed for '{self.name}', retrying fresh: {e}")
                 save_session_id(self.name, "")
-                options = ClaudeAgentOptions(
-                    cwd=self.cwd,
-                    permission_mode="bypassPermissions",
-                    cli_path=get_cli_path(),
-                    system_prompt=self._system_prompt,
-                    **self._extra_options,
-                )
-                self._client = ClaudeSDKClient(options)
+                self._client = self._make_brain_session(resume=None)
                 await self._client.connect(startup_prompt)
             else:
                 raise

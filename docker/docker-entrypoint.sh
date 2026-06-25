@@ -25,27 +25,83 @@ PROJECT_DIR="${MODASTACK_PROJECT:-${DATA_DIR}/project}"
 export HOME="${MODASTACK_HOME:-/home/modastack}"
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-${DATA_DIR}/claude}"
 
+# The agent brain (#485). Decides the provider API key (api_key/subscription),
+# the durable OAuth credential dir on the volume, and the credential file the
+# first-boot subscription bootstrap waits for. Default claude for entrypoint
+# branching only; do not export that default because agent.yaml must still be
+# able to select a non-Claude brain when MODASTACK_BRAIN was not explicit.
+ENTRYPOINT_BRAIN="${MODASTACK_BRAIN:-claude}"
+
+configure_brain_paths() {
+  case "$ENTRYPOINT_BRAIN" in
+    codex)
+      BRAIN_SHADOW_KEY="OPENAI_API_KEY"
+      BRAIN_CRED_DIR="${DATA_DIR}/codex"      # ~/.codex symlinks here
+      BRAIN_HOME_LINK="${HOME}/.codex"
+      BRAIN_CRED_FILE="auth.json"
+      ;;
+    *)  # claude (default): durable state already lives under CLAUDE_CONFIG_DIR
+      BRAIN_SHADOW_KEY="ANTHROPIC_API_KEY"
+      BRAIN_CRED_DIR="${CLAUDE_CONFIG_DIR}"
+      BRAIN_HOME_LINK="${HOME}/.claude"
+      BRAIN_CRED_FILE=".credentials.json"
+      ;;
+  esac
+}
+
+validate_auth_mode() {
+  # The provider API key is brain-specific (ANTHROPIC_API_KEY / OPENAI_API_KEY);
+  # ${!BRAIN_SHADOW_KEY} is its live value via bash indirect expansion.
+  case "${MODASTACK_AUTH:-api_key}" in
+    api_key)
+      [ -n "${!BRAIN_SHADOW_KEY:-}" ] \
+        || fatal "MODASTACK_AUTH=api_key but ${BRAIN_SHADOW_KEY} is unset."
+      ;;
+    subscription)
+      # The provider API key silently outranks subscription OAuth creds and bills
+      # the API instead — it must be entirely absent in this mode (§6.1).
+      [ -z "${!BRAIN_SHADOW_KEY:-}" ] \
+        || fatal "MODASTACK_AUTH=subscription but ${BRAIN_SHADOW_KEY} is set; it overrides subscription auth. Unset it."
+      ;;
+    *)
+      fatal "unknown MODASTACK_AUTH='${MODASTACK_AUTH}' (expected api_key|subscription)."
+      ;;
+  esac
+}
+
+resolve_configured_brain() {
+  [ -z "${MODASTACK_BRAIN:-}" ] || return 0
+  [ -f "${PROJECT_DIR}/.modastack/agent.yaml" ] || return 0
+
+  local configured
+  if configured="$(PROJECT_DIR="${PROJECT_DIR}" python - <<'PY' 2>/dev/null
+import os
+from pathlib import Path
+
+from modastack.config import Config
+
+print(Config.load(Path(os.environ["PROJECT_DIR"])).brain_kind or "", end="")
+PY
+  )" && [ -n "${configured}" ]; then
+    ENTRYPOINT_BRAIN="${configured}"
+  fi
+}
+
+resolve_configured_brain
+configure_brain_paths
+
 log() { echo "[entrypoint] $*"; }
 fatal() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
 
-# --- 1. Validate auth mode BEFORE touching the volume (§6.1) -----------------
-case "${MODASTACK_AUTH:-api_key}" in
-  api_key)
-    [ -n "${ANTHROPIC_API_KEY:-}" ] \
-      || fatal "MODASTACK_AUTH=api_key but ANTHROPIC_API_KEY is unset."
-    ;;
-  subscription)
-    # ANTHROPIC_API_KEY silently outranks subscription OAuth creds and bills the
-    # API instead — it must be entirely absent in this mode (§6.1).
-    [ -z "${ANTHROPIC_API_KEY:-}" ] \
-      || fatal "MODASTACK_AUTH=subscription but ANTHROPIC_API_KEY is set; it overrides subscription auth. Unset it."
-    ;;
-  *)
-    fatal "unknown MODASTACK_AUTH='${MODASTACK_AUTH}' (expected api_key|subscription)."
-    ;;
-esac
+AUTH_VALIDATED=0
+if [ -n "${MODASTACK_BRAIN:-}" ] \
+   || [ -f "${PROJECT_DIR}/.modastack/agent.yaml" ] \
+   || { [ -z "${MODASTACK_TEAM_URL:-}" ] && [ -z "${MODASTACK_TEAM:-}" ]; }; then
+  validate_auth_mode
+  AUTH_VALIDATED=1
+fi
 
-# --- 2. Prepare the volume (root) -------------------------------------------
+# --- 1. Prepare the volume (root) -------------------------------------------
 # Only the durable dirs live on the volume: the project root and Claude's config
 # dir (CLAUDE_CONFIG_DIR). HOME is on the image and needs no volume prep.
 mkdir -p "${PROJECT_DIR}" "${CLAUDE_CONFIG_DIR}"
@@ -61,7 +117,7 @@ else
   chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${PROJECT_DIR}" "${CLAUDE_CONFIG_DIR}"
 fi
 
-# --- 2b. Make ~/.claude coincide with the durable volume config dir (C24) -----
+# --- 1b. Make ~/.claude coincide with the durable volume config dir (C24) -----
 # $HOME stays on the image (baked tools read in place), but Claude's DURABLE
 # state (creds, transcripts, settings) lives under CLAUDE_CONFIG_DIR on the
 # volume. Point the whole ~/.claude AT that dir, so any tool/skill that hardcodes
@@ -94,9 +150,15 @@ cd "${PROJECT_DIR}"
 # Carry HOME (the image home — gosu would otherwise reset it from passwd, which
 # is the same path here, but be explicit) and CLAUDE_CONFIG_DIR (the volume dir
 # holding durable creds/transcripts) into every privilege drop.
-as_app() { gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "$@"; }
+as_app() {
+  if [ -n "${MODASTACK_BRAIN:-}" ]; then
+    gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_BRAIN=${MODASTACK_BRAIN}" "$@"
+  else
+    gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "$@"
+  fi
+}
 
-# --- 3. First boot: install a team if the volume has no agent (C9 hardens) ---
+# --- 2. First boot: install a team if the volume has no agent (C9 hardens) ---
 # Team source precedence: a public MODASTACK_TEAM_URL (fetched at boot — the
 # dark instance reaches out, nothing reaches in) wins over MODASTACK_TEAM (a
 # bundled/registry name).
@@ -144,12 +206,39 @@ if [ ! -f "${PROJECT_DIR}/.modastack/agent.yaml" ]; then
   fi
 fi
 
+resolve_configured_brain
+configure_brain_paths
+
+# --- 3. Validate auth mode --------------------------------------------------
+# First-boot team installs can define ``brain.kind`` in agent.yaml, so their
+# shadow-key check may need to wait until after install. Blank/no-team boots and
+# existing installs validate before the wait-for-team loop so auth mistakes fail
+# fast instead of hanging as a blank instance.
+if [ "${AUTH_VALIDATED}" != "1" ]; then
+  validate_auth_mode
+fi
+
+# --- 3b. Codex's durable OAuth dir on the volume (#485) ---------------------
+# Same idea for codex: ~/.codex (where `codex login`/`codex exec` keep auth.json)
+# points at a volume dir so the ChatGPT subscription survives a redeploy. claude
+# already gets this via CLAUDE_CONFIG_DIR above; codex has no config-dir override,
+# so we symlink the home dir directly.
+if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
+  mkdir -p "${BRAIN_CRED_DIR}"
+  chown "${APP_USER}:${APP_USER}" "${BRAIN_CRED_DIR}"
+  if [ "$(readlink "${BRAIN_HOME_LINK}" 2>/dev/null)" != "${BRAIN_CRED_DIR}" ]; then
+    log "Pointing ${BRAIN_HOME_LINK} -> ${BRAIN_CRED_DIR} (durable codex creds on volume)"
+    rm -rf "${BRAIN_HOME_LINK}"
+    ln -s "${BRAIN_CRED_DIR}" "${BRAIN_HOME_LINK}"
+  fi
+fi
+
 # --- 4. Subscription auth: bootstrap login over Slack if no creds yet (C23) --
 # Idempotent: a no-op once the credentials exist. They live under
 # CLAUDE_CONFIG_DIR (the volume), not HOME — that's the durable state we keep.
 if [ "${MODASTACK_AUTH:-api_key}" = "subscription" ] \
-   && [ ! -f "${CLAUDE_CONFIG_DIR}/.credentials.json" ]; then
-  log "Subscription mode, no credentials on volume — running login bootstrap"
+   && [ ! -f "${BRAIN_CRED_DIR}/${BRAIN_CRED_FILE}" ]; then
+  log "Subscription mode, no ${ENTRYPOINT_BRAIN} credentials on volume — running login bootstrap"
   as_app modastack login-bootstrap
 fi
 
@@ -170,4 +259,8 @@ log "Starting manager under self-heal watchdog (user=${APP_USER}, project=${PROJ
 # escalates. `healthcheck.sh` is unaffected (the manager child still writes the
 # port file). The forwarded `--foreground` keeps the manager a supervisable
 # child rather than letting it daemonize.
-exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_UI=${MODASTACK_UI}" modastack supervise -- --foreground "$@"
+if [ -n "${MODASTACK_BRAIN:-}" ]; then
+  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_BRAIN=${MODASTACK_BRAIN}" "MODASTACK_UI=${MODASTACK_UI}" modastack supervise -- --foreground "$@"
+else
+  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_UI=${MODASTACK_UI}" modastack supervise -- --foreground "$@"
+fi

@@ -38,8 +38,8 @@ EXPECTED_BOT_EVENTS = {
 # Scopes those events require, plus the scopes the outbound CLI tools need.
 EXPECTED_BOT_SCOPES = {
     "app_mentions:read", "channels:history", "channels:read", "chat:write",
-    "files:read", "files:write", "groups:history", "im:history", "im:read",
-    "im:write", "mpim:history", "users:read",
+    "files:read", "files:write", "groups:history", "groups:read", "im:history",
+    "im:read", "im:write", "mpim:history", "users:read",
 }
 
 

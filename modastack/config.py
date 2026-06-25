@@ -226,6 +226,14 @@ class Config:
     build: "BuildSpec | None" = None  # C24 team image build spec; None = generic base
     spend_cap: int = 0  # max agent invocations per rolling hour; 0 = use default
     max_concurrent_agents: int = 0  # max simultaneous subagents; 0 = use default (2)
+    # Which agent "brain" drives this team's agents (#485). `{kind: claude|codex|
+    # …, model: <optional override>}`. Empty = the framework default (claude).
+    brain: dict = field(default_factory=dict)
+
+    @property
+    def brain_kind(self) -> str:
+        """The configured brain kind, or "" for the framework default."""
+        return str((self.brain or {}).get("kind", "") or "")
 
     def credential(self, service: str, key: str) -> str:
         """Look up a credential value for a named service."""
@@ -312,6 +320,7 @@ class Config:
             build=build,
             spend_cap=int(raw.get("spend_cap", 0)),
             max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),
+            brain=raw.get("brain", {}) if isinstance(raw.get("brain"), dict) else {},
         )
 
     @staticmethod

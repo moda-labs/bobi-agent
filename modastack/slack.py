@@ -76,6 +76,57 @@ def _slack_api(
     return result
 
 
+def resolve_channel_id(token: str, channel: str, *, timeout: float = 10) -> str:
+    """Resolve a Slack channel reference to its channel ID.
+
+    Accepts either an ID (``C…``/``G…``/``D…``, returned unchanged) or a human
+    name (with or without a leading ``#``), looked up via ``conversations.list``.
+    Matches public and private channels, falling back to public-only if the token
+    lacks ``groups:read``. Lets the config carry ``#codex-test`` instead of an
+    opaque ``C0…`` id. Raises ``RuntimeError`` if a name can't be resolved.
+    """
+    ref = (channel or "").strip()
+    if not ref:
+        return ref
+    # Already an ID? IDs start with C/G/D and are uppercase alphanumerics; a
+    # '#'-prefixed value is always a name.
+    if not ref.startswith("#") and re.fullmatch(r"[CGD][A-Z0-9]{6,}", ref):
+        return ref
+    want = ref.lstrip("#").lower()
+
+    types = "public_channel,private_channel"
+    cursor = ""
+    while True:
+        params: dict = {"types": types, "limit": 1000, "exclude_archived": "true"}
+        if cursor:
+            params["cursor"] = cursor
+        resp = pooled.client().get(
+            "https://slack.com/api/conversations.list",
+            params=params,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+        result = resp.json()
+        if not result.get("ok"):
+            err = result.get("error", "unknown")
+            # Private channels need groups:read; degrade to public-only rather
+            # than fail when the app wasn't granted it.
+            if err == "missing_scope" and types != "public_channel":
+                types, cursor = "public_channel", ""
+                continue
+            raise RuntimeError(f"Slack API error: {err}")
+        for ch in result.get("channels", []):
+            if (ch.get("name") or "").lower() == want:
+                return ch["id"]
+        cursor = (result.get("response_metadata") or {}).get("next_cursor", "")
+        if not cursor:
+            break
+    raise RuntimeError(
+        f"Slack channel '#{want}' not found — is the bot a member? "
+        "(a private channel also needs the groups:read scope)."
+    )
+
+
 def post_slack_message(
     token: str,
     channel: str,

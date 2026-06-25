@@ -314,26 +314,39 @@ async def _async_probe_mcp(
     all_servers: dict[str, dict],
     project_path: Path,
 ) -> list[CheckResult]:
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-    from modastack.sdk import get_cli_path
+    from modastack.brain import get_brain
 
-    options = ClaudeAgentOptions(
+    # Build the probe session through the brain (Claude today). No system prompt
+    # — this is a connect-and-poll MCP probe, not a turn. ``get_mcp_status`` is a
+    # Claude-adapter capability (see #485 open Q4 on per-brain MCP discovery).
+    brain = get_brain()
+    client = brain.make_session(
         cwd=str(project_path),
-        permission_mode="bypassPermissions",
-        cli_path=get_cli_path(),
-        mcp_servers=all_servers,
-        strict_mcp_config=True,
-        max_turns=0,
-        # Probe in the same environment agents are spawned in so preflight can
-        # never be green when the runtime PATH would fail to resolve a bare
-        # command (MDS-64).
-        env=agent_spawn_env(),
+        system_prompt=None,
+        options={
+            "mcp_servers": all_servers,
+            "strict_mcp_config": True,
+            "max_turns": 0,
+            # Probe in the same environment agents are spawned in so preflight can
+            # never be green when the runtime PATH would fail to resolve a bare
+            # command (MDS-64).
+            "env": agent_spawn_env(),
+        },
     )
-
-    client = ClaudeSDKClient(options)
+    get_mcp_status = getattr(client, "get_mcp_status", None)
+    if get_mcp_status is None:
+        return [
+            CheckResult(
+                name, ok=False,
+                detail=f"mcp — status probe not supported for {brain.name} brain",
+                hint="MCP startup will be left to the agent runtime.",
+                required=False,
+            )
+            for name in names
+        ]
     try:
         await client.connect()
-        status = await client.get_mcp_status()
+        status = await get_mcp_status()
 
         # MDS-63: poll until every target server leaves the `pending` spawn
         # window (or the bounded budget elapses). Servers that genuinely
@@ -349,7 +362,7 @@ async def _async_probe_mcp(
             if not still_pending:
                 break
             await asyncio.sleep(MCP_PROBE_POLL_INTERVAL)
-            status = await client.get_mcp_status()
+            status = await get_mcp_status()
 
         servers = {s.get("name"): s for s in status.get("mcpServers", [])}
         return [_judge_mcp_server(name, servers.get(name)) for name in names]

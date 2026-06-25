@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from modastack.sdk import (
-    get_cli_path, save_session_id, load_session_id, log_activity,
+    save_session_id, load_session_id, log_activity,
     get_registry, SessionEntry, SessionRegistry,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
@@ -238,7 +238,13 @@ def _persist_terminal(registry, name: str, status: str, *, error: str = "",
 
 
 def _make_defer_hook() -> dict:
-    """PreToolUse hook that defers AskUserQuestion so we can route it."""
+    """PreToolUse hook that defers AskUserQuestion so we can route it.
+
+    Claude-specific: the hook/HookMatcher API is the only SDK surface left
+    outside ``modastack.brain``. It rides through to the brain as an ``hooks``
+    option (a no-op for brains without a hook system). Whether non-Claude brains
+    need interactive deferral at all is #485 open Q5.
+    """
     from claude_agent_sdk import HookMatcher
 
     async def _defer(input_data, tool_use_id, context):
@@ -275,13 +281,7 @@ async def _run_agent_supervised(
     read-only, observe-and-report agent that no one needs to message mid-run.
     Any agent that must be reachable goes through ``Session`` instead.
     """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ClaudeSDKClient,
-        ResultMessage,
-        TextBlock,
-    )
+    from modastack.brain import AssistantText, TurnResult, get_brain
 
     name = _session_name(run_key, role=role, phase=phase)
     saved_id = load_session_id(name)
@@ -290,14 +290,8 @@ async def _run_agent_supervised(
     hooks = _make_defer_hook() if on_input_needed else None
 
     label = role or "agent"
-    options = ClaudeAgentOptions(
+    client = get_brain().make_session(
         cwd=cwd,
-        permission_mode="bypassPermissions",
-        max_turns=max_turns,
-        cli_path=get_cli_path(),
-        resume=saved_id or None,
-        hooks=hooks,
-        skills="all",
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
@@ -306,9 +300,9 @@ async def _run_agent_supervised(
                 f"phase: {phase}. Follow the skill file instructions exactly."
             ),
         },
+        resume=saved_id or None,
+        options={"max_turns": max_turns, "hooks": hooks, "skills": "all"},
     )
-
-    client = ClaudeSDKClient(options)
     registry.update(name, status="running", phase=phase, session_id=saved_id or "")
 
     result = AgentResult(
@@ -324,15 +318,13 @@ async def _run_agent_supervised(
         while True:
             result_msg = None
             async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    text_parts = [b.text for b in msg.content if isinstance(b, TextBlock)]
-                    if text_parts:
-                        joined = "\n".join(text_parts)
-                        result.final_text = joined
+                if isinstance(msg, AssistantText):
+                    if msg.text:
+                        result.final_text = msg.text
                         log_activity("response", {
-                            "text": joined[:500],
+                            "text": msg.text[:500],
                         }, session=name)
-                elif isinstance(msg, ResultMessage):
+                elif isinstance(msg, TurnResult):
                     result_msg = msg
 
             if result_msg is None:
@@ -347,8 +339,8 @@ async def _run_agent_supervised(
             result.total_cost_usd += result_msg.total_cost_usd or 0.0
             result.num_turns += result_msg.num_turns
 
-            if result_msg.deferred_tool_use and on_input_needed:
-                deferred = result_msg.deferred_tool_use
+            if result_msg.deferred_tool and on_input_needed:
+                deferred = result_msg.deferred_tool
                 log.info(f"Agent {run_key}/{phase} deferred {deferred.name}")
                 loop = asyncio.get_running_loop()
                 answer = await loop.run_in_executor(
@@ -359,13 +351,13 @@ async def _run_agent_supervised(
 
             result.success = not result_msg.is_error
             if result_msg.is_error:
-                result.error = result_msg.result or "unknown error"
+                result.error = result_msg.result_text or "unknown error"
                 # Single-sourced transient classification (§4.3): a 529/rate-limit
                 # /5xx is tagged transient so the launcher can re-dispatch. We do
                 # NOT retry here — survival/retry is owned by #444.
                 result.transient = is_transient_api_error(
-                    getattr(result_msg, "api_error_status", None),
-                    result_msg.result or "",
+                    result_msg.api_error_status,
+                    result_msg.result_text or "",
                 )
             # RC#2: honest terminal status — never record `done` on an error
             # result. A transient 529 surfaces as an error ResultMessage (not an

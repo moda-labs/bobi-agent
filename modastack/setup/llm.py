@@ -18,6 +18,10 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator, Callable, Optional
 
+# The Anthropic partial-stream parser lives in the brain adapter now; re-exported
+# here for back-compat (tested as ``llm._delta_text``) — #485.
+from modastack.brain.claude import _delta_text  # noqa: F401
+
 
 class LLMError(Exception):
     """A streaming call failed before producing usable output."""
@@ -47,62 +51,39 @@ _NO_TOOLS = ["Task", "Bash", "BashOutput", "KillBash", "Glob", "Grep",
 DEFAULT_MAX_TURNS = 8
 
 
-def _delta_text(event) -> str:
-    """Pull the text out of one raw Anthropic streaming event, or ''."""
-    if not isinstance(event, dict):
-        return ""
-    if event.get("type") == "content_block_delta":
-        delta = event.get("delta") or {}
-        if delta.get("type") == "text_delta":
-            return delta.get("text", "")
-    return ""
-
-
 async def _sdk_stream(*, system_prompt: str, user_prompt: str,
                       model: Optional[str] = None,
                       cwd: Optional[str] = None) -> AsyncIterator[str]:
-    """Default source: a stateless one-shot `query()` with partial streaming.
+    """Default source: a stateless one-shot streaming completion via the brain.
 
-    No MCP servers, no tools, no session resume — a clean text completion.
+    No MCP servers, no tools, no session resume — a clean text completion. The
+    brain yields normalized ``StreamDelta`` partials (the token-by-token pour),
+    an ``AssistantText`` fallback when partials never arrive, and a closing
+    ``TurnResult`` carrying any error.
     """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        StreamEvent,
-        TextBlock,
-        query,
-    )
-    from modastack.sdk import get_cli_path
-
-    options = ClaudeAgentOptions(
-        cwd=cwd,
-        model=model,
-        cli_path=get_cli_path(),
-        max_turns=DEFAULT_MAX_TURNS,
-        disallowed_tools=_NO_TOOLS,
-        permission_mode="bypassPermissions",
-        include_partial_messages=True,
-        system_prompt=system_prompt,
-    )
+    from modastack.brain import AssistantText, StreamDelta, TurnResult, get_brain
 
     saw_partial = False
     try:
-        async for msg in query(prompt=user_prompt, options=options):
-            if isinstance(msg, StreamEvent):
-                text = _delta_text(msg.event)
-                if text:
+        async for msg in get_brain().stream_once(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            cwd=cwd,
+            options={"max_turns": DEFAULT_MAX_TURNS, "disallowed_tools": _NO_TOOLS},
+        ):
+            if isinstance(msg, StreamDelta):
+                if msg.text:
                     saw_partial = True
-                    yield text
-            elif isinstance(msg, AssistantMessage) and not saw_partial:
-                # Fallback path when partials never arrived: emit whole blocks.
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        yield block.text
-            elif isinstance(msg, ResultMessage):
+                    yield msg.text
+            elif isinstance(msg, AssistantText) and not saw_partial:
+                # Fallback path when partials never arrived: emit the whole text.
+                if msg.text:
+                    yield msg.text
+            elif isinstance(msg, TurnResult):
                 # is_error is set on API/tool failures; surface it cleanly.
-                if getattr(msg, "is_error", False) and not saw_partial:
-                    raise LLMError(getattr(msg, "result", "") or
+                if msg.is_error and not saw_partial:
+                    raise LLMError(msg.result_text or
                                    "the model returned an error")
     except LLMError:
         raise

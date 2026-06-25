@@ -23,6 +23,7 @@ import pytest
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
+from modastack.brain import AssistantText, BrainCost, BrainSession, TurnResult
 from modastack.inbox import Message
 from modastack.session import (
     COMPACT_SENTINEL,
@@ -32,7 +33,14 @@ from modastack.session import (
 
 
 class _FakeClient:
-    """Async client stub whose ``receive_response`` replays canned messages."""
+    """A brain-session stub whose ``receive_response`` replays canned messages.
+
+    Assigned directly to ``session._client`` (bypassing the adapter), so it
+    speaks the normalized brain contract: it yields :class:`AssistantText` /
+    :class:`TurnResult` and exposes ``provider`` for cost attribution.
+    """
+
+    provider = "anthropic"
 
     def __init__(self, messages):
         self._messages = messages
@@ -80,6 +88,31 @@ def _result(usage: dict | None, *, is_error: bool = False,
     return msg
 
 
+# Normalized brain messages for the direct-injection path (``s._client`` is a
+# brain session post-#485, so its receive_response yields these — not SDK
+# messages). The SDK ``_assistant``/``_result`` above are kept for the
+# adapter-path fakes (``_ErrorTurnClient``), which the Claude adapter converts.
+def _b_assistant(usage: dict | None) -> AssistantText:
+    """One assistant turn carrying a single API call's per-call usage."""
+    return AssistantText(text="step", usage=usage)
+
+
+def _b_result(usage: dict | None = None, *, is_error: bool = False,
+              api_error_status: int | None = None) -> TurnResult:
+    """End-of-turn result. The rotation metric reads the last *assistant*
+    message's usage, not the result's, so ``usage`` here is accepted for
+    call-site symmetry but unused (mirrors the SDK shape)."""
+    return TurnResult(
+        session_id="sess-1",
+        is_error=is_error,
+        api_error_status=api_error_status,
+        total_cost_usd=0.01,
+        duration_ms=1,
+        num_turns=1,
+        costs=[BrainCost(model="claude-opus-4-8", input_tokens=2, output_tokens=3)],
+    )
+
+
 def test_context_fill_sums_cache_fields():
     """True context fill = fresh input + cache read + cache creation."""
     assert _context_fill_tokens(
@@ -114,7 +147,7 @@ async def test_rotation_triggers_when_context_is_cached(modastack_install):
     s._rotation_token_cap = 275_000
     # A single-call turn: the one assistant message carries the warm usage; the
     # ResultMessage aggregate equals it. Fill = 423_732 >= cap → rotate.
-    s._client = _FakeClient([_assistant(warm), _result(warm)])
+    s._client = _FakeClient([_b_assistant(warm), _b_result(warm)])
 
     await s._drain_turn()
 
@@ -133,7 +166,7 @@ async def test_no_rotation_below_cap(modastack_install):
     s = Session(name="test-rot-small", cwd=str(modastack_install.repo_path))
     s._input_ready = asyncio.Event()
     s._rotation_token_cap = 275_000
-    s._client = _FakeClient([_assistant(small), _result(small)])
+    s._client = _FakeClient([_b_assistant(small), _b_result(small)])
 
     await s._drain_turn()
 
@@ -187,10 +220,10 @@ async def test_multi_call_turn_does_not_over_count_context(modastack_install):
     s._input_ready = asyncio.Event()
     s._rotation_token_cap = 275_000
     s._client = _FakeClient([
-        _assistant(per_call),
-        _assistant(per_call),
-        _assistant(per_call),
-        _result(cumulative),
+        _b_assistant(per_call),
+        _b_assistant(per_call),
+        _b_assistant(per_call),
+        _b_result(cumulative),
     ])
 
     await s._drain_turn()
@@ -216,10 +249,10 @@ async def test_multi_call_turn_rotates_when_single_call_is_over_cap(modastack_in
     s._input_ready = asyncio.Event()
     s._rotation_token_cap = 275_000
     s._client = _FakeClient([
-        _assistant(per_call),
-        _assistant(per_call),
-        _assistant(per_call),
-        _result({"input_tokens": 30, "cache_read_input_tokens": 900_000}),
+        _b_assistant(per_call),
+        _b_assistant(per_call),
+        _b_assistant(per_call),
+        _b_result({"input_tokens": 30, "cache_read_input_tokens": 900_000}),
     ])
 
     await s._drain_turn()
@@ -329,9 +362,11 @@ async def test_rotation_reconnect_clears_error_on_arrives_with_529(
     await asyncio.wait_for(s._rotate(), timeout=5.0)
 
     # The error ResultMessage was handled (no exception, no timeout): the
-    # reconnect succeeded on the first attempt and the session is ready.
+    # reconnect succeeded on the first attempt and the session is ready. The
+    # live client is now a brain session wrapping _ErrorTurnClient (the adapter
+    # converted its SDK ResultMessage into a normalized TurnResult).
     assert s._client is not None
-    assert isinstance(s._client, _ErrorTurnClient)
+    assert isinstance(s._client, BrainSession)
     assert s.detect_state() == "waiting_input"
     assert s.detect_state() != "error"
     assert s._rotation_count == 1  # rotation completed, not wedged at 0

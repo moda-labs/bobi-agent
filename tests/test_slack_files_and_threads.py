@@ -21,6 +21,7 @@ from modastack.slack import (
     download_slack_file,
     upload_slack_file,
     fetch_slack_thread,
+    resolve_channel_id,
 )
 
 
@@ -647,3 +648,45 @@ class TestSlackThreadCommand:
 
         assert result.exit_code != 0
         assert "thread_not_found" in result.output
+
+
+# ---------------------------------------------------------------------------
+# resolve_channel_id (#485 — readable #channel-name in config)
+# ---------------------------------------------------------------------------
+
+class TestResolveChannelId:
+    def test_id_passes_through_without_api_call(self):
+        # No client patched: an ID must resolve with zero network calls.
+        assert resolve_channel_id("xoxb", "C0ABCDEF1") == "C0ABCDEF1"
+        assert resolve_channel_id("xoxb", "") == ""
+
+    def test_resolves_name_with_and_without_hash(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "channels": [
+                {"id": "C111", "name": "general"},
+                {"id": "C222", "name": "codex-test"},
+            ]})
+        with patch.object(pooled, "_client", _make_mock_client(handler)):
+            assert resolve_channel_id("xoxb", "#codex-test") == "C222"
+            assert resolve_channel_id("xoxb", "codex-test") == "C222"
+
+    def test_missing_groups_scope_falls_back_to_public(self):
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            seen.append(url)
+            if "private_channel" in url:
+                return httpx.Response(200, json={"ok": False, "error": "missing_scope"})
+            return httpx.Response(200, json={"ok": True,
+                                             "channels": [{"id": "C9", "name": "pub"}]})
+        with patch.object(pooled, "_client", _make_mock_client(handler)):
+            assert resolve_channel_id("xoxb", "#pub") == "C9"
+        assert any("private_channel" in u for u in seen)  # tried private first
+
+    def test_unknown_name_raises(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "channels": []})
+        with patch.object(pooled, "_client", _make_mock_client(handler)):
+            with pytest.raises(RuntimeError, match="not found"):
+                resolve_channel_id("xoxb", "#nope")

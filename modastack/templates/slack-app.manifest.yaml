@@ -27,6 +27,7 @@ oauth_config:
       - files:read           # read files shared in events
       - files:write          # upload files (modastack slack-upload-file)
       - groups:history       # read + thread replies in private channels
+      - groups:read          # list private channels (resolve a #name login channel)
       - im:history           # direct messages to the bot
       - im:read              # list DM conversations
       - im:write             # open/start a DM — proactive messages to a user
