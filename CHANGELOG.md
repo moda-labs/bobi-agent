@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.34.4 — 2026-06-25
+
+Bugfix release for the Codex-backed Fly fleet, Slack event routing, and
+event-server hardening after the 0.34 rollout.
+
+### Added
+- **Webhook resource grants (#491, closes #488).** Deployment registrations now
+  declare the upstream Slack/GitHub/Linear resources they are allowed to
+  subscribe to, and the event server enforces those grants before accepting
+  webhook topic subscriptions.
+- **Internal Worker-to-Durable-Object auth (#492, fixes #489).** Cloudflare
+  Worker calls into deployment Durable Objects now use an internal shared secret
+  instead of forwarding client bearer auth through the internal boundary.
+
+### Fixed
+- **Slack DM login channel resolution (#506, fixes #499).** Slack login channel
+  values can be specified as readable user/channel references and are resolved
+  against the configured bot token workspace.
+- **Slack mention deduping (#508, fixes #496).** `app_mention` and
+  `message.*` deliveries for the same Slack message are coalesced so mentioned
+  bots do not create duplicate placeholder replies.
+- **Homebrew release gate (#509, fixes #493).** Release validation now checks
+  Homebrew bottle URLs so a green release cannot silently ship broken formula
+  artifacts.
+- **Codex skill exposure (#510).** Codex-backed sessions now receive baked
+  skill paths so `/review`, `/qa`, `/browse`, and related gate commands work in
+  deployed teams.
+- **Codex launched-lead brain selection (#512).** Launched project leads honor
+  the parent team's configured Codex brain instead of falling back to the
+  default brain.
+- **Child agent environment propagation (#516, fixes #513).** Child agent
+  launches now inherit the documented runtime environment needed for brain,
+  tool, and credential compatibility.
+
 ## 0.34.3 — 2026-06-25
 
 Bugfix release for Codex-backed managers handling large streamed responses.
