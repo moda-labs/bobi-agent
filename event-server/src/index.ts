@@ -26,6 +26,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	handleTestSeedResourceGrants,
 	slackSigningSecretFor,
 	getAuthRejectionCounters,
 } from "./core";
@@ -42,6 +43,7 @@ interface Env {
 	DEPLOYMENT_SESSION: DurableObjectNamespace;
 	WEBHOOK_SECRET?: string;
 	SLACK_SIGNING_SECRET?: string;
+	TEST_GRANTS_SECRET?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +451,28 @@ export default {
 			const bubble = await authenticateBubble(storage, ctx);
 			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
 			return respond(await handleAuthorizeResource(storage, data, bubble.id));
+		}
+
+		if (method === "POST" && path === "/__test/resource-grants" && env.TEST_GRANTS_SECRET) {
+			if (request.headers.get("x-moda-test-secret") !== env.TEST_GRANTS_SECRET) {
+				return Response.json({ error: "not found" }, { status: 404 });
+			}
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			const bubble = await authenticateBubble(storage, ctx);
+			if (!bubble) return Response.json({ error: "not found" }, { status: 404 });
+			return respond(await handleTestSeedResourceGrants(storage, data, bubble.id));
 		}
 
 		if (method === "POST" && path === "/slack/workspaces") {

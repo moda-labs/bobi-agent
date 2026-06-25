@@ -64,7 +64,7 @@ export interface ResourceGrant {
 	bubble_id: string;
 	service: "github" | "linear" | "slack";
 	resource: string;
-	granted_by: "upstream_token_verification";
+	granted_by: "upstream_token_verification" | "test_seed";
 	// Linear: the team's organization id, recorded so a future fix can
 	// disambiguate the workspace-ambiguous `linear:TEAM` topic (#488 §4). Null
 	// / absent for github + slack.
@@ -984,6 +984,43 @@ export async function handleAuthorizeResource(
 	};
 	await storage.putResourceGrant(grant);
 	return { status: 200, body: { ok: true } };
+}
+
+export async function handleTestSeedResourceGrants(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	const grants = Array.isArray(body.grants) ? body.grants : [];
+	if (!bubbleId || grants.length === 0) {
+		return { status: 400, body: { error: "invalid_request" } };
+	}
+
+	for (const raw of grants) {
+		if (!raw || typeof raw !== "object") {
+			return { status: 400, body: { error: "invalid_request" } };
+		}
+		const grant = raw as Record<string, unknown>;
+		const service = typeof grant.service === "string" ? grant.service : "";
+		const rawResource = typeof grant.resource === "string" ? grant.resource.trim() : "";
+		if ((service !== "github" && service !== "linear" && service !== "slack") || !rawResource) {
+			return { status: 400, body: { error: "invalid_request" } };
+		}
+		const resource = normalizeResource(service, rawResource);
+		await storage.putResourceGrant({
+			id: `${service}:${resource}:${bubbleId}`,
+			account_id: null,
+			bubble_id: bubbleId,
+			service,
+			resource,
+			granted_by: "test_seed",
+			organization_id: null,
+			created_at: new Date().toISOString(),
+			expires_at: null,
+		});
+	}
+
+	return { status: 200, body: { ok: true, grants: grants.length } };
 }
 
 // The global resource topics in `subs` that the bubble does NOT currently hold a

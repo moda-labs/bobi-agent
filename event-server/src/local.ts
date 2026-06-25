@@ -28,6 +28,7 @@ import {
 	handleTopicEvent,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	handleTestSeedResourceGrants,
 	slackSigningSecretFor,
 	getAuthRejectionCounters,
 } from "./core";
@@ -80,6 +81,7 @@ const resourceGrants = new Map<string, ResourceGrant>();
 
 const webhookSecret = process.env.MODASTACK_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.MODASTACK_ES_SLACK_SIGNING_SECRET || "";
+const testGrantsSecret = process.env.MODASTACK_ES_TEST_GRANTS_SECRET || "";
 
 // ---------------------------------------------------------------------------
 // Map-based storage adapter
@@ -496,6 +498,24 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		const bubble = await authenticateBubble(storage, ctx);
 		if (!bubble) return json(res, { error: "forbidden" }, 403);
 		return respond(res, await handleAuthorizeResource(storage, data, bubble.id));
+	}
+
+	if (method === "POST" && path === "/__test/resource-grants" && testGrantsSecret) {
+		if (req.headers["x-moda-test-secret"] !== testGrantsSecret) {
+			return json(res, { error: "not found" }, 404);
+		}
+		const body = await readBody(req);
+		const data = parseJson(body);
+		if (!data) return json(res, { error: "invalid JSON" }, 400);
+		const ctx = readBubbleAuthHeaders(
+			(n) => req.headers[n] as string | undefined,
+			method,
+			url.pathname + url.search,
+			body,
+		);
+		const bubble = await authenticateBubble(storage, ctx);
+		if (!bubble) return json(res, { error: "not found" }, 404);
+		return respond(res, await handleTestSeedResourceGrants(storage, data, bubble.id));
 	}
 
 	res.writeHead(404);

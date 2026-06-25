@@ -1097,7 +1097,20 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         # a github/linear topic we can't authorize is dropped from the PUT.
         try:
             _bubble = ensure_bubble(es_url, project_path)
-            authorized = _authorize_subscriptions(es_url, _bubble)
+            if has_external:
+                try:
+                    register_slack_workspaces(
+                        es_url, cfg,
+                        bubble_id=_bubble["bubble_id"], bubble_key=_bubble["bubble_key"],
+                    )
+                except Exception as e:
+                    log.info("Signed Slack registration unavailable (%s) — unsigned", e)
+                    register_slack_workspaces(es_url, cfg)
+            authorized = authorize_resources(
+                es_url, cfg, subscribe,
+                _bubble["bubble_id"], _bubble["bubble_key"],
+                filter_unauthorized=False,
+            )
         except Exception as e:
             log.info("Pre-PUT resource authorization unavailable (%s)", e)
             authorized = subscribe

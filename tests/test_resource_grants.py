@@ -88,6 +88,25 @@ def test_authorize_resources_drops_topic_with_missing_credential():
     assert [c["service"] for c in captured] == ["github"]  # only github posted
 
 
+def test_authorize_resources_can_keep_unverified_topics_for_saved_deployment():
+    """Saved deployments may already have server-side no-expiry grants. The
+    update path should try to authorize new resources, but must not silently
+    replace existing subscriptions with a filtered list when credentials are
+    unavailable locally."""
+    transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError(f"unexpected authorize call without credentials: {req.url}")))
+    mock_http = httpx.Client(transport=transport)
+    with patch.object(pooled, "_client", mock_http):
+        kept = authorize_resources(
+            "https://es.invalid", _cfg(),
+            ["github:o/r", "linear:ENG", "inbox/self"],
+            "bub_test", "bkey_test",
+            filter_unauthorized=False,
+        )
+
+    assert kept == ["github:o/r", "linear:ENG", "inbox/self"]
+
+
 def test_authorize_resources_drops_topic_on_server_denial():
     """A 403 from the server (credential can't read the resource) drops the topic."""
     def handler(request: httpx.Request) -> httpx.Response:
