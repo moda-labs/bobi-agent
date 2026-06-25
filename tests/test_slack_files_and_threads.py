@@ -658,6 +658,7 @@ class TestResolveChannelId:
     def test_id_passes_through_without_api_call(self):
         # No client patched: an ID must resolve with zero network calls.
         assert resolve_channel_id("xoxb", "C0ABCDEF1") == "C0ABCDEF1"
+        assert resolve_channel_id("xoxb", "D0ABCDEF1") == "D0ABCDEF1"
         assert resolve_channel_id("xoxb", "") == ""
 
     def test_resolves_name_with_and_without_hash(self):
@@ -690,3 +691,163 @@ class TestResolveChannelId:
         with patch.object(pooled, "_client", _make_mock_client(handler)):
             with pytest.raises(RuntimeError, match="not found"):
                 resolve_channel_id("xoxb", "#nope")
+
+    def test_resolves_user_handle_to_im_channel(self):
+        calls: list[tuple[str, dict]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content) if request.content else {}
+            calls.append((str(request.url), body))
+            url = str(request.url)
+            if "auth.test" in url:
+                return httpx.Response(200, json={
+                    "ok": True, "team": "Auroborium", "team_id": "T123",
+                })
+            if "users.list" in url:
+                return httpx.Response(200, json={"ok": True, "members": [
+                    {"id": "U111", "name": "other", "deleted": False},
+                    {"id": "U222", "name": "zachkozick", "deleted": False},
+                ]})
+            if "conversations.open" in url:
+                assert body == {"users": "U222"}
+                return httpx.Response(200, json={
+                    "ok": True, "channel": {"id": "D0ASVSYSP0D"},
+                })
+            raise AssertionError(f"unexpected Slack URL {url}")
+
+        with patch.object(pooled, "_client", _make_mock_client(handler)):
+            assert resolve_channel_id("xoxb", "@zachkozick") == "D0ASVSYSP0D"
+
+        assert any("users.list" in url for url, _ in calls)
+        assert any("conversations.open" in url for url, _ in calls)
+
+    def test_resolves_enterprise_user_id_to_im_channel(self):
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            url = str(request.url)
+            if "auth.test" in url:
+                return httpx.Response(200, json={
+                    "ok": True, "team": "Auroborium", "team_id": "T123",
+                })
+            if "conversations.open" in url:
+                body = json.loads(request.content)
+                assert body == {"users": "W2222222"}
+                return httpx.Response(200, json={
+                    "ok": True, "channel": {"id": "D0ASVSYSP0D"},
+                })
+            raise AssertionError(f"unexpected Slack URL {url}")
+
+        with patch.object(pooled, "_client", _make_mock_client(handler)):
+            assert resolve_channel_id("xoxb", "@W2222222") == "D0ASVSYSP0D"
+
+        assert not any("users.list" in url for url in calls)
+
+    def test_lowercase_handle_that_looks_like_user_id_is_not_treated_as_id(self):
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            url = str(request.url)
+            if "auth.test" in url:
+                return httpx.Response(200, json={
+                    "ok": True, "team": "Auroborium", "team_id": "T123",
+                })
+            if "users.list" in url:
+                return httpx.Response(200, json={"ok": True, "members": [
+                    {"id": "U2222222", "name": "william", "deleted": False},
+                ]})
+            if "conversations.open" in url:
+                body = json.loads(request.content)
+                assert body == {"users": "U2222222"}
+                return httpx.Response(200, json={
+                    "ok": True, "channel": {"id": "D0ASVSYSP0D"},
+                })
+            raise AssertionError(f"unexpected Slack URL {url}")
+
+        with patch.object(pooled, "_client", _make_mock_client(handler)):
+            assert resolve_channel_id("xoxb", "@william") == "D0ASVSYSP0D"
+
+        assert any("users.list" in url for url in calls)
+
+    def test_unknown_user_error_names_workspace_and_reference(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "auth.test" in url:
+                return httpx.Response(200, json={
+                    "ok": True, "team": "Auroborium", "team_id": "T123",
+                })
+            if "users.list" in url:
+                return httpx.Response(200, json={"ok": True, "members": []})
+            raise AssertionError(f"unexpected Slack URL {url}")
+
+        with patch.object(pooled, "_client", _make_mock_client(handler)):
+            with pytest.raises(RuntimeError) as exc:
+                resolve_channel_id("xoxb", "@missing")
+
+        msg = str(exc.value)
+        assert "@missing" in msg
+        assert "Auroborium" in msg
+        assert "T123" in msg
+
+    def test_user_handle_does_not_match_mutable_display_or_real_name(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "auth.test" in url:
+                return httpx.Response(200, json={
+                    "ok": True, "team": "Auroborium", "team_id": "T123",
+                })
+            if "users.list" in url:
+                return httpx.Response(200, json={"ok": True, "members": [
+                    {
+                        "id": "U2222222",
+                        "name": "bob",
+                        "real_name": "Alice",
+                        "profile": {
+                            "display_name": "alice",
+                            "real_name": "Alice",
+                        },
+                        "deleted": False,
+                    },
+                ]})
+            raise AssertionError(f"unexpected Slack URL {url}")
+
+        with patch.object(pooled, "_client", _make_mock_client(handler)):
+            with pytest.raises(RuntimeError, match="not found"):
+                resolve_channel_id("xoxb", "@alice")
+
+    def test_ambiguous_user_handle_raises(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "auth.test" in url:
+                return httpx.Response(200, json={
+                    "ok": True, "team": "Auroborium", "team_id": "T123",
+                })
+            if "users.list" in url:
+                return httpx.Response(200, json={"ok": True, "members": [
+                    {"id": "U111", "name": "zach", "deleted": False},
+                    {"id": "U222", "name": "zach", "deleted": False},
+                ]})
+            raise AssertionError(f"unexpected Slack URL {url}")
+
+        with patch.object(pooled, "_client", _make_mock_client(handler)):
+            with pytest.raises(RuntimeError, match="ambiguous"):
+                resolve_channel_id("xoxb", "@zach")
+
+    def test_deleted_user_handle_raises(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "auth.test" in url:
+                return httpx.Response(200, json={
+                    "ok": True, "team": "Auroborium", "team_id": "T123",
+                })
+            if "users.list" in url:
+                return httpx.Response(200, json={"ok": True, "members": [
+                    {"id": "U111", "name": "zach", "deleted": True},
+                ]})
+            raise AssertionError(f"unexpected Slack URL {url}")
+
+        with patch.object(pooled, "_client", _make_mock_client(handler)):
+            with pytest.raises(RuntimeError, match="deleted"):
+                resolve_channel_id("xoxb", "@zach")

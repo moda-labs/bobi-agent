@@ -3,11 +3,12 @@
 #
 # ChatGPT-subscription auth: NO OPENAI_API_KEY in secrets — first boot runs the
 # codex device-auth login bootstrap (posts the URL + code to login_channel; you
-# authorize, and auth.json lands on the volume). Set login_channel to a PRIVATE
-# Slack channel ID before deploying (the single-use code grants the login).
+# authorize, and auth.json lands on the volume). Set login_channel before
+# deploying. Use a private "#channel", "@user" for a bot DM in this Slack
+# workspace, or a raw Slack channel ID if needed.
 team: codex-test
 auth: subscription
-login_channel: ""        # <-- set to a private Slack channel ID (e.g. C0XXXXXXX)
+login_channel: ""        # e.g. "#login-private" or "@zachkozick"
 memory: 1gb
 cpus: 1
 volume_size: 3

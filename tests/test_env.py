@@ -86,6 +86,105 @@ class TestAgentSpawnEnv:
         assert env["SOME_TOKEN"] == "abc123"
 
 
+class TestChildAgentEnv:
+    def test_pins_root_and_overrides_stale_parent_brain(self, tmp_path, monkeypatch):
+        from modastack.env import child_agent_env
+
+        root = tmp_path / "install"
+        config_dir = root / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "agent: eng-team\nbrain:\n  kind: codex\n"
+        )
+        monkeypatch.setenv("MODASTACK_ROOT", "/stale/root")
+        monkeypatch.setenv("MODASTACK_BRAIN", "claude")
+
+        env = child_agent_env(root)
+
+        assert env["MODASTACK_ROOT"] == str(root)
+        assert env["MODASTACK_BRAIN"] == "codex"
+
+    def test_clears_stale_parent_brain_for_default_brain_team(
+        self, tmp_path, monkeypatch,
+    ):
+        from modastack.env import child_agent_env
+
+        root = tmp_path / "install"
+        config_dir = root / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text("agent: eng-team\n")
+        monkeypatch.setenv("MODASTACK_BRAIN", "codex")
+
+        env = child_agent_env(root)
+
+        assert "MODASTACK_BRAIN" not in env
+
+    def test_interpolates_brain_kind_from_dotenv(self, tmp_path, monkeypatch):
+        from modastack.env import child_agent_env
+
+        root = tmp_path / "install"
+        config_dir = root / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "agent: eng-team\nbrain:\n  kind: ${TEAM_BRAIN}\n"
+        )
+        (config_dir / ".env").write_text("TEAM_BRAIN=codex\n")
+        monkeypatch.delenv("TEAM_BRAIN", raising=False)
+
+        env = child_agent_env(root)
+
+        assert env["TEAM_BRAIN"] == "codex"
+        assert env["MODASTACK_BRAIN"] == "codex"
+
+    def test_carries_parent_tool_and_credential_environment(self, tmp_path, monkeypatch):
+        from modastack.env import child_agent_env
+
+        root = tmp_path / "install"
+        (root / ".modastack").mkdir(parents=True)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+        monkeypatch.setenv("VENN_API_KEY", "venn-key")
+        monkeypatch.setenv("GH_TOKEN", "gh-token")
+
+        env = child_agent_env(root)
+
+        assert env["OPENAI_API_KEY"] == "sk-openai"
+        assert env["VENN_API_KEY"] == "venn-key"
+        assert env["GH_TOKEN"] == "gh-token"
+
+    def test_loads_dotenv_credentials_without_overriding_parent_env(
+        self, tmp_path, monkeypatch,
+    ):
+        from modastack.env import child_agent_env
+
+        root = tmp_path / "install"
+        config_dir = root / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / ".env").write_text(
+            "OPENAI_API_KEY=from-file\n"
+            "VENN_API_KEY=from-file\n"
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "from-parent")
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+
+        env = child_agent_env(root)
+
+        assert env["OPENAI_API_KEY"] == "from-parent"
+        assert env["VENN_API_KEY"] == "from-file"
+        assert os.environ.get("VENN_API_KEY") is None
+
+    def test_uses_same_path_normalization_as_spawn_env(self, tmp_path, monkeypatch):
+        from modastack.env import agent_spawn_env, child_agent_env
+
+        root = tmp_path / "install"
+        (root / ".modastack").mkdir(parents=True)
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+        spawn_env = agent_spawn_env()
+        child_env = child_agent_env(root)
+
+        assert child_env["PATH"] == spawn_env["PATH"]
+
+
 class TestProbeAndSpawnUseSameHelper:
     """Preflight and runtime must wire the *same* helper so they can't diverge."""
 

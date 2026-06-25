@@ -1,5 +1,9 @@
 import type { NormalizedEvent, SlackNormalizationResult } from "../core";
 
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function normalizeSlackWebhook(
 	payload: Record<string, unknown>,
 	// A workspace may host SEVERAL of our bots (one per team), so the self-filter
@@ -8,6 +12,7 @@ export function normalizeSlackWebhook(
 	// (self-spam incident 2026-06-24). A bare string is still accepted for
 	// back-compat with single-bot callers/tests.
 	selfBotIds?: string | Iterable<string>,
+	selfBotUserIds?: string | Iterable<string>,
 ): SlackNormalizationResult {
 	if (payload.type === "url_verification") {
 		return { event: null, challenge: payload.challenge as string, skip: true };
@@ -40,10 +45,26 @@ export function normalizeSlackWebhook(
 	const eventType = event.type as string;
 	const channelType = (event.channel_type as string) || "";
 	const threadTs = (event.thread_ts as string) || "";
+	const rawText = ((event.text as string) || "").slice(0, 4000);
+
+	const selfUserSet =
+		typeof selfBotUserIds === "string"
+			? new Set([selfBotUserIds])
+			: new Set(selfBotUserIds ?? []);
+	const mentionsSelfUser =
+		selfUserSet.size > 0
+		&& [...selfUserSet].some((id) =>
+			new RegExp(`<@${escapeRegExp(id)}(?:\\|[^>]+)?>`).test(rawText));
 
 	let slackEventType: string;
 	if (eventType === "app_mention") {
 		slackEventType = "slack.mention";
+	} else if (eventType === "message" && mentionsSelfUser && channelType !== "im" && channelType !== "mpim") {
+		// Slack sends a bot mention in a channel as both app_mention and message.*
+		// with the same ts when the generated Slack manifest subscribes to both.
+		// The app_mention carries the user intent; dropping the message copy
+		// prevents two chat events and two placeholders.
+		return { event: null, skip: true };
 	} else if (channelType === "im" || channelType === "mpim") {
 		slackEventType = "slack.dm";
 	} else if (threadTs) {
@@ -56,7 +77,6 @@ export function normalizeSlackWebhook(
 	const appId = (payload.api_app_id as string) || "";
 	const channel = (event.channel as string) || "";
 	const userId = (event.user as string) || "";
-	const rawText = ((event.text as string) || "").slice(0, 4000);
 	const ts = (event.ts as string) || "";
 
 	const isDm = channelType === "im" || channelType === "mpim";

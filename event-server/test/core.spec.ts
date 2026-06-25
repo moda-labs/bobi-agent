@@ -1,12 +1,18 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
 	type StorageAdapter,
 	type DeploymentRecord,
 	type BubbleRecord,
 	type BubbleAuthContext,
 	type SlackWorkspaceRecord,
+	type ResourceGrant,
 	type NormalizedEvent,
 	namespaceSubKey,
+	parseGlobalTopic,
+	normalizeResource,
+	handleAuthorizeResource,
+	unauthorizedGlobalTopics,
+	admittedDeploymentIds,
 	createTopicEvent,
 	normalizeGitHubPayload,
 	normalizeLinearPayload,
@@ -31,6 +37,21 @@ import {
 	handleSlackWorkspaceRegister,
 	resolveSlackSigningSecret,
 } from "../src/core";
+
+afterEach(() => vi.unstubAllGlobals());
+
+function stubSlackAuth(teamId: string, botId = "B1", appId = "A1") {
+	vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+		const u = String(url);
+		if (u.includes("/auth.test")) {
+			return fetchOk(200, { ok: true, team_id: teamId, bot_id: botId });
+		}
+		if (u.includes("/bots.info")) {
+			return fetchOk(200, { ok: true, bot: { app_id: appId } });
+		}
+		return fetchOk(200, { ok: true, ts: "1.2" });
+	}));
+}
 
 describe("normalizeGitHubPayload", () => {
 	it("normalizes an issue event with v2 envelope", () => {
@@ -317,6 +338,78 @@ describe("normalizeSlackPayload", () => {
 		});
 		expect(result.event!.type).toBe("slack.thread_reply");
 		expect(result.event!.fields!.thread_ts).toBe("123.000");
+	});
+
+	it("skips message-channel duplicate when thread reply mentions our bot user", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOT> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		}, undefined, new Set(["UBOT"]));
+		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
+	});
+
+	it("skips message-channel duplicate with Slack's labeled mention form", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOT|eng-bot> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		}, undefined, new Set(["UBOT"]));
+		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
+	});
+
+	it("matches bot user mentions literally", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOTX> should not match",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		}, undefined, new Set(["UBOT."]));
+		expect(result.skip).toBe(false);
+		expect(result.event!.type).toBe("slack.thread_reply");
+	});
+
+	it("keeps thread replies that mention someone other than our bot user", () => {
+		const result = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UOTHER> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		}, undefined, new Set(["UBOT"]));
+		expect(result.skip).toBe(false);
+		expect(result.event!.type).toBe("slack.thread_reply");
 	});
 
 	it("skips own bot messages when selfBotId matches", () => {
@@ -807,15 +900,19 @@ function createMockStorage(): StorageAdapter & {
 	subscriptions: Map<string, Set<string>>;
 	bubbles: Map<string, BubbleRecord>;
 	slackWorkspaces: Map<string, SlackWorkspaceRecord>;
+	resourceGrants: Map<string, ResourceGrant>;
 	delivered: NormalizedEvent[];
 	deliveredTo: Array<{ event: NormalizedEvent; ids: string[] }>;
 	initCalls: Array<{ deploymentId: string; subscriptions: string[] }>;
+	/** Test helper: directly seed a grant (bypasses upstream verification). */
+	seedGrant(service: string, resource: string, bubbleId: string): void;
 } {
 	const deployments = new Map<string, DeploymentRecord>();
 	const apiKeyIndex = new Map<string, string>();
 	const subscriptions = new Map<string, Set<string>>();
 	const bubbles = new Map<string, BubbleRecord>();
 	const slackWorkspaces = new Map<string, SlackWorkspaceRecord>();
+	const resourceGrants = new Map<string, ResourceGrant>();
 	const delivered: NormalizedEvent[] = [];
 	const deliveredTo: Array<{ event: NormalizedEvent; ids: string[] }> = [];
 	const initCalls: Array<{ deploymentId: string; subscriptions: string[] }> = [];
@@ -826,9 +923,23 @@ function createMockStorage(): StorageAdapter & {
 		subscriptions,
 		bubbles,
 		slackWorkspaces,
+		resourceGrants,
 		delivered,
 		deliveredTo,
 		initCalls,
+
+		seedGrant(service: string, resource: string, bubbleId: string) {
+			resourceGrants.set(`${service}:${resource}:${bubbleId}`, {
+				id: `grant_${service}_${resource}_${bubbleId}`,
+				account_id: null,
+				bubble_id: bubbleId,
+				service: service as "github" | "linear" | "slack",
+				resource,
+				granted_by: "upstream_token_verification",
+				created_at: "2026-01-01T00:00:00Z",
+				expires_at: null,
+			});
+		},
 
 		async getDeploymentByApiKey(apiKey: string) {
 			const id = apiKeyIndex.get(apiKey);
@@ -840,6 +951,16 @@ function createMockStorage(): StorageAdapter & {
 				if (dep.name === name && dep.bubble_id === bubbleId) return { ...dep };
 			}
 			return null;
+		},
+		async getDeploymentById(id: string) {
+			const dep = deployments.get(id);
+			return dep ? { ...dep } : null;
+		},
+		async putResourceGrant(grant: ResourceGrant) {
+			resourceGrants.set(`${grant.service}:${grant.resource}:${grant.bubble_id}`, grant);
+		},
+		async hasResourceGrant(service: string, resource: string, bubbleId: string) {
+			return resourceGrants.has(`${service}:${resource}:${bubbleId}`);
 		},
 		async putDeployment(dep: DeploymentRecord) {
 			deployments.set(dep.id, { ...dep });
@@ -1162,6 +1283,125 @@ describe("handleSlackWebhook", () => {
 		expect(store.delivered).toHaveLength(0);
 	});
 
+	it("deduplicates app_mention against the matching message.channels event", async () => {
+		const store = createMockStorage();
+		store.slackWorkspaces.set("T123", {
+			bots: {
+				A123: {
+					bot_token: "xoxb-test",
+					bot_id: "BSELF",
+					bot_user_id: "UBOT",
+					app_id: "A123",
+				},
+			},
+		});
+
+		const mentionPayload = {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A123",
+			event: {
+				type: "app_mention",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOT> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		};
+		const messagePayload = {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A123",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOT> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		};
+
+		const mention = await handleSlackWebhook(store, mentionPayload);
+		const message = await handleSlackWebhook(store, messagePayload);
+
+		expect(mention.status).toBe(200);
+		expect(message.status).toBe(200);
+		expect(store.delivered).toHaveLength(1);
+		expect(store.delivered[0].type).toBe("slack.mention");
+	});
+
+	it("does not deduplicate a message mentioning another app's bot user", async () => {
+		const store = createMockStorage();
+		store.slackWorkspaces.set("T123", {
+			bots: {
+				A_ENG: {
+					bot_token: "xoxb-eng",
+					bot_id: "B_ENG",
+					bot_user_id: "UENG",
+					app_id: "A_ENG",
+				},
+				A_SUPPORT: {
+					bot_token: "xoxb-support",
+					bot_id: "B_SUPPORT",
+					bot_user_id: "USUPPORT",
+					app_id: "A_SUPPORT",
+				},
+			},
+		});
+
+		await handleSlackWebhook(store, {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A_ENG",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@USUPPORT> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		});
+
+		expect(store.delivered).toHaveLength(1);
+		expect(store.delivered[0].type).toBe("slack.thread_reply");
+	});
+
+	it("deduplicates with a single bot record even when api_app_id does not match its key", async () => {
+		const store = createMockStorage();
+		store.slackWorkspaces.set("T123", {
+			bots: {
+				BSELF: {
+					bot_token: "xoxb-test",
+					bot_id: "BSELF",
+					bot_user_id: "UBOT",
+				},
+			},
+		});
+
+		await handleSlackWebhook(store, {
+			type: "event_callback",
+			team_id: "T123",
+			api_app_id: "A_UNKNOWN",
+			event: {
+				type: "message",
+				user: "U123",
+				channel: "C456",
+				channel_type: "channel",
+				text: "<@UBOT> can you check this?",
+				ts: "123.456",
+				thread_ts: "123.000",
+			},
+		});
+
+		expect(store.delivered).toHaveLength(0);
+	});
+
 	it("returns challenge for url_verification payload", async () => {
 		const store = createMockStorage();
 		const result = await handleSlackWebhook(store, {
@@ -1213,7 +1453,9 @@ describe("handleSlackWebhook", () => {
 describe("handleRegisterDeployment", () => {
 	it("MINTS a bubble for an unsigned registration and returns the key once", async () => {
 		const store = createMockStorage();
-		const body = { name: "my-deploy", subscriptions: ["github:org/repo", "linear:PROJ"] };
+		// MINT carries only non-global bootstrap topics (a freshly minted bubble
+		// holds no resource grants yet; global topics arrive after authorize, #488).
+		const body = { name: "my-deploy", subscriptions: ["_bootstrap", "inbox/my-deploy"] };
 		const raw = JSON.stringify(body);
 		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
 		expect(result.status).toBe(201);
@@ -1225,11 +1467,39 @@ describe("handleRegisterDeployment", () => {
 		expect(store.bubbles.has(resp.bubble_id)).toBe(true);
 
 		expect(store.deployments.size).toBe(1);
-		// Global webhook topics are not namespaced.
-		expect(store.subscriptions.get("github:org/repo")?.has(resp.deployment_id)).toBe(true);
-		expect(store.subscriptions.get("linear:PROJ")?.has(resp.deployment_id)).toBe(true);
+		// Non-global topics are namespaced to the minted bubble.
+		expect(store.subscriptions.get(`${resp.bubble_id}:_bootstrap`)?.has(resp.deployment_id)).toBe(true);
 		expect(store.initCalls).toHaveLength(1);
 		expect(store.initCalls[0].deploymentId).toBe(resp.deployment_id);
+	});
+
+	it("indexes a granted global topic on JOIN; hard-rejects an ungranted one (#488)", async () => {
+		const store = createMockStorage();
+		const bubble = seedBubble(store);
+		// Bubble holds a github grant but NOT a linear grant.
+		store.seedGrant("github", "org/repo", bubble.id);
+
+		// JOIN with only the granted topic — indexed (global topics are not namespaced).
+		const okBody = { name: "d", subscriptions: ["github:org/repo"] };
+		const okRaw = JSON.stringify(okBody);
+		const okCtx = await signCtx(bubble, "POST", "/deployments", okRaw);
+		const okRes = await handleRegisterDeployment(store, okBody, okCtx);
+		expect(okRes.status).toBe(201);
+		const okResp = okRes.body as { deployment_id: string };
+		expect(store.subscriptions.get("github:org/repo")?.has(okResp.deployment_id)).toBe(true);
+
+		// JOIN that also asks for the UNGRANTED linear topic — whole request is
+		// rejected 400, listing the unauthorized topic, with NO index writes.
+		const badBody = { name: "d2", subscriptions: ["inbox/d2", "github:org/repo", "linear:PROJ"] };
+		const badRaw = JSON.stringify(badBody);
+		const badCtx = await signCtx(bubble, "POST", "/deployments", badRaw, "n2");
+		const badRes = await handleRegisterDeployment(store, badBody, badCtx);
+		expect(badRes.status).toBe(400);
+		expect((badRes.body as { error: string }).error).toBe("unauthorized_topics");
+		expect((badRes.body as { topics: string[] }).topics).toEqual(["linear:PROJ"]);
+		// Reject-as-a-unit: the non-global topic in the same request is NOT indexed.
+		expect(store.subscriptions.get(`${bubble.id}:inbox/d2`)).toBeUndefined();
+		expect(store.deployments.has("d2")).toBe(false);
 	});
 
 	it("namespaces non-global subscriptions to the bubble", async () => {
@@ -1300,6 +1570,7 @@ describe("handleRegisterDeployment", () => {
 	it("supersedes a prior deployment with the same name in the same bubble (#278)", async () => {
 		const store = createMockStorage();
 		const bubble = seedBubble(store);
+		store.seedGrant("github", "org/repo", bubble.id); // re-register adds this global topic
 
 		// First registration — joins the existing bubble.
 		const body1 = { name: "worker", subscriptions: ["inbox/worker"] };
@@ -1364,6 +1635,7 @@ describe("handleUpdateSubscriptions", () => {
 		};
 		store.deployments.set("d1", dep);
 		store.apiKeyIndex.set("key1", "d1");
+		store.seedGrant("linear", "PROJ", "bub_test"); // grant required to add a global topic
 
 		const result = await handleUpdateSubscriptions(store, "d1", "key1", {
 			add: ["linear:PROJ"],
@@ -1397,6 +1669,8 @@ describe("handleUpdateSubscriptions", () => {
 		};
 		store.deployments.set("d1", dep);
 		store.apiKeyIndex.set("key1", "d1");
+		store.seedGrant("github", "org/repo", "bub_test");
+		store.seedGrant("linear", "PROJ", "bub_test");
 
 		const result = await handleUpdateSubscriptions(store, "d1", "key1", {
 			add: ["github:org/repo", "linear:PROJ"],
@@ -1414,6 +1688,7 @@ describe("handleUpdateSubscriptions", () => {
 		};
 		store.deployments.set("d1", dep);
 		store.apiKeyIndex.set("key1", "d1");
+		store.seedGrant("slack", "T1", "bub_test");
 		store.subscriptions.set("bub_test:inbox/test", new Set(["d1"]));
 		store.subscriptions.set("slack:T1", new Set(["d1"]));
 
@@ -1455,6 +1730,7 @@ describe("handleUpdateSubscriptions", () => {
 		};
 		store.deployments.set("d1", dep);
 		store.apiKeyIndex.set("key1", "d1");
+		store.seedGrant("slack", "T1", "bub_test");
 
 		await handleUpdateSubscriptions(store, "d1", "key1", { add: ["slack:T1"] });
 		const saved = store.deployments.get("d1")!;
@@ -1566,6 +1842,17 @@ describe("handleTopicEvent", () => {
 		const last = store.deliveredTo[store.deliveredTo.length - 1];
 		expect(last.ids).toEqual(["depA"]); // bubble B's subscriber excluded
 	});
+
+	it("rejects body-derived global webhook routing fields on generic publishes", async () => {
+		const store = createMockStorage();
+		const bubble = seedBubble(store, "bub_A", "bkey_A");
+		const body = { source: "ci", repo: "victim/repo", payload: { text: "fake" } };
+		const raw = JSON.stringify(body);
+		const ctx = await signCtx(bubble, "POST", "/events/deploy.complete", raw);
+		const result = await handleTopicEvent(store, "deploy.complete", body, ctx);
+		expect(result.status).toBe(400);
+		expect(store.delivered).toHaveLength(0);
+	});
 });
 
 describe("handleSlackSend", () => {
@@ -1600,6 +1887,7 @@ describe("handleSlackSend", () => {
 	// though both name the same Slack workspace id.
 	it("does not read another bubble's workspace registration", async () => {
 		const store = createMockStorage();
+		stubSlackAuth("T1", "B_B", "A_B");
 		// Bubble B registers workspace T1 (scoped to B).
 		await handleSlackWorkspaceRegister(
 			store, { workspace_id: "T1", bot_token: "xoxb-B", bot_id: "B_B" }, "bubB",
@@ -1643,12 +1931,15 @@ describe("handleSlackWorkspaceRegister", () => {
 			workspace_id: "T_EXPLICIT",
 			bot_token: "xoxb-test",
 			bot_id: "B_EXPLICIT",
+			bot_user_id: "U_EXPLICIT",
 		});
 		expect(result.status).toBe(200);
 		const body = result.body as Record<string, unknown>;
 		expect(body.bot_id).toBe("B_EXPLICIT");
+		expect(body.bot_user_id).toBe("U_EXPLICIT");
 		const ws = store.slackWorkspaces.get("T_EXPLICIT");
 		expect(ws?.bot_id).toBe("B_EXPLICIT");
+		expect(ws?.bots?.B_EXPLICIT?.bot_user_id).toBe("U_EXPLICIT");
 	});
 
 	// #487: an UNSIGNED registration writes only the global self-reply record —
@@ -1668,6 +1959,7 @@ describe("handleSlackWorkspaceRegister", () => {
 	// bubble — and only that bubble — to send through the workspace.
 	it("signed registration writes both global and bubble-scoped records", async () => {
 		const store = createMockStorage();
+		stubSlackAuth("T1", "B_A", "A_A");
 		await handleSlackWorkspaceRegister(
 			store, { workspace_id: "T1", bot_token: "xoxb-A", bot_id: "B_A", app_id: "A_A" }, "bubA",
 		);
@@ -1676,12 +1968,11 @@ describe("handleSlackWorkspaceRegister", () => {
 		expect(global?.bots?.A_A?.bot_token).toBe("xoxb-A");
 		expect(scoped?.bots?.A_A?.bot_token).toBe("xoxb-A");
 
-		// The scoped record makes outbound send succeed reaching credential
-		// selection (then 502 in the sandbox where the slack.com fetch fails).
+		// The scoped record makes outbound send use the verified workspace token.
 		const send = await handleSlackSend(
 			store, { channel: "C1", text: "hi", workspace: "T1", app_id: "A_A" }, "bubA",
 		);
-		expect(send.status).toBe(502);
+		expect(send.status).toBe(200);
 	});
 
 	// Incident 2026-06-24: a second bot registering the same workspace must NOT
@@ -1731,7 +2022,12 @@ describe("handleSlackWorkspaceRegister", () => {
 	it("preserves an existing signing_secret when a later registration omits it", async () => {
 		const store = createMockStorage();
 		await handleSlackWorkspaceRegister(store, {
-			workspace_id: "T1", bot_token: "x1", bot_id: "B1", app_id: "A1", signing_secret: "sec-1",
+			workspace_id: "T1",
+			bot_token: "x1",
+			bot_id: "B1",
+			bot_user_id: "U1",
+			app_id: "A1",
+			signing_secret: "sec-1",
 		});
 		// Older client re-registers the same app (same resolved app_id) WITHOUT a secret.
 		await handleSlackWorkspaceRegister(store, {
@@ -1739,6 +2035,7 @@ describe("handleSlackWorkspaceRegister", () => {
 		});
 		const ws = store.slackWorkspaces.get("T1");
 		expect(ws?.bots?.A1?.signing_secret).toBe("sec-1");      // preserved
+		expect(ws?.bots?.A1?.bot_user_id).toBe("U1");            // preserved
 		expect(ws?.bots?.A1?.bot_token).toBe("x1-rotated");      // token refreshed
 	});
 });
@@ -1829,5 +2126,248 @@ describe("auth rejection counters", () => {
 		const c = getAuthRejectionCounters();
 		c.bad_signature = 999;
 		expect(getAuthRejectionCounters().bad_signature).toBe(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #488 — resource-grant authorization
+// ---------------------------------------------------------------------------
+
+describe("parseGlobalTopic / normalizeResource", () => {
+	it("parses github + linear on the first colon", () => {
+		expect(parseGlobalTopic("github:org/repo")).toEqual({ service: "github", resource: "org/repo" });
+		expect(parseGlobalTopic("linear:ENG")).toEqual({ service: "linear", resource: "ENG" });
+	});
+
+	it("reduces a slack channel-scoped topic to the team id (grant gates the whole team)", () => {
+		expect(parseGlobalTopic("slack:T123")).toEqual({ service: "slack", resource: "T123" });
+		expect(parseGlobalTopic("slack:T123:C456")).toEqual({ service: "slack", resource: "T123" });
+	});
+
+	it("lowercases + strips .git for github so the grant key and topic never diverge", () => {
+		expect(normalizeResource("github", "Org/Repo.git")).toBe("org/repo");
+		expect(parseGlobalTopic("github:Org/Repo")).toEqual({ service: "github", resource: "org/repo" });
+		// linear/slack are case-significant upstream — left verbatim.
+		expect(normalizeResource("linear", "ENG")).toBe("ENG");
+		expect(normalizeResource("slack", "T123")).toBe("T123");
+	});
+
+	it("returns null for non-global or malformed keys", () => {
+		expect(parseGlobalTopic("inbox/manager")).toBeNull();
+		expect(parseGlobalTopic("github:")).toBeNull();
+		expect(parseGlobalTopic("monitor/support.email")).toBeNull();
+	});
+});
+
+// A Response-ish stub for the verifier fetch (Worker/Node `fetch`).
+function fetchOk(status: number, json: unknown = {}) {
+	return { ok: status >= 200 && status < 300, status, json: async () => json };
+}
+
+describe("handleAuthorizeResource", () => {
+	afterEach(() => vi.unstubAllGlobals());
+
+	it("github: a 2xx repo read writes a grant; the credential is never stored (test 2/4)", async () => {
+		const store = createMockStorage();
+		const fetchMock = vi.fn(async () => fetchOk(200, { full_name: "org/repo", private: true }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const res = await handleAuthorizeResource(
+			store, { service: "github", resource: "org/repo", credential: "ghp_secrettoken" }, "bubA",
+		);
+		expect(res.status).toBe(200);
+		expect(await store.hasResourceGrant("github", "org/repo", "bubA")).toBe(true);
+		// The token was sent to GitHub but is never stored on the grant.
+		const grant = store.resourceGrants.get("github:org/repo:bubA")!;
+		expect(JSON.stringify(grant)).not.toContain("ghp_secrettoken");
+		expect((grant as Record<string, unknown>).credential).toBeUndefined();
+		expect(grant.account_id).toBeNull(); // shaped for the future account system
+	});
+
+	it("github: a 404/401 → opaque 403 and NO grant (test 2)", async () => {
+		const store = createMockStorage();
+		vi.stubGlobal("fetch", vi.fn(async () => fetchOk(404)));
+		const res = await handleAuthorizeResource(
+			store, { service: "github", resource: "org/ghost", credential: "ghp_x" }, "bubA",
+		);
+		expect(res.status).toBe(403);
+		expect(await store.hasResourceGrant("github", "org/ghost", "bubA")).toBe(false);
+	});
+
+	it("github: 2xx grants regardless of private/permissions; non-2xx denies (Q4, test 14)", async () => {
+		const store = createMockStorage();
+		// A PUBLIC repo with permissions.push == false still grants — only the 2xx
+		// distinction gates (the Rev-2 private||push tightening is dropped).
+		vi.stubGlobal("fetch", vi.fn(async () =>
+			fetchOk(200, { private: false, permissions: { push: false, pull: true } })));
+		const ok = await handleAuthorizeResource(
+			store, { service: "github", resource: "pub/repo", credential: "ghp_x" }, "bubA",
+		);
+		expect(ok.status).toBe(200);
+		expect(await store.hasResourceGrant("github", "pub/repo", "bubA")).toBe(true);
+
+		vi.stubGlobal("fetch", vi.fn(async () => fetchOk(403)));
+		const denied = await handleAuthorizeResource(
+			store, { service: "github", resource: "no/access", credential: "ghp_x" }, "bubA",
+		);
+		expect(denied.status).toBe(403);
+		expect(await store.hasResourceGrant("github", "no/access", "bubA")).toBe(false);
+	});
+
+	it("linear: team key present → grant (records org id); absent → 403 (test 3)", async () => {
+		const store = createMockStorage();
+		vi.stubGlobal("fetch", vi.fn(async () =>
+			fetchOk(200, { data: { teams: { nodes: [{ id: "t1", key: "ENG", organization: { id: "org_9" } }] } } })));
+		const ok = await handleAuthorizeResource(
+			store, { service: "linear", resource: "ENG", credential: "lin_secret" }, "bubA",
+		);
+		expect(ok.status).toBe(200);
+		const grant = store.resourceGrants.get("linear:ENG:bubA")!;
+		expect(grant.organization_id).toBe("org_9");
+		expect(JSON.stringify(grant)).not.toContain("lin_secret");
+
+		// A token valid org-wide but WITHOUT the requested team → no node → 403.
+		vi.stubGlobal("fetch", vi.fn(async () => fetchOk(200, { data: { teams: { nodes: [] } } })));
+		const denied = await handleAuthorizeResource(
+			store, { service: "linear", resource: "OPS", credential: "lin_x" }, "bubA",
+		);
+		expect(denied.status).toBe(403);
+		expect(await store.hasResourceGrant("linear", "OPS", "bubA")).toBe(false);
+	});
+
+	it("rejects invalid service / empty resource / missing credential with 400 (no upstream call)", async () => {
+		const store = createMockStorage();
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		// slack is not authorized here (it converges via /slack/workspaces).
+		expect((await handleAuthorizeResource(store, { service: "slack", resource: "T1", credential: "x" }, "b")).status).toBe(400);
+		expect((await handleAuthorizeResource(store, { service: "github", resource: "", credential: "x" }, "b")).status).toBe(400);
+		expect((await handleAuthorizeResource(store, { service: "github", resource: "org/repo", credential: "" }, "b")).status).toBe(400);
+		// github must be owner/repo shape; linear must be alnum (GraphQL-injection guard).
+		expect((await handleAuthorizeResource(store, { service: "github", resource: "not-a-slug", credential: "x" }, "b")).status).toBe(400);
+		expect((await handleAuthorizeResource(store, { service: "linear", resource: 'A"}}}injection', credential: "x" }, "b")).status).toBe(400);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("is idempotent — re-authorizing re-verifies and is a no-op write", async () => {
+		const store = createMockStorage();
+		const fetchMock = vi.fn(async () => fetchOk(200, {}));
+		vi.stubGlobal("fetch", fetchMock);
+		await handleAuthorizeResource(store, { service: "github", resource: "org/repo", credential: "ghp_x" }, "bubA");
+		await handleAuthorizeResource(store, { service: "github", resource: "org/repo", credential: "ghp_x" }, "bubA");
+		expect(fetchMock).toHaveBeenCalledTimes(2);   // re-verifies each time
+		expect(store.resourceGrants.size).toBe(1);     // single grant key
+	});
+});
+
+describe("unauthorizedGlobalTopics", () => {
+	it("returns only the global topics the bubble lacks a grant for", async () => {
+		const store = createMockStorage();
+		store.seedGrant("github", "org/repo", "bubA");
+		const bad = await unauthorizedGlobalTopics(store, "bubA", [
+			"inbox/manager",        // non-global — ignored
+			"github:org/repo",      // granted — ok
+			"linear:ENG",           // ungranted
+			"slack:T1:C9",          // ungranted (team T1)
+		]);
+		expect(bad).toEqual(["linear:ENG", "slack:T1:C9"]);
+	});
+});
+
+describe("resource-grant delivery filter (admittedDeploymentIds — tests 6/7)", () => {
+	// Resolve admitted ids using the store's subscription index, the same way the
+	// runtime adapters call admittedDeploymentIds.
+	const admit = (store: ReturnType<typeof createMockStorage>, event: NormalizedEvent) =>
+		admittedDeploymentIds(store, event, async (k) => store.subscriptions.get(k) ?? []);
+
+	function depIn(store: ReturnType<typeof createMockStorage>, id: string, bubbleId: string) {
+		store.deployments.set(id, { id, name: id, api_key: `k_${id}`, bubble_id: bubbleId, subscriptions: [] });
+	}
+
+	it("delivers a github event only to a bubble holding the grant — a stale index entry is dropped (test 6)", async () => {
+		const store = createMockStorage();
+		depIn(store, "depGranted", "bubGranted");
+		depIn(store, "depStale", "bubStale");
+		// BOTH are in the subscription index (depStale is a stale/forged entry).
+		await store.addSubscription("github:org/repo", "depGranted");
+		await store.addSubscription("github:org/repo", "depStale");
+		store.seedGrant("github", "org/repo", "bubGranted"); // only the granted bubble
+
+		const event = normalizeGitHubPayload("issues", "d1", {
+			action: "opened", repository: { full_name: "org/repo" },
+		})!;
+		const admitted = await admit(store, event);
+		expect([...admitted]).toEqual(["depGranted"]); // stale entry filtered out
+	});
+
+	it("multi-bubble: two granted bubbles both receive; a third without a grant gets none (test 7)", async () => {
+		const store = createMockStorage();
+		depIn(store, "depA", "bubA");
+		depIn(store, "depB", "bubB");
+		depIn(store, "depC", "bubC");
+		for (const d of ["depA", "depB", "depC"]) await store.addSubscription("github:org/repo", d);
+		store.seedGrant("github", "org/repo", "bubA");
+		store.seedGrant("github", "org/repo", "bubB");
+
+		const event = normalizeGitHubPayload("issues", "d2", {
+			action: "opened", repository: { full_name: "org/repo" },
+		})!;
+		const admitted = await admit(store, event);
+		expect([...admitted].sort()).toEqual(["depA", "depB"]);
+	});
+
+	it("slack: a channel event is grant-filtered by team id (slack:T:C → grant slack:T)", async () => {
+		const store = createMockStorage();
+		depIn(store, "depGranted", "bubGranted");
+		depIn(store, "depStale", "bubStale");
+		// The channel-scoped subscription key the manager registers.
+		await store.addSubscription("slack:T1:C9", "depGranted");
+		await store.addSubscription("slack:T1:C9", "depStale");
+		store.seedGrant("slack", "T1", "bubGranted"); // grant keyed on the TEAM id
+
+		const event = normalizeSlackPayload({
+			type: "event_callback", team_id: "T1",
+			event: { type: "app_mention", channel: "C9", channel_type: "channel", user: "U1", text: "hi", ts: "1.0" },
+		}).event!;
+		const admitted = await admit(store, event);
+		expect([...admitted]).toEqual(["depGranted"]);
+	});
+
+	it("a non-global (bubble-scoped) event admits all subscribers without a grant check", async () => {
+		const store = createMockStorage();
+		depIn(store, "dep1", "bubA");
+		await store.addSubscription(namespaceSubKey("bubA", "inbox/x"), "dep1");
+		const event = createTopicEvent("inbox/x", { payload: {} }, "bubA");
+		const admitted = await admit(store, event);
+		expect([...admitted]).toEqual(["dep1"]); // no grant needed
+	});
+});
+
+describe("handleSlackWorkspaceRegister resource grant (#488 §6, test 8)", () => {
+	it("a SIGNED registration writes a slack grant; an UNSIGNED one does not", async () => {
+		const store = createMockStorage();
+		// Unsigned (no bubble) — global self-reply record only, no grant.
+		await handleSlackWorkspaceRegister(store, { workspace_id: "T1", bot_token: "x", bot_id: "B1", app_id: "A1" });
+		expect(await store.hasResourceGrant("slack", "T1", "bubA")).toBe(false);
+
+		// Signed (bubble authenticated) — also writes the slack grant.
+		stubSlackAuth("T1", "B1", "A1");
+		await handleSlackWorkspaceRegister(
+			store, { workspace_id: "T1", bot_token: "x", bot_id: "B1", app_id: "A1" }, "bubA",
+		);
+		expect(await store.hasResourceGrant("slack", "T1", "bubA")).toBe(true);
+	});
+
+	it("denies a signed slack registration when auth.test cannot prove the workspace", async () => {
+		const store = createMockStorage();
+		vi.stubGlobal("fetch", vi.fn(async () => fetchOk(200, { ok: true, team_id: "T_OTHER", bot_id: "B1" })));
+
+		const result = await handleSlackWorkspaceRegister(
+			store, { workspace_id: "T1", bot_token: "x", bot_id: "B_FAKE", app_id: "A_FAKE" }, "bubA",
+		);
+
+		expect(result.status).toBe(403);
+		expect(await store.hasResourceGrant("slack", "T1", "bubA")).toBe(false);
+		expect(store.slackWorkspaces.get("bubA:T1")).toBeUndefined();
 	});
 });

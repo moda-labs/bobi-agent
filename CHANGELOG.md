@@ -27,6 +27,176 @@ and give clear local-vs-cloud deployment guidance.
 - **"Start it for me" button + `/api/run-start`.** Users run `modastack start`
   in their own terminal.
 
+## 0.34.12 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.11 canary run.
+
+### Fixed
+- **Internal Durable Object POST auth on Cloudflare.** Worker-to-DO `/init` and
+  `/event` requests now include the internal auth token as a private query
+  parameter in addition to the existing internal header. This matches the
+  production-safe WebSocket fallback and fixes `POST /deployments` returning
+  `500 Internal Server Error` while `modastack ask` tried to open a temporary
+  reply channel for the canary smoke.
+- **WebSocket transport fixes.** Includes the 0.34.10 and 0.34.11 fixes for
+  production WebSocket upgrades and protocol negotiation.
+
+## 0.34.11 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.10 canary run.
+
+### Fixed
+- **WebSocket protocol negotiation.** Event clients no longer send the
+  deployment bearer token as a `Sec-WebSocket-Protocol` value. The Worker still
+  authenticates WebSocket subscriptions with the normal `Authorization` bearer
+  header, and removing the auth subprotocol avoids `websocket-client` rejecting
+  otherwise-successful handshakes with `Invalid WebSocket Header` when the
+  server does not select that subprotocol.
+- **Production WebSocket session upgrades.** Includes the 0.34.10 fix that
+  trusts the public Worker's deployment authentication for WebSocket upgrades
+  while keeping internal `/init` and `/event` writes protected by the internal
+  secret.
+
+## 0.34.10 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.9 canary run.
+
+### Fixed
+- **Production WebSocket session upgrades.** `DeploymentSession` now trusts the
+  public Worker's deployment authentication for WebSocket upgrades instead of
+  requiring a second internal Durable Object auth token on that hop. Internal
+  `/init` and `/event` writes still require the internal secret. This targets
+  Cloudflare production handshakes that returned an empty `403 Forbidden` even
+  after deployment auth succeeded for HTTP registration and subscription
+  updates.
+- **Production WebSocket upgrade preservation.** Includes the 0.34.9 request
+  preservation fix, plus the earlier public and internal WebSocket auth
+  fallbacks from 0.34.7 and 0.34.8.
+
+## 0.34.9 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.8 canary run.
+
+### Fixed
+- **Production WebSocket upgrade preservation.** The Worker now wraps the
+  original public WebSocket upgrade request when forwarding to
+  `DeploymentSession`, changing only the internal URL token. This preserves
+  Cloudflare's production upgrade metadata while still authenticating the
+  Worker-to-Durable-Object hop.
+- **Internal Durable Object WebSocket auth on Cloudflare.** Includes the 0.34.8
+  private query-token fallback for Worker-created WebSocket requests.
+- **Public WebSocket auth on Cloudflare.** Includes the 0.34.7 deployment-key
+  subprotocol fallback for public event clients.
+
+## 0.34.8 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.7 canary run.
+
+### Fixed
+- **Internal Durable Object WebSocket auth on Cloudflare.** Worker-created
+  WebSocket requests to `DeploymentSession` now carry the internal DO secret in
+  a private query parameter instead of relying on WebSocket headers surviving
+  `DurableObjectStub.fetch()`. This targets the remaining bodyless `403
+  Forbidden` seen after the public deployment key had already authenticated.
+- **Public WebSocket auth on Cloudflare.** Includes the 0.34.7 client fallback
+  that sends deployment bearer auth as a WebSocket subprotocol in addition to
+  the `Authorization` header.
+- **Release ordering for event-server hotfixes.** Includes the 0.34.6 release
+  workflow change that deploys the Cloudflare event server before the canary
+  smoke.
+
+## 0.34.7 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.6 canary run.
+
+### Fixed
+- **Public WebSocket auth on Cloudflare.** Event clients now send their
+  deployment bearer token in a dedicated WebSocket subprotocol in addition to
+  the `Authorization` header, and the Worker accepts either form. This fixes
+  Cloudflare WebSocket upgrades that returned `403 Forbidden` even though the
+  same deployment key worked for HTTP subscription updates.
+- **Release ordering for event-server hotfixes.** Includes the 0.34.6 release
+  workflow change that deploys the Cloudflare event server before the canary
+  smoke, while still keeping PyPI publish and fleet roll gated behind the
+  canary.
+- **Codex CLI auto-bake (#511, fixes #498).** Teams configured with
+  `brain.kind: codex` now automatically bake the Codex CLI even when the team
+  omits an explicit `tool_library: [codex]`, removing a deploy-time footgun for
+  Codex-backed managers.
+- **Worker-to-Durable-Object WebSocket auth.** Includes the server-side
+  subprotocol auth path for internal Worker-to-DO WebSocket upgrades.
+
+## 0.34.6 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.5 canary run.
+
+### Fixed
+- **Release ordering for event-server hotfixes.** The release workflow now
+  deploys the Cloudflare event server before the canary smoke, while still
+  keeping PyPI publish and fleet roll gated behind the canary. This lets
+  server-side event-bus fixes be validated by the canary instead of being
+  blocked by the older live Worker.
+- **Codex CLI auto-bake (#511, fixes #498).** Teams configured with
+  `brain.kind: codex` now automatically bake the Codex CLI even when the team
+  omits an explicit `tool_library: [codex]`, removing a deploy-time footgun for
+  Codex-backed managers.
+- **Worker-to-Durable-Object WebSocket auth.** The Worker now authenticates
+  internal WebSocket upgrades to `DeploymentSession` through a WebSocket
+  subprotocol token, with the existing internal header retained for HTTP
+  `/init` and `/event` calls. This fixes deployed managers that could register
+  and update subscriptions successfully but then received repeated `403
+  Forbidden` WebSocket handshakes and missed Slack events.
+
+## 0.34.5 — 2026-06-25
+
+Bugfix release for the event-server WebSocket auth path introduced in 0.34.4.
+
+### Fixed
+- **Codex CLI auto-bake (#511, fixes #498).** Teams configured with
+  `brain.kind: codex` now automatically bake the Codex CLI even when the team
+  omits an explicit `tool_library: [codex]`, removing a deploy-time footgun for
+  Codex-backed managers.
+- **Worker-to-Durable-Object WebSocket auth.** The Worker now authenticates
+  internal WebSocket upgrades to `DeploymentSession` through a WebSocket
+  subprotocol token, with the existing internal header retained for HTTP
+  `/init` and `/event` calls. This fixes deployed managers that could register
+  and update subscriptions successfully but then received repeated `403
+  Forbidden` WebSocket handshakes and missed Slack events.
+
+## 0.34.4 — 2026-06-25
+
+Bugfix release for the Codex-backed Fly fleet, Slack event routing, and
+event-server hardening after the 0.34 rollout.
+
+### Added
+- **Webhook resource grants (#491, closes #488).** Deployment registrations now
+  declare the upstream Slack/GitHub/Linear resources they are allowed to
+  subscribe to, and the event server enforces those grants before accepting
+  webhook topic subscriptions.
+- **Internal Worker-to-Durable-Object auth (#492, fixes #489).** Cloudflare
+  Worker calls into deployment Durable Objects now use an internal shared secret
+  instead of forwarding client bearer auth through the internal boundary.
+
+### Fixed
+- **Slack DM login channel resolution (#506, fixes #499).** Slack login channel
+  values can be specified as readable user/channel references and are resolved
+  against the configured bot token workspace.
+- **Slack mention deduping (#508, fixes #496).** `app_mention` and
+  `message.*` deliveries for the same Slack message are coalesced so mentioned
+  bots do not create duplicate placeholder replies.
+- **Homebrew release gate (#509, fixes #493).** Release validation now checks
+  Homebrew bottle URLs so a green release cannot silently ship broken formula
+  artifacts.
+- **Codex skill exposure (#510).** Codex-backed sessions now receive baked
+  skill paths so `/review`, `/qa`, `/browse`, and related gate commands work in
+  deployed teams.
+- **Codex launched-lead brain selection (#512).** Launched project leads honor
+  the parent team's configured Codex brain instead of falling back to the
+  default brain.
+- **Child agent environment propagation (#516, fixes #513).** Child agent
+  launches now inherit the documented runtime environment needed for brain,
+  tool, and credential compatibility.
+
 ## 0.34.3 — 2026-06-25
 
 Bugfix release for Codex-backed managers handling large streamed responses.

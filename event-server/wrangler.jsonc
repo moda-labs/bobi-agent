@@ -5,6 +5,9 @@
 	"observability": {
 		"enabled": true
 	},
+	// Required Cloudflare Worker secret:
+	//   wrangler secret put INTERNAL_DO_SECRET
+	// Do not store this value in wrangler.jsonc, .env, Fly, Bubble, or agent-team env.
 	"kv_namespaces": [
 		{
 			"binding": "EVENTS",

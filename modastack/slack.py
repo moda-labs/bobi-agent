@@ -76,14 +76,117 @@ def _slack_api(
     return result
 
 
+def _workspace_label(token: str, *, timeout: float = 10) -> str:
+    """Return a human-readable Slack workspace label from auth.test."""
+    result = _slack_api("auth.test", token, {}, timeout=timeout)
+    team = result.get("team") or "unknown workspace"
+    team_id = result.get("team_id") or "unknown team"
+    return f"{team} ({team_id})"
+
+
+def _user_matches(member: dict, handle: str) -> bool:
+    """True when a Slack user record matches a human-entered @handle."""
+    return (member.get("name") or "").strip().lstrip("@").lower() == handle
+
+
+def _resolve_im_channel_id(
+    token: str,
+    ref: str,
+    *,
+    timeout: float = 10,
+) -> str:
+    """Resolve ``@handle`` to a bot DM channel ID in the token's workspace."""
+    workspace = _workspace_label(token, timeout=timeout)
+    raw_handle = ref.strip().lstrip("@")
+    handle = raw_handle.lower()
+    if not handle:
+        raise RuntimeError(
+            f"Slack user reference '{ref}' is empty in workspace {workspace}."
+        )
+
+    if re.fullmatch(r"[UW][A-Z0-9]{6,}", raw_handle):
+        user_id = raw_handle
+    else:
+        matches: list[dict] = []
+        deleted_matches: list[dict] = []
+        cursor = ""
+        while True:
+            params: dict = {"limit": 1000}
+            if cursor:
+                params["cursor"] = cursor
+            resp = pooled.client().get(
+                "https://slack.com/api/users.list",
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=timeout,
+            )
+            result = resp.json()
+            if not result.get("ok"):
+                err = result.get("error", "unknown")
+                raise RuntimeError(
+                    f"Slack user '{ref}' could not be resolved in {workspace}: "
+                    f"users.list failed with {err}. The bot needs users:read."
+                )
+            for member in result.get("members", []):
+                if _user_matches(member, handle):
+                    if member.get("deleted"):
+                        deleted_matches.append(member)
+                    else:
+                        matches.append(member)
+            cursor = (result.get("response_metadata") or {}).get("next_cursor", "")
+            if not cursor:
+                break
+
+        if len(matches) > 1:
+            ids = ", ".join(m.get("id", "?") for m in matches)
+            raise RuntimeError(
+                f"Slack user '{ref}' is ambiguous in {workspace}; matched "
+                f"multiple active users ({ids}). Use the Slack user ID instead."
+            )
+        if not matches and deleted_matches:
+            ids = ", ".join(m.get("id", "?") for m in deleted_matches)
+            raise RuntimeError(
+                f"Slack user '{ref}' in {workspace} is deleted ({ids}); choose "
+                "an active user."
+            )
+        if not matches:
+            raise RuntimeError(
+                f"Slack user '{ref}' was not found in {workspace}. Check the "
+                "handle and make sure it belongs to the bot token's workspace."
+            )
+        user_id = matches[0]["id"]
+
+    try:
+        result = _slack_api(
+            "conversations.open",
+            token,
+            {"users": user_id},
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Slack user '{ref}' resolved in {workspace}, but the bot could not "
+            f"open a DM: {exc}. The bot needs im:write."
+        ) from exc
+    channel_id = ((result.get("channel") or {}).get("id") or "").strip()
+    if not channel_id:
+        raise RuntimeError(
+            f"Slack user '{ref}' resolved in {workspace}, but conversations.open "
+            "did not return a DM channel ID."
+        )
+    log.info("Resolved %s in %s to %s.", ref, workspace, channel_id)
+    return channel_id
+
+
 def resolve_channel_id(token: str, channel: str, *, timeout: float = 10) -> str:
     """Resolve a Slack channel reference to its channel ID.
 
-    Accepts either an ID (``C…``/``G…``/``D…``, returned unchanged) or a human
-    name (with or without a leading ``#``), looked up via ``conversations.list``.
-    Matches public and private channels, falling back to public-only if the token
-    lacks ``groups:read``. Lets the config carry ``#codex-test`` instead of an
-    opaque ``C0…`` id. Raises ``RuntimeError`` if a name can't be resolved.
+    Accepts either an ID (``C…``/``G…``/``D…``, returned unchanged), ``@handle``
+    for the bot's DM with a Slack user, or a human channel name (with or without
+    a leading ``#``), looked up via ``conversations.list``. Matches public and
+    private channels, falling back to public-only if the token lacks
+    ``groups:read``. Lets the config carry ``#codex-test`` or ``@zach`` instead
+    of opaque Slack IDs. Raises ``RuntimeError`` if a reference can't be resolved.
     """
     ref = (channel or "").strip()
     if not ref:
@@ -92,6 +195,8 @@ def resolve_channel_id(token: str, channel: str, *, timeout: float = 10) -> str:
     # '#'-prefixed value is always a name.
     if not ref.startswith("#") and re.fullmatch(r"[CGD][A-Z0-9]{6,}", ref):
         return ref
+    if ref.startswith("@"):
+        return _resolve_im_channel_id(token, ref, timeout=timeout)
     want = ref.lstrip("#").lower()
 
     types = "public_channel,private_channel"

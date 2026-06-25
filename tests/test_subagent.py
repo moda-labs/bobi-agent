@@ -4,6 +4,7 @@ For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 """
 
 import json
+import os
 import tempfile
 import shutil
 from pathlib import Path
@@ -388,6 +389,33 @@ class TestLaunchAgent:
     @patch("modastack.subagent.check_requires", return_value=[])
     @patch("modastack.subagent.get_registry")
     @patch("modastack.subagent._launch_detached")
+    def test_project_lead_launch_passes_configured_codex_brain_to_child(
+        self, mock_launch, mock_reg, mock_check, tmp_path, monkeypatch,
+    ):
+        """A codex-backed project lead must not inherit the default Claude brain."""
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setenv("MODASTACK_BRAIN", "claude")
+        config_dir = tmp_path / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "agent: eng-team\nbrain:\n  kind: codex\n"
+        )
+
+        from modastack.subagent import launch_agent
+        launch_agent(
+            task="Lead #507",
+            cwd=str(tmp_path),
+            workflow_name="issue-lifecycle",
+            role="project_lead",
+        )
+
+        child_env = mock_launch.call_args.kwargs["env"]
+        assert child_env["MODASTACK_BRAIN"] == "codex"
+
+    @patch("modastack.subagent.check_requires", return_value=[])
+    @patch("modastack.subagent.get_registry")
+    @patch("modastack.subagent._launch_detached")
     def test_raises_when_spawner_unbound(self, mock_launch, mock_reg,
                                          mock_check, tmp_path, monkeypatch):
         """An unbound spawning process is a bug — no resolution from cwd,
@@ -425,6 +453,49 @@ class TestRunAgentEntryRootBinding:
         assert sdk.get_project_root() == root
         # cwd stays the working dir for the spawned session
         assert mock_spawn.call_args.kwargs["cwd"] == str(repo)
+
+    @patch("modastack.subagent.spawn_adhoc")
+    def test_sets_process_brain_from_passed_root(self, mock_spawn, tmp_path,
+                                                monkeypatch):
+        monkeypatch.setattr("modastack.paths._root", None)
+        monkeypatch.setenv("MODASTACK_BRAIN", "claude")
+        root = tmp_path / "dev"
+        repo = root / "jobtack"
+        (root / ".modastack").mkdir(parents=True)
+        (root / ".modastack" / "agent.yaml").write_text(
+            "name: t\nbrain:\n  kind: codex\n"
+        )
+        repo.mkdir()
+
+        from modastack.brain import BRAIN_ENV
+        from modastack.subagent import _run_agent_entry
+        _run_agent_entry({
+            "task": "t", "cwd": str(repo), "root": str(root),
+            "workflow_name": "adhoc", "persistent": True, "subscribe": [],
+        })
+
+        assert os.environ[BRAIN_ENV] == "codex"
+
+    @patch("modastack.subagent.spawn_adhoc")
+    def test_clears_stale_process_brain_when_passed_root_has_default_brain(
+        self, mock_spawn, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr("modastack.paths._root", None)
+        monkeypatch.setenv("MODASTACK_BRAIN", "codex")
+        root = tmp_path / "dev"
+        repo = root / "jobtack"
+        (root / ".modastack").mkdir(parents=True)
+        (root / ".modastack" / "agent.yaml").write_text("name: t\n")
+        repo.mkdir()
+
+        from modastack.brain import BRAIN_ENV
+        from modastack.subagent import _run_agent_entry
+        _run_agent_entry({
+            "task": "t", "cwd": str(repo), "root": str(root),
+            "workflow_name": "adhoc", "persistent": True, "subscribe": [],
+        })
+
+        assert BRAIN_ENV not in os.environ
 
     @patch("modastack.subagent.spawn_adhoc")
     def test_missing_root_is_a_spawner_bug(self, mock_spawn, tmp_path,
@@ -499,5 +570,3 @@ class TestResolveSelfGitHubLogin:
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         from modastack.subagent import _resolve_self_github_login
         assert _resolve_self_github_login() is None
-
-

@@ -38,18 +38,22 @@ _BRAINS: dict[str, BrainFactory] = {
 
 DEFAULT_BRAIN = "claude"
 
-# Env var carrying the team's configured brain kind. Set once at the agent
-# process entry from ``agent.yaml`` ``brain.kind`` (see ``set_process_brain``)
-# so it propagates to subprocess agents — the same pattern as ``MODASTACK_AUTH``.
+# Env var carrying the active process brain kind. The process entrypoint seeds
+# it from ``agent.yaml`` ``brain.kind`` (see ``set_process_brain``). Launched
+# child agents get a stricter root-bound value from ``child_agent_env()`` so a
+# stale ambient value from another installation cannot leak across sessions.
 BRAIN_ENV = "MODASTACK_BRAIN"
 
 
 def set_process_brain(kind: str | None) -> None:
-    """Record the team's brain kind for this process tree (and its children).
+    """Record the team's brain kind for the current process.
 
-    A no-op for an empty/None kind (keeps the framework default). An explicit
-    ``MODASTACK_BRAIN`` already in the environment is left untouched so an
-    operator override wins over agent.yaml.
+    A no-op for an empty/None kind (keeps the framework default). At top-level
+    process startup, an explicit ``MODASTACK_BRAIN`` already in the environment
+    is left untouched so an operator override can select the current process's
+    brain. Detached child launches do not rely on this ambient inheritance:
+    ``modastack.env.child_agent_env()`` rewrites the child's value from the
+    verified installation root.
     """
     if kind and not os.environ.get(BRAIN_ENV):
         os.environ[BRAIN_ENV] = kind
@@ -58,10 +62,12 @@ def set_process_brain(kind: str | None) -> None:
 def get_brain(kind: str | None = None) -> BrainFactory:
     """Resolve a brain kind to its factory.
 
-    Precedence: explicit ``kind`` arg → ``MODASTACK_BRAIN`` env (the team's
-    configured brain) → ``claude``. Raises ``ValueError`` for an unknown kind so
-    a typo in ``agent.yaml`` ``brain.kind`` fails loud at session construction
-    rather than silently falling back.
+    Precedence inside the current process: explicit ``kind`` arg →
+    ``MODASTACK_BRAIN`` env → ``claude``. For launched child agents,
+    ``MODASTACK_BRAIN`` is prepared by ``child_agent_env()`` from the verified
+    installation root, not blindly inherited from the parent process. Raises
+    ``ValueError`` for an unknown kind so a typo in ``agent.yaml`` ``brain.kind``
+    fails loud at session construction rather than silently falling back.
     """
     name = kind or os.environ.get(BRAIN_ENV) or DEFAULT_BRAIN
     try:

@@ -106,6 +106,17 @@ def test_secrets_nested_mapping_is_flattened(repo):
     assert cfg.secrets_env_file == "./x.env"
 
 
+def test_structured_im_login_channel_is_normalized(repo):
+    (repo / "deployments" / "x.yaml").write_text(
+        "team-url: https://r/x.tar.gz\n"
+        "login_channel:\n"
+        "  type: im\n"
+        "  user: zachkozick\n"
+    )
+    cfg = D.load_deploy_config(repo, "x")
+    assert cfg.login_channel == "@zachkozick"
+
+
 # --- validation --------------------------------------------------------------
 
 def test_no_team_source_is_an_error(repo):
@@ -281,6 +292,24 @@ def test_brain_kind_resolved_from_team_agent_yaml(repo):
     assert cfg.brain == "codex"
 
 
+def test_brain_kind_resolved_from_composed_team(repo):
+    core = repo / "agents" / "codex-core"
+    core.mkdir()
+    core.joinpath("agent.yaml").write_text(
+        "agent: codex-core\nbrain:\n  kind: codex\n"
+    )
+    leaf = repo / "agents" / "codex-leaf"
+    leaf.mkdir()
+    leaf.joinpath("agent.yaml").write_text(
+        "from: codex-core\nagent: codex-leaf\nslack_token: ${SLACK_BOT_TOKEN}\n"
+    )
+    (repo / "deployments" / "ct.yaml").write_text("team: codex-leaf\n")
+
+    cfg = D.load_deploy_config(repo, "ct")
+
+    assert cfg.brain == "codex"
+
+
 def test_codex_api_key_mode_requires_openai_key(repo, tmp_path, monkeypatch):
     _codex_team(repo)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -314,6 +343,27 @@ def test_codex_brain_passed_to_provisioner(repo):
     cfg = D.load_deploy_config(repo, "ct")
     args = D._provision_args(cfg, Path("/tmp/x.env"))
     assert "--brain" in args and "codex" in args
+
+
+def test_inherited_codex_brain_uses_openai_auth(repo, tmp_path, monkeypatch):
+    core = repo / "agents" / "codex-core"
+    core.mkdir()
+    core.joinpath("agent.yaml").write_text(
+        "agent: codex-core\nbrain:\n  kind: codex\n"
+    )
+    leaf = repo / "agents" / "codex-leaf"
+    leaf.mkdir()
+    leaf.joinpath("agent.yaml").write_text(
+        "from: codex-core\nagent: codex-leaf\nslack_token: ${SLACK_BOT_TOKEN}\n"
+    )
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    ef = tmp_path / "ct.env"
+    ef.write_text("SLACK_BOT_TOKEN=xoxb\n")
+    (repo / "deployments" / "ct.yaml").write_text("team: codex-leaf\nauth: api_key\n")
+    cfg = D.load_deploy_config(repo, "ct", {"secrets_env_file": str(ef)})
+
+    with pytest.raises(D.DeployError, match="OPENAI_API_KEY"):
+        D.resolve_env_file(cfg, repo, tmp_path)
 
 
 # --- secret reconcile against live Fly (#385) --------------------------------

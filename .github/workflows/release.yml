@@ -7,21 +7,22 @@ name: Release
 #
 #   1. subscription-login-smoke  gate the release on a verified login path (#388).
 #   2. build-wheel               `python -m build` the wheel/sdist ONCE; upload it.
-#   3. build-canary              deploy the canary from an image built FROM that
+#   3. deploy-event-server       deploy the Worker code the canary talks to.
+#   4. build-canary              deploy the canary from an image built FROM that
 #                                wheel (MODASTACK_BUILD=wheel) and SMOKE it — a
 #                                functional `ask` proving the agent answers
 #                                CANARY-OK end-to-end. THIS is the gate.
-#   4a. publish                  needs build-canary → upload the SAME wheel to PyPI
-#                                (+ event-server + Homebrew). Gated on the canary,
+#   5a. publish                  needs build-canary → upload the SAME wheel to PyPI
+#                                (+ Homebrew). Gated on the canary,
 #                                NOT the fleet roll — a flaky fleet app can't block
 #                                an already-proven publish.
-#   4b. roll-fleet               needs build-canary → reuse the canary's image
+#   5b. roll-fleet               needs build-canary → reuse the canary's image
 #                                digest for generic instances; a TEAM-FLAVORED app
 #                                (a `build:` spec, C24 #368) rebuilds its OWN image
 #                                from the wheel + its TEAM_DEPS hook.
-#   5. deploy-teams              needs roll-fleet → reconcile each deployment's
-#                                package CONTENT + SECRETS onto the rolled image, by
-#                                CALLING deploy-agent-teams.yml (workflow_call).
+#   6. deploy-teams              needs roll-fleet + update-homebrew → reconcile
+#                                each deployment's package CONTENT + SECRETS onto
+#                                the rolled image after the Homebrew bottle smoke.
 #
 # Why the canary is built from the WHEEL, not source: it then proves the exact
 # artifact we publish actually boots and answers — catching wheel/sdist packaging
@@ -151,7 +152,7 @@ jobs:
   # wheel/image fails here and blocks BOTH publish and the fleet roll.
   build-canary:
     name: Build canary from the wheel + smoke
-    needs: [subscription-login-smoke, build-wheel]
+    needs: [subscription-login-smoke, build-wheel, deploy-event-server]
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.canary.outputs.image }}
@@ -385,12 +386,13 @@ jobs:
           echo "Fleet rolled (${#apps[@]} instance(s); generic image: ${IMAGE:-none}; team-flavored instances rebuilt their own)."
 
   # --------------------------------------------------------------------------
-  # Deploy the Cloudflare event server — gated on the canary, not PyPI publish.
-  # The event server is a Cloudflare Worker built from event-server/src; it has
-  # no dependency on the published wheel, so it runs concurrently with publish.
+  # Deploy the Cloudflare event server before the canary. The canary proves the
+  # exact wheel against the live event bus, so event-server-only fixes must be
+  # live before that functional gate runs. PyPI publish and fleet roll remain
+  # gated on build-canary.
   deploy-event-server:
     name: Deploy event server
-    needs: build-canary
+    needs: [subscription-login-smoke, build-wheel]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -425,6 +427,10 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
+
       - name: Extract version from the release tag
         id: version
         # Prefer the Release's tag; fall back to the ref name for a manual dispatch.
@@ -440,6 +446,11 @@ jobs:
           event-type: pypi-release
           client-payload: '{"version": "${{ steps.version.outputs.version }}"}'
 
+      - name: Smoke Homebrew bottle URLs
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: scripts/smoke-homebrew-bottles.sh "${{ steps.version.outputs.version }}"
+
   # --------------------------------------------------------------------------
   # Reconcile each deployment's package CONTENT + SECRETS onto the freshly-rolled
   # image — the FINAL release step. Image FIRST (roll-fleet), packages/secrets
@@ -449,7 +460,7 @@ jobs:
   # secrets; `ref` pins the reconcile to the released commit.
   deploy-teams:
     name: Deploy team packages + secrets
-    needs: roll-fleet
+    needs: [roll-fleet, update-homebrew]
     uses: ./.github/workflows/deploy-agent-teams.yml
     secrets: inherit
     with:
