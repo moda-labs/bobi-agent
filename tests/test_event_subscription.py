@@ -369,7 +369,12 @@ def test_register_slack_workspaces_posts_bot_token():
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if "auth.test" in url:
-            return httpx.Response(200, json={"ok": True, "team_id": "T0952", "bot_id": "BSELF"})
+            return httpx.Response(200, json={
+                "ok": True,
+                "team_id": "T0952",
+                "bot_id": "BSELF",
+                "user_id": "USELF",
+            })
         if "bots.info" in url:
             assert "bot=BSELF" in url
             return httpx.Response(200, json={"ok": True, "bot": {"app_id": "A0952"}})
@@ -395,12 +400,14 @@ def test_register_slack_workspaces_posts_bot_token():
     assert len(captured) == 1
     assert captured[0]["url"] == "http://localhost:8080/slack/workspaces"
     # bot_id + app_id + signing_secret travel with the registration. app_id keys
-    # the per-bot record so two bots can share a workspace; signing_secret lets
-    # the server verify THIS app's inbound events (a second app signs with its
-    # own secret, so a single global secret would 401 it).
+    # the per-bot record so two bots can share a workspace; bot_user_id lets the
+    # server drop message.* duplicates of app_mention; signing_secret lets the
+    # server verify THIS app's inbound events (a second app signs with its own
+    # secret, so a single global secret would 401 it).
     assert captured[0]["body"] == {"workspace_id": "T0952",
                                    "bot_token": "xoxb-test",
                                    "bot_id": "BSELF",
+                                   "bot_user_id": "USELF",
                                    "app_id": "A0952",
                                    "signing_secret": "shhh"}
 

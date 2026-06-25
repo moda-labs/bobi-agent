@@ -9,6 +9,7 @@ Containerized instances (#336) must never start Node when
 ``event_server_url`` points to a remote server.
 """
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -133,7 +134,7 @@ def _capture_post(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr(pooled, "post", fake_post)
-    monkeypatch.setattr(es, "_slack_auth_info", lambda token: ("T_TEAM", "B_BOT"))
+    monkeypatch.setattr(es, "_slack_auth_info", lambda token: ("T_TEAM", "B_BOT", "U_BOT"))
     monkeypatch.setattr(es, "_slack_app_id", lambda token, bot_id: "A_APP")
     return captured
 
@@ -164,6 +165,10 @@ def test_slack_registration_signs_when_bubble_key_present(monkeypatch):
     from modastack.events.signing import canonical_string
     import hashlib
     import hmac
+
+    body = json.loads(kwargs["content"])
+    assert body["bot_user_id"] == "U_BOT"
+
     msg = canonical_string(
         headers["x-moda-timestamp"], headers["x-moda-nonce"],
         "POST", "/slack/workspaces", kwargs["content"],
@@ -186,3 +191,5 @@ def test_slack_registration_unsigned_without_bubble_key(monkeypatch):
     assert "x-moda-signature" not in headers
     # Still raw bytes via content= (the body is serialized once regardless).
     assert "content" in captured["kwargs"]
+    body = json.loads(captured["kwargs"]["content"])
+    assert body["bot_user_id"] == "U_BOT"

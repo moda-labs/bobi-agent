@@ -248,7 +248,7 @@ def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, mon
         lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
     )
     monkeypatch.setattr(server_mod, "register_slack_workspaces", lambda *a, **k: ["T123"])
-    monkeypatch.setattr(server_mod, "_slack_auth_info", lambda token: ("T123", "B123"))
+    monkeypatch.setattr(server_mod, "_slack_auth_info", lambda token: ("T123", "B123", "U123"))
     monkeypatch.setattr(server_mod, "_slack_app_id", lambda token, bot_id: "A123")
 
     def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
@@ -292,7 +292,7 @@ def test_wait_for_code_falls_back_to_legacy_slack_topic(slack_config, monkeypatc
         lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
     )
     monkeypatch.setattr(server_mod, "register_slack_workspaces", lambda *a, **k: ["T123"])
-    monkeypatch.setattr(server_mod, "_slack_auth_info", lambda token: ("T123", ""))
+    monkeypatch.setattr(server_mod, "_slack_auth_info", lambda token: ("T123", "", ""))
     monkeypatch.setattr(server_mod, "_slack_app_id", lambda token, bot_id: "")
 
     def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
