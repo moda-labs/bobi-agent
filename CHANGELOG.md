@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.34.10 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.9 canary run.
+
+### Fixed
+- **Production WebSocket session upgrades.** `DeploymentSession` now trusts the
+  public Worker's deployment authentication for WebSocket upgrades instead of
+  requiring a second internal Durable Object auth token on that hop. Internal
+  `/init` and `/event` writes still require the internal secret. This targets
+  Cloudflare production handshakes that returned an empty `403 Forbidden` even
+  after deployment auth succeeded for HTTP registration and subscription
+  updates.
+- **Production WebSocket upgrade preservation.** Includes the 0.34.9 request
+  preservation fix, plus the earlier public and internal WebSocket auth
+  fallbacks from 0.34.7 and 0.34.8.
+
 ## 0.34.9 — 2026-06-25
 
 Bugfix release that supersedes the failed 0.34.8 canary run.
