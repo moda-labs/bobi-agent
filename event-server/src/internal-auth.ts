@@ -1,4 +1,5 @@
 export const INTERNAL_HEADER = "x-modastack-internal";
+export const INTERNAL_WS_QUERY_PARAM = "__modastack_internal";
 export const INTERNAL_WS_PROTOCOL_PREFIX = "modastack-internal.";
 export const PUBLIC_WS_BEARER_PROTOCOL_PREFIX = "modastack-bearer.";
 
@@ -15,10 +16,11 @@ export function internalEventRequest(env: InternalEnv, url: string, body: string
 }
 
 export function internalWebSocketRequest(env: InternalEnv, url: string): Request {
-	return new Request(url, {
+	const internalUrl = new URL(url);
+	internalUrl.searchParams.set(INTERNAL_WS_QUERY_PARAM, env.INTERNAL_DO_SECRET);
+	return new Request(internalUrl.toString(), {
 		headers: {
 			Upgrade: "websocket",
-			"Sec-WebSocket-Protocol": internalWebSocketProtocol(env.INTERNAL_DO_SECRET),
 		},
 	});
 }

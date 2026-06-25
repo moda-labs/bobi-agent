@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.34.8 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.7 canary run.
+
+### Fixed
+- **Internal Durable Object WebSocket auth on Cloudflare.** Worker-created
+  WebSocket requests to `DeploymentSession` now carry the internal DO secret in
+  a private query parameter instead of relying on WebSocket headers surviving
+  `DurableObjectStub.fetch()`. This targets the remaining bodyless `403
+  Forbidden` seen after the public deployment key had already authenticated.
+- **Public WebSocket auth on Cloudflare.** Includes the 0.34.7 client fallback
+  that sends deployment bearer auth as a WebSocket subprotocol in addition to
+  the `Authorization` header.
+- **Release ordering for event-server hotfixes.** Includes the 0.34.6 release
+  workflow change that deploys the Cloudflare event server before the canary
+  smoke.
+
 ## 0.34.7 — 2026-06-25
 
 Bugfix release that supersedes the failed 0.34.6 canary run.
