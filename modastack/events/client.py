@@ -5,7 +5,6 @@ receives events via WebSocket with automatic catch-up after downtime.
 Pushes raw event envelopes to a thread-safe queue for the drain loop.
 """
 
-import base64
 import json
 import logging
 import ssl
@@ -25,11 +24,6 @@ def _state_path(name: str) -> Path:
 
 # Normalized events land here for the consumer to drain.
 event_queue: SimpleQueue = SimpleQueue()
-
-
-def _ws_bearer_subprotocol(api_key: str) -> str:
-    encoded = base64.urlsafe_b64encode(api_key.encode()).decode().rstrip("=")
-    return f"modastack-bearer.{encoded}"
 
 
 def _load_cursor(path: Path | None = None) -> int:
@@ -436,7 +430,6 @@ class EventServerClient:
         self._ws = websocket.WebSocketApp(
             ws_url,
             header={"Authorization": f"Bearer {self.api_key}"},
-            subprotocols=[_ws_bearer_subprotocol(self.api_key)],
             on_open=on_open,
             on_message=on_message,
             on_error=on_error,

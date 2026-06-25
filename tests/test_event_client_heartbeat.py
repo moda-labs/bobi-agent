@@ -24,7 +24,7 @@ import time
 
 import pytest
 
-from modastack.events.client import EventServerClient, _ws_bearer_subprotocol
+from modastack.events.client import EventServerClient
 
 
 class FakeWebSocketApp:
@@ -120,7 +120,7 @@ def _wait_until(predicate, timeout=5.0, interval=0.02):
     return predicate()
 
 
-def test_client_sends_public_bearer_subprotocol(tmp_path, monkeypatch):
+def test_client_sends_authorization_header_without_subprotocol(tmp_path, monkeypatch):
     factory = _Factory()
     monkeypatch.setattr("websocket.WebSocketApp", factory)
 
@@ -135,9 +135,7 @@ def test_client_sends_public_bearer_subprotocol(tmp_path, monkeypatch):
     assert factory.connections[0].header == {
         "Authorization": "Bearer key-1",
     }
-    assert factory.connections[0].kwargs["subprotocols"] == [
-        _ws_bearer_subprotocol("key-1"),
-    ]
+    assert "subprotocols" not in factory.connections[0].kwargs
 
 
 class TestDeafManagerSelfHeal:
