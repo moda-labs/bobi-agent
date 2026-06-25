@@ -41,6 +41,11 @@ export class DeploymentSession extends DurableObject<Env> {
 
 	override async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
+		const upgradeHeader = request.headers.get("Upgrade");
+		if (upgradeHeader === "websocket") {
+			return this.handleWebSocketUpgrade(request);
+		}
+
 		const expected = this.env.INTERNAL_DO_SECRET;
 		const provided = request.headers.get(INTERNAL_HEADER)
 			|| internalSecretFromWebSocketProtocols(request.headers.get("Sec-WebSocket-Protocol"))
@@ -55,11 +60,6 @@ export class DeploymentSession extends DurableObject<Env> {
 
 		if (url.pathname === "/init" && request.method === "POST") {
 			return this.handleInit(request);
-		}
-
-		const upgradeHeader = request.headers.get("Upgrade");
-		if (upgradeHeader === "websocket") {
-			return this.handleWebSocketUpgrade(request);
 		}
 
 		return new Response("Not Found", { status: 404 });

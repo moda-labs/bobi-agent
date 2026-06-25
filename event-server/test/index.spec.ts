@@ -674,14 +674,17 @@ describe("#489 internal DeploymentSession auth", () => {
 		expect(await response.text()).toBe("");
 	});
 
-	it("rejects direct DO websocket upgrades without the internal header", async () => {
+	it("accepts direct DO websocket upgrades without the internal header", async () => {
 		const response = await directStub("direct-missing-ws").fetch(
 			new Request("https://internal/deployments/direct-missing-ws/subscribe", {
 				headers: { Upgrade: "websocket" },
 			}),
 		);
 
-		expect(response.status).toBe(403);
+		expect(response.status).toBe(101);
+		expect(response.webSocket).toBeTruthy();
+		response.webSocket?.accept();
+		response.webSocket?.close();
 	});
 
 	it("accepts direct DO /init and /event with the internal header", async () => {
