@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.34.0 — 2026-06-24
+
+Adds the pluggable agent brain layer so a team can run on Claude Code or Codex
+behind the same Modastack session interface, including Codex headless auth,
+deploy wiring, and a `codex-test` team for smoke testing the new path. This is
+the release to switch `eng-team` over to Codex-backed operation.
+
+### Added
+- **Pluggable agent brain (#495, closes #485).** Agent execution now goes
+  through a `BrainSession` interface with Claude and Codex adapters, moving
+  session, subagent, workflow, setup, and validation paths off direct
+  Claude-only assumptions.
+- **Codex brain support (#495).** Adds a `CodexBrain` backed by `codex exec`,
+  normalized message handling, usage accounting, ANSI-stripped login scraping,
+  and context-rotation behavior that avoids false storm detection from Codex
+  turn-aggregate usage.
+- **Brain-aware deploy and auth (#495).** Deploys can provision the right CLI
+  and authentication flow for the selected brain, including container preflight
+  checks that fail fast when required auth is missing.
+- **`codex-test` team (#495).** Ships a minimal Codex-backed team and deployment
+  config for validating the new brain path before cutting over production teams.
+
+### Fixed
+- **Agent UI transcript replay (#494).** Fixes replay behavior so the UI can
+  show existing transcript history consistently when reconnecting.
+- **Outbound Slack send auth (#490, closes #487).** Slack sends are now scoped
+  to the active bubble/auth context so agents do not send through the wrong
+  credentials.
+
+### Changed
+- **Slack login channel setup (#495).** Headless login can accept a readable
+  `#channel-name` instead of requiring a raw channel ID.
+- **Event server replay and auth paths (#494, #490).** Tightens replay and
+  bubble-scoped authentication handling around the local and Worker event
+  server implementations.
+
 ## 0.33.0 — 2026-06-24
 
 Adds an installable **personal-assistant** team and makes `from:`-overlay teams
