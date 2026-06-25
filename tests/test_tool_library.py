@@ -88,6 +88,7 @@ def test_expansion_basics(project):
     cfg = _agent_yaml(dest)
 
     assert any(r["name"] == "codex" for r in cfg["requires"])
+    assert cfg["build"]["apt"] == ["nodejs", "npm"]
     assert CODEX_PIN in cfg["build"]["npm"]
     guide = (tool_library.CATALOG_DIR / "codex" / "guide.md").read_text()
     assert (dest / "tools" / "codex.md").read_text() == guide
@@ -98,6 +99,67 @@ def test_tool_library_key_consumed(project):
                  'version: "1.0.0"\nentry_point: director\ntool_library: [codex]\n')
     cfg = _agent_yaml(_compose(project, leaf)[0])
     assert "tool_library" not in cfg
+
+
+def test_codex_brain_implicitly_expands_codex_tool(project):
+    """A Codex-brained team should bake the Codex CLI without an explicit
+    `tool_library: [codex]` opt-in."""
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'brain:\n  kind: codex\n')
+    dest = _compose(project, leaf)[0]
+    cfg = _agent_yaml(dest)
+
+    assert any(r["name"] == "codex" for r in cfg["requires"])
+    assert cfg["build"]["apt"] == ["nodejs", "npm"]
+    assert CODEX_PIN in cfg["build"]["npm"]
+    assert "tool_library" not in cfg
+    guide = (tool_library.CATALOG_DIR / "codex" / "guide.md").read_text()
+    assert (dest / "tools" / "codex.md").read_text() == guide
+
+
+def test_codex_brain_dedupes_explicit_codex_tool(project):
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'brain:\n  kind: codex\n'
+                 'tool_library: [codex]\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+
+    assert cfg["build"]["npm"].count(CODEX_PIN) == 1
+    codex_reqs = [r for r in cfg["requires"] if r["name"] == "codex"]
+    assert len(codex_reqs) == 1
+
+
+def test_codex_brain_preserves_explicit_codex_build_override(project):
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'brain:\n  kind: codex\n'
+                 'requires:\n'
+                 '  - name: codex\n'
+                 '    why: "team custom codex install"\n'
+                 '    check: "command -v codex-custom"\n'
+                 'build:\n'
+                 '  npm: ["@openai/codex@9.9.9"]\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+
+    assert cfg["build"]["npm"] == ["@openai/codex@9.9.9"]
+    codex_reqs = [r for r in cfg["requires"] if r["name"] == "codex"]
+    assert len(codex_reqs) == 1
+    assert codex_reqs[0]["check"] == "command -v codex-custom"
+
+
+def test_codex_brain_overlay_expands_codex_tool(project):
+    _team(project, "core",
+          'version: "1.0.0"\nentry_point: director\n'
+          'brain:\n  kind: claude\n')
+    leaf = _team(project, "moda",
+                 'from: core\nversion: "2.0.0"\n'
+                 'brain:\n  kind: codex\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+
+    assert cfg["brain"]["kind"] == "codex"
+    assert any(r["name"] == "codex" for r in cfg["requires"])
+    assert CODEX_PIN in cfg["build"]["npm"]
 
 
 # --- local / explicit wins (escape hatches) ----------------------------------
@@ -221,8 +283,8 @@ requires:
     check: "command -v venn >/dev/null 2>&1 && venn --help >/dev/null 2>&1"
     fix: "python3 -m venv /opt/venn-cli && /opt/venn-cli/bin/pip install venn-cli==0.2.0 && ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn && echo 'Set VENN_API_KEY in .modastack/.env'"
 build:
+  apt: [nodejs, npm, python3-venv]
   npm: ["@openai/codex@0.142.0"]
-  apt: [python3-venv]
   run_root:
     - >-
       python3 -m venv /opt/venn-cli &&

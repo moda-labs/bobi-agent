@@ -62,6 +62,26 @@ def test_composed_loader_bakes_tool_library_cli(tmp_path):
     assert "/opt/venn-cli" in script     # the isolated venv install
 
 
+def test_composed_loader_bakes_codex_cli_for_codex_brain(tmp_path):
+    """A Codex-brained team gets the Codex CLI baked even without an explicit
+    `tool_library: [codex]` declaration."""
+    team = tmp_path / "agents" / "codex-team"
+    team.mkdir(parents=True)
+    (team / "agent.yaml").write_text(dedent("""
+        agent: codex-team
+        brain:
+          kind: codex
+    """))
+    assert load_team_config(team).build is None
+
+    cfg = build_render.load_composed_team_config(team, tmp_path)
+    assert cfg.build is not None
+    script = render_team_deps_script(cfg)
+    assert "apt-get install -y --no-install-recommends nodejs npm" in script
+    assert "npm install -g @openai/codex@0.142.0" in script
+    assert any(r.name == "codex" for r in cfg.requires)
+
+
 def test_renders_apt_npm_run_verify(tmp_path):
     script = render_team_deps_script(_team(tmp_path, ENG_TEAM))
     assert script.startswith("#!/usr/bin/env bash")
