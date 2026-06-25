@@ -38,6 +38,48 @@ from modastack.workflow.variables import VariableContext
 log = logging.getLogger(__name__)
 
 MAX_HANDOFF_RETRIES = 2
+DEFAULT_STARTUP_CONNECT_ATTEMPTS = 3
+DEFAULT_STARTUP_CONNECT_BACKOFF = 5.0
+STARTUP_RETRYABLE_MARKERS = (
+    "control request timeout: initialize",
+    "deadline exceeded",
+)
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(int(raw), minimum)
+    except ValueError:
+        log.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(float(raw), minimum)
+    except ValueError:
+        log.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
+
+
+def _is_retryable_startup_connect_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in STARTUP_RETRYABLE_MARKERS)
+
+
+async def _disconnect_client(client: Any) -> None:
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
 
 
 def _close_if_still_active(registry, session_name: str) -> None:
@@ -382,28 +424,6 @@ async def _run_workflow_async(
                 first_agent = s.agent
                 break
 
-    # Try resume, fall back to fresh session
-    for attempt in range(2):
-        resume_id = saved_id if attempt == 0 else None
-        client = _make_session(resume_id, agent_name=first_agent)
-        try:
-            initial_prompt = task if not resume_id else None
-            await client.connect(initial_prompt)
-            if resume_id:
-                await client.query(task)
-            await _drain_response(client, session_name, run_key)
-            break
-        except Exception as e:
-            if resume_id and attempt == 0:
-                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
-                save_session_id(session_name, "")
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                continue
-            raise
-
     # Terminal-emit outcome (MDS-65 RC#2). The `finally` emits the honest
     # lifecycle event for this session: session.completed on success/suspend,
     # session.failed on any failure path — never session.completed after a
@@ -416,8 +436,78 @@ async def _run_workflow_async(
     # be told the agent "finished" while it waits) and must NOT be marked
     # terminal in the registry (the reconciler leaves "waiting" alone).
     suspended = False
+    client = None
 
     try:
+        # Try resume, fall back to fresh session. A stale resume should not burn
+        # the fresh-start retry budget, while a fresh initialize timeout should
+        # retry because the CLI may simply be slow under CPU/IO contention.
+        startup_connected = False
+        startup_error: Exception | None = None
+        startup_attempts = _env_int(
+            "MODASTACK_WORKFLOW_STARTUP_CONNECT_ATTEMPTS",
+            DEFAULT_STARTUP_CONNECT_ATTEMPTS,
+        )
+        startup_backoff = _env_float(
+            "MODASTACK_WORKFLOW_STARTUP_CONNECT_BACKOFF",
+            DEFAULT_STARTUP_CONNECT_BACKOFF,
+        )
+        resume_candidates = [saved_id] if saved_id else []
+        resume_candidates.append(None)
+
+        for resume_id in resume_candidates:
+            attempts = 1 if resume_id else startup_attempts
+            for connect_attempt in range(1, attempts + 1):
+                client = _make_session(resume_id, agent_name=first_agent)
+                try:
+                    initial_prompt = task if not resume_id else None
+                    await client.connect(initial_prompt)
+                    if resume_id:
+                        await client.query(task)
+                    await _drain_response(client, session_name, run_key)
+                    startup_connected = True
+                    break
+                except Exception as e:
+                    startup_error = e
+                    await _disconnect_client(client)
+                    client = None
+
+                    if resume_id:
+                        log.warning(
+                            "Resume failed (stale session?), retrying fresh: %s",
+                            e,
+                        )
+                        save_session_id(session_name, "")
+                        break
+
+                    retryable = _is_retryable_startup_connect_error(e)
+                    if connect_attempt >= attempts or not retryable:
+                        break
+
+                    delay = startup_backoff * connect_attempt
+                    log.warning(
+                        "Workflow startup connect failed on attempt %d/%d: %s; "
+                        "retrying in %.1fs",
+                        connect_attempt,
+                        attempts,
+                        e,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+
+            if startup_connected:
+                break
+
+        if not startup_connected:
+            failure_error = f"startup connect failed: {startup_error}"
+            run_failed = True
+            _emit_lifecycle_event("agent/workflow.failed", {
+                "run_key": run_key,
+                "workflow": workflow.name,
+                "error": failure_error,
+                "text": f"Workflow error: {failure_error}",
+            }, blocking=True)
+            return False
 
         registry.update(session_name, status="running",
                         session_id=saved_id or "")
@@ -490,10 +580,7 @@ async def _run_workflow_async(
                 })
 
                 suspended = True
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
+                await _disconnect_client(client)
                 return True
 
             # Prompt step — inject into the persistent session
@@ -613,7 +700,8 @@ async def _run_workflow_async(
                 emit_confirmed=bool(landed),
             )
         try:
-            await client.disconnect()
+            if client is not None:
+                await _disconnect_client(client)
         except Exception:
             pass
 

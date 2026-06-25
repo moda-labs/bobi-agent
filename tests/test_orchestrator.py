@@ -368,6 +368,62 @@ class FailingClient:
         self.connected = False
 
 
+class FlakyStartupClient(FakeClient):
+    """Fails fresh startup twice, then connects."""
+
+    connect_calls = 0
+    disconnect_calls = 0
+
+    async def connect(self, prompt=None):
+        type(self).connect_calls += 1
+        if type(self).connect_calls < 3:
+            raise Exception("Control request timeout: initialize")
+        await super().connect(prompt)
+
+    async def disconnect(self):
+        type(self).disconnect_calls += 1
+        await super().disconnect()
+
+
+class TimeoutStartupClient(FakeClient):
+    """Always fails during the startup initialize handshake."""
+
+    connect_calls = 0
+    disconnect_calls = 0
+
+    async def connect(self, prompt=None):
+        type(self).connect_calls += 1
+        raise Exception("Control request timeout: initialize")
+
+    async def disconnect(self):
+        type(self).disconnect_calls += 1
+        await super().disconnect()
+
+
+class _StartupBrain:
+    def __init__(self, client_cls):
+        self.client_cls = client_cls
+
+    def make_session(self, **kwargs):
+        return self.client_cls()
+
+
+class _NormalizedFlakyStartupClient(FlakyStartupClient):
+    async def receive_response(self):
+        from modastack.brain import AssistantText, TurnResult
+
+        yield AssistantText(text="Done.")
+        yield TurnResult(session_id="test-session-id")
+
+
+class _NormalizedTimeoutStartupClient(TimeoutStartupClient):
+    async def receive_response(self):
+        from modastack.brain import AssistantText, TurnResult
+
+        yield AssistantText(text="Done.")
+        yield TurnResult(session_id="test-session-id")
+
+
 class TestHonestTerminalEmit:
     """MDS-65 RC#2/RC#4 — the orchestrator must emit the HONEST terminal session
     event (session.failed on failure, never session.completed after a failure)
@@ -399,6 +455,22 @@ class TestHonestTerminalEmit:
             result = run_workflow(workflow, **kwargs)
         return result, emits
 
+    def _run_capture_with_brain_client(self, workflow, client_cls, **kwargs):
+        cwd = kwargs.get("cwd", "/tmp")
+        emits = []
+        with patch("modastack.brain.get_brain",
+                   return_value=_StartupBrain(client_cls)), \
+             patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("modastack.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda etype, data, **kw: emits.append((etype, data))), \
+             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("modastack.workflow.orchestrator.save_session_id"), \
+             patch("modastack.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(workflow, **kwargs)
+        return result, emits
+
     def test_failure_emits_session_failed_not_completed(self):
         wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
         result, emits = self._run_capture(
@@ -426,6 +498,47 @@ class TestHonestTerminalEmit:
         assert "agent/session.failed" not in types
         done = next(d for t, d in emits if t == "agent/session.completed")
         assert done["requested_by"] == {"slack_user": "U2"}
+
+    def test_fresh_startup_initialize_timeout_retries(self, monkeypatch):
+        monkeypatch.setenv("MODASTACK_WORKFLOW_STARTUP_CONNECT_ATTEMPTS", "3")
+        monkeypatch.setenv("MODASTACK_WORKFLOW_STARTUP_CONNECT_BACKOFF", "0")
+        _NormalizedFlakyStartupClient.connect_calls = 0
+        _NormalizedFlakyStartupClient.disconnect_calls = 0
+
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture_with_brain_client(
+            wf, _NormalizedFlakyStartupClient, task="t", repo="r", cwd="/tmp",
+            run_key="1",
+        )
+
+        assert result is True
+        assert _NormalizedFlakyStartupClient.connect_calls == 3
+        assert _NormalizedFlakyStartupClient.disconnect_calls >= 2
+        types = [e[0] for e in emits]
+        assert "agent/session.completed" in types
+        assert "agent/session.failed" not in types
+
+    def test_exhausted_startup_initialize_retries_emit_failed(self, monkeypatch):
+        monkeypatch.setenv("MODASTACK_WORKFLOW_STARTUP_CONNECT_ATTEMPTS", "2")
+        monkeypatch.setenv("MODASTACK_WORKFLOW_STARTUP_CONNECT_BACKOFF", "0")
+        _NormalizedTimeoutStartupClient.connect_calls = 0
+        _NormalizedTimeoutStartupClient.disconnect_calls = 0
+
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture_with_brain_client(
+            wf, _NormalizedTimeoutStartupClient, task="t", repo="r", cwd="/tmp",
+            run_key="1", requested_by={"slack_user": "U1"},
+        )
+
+        assert result is False
+        assert _NormalizedTimeoutStartupClient.connect_calls == 2
+        assert _NormalizedTimeoutStartupClient.disconnect_calls == 2
+        types = [e[0] for e in emits]
+        assert "agent/session.failed" in types
+        assert "agent/session.completed" not in types
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert "startup connect failed" in failed["error"]
+        assert failed["requested_by"] == {"slack_user": "U1"}
 
     def test_suspend_does_not_emit_terminal_session_event(self, tmp_path, monkeypatch):
         """An await/suspend is dormant, not terminal: it must emit

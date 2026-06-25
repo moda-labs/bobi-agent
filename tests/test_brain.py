@@ -21,6 +21,11 @@ from modastack.brain import (
     get_brain,
 )
 from modastack.brain.claude import _ClaudeSession, _result_to_turn
+from modastack.brain.claude import (
+    DEFAULT_INITIALIZE_TIMEOUT_MS,
+    SDK_INITIALIZE_TIMEOUT_ENV,
+    _ensure_initialize_timeout_default,
+)
 
 
 # --- registry / selector ---------------------------------------------------
@@ -86,6 +91,24 @@ def test_config_parses_brain(tmp_path):
     # Absent brain → empty + the framework default downstream.
     (tmp_path / ".modastack" / "agent.yaml").write_text("agent: t\n")
     assert Config.load(tmp_path).brain_kind == ""
+
+
+def test_claude_initialize_timeout_default_is_raised(monkeypatch):
+    monkeypatch.delenv(SDK_INITIALIZE_TIMEOUT_ENV, raising=False)
+
+    _ensure_initialize_timeout_default()
+
+    assert os.environ[SDK_INITIALIZE_TIMEOUT_ENV] == str(
+        DEFAULT_INITIALIZE_TIMEOUT_MS
+    )
+
+
+def test_claude_initialize_timeout_default_honors_operator_override(monkeypatch):
+    monkeypatch.setenv(SDK_INITIALIZE_TIMEOUT_ENV, "240000")
+
+    _ensure_initialize_timeout_default()
+
+    assert os.environ[SDK_INITIALIZE_TIMEOUT_ENV] == "240000"
 
 
 # --- ResultMessage → TurnResult normalization ------------------------------

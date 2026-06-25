@@ -14,6 +14,7 @@ monkeypatch ``claude_agent_sdk.ClaudeSDKClient`` continue to take effect.
 
 from __future__ import annotations
 
+import os
 from typing import Any, AsyncIterator
 
 from modastack.brain.base import (
@@ -25,6 +26,22 @@ from modastack.brain.base import (
     StreamDelta,
     TurnResult,
 )
+
+DEFAULT_INITIALIZE_TIMEOUT_MS = 180_000
+SDK_INITIALIZE_TIMEOUT_ENV = "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"
+
+
+def _ensure_initialize_timeout_default() -> None:
+    """Raise the SDK initialize timeout default without overriding operators.
+
+    The Claude SDK reads ``CLAUDE_CODE_STREAM_CLOSE_TIMEOUT`` from the parent
+    process and uses it as the initialize control-request timeout. Fresh
+    workflow agents load large prompts, skills, and MCP config during that
+    handshake, so the SDK's 60s default is too tight under CPU/IO contention.
+    """
+    os.environ.setdefault(
+        SDK_INITIALIZE_TIMEOUT_ENV, str(DEFAULT_INITIALIZE_TIMEOUT_MS)
+    )
 
 
 def _delta_text(event: Any) -> str:
@@ -50,6 +67,7 @@ class _ClaudeSession:
     def __init__(self, options: Any) -> None:
         from claude_agent_sdk import ClaudeSDKClient
 
+        _ensure_initialize_timeout_default()
         self._options = options
         self._client = ClaudeSDKClient(options)
 
