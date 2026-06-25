@@ -230,7 +230,7 @@ def _wait_for_code(project_path: Path, channel: str, timeout: float) -> str:
         es_url, cfg,
         bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
     )
-    team_id, _ = _slack_auth_info(token)
+    team_id, _, _ = _slack_auth_info(token)
     if not team_id:
         raise RuntimeError("could not resolve Slack team_id from bot_token.")
     topic = f"slack:{team_id}"
