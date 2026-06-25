@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.34.11 — 2026-06-25
+
+Bugfix release that supersedes the failed 0.34.10 canary run.
+
+### Fixed
+- **WebSocket protocol negotiation.** Event clients no longer send the
+  deployment bearer token as a `Sec-WebSocket-Protocol` value. The Worker still
+  authenticates WebSocket subscriptions with the normal `Authorization` bearer
+  header, and removing the auth subprotocol avoids `websocket-client` rejecting
+  otherwise-successful handshakes with `Invalid WebSocket Header` when the
+  server does not select that subprotocol.
+- **Production WebSocket session upgrades.** Includes the 0.34.10 fix that
+  trusts the public Worker's deployment authentication for WebSocket upgrades
+  while keeping internal `/init` and `/event` writes protected by the internal
+  secret.
+
 ## 0.34.10 — 2026-06-25
 
 Bugfix release that supersedes the failed 0.34.9 canary run.
