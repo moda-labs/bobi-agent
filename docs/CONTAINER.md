@@ -164,7 +164,7 @@ rolling `teams-latest` release, so a full provisioner → boot → ask round-tri
 
 ```bash
 scripts/provision-instance.sh --app <you>-bobi-smoke \
-  --team-url https://github.com/moda-labs/modastack/releases/download/teams-latest/smoke-team.tar.gz \
+  --team-url https://github.com/moda-labs/bobi-agent/releases/download/teams-latest/smoke-team.tar.gz \
   --env-file ./smoke.env --region sjc          # smoke.env: just ANTHROPIC_API_KEY
 ```
 
@@ -184,7 +184,7 @@ and the same contract a future provisioner service inherits (design §9).
 membership key, so two fleets can share one Fly org and a later
 `BOBI_TENANT` filter slots into the same query for multitenant SaaS.
 
-**One-time repo setup** (in `moda-labs/modastack` settings):
+**One-time repo setup** (in `moda-labs/bobi-agent` settings):
 
 | What | Where | Value |
 |---|---|---|

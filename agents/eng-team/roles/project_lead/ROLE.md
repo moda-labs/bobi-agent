@@ -86,7 +86,7 @@ is GitHub issues, where the reference is `owner/repo#number`:
 
 ```bash
 # ✓ GitHub — use owner/repo#number
-bobi agents launch -w issue-lifecycle --role engineer --task "Fix moda-labs/modastack#246"
+bobi agents launch -w issue-lifecycle --role engineer --task "Fix moda-labs/bobi-agent#246"
 
 # ✗ Wrong — no source, engineer doesn't know where to look
 bobi agents launch -w issue-lifecycle --role engineer --task "Fix #246"
