@@ -276,8 +276,8 @@ agent: acme
 requires:
   - name: codex
     why: "Delegate a coding sub-task to the Codex CLI (tools/codex.md)."
-    check: "command -v codex >/dev/null 2>&1 && { test -n \\"${OPENAI_API_KEY:-}\\" || codex --version >/dev/null 2>&1; }"
-    fix: "npm install -g @openai/codex@0.142.0 && (codex auth login || echo 'Set OPENAI_API_KEY in .modastack/.env')"
+    check: "command -v codex >/dev/null 2>&1 && { if [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if [ -f ~/.codex/auth.json ]; then timeout 8s codex exec -s read-only --skip-git-repo-check 'reply OK' >/dev/null </dev/null; else codex --version >/dev/null 2>&1; fi; }"
+    fix: "npm install -g @openai/codex@0.142.0 && mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)' || echo 'Set OPENAI_API_KEY in .modastack/.env'"
   - name: venn
     why: "Reach external services (email, calendar, CRM) via the Venn CLI (tools/venn.md). Auth via VENN_API_KEY."
     check: "command -v venn >/dev/null 2>&1 && venn --help >/dev/null 2>&1"

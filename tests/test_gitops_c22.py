@@ -22,7 +22,9 @@ The deploy ENGINE itself (config precedence, delivery selection, secret
 validation) is unit-tested in test_deploy.py.
 """
 
+import json
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -125,6 +127,41 @@ def test_entrypoint_waits_for_team_when_blank():
     assert ".modastack/agent.yaml" in entry
     # It must NOT fatal on the no-team branch any more.
     assert "nothing to install" not in entry
+
+
+def test_entrypoint_materializes_codex_api_key_auth_file():
+    """Codex does not read OPENAI_API_KEY directly; the entrypoint must create
+    auth.json for Codex-brained teams and auxiliary Codex tool users."""
+    entry = (REPO / "docker" / "docker-entrypoint.sh").read_text()
+    assert 'Path(os.environ["CODEX_CRED_DIR"]) / "auth.json"' in entry
+    assert '{"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]}' in entry
+    assert "chmod(0o600)" in entry
+    assert 'materialize_codex_api_key_auth "${BRAIN_CRED_DIR}"' in entry
+    assert 'materialize_codex_api_key_auth "${HOME}/.codex"' in entry
+
+
+def test_entrypoint_codex_auth_helper_writes_expected_file(tmp_path):
+    """Exercise the entrypoint helper itself, not just its source text."""
+    entry = (REPO / "docker" / "docker-entrypoint.sh").read_text()
+    start = entry.index("materialize_codex_api_key_auth() {")
+    end = entry.index("\n\nAUTH_VALIDATED=", start)
+    helper = entry[start:end]
+    cred_dir = tmp_path / "codex"
+
+    script = f"""
+set -euo pipefail
+APP_USER="$(id -un)"
+log() {{ :; }}
+chown() {{ :; }}
+{helper}
+OPENAI_API_KEY="sk-test" materialize_codex_api_key_auth "{cred_dir}"
+"""
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+    auth_file = cred_dir / "auth.json"
+    assert json.loads(auth_file.read_text()) == {"OPENAI_API_KEY": "sk-test"}
+    assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
 def test_dockerfile_supports_wheel_build_mode():

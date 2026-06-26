@@ -93,6 +93,23 @@ configure_brain_paths
 log() { echo "[entrypoint] $*"; }
 fatal() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
 
+materialize_codex_api_key_auth() {
+  local cred_dir="$1"
+  [ -n "${OPENAI_API_KEY:-}" ] || return 0
+  log "Writing Codex API-key auth file from OPENAI_API_KEY"
+  mkdir -p "${cred_dir}"
+  CODEX_CRED_DIR="${cred_dir}" OPENAI_API_KEY="${OPENAI_API_KEY}" python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["CODEX_CRED_DIR"]) / "auth.json"
+path.write_text(json.dumps({"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]}) + "\n")
+path.chmod(0o600)
+PY
+  chown -R "${APP_USER}:${APP_USER}" "${cred_dir}"
+}
+
 AUTH_VALIDATED=0
 if [ -n "${MODASTACK_BRAIN:-}" ] \
    || [ -f "${PROJECT_DIR}/.modastack/agent.yaml" ] \
@@ -269,6 +286,16 @@ if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
     rm -rf "${BRAIN_HOME_LINK}"
     ln -s "${BRAIN_CRED_DIR}" "${BRAIN_HOME_LINK}"
   fi
+fi
+
+# The Codex CLI also exists as an auxiliary tool for Claude-brained teams
+# (`tool_library: [codex]`). Unlike Claude, Codex does not read OPENAI_API_KEY
+# directly; it expects ~/.codex/auth.json. Materialize that file whenever the
+# optional key is present, not only when Codex is the primary brain.
+if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
+  materialize_codex_api_key_auth "${BRAIN_CRED_DIR}"
+else
+  materialize_codex_api_key_auth "${HOME}/.codex"
 fi
 
 # --- 4. Subscription auth: bootstrap login over Slack if no creds yet (C23) --
