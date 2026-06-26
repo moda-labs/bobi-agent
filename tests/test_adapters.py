@@ -46,10 +46,10 @@ class TestAdapterRegistry:
 class TestGithubDetector:
 
     def test_parse_https_url(self):
-        assert _parse_github_url("https://github.com/moda-labs/modastack.git") == "moda-labs/modastack"
+        assert _parse_github_url("https://github.com/moda-labs/bobi-agent.git") == "moda-labs/bobi-agent"
 
     def test_parse_ssh_url(self):
-        assert _parse_github_url("git@github.com:moda-labs/modastack.git") == "moda-labs/modastack"
+        assert _parse_github_url("git@github.com:moda-labs/bobi-agent.git") == "moda-labs/bobi-agent"
 
     def test_parse_non_github_url(self):
         assert _parse_github_url("https://gitlab.com/foo/bar") == ""

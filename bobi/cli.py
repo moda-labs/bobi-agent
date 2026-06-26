@@ -2752,7 +2752,7 @@ main.add_command(event_server_cmd)
 @click.option("--persistent", is_flag=True,
               help="Keep the agent alive after initial task, accepting inbox messages")
 @click.option("--subscribe", multiple=True,
-              help="Subscribe to event topics (e.g. moda-labs/modastack, slack:T123)")
+              help="Subscribe to event topics (e.g. moda-labs/bobi-agent, slack:T123)")
 def agents_launch(workflow, role, run_key, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe):
     """Launch an agent with a workflow and role.
 
@@ -2760,10 +2760,10 @@ def agents_launch(workflow, role, run_key, task, timeout, wait, post_event, requ
     Use 'bobi roles list' to see available roles.
 
     Examples:
-        bobi agents launch -w issue-lifecycle --role engineer --id 42 --task "Fix moda-labs/modastack#42"
+        bobi agents launch -w issue-lifecycle --role engineer --id 42 --task "Fix moda-labs/bobi-agent#42"
         bobi agents launch -w adhoc --role engineer --task "Why is CI failing?"
         bobi agents launch -w adhoc --role engineer --task "Be a team lead" --persistent
-        bobi agents launch -w adhoc --role manager --subscribe moda-labs/modastack --persistent
+        bobi agents launch -w adhoc --role manager --subscribe moda-labs/bobi-agent --persistent
     """
     if subscribe:
         persistent = True

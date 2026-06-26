@@ -9,10 +9,10 @@ and give clear local-vs-cloud deployment guidance.
 - **Harness status on the welcome screen.** Shows which agent runs your team
   (Claude Code + model) and whether it's authenticated, with a copyable
   `claude auth login` command and a Re-check button when it isn't. A new
-  `modastack/setup/harness.py` detects the CLI and auth (env key, on-disk
+  `bobi/setup/harness.py` detects the CLI and auth (env key, on-disk
   creds, or the macOS keychain) behind a `GET /api/harness` endpoint.
 - **Local vs cloud finalization.** The "All set" screen now presents two
-  explicit deployment paths — local (`modastack start`) and cloud (the Fly
+  explicit deployment paths — local (`bobi start`) and cloud (the Fly
   provisioner + `docs/CONTAINER.md`) — replacing the placeholder cloud link.
 
 ### Changed
@@ -24,7 +24,7 @@ and give clear local-vs-cloud deployment guidance.
   longer scrolls inside a narrow left column).
 
 ### Removed
-- **"Start it for me" button + `/api/run-start`.** Users run `modastack start`
+- **"Start it for me" button + `/api/run-start`.** Users run `bobi start`
   in their own terminal.
 
 ## 0.34.12 — 2026-06-25
@@ -36,7 +36,7 @@ Bugfix release that supersedes the failed 0.34.11 canary run.
   `/event` requests now include the internal auth token as a private query
   parameter in addition to the existing internal header. This matches the
   production-safe WebSocket fallback and fixes `POST /deployments` returning
-  `500 Internal Server Error` while `modastack ask` tried to open a temporary
+  `500 Internal Server Error` while `bobi ask` tried to open a temporary
   reply channel for the canary smoke.
 - **WebSocket transport fixes.** Includes the 0.34.10 and 0.34.11 fixes for
   production WebSocket upgrades and protocol negotiation.
@@ -229,22 +229,22 @@ Codex-backed Fly fleet.
 Bugfix release for the Codex-backed Fly fleet cutover.
 
 ### Fixed
-- **Codex shell PATH in containers (#500).** Exposes `modastack` from both
-  `/usr/local/bin` and `/home/modastack/.local/bin`, covering Codex tool shells
+- **Codex shell PATH in containers (#500).** Exposes `bobi` from both
+  `/usr/local/bin` and `/home/bobi/.local/bin`, covering Codex tool shells
   that sanitize `PATH` and drop `/opt/venv/bin`.
 - **Slack app cross-delivery (#503, fixes #502).** Slack events and
   subscriptions now use app-qualified topics (`slack:<team>:app:<app>` and
   app+channel variants), so Bobbers, eng-team, and other bots in the same Slack
   workspace do not receive each other's DMs after redeploy.
 - **Fly volume secret drift (#503, fixes #501).** Existing-app deploy reconcile
-  now syncs resolved secret values into `/data/project/.modastack/.env` and
+  now syncs resolved secret values into `/data/project/.bobi/.env` and
   removes pruned keys from that file, preventing tool shells that lose inherited
   env from falling back to stale volume credentials.
 
 ## 0.34.0 — 2026-06-24
 
 Adds the pluggable agent brain layer so a team can run on Claude Code or Codex
-behind the same Modastack session interface, including Codex headless auth,
+behind the same Bobi session interface, including Codex headless auth,
 deploy wiring, and a `codex-test` team for smoke testing the new path. This is
 the release to switch `eng-team` over to Codex-backed operation.
 
@@ -320,7 +320,7 @@ manager self-heal watchdog, the policy-curator as a framework default, and the
 
 Ends the recurring eng-team **rotation wedge** at its root: the
 agent-maintained decision log is gone, replaced by a curated `policy.md`. Also
-makes a Slack workspace safe for **more than one modastack bot** (the
+makes a Slack workspace safe for **more than one bobi bot** (the
 self-reply spam loop), and adds a **reusable tool library** plus a **web UI**
 for a running team.
 
@@ -329,14 +329,14 @@ for a running team.
   append-only, agent-written decision log — the root cause of the recurring
   context-rotation wedge — is replaced by a `policy-curator` monitor
   (`curator: true`) that distills new transcripts into a team-scoped, capped,
-  rewritten-in-place `.modastack/state/policy.md`, injected read-only into every
+  rewritten-in-place `.bobi/state/policy.md`, injected read-only into every
   agent's prompt as `## Team Policy`. Agents no longer write their own log;
   durable knowledge persists via transcript → curator → policy. Publishes
   `policy.updated` (passive re-read by default, inbox push only for `urgent`).
   eng-team `director`/`project_lead` role prompts migrated to the model. See
   `docs/specs/456-policy-curator.md`.
 - **Reusable tool library (#465, #416).** `tool_library:` in `agent.yaml` is an
-  opt-in catalog of baked CLI tools (`modastack/tool_library/`). A team lists
+  opt-in catalog of baked CLI tools (`bobi/tool_library/`). A team lists
   entries by id (`tool_library: [codex, venn]`) and `compose.py` expands each
   into its `requires:` + `build:` + a `tools/<id>.md` guide at build time — one
   pinned definition, reusable across teams, de-duped across `from:` layers. Ships
@@ -347,7 +347,7 @@ for a running team.
   standing up a dedicated Slack app, plus a `url_verification` retry fix.
 
 ### Fixed
-- **Multiple Slack bots per workspace (#466, #467, #468).** Two modastack bots in
+- **Multiple Slack bots per workspace (#466, #467, #468).** Two bobi bots in
   one workspace clobbered each other's self-filter (event server keyed Slack
   state by `team_id`, last-writer-wins) → bots replied to their own placeholders,
   a runaway spam loop. Re-keyed Slack state by `api_app_id` with per-app signing
@@ -367,7 +367,7 @@ for a running team.
 
 Agent teams become a **composable package ecosystem**. A team can declare
 `from: <base-team>` and inherit it, contributing only its delta — Docker-style
-composition at install/deploy time. Completes the modastack side of epic **#453**
+composition at install/deploy time. Completes the bobi side of epic **#453**
 (Team distribution & composition): #446 (resolution) + #451 (merge) + the #452
 `eng-team` extraction. Ships the framework support the private
 `moda-agent-teams` cutover needs.
@@ -375,8 +375,8 @@ composition at install/deploy time. Completes the modastack side of epic **#453*
 ### Added
 - **`from:` team inheritance, composed at install/deploy (#446, #451).** A team
   declares `from: <base-team>` (a `name`, `name@version`, or a local path) and
-  `modastack install` (and `deploy`) walk the chain (`base → … → leaf`) and
-  freeze one flat `.modastack/` image — nothing downstream learns about layers.
+  `bobi install` (and `deploy`) walk the chain (`base → … → leaf`) and
+  freeze one flat `.bobi/` image — nothing downstream learns about layers.
   Resolution is **local-always-wins** (checked-in `agents/<name>` → cache →
   registry) with **fail-fast** on a pin/local-version mismatch (a Cargo-quality
   error, never a silent fall-through), cycle + depth guards, and a recorded
@@ -389,7 +389,7 @@ composition at install/deploy time. Completes the modastack side of epic **#453*
   appends with `id`-keyed replace, scalars last-wins; `prune:` drops inherited
   items; `workspace/` stays seed-if-absent. `deploy` flattens the chain on the
   host, so a dark instance never resolves a chain at first boot. New module
-  `modastack/compose.py`.
+  `bobi/compose.py`.
 
 ### Changed
 - **`eng-team` → pristine `eng-team` (#452).** The reference team is split
@@ -402,8 +402,8 @@ composition at install/deploy time. Completes the modastack side of epic **#453*
 - **Agent teams are no longer bundled into the framework wheel.** Teams are
   versioned registry packages now; baking a frozen copy into the wheel pinned a
   team to the framework release and fought independent team versioning.
-  `modastack setup` lists teams from the registry (a source checkout still lists
-  the local `agents/` dir for dev). `modastack install <name@version>` and a
+  `bobi setup` lists teams from the registry (a source checkout still lists
+  the local `agents/` dir for dev). `bobi install <name@version>` and a
   `from:`-bearing team both compose by fetching their base from the registry.
 
 ### Packaging
@@ -448,7 +448,7 @@ completion-delivery fix and Phase 2 of the versioned-team-package work.
   monitor findings; terminal status uses an honest `completed`/`failed`/`crashed`
   vocabulary (never `done` on an error), is persisted to `state.json` *before* and
   independent of the best-effort bus POST, and a dead-pid sweep marks `crashed`. A
-  new reconciler (`modastack/reconcile.py`), run on manager wake, re-emits
+  new reconciler (`bobi/reconcile.py`), run on manager wake, re-emits
   unconfirmed terminals, marks dead-pid runs `crashed`, and times out hung runs —
   idempotent via `emit_confirmed` so healthy completions deliver exactly once.
   `requested_by` is threaded through the blocking, orchestrator, and resume paths so
@@ -457,8 +457,8 @@ completion-delivery fix and Phase 2 of the versioned-team-package work.
 ### Added
 - **Versioned team fetch / install / deploy resolution (#440, Phase 2).** Consumes
   the Phase 1 immutable per-team packages (#442). A team **version** is now the unit
-  of distribution: `modastack install <name>[@version]` and
-  `modastack agents update <name>[@version]` accept a pin, and `deploy` resolves
+  of distribution: `bobi install <name>[@version]` and
+  `bobi agents update <name>[@version]` accept a pin, and `deploy` resolves
   `team: <name>@<version>` through one seam. A single parse rule
   (`registry.split_team_ref()`, split on the last `@`) and one resolver
   (`deploy.resolve_team_dir()`, routing all four production call sites) back it. A
@@ -512,10 +512,10 @@ self-heal, so a momentary overload no longer bricks a running fleet.
   with each team's `agent.yaml` and that the pinned version is strict semver. This
   is the publishing half only — inert at runtime; no consumer reads the new assets
   yet (fetch/deploy land in later phases).
-- **`modastack deploy-init` scaffolds bring-your-own-repo CI (#439).** A new
+- **`bobi deploy-init` scaffolds bring-your-own-repo CI (#439).** A new
   command that turns the bring-your-own-repo setup (DEPLOYMENT.md §7.2 B) into one
   step: from an agent-teams repo root it writes a standalone, actionlint-clean
-  `deploy-agent-teams.yml` (installs `modastack` from PyPI, pinned to the running
+  `deploy-agent-teams.yml` (installs `bobi` from PyPI, pinned to the running
   version) plus a `deployments/` skeleton, then prints the exact `fly`/`gh`
   commands to wire `FLY_API_TOKEN` and the per-tenant GitHub Environment — with
   each team's per-key secret list derived from its declared `${VAR}`s. Non-
@@ -555,7 +555,7 @@ retry, so a transient timeout no longer takes out a running fleet.
 
 ### Added
 - **Graceful preflight degradation for non-required services (#329).** Declared
-  services gain a `required: true|false` flag (default false). `modastack start`
+  services gain a `required: true|false` flag (default false). `bobi start`
   and `doctor` now block only on the entry point and required-service failures;
   other failed service checks render as warnings (⚠) and start proceeds in
   degraded mode. Essential services in the shipped packs are marked
@@ -582,7 +582,7 @@ single declarative reconcile, then validates the whole path end-to-end by rollin
 the live fleet.
 
 ### Added
-- **Per-key secret reconcile to the agent.yaml declared set.** `modastack deploy`
+- **Per-key secret reconcile to the agent.yaml declared set.** `bobi deploy`
   now treats the team's `agent.yaml` `${VAR}` refs as the authoritative secret
   surface: it sets every declared secret it's given and prunes any live Fly secret
   the team no longer declares. The GitOps Action (`deploy-agent-teams.yml`)
@@ -599,7 +599,7 @@ the live fleet.
   model gateway; retire the bespoke gateway connection kind. (MDS-48/MDS-49)
 
 ### Fixed
-- **Build the Fly image locally on macOS/Docker-Desktop laptops.** `modastack
+- **Build the Fly image locally on macOS/Docker-Desktop laptops.** `bobi
   deploy` detects the Docker Desktop socket via `docker context` and builds
   locally when the remote builder isn't reachable. (#387)
 - **`resolve_root` honors its `start` arg after self-bind.** (#375)
@@ -611,7 +611,7 @@ the live fleet.
 
 ## 0.26.0 — 2026-06-21
 
-Reskin the `modastack setup` web UI to **bobi**: a single clay accent palette and
+Reskin the `bobi setup` web UI to **bobi**: a single clay accent palette and
 the probe-mark logo. Terminal layout and behavior are unchanged — only the color
 tokens, the brand mark, and brand wording move. (MOD-190)
 
@@ -621,8 +621,7 @@ tokens, the brand mark, and brand wording move. (MOD-190)
   bobi token set, and swapped the titlebar/rail glyph for the probe mark (paper
   body + dashed orbit + a single violet probe dot — the only violet in the
   product). Shipped `bobi-mark.svg` as the favicon, retitled the page, and
-  renamed all user-facing brand copy `modastack → bobi` (CLI commands, install
-  paths, and docs URLs stay `modastack`). Source of truth:
+  aligned all user-facing setup copy with the Bobi brand. Source of truth:
   `docs/design/BOBI_STYLE_GUIDE.md`.
 
 ## 0.25.0 — 2026-06-21
@@ -636,9 +635,9 @@ connection test, and a per-row connection-status indicator.
 - **Stdio MCP connections.** Add a local command-based MCP server (name +
   command + args + env) in the connections UI; persisted to `agent.yaml` as a
   `{type: stdio, command, args, env}` entry with secrets captured as `${VAR}`
-  refs in `.modastack/.env`, never inline. (MOD-209)
+  refs in `.bobi/.env`, never inline. (MOD-209)
 - **Detect from a local folder.** Point at an MCP server's project folder and
-  modastack infers the launch recipe — command/args from `pyproject.toml` /
+  bobi infers the launch recipe — command/args from `pyproject.toml` /
   `package.json`, and env vars (required vs optional, secret vs plain) by AST
   scan, with a confidence guard for highly-configurable servers. Home-confined,
   read-only static analysis.
@@ -685,37 +684,37 @@ canary gate.
 - **Retired the EC2 release path.** Removed the self-hosted release smoke /
   promote-to-prod-director (`publish-pypi`) and real-Claude integration (`ci`)
   jobs; the EC2 director is replaced by `moda-eng-team` running on Fly.
-- `modastack deploy` honors a declared-but-empty optional referenced var (e.g.
+- `bobi deploy` honors a declared-but-empty optional referenced var (e.g.
   `channels: ${SLACK_CHANNELS}`, empty = whole workspace) instead of failing on
   it; auth-critical keys are still enforced at provision and boot.
 
 ## 0.23.0 — 2026-06-19
 
-Containerized instances land: modastack now runs as an immutable image on Fly,
+Containerized instances land: bobi now runs as an immutable image on Fly,
 deployable from the binary alone, with a fast-rebuilding layered Dockerfile.
 
 ### Added
 - **Containerized instance image (C8).** One Dockerfile, two build modes
-  (`MODASTACK_BUILD={source|pypi}`): `source` builds the wheel from a checkout
-  (dev + repo CI), `pypi` installs a published, version-pinned `modastack` so a
+  (`BOBI_BUILD={source|pypi}`): `source` builds the wheel from a checkout
+  (dev + repo CI), `pypi` installs a published, version-pinned `bobi` so a
   deploy needs no repo. Runs the agent non-root, ships the native `claude` CLI
   (no Node), and bakes the embedding model in for cold-start speed. (#338)
-- **`modastack deploy` / `destroy` primitive + binary-only deploy (C22).**
+- **`bobi deploy` / `destroy` primitive + binary-only deploy (C22).**
   Idempotent provision-or-update with config precedence (flags ›
   `deployments/<name>.yaml` › `defaults.yaml` › built-ins). Deploy assets
   (Dockerfile, scripts, entrypoints) ship as wheel package data, so
-  `uv tool install modastack` is enough to deploy — no checkout. (#342)
+  `uv tool install bobi` is enough to deploy — no checkout. (#342)
 - **Fly provisioning + install-team-from-URL (C10).** `provision-instance.sh`
-  and `modastack install <url>` deliver a team to a fresh instance. (#340)
+  and `bobi install <url>` deliver a team to a fresh instance. (#340)
 - **Subscription-login bootstrap (C23).** First-boot subscription auth for a
   dark container. (#343)
 - **GitOps thin clients.** Release / `deploy-*` tag workflows that are thin
-  `modastack deploy` callers; `deployments/` holds per-instance config; a
+  `bobi deploy` callers; `deployments/` holds per-instance config; a
   permanent `moda-canary` instance is the pipeline smoke. (#342)
-- **First-class foreground / PID-1 mode + manager health endpoint.** `modastack
+- **First-class foreground / PID-1 mode + manager health endpoint.** `bobi
   start --foreground` as the container entrypoint, with a health port the
   Docker `HEALTHCHECK` probes. (#333)
-- **`modastack install --non-interactive`** for unattended/container installs.
+- **`bobi install --non-interactive`** for unattended/container installs.
   (containerized-5)
 - **Subagent concurrency semaphore** bounding parallel agent launches. (#334)
 
@@ -726,7 +725,7 @@ deployable from the binary alone, with a fast-rebuilding layered Dockerfile.
 - **Faster, layered Dockerfile.** Layers are ordered stable → volatile so a
   code-only rebuild is seconds instead of minutes: the fastembed model bake
   moves to a dedicated `model-baker` stage keyed only on the fastembed version,
-  the `claude` CLI install sits above the framework, and the `modastack` venv is
+  the `claude` CLI install sits above the framework, and the `bobi` venv is
   the last heavy layer. `source` mode now splits a pyproject-keyed deps layer
   from a thin `--no-deps` wheel layer (dep list read from
   `[project.dependencies]` via stdlib `tomllib`, no drift). This is the layer
@@ -792,9 +791,9 @@ unreleased 0.20.0 setup-UI work.)
 ### Added
 - **Inter-agent comms over the event server (comms-v1).** Agents message each
   other as `inbox/<session>` events; the per-session HTTP inbox transport is
-  retired. Blocking `modastack ask` / `message --wait` is async request/reply
+  retired. Blocking `bobi ask` / `message --wait` is async request/reply
   correlated over a transient `reply/<uuid>` topic. (#268, #269)
-- **Bubble-scoped isolation + HMAC signing (auth-v1).** `modastack start` mints
+- **Bubble-scoped isolation + HMAC signing (auth-v1).** `bobi start` mints
   one trust bubble; every agent joins it. Publishes and join-registrations are
   HMAC-signed and events are scoped to a bubble, so they can't be read or injected
   across instances sharing one event server. Local server binds loopback by
@@ -802,13 +801,13 @@ unreleased 0.20.0 setup-UI work.)
 - **Loop-safety backstops.** Delivery-path circuit breaker pauses runaway
   agent↔agent loops in a conversation (legitimate `inbox/*` exempt); spend governor
   caps agent invocations per rolling hour. (#299, #300)
-- **Observability.** `modastack events` surfaces `inbox/*` messages; `doctor` and
+- **Observability.** `bobi events` surfaces `inbox/*` messages; `doctor` and
   `/health` report bubble + auth status. (#301, #242)
 - **Auto-rotate persistent sessions at the token cap.** (#274)
 
 ### Fixed
 - `resolve_root` trust model hardened: ownership check + manager-set
-  `MODASTACK_ROOT` env pin, so a planted ancestor `agent.yaml` can't capture a
+  `BOBI_ROOT` env pin, so a planted ancestor `agent.yaml` can't capture a
   process. (#249)
 - Transient `reply/<uuid>` deployments deregistered on `ask` teardown, plus a
   crash-time eviction backstop. (#277, #279)
@@ -828,8 +827,8 @@ inbound-webhook fan-out remains accepted v1 behavior (→ #239).
 
 ## 0.20.0 — 2026-06-17
 
-The `modastack setup` web UI's team panel becomes a methodical interview and an
-editable workspace: modastack walks each role one at a time, and every card opens
+The `bobi setup` web UI's team panel becomes a methodical interview and an
+editable workspace: bobi walks each role one at a time, and every card opens
 for inspection and editing.
 
 ### Added
@@ -866,13 +865,13 @@ for inspection and editing.
 
 ## 0.19.0 — 2026-06-12
 
-Single `.modastack/` per installation, and event delivery scoped to what
+Single `.bobi/` per installation, and event delivery scoped to what
 each session actually subscribed to.
 
 ### Changed
-- One `.modastack/` directory per installation, holding both config and
-  state (#245): `modastack/paths.py` is the only module that constructs
-  `.modastack` paths; `resolve_root()` (agent.yaml walk-up) is the single
+- One `.bobi/` directory per installation, holding both config and
+  state (#245): `bobi/paths.py` is the only module that constructs
+  `.bobi` paths; `resolve_root()` (agent.yaml walk-up) is the single
   filesystem resolver; every process binds its root exactly once at its
   entry point — the manager at start, children from the `root` their
   spawner passes in the args blob, CLI commands on first resolve. All
@@ -887,17 +886,17 @@ each session actually subscribed to.
   (previously: silent cwd binding, or raw tracebacks from `transcript`
   and `workflows` subcommands); `doctor` warns instead of reporting
   green when no installation is found
-- `modastack doctor` gains a single-root check: recursive scan for stray
-  `.modastack/` dirs below the installation, classifying agent.yaml-
+- `bobi doctor` gains a single-root check: recursive scan for stray
+  `.bobi/` dirs below the installation, classifying agent.yaml-
   bearing strays (root-capture risk) separately from removable
   state-only leftovers
 
 ### Fixed
 - Engineer dispatch died with "Workflow 'issue-lifecycle' not found"
-  when a state-only `.modastack/` in a repo checkout captured root
+  when a state-only `.bobi/` in a repo checkout captured root
   resolution (prod 2026-06-12) — the marker is now `agent.yaml`, which
   only `install` writes
-- `modastack start` (default daemonized path) crashed with NameError
+- `bobi start` (default daemonized path) crashed with NameError
   after the state-dir refactor; only `--foreground` was exercised in CI
 - Image rotation was silently disabled for workflow/worktree sessions:
   manifest hashing ran against cwd (no manifest there) instead of the
@@ -976,22 +975,22 @@ Slack routing fixes: channel-scoped team routing and the self-reply loop.
   around as inbound events
 - Release smoke runs against the in-repo pack with no external repo —
   posts a synthetic event to a subscribed topic and requires a blocking
-  `modastack ask` round-trip; promote regenerates prod config from the
-  released pack (the v0.15.0 stale-config lesson). modastack-dogfood is
+  `bobi ask` round-trip; promote regenerates prod config from the
+  released pack (the v0.15.0 stale-config lesson). bobi-dogfood is
   archived.
 
 ## 0.15.0 — 2026-06-11
 
 Event contract v2 — hard cutover, no compatibility shims (#177–#181).
-Existing installs must re-run `modastack install <team>` and
-`modastack start --fresh` after upgrading (see
+Existing installs must re-run `bobi install <team>` and
+`bobi start --fresh` after upgrading (see
 docs/design/EVENT_CONTRACT_V2.md §6 for the runbook).
 
 ### Changed (breaking)
 - v2 event envelope in both runtimes; legacy top-level `repo`/
   `team_key`/`workspace`/`channel`/`installation_id` fields removed (#177)
 - Config loader reads credentials only from `services:` descriptors —
-  legacy `slack:`/`linear:` blocks are ignored; `modastack install`
+  legacy `slack:`/`linear:` blocks are ignored; `bobi install`
   regenerates agent.yaml (#178)
 - Lifecycle topics `engineer/*` → `agent/*`; session names are
   role-parameterized; run identity is an explicit `run_key`
@@ -1001,21 +1000,21 @@ docs/design/EVENT_CONTRACT_V2.md §6 for the runbook).
 
 ### Added
 - Agent decision log (memory primitive): per-agent persistent notes at
-  `.modastack/state/memory/<session>/`, loaded at session start —
+  `.bobi/state/memory/<session>/`, loaded at session start —
   decisions survive `--fresh` and session rotation (#174)
 - Session rotation when the installed image changes (#173)
 - Deterministic `auto_dispatch` rules: event→workflow routing that fires
   before the manager LLM sees the event (#205)
 - support-manager agent pack (#200)
 - dogfood-content-review pack absorbed in-repo; release battery installs
-  into throwaway temp projects; modastack-dogfood retired (#180)
+  into throwaway temp projects; bobi-dogfood retired (#180)
 - Slack placeholder + typing status indicator (#189); Slack
   notification steps in issue-lifecycle (#192)
 - Director onboarding and reconciliation from the decision log (#175)
 - Chat SDK bridge adapter spike, Cloudflare Workers validated (#191)
 
 ### Fixed
-- events.jsonl interleaved-write corruption; `modastack events` no
+- events.jsonl interleaved-write corruption; `bobi events` no
   longer crashes on malformed lines (#182)
 - Project lead prompt delegates all work, stays responsive (#149)
 - market-research pack migrated to v2 service-descriptor credentials —
@@ -1053,7 +1052,7 @@ live Linear API).
 
 ### Added
 - `context/` pack subdir — team-shipped reference files, installed
-  frozen to `.modastack/context/` (manifest-tracked, doctor-covered).
+  frozen to `.bobi/context/` (manifest-tracked, doctor-covered).
   Agents get an index (path + first line) in their prompt and read
   files on demand; contents are never inlined
 - `workspace/` pack subdir — seed templates for user-owned domain files.
@@ -1064,20 +1063,20 @@ live Linear API).
   workflows; KB-backed research corpus with typed entries
   (`topic::`, `voice::`, `company::`, `snapshot::`, `pmf::`)
 - Prompt-lint test (`tests/test_tool_guides.py`): pack prompts may only
-  reference modastack CLI commands that exist
+  reference bobi CLI commands that exist
 
 ### Fixed
-- `modastack ask`/`message` resolve the coordinator by the installed
+- `bobi ask`/`message` resolve the coordinator by the installed
   `entry_point` role — previously hardcoded the literal role "manager",
   breaking the interactive loop for any pack with a different
   coordinator name
-- Tool guides taught nonexistent CLI commands (`modastack slack-send`,
-  a fictional `modastack linear` group); Linear guides rewritten against
+- Tool guides taught nonexistent CLI commands (`bobi slack-send`,
+  a fictional `bobi linear` group); Linear guides rewritten against
   the real GraphQL API and verified live
 
 ### Changed
 - Tool-guide authoring doctrine: guides carry team policy; CLI syntax
-  lives in drift-proof surfaces (`--help`, `modastack skill`); raw-API
+  lives in drift-proof surfaces (`--help`, `bobi skill`); raw-API
   mechanics only for services the framework doesn't wrap
 - Authoring and onboarding docs cover `context/`, `workspace/`, and the
   function-vs-policy rule
@@ -1089,10 +1088,10 @@ beyond the fixes below. Verified by the unit, integration, event-server,
 and dogfood batteries.
 
 ### Fixed
-- `modastack start --fresh` and `transcript show manager` now resolve the
+- `bobi start --fresh` and `transcript show manager` now resolve the
   real manager session name (`moda-<entry_point>-<project>`) — previously
   they targeted a nonexistent `moda-mgr-*` name, so `--fresh` cleared nothing
-- `modastack agents show` / `agents cancel` now work from the CLI — they
+- `bobi agents show` / `agents cancel` now work from the CLI — they
   read the on-disk session registry instead of an in-process dict that was
   always empty (cancel terminates the agent's detached process)
 
@@ -1109,13 +1108,13 @@ and dogfood batteries.
   built-in roles tier
 
 ### Changed
-- Event publishing moved to `modastack.events.publish.post_event` with a
+- Event publishing moved to `bobi.events.publish.post_event` with a
   memoized server URL — library code no longer imports the CLI module
 - Shared helpers consolidated into `sdk` (`pid_alive`, `read_pid`,
   `state_dir`, cached runtime-root resolution), `events.server.health()`,
   and `config.parse_env_file`
 - Agent prompts list workflows via the same dispatcher as
-  `modastack workflows list` (same tiers and dedup)
+  `bobi workflows list` (same tiers and dedup)
 - Performance: workflow run files parsed once per read, KB store reuses
   one SQLite connection, embedder caches the sidecar port, Cloudflare
   worker fans out to KV/Durable Objects in parallel, local event-server
@@ -1125,28 +1124,28 @@ and dogfood batteries.
 
 ### Added
 - CI pipeline: unit tests + fast integration on GitHub-hosted, Claude integration tests on self-hosted EC2 runner
-- Release pipeline: dogfood smoke test — installs from PyPI, starts modastack in dogfood repo, files a ticket, waits for modastack to close it, then restarts all configured repos with the new version
+- Release pipeline: dogfood smoke test — installs from PyPI, starts bobi in dogfood repo, files a ticket, waits for bobi to close it, then restarts all configured repos with the new version
 - `deploy/setup-ci-runner.sh` for provisioning new self-hosted runner instances
 
 ### Changed
-- `--repo` flag removed from all CLI commands — modastack always detects the repo from cwd
+- `--repo` flag removed from all CLI commands — bobi always detects the repo from cwd
 
 ## 0.7.0 — 2026-06-05
 
 ### Breaking
-- **All runtime state moved to per-repo `.modastack/`** — PID files, logs, sessions, event server state now live under `<repo>/.modastack/state/` instead of `~/.modastack/`. Credentials moved to `~/.config/modastack/credentials.yaml` (XDG standard); existing credentials are migrated automatically on first load
-- **`--repo` flag removed from all CLI commands** — modastack always detects the repo from the current directory. Commands like `agents launch`, `monitors add/pause/remove`, and `roles list` no longer accept `--repo`
-- **`GlobalConfig` class removed** — machine-wide config via `Config` (`~/.modastack/config.yaml`); `RepoConfig` and `LocalConfig` later consolidated into `Config`
+- **All runtime state moved to per-repo `.bobi/`** — PID files, logs, sessions, event server state now live under `<repo>/.bobi/state/` instead of `~/.bobi/`. Credentials moved to `~/.config/bobi/credentials.yaml` (XDG standard); existing credentials are migrated automatically on first load
+- **`--repo` flag removed from all CLI commands** — bobi always detects the repo from the current directory. Commands like `agents launch`, `monitors add/pause/remove`, and `roles list` no longer accept `--repo`
+- **`GlobalConfig` class removed** — machine-wide config via `Config` (`~/.bobi/config.yaml`); `RepoConfig` and `LocalConfig` later consolidated into `Config`
 
 ### Removed
-- Legacy tmux session management (`modastack/tmux.py`, `modastack/session.py`) — all sessions now use the Claude Agent SDK
-- `~/.modastack/` global directory dependency — the framework no longer reads or writes to the home directory for runtime state
+- Legacy tmux session management (`bobi/tmux.py`, `bobi/session.py`) — all sessions now use the Claude Agent SDK
+- `~/.bobi/` global directory dependency — the framework no longer reads or writes to the home directory for runtime state
 
 ### Fixed
 - Detached agent subprocesses now call `set_repo_root()` so they can find workflows and write session state to the correct per-repo directory
 - `workflows validate` command updated for the current step-based workflow schema (was referencing removed DAG attributes)
 - `monitors remove` now correctly finds monitors in the current repo when `--repo` is not specified
-- `modastack start` info display now shows per-repo log path instead of global
+- `bobi start` info display now shows per-repo log path instead of global
 
 ### Added
 - Auto-resolve merge conflicts: `monitor/pr.conflict_detected` now triggers the manager to auto-spawn an engineer that follows a `merge-conflict` skill (#117)
@@ -1157,7 +1156,7 @@ and dogfood batteries.
 ## 0.4.1 — 2026-06-01
 
 ### Added
-- Engineer lifecycle events: `modastack spawn` and workflow-managed engineers now emit `engineer/session.started`, `engineer/session.completed`, and `engineer/session.failed` to the event bus, so the manager can narrate engineer activity without polling (#103)
+- Engineer lifecycle events: `bobi spawn` and workflow-managed engineers now emit `engineer/session.started`, `engineer/session.completed`, and `engineer/session.failed` to the event bus, so the manager can narrate engineer activity without polling (#103)
 - Events post fire-and-forget over HTTP (`POST /api/event`) on a daemon thread, reusing the same path monitor checks use, so delivery never blocks or breaks an engineer run
 - Manager event formatter now surfaces `phase`, `duration`, `summary`, and `error` fields from lifecycle events
 
@@ -1165,9 +1164,9 @@ and dogfood batteries.
 
 ### Added
 - Background monitoring system: scheduled polling tasks that fill webhook gaps by detecting conditions and injecting synthetic events into the manager's event stream (#100)
-- Three-tier monitor storage (built-in `monitors/defaults.yaml` → user `~/.modastack/monitors.yaml` → repo `.modastack.yaml`), merged with later tiers overriding by `name` and repo-level `enabled: false` opt-out
+- Three-tier monitor storage (built-in `monitors/defaults.yaml` → user `~/.bobi/monitors.yaml` → repo `.bobi.yaml`), merged with later tiers overriding by `name` and repo-level `enabled: false` opt-out
 - Built-in default monitors: PR conflict check (15m) and stale-PR check (1h), both working out of the box
-- `modastack monitor add/list/pause/remove` CLI for managing monitors across tiers
+- `bobi monitor add/list/pause/remove` CLI for managing monitors across tiers
 - Native check runners (`pr_conflicts`, `stale_prs`) with per-condition deduplication; description-only monitors fall back to manager interpretation
 
 ## 0.3.3 — 2026-05-27

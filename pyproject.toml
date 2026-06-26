@@ -34,9 +34,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/moda-labs/modastack"
-Repository = "https://github.com/moda-labs/modastack"
-Issues = "https://github.com/moda-labs/modastack/issues"
+Homepage = "https://github.com/moda-labs/bobi-agent"
+Repository = "https://github.com/moda-labs/bobi-agent"
+Issues = "https://github.com/moda-labs/bobi-agent/issues"
 
 [project.optional-dependencies]
 kb = [
