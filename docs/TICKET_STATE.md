@@ -7,7 +7,9 @@ blocked vs. ready, and which one-offs are ready to hand to the `modastack` bot.
 moves tracks, update it here in the same session. This file is the single place
 to get the lay of the land without re-reading every issue.
 
-- **Last reviewed:** 2026-06-26 (**28 open issues** — filed the **Unified agent dashboard** track: design record **#525** (merge `modastack setup` + `modastack ui` into one dashboard → onboarding → monitor app) plus four **do-now prep carve-outs** that are good regardless of the dashboard and shrink the eventual merge PR: **#526** canonical `~/.modastack/agents/<team>/` directory layout, **#527** shared web-server harness, **#528** consolidated design tokens, **#529** service-core extraction (CLI + web as thin adapters). The frontend-framework decision (vanilla vs lightweight framework) gates the *merge*, not the prep. New track added to "Tracks at a glance".)
+- **Last reviewed:** 2026-06-26 (**17 open issues, 0 open PRs** — reconciled against live GitHub after the bobi rename PR merged. Active clusters: **Unified agent dashboard** (#525 design + #526/#527/#528/#529 prep), **runtime/fleet bugs** (#518/#520), **brain/runtime portability** (#485/#484/#481), **Tool library** (#515 with #428/#398 ready), **User accounts** (#239), **Containerization** (#395), **Chat SDK** (#190), and release protocol compatibility (#427). Since the prior review, #479/#489/#496/#498/#507/#513/#519/#521/#530 closed; #526-#529 remain dashboard-independent prep tickets.)
+- **Prev reviewed:** 2026-06-26 (**28 open issues** — filed the **Unified agent dashboard** track: design record **#525** (merge `modastack setup` + `modastack ui` into one dashboard → onboarding → monitor app) plus four **do-now prep carve-outs** that are good regardless of the dashboard and shrink the eventual merge PR: **#526** canonical `~/.modastack/agents/<team>/` directory layout, **#527** shared web-server harness, **#528** consolidated design tokens, **#529** service-core extraction (CLI + web as thin adapters). The frontend-framework decision (vanilla vs lightweight framework) gates the *merge*, not the prep. New track added to "Tracks at a glance".)
+- **Prev reviewed:** 2026-06-25 (**16 open issues** — filed #515 as the Tool library epic and cleaned #428/#398 into shovel-ready implementation tickets; #493 and #499 closed while reconciling. Earlier today: consolidated containerization into #395 and closed #378/#215/#394 as duplicate tracking tickets; split #239 out as **User accounts**; collapsed Chat SDK into #190 and closed #201/#202/#203/#204; #488 closed after PR #491. Active clusters: Codex-brain rollout (#485 plus #479/#484/#481/#498/#507/#513), Tool library (#515 with #428/#398 ready), user accounts (#239), shared event-server hardening (#489), and Slack event polish (#496). **PR state:** #489/#496/#498/#507 have PRs up; #513/#428/#398 are status:todo; #481 is assigned and moving. **Closed/stale table refs corrected:** #416, #456, #327, #378, #394, #215, #488, #493, #499 are closed; #501/#502 remain closed in 0.34.1.)
 - **Prev reviewed:** 2026-06-25 (**23 open issues after closing #501/#502** — 0.34.1 bugfix release cut from #500/#503. **Closed:** #501 stale persisted `.modastack/.env` secrets on Fly volumes, and #502 Slack workspace-level DM cross-delivery between bots. Both shipped in PR #503; #500 shipped the Codex shell PATH fix.)
 - **Prev reviewed:** 2026-06-25 (**25 open issues** — filed live Codex fleet incident follow-ups: **#501** stale persisted `.modastack/.env` secrets on Fly volumes can make tool shells use the wrong Slack bot, and **#502** workspace-level Slack DM routing can cross-deliver inbound events between bots. #501 is outbound credential drift; #502 is inbound webhook routing isolation.)
 - **Prev reviewed:** 2026-06-24 (**17 open issues** — filed **epic #485 "Pluggable agent brain"** (Claude/Codex/Gemini/Grok behind one `BrainClient`; spec `pluggable-brain.md`; Phase 0 Codex spike done). Self-contained epic — work breakdown is in-issue checkboxes, no child tickets. New track added to "Tracks at a glance".)
@@ -23,19 +25,20 @@ to get the lay of the land without re-reading every issue.
 
 | Track | Type | Issues | Status |
 |---|---|---|---|
-| Multitenant | Epic (#395) | #378, #239, #215, +#394 (tooling) | ⏸️ Deferred — no forcing function |
-| Chat SDK / ChannelAdapter | Multi-issue (#190) | #201 → #202, #203, #204 | ⛔ Blocked on spike #191; #201 is the gate |
-| Tool / Capability library | NEW | #416 (cli) → #428 (skill); #398 (mcp) | 🟡 #416 is the foundation (catalog format + resolver); #428/#398 are the skill/mcp spokes. **Successor to the now-closed CLI-first track.** |
-| Release pipeline (release.yml) | — | #427 | 🔴 design (library↔event-server protocol compat); #426 closed |
+| Unified agent dashboard | **NEW (#525)** | #525 design; #526, #527, #528, #529 prep | 🟡 **PROPOSED 2026-06-26** — merge the create (`setup`) + monitor (`ui`) UIs into one dashboard → onboarding → launch → monitor app. **#526–#529 are do-now, dashboard-independent cleanup** (good regardless). Frontend-framework decision gates the *merge*, not the prep. |
+| Runtime / fleet bugs | Bugs | #518, #520 | 🔴 Open production-safety bugs: session crash bursts tripping the loop breaker, and verify agents mutating the shared editable install to PR worktrees. |
+| Codex brain rollout / runtime portability | Epic + incidents (#485) | #485, #484, #481 | 🔴 Active rollout risk. #479/#498/#507/#513 closed; remaining live items are Claude initialize timeouts under contention (#484) and memory-aware admission (#481), with #485 tracking the broader brain epic. |
+| User accounts | Epic (#239) | account model + bubble registration binding | 🔴 Separate from containerization. Add user accounts, then bind auth bubbles to accounts during registration. |
+| Containerization | Epic (#395) | collapsed #378/#215/#394 | ⏸️ Single epic only. Former child tickets are closed as duplicate tracking tickets and preserved as checklists in #395. User accounts moved to #239. |
+| Chat SDK / ChannelAdapter | Epic (#190) | collapsed #201/#202/#203/#204 | ⏸️ Single epic only. Former child tickets are closed as duplicate tracking tickets and preserved as a checklist in #190. |
+| Tool library | Epic (#515) | #416 done; #428, #398 | 🟢 #428 and #398 are shovel-ready implementation tickets under #515. #416 CLI catalog is CLOSED. |
+| Release pipeline / packaging | — | #427 | 🔴 #493 is closed; #427 remains design-first for library↔event-server protocol compatibility. |
 | Live fleet incidents | NEW | #501, #502 | ✅ **FIXED in PR #503 / release 0.34.1** — Codex-switched Fly bots exposed stale volume secrets and Slack cross-delivery between apps in one workspace |
-| Knowledge / curation | NEW | #456 | 🟢 **Assigned to `modastack`** — replace append-only decision log with curator-monitor → `policy.md` (filed off the 2026-06-23 director wedge) |
 | Team distribution & composition | **Epic (#453)** | #440 → #446 → #451 → #452 | ✅ **DONE — CUTOVER COMPLETE & LIVE 2026-06-24.** PR #457 (`7709b76`) + **modastack 0.31.0 released** (compose on PyPI). moda-agent-teams **PR #3 merged**, `MODASTACK_VERSION→0.31.0`, deploy dispatched (`only=eng-team`, `rebuild=true`) → live `moda-eng-team` reconciled onto the composed team. Behavioral identity confirmed live. |
 | CLI-first connection cleanup | Sequence | #397 → #403 | ✅ **DONE** — #397 (image→CLI) + #403 (inject.py shim deleted) both CLOSED 2026-06-22 |
 | Codex integration | MDS-42 B | #285 | ✅ **DONE** — #285 shipped CLI-first (`codex exec` + `tools/codex.md`), CLOSED |
 | Reliability (post-#409) | — | #425, #433, #443, #454 | ✅ **DONE** — all CLOSED (#433/#454 rotation-metric + `compact`; #443/#425 wedge fixes) |
-| Pluggable agent brain | **Epic (#485)** | self-contained (work breakdown in-issue, no child tickets) | 🟡 **PROPOSED 2026-06-24** — Claude/Codex/Gemini/Grok behind one `BrainClient`. **Phase 0 Codex spike DONE** (exec/NDJSON/MCP/resume validated). Spec: `pluggable-brain.md`. Phases 1–4 tracked as checkboxes in the issue. |
-| Unified agent dashboard | **NEW (#525)** | #525 design; #526, #527, #528, #529 prep | 🟡 **PROPOSED 2026-06-26** — merge the create (`setup`) + monitor (`ui`) UIs into one dashboard → onboarding → launch → monitor app. **#526–#529 are do-now, dashboard-independent cleanup** (good regardless). Frontend-framework decision gates the *merge*, not the prep. |
-| Standalone one-offs | — | #327 | 🔴 Needs design |
+| Pluggable agent brain | **Epic (#485)** | self-contained + follow-ups above | 🟡 Phase 0 + Claude adapter landed; Codex stateless/manager parity is now being driven through #484/#481 and the remaining #485 checklist. |
 
 ---
 
@@ -61,6 +64,49 @@ apps in one workspace.
 | #501 | Deploy reconcile leaves stale `.modastack/.env` secrets on Fly volume | ✅ **CLOSED — fixed in PR #503 / release 0.34.1.** Existing-app deploy now syncs reconciled Fly secrets into `/data/project/.modastack/.env` and removes pruned keys from that file. |
 | #502 | Slack workspace-level DM routing can cross-deliver events between bots | ✅ **CLOSED — fixed in PR #503 / release 0.34.1.** Slack events and subscriptions now use app-qualified topics (`slack:<team>:app:<app>`) so DMs route to the matching Slack app. |
 
+## Codex brain rollout / runtime portability — epic #485
+
+The 0.34 pluggable-brain work made Codex real enough to expose rollout
+footguns. Treat this as the active reliability lane until Codex-backed teams can
+launch children, run gates, authenticate helper reviews, and survive contention
+without special-case operator intervention.
+
+| Issue | What | Status |
+|---|---|---|
+| #485 | Pluggable brain epic | 🟡 **OPEN.** Phase 0 and Claude adapter are done; remaining work is Codex stateless paths, manager loop strategy, and other brain adapters. |
+| #479 | Codex CLI unauthenticated fleet-wide for adversarial review | ✅ **CLOSED 2026-06-26.** `OPENAI_API_KEY` now materializes Codex auth before launch. |
+| #498 | Auto-bake Codex CLI when `brain.kind=codex` | ✅ **CLOSED 2026-06-25.** Removes the config footgun where the brain says Codex but the image lacks `codex`. |
+| #507 | Codex skill/gate compatibility for issue-lifecycle | ✅ **CLOSED 2026-06-25.** Makes `/review`, `/qa`, `/browse` available to Codex-backed sessions. |
+| #513 | General parent→child environment propagation contract | ✅ **CLOSED 2026-06-25.** Contract landed for inherited brain/tool/service credentials. |
+| #484 | Claude CLI `initialize` timeout under CPU/IO contention | 🔴 **OPEN — blocks fresh engines.** Not OOM; needs configurable/retried initialize and possibly launch admission under high load. |
+| #481 | Memory-aware concurrency cap | 🟡 **OPEN, assigned to `modastack`, status:in-progress.** Replace static `max_concurrent_agents` with dispatch-time memory headroom gating plus static hard ceiling fallback. |
+
+## Runtime / fleet bugs
+
+| Issue | What | Status |
+|---|---|---|
+| #518 | Agent sessions crashed in burst and tripped loop breaker | 🔴 **OPEN.** A burst of session.failed events tripped the loop breaker; needs root-cause recovery/reporting so crashes do not create control-plane ambiguity. |
+| #520 | Verify agents can re-root shared editable install to PR worktrees | 🔴 **OPEN.** `pip install -e` from task worktrees can mutate the shared user-level editable install; needs isolation/guardrails before cleanup removes those worktrees. |
+
+## Shared event-server security
+
+These are the near-term blockers before treating the Cloudflare Worker as a
+shared or public event server. The broader account model now lives in the
+separate User accounts epic (#239).
+
+| Issue | What | Status |
+|---|---|---|
+| #488 | Pluggable upstream resource grants for webhook topic subscriptions | ✅ **CLOSED 2026-06-25 after PR #491.** |
+| #489 | Internal Worker-to-Durable-Object auth for `DeploymentSession` | ✅ **CLOSED 2026-06-25.** Defense-in-depth plus stops forwarding client bearer auth to the DO. |
+| #239 | User accounts + bind auth bubbles during registration | 🔴 **SEPARATE EPIC.** Not part of containerization; account-level authorization builds on top of bubble/resource-grant hardening. |
+
+## Slack UX / delivery polish
+
+| Issue | What | Status |
+|---|---|---|
+| #496 | Duplicate `Thinking...` placeholders on @mentions | ✅ **CLOSED 2026-06-25.** Dedup Slack `app_mention` + `message.channels` double-events. |
+| #499 | User-friendly Slack DM `login_channel` values | ✅ **CLOSED 2026-06-25.** Resolved `@handle`/structured user refs against the configured bot token workspace. |
+
 ## Team distribution & composition — epic #453 ✅ DONE (2026-06-24)
 
 Agent teams as a versioned, composable package ecosystem (reuse across orgs without
@@ -79,55 +125,59 @@ CLOSED. Specs (historical): `docs/specs/team-from-resolution.md` (#446),
 | #440 | Package | Versioned per-team tarballs (`name@version`) registry install + deploy | ✅ **Phase 1 (#442) + Phase 2 (#448) MERGED to main** — foundation landed. Interface: `registry.fetch(name, version=)` + `_split_ref` (exact `name@version` or "latest", **not semver ranges**) |
 | #446 | Resolve | `from:` resolution: local-always-wins + fail-fast + `--pinned` | ✅ **MERGED (PR #457)** — `modastack/compose.py` `resolve_chain`/`resolve_team_ref`; Cargo-quality fail-fast; cycle/depth guards; compose-lock; deploy `resolve_team_dir` flattens on the host; publish guard `scripts/check-publishable.py` |
 | #451 | Compose | Merge semantics: prose concat-in-order; structured deep-merge by key; `replace:` hatch; `prune:` | ✅ **MERGED (PR #457)** — `compose.compose()`; prose concat + `replace:`; agent.yaml deep-merge (services/requires by name, build append+dedupe, auto_dispatch id-keyed); `prune:`; provenance; install clears only contributed surfaces; 38 tests |
-| #452 | Std lib | Extract pristine `eng-team` (→ public modastack) + `moda-eng-team` overlay (→ private moda-agent-teams) | 🟡 **modastack side MERGED (PR #457) — cutover pending** — `agents/eng-team` extracted, monolith deleted, tests re-pointed, teams de-bundled from the wheel, regression bar met; overlay on private moda-agent-teams **PR #3**. Live flip release-gated: cut a modastack release (publishes eng-team@1.0.0) → merge PR #3 → flip `deployments/eng-team.yaml` to `team: moda-eng-team` + delete private monolith + deploy |
+| #452 | Std lib | Extract pristine `eng-team` (→ public modastack) + `moda-eng-team` overlay (→ private moda-agent-teams) | ✅ **CLOSED + CUTOVER LIVE.** `agents/eng-team` extracted, monolith deleted, overlay PR merged, `deployments/eng-team.yaml` flipped to `team: moda-eng-team`, and live behavior verified. |
 
-## Multitenant — epic #395 ⏸️
+## User accounts — epic #239 🔴
 
-Post-MVP phase of containerization (#344, closed; MVP shipped v0.24.0, eng-team
-live on Fly, EC2 retired). **Explicitly deferred — don't build speculatively.**
-Pick up only when there's a real driver: a 2nd instance of one team, or an
-external/untrusted tenant.
+Add the user/account identity layer, then bind runtime auth bubbles to accounts
+during deployment registration. This is not a containerization ticket.
 
-| Issue | What | Blocker |
+| Issue | What | Status |
 |---|---|---|
-| #378 | Build-once team images → Fly registry → deploy-many by digest | First ticket; only pays off at N instances of one team. Engine already consumes `image: <ref>`. |
-| #239 | auth-v2: bind bubbles to accounts + authorize webhook subscriptions | Hard-blocked on the accounts model — no-op until it exists. Closes the accepted single-tenant webhook-fan-out hole. |
-| #215 | loop-safety: circuit breaker, spend governor, per-deployment identities | Phase 1 (delivery-path breaker) is independent and could land alone. |
-| #394 | Remote attach (debug/smoke tooling) | Adjacent, not in the epic. **Form A** (run-on-box SSH wrapper) ships independently; **Form B** (attach-from-local) hardened form depends on #239. |
+| #239 | User accounts + bind auth bubbles during registration | 🔴 **OPEN EPIC.** Define persisted accounts/connections, verify account proof during deployment registration, store `bubble_id -> account_id`, and use that account binding for future resource/outbound authorization. |
 
-## Chat SDK / ChannelAdapter — parent #190 ⛔
+## Containerization — epic #395 ⏸️
+
+The single-tenant containerization MVP is shipped (#344 closed; eng-team live on
+Fly; EC2 retired). Remaining deployed-instance work is now consolidated into one
+epic: image reuse, remote debug/smoke tooling, and operational safeguards.
+Account/user identity is tracked separately in #239.
+
+| Issue | What | Status |
+|---|---|---|
+| #395 | Containerization: deployed instances and scale | 🟡 **OPEN EPIC.** Owns build-once team images, `modastack remote`/attach tooling, loop circuit breaker, spend governor, and per-deployment identity follow-ups. Deferred until there is a real scale/debug/safety driver. |
+| #378 / #215 / #394 | Former child tickets for build-once images, loop-safety, and remote attach | ✅ **CLOSED 2026-06-25 as duplicate tracking tickets.** Scope preserved in #395. |
+
+## Chat SDK / ChannelAdapter — epic #190 ⏸️
 
 Replace hand-rolled channel plumbing with a `ChannelAdapter` interface + adapters.
-Blocked on spike #191 (PR #198) results. Strict dependency order.
+Collapsed into a single epic on 2026-06-25: #201/#202/#203/#204 were closed as
+duplicate tracking tickets, and their scope now lives as a checklist in #190.
 
-| Issue | What | Depends on |
+| Issue | What | Status |
 |---|---|---|
-| #201 | Define `ChannelAdapter` interface + adapter registry | — (**foundational — gates the rest**) |
-| #202 | Migrate Slack adapter to the interface | #201 (~1 day, mostly wiring) |
-| #203 | Telegram adapter | #201 |
-| #204 | WhatsApp adapter | #201 (most friction — Meta Business acct, no edit/typing APIs) |
-| #190 | Umbrella: adopt a channel library (e.g. Vercel Chat SDK) | Spike #191 |
+| #190 | Adopt a channel library or minimal `ChannelAdapter`; includes interface, registry, Slack migration, Telegram adapter, WhatsApp adapter, and capability docs | 🟡 **OPEN EPIC.** Work is intentionally not split until there is a renewed product driver. |
+| #201 / #202 / #203 / #204 | Former child tickets for interface + Slack/Telegram/WhatsApp adapters | ✅ **CLOSED 2026-06-25 as duplicate tracking tickets.** Scope preserved in #190. |
 
-## Tool / Capability library — NEW track 🟡
+## Tool library — epic #515 🟢
 
-A curated, **opt-in catalog** where a team pulls in a capability **by name** (one
-pinned definition + one guide) instead of hand-coordinating binary install +
-version pin + guide across three places. Three delivery **kinds**, same opt-in /
-pinning / guide model. **Successor to the now-closed CLI-first cleanup** (#397/#403):
-those tore the runtime MCP-shim down to bare CLIs; this makes the bake/guide
-opt-in and reusable across teams. #417/#418 (the define-once foundation) already CLOSED.
+A curated, **opt-in catalog** where a team pulls in a capability **by name**
+instead of hand-coordinating install/build surfaces, runtime checks, MCP config,
+skill files, and agent-facing guides across teams. #416 shipped the CLI
+foundation; #515 now tracks the full CLI/skill/MCP catalog.
 
 | Issue | Kind | What | Status |
 |---|---|---|---|
-| #416 | `cli` | Catalog of baked CLI tools (binary+version+`requires`+guide); resolver expands `tool_library: [..]` → `build`+`requires`+guide at build time; **migrate aichat/codex/openai/venn/gstack** into it | 🟡 **OPEN, unassigned** — foundation of the track. Build/config-time sugar over primitives we already have; does NOT reintroduce runtime MCP indirection. |
-| #428 | `skill` | Install third-party Claude Code **skill libraries** from GitHub (gstack, superpowers) by pinned SHA/tag | 🟡 **OPEN** — the skill spoke. Runtime-coupled (Claude-only today); supply-chain: pin by SHA. |
-| #398 | `mcp` | First-class third-party **MCP server** support (declare/probe/surface) | 🔴 **OPEN — design-heavy.** The mcp spoke + the only legit MCP path now that built-in shims are retired. Needs a plan (coherent declare/probe/surface + multi-runtime portability). |
+| #515 | epic | Tool library across CLI, skill libraries, and MCP servers | 🟡 **OPEN EPIC.** Keeps the remaining spokes coherent without collapsing them. |
+| #416 | `cli` | Catalog of baked CLI tools (binary+version+`requires`+guide); resolver expands `tool_library: [..]` → `build`+`requires`+guide at build time; **migrate aichat/codex/openai/venn/gstack** into it | ✅ **CLOSED 2026-06-24.** Foundation landed; remaining work is in the skill/MCP spokes. |
+| #428 | `skill` | Install pinned third-party skill libraries | 🟢 **STATUS:TODO / SHOVEL READY.** Register `_expand_skill`, install selected skills from pinned refs, add gstack entry, pin lint, override tests, and runtime-compat docs. |
+| #398 | `mcp` | First-class third-party MCP servers through `tool_library:` | 🟢 **STATUS:TODO / SHOVEL READY.** Register `_expand_mcp`, merge `mcp_servers`, preserve local overrides, probe final config, and document per-brain support. |
 
 ## Knowledge / curation — NEW one-off 🟢
 
 | Issue | What | Status |
 |---|---|---|
-| #456 | Replace the append-only **decision log** with a **curator-monitor** that distills transcripts → a rewritten-in-place, size-capped `policy.md` (injected read-only), publishing `policy.updated` so agents re-read | 🟢 **OPEN — assigned to `modastack`.** Filed off the 2026-06-23 director wedge (the decision log grew to 127KB and aggravated the wedge). Rides existing monitor infra (out-of-band curator agent). Root-cause of the false over-cap was the rotation metric (#454, closed separately). |
+| #456 | Replace the append-only **decision log** with a **curator-monitor** that distills transcripts → a rewritten-in-place, size-capped `policy.md` (injected read-only), publishing `policy.updated` so agents re-read | ✅ **CLOSED 2026-06-24.** Filed off the 2026-06-23 director wedge; root-cause of the false over-cap was the rotation metric (#454, closed separately). |
 
 ## Unified agent dashboard — NEW track 🟡
 
@@ -168,27 +218,27 @@ unresolved design decision, verifiable without infra/credentials the bot lacks.*
 
 | Issue | What | Note |
 |---|---|---|
-| #456 | Curator-monitor → `policy.md` (replaces decision log) | Bounded; rides existing monitor infra. Spec on the GH issue body. |
+| #481 | Memory-aware concurrency cap | Assigned and actively relevant; acceptance is mostly unit-testable, with live behavior verified through queue/admission logs. |
 
 ### 🟡 Ready with a prep step / caveat
 
 | Issue | What | Caveat |
 |---|---|---|
-| #394 (form A) | `modastack remote <app>` SSH wrapper | Code is unit-testable; **acceptance needs live Fly** against moda-canary — human verifies |
 | #527 | Shared web-server harness (`webui_common`) | Bounded refactor; clear acceptance + unit tests in-issue. Pairs with #528. Verify both UIs launch unchanged. |
 | #528 | Consolidate design tokens → `tokens.css` | Bounded; pairs with #527 (shared static path). Reconcile drift to DESIGN.md values. |
 | #526 | Canonical `~/.modastack/` directory layout + `--team` | Bounded but touches `paths.py` (the path chokepoint) broadly; back-compat (cwd walk-up) is spelled out. Good first dashboard-prep brick. |
 | #529 | Service-core extraction (`launch_team`, …) | Bounded; **acceptance wants an integration test driving a real session** (dogfood) for the launch path. |
+| #428 | Tool library `kind: skill` spoke | `status:todo`; implementation is scoped by the issue body and #515. |
+| #398 | Tool library `kind: mcp` spoke | `status:todo`; implementation is scoped by the issue body and #515. |
 
 ### 🔴 Not ready — needs decision/investigation first
 
 | Issue | What | Blocker to autonomy |
 |---|---|---|
-| #416 | Tool/Capability library (cli catalog) | Catalog format + where-it-lives undecided; compose semantics vs explicit `build:`/`requires:` + #380 pinning need a quick design pass first |
-| #428 | Tool library `kind: skill` spoke | Depends on #416's catalog shape; supply-chain (SHA-pin + scanning) open |
-| #398 | First-class MCP support (`kind: mcp`) | Design-heavy; needs a plan |
 | #427 | library ↔ event-server protocol compat | Design-first; N-1 compat + canary-against-new-server |
-| #327 | Self-learning script-cache monitor | Large feature, unresolved design (sandboxing, cache invalidation, retry budgets); must define its own Axis-1 mechanism (per #363/#396) |
+| #484 | Engine initialize timeout under contention | Needs root-cause-preserving fix: SDK timeout/retry and maybe launch admission, not just relaunch loops. |
+| #518 | Session crash burst / loop breaker | Needs root-cause investigation before a fix; likely spans engine lifecycle and breaker policy. |
+| #520 | Verify agents re-root shared editable install | Needs a careful isolation design so task verification cannot mutate the live install. |
 
 ---
 
@@ -206,7 +256,7 @@ unresolved design decision, verifiable without infra/credentials the bot lacks.*
 | #411 | pr-feedback auto-dispatched on bot comments / draft spec PRs — CLOSED 2026-06-22. |
 | #403 | Dismantled the `inject.py` / `ConnectionEntry` connection-kind shim — CLOSED 2026-06-22. |
 | #397 | Moved image generation from MCP server → baked CLI — CLOSED 2026-06-22. |
-| #418 / #417 | Reusable tool library: define-once catalog foundation (binary + guide) — CLOSED 2026-06-22 (track continues in #416/#428). |
+| #418 / #417 | Reusable tool library: define-once catalog foundation (binary + guide) — CLOSED 2026-06-22 (track now lives in #515; CLI foundation #416 closed, skill/MCP spokes #428/#398 open). |
 | #285 | [MDS-47] Codex adversarial-review step — shipped CLI-first (`codex exec` + `tools/codex.md`). CLOSED. ⚠️ Linear MDS-47 still Backlog. |
 | #409 | Event-server registration non-fatal at startup + background retry — **shipped v0.28.0** (PR #413). The headline stability fix. |
 | #326 | Reactor dedup key now includes per-delivery event id (reviewer follow-up comments no longer dropped) — **shipped v0.28.0** (PR #408). |
