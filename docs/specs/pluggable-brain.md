@@ -1,6 +1,6 @@
 # Spec — pluggable agent "brain" (Claude Code / Codex / Gemini / Grok)
 
-- **Issue:** [moda-labs/bobi-agent-team#485](https://github.com/moda-labs/bobi-agent-team/issues/485) — epic (work breakdown lives in the issue, not separate tickets).
+- **Issue:** [moda-labs/bobi-agent#485](https://github.com/moda-labs/bobi-agent/issues/485) — epic (work breakdown lives in the issue, not separate tickets).
 - **Type:** feature (framework / runtime abstraction)
 - **Status:** 🟡 PROPOSED — research + Phase 0 spike done, no production code yet.
 - **Author:** design session (Zach + Claude)

@@ -13,7 +13,7 @@ Status: **two layers.**
   (**PR #143**) are both closed as superseded — #142's GitHub-OAuth-App
   approach was reversed by the one-GitHub-App decision below, and its package
   paths (`manager/`) are deleted. Read the
-  [#143 salvage map](https://github.com/moda-labs/bobi-agent-team/pull/143) before
+  [#143 salvage map](https://github.com/moda-labs/bobi-agent/pull/143) before
   writing v2 code; the login-flow mechanics carry over (see Salvage, bottom).
 
 Sequencing: v1 ships now (no dependencies). v2 lands **after #177** (event
@@ -384,7 +384,7 @@ is no secret to set, so v1 ships with no cutover and no manual step.
 
 ## Salvage from PR #143 (closed, branch preserved)
 
-Full map on the [PR close comment](https://github.com/moda-labs/bobi-agent-team/pull/143).
+Full map on the [PR close comment](https://github.com/moda-labs/bobi-agent/pull/143).
 Still accurate with one amendment: the OAuth flow in `auth.py` carries over
 nearly as-is, but the `client_id` it fetches from `/auth/config` is now the
 **GitHub App's**, and no OAuth App ever gets created. Carry over:

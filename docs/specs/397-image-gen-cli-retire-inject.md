@@ -1,6 +1,6 @@
 # Spec — #397: Image generation → baked CLI (retire the `kind: image` MCP shim)
 
-- **Issue:** [#397](https://github.com/moda-labs/bobi-agent-team/issues/397)
+- **Issue:** [#397](https://github.com/moda-labs/bobi-agent/issues/397)
 - **Status:** Draft — awaiting Zach's approval on this PR. **No implementation lands until approved.**
 - **Complexity:** Medium (spec-first).
 - **Build-vs-adopt:** **Locked = adopt.** Bake the official OpenAI image CLI; do not write our own generation logic. (Issue comment, @underminedsk, 2026-06-21.)

@@ -1,7 +1,7 @@
 # Spec: Reusable tool library — opt-in catalog of baked CLI tools (#416)
 
-- **Ticket:** [#416](https://github.com/moda-labs/bobi-agent-team/issues/416) · **Type:** Enhancement · **Priority:** 2 (medium) · **Status:** approved — implementing
-- **Track:** the **hub** of the Tool/Capability library track. Sibling spokes: [#428](https://github.com/moda-labs/bobi-agent-team/issues/428) (`kind: skill`), [#398](https://github.com/moda-labs/bobi-agent-team/issues/398) (`kind: mcp`). This issue ships `kind: cli` and the catalog/resolver foundation the spokes build on.
+- **Ticket:** [#416](https://github.com/moda-labs/bobi-agent/issues/416) · **Type:** Enhancement · **Priority:** 2 (medium) · **Status:** approved — implementing
+- **Track:** the **hub** of the Tool/Capability library track. Sibling spokes: [#428](https://github.com/moda-labs/bobi-agent/issues/428) (`kind: skill`), [#398](https://github.com/moda-labs/bobi-agent/issues/398) (`kind: mcp`). This issue ships `kind: cli` and the catalog/resolver foundation the spokes build on.
 - **Files:** `bobi/tool_library.py` (new), `bobi/tool_library/<name>/` catalog (new package data), `bobi/compose.py` (one merge branch + one expand call), tests. **No** changes to `subagent.py`/runtime — this is build/config-time sugar.
 
 ---
@@ -221,7 +221,7 @@ This is the **hub** of the capability-library track. The `kind` field answers on
 | `kind` | Expands into | New compose machinery | Effort |
 |---|---|---|---|
 | **cli** (#416, this PR) | `requires` + `build` (apt/npm/run) + `tools/<name>.md` | none — every surface already merges | — |
-| **skill** ([#428](https://github.com/moda-labs/bobi-agent-team/issues/428)) | `build.run` (clone `<repo>@<SHA>` → install skill `.md`s) + optional `requires`/guide | **none** — still a build-time bake | **thin** — register `_expand_skill` + SHA-pin/supply-chain lint. gstack becomes the canonical `skill` entry. |
-| **mcp** ([#398](https://github.com/moda-labs/bobi-agent-team/issues/398)) | `mcp_servers:` (dict) + optional `build` + optional `requires` + guide | **yes** — `mcp_servers` is a dict `compose.py` does **not** deep-merge today; #398 adds that merge branch. | **heavy** — register `_expand_mcp`, add the merge branch, runtime-coupled, gated behind PR #435. |
+| **skill** ([#428](https://github.com/moda-labs/bobi-agent/issues/428)) | `build.run` (clone `<repo>@<SHA>` → install skill `.md`s) + optional `requires`/guide | **none** — still a build-time bake | **thin** — register `_expand_skill` + SHA-pin/supply-chain lint. gstack becomes the canonical `skill` entry. |
+| **mcp** ([#398](https://github.com/moda-labs/bobi-agent/issues/398)) | `mcp_servers:` (dict) + optional `build` + optional `requires` + guide | **yes** — `mcp_servers` is a dict `compose.py` does **not** deep-merge today; #398 adds that merge branch. | **heavy** — register `_expand_mcp`, add the merge branch, runtime-coupled, gated behind PR #435. |
 
 **Sequencing:** #416 (this) → #428 fast-follow (cheap, reuses everything here) → #398 later, gated behind #435. Nothing for the spokes is built in this PR; D-5 is the only thing that keeps them additive.

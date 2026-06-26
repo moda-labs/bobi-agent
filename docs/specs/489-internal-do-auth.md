@@ -1,6 +1,6 @@
 # 489 — Require internal Worker-to-Durable-Object auth for DeploymentSession
 
-**Issue:** moda-labs/bobi-agent-team#489
+**Issue:** moda-labs/bobi-agent#489
 **Type:** security / defense-in-depth (medium+)
 **Status:** spec — awaiting Zach approval before implementation
 

@@ -1,12 +1,12 @@
 # Spec — #464: Manager self-heal watchdog (restart a wedged director, defense-in-depth)
 
-- **Issue:** [#464](https://github.com/moda-labs/bobi-agent-team/issues/464)
+- **Issue:** [#464](https://github.com/moda-labs/bobi-agent/issues/464)
 - **Status:** Draft — awaiting Zach's approval on this PR. **No implementation lands until approved.**
 - **Complexity:** Medium/High (infra; spec-first because the restart-authority and stall-signal design questions are open).
 - **Build-vs-adopt:** **Build** — there is no off-the-shelf supervisor that understands our `last_activity`/turn-state semantics. The watchdog is ~150 lines on top of the existing health endpoint; the restart authority is the container init we already run under.
 
 This spec is a superset of the issue body and of Zach's R5 review of #460
-(comment [4785980738](https://github.com/moda-labs/bobi-agent-team/pull/460#issuecomment-4785980738),
+(comment [4785980738](https://github.com/moda-labs/bobi-agent/pull/460#issuecomment-4785980738),
 item #4, "Manager self-heal watchdog"), which raised this as an explicit
 separate follow-up. It cross-references the #456 spec
 (`docs/specs/456-policy-curator.md`, *Out of scope* and *Related*), which
@@ -274,7 +274,7 @@ today. Flag for Zach if he wants it in v1.
 > *"Do we need protection against crash restart loops? Or is it because the
 > length is long enough (10+ minutes) crash restarting is acceptable? … If we
 > do detect crash/restart, it's not clear what we would do about it."* — R1
-> review, [comment 4792397284](https://github.com/moda-labs/bobi-agent-team/pull/476#issuecomment-4792397284)
+> review, [comment 4792397284](https://github.com/moda-labs/bobi-agent/pull/476#issuecomment-4792397284)
 
 Good catch — these are **two distinct restart paths**, and only one of them is
 gated by the 10-minute stall threshold. The 10-min length makes a *wedge* loop
@@ -527,7 +527,7 @@ Gate: **no implementation until Zach's formal approval on this PR.**
   in its *Out of scope* / *Related* sections. This spec is the deferred
   follow-up; the two compose (bound-the-known + backstop-the-unknown).
 - **Zach's R5 review of #460**, comment
-  [4785980738](https://github.com/moda-labs/bobi-agent-team/pull/460#issuecomment-4785980738),
+  [4785980738](https://github.com/moda-labs/bobi-agent/pull/460#issuecomment-4785980738),
   item #4 — origin of this ticket as a separate defense-in-depth follow-up.
 - **#454** — rotation metric over-count (mechanism #1); orthogonal.
 - **#443** (`session.py:393`) — turn-level API-error clearing; orthogonal to the
