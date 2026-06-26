@@ -18,8 +18,10 @@
   const slugify = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 
   const GENERATING = new Set(["build", "review", "install"]);
-  // TBD: real cloud-deploy docs URL.
-  const DOCS_CLOUD_URL = "https://docs.bobi.ai/cloud";
+  // The cloud-deploy runbook shipped in-repo (the Fly provisioner + container
+  // contract). Points at the GitHub blob so the finalization screen's link
+  // works without a docs site.
+  const DOCS_CLOUD_URL = "https://github.com/moda-labs/bobi-agent-team/blob/main/docs/CONTAINER.md";
   const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4"><path d="M5 12l5 5L19 7"/></svg>';
   const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"/></svg>';
   const HELP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.5-2.7 2.5"/><circle cx="12" cy="16.7" r="0.6" fill="currentColor" stroke="none"/></svg>';
@@ -236,9 +238,12 @@
           <li class="wstep"><span class="wstep-n">4</span><div><b>Build &amp; install.</b> bobi writes the team and installs it, then you start it with one command.</div></li>
         </ol>
 
+        <div class="wsec-label">The agent that runs it</div>
+        <div id="harness-card" class="harness"><p class="ihint">Checking your harness…</p></div>
+
         <div class="wmeta">
           <div class="wmeta-row"><span class="wmeta-k">Takes</span><span class="wmeta-v">about 10–20 minutes</span></div>
-          <div class="wmeta-row"><span class="wmeta-k">You'll need</span><span class="wmeta-v">the Claude Code CLI (already running this), plus logins for any services you want to connect — added as you go.</span></div>
+          <div class="wmeta-row"><span class="wmeta-k">You'll also need</span><span class="wmeta-v">logins for any services you want to connect — added as you go.</span></div>
         </div>
 
         <div class="actions"><button class="btn primary" id="welcome-go">Get started →</button><button class="btn ghost" id="welcome-home">Go to homepage</button></div>
@@ -247,6 +252,60 @@
     </div></div>`;
     $("#welcome-go").addEventListener("click", () => { welcomed = true; introFrom = "welcome"; renderIntro(); });
     $("#welcome-home").addEventListener("click", goHome);
+    loadHarness();
+  }
+
+  // The harness card on the welcome screen: which agent runs the team, and
+  // whether it's authenticated. bobi's own setup brain runs on this same
+  // harness, so an un-authed harness means setup can't function — say so plainly
+  // with the one command to fix it, and a Re-check that re-polls after login.
+  function harnessCardHTML(hs) {
+    const modeLabel = hs.auth_mode === "api_key" ? "API key"
+      : hs.auth_mode === "subscription" ? "subscription" : "";
+    const ok = hs.authenticated;
+    const authRow = ok
+      ? `<span class="harness-ok">✓ authenticated${modeLabel ? ` · ${esc(modeLabel)}` : ""}</span>`
+      : `<span class="harness-bad">✗ ${hs.cli_present ? "not logged in" : "Claude Code CLI not found"}</span>`;
+    const fix = ok ? "" : `
+      <div class="harness-fix">
+        <p>${hs.cli_present
+          ? `Log in so your agents can run. In your terminal:`
+          : `Install the Claude Code CLI, then log in. In your terminal:`}</p>
+        <div class="cmd"><span class="pr">$</span> <span class="cmd-text">${esc(hs.login_command)}</span>
+          <button class="cmd-copy" id="harness-copy" title="Copy">Copy</button></div>
+      </div>`;
+    return `
+      <div class="harness-rows">
+        <div class="harness-row"><span class="harness-k">Agent</span><span class="harness-v">${esc(hs.agent)} · <span class="mono">${esc(hs.model)}</span></span></div>
+        <div class="harness-row"><span class="harness-k">Login</span><span class="harness-v">${authRow}</span></div>
+      </div>
+      ${fix}
+      <div class="harness-actions"><button class="btn ghost xs" id="harness-recheck">Re-check</button></div>`;
+  }
+  async function loadHarness() {
+    const card = $("#harness-card");
+    if (!card) return;
+    let hs;
+    try { hs = await getJSON("/api/harness"); }
+    catch { hs = null; }  // server gone — the disconnect overlay also shows
+    if (!$("#harness-card")) return;  // navigated away while fetching
+    // A failed/malformed response shouldn't strand the card on "Checking…" —
+    // render a recoverable error state with a working Re-check.
+    if (!hs || typeof hs.authenticated !== "boolean") {
+      card.classList.remove("harness-warn");
+      card.innerHTML = `<p class="ihint">Couldn't check the harness.</p>
+        <div class="harness-actions"><button class="btn ghost xs" id="harness-recheck">Re-check</button></div>`;
+      $("#harness-recheck").addEventListener("click", loadHarness);
+      return;
+    }
+    card.classList.toggle("harness-warn", !hs.authenticated);
+    card.innerHTML = harnessCardHTML(hs);
+    const copy = $("#harness-copy");
+    if (copy) copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(hs.login_command); toast("Copied."); }
+      catch { toast("Copy failed — select the command manually."); }
+    });
+    $("#harness-recheck").addEventListener("click", loadHarness);
   }
 
   // --- intro: pick a template team or design a new one ------------------
@@ -1301,14 +1360,24 @@
       <h1>${esc(S.team_name || "your team")} is ready</h1>
       <p class="lede">Installed into <code>.bobi/</code>. We are legion.</p>
 
-      <p class="done-h">Start it whenever you're ready</p>
-      <p class="lede">Open a fresh terminal and run this — it turns your agent team on.</p>
-      <div class="cmd"><span class="pr">$</span> <span class="cmd-text">bobi start</span>
-        <button class="cmd-copy" id="copy-start" title="Copy">Copy</button></div>
-      <div class="actions" style="margin-top:8px"><button class="btn ghost" id="run-start">Start it for me →</button></div>
+      <p class="done-h">Run it — pick where</p>
+      <p class="lede">Your team needs an agent harness wherever it runs. Locally it reuses the Claude Code login you already have; in the cloud the instance gets its own.</p>
 
-      <p class="done-h">Next steps</p>
-      <p class="lede">Want to run bobi in the cloud? <a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">Follow these instructions →</a></p>
+      <div class="deploy">
+        <div class="deploy-opt">
+          <div class="deploy-head"><span class="deploy-tag">Local</span><span class="deploy-sub">on this machine</span></div>
+          <p class="deploy-lede">Open a fresh terminal and turn your team on.</p>
+          <div class="cmd"><span class="pr">$</span> <span class="cmd-text">bobi start</span>
+            <button class="cmd-copy" id="copy-start" title="Copy">Copy</button></div>
+        </div>
+        <div class="deploy-opt">
+          <div class="deploy-head"><span class="deploy-tag">Cloud</span><span class="deploy-sub">always-on, on Fly</span></div>
+          <p class="deploy-lede">Provision a dedicated instance (container + volume + secrets).</p>
+          <div class="cmd"><span class="pr">$</span> <span class="cmd-text">scripts/provision-instance.sh --app you-bobi --team ${esc(slugify(S.team_name) || "your-team")} --env-file ./instance.env</span>
+            <button class="cmd-copy" id="copy-deploy" title="Copy">Copy</button></div>
+          <p class="deploy-note">The instance needs its own <span class="mono">ANTHROPIC_API_KEY</span> (or a subscription login) in <span class="mono">instance.env</span>. <a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">Full runbook →</a></p>
+        </div>
+      </div>
 
       <div class="actions" style="margin-top:26px"><button class="btn primary" id="done-home">Done →</button></div>
     </main>`;
@@ -1316,11 +1385,10 @@
       try { await navigator.clipboard.writeText("bobi start"); toast("Copied."); }
       catch { toast("Copy failed — select the command manually."); }
     });
-    $("#run-start").addEventListener("click", async () => {
-      const b = $("#run-start"); b.disabled = true; b.textContent = "Starting…";
-      const r = await postJSON("/api/run-start", {});
-      if (r.ok) { toast("Starting your agent team…"); b.textContent = "Started ✓"; }
-      else { toast(r.data.error || "couldn't start it"); b.disabled = false; b.textContent = "Start it for me →"; }
+    $("#copy-deploy").addEventListener("click", async () => {
+      const cmd = $(".cmd-text", $("#copy-deploy").closest(".cmd")).textContent;
+      try { await navigator.clipboard.writeText(cmd); toast("Copied."); }
+      catch { toast("Copy failed — select the command manually."); }
     });
     $("#done-home").addEventListener("click", () => { atHome = true; renderHome(); });
   }

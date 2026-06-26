@@ -503,7 +503,11 @@ class MonitorScheduler:
 
     def _fire(self, monitor, condition) -> bool:
         event = monitor.event or f"monitor/{monitor.name}"
-        ok = self.publish(event, {"monitor": monitor.name, **condition.data})
+        ok = self.publish(event, {
+            **condition.data,
+            "monitor": monitor.name,
+            "finding_key": str(condition.key),
+        })
         if ok:
             log.info(f"Monitor {monitor.name} fired {event} ({condition.key})")
         else:

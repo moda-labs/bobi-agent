@@ -8,7 +8,11 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Condition:
-    """One detected condition: a dedup key plus the event payload."""
+    """One detected condition: a dedup key plus the event payload.
+
+    Monitor publishes reserve the top-level ``monitor`` and ``finding_key``
+    fields for framework routing and loop-safety metadata.
+    """
 
     key: str
     data: dict = field(default_factory=dict)

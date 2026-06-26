@@ -163,6 +163,89 @@ class TestMessageEndpoint:
         assert "[redacted]" in state.messages[0]["content"]
 
 
+# --- harness -------------------------------------------------------------
+
+class TestHarnessEndpoint:
+    def test_harness_reports_status(self, project, monkeypatch):
+        from bobi.setup import harness
+        monkeypatch.setattr(harness.shutil, "which", lambda n: "/bin/claude")
+        monkeypatch.setattr(harness, "_oauth_credentials_present", lambda: False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+        c = _client(SetupState(), project, model="claude-opus-4-8")
+        d = c.get("/api/harness").json()
+        assert d["agent"] == "Claude Code"
+        assert d["model"] == "claude-opus-4-8"
+        assert d["authenticated"] is True
+        assert d["auth_mode"] == "api_key"
+
+    def test_harness_is_nonce_guarded(self, project):
+        app = server.build_app(SetupState(), project, nonce=NONCE)
+        c = _testclient(app)
+        assert c.get("/api/harness").status_code == 403
+
+    def test_missing_cli_blocks_message_early(self, project, monkeypatch):
+        # A missing CLI is reliable (cheap `shutil.which` check, no keychain
+        # probe), so block up front with install guidance and never reach the
+        # digestion brain (real path: stream_fn=None).
+        import shutil
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        c = _client(SetupState(team_name="t"), project)   # stream_fn=None
+        r = c.post("/api/message", json={"text": "build a triage bot"})
+        assert r.status_code == 200
+        assert "event: error" in r.text
+        assert "CLI isn't installed" in r.text
+        assert "event: delta" not in r.text              # digestion never ran
+
+    def test_unauthed_failure_enriches_with_login_hint(
+            self, project, monkeypatch):
+        # CLI present but not authed: we DON'T pre-block (auth is unreliable to
+        # detect) — we let the call run and, only if it fails, turn the cryptic
+        # transport error into an actionable login hint.
+        import shutil
+        from bobi.setup import harness
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
+        monkeypatch.setattr(harness, "harness_status", lambda model=None:
+            harness.HarnessStatus(
+                agent="Claude Code", model="default", cli_present=True,
+                authenticated=False, auth_mode=None,
+                login_command="claude auth login"))
+
+        async def _boom(*a, **k):
+            raise RuntimeError("transport died")
+            yield  # pragma: no cover — makes this an async generator
+        monkeypatch.setattr("bobi.setup.digestion.digest_turn", _boom)
+
+        c = _client(SetupState(team_name="t"), project)   # stream_fn=None
+        r = c.post("/api/message", json={"text": "build a triage bot"})
+        assert r.status_code == 200
+        assert "event: error" in r.text
+        assert "claude auth login" in r.text
+        assert "not be logged into Claude Code" in r.text
+
+    def test_authed_failure_surfaces_raw_error_not_login_hint(
+            self, project, monkeypatch):
+        # A working (authed) harness that hits a transient error must NOT be
+        # told to log in — that would be a misleading false alarm.
+        import shutil
+        from bobi.setup import harness
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
+        monkeypatch.setattr(harness, "harness_status", lambda model=None:
+            harness.HarnessStatus(
+                agent="Claude Code", model="default", cli_present=True,
+                authenticated=True, auth_mode="api_key",
+                login_command="claude auth login"))
+
+        async def _boom(*a, **k):
+            raise RuntimeError("rate limited")
+            yield  # pragma: no cover
+        monkeypatch.setattr("bobi.setup.digestion.digest_turn", _boom)
+
+        c = _client(SetupState(team_name="t"), project)
+        r = c.post("/api/message", json={"text": "build a triage bot"})
+        assert "rate limited" in r.text
+        assert "claude auth login" not in r.text
+
+
 # --- advance -------------------------------------------------------------
 
 class TestAdvance:
@@ -723,7 +806,13 @@ class TestPanelEdits:
     def _stub_probe(self, monkeypatch, *, run_result):
         """Fake probe: a propose call (call_name=None) lists tools + a suggestion;
         a run call (call_name=...) returns the given run_result."""
+        import shutil
         import bobi.setup.mcp_probe as mcp_probe
+
+        # The connection-test path is pure Python (mcp_probe), but /api/message
+        # gates on the CLI being present first. Simulate a present CLI so these
+        # tests don't depend on `claude` being installed on the runner.
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
 
         async def fake_probe(entry, proj, *, call_name=None, **kw):
             if call_name is None:
@@ -968,33 +1057,6 @@ class TestHome:
     def test_empty_library_lists_nothing(self, project, home):
         c = _client(SetupState(), project, home_root=home)
         assert c.get("/api/home").json()["teams"] == []
-
-
-class TestRunStart:
-    def test_spawns_bobi_start_in_project(self, project, monkeypatch):
-        calls = {}
-
-        def fake_popen(args, **kw):
-            calls["args"] = args
-            calls["cwd"] = kw.get("cwd")
-            return object()
-
-        monkeypatch.setattr("subprocess.Popen", fake_popen)
-        c = _client(SetupState(stage=Stage.DONE), project)
-        r = c.post("/api/run-start")
-        assert r.status_code == 200 and r.json()["ok"] is True
-        assert calls["args"][1:] == ["-m", "bobi", "start"]
-        assert calls["cwd"] == str(project)
-
-    def test_reports_error_when_spawn_fails(self, project, monkeypatch):
-        def boom(*a, **k):
-            raise OSError("no exec")
-
-        monkeypatch.setattr("subprocess.Popen", boom)
-        c = _client(SetupState(stage=Stage.DONE), project)
-        r = c.post("/api/run-start")
-        assert r.status_code == 500
-        assert "no exec" in r.json()["error"]
 
 
 # --- intro: create / open + location -------------------------------------

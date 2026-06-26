@@ -93,6 +93,39 @@ configure_brain_paths
 log() { echo "[entrypoint] $*"; }
 fatal() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
 
+materialize_codex_api_key_auth() {
+  local cred_dir="$1"
+  [ -n "${OPENAI_API_KEY:-}" ] || return 0
+  log "Writing Codex API-key auth file from OPENAI_API_KEY"
+  mkdir -p "${cred_dir}"
+  CODEX_CRED_DIR="${cred_dir}" OPENAI_API_KEY="${OPENAI_API_KEY}" python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["CODEX_CRED_DIR"]) / "auth.json"
+path.write_text(json.dumps({"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]}) + "\n")
+path.chmod(0o600)
+PY
+  chown -R "${APP_USER}:${APP_USER}" "${cred_dir}"
+}
+
+codex_auth_uses_api_key() {
+  local cred_dir="$1"
+  CODEX_CRED_DIR="${cred_dir}" python - <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads((Path(os.environ["CODEX_CRED_DIR"]) / "auth.json").read_text())
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(data, dict) and "OPENAI_API_KEY" in data else 1)
+PY
+}
+
 AUTH_VALIDATED=0
 if [ -n "${BOBI_BRAIN:-}" ] \
    || [ -f "${PROJECT_DIR}/.bobi/agent.yaml" ] \
@@ -151,8 +184,8 @@ cd "${PROJECT_DIR}"
 # is the same path here, but be explicit) and CLAUDE_CONFIG_DIR (the volume dir
 # holding durable creds/transcripts) into every privilege drop.
 as_app() {
-  if [ -n "${BOBI_BRAIN:-}" ]; then
-    gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_BRAIN=${BOBI_BRAIN}" "$@"
+  if [ -n "${BOBI_BRAIN:-}" ] || [ "${ENTRYPOINT_BRAIN}" != "claude" ]; then
+    gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_BRAIN=${ENTRYPOINT_BRAIN}" "$@"
   else
     gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "$@"
   fi
@@ -271,6 +304,32 @@ if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
   fi
 fi
 
+# The Codex CLI also exists as an auxiliary tool for Claude-brained teams
+# (`tool_library: [codex]`). Unlike Claude, Codex does not read OPENAI_API_KEY
+# directly; it expects ~/.codex/auth.json. In subscription mode, never turn an
+# ambient API key into Codex auth: subscription OAuth must remain authoritative.
+if [ "${BOBI_AUTH:-api_key}" != "subscription" ]; then
+  if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
+    materialize_codex_api_key_auth "${BRAIN_CRED_DIR}"
+  else
+    materialize_codex_api_key_auth "${HOME}/.codex"
+  fi
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
+  log "Subscription mode: leaving OPENAI_API_KEY out of Codex auth materialization"
+fi
+
+if [ "${BOBI_AUTH:-api_key}" = "subscription" ]; then
+  if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
+    codex_dir="${BRAIN_CRED_DIR}"
+  else
+    codex_dir="${HOME}/.codex"
+  fi
+  if codex_auth_uses_api_key "${codex_dir}"; then
+    log "Subscription mode: removing Codex API-key auth file so OAuth can be used"
+    rm -f "${codex_dir}/auth.json"
+  fi
+fi
+
 # --- 4. Subscription auth: bootstrap login over Slack if no creds yet (C23) --
 # Idempotent: a no-op once the credentials exist. They live under
 # CLAUDE_CONFIG_DIR (the volume), not HOME — that's the durable state we keep.
@@ -297,8 +356,8 @@ log "Starting manager under self-heal watchdog (user=${APP_USER}, project=${PROJ
 # escalates. `healthcheck.sh` is unaffected (the manager child still writes the
 # port file). The forwarded `--foreground` keeps the manager a supervisable
 # child rather than letting it daemonize.
-if [ -n "${BOBI_BRAIN:-}" ]; then
-  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_BRAIN=${BOBI_BRAIN}" "BOBI_UI=${BOBI_UI}" bobi supervise -- --foreground "$@"
+if [ -n "${BOBI_BRAIN:-}" ] || [ "${ENTRYPOINT_BRAIN}" != "claude" ]; then
+  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_BRAIN=${ENTRYPOINT_BRAIN}" "BOBI_UI=${BOBI_UI}" bobi supervise -- --foreground "$@"
 else
   exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_UI=${BOBI_UI}" bobi supervise -- --foreground "$@"
 fi

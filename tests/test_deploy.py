@@ -361,7 +361,10 @@ def test_inherited_codex_brain_uses_openai_auth(repo, tmp_path, monkeypatch):
     ef.write_text("SLACK_BOT_TOKEN=xoxb\n")
     (repo / "deployments" / "ct.yaml").write_text("team: codex-leaf\nauth: api_key\n")
     cfg = D.load_deploy_config(repo, "ct", {"secrets_env_file": str(ef)})
+    args = D._provision_args(cfg, Path("/tmp/x.env"))
 
+    assert cfg.brain == "codex"
+    assert "--brain" in args and "codex" in args
     with pytest.raises(D.DeployError, match="OPENAI_API_KEY"):
         D.resolve_env_file(cfg, repo, tmp_path)
 
