@@ -1,12 +1,12 @@
 # Spec — #471: policy-curator as a framework default monitor (opt-out)
 
-- **Issue:** [moda-labs/bobi-agent-team#471](https://github.com/moda-labs/bobi-agent-team/issues/471)
+- **Issue:** [moda-labs/bobi-agent#471](https://github.com/moda-labs/bobi-agent/issues/471)
 - **Type:** update (framework / compose + monitors)
 - **Status:** SPEC — held for Zach's approval. This is a unified spec+impl PR; the spec is posted on the issue for sign-off before merge.
 - **Author:** engineer (spec phase)
 - **Related:** #460 (curator content that silently missed prod — the motivating failure), #470 (the eng-team@1.1.0 content cutover that finally landed it), #456 (the curator mechanism), #454 (the rotation-wedge failure mode), #446/#451 (`from:` compose + merge), release v0.32.0 (#469)
 
-> This spec is a strict superset of the issue and the locked design comment ([issuecomment-4791052666](https://github.com/moda-labs/bobi-agent-team/issues/471#issuecomment-4791052666)). Nothing in either is dropped.
+> This spec is a strict superset of the issue and the locked design comment ([issuecomment-4791052666](https://github.com/moda-labs/bobi-agent/issues/471#issuecomment-4791052666)). Nothing in either is dropped.
 
 ---
 

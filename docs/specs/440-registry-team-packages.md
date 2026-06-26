@@ -1,6 +1,6 @@
 # Spec: Registry-based agent-team install + deploy — versioned per-team packages (`name@version`)
 
-- **Issue:** [#440](https://github.com/moda-labs/bobi-agent-team/issues/440)
+- **Issue:** [#440](https://github.com/moda-labs/bobi-agent/issues/440)
 - **Status:** Approved by reviewer (`@underminedsk`, 2026-06-23, comment on PR #441
   — "all the recommended options"); §4 design decisions D-1–D-6 now **locked**.
   Implementation is staged/gated separately (§5.2) — Phase 1 first; merge of this
@@ -98,7 +98,7 @@ inherit registry deploy for free, with no behavioral change to the local path.
 - **Changing the rolling-release mechanism** for floating consumers — the rolling
   `<team>.tar.gz` remains exactly as today.
 - **A public starter-registry** for `pip install` users behind a private
-  `moda-labs/bobi-agent-team` — flagged by #438 as a possible follow-up; not this
+  `moda-labs/bobi-agent` — flagged by #438 as a possible follow-up; not this
   ticket (noted in §7 as a known gap).
 - **Version-bump / changelog edits** — none in this PR (release-time only, per
   CLAUDE.md Contributing).
@@ -178,7 +178,7 @@ callers unaffected):
   we already trust for URL installs.
   - **Download must be token-authed (review fix).** Do **not** route the asset
     download through `fetch_from_url`, whose `pooled.get` is **un-authenticated** —
-    that 404s on a private `moda-labs/bobi-agent-team`. Download the asset bytes via the
+    that 404s on a private `moda-labs/bobi-agent`. Download the asset bytes via the
     token-aware `_urlopen` (used everywhere else in `registry.py`), then hand the
     bytes to the shared `_install_team_tar` core. (Refactor: split
     `fetch_from_url` so the extraction core is callable with pre-fetched bytes.)
@@ -475,7 +475,7 @@ This ticket is one of a cluster reshaping how teams ship. Explicit interactions:
   teams → `bobi setup` falls back to the **registry**. That makes Phase 2's
   registry-fetch the **primary** acquisition path for `pip install` users — so the
   per-team-asset fetch + fallback robustness in this spec directly de-risks #438.
-- **Known gap #438 raised (out of scope, flagged):** if `moda-labs/bobi-agent-team` is
+- **Known gap #438 raised (out of scope, flagged):** if `moda-labs/bobi-agent` is
   private, `pip install` users get no offline teams *and* an auth-walled registry.
   A public starter-registry is a possible follow-up; not this ticket.
 - **Sequencing:** independent; either can merge first. If #438 merges first, no

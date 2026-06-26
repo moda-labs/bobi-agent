@@ -956,7 +956,7 @@ All five are now decided from the review's leans; recorded here with rationale.
   §6b reconnect hardening builds on it (confirms it covers the connect-turn
   drain) and adds the orthogonal *never-receives-a-message* timeout it does not
   cover.
-- **Manager self-heal watchdog** ([#464](https://github.com/moda-labs/bobi-agent-team/issues/464)) — a follow-up ticket (out of scope here) for a
+- **Manager self-heal watchdog** ([#464](https://github.com/moda-labs/bobi-agent/issues/464)) — a follow-up ticket (out of scope here) for a
   health-endpoint watchdog that restarts a wedged *director* on a stalled
   `last_activity`, covering **unknown** wedge classes beyond the three enumerated.
 - Mirrors the framework's own context-files pattern (index + read-on-demand) and

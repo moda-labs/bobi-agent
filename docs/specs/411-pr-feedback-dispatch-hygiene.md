@@ -1,6 +1,6 @@
 # Spec — #411 + #412: dispatch hygiene + implement-phase approval gate
 
-- **Issue:** [moda-labs/bobi-agent-team#411](https://github.com/moda-labs/bobi-agent-team/issues/411)
+- **Issue:** [moda-labs/bobi-agent#411](https://github.com/moda-labs/bobi-agent/issues/411)
 - **Type:** bug (event-reactor / auto-dispatch)
 - **Status:** SPEC — held for Zach's approval. Implementation is gated on sign-off; this PR must not auto-build past the spec gate.
 - **Author:** engineer (spec phase)

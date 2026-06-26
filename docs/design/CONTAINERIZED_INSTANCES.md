@@ -371,27 +371,27 @@ Ticket IDs below are local to this doc (C-numbers); file as GitHub issues
 and back-link them here. Phases are strict dependency layers; tickets within
 a phase are parallelizable unless noted.
 
-**Filed 2026-06-18 — epic [#344](https://github.com/moda-labs/bobi-agent-team/issues/344).**
+**Filed 2026-06-18 — epic [#344](https://github.com/moda-labs/bobi-agent/issues/344).**
 MVP-cut issue mapping:
 
 | C | Issue | Phase | Status |
 |---|---|---|---|
-| C1 | [#332](https://github.com/moda-labs/bobi-agent-team/issues/332) | 0 | ✅ merged (PR #345) |
-| C2 | [#333](https://github.com/moda-labs/bobi-agent-team/issues/333) | 0 | ✅ merged (PR #355) |
-| C3 | [#334](https://github.com/moda-labs/bobi-agent-team/issues/334) | 0 | ✅ merged (PR #354) |
-| C4 | [#346](https://github.com/moda-labs/bobi-agent-team/issues/346) | 0 | ✅ merged (PR #352) |
-| C5 | [#335](https://github.com/moda-labs/bobi-agent-team/issues/335) | 0 | ✅ merged (PR #353) |
-| C6 | [#336](https://github.com/moda-labs/bobi-agent-team/issues/336) | 0 | ✅ merged (PR #350) |
-| C7 | [#337](https://github.com/moda-labs/bobi-agent-team/issues/337) | 0 | ✅ merged (PR #351) |
-| C8 | [#338](https://github.com/moda-labs/bobi-agent-team/issues/338) | 1 | ✅ merged (PR #358) |
-| C9 | [#339](https://github.com/moda-labs/bobi-agent-team/issues/339) | 1 | 🟡 core landed (wait-for-team, #365); extra hardening OPEN |
-| C10 | [#340](https://github.com/moda-labs/bobi-agent-team/issues/340) | 1 | ✅ merged (PR #359) |
-| C12 | [#341](https://github.com/moda-labs/bobi-agent-team/issues/341) | 1 | ⛔ OPEN, blocked on #177 |
-| C22 | [#342](https://github.com/moda-labs/bobi-agent-team/issues/342) | 1 | ✅ merged (PR #365) |
-| C23 | [#343](https://github.com/moda-labs/bobi-agent-team/issues/343) | 1 | ✅ merged (PR #358) |
-| C24 | [#368](https://github.com/moda-labs/bobi-agent-team/issues/368) | 1+ | ✅ merged (PR #377); eng-team LIVE, EC2 retired, v0.24.0 |
-| C25 | [#378](https://github.com/moda-labs/bobi-agent-team/issues/378) | post-MVP | OPEN — build-once team images → Fly registry → deploy-many |
-| C26 | [#379](https://github.com/moda-labs/bobi-agent-team/issues/379) | post-MVP | OPEN — deps-vs-definition trigger split (depends C25) |
+| C1 | [#332](https://github.com/moda-labs/bobi-agent/issues/332) | 0 | ✅ merged (PR #345) |
+| C2 | [#333](https://github.com/moda-labs/bobi-agent/issues/333) | 0 | ✅ merged (PR #355) |
+| C3 | [#334](https://github.com/moda-labs/bobi-agent/issues/334) | 0 | ✅ merged (PR #354) |
+| C4 | [#346](https://github.com/moda-labs/bobi-agent/issues/346) | 0 | ✅ merged (PR #352) |
+| C5 | [#335](https://github.com/moda-labs/bobi-agent/issues/335) | 0 | ✅ merged (PR #353) |
+| C6 | [#336](https://github.com/moda-labs/bobi-agent/issues/336) | 0 | ✅ merged (PR #350) |
+| C7 | [#337](https://github.com/moda-labs/bobi-agent/issues/337) | 0 | ✅ merged (PR #351) |
+| C8 | [#338](https://github.com/moda-labs/bobi-agent/issues/338) | 1 | ✅ merged (PR #358) |
+| C9 | [#339](https://github.com/moda-labs/bobi-agent/issues/339) | 1 | 🟡 core landed (wait-for-team, #365); extra hardening OPEN |
+| C10 | [#340](https://github.com/moda-labs/bobi-agent/issues/340) | 1 | ✅ merged (PR #359) |
+| C12 | [#341](https://github.com/moda-labs/bobi-agent/issues/341) | 1 | ⛔ OPEN, blocked on #177 |
+| C22 | [#342](https://github.com/moda-labs/bobi-agent/issues/342) | 1 | ✅ merged (PR #365) |
+| C23 | [#343](https://github.com/moda-labs/bobi-agent/issues/343) | 1 | ✅ merged (PR #358) |
+| C24 | [#368](https://github.com/moda-labs/bobi-agent/issues/368) | 1+ | ✅ merged (PR #377); eng-team LIVE, EC2 retired, v0.24.0 |
+| C25 | [#378](https://github.com/moda-labs/bobi-agent/issues/378) | post-MVP | OPEN — build-once team images → Fly registry → deploy-many |
+| C26 | [#379](https://github.com/moda-labs/bobi-agent/issues/379) | post-MVP | OPEN — deps-vs-definition trigger split (depends C25) |
 
 C24 (custom agent dependencies / team-flavored images) is a follow-on capability
 beyond the original §10 list — see `docs/design/CUSTOM_AGENT_DEPS.md`. It unblocked

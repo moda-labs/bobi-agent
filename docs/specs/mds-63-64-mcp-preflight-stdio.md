@@ -81,8 +81,8 @@ one set of regression tests, one review.
 - Broader MCP config schema changes.
 
 > **Forward dependency (informational — no work here).** This PR is foundational plumbing for the
-> `kind: mcp` capability spoke ([#398](https://github.com/moda-labs/bobi-agent-team/issues/398)), under
-> the reusable-tool-library umbrella ([#416](https://github.com/moda-labs/bobi-agent-team/issues/416)).
+> `kind: mcp` capability spoke ([#398](https://github.com/moda-labs/bobi-agent/issues/398)), under
+> the reusable-tool-library umbrella ([#416](https://github.com/moda-labs/bobi-agent/issues/416)).
 > #398 sequences *after* this lands and should **consume** what ships here, not re-derive it:
 > its "probe/validate on add" reuses MDS-63's hardened poll-until-settled probe, and MDS-64's
 > shared spawn-env helper (D-64a, option A) is the seed of #398's per-runtime MCP registration
