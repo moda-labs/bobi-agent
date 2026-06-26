@@ -20,6 +20,7 @@ node_modules/
 worktrees/
 .gstack/
 .bobi/
+.modastack/
 .context/
 
 # Local secrets for the Bobbers test drive (never commit)

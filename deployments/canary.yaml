@@ -11,7 +11,7 @@
 # delivery mode (no SSH needed; a Fly deploy token suffices). The smoke team has
 # no `requires:` gate, so it DISPATCHES in the bare generic image. App: ci-canary
 # (fleet `ci` from defaults.yaml).
-team-url: https://github.com/moda-labs/bobi-agent-team/releases/download/teams-latest/smoke-team.tar.gz
+team-url: https://github.com/moda-labs/modastack/releases/download/teams-latest/smoke-team.tar.gz
 
 # Right-sized to keep an always-on canary cheap (~$6/mo vs ~$25 at the 4gb/2cpu
 # defaults). The smoke team uses no knowledge base, so the baked fastembed model

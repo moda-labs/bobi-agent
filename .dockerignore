@@ -8,6 +8,7 @@
 venv
 .claude
 .bobi
+.modastack
 workspace
 
 # Python build artifacts / caches

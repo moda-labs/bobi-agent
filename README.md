@@ -1,6 +1,6 @@
 # Bobi
 
-[![CI](https://github.com/moda-labs/bobi-agent-team/actions/workflows/ci.yml/badge.svg)](https://github.com/moda-labs/bobi-agent-team/actions/workflows/ci.yml)
+[![CI](https://github.com/moda-labs/modastack/actions/workflows/ci.yml/badge.svg)](https://github.com/moda-labs/modastack/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/bobi)](https://pypi.org/project/bobi/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -26,7 +26,7 @@ Follow the prompts to log in with your Anthropic account (Pro, Max, or API key).
 Once Claude Code is set up, paste this into your Claude Code session:
 
 ```plaintext
-Install bobi using https://raw.githubusercontent.com/moda-labs/bobi-agent-team/main/scripts/install.sh
+Install bobi using https://raw.githubusercontent.com/moda-labs/modastack/main/scripts/install.sh
 ```
 
 Or install manually:
@@ -38,7 +38,7 @@ uv tool install bobi
 On macOS you can also use Homebrew:
 
 ```bash
-brew install moda-labs/bobi-agent-team/bobi
+brew install moda-labs/modastack/bobi
 ```
 
 See [scripts/install.sh](scripts/install.sh) for what the installer does.
@@ -88,7 +88,7 @@ agents/eng-team/                   # ← browse the reference team at agents/eng
 Run the following prompt in your chat assistant of choice (ChatGPT, Claude, etc) to launch a guided process that will help you generate your own agent team:
 
 ```plaintext
-Read https://raw.githubusercontent.com/moda-labs/bobi-agent-team/main/skills/create-agent.md and help me build a bobi agent
+Read https://raw.githubusercontent.com/moda-labs/modastack/main/skills/create-agent.md and help me build a bobi agent
 ```
 
 ### Agent Team Registry
@@ -274,8 +274,8 @@ installation stay clean.
 ## Development
 
 ```bash
-git clone https://github.com/moda-labs/bobi-agent-team.git
-cd bobi
+git clone https://github.com/moda-labs/modastack.git
+cd modastack
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest tests/ --ignore=tests/integration/
