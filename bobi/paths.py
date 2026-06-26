@@ -1,7 +1,9 @@
 """Canonical filesystem layout — the ONLY place .bobi paths come from.
 
 There is exactly one .bobi/ directory per installation, holding both
-config and state. Exactly one function resolves it from the filesystem:
+config and state. Legacy pre-rename installations may still have the
+same layout under .modastack/. Exactly one function resolves it from the
+filesystem:
 resolve_root(). Every path in the system derives from that answer via the
 helpers below. No module may build a '.bobi' literal, walk the
 filesystem for one, or chain alternatives ("passed value or global or
@@ -42,6 +44,8 @@ from pathlib import Path
 # The artifact that marks an installed root. Written verbatim by
 # `bobi install`; state-only .bobi/ dirs never contain it.
 ROOT_MARKER = "agent.yaml"
+BOBI_DIR = ".bobi"
+LEGACY_BOBI_DIR = ".modastack"
 
 _root: Path | None = None
 
@@ -135,12 +139,45 @@ def _is_linked_worktree(path: Path) -> bool:
     return False
 
 
+def _marker_dir(candidate: Path) -> Path | None:
+    """Installed metadata dir for *candidate*, preferring .bobi over legacy.
+
+    The bobi rename changed the runtime directory from .modastack to .bobi,
+    but existing deployments may not have been migrated yet. Treat
+    .modastack/agent.yaml as a legacy install marker during root resolution.
+    """
+    preferred = candidate / BOBI_DIR
+    if (preferred / ROOT_MARKER).is_file():
+        return preferred
+
+    legacy = candidate / LEGACY_BOBI_DIR
+    if (legacy / ROOT_MARKER).is_file():
+        return legacy
+
+    return None
+
+
+def _find_root_with_marker(origin: Path, dirname: str) -> Path | None:
+    for candidate in (origin, *origin.parents):
+        marker_dir = candidate / dirname
+        if not (marker_dir / ROOT_MARKER).is_file():
+            continue
+        if _is_linked_worktree(candidate):
+            continue
+        if not _is_owned_by_current_user(marker_dir):
+            continue
+        return candidate
+    return None
+
+
 def resolve_root(start: Path) -> Path:
     """THE filesystem resolver for the Bobi working directory.
 
-    Walks up from `start` to the nearest ancestor whose .bobi/
-    contains agent.yaml and returns it. Raises when no installed root
-    exists. Only entry points call this, and they bind what it returns.
+    Walks up from `start` to the nearest ancestor whose .bobi/ contains
+    agent.yaml and returns it. For pre-rename deployments, a legacy
+    .modastack/agent.yaml is accepted as a fallback. Raises when no
+    installed root exists. Only entry points call this, and they bind
+    what it returns.
 
     When BOBI_ROOT was set in the environment at process start, it
     short-circuits the walk-up — managed child processes inherit the
@@ -164,27 +201,25 @@ def resolve_root(start: Path) -> Path:
     env_root = _inherited_root_env
     if env_root:
         p = Path(env_root).resolve()
-        if (p / ".bobi" / ROOT_MARKER).is_file():
+        if _marker_dir(p) is not None:
             return p
         raise RuntimeError(
             f"BOBI_ROOT is set to {p} but it is not a valid "
-            f"Bobi installation (missing .bobi/{ROOT_MARKER}). "
+            f"Bobi installation (missing .bobi/{ROOT_MARKER} or "
+            f".modastack/{ROOT_MARKER}). "
             f"The spawning process has a stale or incorrect root — fix "
             f"the environment rather than falling back to walk-up."
         )
 
     origin = start.resolve()
-    for candidate in (origin, *origin.parents):
-        marker_dir = candidate / ".bobi"
-        if (marker_dir / ROOT_MARKER).is_file():
-            if _is_linked_worktree(candidate):
-                continue
-            if not _is_owned_by_current_user(marker_dir):
-                continue
-            return candidate
+    for dirname in (BOBI_DIR, LEGACY_BOBI_DIR):
+        found = _find_root_with_marker(origin, dirname)
+        if found is not None:
+            return found
     raise RuntimeError(
         f"no Bobi installation found above {origin} — "
-        f"expected an ancestor with .bobi/{ROOT_MARKER}. "
+        f"expected an ancestor with .bobi/{ROOT_MARKER} "
+        f"or .modastack/{ROOT_MARKER}. "
         f"Run `bobi install` to create one."
     )
 
@@ -195,7 +230,11 @@ def resolve_root(start: Path) -> Path:
 # bobi_root() — the bound root, never a guess.
 
 def bobi_dir(root: Path | None = None) -> Path:
-    return (root if root is not None else bobi_root()) / ".bobi"
+    base = root if root is not None else bobi_root()
+    marker_dir = _marker_dir(base)
+    if marker_dir is not None:
+        return marker_dir
+    return base / BOBI_DIR
 
 
 def agent_yaml_path(root: Path | None = None) -> Path:

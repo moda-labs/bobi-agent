@@ -22,6 +22,11 @@ def _install(root):
     (root / ".bobi" / "agent.yaml").write_text("name: t\n")
 
 
+def _legacy_install(root):
+    (root / ".modastack").mkdir(parents=True)
+    (root / ".modastack" / "agent.yaml").write_text("name: t\n")
+
+
 class TestBindRoot:
     def test_binds_and_resolves_symlinks(self, tmp_path):
         real = tmp_path / "real"
@@ -133,6 +138,15 @@ class TestResolveRoot:
         # Even starting from inside decoy, the inherited pin wins
         assert paths.resolve_root(decoy / "src") == real_root
 
+    def test_env_var_accepts_legacy_modastack_root(self, tmp_path, monkeypatch):
+        """A BOBI_ROOT pin can point at a pre-rename .modastack install."""
+        legacy_root = tmp_path / "legacy"
+        _legacy_install(legacy_root)
+
+        monkeypatch.setattr(paths, "_inherited_root_env", str(legacy_root))
+
+        assert paths.resolve_root(tmp_path) == legacy_root
+
     def test_env_var_invalid_raises(self, tmp_path, monkeypatch):
         """A set-but-invalid inherited BOBI_ROOT must raise — the
         spawning process is broken and silently falling back to walk-up
@@ -148,6 +162,37 @@ class TestResolveRoot:
         deep.mkdir()
         with pytest.raises(RuntimeError, match="BOBI_ROOT"):
             paths.resolve_root(deep)
+
+    def test_legacy_modastack_install_is_root_fallback(self, tmp_path):
+        """Existing deployments with only .modastack/agent.yaml still resolve."""
+        legacy_root = tmp_path / "legacy"
+        _legacy_install(legacy_root)
+        deep = legacy_root / "workspace" / "repo"
+        deep.mkdir(parents=True)
+
+        assert paths.resolve_root(deep) == legacy_root
+        assert paths.bobi_dir(legacy_root) == legacy_root / ".modastack"
+        assert paths.agent_yaml_path(legacy_root) == (
+            legacy_root / ".modastack" / "agent.yaml"
+        )
+
+    def test_bobi_marker_wins_over_legacy_modastack_marker(self, tmp_path):
+        """When both markers exist, the renamed .bobi install is preferred."""
+        _legacy_install(tmp_path)
+        _install(tmp_path)
+
+        assert paths.resolve_root(tmp_path) == tmp_path
+        assert paths.bobi_dir(tmp_path) == tmp_path / ".bobi"
+
+    def test_modern_ancestor_beats_nested_legacy_modastack_marker(self, tmp_path):
+        """Modern installs are preferred before falling back to legacy markers."""
+        _install(tmp_path)
+        nested = tmp_path / "workspace" / "repo"
+        _legacy_install(nested)
+        deep = nested / "src"
+        deep.mkdir()
+
+        assert paths.resolve_root(deep) == tmp_path
 
     def test_honors_start_after_self_bind(self, tmp_path):
         """#375: resolve_root(start) must honor `start` even after THIS

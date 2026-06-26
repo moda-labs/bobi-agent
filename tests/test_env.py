@@ -136,6 +136,30 @@ class TestChildAgentEnv:
         assert env["TEAM_BRAIN"] == "codex"
         assert env["BOBI_BRAIN"] == "codex"
 
+    def test_legacy_modastack_root_loads_dotenv_and_brain_kind(
+        self, tmp_path, monkeypatch,
+    ):
+        from bobi.env import child_agent_env
+
+        root = tmp_path / "install"
+        config_dir = root / ".modastack"
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "agent: eng-team\nbrain:\n  kind: ${TEAM_BRAIN}\n"
+        )
+        (config_dir / ".env").write_text(
+            "TEAM_BRAIN=codex\n"
+            "VENN_API_KEY=from-legacy-file\n"
+        )
+        monkeypatch.delenv("TEAM_BRAIN", raising=False)
+        monkeypatch.delenv("VENN_API_KEY", raising=False)
+
+        env = child_agent_env(root)
+
+        assert env["TEAM_BRAIN"] == "codex"
+        assert env["BOBI_BRAIN"] == "codex"
+        assert env["VENN_API_KEY"] == "from-legacy-file"
+
     def test_carries_parent_tool_and_credential_environment(self, tmp_path, monkeypatch):
         from bobi.env import child_agent_env
 

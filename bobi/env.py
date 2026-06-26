@@ -22,8 +22,10 @@ def _configured_brain_kind(root: Path, env: dict[str, str] | None = None) -> str
     """Return the team's configured brain kind from the installation root."""
     try:
         import yaml
+        from bobi import paths
+
         raw = yaml.safe_load(
-            (root / ".bobi" / "agent.yaml").read_text()
+            (paths.bobi_dir(root) / "agent.yaml").read_text()
         ) or {}
     except Exception:
         return ""
@@ -40,8 +42,10 @@ def _configured_brain_kind(root: Path, env: dict[str, str] | None = None) -> str
 def _load_dotenv_into(env: dict[str, str], root: Path) -> None:
     """Merge ``.bobi/.env`` into *env* without overriding parent values."""
     try:
+        from bobi import paths
         from bobi.config import parse_env_file
-        values = parse_env_file(root / ".bobi" / ".env")
+
+        values = parse_env_file(paths.bobi_dir(root) / ".env")
     except Exception:
         return
     for key, value in values.items():
