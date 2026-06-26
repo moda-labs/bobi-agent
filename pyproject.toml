@@ -57,9 +57,10 @@ dev = [
 
 [project.scripts]
 bobi = "bobi.cli:main"
+modastack = "bobi.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["bobi"]
+packages = ["bobi", "modastack"]
 
 # Bundle the event server source so standalone (PyPI) installs can run a
 # local event server — it is npm-installed and built on first use.
@@ -92,7 +93,7 @@ packages = ["bobi"]
 # Agent teams are deliberately NOT shipped in the distribution (wheel or sdist) —
 # they're fetched from the registry as versioned packages (see the wheel
 # force-include note above).
-include = ["bobi", "event-server", "Dockerfile", "docker",
+include = ["bobi", "modastack", "event-server", "Dockerfile", "docker",
            "scripts", "README.md", "CHANGELOG.md"]
 exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
 

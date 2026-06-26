@@ -51,6 +51,21 @@ def test_force_included_template_paths_exist_on_disk():
     assert not missing, f"force-include sources missing on disk: {missing}"
 
 
+def test_wheel_packages_are_in_sdist():
+    """Wheels are built from the sdist in release, so package dirs must ship."""
+    cfg = _config()
+    wheel_packages = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
+    sdist_include = cfg["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+
+    missing = [pkg for pkg in wheel_packages if pkg not in sdist_include]
+
+    assert not missing, (
+        f"wheel package(s) not covered by sdist include "
+        f"(build-from-sdist will drop them): {missing}; "
+        f"sdist include={sdist_include}"
+    )
+
+
 # --- deploy assets (binary-mode `bobi deploy`) -------------------------
 
 def test_deploy_assets_force_included_under_deploy_dir():
