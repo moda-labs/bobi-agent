@@ -168,8 +168,8 @@ cd "${PROJECT_DIR}"
 # is the same path here, but be explicit) and CLAUDE_CONFIG_DIR (the volume dir
 # holding durable creds/transcripts) into every privilege drop.
 as_app() {
-  if [ -n "${MODASTACK_BRAIN:-}" ]; then
-    gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_BRAIN=${MODASTACK_BRAIN}" "$@"
+  if [ -n "${MODASTACK_BRAIN:-}" ] || [ "${ENTRYPOINT_BRAIN}" != "claude" ]; then
+    gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_BRAIN=${ENTRYPOINT_BRAIN}" "$@"
   else
     gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "$@"
   fi
@@ -290,12 +290,16 @@ fi
 
 # The Codex CLI also exists as an auxiliary tool for Claude-brained teams
 # (`tool_library: [codex]`). Unlike Claude, Codex does not read OPENAI_API_KEY
-# directly; it expects ~/.codex/auth.json. Materialize that file whenever the
-# optional key is present, not only when Codex is the primary brain.
-if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
-  materialize_codex_api_key_auth "${BRAIN_CRED_DIR}"
-else
-  materialize_codex_api_key_auth "${HOME}/.codex"
+# directly; it expects ~/.codex/auth.json. In subscription mode, never turn an
+# ambient API key into Codex auth: subscription OAuth must remain authoritative.
+if [ "${MODASTACK_AUTH:-api_key}" != "subscription" ]; then
+  if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
+    materialize_codex_api_key_auth "${BRAIN_CRED_DIR}"
+  else
+    materialize_codex_api_key_auth "${HOME}/.codex"
+  fi
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
+  log "Subscription mode: leaving OPENAI_API_KEY out of Codex auth materialization"
 fi
 
 # --- 4. Subscription auth: bootstrap login over Slack if no creds yet (C23) --
@@ -324,8 +328,8 @@ log "Starting manager under self-heal watchdog (user=${APP_USER}, project=${PROJ
 # escalates. `healthcheck.sh` is unaffected (the manager child still writes the
 # port file). The forwarded `--foreground` keeps the manager a supervisable
 # child rather than letting it daemonize.
-if [ -n "${MODASTACK_BRAIN:-}" ]; then
-  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_BRAIN=${MODASTACK_BRAIN}" "MODASTACK_UI=${MODASTACK_UI}" modastack supervise -- --foreground "$@"
+if [ -n "${MODASTACK_BRAIN:-}" ] || [ "${ENTRYPOINT_BRAIN}" != "claude" ]; then
+  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_BRAIN=${ENTRYPOINT_BRAIN}" "MODASTACK_UI=${MODASTACK_UI}" modastack supervise -- --foreground "$@"
 else
   exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_UI=${MODASTACK_UI}" modastack supervise -- --foreground "$@"
 fi

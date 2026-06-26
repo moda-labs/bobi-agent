@@ -138,6 +138,9 @@ def test_entrypoint_materializes_codex_api_key_auth_file():
     assert "chmod(0o600)" in entry
     assert 'materialize_codex_api_key_auth "${BRAIN_CRED_DIR}"' in entry
     assert 'materialize_codex_api_key_auth "${HOME}/.codex"' in entry
+    assert 'if [ "${MODASTACK_AUTH:-api_key}" != "subscription" ]; then' in entry
+    assert "leaving OPENAI_API_KEY out of Codex auth materialization" in entry
+    assert '"MODASTACK_BRAIN=${ENTRYPOINT_BRAIN}"' in entry
 
 
 def test_entrypoint_codex_auth_helper_writes_expected_file(tmp_path):
@@ -162,6 +165,32 @@ OPENAI_API_KEY="sk-test" materialize_codex_api_key_auth "{cred_dir}"
     auth_file = cred_dir / "auth.json"
     assert json.loads(auth_file.read_text()) == {"OPENAI_API_KEY": "sk-test"}
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+
+
+def test_entrypoint_codex_auth_helper_noops_without_api_key(tmp_path):
+    """Subscription auth has no OPENAI_API_KEY; the helper must leave existing
+    OAuth auth.json alone and return successfully."""
+    entry = (REPO / "docker" / "docker-entrypoint.sh").read_text()
+    start = entry.index("materialize_codex_api_key_auth() {")
+    end = entry.index("\n\nAUTH_VALIDATED=", start)
+    helper = entry[start:end]
+    cred_dir = tmp_path / "codex"
+    cred_dir.mkdir()
+    auth_file = cred_dir / "auth.json"
+    auth_file.write_text('{"tokens":"subscription"}\n')
+
+    script = f"""
+set -euo pipefail
+APP_USER="$(id -un)"
+log() {{ :; }}
+chown() {{ :; }}
+{helper}
+unset OPENAI_API_KEY
+materialize_codex_api_key_auth "{cred_dir}"
+"""
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert auth_file.read_text() == '{"tokens":"subscription"}\n'
 
 
 def test_dockerfile_supports_wheel_build_mode():
