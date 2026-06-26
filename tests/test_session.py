@@ -10,15 +10,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from modastack.brain import TurnResult
-from modastack.inbox import Message
-from modastack.session import Session
+from bobi.brain import TurnResult
+from bobi.inbox import Message
+from bobi.session import Session
 
 
 @pytest.fixture
-def session(modastack_install):
+def session(bobi_install):
     """Create a Session without starting it (no Claude client needed)."""
-    s = Session(name="test-wake", cwd=str(modastack_install.repo_path))
+    s = Session(name="test-wake", cwd=str(bobi_install.repo_path))
     # Simulate what _run does: create the asyncio.Event
     s._input_ready = asyncio.Event()
     # Stub out SDK calls that _process_message uses
@@ -167,7 +167,7 @@ class TestSubscriptionResilience:
     def test_registration_timeout_is_nonfatal_and_retries(
         self, session, monkeypatch
     ):
-        monkeypatch.setattr("modastack.session.SUBSCRIPTION_RETRY_BASE", 0.01)
+        monkeypatch.setattr("bobi.session.SUBSCRIPTION_RETRY_BASE", 0.01)
         fake_sub = MagicMock()
         calls = {"n": 0}
 
@@ -179,7 +179,7 @@ class TestSubscriptionResilience:
             return fake_sub
 
         monkeypatch.setattr(
-            "modastack.subagent._start_event_subscription", fake_start
+            "bobi.subagent._start_event_subscription", fake_start
         )
         # A non-inbox topic makes this a coordinator — the exact case that used
         # to be FATAL (the re-raise killed managers/leads at init).
@@ -201,7 +201,7 @@ class TestSubscriptionResilience:
         session._sub_retry_stop.set()
 
     def test_persistent_failure_never_terminates(self, session, monkeypatch):
-        monkeypatch.setattr("modastack.session.SUBSCRIPTION_RETRY_BASE", 0.01)
+        monkeypatch.setattr("bobi.session.SUBSCRIPTION_RETRY_BASE", 0.01)
         attempts = {"n": 0}
 
         def always_timeout(name, keys, root, register_attempts=3):
@@ -209,7 +209,7 @@ class TestSubscriptionResilience:
             raise TimeoutError("The read operation timed out")
 
         monkeypatch.setattr(
-            "modastack.subagent._start_event_subscription", always_timeout
+            "bobi.subagent._start_event_subscription", always_timeout
         )
         session._subscribe = ["github:o/r"]
 
@@ -233,7 +233,7 @@ class TestSubscriptionResilience:
     ):
         """A subscription wired in by the background retry must be torn down by
         stop() — never leaked. Regression for the shutdown TOCTOU."""
-        monkeypatch.setattr("modastack.session.SUBSCRIPTION_RETRY_BASE", 0.01)
+        monkeypatch.setattr("bobi.session.SUBSCRIPTION_RETRY_BASE", 0.01)
         fake_sub = MagicMock()
         calls = {"n": 0}
 
@@ -244,7 +244,7 @@ class TestSubscriptionResilience:
             return fake_sub
 
         monkeypatch.setattr(
-            "modastack.subagent._start_event_subscription", fake_start
+            "bobi.subagent._start_event_subscription", fake_start
         )
         session._subscribe = ["github:o/r"]
         session._start_subscription()
@@ -314,7 +314,7 @@ class TestTurnErrorRecovery:
     @pytest.mark.asyncio
     async def test_turn_error_is_not_terminal(self, session, monkeypatch):
         """After a 529 turn, the session must be ready — not in ``error``."""
-        monkeypatch.setattr("modastack.session.save_session_id", lambda *a, **k: None)
+        monkeypatch.setattr("bobi.session.save_session_id", lambda *a, **k: None)
         session._set_state("working")
         _streaming_client(session, [[_result(is_error=True, api_error_status=529)]])
 
@@ -326,9 +326,9 @@ class TestTurnErrorRecovery:
     @pytest.mark.asyncio
     async def test_529_does_not_wedge_subsequent_messages(self, session, monkeypatch):
         """The core wedge: a 529 on one turn must not silence later events."""
-        monkeypatch.setattr("modastack.session.save_session_id", lambda *a, **k: None)
+        monkeypatch.setattr("bobi.session.save_session_id", lambda *a, **k: None)
         # Isolate recovery from retry so this asserts the wedge fix specifically.
-        monkeypatch.setattr("modastack.session.TURN_RETRY_MAX_ATTEMPTS", 0)
+        monkeypatch.setattr("bobi.session.TURN_RETRY_MAX_ATTEMPTS", 0)
         session._set_state("waiting_input")
 
         # Turn 1 — Anthropic 529s.
@@ -346,9 +346,9 @@ class TestTurnErrorRecovery:
     async def test_transient_error_is_retried_in_band(self, session, monkeypatch):
         """A transient 529 should self-heal within the turn via bounded retry,
         so the triggering event is answered rather than dropped."""
-        monkeypatch.setattr("modastack.session.save_session_id", lambda *a, **k: None)
-        monkeypatch.setattr("modastack.session.TURN_RETRY_BASE", 0.0)
-        monkeypatch.setattr("modastack.session.TURN_RETRY_MAX_ATTEMPTS", 3)
+        monkeypatch.setattr("bobi.session.save_session_id", lambda *a, **k: None)
+        monkeypatch.setattr("bobi.session.TURN_RETRY_BASE", 0.0)
+        monkeypatch.setattr("bobi.session.TURN_RETRY_MAX_ATTEMPTS", 3)
         session._set_state("waiting_input")
 
         # First turn 529s, the retry succeeds.
@@ -369,9 +369,9 @@ class TestTurnErrorRecovery:
     async def test_nontransient_error_is_not_retried(self, session, monkeypatch):
         """A non-transient error (e.g. 400) must recover but NOT retry —
         re-sending the same bad turn would just fail again."""
-        monkeypatch.setattr("modastack.session.save_session_id", lambda *a, **k: None)
-        monkeypatch.setattr("modastack.session.TURN_RETRY_BASE", 0.0)
-        monkeypatch.setattr("modastack.session.TURN_RETRY_MAX_ATTEMPTS", 3)
+        monkeypatch.setattr("bobi.session.save_session_id", lambda *a, **k: None)
+        monkeypatch.setattr("bobi.session.TURN_RETRY_BASE", 0.0)
+        monkeypatch.setattr("bobi.session.TURN_RETRY_MAX_ATTEMPTS", 3)
         session._set_state("waiting_input")
 
         c = _streaming_client(session, [[_result(is_error=True, api_error_status=400)]])
@@ -387,7 +387,7 @@ class TestTurnErrorRecovery:
         cleared at the end of a turn that never runs."""
         called = {"n": 0}
         monkeypatch.setattr(
-            "modastack.events.channels.stop_all_refresh_loops",
+            "bobi.events.channels.stop_all_refresh_loops",
             lambda: called.__setitem__("n", called["n"] + 1),
         )
         session._set_state("error")

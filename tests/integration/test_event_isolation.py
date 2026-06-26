@@ -30,7 +30,7 @@ import pytest
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 
 DM_TEXT = "did the jobtack tickets stall? #39 and #97"
-TEST_GRANTS_SECRET = "modastack-integration-test-grants"
+TEST_GRANTS_SECRET = "bobi-integration-test-grants"
 
 DRIVER = '''\
 """One agent session's event subscription, exactly as _run_agent_entry wires it."""
@@ -45,14 +45,14 @@ session = sys.argv[2]
 subs = json.loads(sys.argv[3])
 out = Path(sys.argv[4])
 
-from modastack.sdk import set_project_root
+from bobi.sdk import set_project_root
 set_project_root(project)
 
 # Capture the drain loop's final hop (push into the session's in-process
 # inbox) to a file the test can read. Everything upstream — registration,
 # WebSocket, queue, drain — is real. The drain resolves the inbox by session
 # name via the process-local registry, so register a capturing stand-in.
-import modastack.inbox as inbox
+import bobi.inbox as inbox
 
 class _CaptureInbox:
     def push(self, msg):
@@ -62,7 +62,7 @@ class _CaptureInbox:
 
 inbox.register_local_inbox(session, _CaptureInbox())
 
-from modastack.subagent import _start_event_subscription
+from bobi.subagent import _start_event_subscription
 _start_event_subscription(session, subs, project)
 
 time.sleep(120)  # parent terminates us
@@ -88,21 +88,21 @@ def _post_json(url: str, data: dict, headers: dict | None = None) -> dict:
 @pytest.fixture
 def iso_project(tmp_path):
     """Isolated project root with its own local event server."""
-    from modastack.events.server import ensure_running, health
+    from bobi.events.server import ensure_running, health
 
     project = tmp_path / "iso-project"
-    (project / ".modastack" / "state").mkdir(parents=True)
+    (project / ".bobi" / "state").mkdir(parents=True)
 
     port = _free_port()
     base_url = f"http://localhost:{port}"
-    (project / ".modastack" / "agent.yaml").write_text(
+    (project / ".bobi" / "agent.yaml").write_text(
         f"agent: iso-test\nentry_point: manager\nevent_server: {base_url}\n"
     )
 
     ensure_running(
         port,
         project_path=project,
-        extra_env={"MODASTACK_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET},
+        extra_env={"BOBI_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET},
     )
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -114,7 +114,7 @@ def iso_project(tmp_path):
 
     yield project, base_url
 
-    pid_file = project / ".modastack" / "state" / "event-server.pid"
+    pid_file = project / ".bobi" / "state" / "event-server.pid"
     if pid_file.exists():
         try:
             os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
@@ -138,7 +138,7 @@ def session_proc(tmp_path):
             env={
                 **os.environ,
                 "PYTHONPATH": str(PACKAGE_ROOT),
-                "MODASTACK_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET,
+                "BOBI_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET,
             },
         )
         procs.append(proc)

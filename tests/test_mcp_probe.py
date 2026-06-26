@@ -8,7 +8,7 @@ launching anything.
 import anyio
 import pytest
 
-from modastack.setup import mcp_probe
+from bobi.setup import mcp_probe
 
 
 class TestDispatch:
@@ -144,7 +144,7 @@ class TestMatchTestConfirmation:
 class TestEnvResolution:
     def test_declared_vars_pulled_from_env_file(self, tmp_path, monkeypatch):
         # .env value is surfaced into the child env for declared vars only.
-        from modastack.setup import actions
+        from bobi.setup import actions
         monkeypatch.setattr(actions, "read_env",
                             lambda p: {"SUBSTACK_COOKIE": "sek", "UNRELATED": "x"})
         env = mcp_probe._resolved_env(

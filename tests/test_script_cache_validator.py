@@ -8,7 +8,7 @@ codex adversarial pass was unavailable for this change.
 
 import pytest
 
-from modastack.monitors.script_cache_checks import (
+from bobi.monitors.script_cache_checks import (
     CapabilityEnvelope,
     validate_script,
 )

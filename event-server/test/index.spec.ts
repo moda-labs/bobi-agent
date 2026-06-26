@@ -153,7 +153,7 @@ describe("event-server", () => {
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
 				name: "test-deployment",
-				subscriptions: ["moda-labs/modastack"],
+				subscriptions: ["moda-labs/bobi"],
 			}),
 		});
 		expect(response.status).toBe(201);

@@ -3,13 +3,13 @@ name: Team packages
 # Builds distributable .tar.gz packages from each agent team under agents/, plus
 # the zero-secret tests/fixtures/smoke-team (the canonical smoke-test target).
 # This is the C10 team-injection seam — a dark instance fetches its team from a
-# public URL at first boot via MODASTACK_TEAM_URL / `modastack install <url>`.
+# public URL at first boot via BOBI_TEAM_URL / `bobi install <url>`.
 #
 # Path-filtered so unrelated PRs pay nothing. On a PR this validates that every
 # team still packages from source and that each archive contains an agent.yaml.
 # On push to main, the `publish` job uploads the tarballs to a rolling
 # `teams-latest` GitHub Release, giving each team a stable, public, no-auth
-# download URL that --team-url / MODASTACK_TEAM_URL can point at:
+# download URL that --team-url / BOBI_TEAM_URL can point at:
 #
 #   https://github.com/<owner>/<repo>/releases/download/teams-latest/<team>.tar.gz
 on:
@@ -46,7 +46,7 @@ jobs:
       - name: Build packages
         run: |
           # Every real team under agents/, plus the zero-secret smoke-team
-          # fixture (only needs MODASTACK_EVENT_SERVER) — the canonical target
+          # fixture (only needs BOBI_EVENT_SERVER) — the canonical target
           # for container/Fly smoke tests via --team-url.
           scripts/build-team-tarballs.sh --out dist/teams
           scripts/build-team-tarballs.sh --out dist/teams tests/fixtures/smoke-team

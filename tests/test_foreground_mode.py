@@ -41,9 +41,9 @@ class TestForegroundLogging:
 class TestPidSkipInForeground:
     """Verify that foreground mode skips the already-running PID check."""
 
-    def test_stale_pid_file_does_not_block_foreground(self, modastack_install):
+    def test_stale_pid_file_does_not_block_foreground(self, bobi_install):
         """A stale PID file should not prevent foreground start."""
-        state_dir = modastack_install.state_dir
+        state_dir = bobi_install.state_dir
         pid_path = state_dir / "manager.pid"
 
         # Write a PID that cannot possibly be alive
@@ -62,9 +62,9 @@ class TestPidSkipInForeground:
 
         assert not blocked, "Foreground mode should skip PID check"
 
-    def test_pid_check_still_works_in_daemon_mode(self, modastack_install):
+    def test_pid_check_still_works_in_daemon_mode(self, bobi_install):
         """Daemon mode should still detect and clean stale PID files."""
-        state_dir = modastack_install.state_dir
+        state_dir = bobi_install.state_dir
         pid_path = state_dir / "manager.pid"
 
         # Write a stale PID

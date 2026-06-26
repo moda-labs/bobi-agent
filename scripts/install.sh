@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Install modastack
+# Install bobi
 #
 # One-liner:
-#   curl -sL https://raw.githubusercontent.com/moda-labs/modastack/main/scripts/install.sh | bash
+#   curl -sL https://raw.githubusercontent.com/moda-labs/bobi/main/scripts/install.sh | bash
 
 set -euo pipefail
 
@@ -12,8 +12,8 @@ if ! command -v uv &>/dev/null; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-echo "Installing modastack..."
-uv tool install modastack
+echo "Installing bobi..."
+uv tool install bobi
 
 echo ""
-echo "Done. Run 'modastack start <agent-pack>' to get started."
+echo "Done. Run 'bobi start <agent-pack>' to get started."

@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from modastack import browser
-from modastack.browser import CheckResult
-from modastack.cli import main
+from bobi import browser
+from bobi.browser import CheckResult
+from bobi.cli import main
 
 
 # --- sysctl reading -------------------------------------------------------
@@ -187,7 +187,7 @@ def test_check_system_deps_all_present(tmp_path):
 
 def test_doctor_all_ok():
     results = [CheckResult("a", ok=True, detail="x"), CheckResult("b", ok=True, detail="y")]
-    with patch("modastack.doctor.run_doctor", return_value=results):
+    with patch("bobi.doctor.run_doctor", return_value=results):
         result = CliRunner().invoke(main, ["doctor"])
     assert result.exit_code == 0
     assert "All checks passed" in result.output
@@ -198,9 +198,9 @@ def test_doctor_reports_failure_and_exits_nonzero():
         CheckResult("Chromium launches", ok=False,
                     detail="blocked", hint="run the fix", sandbox_error=True),
     ]
-    with patch("modastack.doctor.run_doctor", return_value=browser_results), \
-         patch("modastack.browser.run_doctor", return_value=[]), \
-         patch("modastack.browser.is_linux", return_value=True):
+    with patch("bobi.doctor.run_doctor", return_value=browser_results), \
+         patch("bobi.browser.run_doctor", return_value=[]), \
+         patch("bobi.browser.is_linux", return_value=True):
         result = CliRunner().invoke(main, ["doctor", "--browser"])
     assert result.exit_code == 1
     assert "✗" in result.output
@@ -212,11 +212,11 @@ def test_doctor_reports_failure_and_exits_nonzero():
 def test_doctor_fix_applies_when_confirmed():
     results = [CheckResult("Chromium launches", ok=False, detail="blocked",
                            sandbox_error=True)]
-    with patch("modastack.doctor.run_doctor", return_value=results), \
-         patch("modastack.browser.run_doctor", return_value=[]), \
-         patch("modastack.browser.is_linux", return_value=True), \
-         patch("modastack.browser.apply_sandbox_fix", return_value=(True, "Applied.")) as apply_fix, \
-         patch("modastack.browser.check_chromium_launch",
+    with patch("bobi.doctor.run_doctor", return_value=results), \
+         patch("bobi.browser.run_doctor", return_value=[]), \
+         patch("bobi.browser.is_linux", return_value=True), \
+         patch("bobi.browser.apply_sandbox_fix", return_value=(True, "Applied.")) as apply_fix, \
+         patch("bobi.browser.check_chromium_launch",
                return_value=CheckResult("Chromium launches", ok=True)):
         result = CliRunner().invoke(main, ["doctor", "--browser", "--fix"], input="y\n")
     apply_fix.assert_called_once()

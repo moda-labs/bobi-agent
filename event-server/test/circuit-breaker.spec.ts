@@ -52,16 +52,16 @@ function makeGitHubBotEvent(overrides: Partial<NormalizedEvent> = {}): Normalize
 		id: crypto.randomUUID(),
 		source: "github",
 		type: "github.issue_comment",
-		topics: ["github:moda-labs/modastack"],
+		topics: ["github:moda-labs/bobi-agent-team"],
 		delivery: "bulk",
-		text: "[moda-labs/modastack] created issue_comment #10",
+		text: "[moda-labs/bobi-agent-team] created issue_comment #10",
 		fields: { action: "created", number: 10 },
 		timestamp: new Date().toISOString(),
 		payload: {
 			action: "created",
-			repository: { full_name: "moda-labs/modastack" },
+			repository: { full_name: "moda-labs/bobi-agent-team" },
 			issue: { number: 10, title: "Test" },
-			sender: { login: "modastack[bot]", type: "Bot" },
+			sender: { login: "bobi[bot]", type: "Bot" },
 		},
 		...overrides,
 	};
@@ -73,14 +73,14 @@ function makeGitHubHumanEvent(): NormalizedEvent {
 		id: crypto.randomUUID(),
 		source: "github",
 		type: "github.issue_comment",
-		topics: ["github:moda-labs/modastack"],
+		topics: ["github:moda-labs/bobi-agent-team"],
 		delivery: "bulk",
-		text: "[moda-labs/modastack] created issue_comment #10",
+		text: "[moda-labs/bobi-agent-team] created issue_comment #10",
 		fields: { action: "created", number: 10 },
 		timestamp: new Date().toISOString(),
 		payload: {
 			action: "created",
-			repository: { full_name: "moda-labs/modastack" },
+			repository: { full_name: "moda-labs/bobi-agent-team" },
 			issue: { number: 10, title: "Test" },
 			sender: { login: "zachary", type: "User" },
 		},
@@ -171,7 +171,7 @@ describe("circuit-breaker", () => {
 
 		it("extracts github repo#number", () => {
 			const event = makeGitHubBotEvent();
-			expect(conversationKey(event)).toBe("github:moda-labs/modastack#10");
+			expect(conversationKey(event)).toBe("github:moda-labs/bobi-agent-team#10");
 		});
 
 		it("returns other:type for unknown sources", () => {
@@ -432,13 +432,13 @@ describe("circuit-breaker", () => {
 					id: crypto.randomUUID(),
 					source: "github",
 					type: "github.issue_comment",
-					topics: ["github:moda-labs/modastack"],
+					topics: ["github:moda-labs/bobi-agent-team"],
 					delivery: "bulk",
 					text: "",
 					fields: { number: i + 1 },
 					timestamp: new Date().toISOString(),
 					payload: {
-						repository: { full_name: "moda-labs/modastack" },
+						repository: { full_name: "moda-labs/bobi-agent-team" },
 						issue: { number: i + 1, title: "Test" },
 						sender: { login: "bot[bot]", type: "Bot" },
 					},

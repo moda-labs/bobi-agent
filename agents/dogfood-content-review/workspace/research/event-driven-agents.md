@@ -22,8 +22,8 @@ which delivery path an event took.
 
 ## Sources
 
-- modastack event-server implementation (event-server/src/)
-- modastack monitor scheduler (modastack/monitors/scheduler.py)
+- bobi event-server implementation (event-server/src/)
+- bobi monitor scheduler (bobi/monitors/scheduler.py)
 - CloudEvents specification (https://cloudevents.io/)
 
 Last verified: 2026-06-11

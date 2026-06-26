@@ -10,8 +10,8 @@ into published artifacts), packaging must reject it.
 Exits non-zero (aborting the build under `set -e`) if the team's agent.yaml
 declares a path-based `from:`. A registry ref or no `from:` passes silently.
 
-Kept dependency-free (yaml only, no `modastack` import) so it runs in a bare CI
-packaging step; the rule mirrors `modastack.compose._is_path_ref` /
+Kept dependency-free (yaml only, no `bobi` import) so it runs in a bare CI
+packaging step; the rule mirrors `bobi.compose._is_path_ref` /
 `reject_path_from`.
 """
 from __future__ import annotations

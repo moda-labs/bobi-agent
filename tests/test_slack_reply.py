@@ -8,13 +8,13 @@ from textwrap import dedent
 import httpx
 from click.testing import CliRunner
 
-from modastack.cli import main
-from modastack import http as pooled
+from bobi.cli import main
+from bobi import http as pooled
 
 
 def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
     """Set up project config with a Slack bot token."""
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir(parents=True)
     if slack_bot_token:
         yaml = (

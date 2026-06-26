@@ -1,6 +1,6 @@
 """Tests for the hosted-MCP registry — the Connect cascade's third rung."""
 
-from modastack.setup import mcp_registry
+from bobi.setup import mcp_registry
 
 
 class TestLookup:
@@ -25,7 +25,7 @@ class TestLookup:
     def test_no_venn_bucket_names_in_registry(self):
         # Services Venn's curated buckets already cover resolve to Venn FIRST,
         # so the registry must not shadow them (notion, slack, jira, …).
-        from modastack.venn import SERVICE_ALIASES
+        from bobi.venn import SERVICE_ALIASES
         venn_names = {n.lower() for names in SERVICE_ALIASES.values()
                       for n in names} | set(SERVICE_ALIASES)
         assert not (set(mcp_registry.REGISTRY) & venn_names)

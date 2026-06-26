@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from modastack import history
-from modastack.history import (
+from bobi import history
+from bobi.history import (
     _extract_text,
     _extract_tool_calls,
     _fts_query,

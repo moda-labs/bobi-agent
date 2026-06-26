@@ -10,8 +10,8 @@ from pathlib import Path
 
 import yaml
 
-from modastack.cli import _install_pack
-from modastack.config import Config
+from bobi.cli import _install_pack
+from bobi.config import Config
 
 
 PACK_DIR = Path(__file__).parent.parent / "agents" / "dogfood-content-review"
@@ -59,7 +59,7 @@ class TestInstall:
 
     def test_install_succeeds(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
-        installed = tmp_path / ".modastack" / "agent.yaml"
+        installed = tmp_path / ".bobi" / "agent.yaml"
         assert installed.exists()
         cfg = yaml.safe_load(installed.read_text())
         assert cfg["agent"] == "dogfood-content-review"
@@ -67,13 +67,13 @@ class TestInstall:
 
     def test_install_copies_all_roles(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
-        roles_dir = tmp_path / ".modastack" / "roles"
+        roles_dir = tmp_path / ".bobi" / "roles"
         for role in ["manager", "researcher", "editor", "fact_checker"]:
             assert (roles_dir / role / "ROLE.md").exists()
 
     def test_install_copies_workflows(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
-        wf_dir = tmp_path / ".modastack" / "workflows"
+        wf_dir = tmp_path / ".bobi" / "workflows"
         assert (wf_dir / "content-lifecycle.yaml").exists()
         assert (wf_dir / "smoke-test.yaml").exists()
 
@@ -130,7 +130,7 @@ class TestEmailEventRouting:
 
     def test_email_has_no_registered_adapter(self):
         """email has no adapter — detector falls back to bare service name."""
-        from modastack.events.adapters import is_registered
+        from bobi.events.adapters import is_registered
         assert not is_registered("email")
 
     def test_email_is_venn_service(self, tmp_path):
@@ -142,7 +142,7 @@ class TestEmailEventRouting:
 
     def test_monitor_event_parts_parse(self):
         """The monitor's event: email/received splits into source=email, type=received."""
-        from modastack.monitors.schema import Monitor
+        from bobi.monitors.schema import Monitor
         record = Monitor(
             name="new-emails",
             command="venn exec gmail list_messages",
@@ -165,7 +165,7 @@ class TestContentDirs:
 
     def test_content_dirs_exist_after_install(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
-        cfg = yaml.safe_load((tmp_path / ".modastack" / "agent.yaml").read_text())
+        cfg = yaml.safe_load((tmp_path / ".bobi" / "agent.yaml").read_text())
         dirs = cfg["context"]["content_dirs"]
         for d in dirs.split():
             assert (tmp_path / d).is_dir(), f"{d} should exist after install"

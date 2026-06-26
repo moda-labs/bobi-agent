@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from modastack.events.client import (
+from bobi.events.client import (
     format_event_for_manager,
     event_queue,
     _log_event,
@@ -208,7 +208,7 @@ class TestLogEvent:
         first = {"timestamp": "2026-01-01T00:00:00", "type": "a", "source": "x", "payload": {}}
         jsonl.write_text(json.dumps(first))  # no trailing \n
 
-        with patch("modastack.events.client._state_path",
+        with patch("bobi.events.client._state_path",
                    side_effect=lambda name: tmp_path / name):
             _log_event({"type": "b", "source": "y"})
 
@@ -224,7 +224,7 @@ class TestLogEvent:
         first = {"timestamp": "2026-01-01T00:00:00", "type": "a", "source": "x", "payload": {}}
         jsonl.write_text(json.dumps(first) + "\n")
 
-        with patch("modastack.events.client._state_path",
+        with patch("bobi.events.client._state_path",
                    side_effect=lambda name: tmp_path / name):
             _log_event({"type": "b", "source": "y"})
 
@@ -235,7 +235,7 @@ class TestLogEvent:
 
     def test_per_session_writes_to_session_file(self, tmp_path):
         """When session_id is provided, _log_event writes to events-<session>.jsonl."""
-        with patch("modastack.events.client._state_path",
+        with patch("bobi.events.client._state_path",
                    side_effect=lambda name: tmp_path / name):
             _log_event({"type": "push", "source": "github", "seq": 5}, session_id="lead-abc")
 
@@ -247,7 +247,7 @@ class TestLogEvent:
 
     def test_per_session_includes_seq_and_deployment(self, tmp_path):
         """Per-session log entries include seq and deployment_id for dedup."""
-        with patch("modastack.events.client._state_path",
+        with patch("bobi.events.client._state_path",
                    side_effect=lambda name: tmp_path / name):
             _log_event({"type": "a", "source": "x", "seq": 10, "deployment_id": "dep-1"},
                        session_id="sess1")
@@ -259,7 +259,7 @@ class TestLogEvent:
 
     def test_no_session_id_writes_to_default_file(self, tmp_path):
         """Without session_id, _log_event writes to events-default.jsonl."""
-        with patch("modastack.events.client._state_path",
+        with patch("bobi.events.client._state_path",
                    side_effect=lambda name: tmp_path / name):
             _log_event({"type": "a", "source": "x"})
 
@@ -267,7 +267,7 @@ class TestLogEvent:
 
     def test_two_sessions_write_separate_files(self, tmp_path):
         """Two sessions writing concurrently produce separate files."""
-        with patch("modastack.events.client._state_path",
+        with patch("bobi.events.client._state_path",
                    side_effect=lambda name: tmp_path / name):
             _log_event({"type": "push", "source": "github", "seq": 1}, session_id="sess-a")
             _log_event({"type": "pr", "source": "github", "seq": 1}, session_id="sess-b")
@@ -286,7 +286,7 @@ class TestAckThrough:
     """EventServerClient.ack_through saves cursor and sends ACK (#278)."""
 
     def test_ack_through_saves_cursor(self, tmp_path):
-        from modastack.events.client import EventServerClient, _load_cursor
+        from bobi.events.client import EventServerClient, _load_cursor
         cursor_path = tmp_path / "cursor.json"
         client = EventServerClient(
             server_url="http://localhost:9999",
@@ -299,7 +299,7 @@ class TestAckThrough:
         assert _load_cursor(cursor_path) == 42
 
     def test_ack_through_sends_ws_ack(self, tmp_path):
-        from modastack.events.client import EventServerClient
+        from bobi.events.client import EventServerClient
         cursor_path = tmp_path / "cursor.json"
         client = EventServerClient(
             server_url="http://localhost:9999",
@@ -315,7 +315,7 @@ class TestAckThrough:
         assert sent[0] == {"type": "ack", "seq": 10}
 
     def test_ack_through_ignores_zero_seq(self, tmp_path):
-        from modastack.events.client import EventServerClient, _load_cursor
+        from bobi.events.client import EventServerClient, _load_cursor
         cursor_path = tmp_path / "cursor.json"
         client = EventServerClient(
             server_url="http://localhost:9999",
@@ -334,7 +334,7 @@ class TestRecordDisconnect:
     connection that never stays up is 'flapping' and must surface."""
 
     def _client(self, tmp_path):
-        from modastack.events.client import EventServerClient
+        from bobi.events.client import EventServerClient
         return EventServerClient(
             server_url="http://localhost:9999",
             deployment_id="dep-1",

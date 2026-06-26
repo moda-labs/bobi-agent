@@ -9,27 +9,27 @@ from unittest.mock import MagicMock, patch, mock_open
 import httpx
 import pytest
 
-from modastack import http as pooled
-from modastack.kb import embedder
+from bobi import http as pooled
+from bobi.kb import embedder
 
 
 @pytest.fixture
 def state_dir(tmp_path, monkeypatch):
     """Redirect sidecar state files to a temp directory."""
-    sd = tmp_path / ".modastack" / "state"
+    sd = tmp_path / ".bobi" / "state"
     sd.mkdir(parents=True)
     monkeypatch.setattr(embedder, "_state_dir", lambda: sd)
-    monkeypatch.setattr("modastack.kb.embedder._state_dir", lambda: sd)
+    monkeypatch.setattr("bobi.kb.embedder._state_dir", lambda: sd)
     return sd
 
 
 @pytest.fixture
 def mock_project_root(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "modastack.kb.embedder._state_dir",
-        lambda: tmp_path / ".modastack" / "state",
+        "bobi.kb.embedder._state_dir",
+        lambda: tmp_path / ".bobi" / "state",
     )
-    (tmp_path / ".modastack" / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".bobi" / "state").mkdir(parents=True, exist_ok=True)
     return tmp_path
 
 
@@ -78,20 +78,20 @@ class TestIsRunning:
     def test_stale_pid(self, state_dir):
         (state_dir / "embedding-sidecar.pid").write_text("999999")
         (state_dir / "embedding-sidecar.port").write_text("8000")
-        with patch("modastack.sdk.pid_alive", return_value=False):
+        with patch("bobi.sdk.pid_alive", return_value=False):
             assert embedder.is_running() is False
 
     def test_alive_and_healthy(self, state_dir):
         (state_dir / "embedding-sidecar.pid").write_text("12345")
         (state_dir / "embedding-sidecar.port").write_text("8000")
-        with patch("modastack.sdk.pid_alive", return_value=True), \
+        with patch("bobi.sdk.pid_alive", return_value=True), \
              patch.object(embedder, "_check_health", return_value=True):
             assert embedder.is_running() is True
 
     def test_alive_but_unhealthy(self, state_dir):
         (state_dir / "embedding-sidecar.pid").write_text("12345")
         (state_dir / "embedding-sidecar.port").write_text("8000")
-        with patch("modastack.sdk.pid_alive", return_value=True), \
+        with patch("bobi.sdk.pid_alive", return_value=True), \
              patch.object(embedder, "_check_health", return_value=False):
             assert embedder.is_running() is False
 
@@ -109,7 +109,7 @@ class TestEnsureRunning:
 
     def test_cold_start(self, state_dir, monkeypatch):
         monkeypatch.setattr(
-            "modastack.sdk.get_project_root",
+            "bobi.sdk.get_project_root",
             lambda: state_dir.parent.parent,
         )
         call_count = 0
@@ -133,7 +133,7 @@ class TestEnsureRunning:
 
     def test_timeout_raises(self, state_dir, monkeypatch):
         monkeypatch.setattr(
-            "modastack.sdk.get_project_root",
+            "bobi.sdk.get_project_root",
             lambda: state_dir.parent.parent,
         )
         with patch.object(embedder, "_check_health", return_value=False), \

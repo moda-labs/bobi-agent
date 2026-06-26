@@ -1,6 +1,6 @@
 # Building Agent Teams
 
-A focused guide for authoring a modastack agent team. Written for the
+A focused guide for authoring a bobi agent team. Written for the
 agent (or human) doing the authoring. For the product vision around
 interactive onboarding, see AGENT_TEAM_ONBOARDING.md — this document is
 the durable reference for what a team *is*.
@@ -16,22 +16,22 @@ my-team/
   roles/
     <role>/ROLE.md  # one prompt per role
   tools/*.md        # how-to docs injected for the agents (CLI recipes)
-  workflows/*.yaml  # step-based workflows (validate with `modastack workflows validate`)
+  workflows/*.yaml  # step-based workflows (validate with `bobi workflows validate`)
   monitors/         # optional: defaults.yaml + custom check scripts
   context/          # optional: reference files agents read on demand
   workspace/        # optional: seed templates for user-owned domain files
 ```
 
 Ship it inside a project at `agents/<name>/`, or in a registry repo with
-an `agents/` directory. Users run `modastack install <path-or-name>`.
+an `agents/` directory. Users run `bobi install <path-or-name>`.
 
 ## agent.yaml
 
-Fields the framework parses (see `modastack/config.py`):
+Fields the framework parses (see `bobi/config.py`):
 
 ```yaml
 version: "1.0.0"
-entry_point: manager        # role launched by `modastack start` — must exist in roles/
+entry_point: manager        # role launched by `bobi start` — must exist in roles/
 chat: slack                 # human interaction surface: slack | telegram | none
 
 services:                   # what the team connects to
@@ -42,13 +42,13 @@ services:                   # what the team connects to
 
 # Credentials and per-machine values: ALWAYS ${VAR} references, never
 # literals. Install scans for ${VAR}, prompts for missing values, and
-# writes .modastack/.env. Config.load() resolves them at runtime.
+# writes .bobi/.env. Config.load() resolves them at runtime.
 slack:
   bot_token: ${SLACK_BOT_TOKEN}
 linear:
   api_key: ${LINEAR_API_KEY}
 venn_api_key: ${VENN_API_KEY}
-event_server: ${MODASTACK_EVENT_SERVER}   # empty → auto-started local server
+event_server: ${BOBI_EVENT_SERVER}   # empty → auto-started local server
 
 mcp_servers:                # custom tools, wired into agent sessions via the SDK
   internal-crm:
@@ -82,7 +82,7 @@ prompts that consume them.
 ## Roles
 
 One directory per role under `roles/`, each with a `ROLE.md` prompt.
-`entry_point` names the role that `modastack start` launches; it spawns
+`entry_point` names the role that `bobi start` launches; it spawns
 the others. Write prompts the way you'd brief a person: responsibilities,
 what to do with each event type, when to escalate, which tools docs to
 follow.
@@ -134,7 +134,7 @@ A weekly job is a `notify` monitor on a weekly `at:`/`days:` schedule whose
 hand-editing YAML:
 
 ```bash
-modastack monitors add weekly-prep-doc \
+bobi monitors add weekly-prep-doc \
   --at 21:00 --days sun --tz America/Los_Angeles --notify \
   --event monitor/prep.weekly_due \
   --description "Generate my prep doc for the upcoming week"
@@ -157,14 +157,14 @@ lead would put in an onboarding doc.
 **Function** (command syntax, flags) belongs to surfaces that can't
 drift from the installed version:
 
-- `modastack <cmd> --help` — generated from code, always correct
-- `modastack skill modastack` — the full CLI reference
+- `bobi <cmd> --help` — generated from code, always correct
+- `bobi skill bobi` — the full CLI reference
 - `venn tools describe` — live schemas from the gateway
 
-Never re-document modastack or venn CLI syntax in a tool guide — name
+Never re-document bobi or venn CLI syntax in a tool guide — name
 the command and let agents pull syntax from those surfaces.
 `tests/test_tool_guides.py` fails the build if a pack prompt references
-a modastack command that doesn't exist (this drift reached main twice).
+a bobi command that doesn't exist (this drift reached main twice).
 
 The exception: services the framework doesn't wrap (a raw REST/GraphQL
 API the team calls with a `${VAR}` credential). The pack is the only
@@ -175,7 +175,7 @@ and tested by hand. See `agents/eng-team/tools/linear.md`.
 
 `context/*.md` is team-shipped reference content — rubrics, methodology,
 output format specs, worked examples. It installs frozen to
-`.modastack/context/` and agents see an index (path + first line) in
+`.bobi/context/` and agents see an index (path + first line) in
 their prompt, reading files on demand. Make the first line of each file
 a one-line description.
 
@@ -199,7 +199,7 @@ customization — the team source stays untouched and updatable.
 ## Decision log (memory)
 
 Every agent has a persistent decision log at
-`.modastack/state/memory/<session-name>/`. The framework injects it into
+`.bobi/state/memory/<session-name>/`. The framework injects it into
 context at every session start — this is what makes `--fresh` and session
 rotation safe. The agent curates the content; the framework owns the
 lifecycle.
@@ -207,7 +207,7 @@ lifecycle.
 ### Storage
 
 ```
-.modastack/state/memory/<session-name>/
+.bobi/state/memory/<session-name>/
   INDEX.md           # YAML current-state block + prose notes
   2026-06-10-deploy-policy.md   # optional per-topic notes
 ```
@@ -218,7 +218,7 @@ current operational state, followed by timestamped prose notes:
 ```markdown
 ---
 managed_repos:
-  - moda-labs/modastack
+  - moda-labs/bobi
   - moda-labs/jobtack
 slack_channel: "#eng-alerts"
 linear_team: MDS
@@ -245,7 +245,7 @@ The base prompt (`prompts/base.md`) instructs every agent to:
 - Memory survives `--fresh` (which only wipes the session ID, not state).
 - Memory survives reinstall and version upgrades (lives in `state/`,
   which is gitignored and not part of the frozen install image).
-- `modastack doctor` checks for agents with empty decision logs and
+- `bobi doctor` checks for agents with empty decision logs and
   flags them as potential drift.
 
 ### Team authoring notes
@@ -263,14 +263,14 @@ the contract in `prompts/base.md` is inherited by every role automatically.
 
 ## The frozen-image contract
 
-`modastack install` regenerates `.modastack/` verbatim from the team
+`bobi install` regenerates `.bobi/` verbatim from the team
 source — every time, no merging. Authoring rules that follow from this:
 
-- Never instruct users (or agents) to edit `.modastack/` — edits are
-  destroyed by the next install, and `modastack doctor` flags them
+- Never instruct users (or agents) to edit `.bobi/` — edits are
+  destroyed by the next install, and `bobi doctor` flags them
   against the install manifest.
 - All variance a deployment needs must be expressible as `${VAR}` in
-  agent.yaml + a value in `.modastack/.env`, or as a user-owned file
+  agent.yaml + a value in `.bobi/.env`, or as a user-owned file
   seeded from `workspace/`. If your team needs a knob, make it an env
   reference; if it needs domain content, make it a workspace file.
 - Customization means editing the team source and reinstalling. For
@@ -280,21 +280,21 @@ source — every time, no merging. Authoring rules that follow from this:
 ## Validating your team
 
 ```bash
-modastack install agents/my-team    # copies image, prompts for ${VAR}s
-modastack start                     # preflight: entry point, credentials,
+bobi install agents/my-team    # copies image, prompts for ${VAR}s
+bobi start                     # preflight: entry point, credentials,
                                     # Venn connections, MCP probe (lists tools)
-modastack doctor                    # env checks + install-image drift
-modastack workflows validate        # workflow schema
+bobi doctor                    # env checks + install-image drift
+bobi workflows validate        # workflow schema
 ```
 
 Then the real test: file an issue / send the event your team claims to
-handle, and watch `.modastack/state/manager.log`.
+handle, and watch `.bobi/state/manager.log`.
 
 ## Reference implementations
 
-- `agents/eng-team` (modastack repo) — multi-repo org: director entry
+- `agents/eng-team` (bobi repo) — multi-repo org: director entry
   point, project leads, engineers; github + slack with tool-agnostic seams
   (Moda's house team derives from it via `from: eng-team`).
-- `agents/dogfood-content-review` (modastack repo) — single-repo content
+- `agents/dogfood-content-review` (bobi repo) — single-repo content
   pipeline: manager entry point, researcher/editor/fact-checker roles,
   github + email via Venn, command monitor for inbound email.

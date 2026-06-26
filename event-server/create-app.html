@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html>
-<head><title>Create Modastack GitHub App</title></head>
+<head><title>Create Bobi GitHub App</title></head>
 <body>
-<h2>Create Modastack GitHub App</h2>
+<h2>Create Bobi GitHub App</h2>
 <p>Click the button below to create the app on GitHub.</p>
 <form method="post" action="https://github.com/organizations/moda-labs/settings/apps/new">
-  <input type="hidden" name="manifest" value='{"name":"Modastack","url":"https://github.com/moda-labs/modastack","hook_attributes":{"url":"https://modastack-events.modalabs.workers.dev/webhooks/github","active":true},"redirect_url":"https://github.com/organizations/moda-labs/settings/apps","public":false,"default_permissions":{"contents":"write","issues":"write","pull_requests":"write","checks":"read","metadata":"read"},"default_events":["issues","issue_comment","pull_request","pull_request_review","check_run","workflow_run"]}'>
+  <input type="hidden" name="manifest" value='{"name":"Bobi","url":"https://github.com/moda-labs/bobi-agent-team","hook_attributes":{"url":"https://bobi-events.modalabs.workers.dev/webhooks/github","active":true},"redirect_url":"https://github.com/organizations/moda-labs/settings/apps","public":false,"default_permissions":{"contents":"write","issues":"write","pull_requests":"write","checks":"read","metadata":"read"},"default_events":["issues","issue_comment","pull_request","pull_request_review","check_run","workflow_run"]}'>
   <button type="submit" style="font-size:18px;padding:10px 20px;cursor:pointer;">Create GitHub App</button>
 </form>
 </body>

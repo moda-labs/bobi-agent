@@ -4,8 +4,8 @@ import httpx
 import pytest
 from unittest.mock import patch
 
-from modastack import http as pooled
-from modastack.venn import (check_services, list_servers, list_servers_verified,
+from bobi import http as pooled
+from bobi.venn import (check_services, list_servers, list_servers_verified,
                             format_service_report, VennServer, VennError)
 
 
@@ -136,7 +136,7 @@ class TestCheckServices:
 
 class TestFormatReport:
     def test_report_format(self):
-        from modastack.venn import ServiceCheck
+        from bobi.venn import ServiceCheck
         check = ServiceCheck(connected=["email"], missing=["salesforce"])
         report = format_service_report(check, native_services=["github"])
         assert "github" in report

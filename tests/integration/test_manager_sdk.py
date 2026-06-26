@@ -43,7 +43,7 @@ class TestManagerSDKDirect:
             ResultMessage,
             TextBlock,
         )
-        from modastack.sdk import get_cli_path
+        from bobi.sdk import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -82,7 +82,7 @@ class TestManagerSDKDirect:
             ResultMessage,
             TextBlock,
         )
-        from modastack.sdk import get_cli_path
+        from bobi.sdk import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -122,7 +122,7 @@ class TestManagerSDKDirect:
             ClaudeSDKClient,
             ResultMessage,
         )
-        from modastack.sdk import get_cli_path
+        from bobi.sdk import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -165,7 +165,7 @@ class TestManagerSessionModule:
             ResultMessage,
             TextBlock,
         )
-        from modastack.sdk import get_cli_path
+        from bobi.sdk import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",

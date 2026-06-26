@@ -1,7 +1,7 @@
 # Monitor Cost — Cheap Detection, Escalate-on-Hit
 
 Status: **design, ready for Linear epic.** Driving problem: event-shaped
-needs ("when I get an email from X, do Y") are materialized by `modastack
+needs ("when I get an email from X, do Y") are materialized by `bobi
 setup` as **polling monitors**, and the default flavor spawns a full
 default-model (Opus) session on **every tick whether or not anything
 happened**. Two monitors polling MCP sources every 5m ≈ ~576 fresh Opus
@@ -42,7 +42,7 @@ The description-only flavor spawns a **full supervised session**:
 session each tick (deliberate fresh `run_key`, `subagent.py:1090-1093`),
 on the CLI's default model — **Opus, for this user**.
 
-**Why these get generated.** `modastack setup` routes *every* `autonomous`
+**Why these get generated.** `bobi setup` routes *every* `autonomous`
 behavior to a polling monitor (`setup/authoring.py:193-211`). An
 event-shaped cadence ("when I get an email") **fails to parse as an
 interval and falls back to 15m** (`setup/authoring.py:30-39`), and because
@@ -54,7 +54,7 @@ model as the manager.
 
 **Already shipped (reuse):** Multi-model **Phase 1** (`6ecd066`) added
 cost attribution — `SessionEntry.{model,provider,model_usage}` and
-`modastack costs --by model|role|session`. Spend is already attributable;
+`bobi costs --by model|role|session`. Spend is already attributable;
 this epic makes it cheap. **Phase 2** (per-role model selection) is
 designed in `MULTI_MODEL.md` but **not built** — Part A is its minimal
 slice.
@@ -98,7 +98,7 @@ place rather than in generated shell strings.)*
      command from `service`/`tool`/`query` params, then delegates to the
      shared execution path.
    - **Script caching**: on first successful poll the resolved command is
-     saved as a shell script (`.modastack/state/scripts/<name>.sh`).
+     saved as a shell script (`.bobi/state/scripts/<name>.sh`).
      Subsequent runs try the cached script first — self-healing when the
      script fails by falling back to direct execution and regenerating
      the cache. This is the foundation for future agent-generated scripts.
@@ -137,7 +137,7 @@ and the semantic gate).
    `defaults.model` and per-role `roles.<role>.model`. Secrets via existing
    `${ENV_VAR}`.
 2. **Resolver**: `resolve_model(cfg, role)` by precedence — launch flag >
-   `.modastack/roles/<role>` override > team `roles.<role>.model` >
+   `.bobi/roles/<role>` override > team `roles.<role>.model` >
    `defaults.model` > built-in `claude_code`. Unchanged when unconfigured.
 3. **Thread into the SDK** — set `model=` (merge `env=` for gateway) in
    `session.py:198-205`, `subagent.py:229-245` (`_run_agent_supervised`),
@@ -167,7 +167,7 @@ and the semantic gate).
 
 ## Verification
 
-`modastack costs --by model --by role --since 7d` before/after on a real
+`bobi costs --by model --by role --since 7d` before/after on a real
 install to confirm the spend collapse.
 
 ## Defaults & decisions

@@ -1,13 +1,13 @@
 # Release Runbook
 
-This is the production bugfix release recipe for `modastack` plus the Moda
+This is the production bugfix release recipe for `bobi` plus the Moda
 agent-team fleet. Use it when a fix has merged to `main` and needs to reach the
 Fly-hosted agents.
 
-## 1. Sync `modastack`
+## 1. Sync `bobi`
 
 ```bash
-cd ~/dev/modastack
+cd ~/dev/bobi
 git switch main
 git pull --ff-only
 git status --short
@@ -15,7 +15,7 @@ git status --short
 
 The worktree should be clean before the release bump.
 
-## 2. Cut the `modastack` release
+## 2. Cut the `bobi` release
 
 Pick the next patch/minor version. For a patch release, update:
 
@@ -63,10 +63,10 @@ gh release create v<version> --target main --title "v<version>" --notes-file -
 Watch it to completion:
 
 ```bash
-gh run list --repo moda-labs/modastack --workflow release.yml --limit 3 \
+gh run list --repo moda-labs/bobi --workflow release.yml --limit 3 \
   --json databaseId,displayTitle,status,conclusion,url
 
-gh run watch <run-id> --repo moda-labs/modastack --interval 20
+gh run watch <run-id> --repo moda-labs/bobi --interval 20
 ```
 
 Do not continue to the Moda fleet pin until the release workflow is green,
@@ -84,7 +84,7 @@ the new version from another repo.
 
 ## 3. Bump `moda-agent-teams`
 
-The Moda fleet has its own deploy pin. Update it after the `modastack` release
+The Moda fleet has its own deploy pin. Update it after the `bobi` release
 is available on PyPI.
 
 ```bash
@@ -96,15 +96,15 @@ git status --short
 
 Update both pins:
 
-- `.github/workflows/deploy-agent-teams.yml`: `MODASTACK_VERSION`
-- `.github/workflows/lint.yml`: pinned `pip install "modastack==..."`
+- `.github/workflows/deploy-agent-teams.yml`: `BOBI_VERSION`
+- `.github/workflows/lint.yml`: pinned `pip install "bobi==..."`
 
 Verify compose against the exact released package:
 
 ```bash
 tmpdir=$(mktemp -d)
 python3 -m venv "$tmpdir/venv"
-"$tmpdir/venv/bin/pip" install -q "modastack==<version>" pyyaml
+"$tmpdir/venv/bin/pip" install -q "bobi==<version>" pyyaml
 "$tmpdir/venv/bin/python" scripts/verify-tool-library.py
 rm -rf "$tmpdir"
 ```
@@ -115,7 +115,7 @@ Commit, push, and dispatch the fleet rebuild:
 
 ```bash
 git add .github/workflows/deploy-agent-teams.yml .github/workflows/lint.yml
-git commit -m "ops: bump modastack deploy pin to <version>"
+git commit -m "ops: bump bobi deploy pin to <version>"
 git push origin main
 
 gh workflow run "Deploy agent teams" --ref main -f rebuild=true
@@ -165,9 +165,9 @@ Known failure signatures:
 - `Invalid API key` before re-registration: stale event deployment credentials.
 - `Subscription update failed (...) — re-registering`: expected recovery path
   after stale credentials.
-- Canary `modastack ask` fails while opening the reply channel with
+- Canary `bobi ask` fails while opening the reply channel with
   `POST /deployments` `500`: check the Cloudflare Worker tail. If it shows an
-  internal Durable Object URL with `__modastack_internal=undefined`, the Worker
+  internal Durable Object URL with `__bobi_internal=undefined`, the Worker
   is missing `INTERNAL_DO_SECRET`. Restore it with `wrangler secret put
   INTERNAL_DO_SECRET`, redeploy the event server if needed, then rerun the
   canary smoke.
@@ -181,7 +181,7 @@ Known failure signatures:
 Use the local Venn CLI and the repo `.env` without printing secrets:
 
 ```bash
-cd ~/dev/modastack
+cd ~/dev/bobi
 set -a; source .env; set +a
 ```
 
@@ -189,7 +189,7 @@ Send a unique marker to `#bobi-eng-team` and explicitly mention Eng Team:
 
 ```bash
 MARKER="ENG_TEAM_E2E_$(date -u +%Y%m%d_%H%M%S)"
-printf '%s\n' "$MARKER" > /tmp/modastack-engteam-marker
+printf '%s\n' "$MARKER" > /tmp/bobi-engteam-marker
 
 venn --json tools execute \
   -s moda-labs-slack \
@@ -238,13 +238,13 @@ The Eng Team marker should not appear in Codex Test logs.
 
 Before handing off, capture:
 
-- modastack release URL
+- bobi release URL
 - release workflow run URL
 - moda-agent-teams deploy run URL
 - Slack marker and thread timestamp
 - whether Eng Team replied with the correct app/user IDs
 - any residual issues, such as duplicate final replies or slow startup
 
-If validation finds a new production blocker, fix it in `modastack` with a
+If validation finds a new production blocker, fix it in `bobi` with a
 regression test, open and merge a focused PR, then repeat this runbook with the
 next patch version.

@@ -1,7 +1,7 @@
 """Integration tests for pack context/ and workspace/ install semantics.
 
-Drives the real `modastack install` CLI against a pack shipping both
-folders. context/ is part of the frozen image (.modastack/context/,
+Drives the real `bobi install` CLI against a pack shipping both
+folders. context/ is part of the frozen image (.bobi/context/,
 manifest-tracked); workspace/ seeds <project>/workspace/ once and
 reinstall never overwrites user edits.
 """
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-# Run subprocesses against this checkout, not whatever copy of modastack
+# Run subprocesses against this checkout, not whatever copy of bobi
 # happens to be pip-installed in the venv.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _ENV = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
@@ -48,7 +48,7 @@ def project_with_pack(tmp_path):
 
 def _install(project, pack):
     return subprocess.run(
-        [sys.executable, "-m", "modastack.cli", "install", str(pack)],
+        [sys.executable, "-m", "bobi.cli", "install", str(pack)],
         capture_output=True, text=True, timeout=60, cwd=str(project),
         env=_ENV,
     )
@@ -68,10 +68,10 @@ class TestInstallContextWorkspace:
         result = _install(project, pack)
         assert result.returncode == 0, result.stderr
 
-        context_file = project / ".modastack" / "context" / "style-guide.md"
+        context_file = project / ".bobi" / "context" / "style-guide.md"
         assert context_file.read_text().startswith("# House style guide")
         manifest = json.loads(
-            (project / ".modastack" / "install-manifest.json").read_text())
+            (project / ".bobi" / "install-manifest.json").read_text())
         assert "context/style-guide.md" in manifest["files"]
 
         seeded = project / "workspace" / "domain-context.md"
@@ -84,7 +84,7 @@ class TestInstallContextWorkspace:
         project, pack = project_with_pack
         assert _install(project, pack).returncode == 0
 
-        context_file = project / ".modastack" / "context" / "style-guide.md"
+        context_file = project / ".bobi" / "context" / "style-guide.md"
         context_file.write_text("hand-edited\n")
         seeded = project / "workspace" / "domain-context.md"
         seeded.write_text("user filled this in\n")
@@ -99,7 +99,7 @@ class TestInstallContextWorkspace:
         assert _install(project, pack).returncode == 0
 
         code = (
-            "from modastack.prompts.resolver import resolve_agent_prompt;"
+            "from bobi.prompts.resolver import resolve_agent_prompt;"
             f"print(resolve_agent_prompt('manager', {str(project)!r}))"
         )
         result = subprocess.run(
@@ -109,7 +109,7 @@ class TestInstallContextWorkspace:
         )
         assert result.returncode == 0, result.stderr
         assert "## Context files" in result.stdout
-        assert ".modastack/context/style-guide.md" in result.stdout
+        assert ".bobi/context/style-guide.md" in result.stdout
         assert "House style guide" in result.stdout
         assert "Write tersely." not in result.stdout
         assert "## Workspace" in result.stdout

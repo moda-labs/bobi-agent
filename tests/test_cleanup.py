@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from modastack.workflow.schema import StepDef, load_workflow
+from bobi.workflow.schema import StepDef, load_workflow
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ class TestCleanupWorktree:
         return wt_dir
 
     def test_removes_worktree_and_branch(self, git_repo):
-        from modastack.workflow.cleanup import cleanup_worktree
+        from bobi.workflow.cleanup import cleanup_worktree
 
         wt = self._create_worktree(git_repo, "agent/issue-99", "session-99")
         assert wt.exists()
@@ -65,14 +65,14 @@ class TestCleanupWorktree:
         assert "agent/issue-99" not in branches.stdout
 
     def test_not_found_returns_status(self, git_repo):
-        from modastack.workflow.cleanup import cleanup_worktree
+        from bobi.workflow.cleanup import cleanup_worktree
 
         result = cleanup_worktree(str(git_repo), "agent/nonexistent")
         assert result["status"] == "not_found"
 
     def test_removes_worktree_at_nonstandard_path(self, git_repo):
         """Cleanup finds worktrees regardless of path — it looks up by branch."""
-        from modastack.workflow.cleanup import cleanup_worktree
+        from bobi.workflow.cleanup import cleanup_worktree
 
         # Create worktree at a non-standard location (simulating historical mess)
         wt_dir = git_repo.parent / "elsewhere" / "wt-99"
@@ -89,7 +89,7 @@ class TestCleanupWorktree:
 
     def test_handles_already_removed_worktree_dir(self, git_repo):
         """If the directory is gone but git still tracks it, prune cleans up."""
-        from modastack.workflow.cleanup import cleanup_worktree
+        from bobi.workflow.cleanup import cleanup_worktree
 
         import shutil
         wt = self._create_worktree(git_repo, "agent/ghost-1", "ghost-1")
@@ -157,9 +157,9 @@ class TestReactorPrClosedDispatch:
             },
         }
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatches_pr_closed_merged(self, mock_launch):
-        from modastack.events.reactor import AutoDispatchRule, EventReactor
+        from bobi.events.reactor import AutoDispatchRule, EventReactor
 
         mock_launch.return_value = "wf-pr-closed-test-42"
         rules = [AutoDispatchRule(
@@ -177,9 +177,9 @@ class TestReactorPrClosedDispatch:
         assert kwargs["workflow_name"] == "pr-closed"
         assert "merged=True" in kwargs["task"] or "merged" in kwargs["task"].lower()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatches_pr_closed_unmerged(self, mock_launch):
-        from modastack.events.reactor import AutoDispatchRule, EventReactor
+        from bobi.events.reactor import AutoDispatchRule, EventReactor
 
         mock_launch.return_value = "wf-pr-closed-test-43"
         rules = [AutoDispatchRule(
@@ -195,9 +195,9 @@ class TestReactorPrClosedDispatch:
         kwargs = mock_launch.call_args[1]
         assert "merged=False" in kwargs["task"] or "merged" in kwargs["task"].lower()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_no_dispatch_on_pr_opened(self, mock_launch):
-        from modastack.events.reactor import AutoDispatchRule, EventReactor
+        from bobi.events.reactor import AutoDispatchRule, EventReactor
 
         rules = [AutoDispatchRule(
             event="github.pull_request",
@@ -215,11 +215,11 @@ class TestReactorPrClosedDispatch:
         assert reactor.process(event) is None
         mock_launch.assert_not_called()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatch_passes_event_fields(self, mock_launch):
         """The dispatched task must include fields needed by the workflow
         (merged, head_branch, number, repo)."""
-        from modastack.events.reactor import AutoDispatchRule, EventReactor
+        from bobi.events.reactor import AutoDispatchRule, EventReactor
 
         mock_launch.return_value = "wf-pr-closed-test-42"
         rules = [AutoDispatchRule(
@@ -237,11 +237,11 @@ class TestReactorPrClosedDispatch:
         assert "#42" in kwargs["task"]
         assert "moda-labs/test" in kwargs["task"]
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatch_passes_input_fields_for_workflow_variables(self, mock_launch):
         """Event fields must be passed as input_fields so the workflow can
         resolve ${{ input.merged }}, ${{ input.head_branch }}, etc."""
-        from modastack.events.reactor import AutoDispatchRule, EventReactor
+        from bobi.events.reactor import AutoDispatchRule, EventReactor
 
         mock_launch.return_value = "wf-pr-closed-test-42"
         rules = [AutoDispatchRule(
@@ -315,7 +315,7 @@ class TestCleanupWorktreeRejectsNonGitDir:
     the wrong directory."""
 
     def test_non_git_dir_returns_error(self, tmp_path):
-        from modastack.workflow.cleanup import cleanup_worktree
+        from bobi.workflow.cleanup import cleanup_worktree
 
         # tmp_path is a plain directory, not a git repo
         result = cleanup_worktree(str(tmp_path), "agent/issue-99")
@@ -328,7 +328,7 @@ class TestResolveRepoRoot:
     not fall back to the installation root."""
 
     def _make_ctx(self, repo_slug: str) -> "VariableContext":
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.variables import VariableContext
 
         ctx = VariableContext()
         ctx.set_scope("input", {"repo": repo_slug, "head_branch": "agent/x"})
@@ -337,7 +337,7 @@ class TestResolveRepoRoot:
     def test_director_layout_finds_child_repo(self, tmp_path):
         """When the installation root contains a child dir matching the repo
         name and that child is a git repo, resolve to it."""
-        from modastack.workflow.orchestrator import _resolve_repo_root
+        from bobi.workflow.orchestrator import _resolve_repo_root
 
         # Set up: installation root with a child git repo
         child = tmp_path / "myrepo"
@@ -345,7 +345,7 @@ class TestResolveRepoRoot:
         subprocess.run(["git", "init"], cwd=child, capture_output=True)
 
         ctx = self._make_ctx("org/myrepo")
-        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+        with patch("bobi.paths.bobi_root", return_value=tmp_path):
             result = _resolve_repo_root(ctx)
 
         assert result == str(child)
@@ -353,7 +353,7 @@ class TestResolveRepoRoot:
     def test_single_repo_layout(self, tmp_path):
         """When the installation root itself is a git repo whose remote
         matches the slug, resolve to it."""
-        from modastack.workflow.orchestrator import _resolve_repo_root
+        from bobi.workflow.orchestrator import _resolve_repo_root
 
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
         subprocess.run(
@@ -363,7 +363,7 @@ class TestResolveRepoRoot:
         )
 
         ctx = self._make_ctx("org/somerepo")
-        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+        with patch("bobi.paths.bobi_root", return_value=tmp_path):
             result = _resolve_repo_root(ctx)
 
         assert result == str(tmp_path)
@@ -372,7 +372,7 @@ class TestResolveRepoRoot:
         """When the installation root is a git repo but its remote does NOT
         match the event's slug, return None — do not run git ops against
         the wrong repo.  Regression: a same-named branch must survive."""
-        from modastack.workflow.orchestrator import _resolve_repo_root
+        from bobi.workflow.orchestrator import _resolve_repo_root
 
         # Installation root is a git repo for a *different* project
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
@@ -397,7 +397,7 @@ class TestResolveRepoRoot:
         )
 
         ctx = self._make_ctx("org/some-other-repo")
-        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+        with patch("bobi.paths.bobi_root", return_value=tmp_path):
             result = _resolve_repo_root(ctx)
 
         assert result is None
@@ -413,7 +413,7 @@ class TestResolveRepoRoot:
 
     def test_path_traversal_rejected(self, tmp_path):
         """A crafted input.repo with '..' must not escape the install root."""
-        from modastack.workflow.orchestrator import _resolve_repo_root
+        from bobi.workflow.orchestrator import _resolve_repo_root
 
         # Create a parent dir that happens to be a git repo
         parent = tmp_path / "parent"
@@ -423,14 +423,14 @@ class TestResolveRepoRoot:
         subprocess.run(["git", "init"], cwd=parent, capture_output=True)
 
         ctx = self._make_ctx("org/..")
-        with patch("modastack.paths.modastack_root", return_value=install):
+        with patch("bobi.paths.bobi_root", return_value=install):
             result = _resolve_repo_root(ctx)
 
         assert result is None
 
     def test_substring_slug_does_not_match(self, tmp_path):
         """A slug like 'org/api' must NOT match a remote for 'org/api-private'."""
-        from modastack.workflow.orchestrator import _resolve_repo_root
+        from bobi.workflow.orchestrator import _resolve_repo_root
 
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
         subprocess.run(
@@ -440,14 +440,14 @@ class TestResolveRepoRoot:
         )
 
         ctx = self._make_ctx("org/api")
-        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+        with patch("bobi.paths.bobi_root", return_value=tmp_path):
             result = _resolve_repo_root(ctx)
 
         assert result is None
 
     def test_ssh_remote_url_matches(self, tmp_path):
         """SSH remote URLs (git@github.com:org/repo.git) must match."""
-        from modastack.workflow.orchestrator import _resolve_repo_root
+        from bobi.workflow.orchestrator import _resolve_repo_root
 
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
         subprocess.run(
@@ -457,29 +457,29 @@ class TestResolveRepoRoot:
         )
 
         ctx = self._make_ctx("org/somerepo")
-        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+        with patch("bobi.paths.bobi_root", return_value=tmp_path):
             result = _resolve_repo_root(ctx)
 
         assert result == str(tmp_path)
 
     def test_no_repo_found_returns_none(self, tmp_path):
         """When no matching checkout exists, return None."""
-        from modastack.workflow.orchestrator import _resolve_repo_root
+        from bobi.workflow.orchestrator import _resolve_repo_root
 
         ctx = self._make_ctx("org/missing")
-        with patch("modastack.paths.modastack_root", return_value=tmp_path):
+        with patch("bobi.paths.bobi_root", return_value=tmp_path):
             result = _resolve_repo_root(ctx)
 
         assert result is None
 
     def test_no_repo_in_input_returns_none(self):
         """When input.repo is missing, return None."""
-        from modastack.workflow.orchestrator import _resolve_repo_root
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.orchestrator import _resolve_repo_root
+        from bobi.workflow.variables import VariableContext
 
         ctx = VariableContext()
         ctx.set_scope("input", {"head_branch": "agent/x"})
-        with patch("modastack.paths.modastack_root"):
+        with patch("bobi.paths.bobi_root"):
             result = _resolve_repo_root(ctx)
 
         assert result is None
@@ -492,8 +492,8 @@ class TestCleanupActionUsesInputRepo:
     def test_action_resolves_repo_from_input(self, tmp_path):
         """The action should call cleanup_worktree with the resolved repo
         path, not the installation root."""
-        from modastack.workflow.orchestrator import _cleanup_worktree_action
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.orchestrator import _cleanup_worktree_action
+        from bobi.workflow.variables import VariableContext
 
         # Set up a child git repo under a non-git installation root
         child = tmp_path / "testrepo"
@@ -506,8 +506,8 @@ class TestCleanupActionUsesInputRepo:
             "head_branch": "agent/issue-246",
         })
 
-        with patch("modastack.paths.modastack_root", return_value=tmp_path), \
-             patch("modastack.workflow.cleanup.cleanup_worktree") as mock_cleanup:
+        with patch("bobi.paths.bobi_root", return_value=tmp_path), \
+             patch("bobi.workflow.cleanup.cleanup_worktree") as mock_cleanup:
             mock_cleanup.return_value = {"status": "cleaned", "paths_removed": [], "branch": "agent/issue-246"}
             result = _cleanup_worktree_action(ctx, str(tmp_path))
 
@@ -517,8 +517,8 @@ class TestCleanupActionUsesInputRepo:
 
     def test_action_returns_error_when_repo_unresolvable(self):
         """When input.repo can't be resolved to a local checkout, return error."""
-        from modastack.workflow.orchestrator import _cleanup_worktree_action
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.orchestrator import _cleanup_worktree_action
+        from bobi.workflow.variables import VariableContext
 
         ctx = VariableContext()
         ctx.set_scope("input", {
@@ -526,7 +526,7 @@ class TestCleanupActionUsesInputRepo:
             "head_branch": "agent/issue-246",
         })
 
-        with patch("modastack.paths.modastack_root", return_value=Path("/tmp/empty")):
+        with patch("bobi.paths.bobi_root", return_value=Path("/tmp/empty")):
             result = _cleanup_worktree_action(ctx, "/tmp/empty")
 
         assert result["status"] == "error"

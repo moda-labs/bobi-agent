@@ -4,12 +4,12 @@ name: Team images
 # image (C24 team-flavored images; docs/design/CUSTOM_AGENT_DEPS.md). A team that
 # declares `build:` needs its host tools (node, codex, gstack, …) baked in — the
 # generic base ships none, and a dark container has no TTY to install them. CI
-# renders the team-deps hook (modastack.build_render) and builds the ONE
+# renders the team-deps hook (bobi.build_render) and builds the ONE
 # Dockerfile with --build-arg TEAM_DEPS; the hook's final step re-runs the team's
 # requires[].check, so a missing tool fails THIS build, not production dispatch.
 #
 # This is a BUILD-ONLY verify gate. The team-flavored image is built on Fly's
-# remote builder during `modastack deploy` (deploy.py renders TEAM_DEPS into the
+# remote builder during `bobi deploy` (deploy.py renders TEAM_DEPS into the
 # build context — Fly creates app + registry + machine together, no separate
 # registry push). A "build once in CI → push to a registry → deploy many by ref"
 # optimization is deferred (Fly's registry rejects pushes to a never-deployed
@@ -23,8 +23,8 @@ on:
       - "Dockerfile"
       - "docker/**"
       - "pyproject.toml"
-      - "modastack/build_render.py"
-      - "modastack/config.py"
+      - "bobi/build_render.py"
+      - "bobi/config.py"
       - "scripts/build-team-images.sh"
       - ".github/workflows/team-images.yml"
   pull_request:
@@ -43,9 +43,9 @@ jobs:
         with:
           python-version: "3.11"
 
-      # build_render imports modastack.config (needs pyyaml); install the package
-      # so `python -m modastack.build_render` resolves on the runner.
-      - name: Install modastack (for the renderer)
+      # build_render imports bobi.config (needs pyyaml); install the package
+      # so `python -m bobi.build_render` resolves on the runner.
+      - name: Install bobi (for the renderer)
         run: pip install -e .
 
       - name: Build team images (no push — verify the build + requires gate)

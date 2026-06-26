@@ -1,4 +1,4 @@
-"""Tests for `modastack deploy-init` scaffolding (modastack/scaffold.py)."""
+"""Tests for `bobi deploy-init` scaffolding (bobi/scaffold.py)."""
 
 from pathlib import Path
 
@@ -6,14 +6,14 @@ import yaml
 import pytest
 from click.testing import CliRunner
 
-from modastack import scaffold
-from modastack.cli import main
+from bobi import scaffold
+from bobi.cli import main
 
 
 AGENT_YAML = """\
 version: "1.0.0"
 entry_point: director
-event_server: ${MODASTACK_EVENT_SERVER}
+event_server: ${BOBI_EVENT_SERVER}
 services:
   - name: slack
     channels: ${SLACK_CHANNELS}
@@ -54,14 +54,14 @@ def test_discover_teams_no_agents_dir(tmp_path):
     assert scaffold.discover_teams(tmp_path) == []
 
 
-def test_secret_keys_api_key_adds_anthropic_drops_modastack(tmp_path):
+def test_secret_keys_api_key_adds_anthropic_drops_bobi(tmp_path):
     _make_team(tmp_path, "eng-team")
     keys = scaffold.secret_keys_for(tmp_path, "eng-team", "api_key")
-    # declared service/runtime vars, MODASTACK_* excluded, ANTHROPIC overlaid
+    # declared service/runtime vars, BOBI_* excluded, ANTHROPIC overlaid
     assert set(keys) == {
         "SLACK_CHANNELS", "SLACK_BOT_TOKEN", "GH_TOKEN",
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
-    assert "MODASTACK_EVENT_SERVER" not in keys
+    assert "BOBI_EVENT_SERVER" not in keys
 
 
 def test_secret_keys_subscription_omits_anthropic(tmp_path):
@@ -81,9 +81,9 @@ def test_subscription_drops_explicitly_declared_anthropic(tmp_path):
 
 def test_render_workflow_pins_version_and_uses_pypi():
     wf = scaffold.render_workflow("9.9.9")
-    assert "__MODASTACK_VERSION__" not in wf
-    assert 'MODASTACK_VERSION: "9.9.9"' in wf
-    assert 'pip install "modastack==${MODASTACK_VERSION}"' in wf
+    assert "__BOBI_VERSION__" not in wf
+    assert 'BOBI_VERSION: "9.9.9"' in wf
+    assert 'pip install "bobi==${BOBI_VERSION}"' in wf
     assert "pip install -e ." not in wf          # standalone, not the framework copy
     assert "fly apps list --json" in wf          # orphans enumerates inline, no fleet.sh
     doc = yaml.safe_load(wf)

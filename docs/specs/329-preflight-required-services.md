@@ -15,7 +15,7 @@
 
 ## Problem
 
-`modastack start` runs preflight checks before forking the agent. Today
+`bobi start` runs preflight checks before forking the agent. Today
 **any** failed check blocks startup (`cli.py` `start`:
 `if not validation.ok: raise SystemExit(1)`, where
 `ValidationResult.ok = all(c.ok for c in checks)`). A single unconfigured
@@ -26,7 +26,7 @@ declares a Venn-backed `email` service. With no `VENN_API_KEY` (and even
 with a dummy one — `_check_venn_services` makes a live `POST` to venn.ai),
 preflight returns `✗ email venn — not connected` and startup aborts, even
 though the user only wants GitHub. The credential-free dogfood/release
-smoke can't `modastack start` at all without a real Venn + Gmail
+smoke can't `bobi start` at all without a real Venn + Gmail
 connection.
 
 Not a regression: the all-or-nothing gate is pre-existing (auth-v1, #281,
@@ -37,7 +37,7 @@ shipped in 0.21.0). Filing as a quality/UX fix, not a release blocker.
 > target and is fixed by the mechanism below. For **dogfood specifically**,
 > the reviewer (Zach) determined `email`/venn is an **optional** dependency:
 > a missing Venn credential degrades email events gracefully so the
-> credential-free dogfood/release smoke can `modastack start` with GitHub
+> credential-free dogfood/release smoke can `bobi start` with GitHub
 > alone. dogfood `email` (`required: false`) is the canonical example
 > exercising the degradation path.
 
@@ -72,7 +72,7 @@ explicit, declarative control.
   failures as warnings (`⚠`).
 - `start` (cli.py) prints a clear "starting in degraded mode" note (to
   stderr) **only when it actually proceeds** past non-required failures.
-- **`modastack doctor` consistency** (`doctor.py._check_services`, ~line
+- **`bobi doctor` consistency** (`doctor.py._check_services`, ~line
   220): thread the new `required` flag through doctor's own `CheckResult`
   so `doctor` mirrors the warn-vs-block distinction instead of reporting
   every degraded service as a hard failure.
@@ -147,13 +147,13 @@ failure blocks (`required=True`) or warns (`required=False`).
   required=by_name[name].required
   ```
 
-### 3a. `modastack doctor` parity (doctor.py ~line 220)
+### 3a. `bobi doctor` parity (doctor.py ~line 220)
 `doctor.py` defines its **own** `CheckResult` (separate class) and
 `_check_services` re-wraps validate's results:
 `CheckResult(c.name, ok=c.ok, detail=c.detail, hint=c.hint)`. Add a
 `required: bool = True` field to doctor's `CheckResult` and pass
 `required=c.required` in that copy, and render `⚠` for non-required
-failures in doctor's output, so `modastack doctor` doesn't flag a
+failures in doctor's output, so `bobi doctor` doesn't flag a
 perfectly-startable pack's optional service as a failure.
 
 ### 4. `ValidationResult.ok` — block only on required failures
@@ -200,13 +200,13 @@ Unit tests (`tests/test_validate.py`, mirroring existing structure):
   produce `ok=False`.
 
 Manual / smoke:
-- **Degradation path / dogfood smoke** — `modastack start` against
+- **Degradation path / dogfood smoke** — `bobi start` against
   `dogfood-content-review` with no `VENN_API_KEY`: preflight shows `✓ github`
   (required), `⚠ email` (optional venn — not connected), prints the
   "degraded mode" notice, and the manager starts. Email events just don't
   arrive until Venn is connected. This is the canonical credential-free
   smoke and satisfies acceptance criteria 1 & 2.
-- **Required-failure block** — `modastack start` against a pack with a
+- **Required-failure block** — `bobi start` against a pack with a
   *required* service unset (e.g. eng-team with no `GITHUB_TOKEN`, or dogfood
   with no GitHub) still blocks with `✗` and a "Startup blocked" message
   (acceptance criterion 3 / regression guard).
@@ -277,10 +277,10 @@ Run `pytest tests/ --ignore=tests/integration/` (zero new failures).
 
 ## Acceptance criteria
 - A pack declaring an unconfigured service marked `required: false` can
-  `modastack start`; the unmet service is a **warning**, not a block.
+  `bobi start`; the unmet service is a **warning**, not a block.
 - Entry-point / required-service failures still block (regression guard).
 - **dogfood (Zach, 2026-06-22):** `email`/venn is `required: false` —
-  optional. `modastack start` against `dogfood-content-review` with no
+  optional. `bobi start` against `dogfood-content-review` with no
   `VENN_API_KEY` starts in degraded mode (`✓ github`, `⚠ email`); email
   events don't arrive until Venn is connected. The credential-free dogfood/
   release smoke works again — the original #329 goal.

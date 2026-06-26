@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from modastack import auth_bootstrap as ab
+from bobi import auth_bootstrap as ab
 
 
 # --- credentials / needs_bootstrap ------------------------------------------
@@ -29,9 +29,9 @@ def test_credentials_exist(tmp_path):
 
 
 def test_needs_bootstrap_only_in_subscription_mode(tmp_path, monkeypatch):
-    monkeypatch.setenv("MODASTACK_AUTH", "api_key")
+    monkeypatch.setenv("BOBI_AUTH", "api_key")
     assert ab.needs_bootstrap(tmp_path) is False
-    monkeypatch.setenv("MODASTACK_AUTH", "subscription")
+    monkeypatch.setenv("BOBI_AUTH", "subscription")
     assert ab.needs_bootstrap(tmp_path) is True
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / ".credentials.json").write_text("{}")
@@ -142,12 +142,12 @@ def test_extract_code_real_shape_rejects_other_channel():
 @pytest.fixture
 def slack_config(tmp_path, monkeypatch):
     """A project with a Slack bot_token so run_bootstrap gets past config checks."""
-    from modastack import paths
+    from bobi import paths
 
     monkeypatch.setattr(paths, "_root", None, raising=False)
     project = tmp_path / "proj"
-    (project / ".modastack").mkdir(parents=True)
-    (project / ".modastack" / "agent.yaml").write_text(
+    (project / ".bobi").mkdir(parents=True)
+    (project / ".bobi" / "agent.yaml").write_text(
         "agent: test\n"
         "event_server_url: wss://example\n"
         "services:\n"
@@ -232,13 +232,13 @@ def test_run_bootstrap_refuses_with_api_key_set(slack_config, monkeypatch):
 
 def test_run_bootstrap_requires_channel(slack_config, monkeypatch):
     monkeypatch.delenv(ab.LOGIN_CHANNEL_ENV, raising=False)
-    with pytest.raises(RuntimeError, match="MODASTACK_LOGIN_CHANNEL"):
+    with pytest.raises(RuntimeError, match="BOBI_LOGIN_CHANNEL"):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
 
 
 def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, monkeypatch):
-    import modastack.events.client as client_mod
-    import modastack.events.server as server_mod
+    import bobi.events.client as client_mod
+    import bobi.events.server as server_mod
 
     registered = {}
 
@@ -281,8 +281,8 @@ def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, mon
 
 
 def test_wait_for_code_falls_back_to_legacy_slack_topic(slack_config, monkeypatch):
-    import modastack.events.client as client_mod
-    import modastack.events.server as server_mod
+    import bobi.events.client as client_mod
+    import bobi.events.server as server_mod
 
     registered = {}
 
@@ -327,7 +327,7 @@ def test_wait_for_code_falls_back_to_legacy_slack_topic(slack_config, monkeypatc
 # --- Codex brain: device-auth (poll) flow (#485) ----------------------------
 
 def test_credentials_path_for_codex(tmp_path, monkeypatch):
-    from modastack.brain import BRAIN_ENV
+    from bobi.brain import BRAIN_ENV
 
     monkeypatch.setenv(BRAIN_ENV, "codex")
     assert ab.credentials_path(tmp_path) == tmp_path / ".codex" / "auth.json"
@@ -364,7 +364,7 @@ def test_scrape_login_codex_gets_url_and_code():
 def test_run_bootstrap_codex_device_poll(slack_config, monkeypatch):
     """Codex flow: scrape URL + code, post both, wait for the CLI to poll-auth,
     then verify auth.json landed — no code is pasted back."""
-    from modastack.brain import BRAIN_ENV
+    from bobi.brain import BRAIN_ENV
 
     monkeypatch.setenv(BRAIN_ENV, "codex")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -407,7 +407,7 @@ def test_run_bootstrap_codex_device_poll(slack_config, monkeypatch):
 
 def test_run_bootstrap_codex_refuses_with_openai_key(slack_config, monkeypatch):
     """In codex subscription mode OPENAI_API_KEY would shadow the OAuth creds."""
-    from modastack.brain import BRAIN_ENV
+    from bobi.brain import BRAIN_ENV
 
     monkeypatch.setenv(BRAIN_ENV, "codex")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-x")

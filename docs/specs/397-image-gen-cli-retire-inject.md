@@ -1,6 +1,6 @@
 # Spec — #397: Image generation → baked CLI (retire the `kind: image` MCP shim)
 
-- **Issue:** [#397](https://github.com/moda-labs/modastack/issues/397)
+- **Issue:** [#397](https://github.com/moda-labs/bobi-agent-team/issues/397)
 - **Status:** Draft — awaiting Zach's approval on this PR. **No implementation lands until approved.**
 - **Complexity:** Medium (spec-first).
 - **Build-vs-adopt:** **Locked = adopt.** Bake the official OpenAI image CLI; do not write our own generation logic. (Issue comment, @underminedsk, 2026-06-21.)
@@ -14,7 +14,7 @@ re-scope to image-only and the locked "adopt, don't build" decision).
 
 ### Problem
 
-`modastack/mcp/image_server.py` is a built-in stdio MCP server exposing one tool,
+`bobi/mcp/image_server.py` is a built-in stdio MCP server exposing one tool,
 `generate_image`, injected into agent sessions by `mcp/inject.py` whenever an
 `agent.yaml` connection of `kind: image` exists. It is the **worst of both
 worlds**:
@@ -46,7 +46,7 @@ CLI-first Axis-2 direction in `docs/design/MULTI_MODEL.md`:
   file (`/tmp/*.png`) → print the path → the agent `Read`s the path for true
   native-image rendering, and the file is what's needed downstream (Slack post,
   PR attach).
-- Remove `modastack/mcp/image_server.py` and the `kind: image` branch in
+- Remove `bobi/mcp/image_server.py` and the `kind: image` branch in
   `mcp/inject.py`.
 
 **Breaking change accepted** (per the locked comment): the `generate_image` MCP
@@ -70,7 +70,7 @@ over-reaching here creates merge churn with the siblings.
 
 - The `inject.py` **file itself** — it still has a live `kind: codex` branch after
   this ticket, so it stays. We remove only the `kind: image` branch.
-- `modastack/mcp/codex_server.py`.
+- `bobi/mcp/codex_server.py`.
 - `ConnectionEntry`, `Config.connection()`, `Config.connections_by_kind()`,
   and the `connections:` block in `agent.yaml`.
 - The `inject_builtin_mcp_servers()` call sites in `subagent.py:369,504`.
@@ -90,10 +90,10 @@ the shim *smaller but functional*; #403 deletes the carcass.
 2. **Tools guide** — `agents/eng-team/tools/image.md`: policy + the temp-file
    contract + the documented save-to-file one-liner. No hardcoded flag reference.
 3. **Base-prompt pointer** — a short "Generate images" subsection in
-   `modastack/prompts/base.md`, sibling to the existing "Call other models"
+   `bobi/prompts/base.md`, sibling to the existing "Call other models"
    (`aichat`) block, so every agent knows the capability exists and the
    write-file→`Read` convention.
-4. **Remove** `modastack/mcp/image_server.py`.
+4. **Remove** `bobi/mcp/image_server.py`.
 5. **Remove** the `kind: image` branch in `mcp/inject.py` (lines 46–55) — leave
    the `kind: codex` branch intact.
 6. **Tests** — delete `tests/test_image_server.py`; trim any `kind: image`
@@ -179,16 +179,16 @@ The contract the guide and base prompt encode:
 
 ### 4. Removals (this ticket only)
 
-- Delete `modastack/mcp/image_server.py` (304 lines).
+- Delete `bobi/mcp/image_server.py` (304 lines).
 - In `mcp/inject.py`, delete the `if _has_kind("image"):` block
-  (`modastack-image` injection, lines 46–55). Keep the `kind: codex` block, the
+  (`bobi-image` injection, lines 46–55). Keep the `kind: codex` block, the
   helpers, and the function signature. Update the module docstring to say only
   codex is injected.
 - `tests/test_image_server.py` → delete.
 - `tests/test_connections.py` → remove any assertion that a `kind: image`
-  connection injects `modastack-image`; keep `ConnectionEntry` parse tests.
+  connection injects `bobi-image`; keep `ConnectionEntry` parse tests.
 
-After this ticket: `inject.py` still compiles and still injects `modastack-codex`;
+After this ticket: `inject.py` still compiles and still injects `bobi-codex`;
 nothing references `image_server`. `grep -rn 'image_server\|generate_image\|kind.*image'`
 returns only docs/spec mentions.
 
@@ -279,7 +279,7 @@ The CLI has no native file output (verified above). The locked decision says
 - **Recommendation: A.**
 
 **D3 — Guide surface.** Proposed: a new `agents/eng-team/tools/image.md` (full
-policy) **plus** a 4–6 line pointer in `modastack/prompts/base.md` next to the
+policy) **plus** a 4–6 line pointer in `bobi/prompts/base.md` next to the
 `aichat` block. Confirm both, or guide-only.
 
 ---
@@ -291,10 +291,10 @@ policy) **plus** a 4–6 line pointer in `modastack/prompts/base.md` next to the
   with the image-injection assertion removed; `tests/test_codex_server.py` and
   the codex injection path **unchanged and still green** (proves we didn't touch
   the codex branch).
-- **Dead-reference grep:** `grep -rn 'image_server\|generate_image' modastack/`
-  returns nothing; `grep -rn 'modastack-image' modastack/` returns nothing.
+- **Dead-reference grep:** `grep -rn 'image_server\|generate_image' bobi/`
+  returns nothing; `grep -rn 'bobi-image' bobi/` returns nothing.
 - **`inject.py` still works:** a focused test (or the existing codex test)
-  confirms a `kind: codex` connection still injects `modastack-codex` and a
+  confirms a `kind: codex` connection still injects `bobi-codex` and a
   `kind: image` connection now injects **nothing**.
 - **Build smoke (CI image build):** the pinned `openai` install succeeds; `openai
   images generate --help` exits 0 in the built image (mirrors `aichat --version`

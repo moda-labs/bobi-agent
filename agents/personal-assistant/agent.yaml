@@ -1,13 +1,13 @@
 version: "1.0.0"
 
-# Entry point role for `modastack start`.
+# Entry point role for `bobi start`.
 entry_point: assistant
 chat: slack
 max_concurrent_agents: 3
 
 # Cloud event server URL in production (.env), empty for an
 # auto-started local server.
-event_server: ${MODASTACK_EVENT_SERVER}
+event_server: ${BOBI_EVENT_SERVER}
 
 # The assistant talks to its principal on a chat surface (Slack by
 # default) and reaches the real world — email, calendar, tasks — through
@@ -54,7 +54,7 @@ venn_api_key: ${VENN_API_KEY}
 # line pulls in the whole bundle — the `doctor`/dispatch `requires:` check, the
 # pinned container `build:` bake (its own venv at /opt/venn-cli, symlinked onto
 # PATH), and the catalog's `tools/venn.md` guide — with the `venn-cli==0.2.0`
-# pin written ONCE in the catalog (modastack/tool_library/venn/tool.yaml).
+# pin written ONCE in the catalog (bobi/tool_library/venn/tool.yaml).
 #
 # This team's own tools/venn.md wins over the catalog guide (compose is
 # local-first for guides), so the PA-specific policy there — the reads-vs-writes

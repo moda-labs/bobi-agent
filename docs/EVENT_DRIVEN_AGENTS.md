@@ -13,7 +13,7 @@ world: a PR gets opened, a deploy fails, a customer files a ticket, an
 alert fires, a deadline passes. Agents that watch, reason, and act
 without being prompted.
 
-No framework makes this easy today. modastack is an open-source agent
+No framework makes this easy today. bobi is an open-source agent
 framework that does. Agents subscribe to real-world events, respond
 with autonomous reasoning — and remain interactive at all times. You
 can spin them up in any topology, wire them together, and talk to any
@@ -160,9 +160,9 @@ reasoning — prompt-and-tool-call, not persistent multi-step agents.
 | **Agent infrastructure** (Inngest, Temporal) | Yes | Yes | No | No — BYO agent | Partial |
 | **Composio** | Bolt-on triggers | Yes | No | No | Elastic |
 | **Mastra** | Event primitives | Yes | Per-request | No | Yes |
-| **modastack** | **Native event bus** | **Yes** | **Always** | **Any topology** | **Yes — MIT** |
+| **bobi** | **Native event bus** | **Yes** | **Always** | **Any topology** | **Yes — MIT** |
 
-OpenClaw and Hermes are the closest to modastack in spirit — they're
+OpenClaw and Hermes are the closest to bobi in spirit — they're
 agent harnesses with cron scheduling, inbound webhooks, and Slack
 integration. Agents can monitor external systems on intervals and
 react to incoming webhooks. But they lack a centralized event bus:
@@ -179,23 +179,23 @@ persistent event bus, catch-up replay, long-running agent daemons,
 agent-to-agent messaging, and interactive access to running agents.
 It's event-aware, not event-native.
 
-The interactive + autonomous combination is what makes modastack's
+The interactive + autonomous combination is what makes bobi's
 event-driven architecture practical. Autonomous agents that you can't
 talk to are too risky for production. Interactive agents that can't
-react to events are too limited for real work. modastack agents are
+react to events are too limited for real work. bobi agents are
 both — persistent processes that act on events and accept human input
 through the same session.
 
 ---
 
-## How modastack solves it
+## How bobi solves it
 
 ### Create agents, wire them together
 
 The foundation is the CLI. One command creates an agent:
 
 ```bash
-modastack agents launch \
+bobi agents launch \
   --role oncall \
   --task "Monitor production and respond to incidents" \
   --subscribe pagerduty,sentry,github:org/infra
@@ -207,10 +207,10 @@ also always reachable:
 
 ```bash
 # Ask it a question (blocks until response)
-modastack ask "What's the status of the current incident?"
+bobi ask "What's the status of the current incident?"
 
 # Inject context (fire-and-forget)
-modastack message "The deploy was rolled back manually, stand down"
+bobi message "The deploy was rolled back manually, stand down"
 ```
 
 The CLI is built primarily for agent consumption, not just humans.
@@ -218,8 +218,8 @@ An agent can spawn other agents, ask them questions, check their
 status, read their transcripts, and diagnose problems — using the
 same CLI commands a human would. This means agents can build and
 manage their own networks: a director agent can launch project leads,
-monitor their progress with `modastack agents list` and
-`modastack transcript show`, and intervene when something stalls.
+monitor their progress with `bobi agents list` and
+`bobi transcript show`, and intervene when something stalls.
 
 Agents message each other the same way — synchronously (block until
 response) or asynchronously (fire and forget). The framework doesn't
@@ -227,19 +227,19 @@ impose a topology. You build whatever shape the problem needs:
 
 ```bash
 # Star: manager delegates to specialists
-modastack agents launch --role manager --subscribe github:org/repo
-modastack agents launch --role frontend --task "Handle UI changes"
-modastack agents launch --role backend --task "Handle API changes"
+bobi agents launch --role manager --subscribe github:org/repo
+bobi agents launch --role frontend --task "Handle UI changes"
+bobi agents launch --role backend --task "Handle API changes"
 
 # Chain: pipeline stages
-modastack agents launch --role triage --subscribe linear:ENG
-modastack agents launch --role spec --subscribe triage/handoff
-modastack agents launch --role implement --subscribe spec/handoff
+bobi agents launch --role triage --subscribe linear:ENG
+bobi agents launch --role spec --subscribe triage/handoff
+bobi agents launch --role implement --subscribe spec/handoff
 
 # Mesh: peers share findings
-modastack agents launch --role researcher --subscribe topic/security
-modastack agents launch --role researcher --subscribe topic/security
-modastack agents launch --role synthesizer --subscribe topic/security
+bobi agents launch --role researcher --subscribe topic/security
+bobi agents launch --role researcher --subscribe topic/security
+bobi agents launch --role synthesizer --subscribe topic/security
 ```
 
 There's no structural difference between a "manager" and a "worker"
@@ -249,7 +249,7 @@ and subscriptions. Not from code.
 
 ### Always interactive, always autonomous
 
-This is the key property other frameworks lack. A modastack agent
+This is the key property other frameworks lack. A bobi agent
 processes events from the outside world **and** human input through
 the same session. You can:
 
@@ -268,7 +268,7 @@ the world.
 
 ### Three paths for inbound events
 
-modastack supports three complementary mechanisms for getting
+bobi supports three complementary mechanisms for getting
 real-world events into the system:
 
 **1. Push (webhooks)**
@@ -347,7 +347,7 @@ monitors:
 This turns every MCP server into an event source with zero custom
 code. The MCP ecosystem already has servers for GitHub, Jira,
 Confluence, PagerDuty, Datadog, Sentry, Notion, Google Workspace,
-Salesforce, and hundreds more. Each one becomes a modastack connector
+Salesforce, and hundreds more. Each one becomes a bobi connector
 through YAML configuration.
 
 For checks that require judgment — "is this dashboard healthy?" vs.
@@ -376,7 +376,7 @@ agent's prompt and workflow logic are the same either way.
 
 ### Persistent agents with catch-up
 
-modastack agents are long-running processes, not request-response
+bobi agents are long-running processes, not request-response
 functions. They maintain a WebSocket connection to the event server,
 hold conversational context across events, and resume after downtime
 with cursor-based replay — every event missed during an outage is
@@ -406,7 +406,7 @@ each step to the LLM. The workflow is deterministic; the work inside
 each step is not.
 
 ```yaml
-# .modastack/workflows/incident-response.yaml
+# .bobi/workflows/incident-response.yaml
 name: incident-response
 trigger: "PagerDuty alert fires for a production service"
 steps:
@@ -439,7 +439,7 @@ without forking the framework.
 Creating a purpose-built agent is a single command:
 
 ```bash
-modastack agents create customer-support
+bobi agents create customer-support
 ```
 
 This launches an interactive session with a builder agent that walks
@@ -453,7 +453,7 @@ You can also skip the interactive flow if you already know what you
 want:
 
 ```bash
-modastack agents create incident-responder \
+bobi agents create incident-responder \
   --task "Build an oncall agent that triages PagerDuty alerts, \
           investigates using Datadog, and posts findings to Slack"
 ```
@@ -496,7 +496,7 @@ The biggest barrier to autonomous agents in production is trust. Teams
 won't let an agent roll back a deploy or merge a PR if they can't see
 what it's thinking and intervene when it's wrong.
 
-modastack solves this by keeping agents interactive. They act
+bobi solves this by keeping agents interactive. They act
 autonomously on events, but you can always ask what they're doing,
 why they made a decision, or tell them to stop. This is the
 difference between "autonomous agent" and "autonomous agent I
@@ -508,7 +508,7 @@ Agent networks aren't one-size-fits-all. Some problems need a
 hierarchy (manager delegates to workers). Some need a pipeline
 (stages process sequentially). Some need a mesh (peers collaborate).
 
-With modastack, topology is configuration. Launch agents, give them
+With bobi, topology is configuration. Launch agents, give them
 subscriptions, let them message each other. Change the shape by
 changing the config, not by switching frameworks.
 
@@ -615,7 +615,7 @@ event_sources:
   - linear
 
 # Or subscribe via CLI:
-# modastack start eng-team --subscribe github:moda-labs/modastack
+# bobi start eng-team --subscribe github:moda-labs/bobi
 ```
 
 The event server maintains a subscription index in KV. When an event
@@ -629,15 +629,15 @@ missed events on reconnect via cursor-based replay.
 
 ```bash
 # Install
-uv tool install modastack
+uv tool install bobi
 
 # Browse and install an agent team
-modastack agents browse
-modastack agents update eng-team
+bobi agents browse
+bobi agents update eng-team
 
 # Start the agent
 cd my-project
-modastack start eng-team
+bobi start eng-team
 
 # The agent is now:
 # - Subscribed to GitHub, Slack, and Linear events
@@ -649,10 +649,10 @@ Adding a new event source with an MCP gateway:
 
 ```bash
 # Connect an MCP gateway for additional services
-modastack connect gateway venn --token $VENN_TOKEN
+bobi connect gateway venn --token $VENN_TOKEN
 
 # Add a monitor that polls via MCP
-modastack monitors add sentry_errors \
+bobi monitors add sentry_errors \
   --tool sentry_list_issues \
   --args '{"project": "my-app", "query": "is:unresolved firstSeen:-5m"}' \
   --key-field id \
@@ -662,23 +662,23 @@ modastack monitors add sentry_errors \
 
 ---
 
-## What modastack is not
+## What bobi is not
 
-**Not an integration platform.** modastack doesn't manage OAuth tokens
+**Not an integration platform.** bobi doesn't manage OAuth tokens
 or maintain API connectors. It delegates service connectivity to MCP
 servers and gateways. It owns the event loop, not the service mesh.
 
-**Not an agent runtime.** modastack uses Claude Code sessions (or any
+**Not an agent runtime.** bobi uses Claude Code sessions (or any
 compatible agent runtime) as its execution engine. It doesn't compete
 with LangGraph or CrewAI on reasoning architecture — it orchestrates
 on top of them.
 
 **Not a workflow automation tool.** Zapier and n8n connect apps with
-deterministic if-then logic. modastack connects events to agents with
+deterministic if-then logic. bobi connects events to agents with
 autonomous reasoning. The agent decides what to do, not a predefined
 rule.
 
-**Not a chat interface.** modastack agents can be messaged (via Slack,
+**Not a chat interface.** bobi agents can be messaged (via Slack,
 CLI, or API), but that's one input channel among many. The primary
 interaction model is event subscription, not conversation.
 
@@ -686,7 +686,7 @@ interaction model is event subscription, not conversation.
 
 ## The open-source case
 
-modastack is MIT-licensed. This matters for three reasons:
+bobi is MIT-licensed. This matters for three reasons:
 
 **Trust.** Autonomous agents that react to production events need to be
 auditable. Teams need to read the code that decides whether to roll

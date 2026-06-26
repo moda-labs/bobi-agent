@@ -5,8 +5,8 @@ import threading
 from unittest.mock import patch, call
 from queue import SimpleQueue
 
-from modastack.events.client import format_event_for_manager
-from modastack.inbox import register_local_inbox, unregister_local_inbox
+from bobi.events.client import format_event_for_manager
+from bobi.inbox import register_local_inbox, unregister_local_inbox
 
 
 class _CaptureInbox:
@@ -38,8 +38,8 @@ class TestDrainLoop:
                 "data": data}
 
     def test_single_event_delivered(self):
-        from modastack.events.client import event_queue
-        from modastack.events.drain import drain_loop as _drain_loop
+        from bobi.events.client import event_queue
+        from bobi.events.drain import drain_loop as _drain_loop
 
         while not event_queue.empty():
             event_queue.get_nowait()
@@ -60,7 +60,7 @@ class TestDrainLoop:
 
     def test_drain_stops_on_poison_pill(self):
         """Subscription.stop() poison-pills the drain so its thread exits."""
-        from modastack.events.drain import drain_loop as _drain_loop, _DRAIN_STOP
+        from bobi.events.drain import drain_loop as _drain_loop, _DRAIN_STOP
 
         q = SimpleQueue()
         register_local_inbox("stoppable", _CaptureInbox())
@@ -73,10 +73,10 @@ class TestDrainLoop:
         finally:
             unregister_local_inbox("stoppable")
 
-    @patch("modastack.events.drain.DRAIN_INTERVAL", 0.1)
+    @patch("bobi.events.drain.DRAIN_INTERVAL", 0.1)
     def test_inbox_event_pushed_raw_and_skips_reactor(self):
         """inbox/* events are delivered raw (no formatting) and skip dispatch."""
-        from modastack.events.drain import drain_loop as _drain_loop
+        from bobi.events.drain import drain_loop as _drain_loop
 
         q = SimpleQueue()
         q.put({
@@ -107,10 +107,10 @@ class TestDrainLoop:
         assert msg.id == "m1" and msg.wait is True
         assert reactor_calls == []             # auto-dispatch skipped
 
-    @patch("modastack.events.drain.DRAIN_INTERVAL", 0.1)
+    @patch("bobi.events.drain.DRAIN_INTERVAL", 0.1)
     def test_multiple_events_batched(self):
-        from modastack.events.client import event_queue
-        from modastack.events.drain import drain_loop as _drain_loop
+        from bobi.events.client import event_queue
+        from bobi.events.drain import drain_loop as _drain_loop
 
         while not event_queue.empty():
             event_queue.get_nowait()
@@ -143,18 +143,18 @@ class TestDrainLoop:
 class TestBuildSubscriptions:
 
     def test_reads_from_agent_yaml(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(
             "subscribe:\n  - github:org/repo\n  - slack:T123\n"
         )
-        from modastack.events.subscriptions import discover_subscriptions
+        from bobi.events.subscriptions import discover_subscriptions
         subs = discover_subscriptions(tmp_path)
         assert "github:org/repo" in subs
         assert "slack:T123" in subs
 
     def test_fallback_to_dirname(self, tmp_path):
-        from modastack.events.subscriptions import discover_subscriptions
+        from bobi.events.subscriptions import discover_subscriptions
         subs = discover_subscriptions(tmp_path)
         assert tmp_path.name in subs
 
@@ -178,7 +178,7 @@ class TestDrainLoopWithReactor:
         }
 
     def _run_drain(self, event, reactor):
-        from modastack.events.drain import drain_loop
+        from bobi.events.drain import drain_loop
         q = SimpleQueue()
         q.put(event)
         inbox = _CaptureInbox(stop_after=1)
@@ -225,7 +225,7 @@ class TestCursorAckAfterDelivery:
     """cursor_ack callback is called AFTER delivery, not before (#278)."""
 
     def test_cursor_ack_called_with_max_seq(self):
-        from modastack.events.drain import drain_loop, _DRAIN_STOP
+        from bobi.events.drain import drain_loop, _DRAIN_STOP
         q = SimpleQueue()
         q.put({"type": "push", "source": "github", "delivery": "bulk",
                "seq": 5, "data": {"issue_id": "1"}})
@@ -247,7 +247,7 @@ class TestCursorAckAfterDelivery:
         assert acked == [7]
 
     def test_cursor_ack_not_called_for_zero_seq(self):
-        from modastack.events.drain import drain_loop, _DRAIN_STOP
+        from bobi.events.drain import drain_loop, _DRAIN_STOP
         q = SimpleQueue()
         q.put({"type": "push", "source": "github", "delivery": "bulk",
                "data": {"issue_id": "1"}})  # no seq field
@@ -266,7 +266,7 @@ class TestCursorAckAfterDelivery:
 
     def test_cursor_ack_called_after_inbox_push(self):
         """Ensures cursor_ack fires AFTER inbox.push, not before."""
-        from modastack.events.drain import drain_loop, _DRAIN_STOP
+        from bobi.events.drain import drain_loop, _DRAIN_STOP
 
         order = []
 

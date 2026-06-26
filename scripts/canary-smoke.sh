@@ -28,7 +28,7 @@ max_wait="${CANARY_SMOKE_MAX_WAIT:-300}"
 interval="${CANARY_SMOKE_INTERVAL:-15}"
 ask_timeout="${CANARY_SMOKE_ASK_TIMEOUT:-180}"
 
-ask="gosu modastack env HOME=/data/home bash -c \"cd /data/project && /opt/venv/bin/modastack ask \\\"Release canary smoke: reply with exactly CANARY-OK and nothing else.\\\" --timeout ${ask_timeout}\""
+ask="gosu bobi env HOME=/data/home bash -c \"cd /data/project && /opt/venv/bin/bobi ask \\\"Release canary smoke: reply with exactly CANARY-OK and nothing else.\\\" --timeout ${ask_timeout}\""
 
 # Boot off the clock — the machine may be auto-stopped/suspended, and waking it
 # on the first ask attempt is what used to burn the whole (too-small) budget.

@@ -1,6 +1,6 @@
 # bobi — setup UI style guide (clay)
 
-The locked visual approach for the `modastack`/bobi setup web UI. Warm light
+The locked visual approach for the `bobi`/bobi setup web UI. Warm light
 chrome + a single dark CRT slab, mono-accented identity, system fonts only,
 static space-retro. **Clay is the single UI accent.** Violet appears in exactly
 one place — the probe dot in the logo — as the brand glint; it never enters the
@@ -257,14 +257,14 @@ at rest.
 
 ## 9. Reskin checklist (for the implementation task)
 
-Target: `modastack/setup/webui/static/app.css` + `index.html` + `app.js`.
+Target: `bobi/setup/webui/static/app.css` + `index.html` + `app.js`.
 
 - [ ] Replace `:root` + `html[data-accent="amber"|"green"]` with the §2 block;
       collapse to a single clay accent (drop the amber/green/violet switch, or
       keep the switch as clay-only for now).
 - [ ] Swap the titlebar/rail `.brand .mk` glyph for the centered probe mark (§1);
       set chip bg `#201A14`.
-- [ ] Update wordmark text `modastack → bobi` (keep `setup` qualifier).
+- [ ] Update wordmark text `bobi → bobi` (keep `setup` qualifier).
 - [ ] Re-point slab tokens to the warm-void values (no violet undertone).
 - [ ] Ship `bobi-mark.svg` as favicon; update `<title>`.
 - [ ] Verify retro-on and retro-off both read; check focus rings and `--ok`/`--err`.

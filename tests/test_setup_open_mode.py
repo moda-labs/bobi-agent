@@ -1,7 +1,7 @@
-"""Unit tests for modastack.setup.open_mode team listing."""
+"""Unit tests for bobi.setup.open_mode team listing."""
 
-from modastack import registry
-from modastack.setup import open_mode
+from bobi import registry
+from bobi.setup import open_mode
 
 
 def _make_team(d, name, desc):
@@ -11,7 +11,7 @@ def _make_team(d, name, desc):
 
 
 def test_list_registry_teams_flags_official(monkeypatch, tmp_path):
-    # Remote teams from the canonical modastack registry are "official"; teams
+    # Remote teams from the canonical bobi registry are "official"; teams
     # from a user-added registry, and cached teams, are not. Isolate from the
     # bundled starter templates so the assertions are about the registry path.
     monkeypatch.setattr(open_mode, "list_bundled_templates", lambda: [])
@@ -35,7 +35,7 @@ def test_list_registry_teams_flags_official(monkeypatch, tmp_path):
 
 
 def test_bundled_templates_listed_and_copied_offline(monkeypatch, tmp_path):
-    # Starter templates ship with modastack and must surface (tagged official +
+    # Starter templates ship with bobi and must surface (tagged official +
     # bundled) and copy from local disk — no registry, no network.
     bundle = tmp_path / "templates"
     _make_team(bundle / "alpha-team", "alpha-team", "Does alpha things.")

@@ -22,7 +22,7 @@ class TestDotenvResolution:
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         monkeypatch.delenv("LINEAR_API_KEY", raising=False)
 
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / ".env").write_text(
             "SLACK_BOT_TOKEN=xoxb-dotenv-token\n"
@@ -39,7 +39,7 @@ class TestDotenvResolution:
                   api_key: ${LINEAR_API_KEY}
         """))
 
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
 
         assert cfg.credential("slack", "bot_token") == "xoxb-dotenv-token"
@@ -49,7 +49,7 @@ class TestDotenvResolution:
         """Real environment variables take precedence over .env values."""
         monkeypatch.setenv("MY_TOKEN", "from-real-env")
 
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / ".env").write_text("MY_TOKEN=from-dotenv\n")
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
@@ -57,21 +57,21 @@ class TestDotenvResolution:
             venn_api_key: ${MY_TOKEN}
         """))
 
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
 
         assert cfg.venn_api_key == "from-real-env"
 
     def test_missing_env_var_resolves_empty(self, tmp_path):
         """An unset ${VAR} resolves to empty string, not a crash."""
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager
             venn_api_key: ${NONEXISTENT_VAR_12345}
         """))
 
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
 
         assert cfg.venn_api_key == ""
@@ -81,10 +81,10 @@ class TestDeploymentState:
     """Deployment state round-trip: save → load → per-session isolation."""
 
     def test_roundtrip(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
 
-        from modastack.config import save_deployment_state, load_deployment_state
+        from bobi.config import save_deployment_state, load_deployment_state
 
         save_deployment_state(tmp_path, "sess-a", "deploy-1", "key-1")
         state = load_deployment_state(tmp_path, "sess-a")
@@ -93,10 +93,10 @@ class TestDeploymentState:
         assert state["api_key"] == "key-1"
 
     def test_per_session_isolation(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
 
-        from modastack.config import save_deployment_state, load_deployment_state
+        from bobi.config import save_deployment_state, load_deployment_state
 
         save_deployment_state(tmp_path, "sess-a", "deploy-a", "key-a")
         save_deployment_state(tmp_path, "sess-b", "deploy-b", "key-b")
@@ -105,7 +105,7 @@ class TestDeploymentState:
         assert load_deployment_state(tmp_path, "sess-b")["deployment_id"] == "deploy-b"
 
     def test_missing_returns_empty(self, tmp_path):
-        from modastack.config import load_deployment_state
+        from bobi.config import load_deployment_state
         assert load_deployment_state(tmp_path, "nonexistent") == {}
 
 
@@ -116,7 +116,7 @@ class TestChannelParsing:
         """Comma-separated channel string from ${VAR} is parsed to list."""
         monkeypatch.setenv("MY_CHANNELS", "C001,C002,C003")
 
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager
@@ -126,7 +126,7 @@ class TestChannelParsing:
                 channels: ${MY_CHANNELS}
         """))
 
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
 
         slack = [s for s in cfg.services if s.name == "slack"][0]
@@ -134,7 +134,7 @@ class TestChannelParsing:
 
     def test_list_channels_literal(self, tmp_path):
         """YAML list channels are preserved as-is."""
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager
@@ -146,7 +146,7 @@ class TestChannelParsing:
                   - C200
         """))
 
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
 
         slack = [s for s in cfg.services if s.name == "slack"][0]
@@ -157,7 +157,7 @@ class TestRequiresChecks:
     """Health-check commands declared in requires: block."""
 
     def test_passing_check(self, tmp_path):
-        from modastack.config import RequiresEntry, run_requires_checks
+        from bobi.config import RequiresEntry, run_requires_checks
 
         entry = RequiresEntry(name="echo", check="echo ok", why="test", fix="n/a")
         results = run_requires_checks([entry], timeout=5)
@@ -166,7 +166,7 @@ class TestRequiresChecks:
         assert results[0][1] is True  # passed
 
     def test_failing_check(self, tmp_path):
-        from modastack.config import RequiresEntry, run_requires_checks
+        from bobi.config import RequiresEntry, run_requires_checks
 
         entry = RequiresEntry(name="fail", check="exit 1", why="test", fix="n/a")
         results = run_requires_checks([entry], timeout=5)

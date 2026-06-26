@@ -2,7 +2,7 @@
 
 import pytest
 
-from modastack.workflow.variables import (
+from bobi.workflow.variables import (
     VariableContext,
     _eval_expr,
     _parse_value,
@@ -17,8 +17,8 @@ from modastack.workflow.variables import (
 class TestVariableContextScopes:
     def test_set_and_get_scope(self):
         ctx = VariableContext()
-        ctx.set_scope("repo", {"name": "modastack", "branch": "main"})
-        assert ctx.get("repo", "name") == "modastack"
+        ctx.set_scope("repo", {"name": "bobi", "branch": "main"})
+        assert ctx.get("repo", "name") == "bobi"
         assert ctx.get("repo", "branch") == "main"
 
     def test_get_missing_scope_returns_default(self):
@@ -27,7 +27,7 @@ class TestVariableContextScopes:
 
     def test_get_missing_key_returns_default(self):
         ctx = VariableContext()
-        ctx.set_scope("repo", {"name": "modastack"})
+        ctx.set_scope("repo", {"name": "bobi"})
         assert ctx.get("repo", "missing") == ""
 
     def test_get_custom_default(self):
@@ -59,14 +59,14 @@ class TestVariableContextScopes:
 class TestVariableResolve:
     def test_simple_substitution(self):
         ctx = VariableContext()
-        ctx.set_scope("repo", {"name": "modastack"})
-        assert ctx.resolve("Project: ${{repo.name}}") == "Project: modastack"
+        ctx.set_scope("repo", {"name": "bobi"})
+        assert ctx.resolve("Project: ${{repo.name}}") == "Project: bobi"
 
     def test_multiple_substitutions(self):
         ctx = VariableContext()
-        ctx.set_scope("repo", {"name": "modastack", "branch": "main"})
+        ctx.set_scope("repo", {"name": "bobi", "branch": "main"})
         result = ctx.resolve("${{repo.name}} on ${{repo.branch}}")
-        assert result == "modastack on main"
+        assert result == "bobi on main"
 
     def test_missing_scope_resolves_to_empty(self):
         ctx = VariableContext()

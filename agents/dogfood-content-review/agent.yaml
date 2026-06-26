@@ -13,7 +13,7 @@ tool_library: [venn]
 
 # Cloud event server URL in production (.env), empty for an
 # auto-started local server (CI smoke tests, local dev).
-event_server: ${MODASTACK_EVENT_SERVER}
+event_server: ${BOBI_EVENT_SERVER}
 
 # GitHub events arrive via webhooks (native adapter auto-detects the
 # repo). Email has no webhook adapter — the new-emails monitor polls
@@ -26,7 +26,7 @@ services:
   # email/venn is optional: dogfood-content-review polls Gmail for email
   # events, but a missing Venn credential degrades gracefully — email events
   # just don't arrive until Venn is connected — rather than bricking
-  # `modastack start`. This keeps the credential-free dogfood/release smoke
+  # `bobi start`. This keeps the credential-free dogfood/release smoke
   # able to start with GitHub alone (per human review on #329 / PR #405,
   # Zach 2026-06-22).
   - name: email

@@ -10,7 +10,7 @@ brain:
   kind: codex
 
 # Cloud event server URL in production (stamped into [env] from the deploy flag).
-event_server: ${MODASTACK_EVENT_SERVER}
+event_server: ${BOBI_EVENT_SERVER}
 
 services:
   - name: slack

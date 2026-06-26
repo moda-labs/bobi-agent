@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from modastack.kb.store import (
+from bobi.kb.store import (
     EMBEDDING_DIM,
     KBStore,
     _chunk_text,
@@ -29,7 +29,7 @@ def kb_root(tmp_path, monkeypatch):
     """Redirect KB storage to a temp directory."""
     kb_d = tmp_path / "kb"
     kb_d.mkdir()
-    monkeypatch.setattr("modastack.kb.store._kb_dir", lambda: kb_d)
+    monkeypatch.setattr("bobi.kb.store._kb_dir", lambda: kb_d)
     return kb_d
 
 
@@ -457,6 +457,6 @@ class TestOptionalDependencyErrors:
         import apsw
         conn = apsw.Connection(":memory:")
         with patch("builtins.__import__", side_effect=_block_sqlite_vec):
-            with pytest.raises(ImportError, match="pip install 'modastack\\[kb\\]'"):
+            with pytest.raises(ImportError, match="pip install 'bobi\\[kb\\]'"):
                 KBStore._load_vec(conn)
         conn.close()

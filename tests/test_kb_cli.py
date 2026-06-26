@@ -1,4 +1,4 @@
-"""Unit tests for the modastack kb CLI commands."""
+"""Unit tests for the bobi kb CLI commands."""
 
 import json
 from pathlib import Path
@@ -7,27 +7,27 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from modastack.cli import main
+from bobi.cli import main
 
 
 @pytest.fixture(autouse=True)
 def setup_project_root(tmp_path, monkeypatch):
     """Set project root and redirect KB storage for all CLI tests."""
-    kb_dir = tmp_path / ".modastack" / "kb"
+    kb_dir = tmp_path / ".bobi" / "kb"
     kb_dir.mkdir(parents=True)
-    state_dir = tmp_path / ".modastack" / "state"
+    state_dir = tmp_path / ".bobi" / "state"
     state_dir.mkdir(parents=True)
     # Write an agent.yaml so resolve_root() accepts this as a valid root
-    (tmp_path / ".modastack" / "agent.yaml").write_text("entry_point: test\n")
-    monkeypatch.setattr("modastack.paths._root", tmp_path)
+    (tmp_path / ".bobi" / "agent.yaml").write_text("entry_point: test\n")
+    monkeypatch.setattr("bobi.paths._root", tmp_path)
     # Pin the root so the CLI's resolve_root() returns the same path as
     # _root, making the rebind a no-op instead of a conflict (#249). The
     # pin is the value inherited at process start, so set the import-time
     # snapshot resolve_root consults (#375); keep the env var too so any
     # subprocess the command spawns inherits it.
-    monkeypatch.setattr("modastack.paths._inherited_root_env", str(tmp_path))
-    monkeypatch.setenv("MODASTACK_ROOT", str(tmp_path))
-    monkeypatch.setattr("modastack.kb.store._kb_dir", lambda: kb_dir)
+    monkeypatch.setattr("bobi.paths._inherited_root_env", str(tmp_path))
+    monkeypatch.setenv("BOBI_ROOT", str(tmp_path))
+    monkeypatch.setattr("bobi.kb.store._kb_dir", lambda: kb_dir)
     return tmp_path
 
 
@@ -60,7 +60,7 @@ class TestKBCreate:
 class TestKBAdd:
     def test_add_text(self, runner, setup_project_root):
         runner.invoke(main, ["kb", "create", "docs"])
-        with patch("modastack.kb.embedder.embed", return_value=[[0.1] * 384]):
+        with patch("bobi.kb.embedder.embed", return_value=[[0.1] * 384]):
             result = runner.invoke(main, ["kb", "add", "docs", "--text", "Hello world"])
         assert result.exit_code == 0
         assert "Added" in result.output
@@ -69,7 +69,7 @@ class TestKBAdd:
         runner.invoke(main, ["kb", "create", "docs"])
         f = tmp_path / "test.md"
         f.write_text("File content here")
-        with patch("modastack.kb.embedder.embed", return_value=[[0.1] * 384]):
+        with patch("bobi.kb.embedder.embed", return_value=[[0.1] * 384]):
             result = runner.invoke(main, ["kb", "add", "docs", "--file", str(f)])
         assert result.exit_code == 0
         assert "Added" in result.output
@@ -81,7 +81,7 @@ class TestKBAdd:
         assert "Provide --file or --text" in result.output
 
     def test_add_nonexistent_kb(self, runner, setup_project_root):
-        with patch("modastack.kb.embedder.embed"):
+        with patch("bobi.kb.embedder.embed"):
             result = runner.invoke(main, ["kb", "add", "ghost", "--text", "hello"])
         assert result.exit_code != 0
         assert "does not exist" in result.output
@@ -94,7 +94,7 @@ class TestKBAdd:
 class TestKBSearch:
     def test_search_fts(self, runner, setup_project_root):
         runner.invoke(main, ["kb", "create", "docs"])
-        with patch("modastack.kb.embedder.embed", return_value=[[0.1] * 384]):
+        with patch("bobi.kb.embedder.embed", return_value=[[0.1] * 384]):
             runner.invoke(main, ["kb", "add", "docs", "--text", "Python programming language"])
         result = runner.invoke(main, ["kb", "search", "docs", "Python", "--mode", "fts"])
         assert result.exit_code == 0
@@ -107,7 +107,7 @@ class TestKBSearch:
         assert "No results" in result.output
 
     def test_search_nonexistent_kb(self, runner, setup_project_root):
-        with patch("modastack.kb.embedder.embed"):
+        with patch("bobi.kb.embedder.embed"):
             result = runner.invoke(main, ["kb", "search", "ghost", "query", "--mode", "fts"])
         assert result.exit_code != 0
         assert "does not exist" in result.output

@@ -1,11 +1,11 @@
-"""Unit tests for modastack.manager_health — the manager health endpoint."""
+"""Unit tests for bobi.manager_health — the manager health endpoint."""
 
 import json
 import urllib.request
 
 import pytest
 
-from modastack import manager_health
+from bobi import manager_health
 
 
 @pytest.fixture(autouse=True)
@@ -166,7 +166,7 @@ class TestManagerBlock:
 
     def test_idle_seconds_derived_from_registry_entry(self, tmp_path, monkeypatch):
         """The block derives idle_seconds = now - last_activity server-side."""
-        from modastack import sdk
+        from bobi import sdk
 
         class _Entry:
             name = "moda-mgr-p"

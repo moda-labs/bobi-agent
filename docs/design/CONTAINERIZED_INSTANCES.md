@@ -14,14 +14,14 @@ resolved.
 **Amended 2026-06-20 — MVP COMPLETE; eng-team LIVE on Fly; EC2 retired.** Phase 0
 + Phase 1 shipped; C24 (#368, team-flavored images) merged (PR #377) and
 **released as v0.24.0**. `moda-eng-team` runs containerized on Fly — fully
-GitOps-managed, dispatching as the `modastack` bot — and the **EC2 director is
+GitOps-managed, dispatching as the `bobi` bot — and the **EC2 director is
 decommissioned** (box paused, self-hosted runner deregistered, EC2 CI jobs
 removed). The release smoke is now a **functional Fly canary gate** in
 `release.yml` (build the canary → `ask` it → assert `CANARY-OK` → roll the
 rest), and the roll is **team-aware** (a team-flavored instance rebuilds its own
 image instead of taking the shared generic one). Earlier history: C8/C23 (#358),
 C10 (#359), C22 + binary deploy (PR #365) — the deploy *engine* is a portable CLI
-(`modastack deploy`/`destroy`), `MODASTACK_BUILD`={source|pypi|wheel}; permanent
+(`bobi deploy`/`destroy`), `BOBI_BUILD`={source|pypi|wheel}; permanent
 canary `moda-canary`; C9 first-boot landed as the wait-for-team entrypoint state.
 
 **Remaining (none block the cutover):** operationally — re-onboard
@@ -45,13 +45,13 @@ Related designs:
 
 ## 1. Goal and framing
 
-Run each modastack instance in an isolated container/microVM — one instance
+Run each bobi instance in an isolated container/microVM — one instance
 per "account." The near-term deployment is an **internal tool**: we operate a
 handful of instances for ourselves, dogfooding the model's ability to become
 a SaaS product later. That framing drives two hard constraints:
 
 1. **Auth stays separate from the instance work.** Instances consume
-   credentials only as env vars (already modastack's contract via `${VAR}`
+   credentials only as env vars (already bobi's contract via `${VAR}`
    refs in `agent.yaml`). How those env vars get populated — a human running
    `fly secrets set` today, a token broker later — is invisible to the
    instance. (One scoped exception: subscription-mode Anthropic auth
@@ -71,7 +71,7 @@ later so nothing built now gets thrown away.
 
 The abstraction everything else hangs off:
 
-> **A modastack instance is: one container image + one persistent volume
+> **A bobi instance is: one container image + one persistent volume
 > (mounted as project root and `$HOME`) + a set of env vars + an outbound
 > connection to one event-server deployment. Nothing reaches into it; it
 > reaches out to nothing else.**
@@ -94,7 +94,7 @@ From the codebase audit. One instance's process tree, all localhost:
 
 | Process | Source | Notes |
 |---|---|---|
-| Manager (Python) | `cli.py:248-341` | PID file `.modastack/state/manager.pid`; spawns the rest. In containers, runs as PID 1 via `--foreground` |
+| Manager (Python) | `cli.py:248-341` | PID file `.bobi/state/manager.pid`; spawns the rest. In containers, runs as PID 1 via `--foreground` |
 | Manager's persistent Claude session | `session.py:196` via `claude-agent-sdk` → `claude` CLI subprocess | `permission_mode="bypassPermissions"` (`session.py:189`) |
 | Subagents | `subagent.py:522-591`, detached | one `claude` process each; **no concurrency cap today** (C3) |
 | Per-session inboxes | `inbox.py`, `events/drain.py` | in-memory queues, **no HTTP server / no ports** — messages arrive as `inbox/<session>` events over the event-server subscription/drain path; `deliver(wait=True)` is pub/sub request-reply (#269) |
@@ -103,7 +103,7 @@ From the codebase audit. One instance's process tree, all localhost:
 | Monitor scheduler | `monitors/scheduler.py:143-148` daemon thread | interval loop; gets a remote-tick mode in Phase 2 (C17) |
 
 State layout (everything per-project, which is why containerization is
-clean): `.modastack/` holds config, sessions, KB sqlite DBs, event cursor
+clean): `.bobi/` holds config, sessions, KB sqlite DBs, event cursor
 (`state/cursor.json`), monitor dedup (`state/monitor_state.json`),
 `history.db`. Outside the project dir: `~/.claude/projects/` (Claude Code
 transcripts — **required for session resume**, `session.py:184`), and the
@@ -156,7 +156,7 @@ Event server: the existing Worker. Local Node event server is not deployed
 in instances.
 
 Interaction (internal phase): Slack via the existing integration, plus
-`fly ssh console -a <app> modastack ask|status|events`. The future dashboard
+`fly ssh console -a <app> bobi ask|status|events`. The future dashboard
 talks over the event bus (`user_message` events in, activity mirroring out)
 — see §9; nothing is built for it now.
 
@@ -188,7 +188,7 @@ as deferred ticket D1.
 ## 6. Credentials (the separation principle)
 
 The instance-side contract is **env vars only**, which already exists:
-`.modastack/.env` / process env resolved through `${VAR}` refs
+`.bobi/.env` / process env resolved through `${VAR}` refs
 (`config.py:41-74`). This design adds **nothing** auth-related inside the
 instance.
 
@@ -209,7 +209,7 @@ here and evolves separately under `docs/design/AUTH.md`.
 ### 6.1 Anthropic auth: API key vs subscription (decided 2026-06-12)
 
 Two supported per-instance modes, selected at provision time
-(`MODASTACK_AUTH=api_key|subscription`); the C8 image supports both.
+(`BOBI_AUTH=api_key|subscription`); the C8 image supports both.
 
 **Fleet default: per-instance workspace API keys** with console spend caps
 (C14). This is the only option with per-instance cost isolation.
@@ -242,7 +242,7 @@ refresh-token rotation rewriting the file in place — verified live on prod
   accepted for internal dogfooding only; D2 (token broker / API keys) is
   the durable answer.
 - **Migration note:** the EC2 director rides a Max subscription today.
-  Moving instances to API-key mode is the moment modastack token spend
+  Moving instances to API-key mode is the moment bobi token spend
   becomes a real line item — budget before migrating, not after. The
   June 15 metering also hits the existing EC2 box regardless.
 
@@ -281,7 +281,7 @@ it's watching. Three-part fix:
 1. Ephemerality contract in `prompts/base.md`: machine stops when idle;
    never background-loop or sleep-to-wait; register a monitor or schedule
    instead.
-2. New primitive `modastack schedule "<prompt>" --in <dur>` — one-shot
+2. New primitive `bobi schedule "<prompt>" --in <dur>` — one-shot
    wake-up (a `count=1` monitor backed by a DO alarm). Converts the whole
    watch-script class into durable state.
 3. Manager quiescence protocol: idle ⇔ no active sessions, no running
@@ -354,11 +354,11 @@ What must stay agnostic (acceptance criteria folded into C8/C10 below):
   instance of that — never a hard dependency. C10 takes the Worker URL as a
   parameter; C8/C10 ship a "deploy your own event server" runbook.
 - **No namespace squatting.** Fly app names are globally unique across all of
-  Fly, so `modastack-<name>` must be operator-namespaced/configurable, not a
+  Fly, so `bobi-<name>` must be operator-namespaced/configurable, not a
   fixed string that collides on a stranger's account.
 - **The solo path is C10 standalone.** C22 (GitOps over *our* agent-teams
   repo) is a moda-labs convenience layered on top — never the only way in. A
-  person runs C10 (or its `modastack`-command wrapper) against their own
+  person runs C10 (or its `bobi`-command wrapper) against their own
   `flyctl` auth and is done.
 
 Not building a polished self-serve UX now — just refusing to bake in
@@ -371,27 +371,27 @@ Ticket IDs below are local to this doc (C-numbers); file as GitHub issues
 and back-link them here. Phases are strict dependency layers; tickets within
 a phase are parallelizable unless noted.
 
-**Filed 2026-06-18 — epic [#344](https://github.com/moda-labs/modastack/issues/344).**
+**Filed 2026-06-18 — epic [#344](https://github.com/moda-labs/bobi-agent-team/issues/344).**
 MVP-cut issue mapping:
 
 | C | Issue | Phase | Status |
 |---|---|---|---|
-| C1 | [#332](https://github.com/moda-labs/modastack/issues/332) | 0 | ✅ merged (PR #345) |
-| C2 | [#333](https://github.com/moda-labs/modastack/issues/333) | 0 | ✅ merged (PR #355) |
-| C3 | [#334](https://github.com/moda-labs/modastack/issues/334) | 0 | ✅ merged (PR #354) |
-| C4 | [#346](https://github.com/moda-labs/modastack/issues/346) | 0 | ✅ merged (PR #352) |
-| C5 | [#335](https://github.com/moda-labs/modastack/issues/335) | 0 | ✅ merged (PR #353) |
-| C6 | [#336](https://github.com/moda-labs/modastack/issues/336) | 0 | ✅ merged (PR #350) |
-| C7 | [#337](https://github.com/moda-labs/modastack/issues/337) | 0 | ✅ merged (PR #351) |
-| C8 | [#338](https://github.com/moda-labs/modastack/issues/338) | 1 | ✅ merged (PR #358) |
-| C9 | [#339](https://github.com/moda-labs/modastack/issues/339) | 1 | 🟡 core landed (wait-for-team, #365); extra hardening OPEN |
-| C10 | [#340](https://github.com/moda-labs/modastack/issues/340) | 1 | ✅ merged (PR #359) |
-| C12 | [#341](https://github.com/moda-labs/modastack/issues/341) | 1 | ⛔ OPEN, blocked on #177 |
-| C22 | [#342](https://github.com/moda-labs/modastack/issues/342) | 1 | ✅ merged (PR #365) |
-| C23 | [#343](https://github.com/moda-labs/modastack/issues/343) | 1 | ✅ merged (PR #358) |
-| C24 | [#368](https://github.com/moda-labs/modastack/issues/368) | 1+ | ✅ merged (PR #377); eng-team LIVE, EC2 retired, v0.24.0 |
-| C25 | [#378](https://github.com/moda-labs/modastack/issues/378) | post-MVP | OPEN — build-once team images → Fly registry → deploy-many |
-| C26 | [#379](https://github.com/moda-labs/modastack/issues/379) | post-MVP | OPEN — deps-vs-definition trigger split (depends C25) |
+| C1 | [#332](https://github.com/moda-labs/bobi-agent-team/issues/332) | 0 | ✅ merged (PR #345) |
+| C2 | [#333](https://github.com/moda-labs/bobi-agent-team/issues/333) | 0 | ✅ merged (PR #355) |
+| C3 | [#334](https://github.com/moda-labs/bobi-agent-team/issues/334) | 0 | ✅ merged (PR #354) |
+| C4 | [#346](https://github.com/moda-labs/bobi-agent-team/issues/346) | 0 | ✅ merged (PR #352) |
+| C5 | [#335](https://github.com/moda-labs/bobi-agent-team/issues/335) | 0 | ✅ merged (PR #353) |
+| C6 | [#336](https://github.com/moda-labs/bobi-agent-team/issues/336) | 0 | ✅ merged (PR #350) |
+| C7 | [#337](https://github.com/moda-labs/bobi-agent-team/issues/337) | 0 | ✅ merged (PR #351) |
+| C8 | [#338](https://github.com/moda-labs/bobi-agent-team/issues/338) | 1 | ✅ merged (PR #358) |
+| C9 | [#339](https://github.com/moda-labs/bobi-agent-team/issues/339) | 1 | 🟡 core landed (wait-for-team, #365); extra hardening OPEN |
+| C10 | [#340](https://github.com/moda-labs/bobi-agent-team/issues/340) | 1 | ✅ merged (PR #359) |
+| C12 | [#341](https://github.com/moda-labs/bobi-agent-team/issues/341) | 1 | ⛔ OPEN, blocked on #177 |
+| C22 | [#342](https://github.com/moda-labs/bobi-agent-team/issues/342) | 1 | ✅ merged (PR #365) |
+| C23 | [#343](https://github.com/moda-labs/bobi-agent-team/issues/343) | 1 | ✅ merged (PR #358) |
+| C24 | [#368](https://github.com/moda-labs/bobi-agent-team/issues/368) | 1+ | ✅ merged (PR #377); eng-team LIVE, EC2 retired, v0.24.0 |
+| C25 | [#378](https://github.com/moda-labs/bobi-agent-team/issues/378) | post-MVP | OPEN — build-once team images → Fly registry → deploy-many |
+| C26 | [#379](https://github.com/moda-labs/bobi-agent-team/issues/379) | post-MVP | OPEN — deps-vs-definition trigger split (depends C25) |
 
 C24 (custom agent dependencies / team-flavored images) is a follow-on capability
 beyond the original §10 list — see `docs/design/CUSTOM_AGENT_DEPS.md`. It unblocked
@@ -403,7 +403,7 @@ follow-ons (do C25 first — it makes C26 a digest comparison).
 
 Target state: the single EC2 director model replaced by ~3 internal
 instances (one per agent team in the registry) on Fly, updatable for both
-team-package and modastack-version changes. Always-on; no Phase 2.
+team-package and bobi-version changes. Always-on; no Phase 2.
 
 **File these 12:** C1, C2, C3, C5, C6, C7, C8, C9, C10, C12, C22, C23.
 
@@ -420,7 +420,7 @@ team-package and modastack-version changes. Always-on; no Phase 2.
 runbook), all of Phase 2. (C4 was promoted into the active set 2026-06-18 —
 it shrinks the C8 image by dropping torch — but is still not an MVP gate.)
 
-### Phase 0 — framework prep (no infra dependency, all in modastack/)
+### Phase 0 — framework prep (no infra dependency, all in bobi/)
 
 **C1 — Make home-directory and CLI-path assumptions container-safe.**
 Audit and fix: `history.py:13` (`~/.claude/projects/`), `browser.py:39-42`
@@ -455,7 +455,7 @@ inline it — implementer's choice.
 torch absent from the deployment dependency set.
 
 **C5 — Non-interactive install / first-boot provisioning path.**
-`modastack install <team> --non-interactive`: no prompts, secrets assumed
+`bobi install <team> --non-interactive`: no prompts, secrets assumed
 present in env, suitable for an entrypoint to run when the volume is empty.
 *Accept:* fresh empty dir + env vars → `install --non-interactive` →
 `start --foreground` works end-to-end with no TTY.
@@ -466,7 +466,7 @@ remote URL means no Node requirement at runtime.
 *Accept:* instance with remote URL runs in an image with no Node installed.
 
 **C7 — State format version marker.**
-Write `.modastack/state/format_version`; check on startup, refuse (with a
+Write `.bobi/state/format_version`; check on startup, refuse (with a
 clear message) on unknown-newer, hook point for future migrations. Cheap
 now, painful retrofit later (volumes outlive images).
 *Accept:* version written on init; mismatch path covered by a unit test.
@@ -474,22 +474,22 @@ now, painful retrofit later (volumes outlive images).
 ### Phase 1 — internal deployment, always-on (depends: Phase 0)
 
 **C8 — Container image.**
-Python 3.11+, `modastack` from source/wheel, **pinned** `claude` CLI version
+Python 3.11+, `bobi` from source/wheel, **pinned** `claude` CLI version
 on `PATH`, fastembed model pre-downloaded (set `FASTEMBED_CACHE_PATH`, or
-`HF_HOME` which the sidecar bridges, to an image path seeded at build), **non-root user**, `tini` + `modastack start --foreground`
+`HF_HOME` which the sidecar bridges, to an image path seeded at build), **non-root user**, `tini` + `bobi start --foreground`
 entrypoint, no Node. Verify headless SDK auth via `ANTHROPIC_API_KEY` and
 that `bypassPermissions` works as the non-root user (root would require
 `IS_SANDBOX=1` — do not run as root). Support both auth modes (§6.1) via
-`MODASTACK_AUTH`; in subscription mode assert `ANTHROPIC_API_KEY` is unset
+`BOBI_AUTH`; in subscription mode assert `ANTHROPIC_API_KEY` is unset
 (precedence gotcha) and use volume credentials.
 *Accept:* `docker run` with a mounted empty volume + env vars reaches a
-healthy manager that completes one `modastack ask` round-trip against the
+healthy manager that completes one `bobi ask` round-trip against the
 real API; subscription mode reaches the same state from a volume holding
 valid `.credentials.json`.
 
 **C9 — First-boot entrypoint logic.**
 If the volume is empty: `install <team> --non-interactive` with team name
-from `MODASTACK_TEAM` env, then start. Idempotent on restart.
+from `BOBI_TEAM` env, then start. Idempotent on restart.
 *Accept:* same image boots both a fresh and an existing volume correctly.
 
 **C10 — Provision script (`scripts/provision-instance.sh` or `make
@@ -501,7 +501,7 @@ local env file, register a deployment with an event-server Worker (capture
 `deployment_id`/`api_key` into secrets" step is obsolete — it predates the #240
 bubble model. Instances now **self-mint a bubble and self-register every session
 at boot** (`subagent.py` → `ensure_bubble`/`register`), so the provisioner's only
-event-server job is to pass the Worker URL (`MODASTACK_EVENT_SERVER`, an
+event-server job is to pass the Worker URL (`BOBI_EVENT_SERVER`, an
 `https://` value the client derives `wss://` from). No deployment IDs touch the
 provisioner. The instance is **dark** (no `[http_service]`/inbound), which also
 makes `auto_stop: false` the natural default until Phase 2. The volume's
@@ -511,7 +511,7 @@ entirely for subscription instances.
 **Operator-agnostic (§9.1) — no moda-labs assumptions:** runs against
 whatever account `flyctl` is authed to; the **app name is operator-namespaced
 / configurable** (Fly names are globally unique — never a fixed
-`modastack-<name>` that squats on a stranger's account); the **event-server
+`bobi-<name>` that squats on a stranger's account); the **event-server
 URL is a parameter** pointing at the operator's own Worker, with the shared
 moda-labs Worker just a default. Ship a short **"deploy your own event
 server"** runbook (`wrangler deploy` the Worker into the operator's own
@@ -521,7 +521,7 @@ a **fresh personal Fly account** with no moda-labs-specific config; runbook
 (including the bring-your-own-Worker steps) in the script header.
 
 **C11 — Backup script.**
-Nightly: `.modastack/` (minus `state/*.pid`, logs), `workspace/`,
+Nightly: `.bobi/` (minus `state/*.pid`, logs), `workspace/`,
 `~/.claude/projects/` → object storage (S3 — deliberately outside Fly, so
 tenant state is never hostage to the platform), per-instance prefix,
 simple retention. Fly volume snapshots are single-host, daily, ~5-day
@@ -562,14 +562,14 @@ dirs:
   with unpopulated secrets provisions but sits unhealthy until filled —
   same seam D2 plugs into).
 - **Changed team** → re-pull the team on the matching instance with
-  `modastack install <teams-latest-url>` (then restart), not `modastack
-  agents update`: a container first-boots from `MODASTACK_TEAM_URL`, so its
+  `bobi install <teams-latest-url>` (then restart), not `bobi
+  agents update`: a container first-boots from `BOBI_TEAM_URL`, so its
   installed pack records `source = url:…`, which the registry-based `agents
   update` path does not resolve. `install <url>` re-runs the same
   workspace-safe reinstall against the refreshed tarball. Never re-provision:
   volume `agent.yaml` is source of truth, reinstall must not clobber workspace
   edits.
-- **modastack release** → scripted `fly deploy` loop over the fleet.
+- **bobi release** → scripted `fly deploy` loop over the fleet.
   Volumes and sessions survive; C9 idempotency makes restart safe; C7
   guards format-version skew.
 - **Deleted team** → nothing automatic; `destroy-instance` stays human.
@@ -580,11 +580,11 @@ This implements the §9 provisioner seam; replace with a service only when
 instance count makes the loop creak (§9, "Provisioner service" upgrade row).
 *Accept:* push a new team dir → live instance with no manual step beyond
 secrets; push a team edit → matching instance updated, workspace intact;
-tag a modastack release → all instances on the new version with sessions
+tag a bobi release → all instances on the new version with sessions
 resumed.
 
 **C23 — Subscription login bootstrap over Slack + event bus.**
-For `MODASTACK_AUTH=subscription` first boot with no `.credentials.json`
+For `BOBI_AUTH=subscription` first boot with no `.credentials.json`
 on the volume: run `claude /login` under a pty and scrape the auth URL;
 post it to a **private** Slack channel/DM via the `SLACK_BOT_TOKEN`
 already in env; connect the event-server WebSocket and wait for the
@@ -625,7 +625,7 @@ no double-fire across a wake.
 only on findings. The "nothing happened" path must not boot a VM.
 *Accept:* stale-PR scenario wakes the instance; clean poll does not.
 
-**C19 — `modastack schedule "<prompt>" --in <dur>`.** One-shot wake-up as a
+**C19 — `bobi schedule "<prompt>" --in <dur>`.** One-shot wake-up as a
 `count=1` monitor backed by a DO alarm; delivers the prompt as an event.
 *Accept:* schedule from inside a session, stop the machine, wake fires and
 the prompt reaches the session.
@@ -656,21 +656,21 @@ continuity; RSS drops after recycle.
 ## 11. Open questions
 
 1. ~~Wheel vs. source install in the image (C8)~~ — **resolved 2026-06-19.**
-   One Dockerfile, `MODASTACK_BUILD` selects: `pypi` (install a published
-   `modastack==<operator's CLI version>` — the normal/SaaS path; build once per
+   One Dockerfile, `BOBI_BUILD` selects: `pypi` (install a published
+   `bobi==<operator's CLI version>` — the normal/SaaS path; build once per
    version, fan the digest out to N tenants), `wheel` (scp an unpublished rc into
    the build context — the canary, since it's the run that's *publishing* the
    version), `source` (a dev checkout). **Image-baked, not push-onto-machine** —
    keeps the immutable-digest / atomic-deploy / clean-rollback guarantees; the
    speed comes from **layering** (deps + claude + model in cached early layers,
-   the modastack wheel as the last thin layer → a code-only rebuild is seconds).
+   the bobi wheel as the last thin layer → a code-only rebuild is seconds).
    That layering is C24 #368's "two clocks" extended to three (tool-deps /
    framework-version / definition).
 2. Does `/browse` (Playwright Chromium, ~250 MB + system libs) ship in the
    base image or a variant? Default: leave it out; add a variant if dogfood
    demand appears.
 3. ~~Fleet upgrade mechanics~~ — **resolved 2026-06-12 → C22** (now the
-   idempotent `modastack deploy` primitive; release/`deploy-*` tag triggers).
+   idempotent `bobi deploy` primitive; release/`deploy-*` tag triggers).
    **No-downtime upgrade** is the live open question: the in-memory session
    inbox loses queued events on restart, so durability must live in the event
    server (Worker/DO buffer + replay on reconnect) — VERIFY. With that +

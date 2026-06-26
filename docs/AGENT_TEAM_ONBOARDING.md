@@ -144,13 +144,13 @@ Every service the agent uses connects through one of three mechanisms:
 
 ### API key services (native)
 
-GitHub, Slack, Linear — modastack has built-in webhook integrations. Each has its own auth:
+GitHub, Slack, Linear — bobi has built-in webhook integrations. Each has its own auth:
 
 - **GitHub**: auto-detected from git remote. Reads/writes via `gh` CLI (user runs `gh auth login`). Webhooks via GitHub App install or manual setup.
-- **Slack**: bot token referenced as `${SLACK_BOT_TOKEN}` in agent.yaml, value in `.modastack/.env`. Handles workspace detection, webhooks, and replies.
-- **Linear**: API key referenced as `${LINEAR_API_KEY}` in agent.yaml, value in `.modastack/.env`. Handles team detection, webhooks, and writes.
+- **Slack**: bot token referenced as `${SLACK_BOT_TOKEN}` in agent.yaml, value in `.bobi/.env`. Handles workspace detection, webhooks, and replies.
+- **Linear**: API key referenced as `${LINEAR_API_KEY}` in agent.yaml, value in `.bobi/.env`. Handles team detection, webhooks, and writes.
 
-Setup: paste the API key or token when `modastack install` prompts. Done.
+Setup: paste the API key or token when `bobi install` prompts. Done.
 
 ### OAuth services (via Venn)
 
@@ -183,32 +183,32 @@ MCP servers are wired directly into the Claude Code session via the SDK. The age
 
 Setup: provide the URL/command and credentials. Preflight validation probes each MCP server to verify it connects and lists tools.
 
-## Installing a team: `modastack install`
+## Installing a team: `bobi install`
 
 Installing is distinct from authoring. A user with an existing team — from
 the repo, a teammate, or a registry — runs:
 
 ```
-$ modastack install agents/eng-team
+$ bobi install agents/eng-team
 
-Installed 'eng-team' into .modastack/
+Installed 'eng-team' into .bobi/
   roles: director, engineer, project_lead
   tools: github.md, linear.md, slack.md, venn.md
   workflows: adhoc.yaml, issue-lifecycle.yaml, pr-feedback.yaml, ...
 
 This agent needs credentials:
   SLACK_BOT_TOKEN: xoxb-...
-Credentials saved to .modastack/.env
+Credentials saved to .bobi/.env
 
-Run `modastack start` to launch.
+Run `bobi start` to launch.
 ```
 
 Resolution order: local path first, then remote registries. Install:
 
 1. Copies the team's `roles/`, `tools/`, `workflows/`, `monitors/`,
-   `context/`, and `agent.md` into `.modastack/` — the only runtime
+   `context/`, and `agent.md` into `.bobi/` — the only runtime
    location.
-2. Writes the team's `agent.yaml` verbatim into `.modastack/agent.yaml`
+2. Writes the team's `agent.yaml` verbatim into `.bobi/agent.yaml`
    (plus the team name). The installed copy is a frozen image —
    regenerated wholesale on every install, never merged with prior
    state, never hand-edited. Per-machine variance enters only through
@@ -218,13 +218,13 @@ Resolution order: local path first, then remote registries. Install:
    image, reinstall never overwrites them and they are not
    manifest-tracked.
 4. Scans the installed config for `${VAR}` references, prompts for any
-   missing values, and writes them to `.modastack/.env` (gitignored
+   missing values, and writes them to `.bobi/.env` (gitignored
    automatically).
 5. Records a hash of every installed file in `install-manifest.json` —
-   `modastack doctor` flags hand-edits to the frozen image before a
+   `bobi doctor` flags hand-edits to the frozen image before a
    reinstall would silently destroy them.
 
-`modastack start` takes no arguments — it reads `.modastack/agent.yaml`,
+`bobi start` takes no arguments — it reads `.bobi/agent.yaml`,
 loads `.env`, runs preflight, and launches. If no agent is installed it
 says so and lists available teams.
 
@@ -233,24 +233,24 @@ says so and lists available teams.
 The source of truth is wherever the team came from, and install adjusts
 what gets checked in accordingly:
 
-**Downloaded team** — installed from a registry. The copy in `.modastack/`
+**Downloaded team** — installed from a registry. The copy in `.bobi/`
 is the only copy, so it is the source of truth. Edit roles, workflows, and
 monitors in place; check the contents in to share customizations with the
 team. Only `.env`, `sessions/`, and `state/` are gitignored.
 
 **Local source of truth** — the team lives at `agents/<name>/` in the repo,
-checked in. Install materializes it into `.modastack/` as a build artifact:
+checked in. Install materializes it into `.bobi/` as a build artifact:
 the installed copies are gitignored and never hand-edited. To customize,
 edit `agents/<name>/` and reinstall. This avoids two diverging copies of
 the same team in git.
 
-Install writes `.modastack/.gitignore` to match the path it took. Either
-way, `.modastack/agent.yaml` (the manifest — which team, its config,
+Install writes `.bobi/.gitignore` to match the path it took. Either
+way, `.bobi/agent.yaml` (the manifest — which team, its config,
 `${VAR}` refs) and the rest of the runtime contract stay identical.
 
-## Interactive onboarding: `modastack setup`
+## Interactive onboarding: `bobi setup`
 
-The `modastack setup` command starts by offering existing teams from the
+The `bobi setup` command starts by offering existing teams from the
 registry — most users should start from a working team rather than a blank
 page. Two branches (implemented):
 
@@ -264,9 +264,9 @@ install → done). Stages are enforced by in-process tools the session
 calls — each refuses out-of-order use — so the conversation stays as
 exploratory as the user wants while the machine still advances.
 Credentials are collected by a tool that prompts the user directly on the
-terminal and writes `.modastack/.env`; secret values never enter the
+terminal and writes `.bobi/.env`; secret values never enter the
 session transcript. An interrupted setup resumes with
-`modastack setup --resume`.
+`bobi setup --resume`.
 
 A third branch is deferred:
 
@@ -276,14 +276,14 @@ A third branch is deferred:
   sources to toggle), then continues to service connection. Customizing
   materializes the team into `agents/<name>/` in the project (the eject
   step) and installs from there — the user owns the source, and
-  `.modastack/` stays a frozen build artifact. Until it exists,
+  `.bobi/` stays a frozen build artifact. Until it exists,
   customizing a team means editing its source directly (e.g. in a
   separate Claude Code session) and reinstalling.
 
 Every branch starts the same way:
 
 ```
-$ modastack setup
+$ bobi setup
 
 Use an existing agent team or build your own?
 
@@ -360,7 +360,7 @@ Connecting services...
   ✓ calendar                       venn
   ✓ salesforce                     venn
 
-  Credentials saved to .modastack/.env
+  Credentials saved to .bobi/.env
 
 Building monitors for event sources...
   Exploring Venn tools for salesforce polling...
@@ -369,26 +369,26 @@ Building monitors for event sources...
   ✓ email/received — venn exec work-gmail list_messages '{"maxResults": 10, "q": "is:unread"}'
 
 Writing agents/sales-outreach/ (roles, monitors, agent.yaml)...
-Installing into .modastack/...
-Done. Run `modastack start` to launch.
+Installing into .bobi/...
+Done. Run `bobi start` to launch.
 ```
 
 Setup ends with the agent installed. The answers produce a team source at
 `agents/<name>/` and setup runs install internally — so the result is a
-normal local-source team, and `.modastack/` stays a regenerable artifact.
+normal local-source team, and `.bobi/` stays a regenerable artifact.
 
 Because install is idempotent (frozen image, no merge), reinstalling is
 safe at any time — editing the team source at `agents/<name>/` and
-re-running `modastack install` resets a hand-edited image back to its
-source, and `modastack doctor` flags drift against the install manifest.
-Re-running `modastack setup` over an existing installation asks before
+re-running `bobi install` resets a hand-edited image back to its
+source, and `bobi doctor` flags drift against the install manifest.
+Re-running `bobi setup` over an existing installation asks before
 replacing it; revisiting the seven questions for an existing team is part
 of the deferred customize branch (today: edit the team source directly and
 reinstall).
 
 ### Preflight validation
 
-On every `modastack start`, the framework runs preflight checks before launching:
+On every `bobi start`, the framework runs preflight checks before launching:
 
 ```
 Preflight checks:
@@ -409,9 +409,9 @@ Checks: entry point role exists, native credentials present, Venn services conne
 
 **Team ships** `agents/<name>/agent.yaml` with defaults — entry point, services, monitors, and `${VAR}` references for any credentials it needs. No secrets.
 
-**Install copies** it verbatim into `.modastack/agent.yaml`. The installed copy mimics a runtime installation — frozen, regenerated on every install, never edited in place. Customizing the team means editing the source `agents/<name>/agent.yaml` and reinstalling. Whether `.modastack/` is checked in depends on which install path was taken (see "Two paths" above) — downloaded teams live there as the source of truth; local-source teams treat the whole image, `agent.yaml` included, as a gitignored build artifact.
+**Install copies** it verbatim into `.bobi/agent.yaml`. The installed copy mimics a runtime installation — frozen, regenerated on every install, never edited in place. Customizing the team means editing the source `agents/<name>/agent.yaml` and reinstalling. Whether `.bobi/` is checked in depends on which install path was taken (see "Two paths" above) — downloaded teams live there as the source of truth; local-source teams treat the whole image, `agent.yaml` included, as a gitignored build artifact.
 
-**Secrets live in `.modastack/.env`** — gitignored, created by `modastack install`, which scans the installed config for `${VAR}` references and prompts for each missing value. `Config.load()` reads `.env` into the environment before resolving the config, so every command (start, doctor, monitors) sees resolved values through a single path. `.env` is also where per-machine, non-secret variance goes — e.g. `event_server: ${MODASTACK_EVENT_SERVER}` resolves to the cloud Worker in production and to nothing (auto-started local server) in CI and local dev.
+**Secrets live in `.bobi/.env`** — gitignored, created by `bobi install`, which scans the installed config for `${VAR}` references and prompts for each missing value. `Config.load()` reads `.env` into the environment before resolving the config, so every command (start, doctor, monitors) sees resolved values through a single path. `.env` is also where per-machine, non-secret variance goes — e.g. `event_server: ${BOBI_EVENT_SERVER}` resolves to the cloud Worker in production and to nothing (auto-started local server) in CI and local dev.
 
 The `${VAR}` references serve as documentation — glance at the config and know exactly what accounts and tokens are needed. Preflight validation resolves them and fails with a pointed hint if any are missing.
 
@@ -439,7 +439,7 @@ Monitor events route through the event server's generic topic endpoint (`POST /e
 
 Agents interact with services through CLI tools and MCP:
 
-- **Native**: `gh` for GitHub, Slack API via `modastack slack-reply`, Linear API via tool guides
+- **Native**: `gh` for GitHub, Slack API via `bobi slack-reply`, Linear API via tool guides
 - **Venn services**: `venn` CLI wraps the Venn REST API
 - **Custom MCP**: tools appear in the Claude session automatically
 

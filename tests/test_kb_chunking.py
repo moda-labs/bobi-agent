@@ -1,6 +1,6 @@
 """Unit tests for the KB text chunking algorithm."""
 
-from modastack.kb.store import _chunk_text
+from bobi.kb.store import _chunk_text
 
 
 class TestChunkText:

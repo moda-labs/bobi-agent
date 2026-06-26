@@ -1,10 +1,10 @@
-# Modastack
+# Bobi
 
-[![CI](https://github.com/moda-labs/modastack/actions/workflows/ci.yml/badge.svg)](https://github.com/moda-labs/modastack/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/modastack)](https://pypi.org/project/modastack/)
+[![CI](https://github.com/moda-labs/bobi-agent-team/actions/workflows/ci.yml/badge.svg)](https://github.com/moda-labs/bobi-agent-team/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/bobi)](https://pypi.org/project/bobi/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Modastack is a CLI toolkit that provides the building blocks for creating proactive agent teams: agents that are both human-responsive, and can act autonomously in response to real-world events like GitHub PRs, Slack messages, ticket updates, or incoming emails. You define the roles and functionality of your agent team, and Modastack builds and runs it for you.
+Bobi is a CLI toolkit that provides the building blocks for creating proactive agent teams: agents that are both human-responsive, and can act autonomously in response to real-world events like GitHub PRs, Slack messages, ticket updates, or incoming emails. You define the roles and functionality of your agent team, and Bobi builds and runs it for you.
 
 Under the hood, every agent is a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) session — which means the entire system runs on a flat-rate Claude Pro or Max plan with no per-token API costs. API key usage is also supported.
 
@@ -21,24 +21,24 @@ claude
 
 Follow the prompts to log in with your Anthropic account (Pro, Max, or API key).
 
-### Install Modastack
+### Install Bobi
 
 Once Claude Code is set up, paste this into your Claude Code session:
 
 ```plaintext
-Install modastack using https://raw.githubusercontent.com/moda-labs/modastack/main/scripts/install.sh
+Install bobi using https://raw.githubusercontent.com/moda-labs/bobi-agent-team/main/scripts/install.sh
 ```
 
 Or install manually:
 
 ```bash
-uv tool install modastack
+uv tool install bobi
 ```
 
 On macOS you can also use Homebrew:
 
 ```bash
-brew install moda-labs/modastack/modastack
+brew install moda-labs/bobi-agent-team/bobi
 ```
 
 See [scripts/install.sh](scripts/install.sh) for what the installer does.
@@ -47,17 +47,17 @@ See [scripts/install.sh](scripts/install.sh) for what the installer does.
 
 ```bash
 # Go from an idea to a runnable agent team, interactively
-modastack setup
+bobi setup
 
 # Start a pre-built agent
-modastack start eng-team 
+bobi start eng-team 
 
 # Or launch a single ad-hoc agent
-modastack agents launch --role engineer --task "Fix the login bug"
+bobi agents launch --role engineer --task "Fix the login bug"
 
 # Talk to running agents
-modastack ask "What's the status of issue #42?"
-modastack message "Skip the integration tests, just ship it"
+bobi ask "What's the status of issue #42?"
+bobi message "Skip the integration tests, just ship it"
 ```
 
 ## Agent Teams
@@ -88,17 +88,17 @@ agents/eng-team/                   # ← browse the reference team at agents/eng
 Run the following prompt in your chat assistant of choice (ChatGPT, Claude, etc) to launch a guided process that will help you generate your own agent team:
 
 ```plaintext
-Read https://raw.githubusercontent.com/moda-labs/modastack/main/skills/create-agent.md and help me build a modastack agent
+Read https://raw.githubusercontent.com/moda-labs/bobi-agent-team/main/skills/create-agent.md and help me build a bobi agent
 ```
 
 ### Agent Team Registry
 
-Modastack maintains an agent team registry at [`agents/`](agents/). Install teams from our registry, or maintain your own private registry and add it to your local installation of Modastack:
+Bobi maintains an agent team registry at [`agents/`](agents/). Install teams from our registry, or maintain your own private registry and add it to your local installation of Bobi:
 
 ```bash
-modastack agents browse                     # see available teams from all registries
-modastack agents update eng-team             # install or update
-modastack agents add-registry myorg/agents  # add a private registry
+bobi agents browse                     # see available teams from all registries
+bobi agents update eng-team             # install or update
+bobi agents add-registry myorg/agents  # add a private registry
 ```
 
 If you think you have a general-purpose agent you'd like to share with the world, we encourage you to open a PR with it and add it to the global registry!
@@ -157,7 +157,7 @@ Agents receive real-world events (GitHub, Slack, Linear, custom webhooks) throug
 
 | | Local | Self-hosted Cloudflare | Hosted (coming soon) |
 |---|---|---|---|
-| Setup | `modastack event-server start` | Deploy the worker yourself | Sign up at [modastack.dev](https://modastack.dev) |
+| Setup | `bobi event-server start` | Deploy the worker yourself | Sign up at [bobi.dev](https://bobi.dev) |
 | Hosting | Runs on your machine | Your Cloudflare account, always on | Managed by Moda Labs |
 | Webhook routing | Requires [ngrok](https://ngrok.com/) or similar tunnel | Stable URL, no tunnel | Stable URL, no tunnel |
 | GitHub/Slack apps | Create your own | Create your own | Install our pre-built apps |
@@ -186,9 +186,9 @@ monitors:
 A monitor with a `check:` field runs a deterministic native function — fast, deduplicated, no LLM needed. A monitor without one spawns a short-lived agent that evaluates the description and posts an event only if it finds something. Either way, the resulting event is indistinguishable from a webhook — subscribing agents handle it the same way.
 
 ```bash
-modastack monitors list              # see all active monitors
-modastack monitors add stale-deploys --interval 1h --description "Deploys older than 24h"
-modastack monitors pause pr_conflicts
+bobi monitors list              # see all active monitors
+bobi monitors add stale-deploys --interval 1h --description "Deploys older than 24h"
+bobi monitors pause pr_conflicts
 ```
 
 ## Workflows
@@ -225,57 +225,57 @@ You normally don't have to build these YAML files by hand — the [create-agent]
 
 ```bash
 # Agents
-modastack agents launch -w <workflow> --role <role> --task "context"
-modastack agents list
-modastack agents show <id>
-modastack agents cancel <id>
+bobi agents launch -w <workflow> --role <role> --task "context"
+bobi agents list
+bobi agents show <id>
+bobi agents cancel <id>
 
 # Communication
-modastack ask "question"          # blocks until response
-modastack message "update"        # fire-and-forget
+bobi ask "question"          # blocks until response
+bobi message "update"        # fire-and-forget
 
 # Observability
-modastack status                  # active agents
-modastack events                  # recent events and decisions
-modastack transcript show <sess>  # session transcript
-modastack doctor                  # system health check
+bobi status                  # active agents
+bobi events                  # recent events and decisions
+bobi transcript show <sess>  # session transcript
+bobi doctor                  # system health check
 
 # Workflows & monitors
-modastack workflows list
-modastack monitors list
-modastack roles list
+bobi workflows list
+bobi monitors list
+bobi roles list
 ```
 
 ## Configuration
 
 See the setup guides for [Slack](skills/slack-setup.md) and [Linear](skills/linear-setup.md).
 
-There is exactly one `.modastack/` directory per installation — created by
-`modastack install` at the directory you run it from — holding both config
+There is exactly one `.bobi/` directory per installation — created by
+`bobi install` at the directory you run it from — holding both config
 and state. `agent.yaml` is the single config file (roles, services,
 monitors, credentials); secrets use `${ENV_VAR}` references resolved from
-the environment, with `.modastack/.env` loaded at startup:
+the environment, with `.bobi/.env` loaded at startup:
 
 ```yaml
-# .modastack/agent.yaml
+# .bobi/agent.yaml
 services:
   - name: slack
     bot_token: ${SLACK_BOT_TOKEN}
   - name: linear
     api_key: ${LINEAR_API_KEY}
-event_server_url: https://modastack-events.example.workers.dev
+event_server_url: https://bobi-events.example.workers.dev
 ```
 
 Custom roles, workflows, monitors, and tools live under the same
-`.modastack/` and take priority over the agent team defaults. There is no
-global `~/.modastack/` and no per-repo config — repos managed by the
+`.bobi/` and take priority over the agent team defaults. There is no
+global `~/.bobi/` and no per-repo config — repos managed by the
 installation stay clean.
 
 ## Development
 
 ```bash
-git clone https://github.com/moda-labs/modastack.git
-cd modastack
+git clone https://github.com/moda-labs/bobi-agent-team.git
+cd bobi
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest tests/ --ignore=tests/integration/

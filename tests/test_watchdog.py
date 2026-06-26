@@ -1,4 +1,4 @@
-"""Unit tests for modastack.watchdog — the #464 manager self-heal watchdog.
+"""Unit tests for bobi.watchdog — the #464 manager self-heal watchdog.
 
 These drive the supervisor state machine with injected time/sleep/health/spawn
 so the discriminator, bounded-retry/backoff, crash-loop containment and
@@ -8,7 +8,7 @@ real-process acceptance + negative tests live in test_watchdog_restart.py.
 
 import pytest
 
-from modastack.watchdog import (
+from bobi.watchdog import (
     ACTIVE_STATES,
     EXIT_BUDGET_EXHAUSTED,
     RestartBudget,

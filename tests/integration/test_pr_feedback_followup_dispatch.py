@@ -30,8 +30,8 @@ from unittest.mock import patch
 
 import yaml
 
-from modastack.events.drain import drain_loop
-from modastack.events.reactor import EventReactor
+from bobi.events.drain import drain_loop
+from bobi.events.reactor import EventReactor
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 ENG_TEAM_AGENT_YAML = PACKAGE_ROOT / "agents" / "eng-team" / "agent.yaml"
@@ -85,8 +85,8 @@ def _human_pr_comment(*, number, delivery_id, body):
         "id": delivery_id,            # unique per webhook delivery / replay-stable
         "source": "github",
         "delivery": "bulk",
-        "topics": ["github:moda-labs/modastack"],
-        "text": f"[moda-labs/modastack] comment PR #{number}",
+        "topics": ["github:moda-labs/bobi"],
+        "text": f"[moda-labs/bobi] comment PR #{number}",
         "fields": {
             "action": "created",
             "number": number,
@@ -99,7 +99,7 @@ def _human_pr_comment(*, number, delivery_id, body):
 
 def _drain_one_batch(events, reactor):
     """Run drain_loop for exactly one batch; return delivered inbox texts."""
-    from modastack.inbox import register_local_inbox, unregister_local_inbox
+    from bobi.inbox import register_local_inbox, unregister_local_inbox
 
     q = _OneShotQueue(events)
     delivered = []
@@ -113,7 +113,7 @@ def _drain_one_batch(events, reactor):
 
     register_local_inbox("test-session-326", _CaptureInbox())
     try:
-        with patch("modastack.events.drain.time.sleep"):
+        with patch("bobi.events.drain.time.sleep"):
             try:
                 drain_loop("test-session-326", queue=q,
                            formatter=fake_formatter, reactor=reactor)
@@ -137,7 +137,7 @@ def _drain_sequentially(events, reactor):
     return delivered
 
 
-@patch("modastack.subagent.launch_agent")
+@patch("bobi.subagent.launch_agent")
 def test_followup_pr_comments_each_dispatch(mock_launch):
     """Two distinct human comments on the same PR → two pr-feedback dispatches.
 
@@ -166,7 +166,7 @@ def test_followup_pr_comments_each_dispatch(mock_launch):
     )
 
 
-@patch("modastack.subagent.launch_agent")
+@patch("bobi.subagent.launch_agent")
 def test_redelivery_of_same_comment_still_dedups(mock_launch):
     """Genuine redelivery of the SAME comment (stable id) must NOT re-dispatch.
 

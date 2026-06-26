@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from modastack import registry
+from bobi import registry
 
 
 def _make_team_dir(root: Path, name: str = "eng-team", *, agent: str | None = "eng-team") -> Path:
@@ -22,7 +22,7 @@ def _make_team_dir(root: Path, name: str = "eng-team", *, agent: str | None = "e
     agent_line = f"agent: {agent}\n" if agent else ""
     team.joinpath("agent.yaml").write_text(
         f"version: '1.2.3'\n{agent_line}entry_point: manager\n"
-        "event_server: ${MODASTACK_EVENT_SERVER}\n"
+        "event_server: ${BOBI_EVENT_SERVER}\n"
     )
     return team
 
@@ -38,7 +38,7 @@ def _targz(arcname_to_path: dict[str, Path]) -> bytes:
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    monkeypatch.setattr("modastack.paths._root", tmp_path)
+    monkeypatch.setattr("bobi.paths._root", tmp_path)
     return tmp_path
 
 
@@ -48,7 +48,7 @@ def _serve(monkeypatch, payload: bytes, *, status: int = 200):
 
     request = httpx.Request("GET", "https://example.com/team.tar.gz")
     resp = httpx.Response(status, content=payload, request=request)
-    monkeypatch.setattr("modastack.http.get", lambda url, **kw: resp)
+    monkeypatch.setattr("bobi.http.get", lambda url, **kw: resp)
 
 
 def test_fetch_plain_team_tarball(project, tmp_path, monkeypatch):
@@ -153,22 +153,22 @@ def test_http_error_is_wrapped(project, monkeypatch):
         req = httpx.Request("GET", url)
         return httpx.Response(404, request=req)
 
-    monkeypatch.setattr("modastack.http.get", _raise)
+    monkeypatch.setattr("bobi.http.get", _raise)
     with pytest.raises(RuntimeError, match="Failed to fetch"):
         registry.fetch_from_url(project, "https://x/missing.tar.gz")
 
 
 def test_cli_install_detects_url(project, tmp_path, monkeypatch):
-    """`modastack install <url>` routes to fetch_from_url and installs the team
-    into .modastack/ — the exact path the container entrypoint exercises."""
+    """`bobi install <url>` routes to fetch_from_url and installs the team
+    into .bobi/ — the exact path the container entrypoint exercises."""
     from click.testing import CliRunner
 
-    from modastack.cli import main
+    from bobi.cli import main
 
     src = _make_team_dir(tmp_path / "src", "eng-team")
     src.joinpath("agent.yaml").write_text(
         "version: '2.0'\nagent: eng-team\nentry_point: manager\n"
-        "event_server: ${MODASTACK_EVENT_SERVER}\n"
+        "event_server: ${BOBI_EVENT_SERVER}\n"
     )
     payload = _targz({"eng-team": src,
                       "eng-team/agent.yaml": src / "agent.yaml",
@@ -176,7 +176,7 @@ def test_cli_install_detects_url(project, tmp_path, monkeypatch):
     _serve(monkeypatch, payload)
 
     monkeypatch.chdir(project)
-    monkeypatch.setenv("MODASTACK_EVENT_SERVER", "https://events.example.com")
+    monkeypatch.setenv("BOBI_EVENT_SERVER", "https://events.example.com")
 
     result = CliRunner().invoke(
         main,
@@ -185,8 +185,8 @@ def test_cli_install_detects_url(project, tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert "URL" in result.output  # took the URL branch, not registry-by-name
-    assert (project / ".modastack" / "agent.yaml").is_file()
-    cfg = (project / ".modastack" / "agent.yaml").read_text()
+    assert (project / ".bobi" / "agent.yaml").is_file()
+    cfg = (project / ".bobi" / "agent.yaml").read_text()
     assert "entry_point: manager" in cfg
 
 
@@ -229,20 +229,20 @@ def test_fetch_from_archive_rejects_non_archive(project, tmp_path):
 
 
 def test_install_cli_routes_local_archive(project, tmp_path, monkeypatch):
-    """`modastack install ./team.tar.gz` takes the local-archive branch."""
+    """`bobi install ./team.tar.gz` takes the local-archive branch."""
     from click.testing import CliRunner
-    from modastack.cli import main
+    from bobi.cli import main
 
     src = _make_team_dir(tmp_path / "src", "eng-team", agent="eng-team")
     arc = tmp_path / "eng-team.tar.gz"
     with tarfile.open(arc, "w:gz") as t:
         t.add(src, arcname="eng-team")
     monkeypatch.chdir(project)
-    monkeypatch.setenv("MODASTACK_EVENT_SERVER", "https://ev.example.workers.dev")
+    monkeypatch.setenv("BOBI_EVENT_SERVER", "https://ev.example.workers.dev")
 
     result = CliRunner().invoke(
         main, ["install", str(arc), "--non-interactive"], catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
     assert "local archive" in result.output
-    assert (project / ".modastack" / "agent.yaml").is_file()
+    assert (project / ".bobi" / "agent.yaml").is_file()

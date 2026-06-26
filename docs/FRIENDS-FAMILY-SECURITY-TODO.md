@@ -51,14 +51,14 @@ server is used.
     route correctly.
 
 - [x] Add Worker-to-Durable-Object internal authentication.
-  - Fixed by #489: the Worker adds `x-modastack-internal` on all
+  - Fixed by #489: the Worker adds `x-bobi-internal` on all
     Worker-to-DO calls, and the Durable Object rejects `/init`, `/event`, and
     websocket upgrade requests without a valid internal shared-secret check.
   - Code: `event-server/src/deployment-session.ts`,
     `event-server/src/index.ts::createKVStorage`.
   - Secret handling: `INTERNAL_DO_SECRET` is a Cloudflare Worker secret only
     (`wrangler secret put INTERNAL_DO_SECRET`); do not propagate it to Fly,
-    Bubble, agent-team env, or `.modastack/.env`.
+    Bubble, agent-team env, or `.bobi/.env`.
 
 - [ ] Add public admission control for `POST /deployments`.
   - Current risk: unsigned deployment minting is fine for bootstrap, but public
@@ -73,14 +73,14 @@ server is used.
 - [ ] Write `.env` files with owner-only permissions.
   - Current risk: `write_env_file()` writes secret material with default process
     umask; a local `.env` was observed as `0644`.
-  - Code: `modastack/config.py::write_env_file`.
+  - Code: `bobi/config.py::write_env_file`.
   - Expected fix: mirror `save_bubble_state()` and create/truncate env files with
     mode `0600`; add a regression test.
 
 - [ ] Add a doctor/preflight warning for permissive secret-file modes.
-  - Current risk: users may already have `.env` or `.modastack/.env` readable by
+  - Current risk: users may already have `.env` or `.bobi/.env` readable by
     group/world.
-  - Expected fix: `modastack doctor` warns, and ideally offers the exact
+  - Expected fix: `bobi doctor` warns, and ideally offers the exact
     `chmod 600 ...` remediation.
 
 ## Medium Priority Hardening
@@ -89,7 +89,7 @@ server is used.
   - Current risk: `_fetch_repo_tarball()` still uses `tar.extractall()` on
     GitHub tarball members without the safe member filter used by the direct
     archive install path.
-  - Code: `modastack/registry.py::_fetch_repo_tarball`,
+  - Code: `bobi/registry.py::_fetch_repo_tarball`,
     `_safe_members`, `_install_team_tar`.
   - Expected fix: reuse `_safe_members` and the `filter="data"` extraction path
     for repo fallback installs.
@@ -112,9 +112,9 @@ server is used.
 - [ ] Make the trusted-team-code boundary explicit.
   - Current risk: installed team packs can run shell commands through
     `requires.check`, monitor `command:`, and build hooks.
-  - Code: `modastack/config.py::run_requires_checks`,
-    `modastack/monitors/scheduler.py::_command_conditions`,
-    `modastack/build_render.py`.
+  - Code: `bobi/config.py::run_requires_checks`,
+    `bobi/monitors/scheduler.py::_command_conditions`,
+    `bobi/build_render.py`.
   - Expected fix: document that team packs are trusted code, and consider
     warning when installing teams from non-default registries or arbitrary URLs.
 

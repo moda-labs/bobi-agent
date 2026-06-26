@@ -1,4 +1,4 @@
-"""Integration tests for modastack kb — end-to-end with real embedding model.
+"""Integration tests for bobi kb — end-to-end with real embedding model.
 
 Exercises the full KB lifecycle: create, add (text + file), search (FTS +
 hybrid), info, list, and remove. The embedding sidecar auto-starts on first
@@ -37,9 +37,9 @@ class TestKBLifecycle:
         assert result.returncode == 0
         assert "Added" in result.stdout
 
-    def test_add_file(self, cli_run, modastack_env):
+    def test_add_file(self, cli_run, bobi_env):
         cli_run("kb", "create", "file-test")
-        doc = modastack_env.project_path / "test-doc.md"
+        doc = bobi_env.project_path / "test-doc.md"
         doc.write_text(
             "# Architecture\n\n"
             "The system uses event-driven architecture with pub/sub messaging.\n\n"
@@ -53,9 +53,9 @@ class TestKBLifecycle:
         assert result.returncode == 0
         assert "Added" in result.stdout
 
-    def test_add_file_dedup(self, cli_run, modastack_env):
+    def test_add_file_dedup(self, cli_run, bobi_env):
         cli_run("kb", "create", "dedup-test")
-        doc = modastack_env.project_path / "dedup-doc.md"
+        doc = bobi_env.project_path / "dedup-doc.md"
         doc.write_text("Content that should not be duplicated on re-add.")
         cli_run("kb", "add", "dedup-test", "--file", str(doc), timeout=60)
         result = cli_run("kb", "add", "dedup-test", "--file", str(doc), timeout=60)
@@ -117,8 +117,8 @@ class TestKBLifecycle:
         assert "list-alpha" in result.stdout
         assert "list-beta" in result.stdout
 
-    def test_list_empty(self, cli_run, modastack_env):
-        kb_dir = modastack_env.project_path / ".modastack" / "kb"
+    def test_list_empty(self, cli_run, bobi_env):
+        kb_dir = bobi_env.project_path / ".bobi" / "kb"
         had_files = list(kb_dir.glob("list-*")) if kb_dir.exists() else []
         result = cli_run("kb", "list")
         assert result.returncode == 0
@@ -143,7 +143,7 @@ class TestKBLifecycle:
 class TestEmbeddingSidecar:
     """Verify the sidecar auto-starts and can be stopped."""
 
-    def test_sidecar_starts_on_add(self, cli_run, modastack_env):
+    def test_sidecar_starts_on_add(self, cli_run, bobi_env):
         cli_run("kb", "create", "sidecar-test")
         result = cli_run(
             "kb", "add", "sidecar-test",
@@ -152,8 +152,8 @@ class TestEmbeddingSidecar:
         )
         assert result.returncode == 0
 
-        pid_file = modastack_env.state_dir / "embedding-sidecar.pid"
-        port_file = modastack_env.state_dir / "embedding-sidecar.port"
+        pid_file = bobi_env.state_dir / "embedding-sidecar.pid"
+        port_file = bobi_env.state_dir / "embedding-sidecar.port"
         assert pid_file.exists()
         assert port_file.exists()
 
@@ -165,7 +165,7 @@ class TestEmbeddingSidecar:
             alive = False
         assert alive, "Sidecar should still be running after add"
 
-    def test_sidecar_survives_between_commands(self, cli_run, modastack_env):
+    def test_sidecar_survives_between_commands(self, cli_run, bobi_env):
         cli_run("kb", "create", "survive-test")
         cli_run(
             "kb", "add", "survive-test",
@@ -173,7 +173,7 @@ class TestEmbeddingSidecar:
             timeout=60,
         )
 
-        pid_file = modastack_env.state_dir / "embedding-sidecar.pid"
+        pid_file = bobi_env.state_dir / "embedding-sidecar.pid"
         first_pid = int(pid_file.read_text().strip())
 
         cli_run(
@@ -185,7 +185,7 @@ class TestEmbeddingSidecar:
         second_pid = int(pid_file.read_text().strip())
         assert first_pid == second_pid, "Sidecar should be reused, not restarted"
 
-    def test_stop_kills_sidecar(self, cli_run, modastack_env):
+    def test_stop_kills_sidecar(self, cli_run, bobi_env):
         cli_run("kb", "create", "stop-test")
         cli_run(
             "kb", "add", "stop-test",
@@ -193,7 +193,7 @@ class TestEmbeddingSidecar:
             timeout=60,
         )
 
-        pid_file = modastack_env.state_dir / "embedding-sidecar.pid"
+        pid_file = bobi_env.state_dir / "embedding-sidecar.pid"
         if pid_file.exists():
             pid = int(pid_file.read_text().strip())
             result = cli_run("stop")
@@ -204,4 +204,4 @@ class TestEmbeddingSidecar:
                 alive = True
             except ProcessLookupError:
                 alive = False
-            assert not alive, "Sidecar should be dead after modastack stop"
+            assert not alive, "Sidecar should be dead after bobi stop"

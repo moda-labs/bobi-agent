@@ -7,7 +7,7 @@ drift. The classifier is pure — no session state — so it is tested directly.
 
 import pytest
 
-from modastack.transient import (
+from bobi.transient import (
     TRANSIENT_API_STATUSES,
     TURN_RETRY_BASE,
     TURN_RETRY_MAX_ATTEMPTS,
@@ -62,7 +62,7 @@ class TestSessionDelegates:
     (behaviour-preserving extraction — same verdict it gave before #MDS-65)."""
 
     def _session(self):
-        from modastack.session import Session
+        from bobi.session import Session
         return Session(name="t", cwd="/tmp")
 
     def test_session_uses_status(self):
@@ -84,7 +84,7 @@ class TestSessionDelegates:
         assert s._is_transient_turn_error() is True
 
     def test_session_module_reexports_shared_symbols(self):
-        import modastack.session as sess
-        from modastack import transient
+        import bobi.session as sess
+        from bobi import transient
         assert sess.TRANSIENT_API_STATUSES is transient.TRANSIENT_API_STATUSES
         assert sess.is_transient_api_error is transient.is_transient_api_error

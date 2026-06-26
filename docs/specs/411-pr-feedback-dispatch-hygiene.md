@@ -1,6 +1,6 @@
 # Spec — #411 + #412: dispatch hygiene + implement-phase approval gate
 
-- **Issue:** [moda-labs/modastack#411](https://github.com/moda-labs/modastack/issues/411)
+- **Issue:** [moda-labs/bobi-agent-team#411](https://github.com/moda-labs/bobi-agent-team/issues/411)
 - **Type:** bug (event-reactor / auto-dispatch)
 - **Status:** SPEC — held for Zach's approval. Implementation is gated on sign-off; this PR must not auto-build past the spec gate.
 - **Author:** engineer (spec phase)
@@ -14,7 +14,7 @@
 
 ## 1. Problem
 
-The deterministic event reactor (`modastack/events/reactor.py`) auto-dispatches a `pr-feedback`
+The deterministic event reactor (`bobi/events/reactor.py`) auto-dispatches a `pr-feedback`
 engineer in four situations where it must not. Each wastes an agent launch and — worse — risks an
 engineer **editing a PR it has no business touching**: the bot reacting to its own activity (part a),
 or — most severely — a **human-authored** PR the bot pushed an unrequested commit onto (part d,
@@ -84,7 +84,7 @@ simultaneously (a third on a later check); the lead cancelled all three before a
 damage from the missing per-trigger dedup is not wasted launches that the lead catches in flight — it
 is **duplicate work products that escape onto GitHub**. One logical trigger (Zach's "open a new ticket
 to build out a reusable tool library" instruction on PR **#407**, 2026-06-22) fanned out into **three**
-near-identical issues, all authored by `modastack` within **51 seconds**:
+near-identical issues, all authored by `bobi` within **51 seconds**:
 
 | Issue | Created (UTC) | State | Title |
 |-------|---------------|-------|-------|
@@ -204,7 +204,7 @@ proposed and then **reverted on review** (kept in the table for traceability):
 
 | Part | Change | Primary file |
 |------|--------|--------------|
-| (a) | Skip auto-dispatch for **any event type** whose `sender` is the bot's own GitHub identity — comments **and** `push` / `synchronize` / review / edit events (closes the #423 self-cascade) — **default-on**, no enable flag, with an `allow_self_authored: true` opt-in escape hatch. | `modastack/events/reactor.py` (+ adapter `fields.sender` on push/synchronize) |
+| (a) | Skip auto-dispatch for **any event type** whose `sender` is the bot's own GitHub identity — comments **and** `push` / `synchronize` / review / edit events (closes the #423 self-cascade) — **default-on**, no enable flag, with an `allow_self_authored: true` opt-in escape hatch. | `bobi/events/reactor.py` (+ adapter `fields.sender` on push/synchronize) |
 | (b) | ~~Skip `pr-feedback` dispatch when the target PR is a **draft**.~~ **REVERTED (underminedsk, 2026-06-22)** — drafts stay watchable; the self-author skip (a) handles the loop and the part-(e) approval gate handles held specs. | — (removed) |
 | (c) | Anchor dedup on the **stable comment/review id** and pass a **deterministic `run_key`** so the active-run guard prevents fan-out. | `reactor.py` (+ adapter field) |
 | (d) | **Hard-skip `pr-feedback` on human-authored PRs** — dispatch only when the PR author == bot identity. | `reactor.py` (+ adapter field) |
@@ -223,7 +223,7 @@ between the spec and implement steps; it touches no reactor or adapter code.
 
 The adapter already emits `fields.sender` (`payload.sender.login`). The reactor must learn its **own**
 GitHub login to compare. The bot's identity is the authenticated `gh` token's user — today that is
-`modastack` (verified via `gh api user --jq .login`).
+`bobi` (verified via `gh api user --jq .login`).
 
 - Resolve the bot login **once** at reactor construction (or first use) via `gh api user --jq .login`,
   cache it on the `EventReactor`. No config key is needed to *resolve identity* — the token is the
@@ -324,7 +324,7 @@ authoritative guard (one engineer per comment, process-independent).
 `pr-feedback` must dispatch **only** when the target PR's author is the bot identity. Any PR authored
 by a human is hard-skipped — the bot never pushes to a branch it does not own.
 
-- Reuse the cached bot login from §3(a) (`gh api user --jq .login`, today `modastack`). No new
+- Reuse the cached bot login from §3(a) (`gh api user --jq .login`, today `bobi`). No new
   identity source.
 - **Resolve the PR author per event type, mirroring (b)'s draft sourcing:**
   - **Review events** (`pull_request_review`, `pull_request_review_comment`) carry
@@ -465,7 +465,7 @@ cd event-server && <adapter test cmd>                          # adapter field t
 ## 5. Scope
 
 ### In scope
-- `modastack/events/reactor.py`: self-author skip (default-on, `allow_self_authored` opt-in) **applied
+- `bobi/events/reactor.py`: self-author skip (default-on, `allow_self_authored` opt-in) **applied
   to all event types incl. `push` / `synchronize` / `edited` (part a broadening — closes #423
   self-cascade)**, stable-comment-id dedup key, deterministic `run_key`, **human-author hard-skip
   (part d)**. (Part b draft skip reverted — not in scope.)
@@ -507,9 +507,9 @@ cd event-server && <adapter test cmd>                          # adapter field t
 8. Workflow (e, #412): add the approval-gated `route` + `await` between the spec and implement steps in
    `agents/eng-team/workflows/issue-lifecycle.yaml` (advance only on `reviewDecision == APPROVED`;
    fail-closed on unresolved). Write the failing workflow-routing test first (confirm red), then wire
-   the route. Run `modastack workflows validate`.
+   the route. Run `bobi workflows validate`.
 9. Extend the integration test (including the #423 / self-cascade case); run full suite +
-   `modastack workflows validate`.
+   `bobi workflows validate`.
 10. `/review`; fix everything it finds.
 11. Open the impl PR against `main` (it — not this spec PR — carries `Fixes #411` and `Fixes #412`).
 

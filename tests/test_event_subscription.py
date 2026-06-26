@@ -13,8 +13,8 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from modastack import http as pooled
-from modastack.subagent import _start_event_subscription
+from bobi import http as pooled
+from bobi.subagent import _start_event_subscription
 
 
 REMOTE_URL = "https://events.example.invalid"
@@ -23,7 +23,7 @@ REMOTE_URL = "https://events.example.invalid"
 @pytest.fixture
 def project(tmp_path):
     """Project dir with a remote event server configured."""
-    ms = tmp_path / ".modastack"
+    ms = tmp_path / ".bobi"
     ms.mkdir()
     (ms / "agent.yaml").write_text(
         f"agent: test\nentry_point: manager\nevent_server: {REMOTE_URL}\n"
@@ -35,7 +35,7 @@ def project(tmp_path):
 def _stub_bubble():
     """Every registration JOINs the instance bubble via ensure_bubble; stub it
     so these unit tests don't make a real mint HTTP call."""
-    with patch("modastack.events.server.ensure_bubble",
+    with patch("bobi.events.server.ensure_bubble",
                return_value={"bubble_id": "bub_test", "bubble_key": "bkey_test"}):
         yield
 
@@ -43,12 +43,12 @@ def _stub_bubble():
 def _state_file(project, session="sess"):
     # Deployment state is per-session — sharing one deployment across
     # sessions is the bug that broadcast the user's DMs to every agent.
-    return project / ".modastack" / "state" / "deployments" / f"{session}.json"
+    return project / ".bobi" / "state" / "deployments" / f"{session}.json"
 
 
-@patch("modastack.events.drain.drain_loop")
-@patch("modastack.events.client.EventServerClient")
-@patch("modastack.events.server.register")
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
 def test_fresh_state_registers_without_put(mock_register,
                                            mock_client, _drain, project):
     """With no saved deployment, go straight to register — no empty-id PUT."""
@@ -68,9 +68,9 @@ def test_fresh_state_registers_without_put(mock_register,
 
 
 @patch("time.sleep")
-@patch("modastack.events.drain.drain_loop")
-@patch("modastack.events.client.EventServerClient")
-@patch("modastack.events.server.register")
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
 def test_transient_register_failure_retries(mock_register, _client, _drain,
                                             _sleep, project):
     """A transient timeout must not propagate — retry and succeed."""
@@ -87,9 +87,9 @@ def test_transient_register_failure_retries(mock_register, _client, _drain,
 
 
 @patch("time.sleep")
-@patch("modastack.events.drain.drain_loop")
-@patch("modastack.events.client.EventServerClient")
-@patch("modastack.events.server.register")
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
 def test_register_exhausted_raises_clean_error(mock_register, _client, _drain,
                                                _sleep, project):
     """Persistent failure raises RuntimeError with context, not a raw socket error."""
@@ -104,15 +104,15 @@ def test_register_exhausted_raises_clean_error(mock_register, _client, _drain,
 
 def _create_bubble(project):
     """Create a bubble.json so the PUT path is taken (post-bubble state)."""
-    from modastack.config import bubble_state_path
+    from bobi.config import bubble_state_path
     bp = bubble_state_path(project)
     bp.parent.mkdir(parents=True, exist_ok=True)
     bp.write_text(json.dumps({"bubble_id": "bub_test", "bubble_key": "bkey_test"}))
 
 
-@patch("modastack.events.drain.drain_loop")
-@patch("modastack.events.client.EventServerClient")
-@patch("modastack.events.server.register")
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
 def test_saved_state_uses_put_not_register(mock_register,
                                            mock_client, _drain, project):
     """With a saved deployment, update subscriptions via PUT — no re-register."""
@@ -142,9 +142,9 @@ def test_saved_state_uses_put_not_register(mock_register,
     assert mock_client.call_args.kwargs["deployment_id"] == "dep-3"
 
 
-@patch("modastack.events.drain.drain_loop")
-@patch("modastack.events.client.EventServerClient")
-@patch("modastack.events.server.register")
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
 def test_failed_put_falls_back_to_register(mock_register,
                                            mock_client, _drain, project):
     """A dead saved deployment (PUT fails) re-registers and persists fresh creds."""
@@ -174,9 +174,9 @@ def test_failed_put_falls_back_to_register(mock_register,
     assert saved["deployment_id"] == "dep-new"
 
 
-@patch("modastack.events.drain.drain_loop")
-@patch("modastack.events.client.EventServerClient")
-@patch("modastack.events.server.register")
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
 def test_forbidden_put_response_falls_back_to_register(mock_register,
                                                        mock_client, _drain,
                                                        project):
@@ -207,9 +207,9 @@ def test_forbidden_put_response_falls_back_to_register(mock_register,
 # --- Pre-bubble upgrade (stale deployment_state, no bubble.json) -------------
 
 
-@patch("modastack.events.drain.drain_loop")
-@patch("modastack.events.client.EventServerClient")
-@patch("modastack.events.server.register")
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
 def test_pre_bubble_upgrade_reregisters(mock_register,
                                         mock_client, _drain, project):
     """Saved deployment_state but no bubble.json → pre-bubble upgrade.
@@ -226,7 +226,7 @@ def test_pre_bubble_upgrade_reregisters(mock_register,
     # Intentionally NO _create_bubble(project) — simulates pre-bubble state.
 
     # Plant a stale cursor that should be cleared on re-register.
-    from modastack.config import session_cursor_path
+    from bobi.config import session_cursor_path
     cursor = session_cursor_path(project, "sess")
     cursor.parent.mkdir(parents=True, exist_ok=True)
     cursor.write_text(json.dumps({"last_seen": 42}))
@@ -253,9 +253,9 @@ def test_pre_bubble_upgrade_reregisters(mock_register,
 # --- Per-session deployment isolation (DM broadcast incident) ----------------
 
 
-@patch("modastack.events.drain.drain_loop")
-@patch("modastack.events.client.EventServerClient")
-@patch("modastack.events.server.register")
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
 def test_each_session_registers_its_own_deployment(mock_register,
                                                    mock_client, _drain, project):
     """Two sessions from one project root must NOT share a deployment.
@@ -289,14 +289,14 @@ def test_each_session_registers_its_own_deployment(mock_register,
     assert cursors[0] != cursors[1]
 
 
-@patch("modastack.events.drain.drain_loop")
-@patch("modastack.events.client.EventServerClient")
-@patch("modastack.events.server.register")
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
 def test_fresh_register_resets_session_cursor(mock_register,
                                               _client, _drain, project):
     """A new deployment starts a new seq space — a leftover cursor from a
     previous deployment must not survive registration."""
-    from modastack.config import session_cursor_path
+    from bobi.config import session_cursor_path
     cursor = session_cursor_path(project, "sess")
     cursor.parent.mkdir(parents=True)
     cursor.write_text(json.dumps({"last_seen": 37}))
@@ -308,14 +308,14 @@ def test_fresh_register_resets_session_cursor(mock_register,
 
 
 def _install_root(path):
-    (path / ".modastack").mkdir(parents=True)
-    (path / ".modastack" / "agent.yaml").write_text("name: test-agent\n")
+    (path / ".bobi").mkdir(parents=True)
+    (path / ".bobi" / "agent.yaml").write_text("name: test-agent\n")
 
 
-def test_resolve_root_walks_up_to_modastack(tmp_path):
+def test_resolve_root_walks_up_to_bobi(tmp_path):
     """An agent spawned from a repo checkout inside the project must bind to
     the real project root, not fork its own config/state/subscriptions."""
-    from modastack.paths import resolve_root
+    from bobi.paths import resolve_root
 
     _install_root(tmp_path)
     checkout = tmp_path / "repos" / "some-repo" / "src"
@@ -325,20 +325,20 @@ def test_resolve_root_walks_up_to_modastack(tmp_path):
     assert resolve_root(tmp_path) == tmp_path
 
 
-def test_resolve_root_skips_state_only_modastack(tmp_path):
-    """A state-only .modastack/ (sessions/state dropped into a repo checkout
+def test_resolve_root_skips_state_only_bobi(tmp_path):
+    """A state-only .bobi/ (sessions/state dropped into a repo checkout
     by the runtime) must not capture resolution — the walk continues to the
     installed root above it. Regression: engineer dispatch resolved a repo's
     state-only dir as project root and died with workflow-not-found."""
-    from modastack.paths import resolve_root
+    from bobi.paths import resolve_root
 
     _install_root(tmp_path)
     repo = tmp_path / "repos" / "some-repo"
-    (repo / ".modastack" / "sessions").mkdir(parents=True)
-    (repo / ".modastack" / "state").mkdir()
+    (repo / ".bobi" / "sessions").mkdir(parents=True)
+    (repo / ".bobi" / "state").mkdir()
 
     assert resolve_root(repo) == tmp_path
-    assert resolve_root(repo / ".modastack" / "state") == tmp_path
+    assert resolve_root(repo / ".bobi" / "state") == tmp_path
 
 
 def test_resolve_root_raises_without_installation(tmp_path):
@@ -346,11 +346,11 @@ def test_resolve_root_raises_without_installation(tmp_path):
     resolving to the bare start dir was the fallback that let processes
     invent roots."""
     import pytest
-    from modastack.paths import resolve_root
+    from bobi.paths import resolve_root
 
     plain = tmp_path / "plain"
     plain.mkdir()
-    with pytest.raises(RuntimeError, match="no Modastack installation"):
+    with pytest.raises(RuntimeError, match="no Bobi installation"):
         resolve_root(plain)
 
 
@@ -361,8 +361,8 @@ def test_register_slack_workspaces_posts_bot_token():
     workspace bot with the event server, else the event server can't identify
     (and skip) the bot's own messages and the agent loops on its own replies.
     """
-    from modastack.events.server import register_slack_workspaces
-    from modastack.config import Config, ServiceConfig
+    from bobi.events.server import register_slack_workspaces
+    from bobi.config import Config, ServiceConfig
 
     captured = []
 
@@ -413,8 +413,8 @@ def test_register_slack_workspaces_posts_bot_token():
 
 
 def test_register_slack_workspaces_noop_without_token():
-    from modastack.events.server import register_slack_workspaces
-    from modastack.config import Config
+    from bobi.events.server import register_slack_workspaces
+    from bobi.config import Config
 
     transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(
         AssertionError("no network call without a slack bot token")))

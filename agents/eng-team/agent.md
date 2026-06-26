@@ -24,7 +24,7 @@ house team with `from: eng-team` and an overlay that binds your toolchain.
 
 ```bash
 cd ~/dev                          # parent of all repos
-modastack start eng-team
+bobi start eng-team
 ```
 
 Then onboard repos via Slack:

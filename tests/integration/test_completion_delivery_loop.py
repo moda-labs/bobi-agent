@@ -24,9 +24,9 @@ proves they compose.
 import queue
 from unittest.mock import patch
 
-from modastack.events.subscriptions import lifecycle_subscription_keys
-from modastack.reconcile import reconcile_sessions
-from modastack.sdk import (
+from bobi.events.subscriptions import lifecycle_subscription_keys
+from bobi.reconcile import reconcile_sessions
+from bobi.sdk import (
     SessionEntry, SessionRegistry, get_registry, TERMINAL_CRASHED,
 )
 
@@ -58,8 +58,8 @@ def _drain_one_batch(events):
 
     No reactor → lifecycle events are pure deliver-to-inbox (the manager must be
     woken by its child's completion, never auto-dispatch it)."""
-    from modastack.inbox import register_local_inbox, unregister_local_inbox
-    from modastack.events.drain import drain_loop
+    from bobi.inbox import register_local_inbox, unregister_local_inbox
+    from bobi.events.drain import drain_loop
 
     delivered = []
 
@@ -69,7 +69,7 @@ def _drain_one_batch(events):
 
     register_local_inbox("manager", _CaptureInbox())
     try:
-        with patch("modastack.events.drain.time.sleep"):
+        with patch("bobi.events.drain.time.sleep"):
             try:
                 drain_loop("manager", queue=_OneShotQueue(events),
                            formatter=lambda e: e.get("text", ""), reactor=None)
@@ -123,7 +123,7 @@ def test_crashed_run_is_reconciled_and_failure_delivered(tmp_path, monkeypatch):
     honest `crashed` status, and the resulting agent/session.failed — carrying
     requested_by — reaches the launcher's inbox through the same drain. The old
     behaviour recorded the crash as `done` and emitted nothing."""
-    monkeypatch.setattr("modastack.paths._root", tmp_path)
+    monkeypatch.setattr("bobi.paths._root", tmp_path)
     reg = get_registry()
     reg.register(SessionEntry(
         name="wf-issue-lifecycle-app-7", run_key="7", role="engineer",

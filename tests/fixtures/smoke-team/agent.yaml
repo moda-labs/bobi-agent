@@ -3,11 +3,11 @@
 #   - github is a native service (auth rides on `gh`; no credentials block)
 #   - no MCP servers (no codex/gstack probes)
 #   - no Venn services, no monitors
-# Just enough to start a manager that answers one `modastack ask`.
+# Just enough to start a manager that answers one `bobi ask`.
 version: "1.0.0"
 agent: smoke
 entry_point: manager
-event_server: ${MODASTACK_EVENT_SERVER}
+event_server: ${BOBI_EVENT_SERVER}
 services:
   - name: github
     events: true

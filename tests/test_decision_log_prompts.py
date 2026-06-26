@@ -18,7 +18,7 @@ the contracts below assert the policy-model behavior.
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BASE_PROMPT = REPO_ROOT / "modastack" / "prompts" / "base.md"
+BASE_PROMPT = REPO_ROOT / "bobi" / "prompts" / "base.md"
 DIRECTOR_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "director" / "ROLE.md"
 LEAD_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "project_lead" / "ROLE.md"
 
@@ -117,7 +117,7 @@ class TestDirectorStartupReconciliation:
         )
 
     def test_checks_live_agents(self):
-        assert "modastack agents list" in self.lower, (
+        assert "bobi agents list" in self.lower, (
             "Director prompt must check live agents during reconciliation"
         )
 
@@ -203,8 +203,8 @@ class TestDirectorListFromLiveSource:
         listing_pos = self.lower.find("listing managed repos")
         assert listing_pos != -1
         listing_text = self.lower[listing_pos:listing_pos + 800]
-        assert "modastack agents list" in listing_text, (
-            "Listing must annotate live status from modastack agents list"
+        assert "bobi agents list" in listing_text, (
+            "Listing must annotate live status from bobi agents list"
         )
 
 

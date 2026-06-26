@@ -114,7 +114,7 @@ describe("normalizeGitHubPayload", () => {
 		const event = normalizeGitHubPayload("issue_comment", "d-ic", {
 			action: "created",
 			repository: { full_name: "org/repo" },
-			sender: { login: "modastack" },
+			sender: { login: "bobi" },
 			issue: {
 				number: 410, title: "spec", state: "open",
 				draft: true,
@@ -125,7 +125,7 @@ describe("normalizeGitHubPayload", () => {
 		expect(event!.type).toBe("github.issue_comment");
 		expect(event!.fields!.is_pull_request).toBe(true);
 		expect(event!.fields!.comment_id).toBe(99887766);
-		expect(event!.fields!.sender).toBe("modastack");
+		expect(event!.fields!.sender).toBe("bobi");
 	});
 
 	it("extracts comment_id from a pull_request_review_comment (#411)", () => {

@@ -9,16 +9,16 @@ from dataclasses import dataclass
 
 import pytest
 
-from modastack.workflow.schema import (
+from bobi.workflow.schema import (
     Workflow, StepDef, HandoffContract, load_workflow,
 )
-from modastack.workflow.orchestrator import (
+from bobi.workflow.orchestrator import (
     _build_step_prompt, _read_handoff, _validate_handoff,
     _setup_worktree,
     run_workflow, resume_workflow, try_resume_for_event,
     make_session_name,
 )
-from modastack.workflow.state import WorkflowRun
+from bobi.workflow.state import WorkflowRun
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +110,8 @@ class TestSessionName:
             "wf-issue-lifecycle-jobtack-42"
 
     def test_plain_repo(self):
-        assert make_session_name("adhoc", "modastack", "99") == \
-            "wf-adhoc-modastack-99"
+        assert make_session_name("adhoc", "bobi", "99") == \
+            "wf-adhoc-bobi-99"
 
 
 # ---------------------------------------------------------------------------
@@ -140,9 +140,9 @@ class TestHandoffValidation:
 
 class TestReadHandoff:
     def test_reads_yaml(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
         session_dir = tmp_path / "wf-test-42"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("complexity: medium\nneeds_spec: true\n")
@@ -151,15 +151,15 @@ class TestReadHandoff:
         assert result["needs_spec"] is True
 
     def test_missing_handoff_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
         assert _read_handoff("wf-test-999", "setup") == {}
 
     def test_step_specific_handoffs(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
         session_dir = tmp_path / "wf-test-1"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("worktree: /tmp/wt\n")
@@ -178,12 +178,12 @@ class TestBuildStepPrompt:
         """Prompt building reads handoffs via the session registry, which
         needs a bound root — bind explicitly, don't rely on leakage from
         earlier tests."""
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
 
     def test_includes_handoff_contract(self):
         step = StepDef(name="setup", prompt="Do work",
                        handoff=HandoffContract(required=["a"], optional=["b"]))
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.variables import VariableContext
         ctx = VariableContext()
         prompt = _build_step_prompt(step, ctx, session_name="wf-test-42", step_name="setup")
         assert "Do work" in prompt
@@ -193,7 +193,7 @@ class TestBuildStepPrompt:
 
     def test_no_contract_when_empty(self):
         step = StepDef(name="t", prompt="Just do it")
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.variables import VariableContext
         ctx = VariableContext()
         prompt = _build_step_prompt(step, ctx)
         assert "handoff" not in prompt.lower()
@@ -205,19 +205,19 @@ class TestBuildStepPrompt:
 
 class TestRouteConditions:
     def test_flat_variable_resolves_in_condition(self):
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.variables import VariableContext
         ctx = VariableContext()
         ctx.set_flat("needs_spec", "true")
         assert ctx.evaluate_condition("needs_spec == true") is True
 
     def test_flat_variable_false(self):
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.variables import VariableContext
         ctx = VariableContext()
         ctx.set_flat("needs_spec", "false")
         assert ctx.evaluate_condition("needs_spec == true") is False
 
     def test_scoped_variable_still_works(self):
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.variables import VariableContext
         ctx = VariableContext()
         ctx.set_scope("triage", {"complexity": "medium"})
         assert ctx.evaluate_condition("${{triage.complexity}} == medium") is True
@@ -274,18 +274,18 @@ class FakeClient:
 class TestRunWorkflow:
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
 
     def _mock_asyncio_run(self, workflow, **kwargs):
         """Run the workflow with a mocked SDK client."""
         cwd = kwargs.get("cwd", "/tmp")
-        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
-             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
-             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
-             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
-             patch("modastack.workflow.orchestrator.save_session_id"), \
-             patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -310,9 +310,9 @@ class TestRunWorkflow:
         assert result is True
 
     def test_route_step_branches(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
 
         # Write handoff during the fake agent's response (simulating the
         # agent writing it after the triage step runs, not before)
@@ -375,19 +375,19 @@ class TestHonestTerminalEmit:
 
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
 
     def _run_capture(self, workflow, client_cls, **kwargs):
         cwd = kwargs.get("cwd", "/tmp")
         emits = []
-        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
-             patch("modastack.workflow.orchestrator._emit_lifecycle_event",
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
                    side_effect=lambda etype, data, **kw: emits.append((etype, data))), \
-             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
-             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
-             patch("modastack.workflow.orchestrator.save_session_id"), \
-             patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: client_cls(),
                  ClaudeAgentOptions=MagicMock,
@@ -432,11 +432,11 @@ class TestHonestTerminalEmit:
         workflow.suspended but NEITHER session.completed NOR session.failed —
         else the (now-subscribed) manager is told the agent finished while it
         waits for the external event."""
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_r")
-        (tmp_path / "_r" / ".modastack" / "state" / "workflow" / "runs").mkdir(
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_r")
+        (tmp_path / "_r" / ".bobi" / "state" / "workflow" / "runs").mkdir(
             parents=True, exist_ok=True)
-        (tmp_path / "_r" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_r")
+        (tmp_path / "_r" / ".bobi" / "sessions").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_r")
 
         wf = Workflow(name="t", steps=[StepDef(name="wait", await_event="approval")])
         result, emits = self._run_capture(
@@ -456,13 +456,13 @@ class TestHonestTerminalEmit:
 class TestAwaitStep:
     def _mock_asyncio_run(self, workflow, **kwargs):
         cwd = kwargs.get("cwd", "/tmp")
-        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
-             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
-             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
-             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
-             patch("modastack.workflow.orchestrator.save_session_id"), \
-             patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -474,12 +474,12 @@ class TestAwaitStep:
             return run_workflow(workflow, **kwargs)
 
     def test_await_suspends_workflow(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".bobi" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True, exist_ok=True)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="spec", prompt="write spec"),
@@ -498,12 +498,12 @@ class TestAwaitStep:
         assert run.run_key == "1"
 
     def test_resume_continues_from_suspended_step(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".modastack" / "sessions"
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
+        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".bobi" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True, exist_ok=True)
 
         run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
         run.status = "waiting"
@@ -521,12 +521,12 @@ class TestAwaitStep:
             StepDef(name="implement", prompt="build it"),
         ])
 
-        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
-             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
-             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
-             patch("modastack.workflow.orchestrator.save_session_id"), \
-             patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -542,15 +542,15 @@ class TestAwaitStep:
         assert reloaded.status == "completed"
 
     def test_find_waiting_returns_none_when_no_match(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".bobi" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True, exist_ok=True)
         assert WorkflowRun.find_waiting("approval") is None
 
     def test_find_waiting_filters_by_run_key(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".modastack" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "_repo" / ".modastack" / "sessions").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        (tmp_path / "_repo" / ".bobi" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True, exist_ok=True)
 
         run = WorkflowRun.create("t", {"data": {"run_key": "42"}})
         run.status = "waiting"
@@ -569,7 +569,7 @@ class TestQAPhase:
     """Tests for the QA phase added after the PR step."""
 
     def test_issue_lifecycle_has_qa_step(self):
-        wf_path = Path(__file__).parent.parent / ".modastack" / "workflows" / "issue-lifecycle.yaml"
+        wf_path = Path(__file__).parent.parent / ".bobi" / "workflows" / "issue-lifecycle.yaml"
         if not wf_path.exists():
             pytest.skip("issue-lifecycle.yaml not in worktree")
         wf = load_workflow(wf_path)
@@ -580,7 +580,7 @@ class TestQAPhase:
         assert "qa_findings" in qa_step.handoff.optional
 
     def test_pickup_step_has_frontend_optional(self):
-        wf_path = Path(__file__).parent.parent / ".modastack" / "workflows" / "issue-lifecycle.yaml"
+        wf_path = Path(__file__).parent.parent / ".bobi" / "workflows" / "issue-lifecycle.yaml"
         if not wf_path.exists():
             pytest.skip("issue-lifecycle.yaml not in worktree")
         wf = load_workflow(wf_path)
@@ -590,7 +590,7 @@ class TestQAPhase:
         assert "has_frontend" in pickup.handoff.optional
 
     def test_qa_step_runs_after_pr(self):
-        wf_path = Path(__file__).parent.parent / ".modastack" / "workflows" / "issue-lifecycle.yaml"
+        wf_path = Path(__file__).parent.parent / ".bobi" / "workflows" / "issue-lifecycle.yaml"
         if not wf_path.exists():
             pytest.skip("issue-lifecycle.yaml not in worktree")
         wf = load_workflow(wf_path)
@@ -601,8 +601,8 @@ class TestQAPhase:
 
     def test_qa_workflow_with_frontend(self, tmp_path, monkeypatch):
         """Full workflow: frontend project runs QA step."""
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        sessions = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        sessions = tmp_path / "_repo" / ".bobi" / "sessions"
         sessions.mkdir(parents=True)
 
         original_init = FakeClient.__init__
@@ -640,8 +640,8 @@ class TestQAPhase:
 
     def test_qa_step_skipped_by_agent_for_backend(self, tmp_path, monkeypatch):
         """Backend project: QA step still runs but agent reports not_applicable."""
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        sessions = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        sessions = tmp_path / "_repo" / ".bobi" / "sessions"
         sessions.mkdir(parents=True)
 
         original_init = FakeClient.__init__
@@ -679,13 +679,13 @@ class TestQAPhase:
 
     def _mock_asyncio_run(self, workflow, **kwargs):
         cwd = kwargs.get("cwd", "/tmp")
-        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
-             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
-             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
-             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
-             patch("modastack.workflow.orchestrator.save_session_id"), \
-             patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -704,13 +704,13 @@ class TestQAPhase:
 class TestTryResumeForEvent:
     def test_returns_false_when_no_waiting_run(self, tmp_path, monkeypatch):
         runs_dir = tmp_path / "runs"
-        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
         assert try_resume_for_event("approval") is False
 
     def test_returns_false_when_workflow_not_found(self, tmp_path, monkeypatch):
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
-        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
 
         run = WorkflowRun.create("nonexistent-wf", {"data": {"run_key": "1"}})
         run.status = "waiting"
@@ -718,7 +718,7 @@ class TestTryResumeForEvent:
         run.run_key = "1"
         run.save()
 
-        with patch("modastack.workflow.triggers.WorkflowDispatcher") as mock_cls:
+        with patch("bobi.workflow.triggers.WorkflowDispatcher") as mock_cls:
             dispatcher = MagicMock()
             dispatcher.find_workflow.return_value = None
             mock_cls.return_value = dispatcher
@@ -729,7 +729,7 @@ class TestTryResumeForEvent:
     def test_resumes_waiting_workflow(self, tmp_path, monkeypatch):
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
-        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
 
         run = WorkflowRun.create("test-wf", {"data": {"run_key": "5"}})
         run.status = "waiting"
@@ -742,8 +742,8 @@ class TestTryResumeForEvent:
             StepDef(name="impl", prompt="build it"),
         ])
 
-        with patch("modastack.workflow.triggers.WorkflowDispatcher") as mock_cls, \
-             patch("modastack.workflow.orchestrator.resume_workflow") as mock_resume:
+        with patch("bobi.workflow.triggers.WorkflowDispatcher") as mock_cls, \
+             patch("bobi.workflow.orchestrator.resume_workflow") as mock_resume:
             dispatcher = MagicMock()
             dispatcher.find_workflow.return_value = fake_wf
             mock_cls.return_value = dispatcher
@@ -754,7 +754,7 @@ class TestTryResumeForEvent:
     def test_filters_by_run_key(self, tmp_path, monkeypatch):
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
-        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
 
         run = WorkflowRun.create("test-wf", {"data": {"run_key": "10"}})
         run.status = "waiting"
@@ -771,11 +771,11 @@ class TestTryResumeForEvent:
 
 class TestResumeWorkflowTimestamps:
     def test_resume_sets_started_at_on_run(self, tmp_path, monkeypatch):
-        (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
-        monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: runs_dir)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
 
         run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
         run.status = "waiting"
@@ -794,13 +794,13 @@ class TestResumeWorkflowTimestamps:
             StepDef(name="implement", prompt="build it"),
         ])
 
-        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
-             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
-             patch("modastack.workflow.orchestrator._setup_worktree", return_value="/tmp"), \
-             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
-             patch("modastack.workflow.orchestrator.save_session_id"), \
-             patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value="/tmp"), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -823,9 +823,9 @@ class TestResumeWorkflowTimestamps:
 
 class TestHandoffEdgeCases:
     def test_corrupted_yaml_returns_empty(self, tmp_path, monkeypatch):
-        sessions_dir = tmp_path / ".modastack" / "sessions"
+        sessions_dir = tmp_path / ".bobi" / "sessions"
         sessions_dir.mkdir(parents=True)
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
         session_dir = sessions_dir / "wf-test-corrupt"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text(": : : invalid yaml [[[")
@@ -833,9 +833,9 @@ class TestHandoffEdgeCases:
         assert result == {}
 
     def test_empty_file_returns_empty(self, tmp_path, monkeypatch):
-        sessions_dir = tmp_path / ".modastack" / "sessions"
+        sessions_dir = tmp_path / ".bobi" / "sessions"
         sessions_dir.mkdir(parents=True)
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
         session_dir = sessions_dir / "wf-test-empty"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("")

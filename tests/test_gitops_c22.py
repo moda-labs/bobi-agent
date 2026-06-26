@@ -1,5 +1,5 @@
 """C22 GitOps deploy/update automation (#342), refactored onto the
-`modastack deploy` primitive (DEPLOY_INTERFACE.md).
+`bobi deploy` primitive (DEPLOY_INTERFACE.md).
 
 Covers the fleet-state primitive (`scripts/fleet.sh`), the provisioner's
 identity stamps + ssh-push blank mode, and the structural invariants of the two
@@ -8,8 +8,8 @@ a stubbed `fleet_exists`, so no Fly calls); the workflows are parsed and
 asserted, so the load-bearing decisions break loudly if someone regresses them:
 
   * deploy-agent-teams is a THIN CLIENT — the reconcile business logic lives in
-    `modastack deploy` (idempotent provision-or-update), not the YAML;
-  * each instance is stamped MODASTACK_FLEET + MODASTACK_INSTANCE (the
+    `bobi deploy` (idempotent provision-or-update), not the YAML;
+  * each instance is stamped BOBI_FLEET + BOBI_INSTANCE (the
     SaaS-extensible fleet/tenant keys — the app name is only a hint);
   * --blank provisions a team-less instance whose entrypoint waits for an
     ssh-pushed team (the local-package delivery path);
@@ -91,17 +91,17 @@ def test_deploy_scripts_pass_shellcheck():
 def test_provisioner_stamps_fleet_and_defaults_from_app():
     text = PROVISION_SH.read_text()
     # The stamp goes into the [env] identity block read back for enumeration.
-    assert 'ENV_VARS["MODASTACK_FLEET"]="$FLEET"' in text
+    assert 'ENV_VARS["BOBI_FLEET"]="$FLEET"' in text
     # --fleet is a real option, and defaults to the app name's leading segment.
     assert "--fleet) FLEET=" in text
     assert 'FLEET="${APP%%-*}"' in text
 
 
 def test_provisioner_stamps_instance_and_defaults_from_slug():
-    """MODASTACK_INSTANCE — the per-instance/SaaS-tenant key `modastack deploy`
-    reads back to find an app for <name> (next to MODASTACK_FLEET)."""
+    """BOBI_INSTANCE — the per-instance/SaaS-tenant key `bobi deploy`
+    reads back to find an app for <name> (next to BOBI_FLEET)."""
     text = PROVISION_SH.read_text()
-    assert 'ENV_VARS["MODASTACK_INSTANCE"]="$INSTANCE"' in text
+    assert 'ENV_VARS["BOBI_INSTANCE"]="$INSTANCE"' in text
     assert "--instance) INSTANCE=" in text
     # Defaults to the app name minus the "<fleet>-" prefix (the slug).
     assert 'INSTANCE="${APP#"$FLEET"-}"' in text
@@ -109,7 +109,7 @@ def test_provisioner_stamps_instance_and_defaults_from_slug():
 
 def test_provisioner_supports_blank_ssh_push_mode():
     """--blank provisions with NO team source so the entrypoint waits for a
-    pushed team — the ssh-push delivery path `modastack deploy` uses for a
+    pushed team — the ssh-push delivery path `bobi deploy` uses for a
     local package."""
     text = PROVISION_SH.read_text()
     assert "--blank) BLANK=" in text
@@ -122,7 +122,7 @@ def test_entrypoint_waits_for_team_when_blank():
     pushed team instead of crashing (enables ssh-push)."""
     entry = (REPO / "docker" / "docker-entrypoint.sh").read_text()
     assert "waiting for" in entry.lower()
-    assert ".modastack/agent.yaml" in entry
+    assert ".bobi/agent.yaml" in entry
     # It must NOT fatal on the no-team branch any more.
     assert "nothing to install" not in entry
 
@@ -157,7 +157,7 @@ def test_workflows_parse_and_actionlint_clean():
     assert _load(WF_RELEASE)["name"]
 
 
-# --- deploy-agent-teams.yml invariants (thin client over `modastack deploy`) -------
+# --- deploy-agent-teams.yml invariants (thin client over `bobi deploy`) -------
 
 def test_teams_is_callable_and_not_release_triggered():
     """The reconcile is invoked by the release pipeline via workflow_call (so the
@@ -193,7 +193,7 @@ def test_release_pipeline_deploys_teams_after_the_fleet_roll():
 
 def test_teams_is_a_thin_client_no_business_logic_in_yaml():
     """The load-bearing refactor invariant: the reconcile business logic moved
-    OUT of the workflow into the `modastack deploy` primitive. The Action must
+    OUT of the workflow into the `bobi deploy` primitive. The Action must
     not call the provisioner or fleet.sh classify itself any more."""
     wf = _load(WF_TEAMS)
     all_scripts = "\n".join(_step_scripts(j) for j in _jobs(wf).values())
@@ -201,12 +201,12 @@ def test_teams_is_a_thin_client_no_business_logic_in_yaml():
     assert "fleet.sh classify" not in all_scripts
     # The deploy job drives the primitive instead.
     deploy_script = _step_scripts(_jobs(wf)["deploy"])
-    assert "modastack deploy" in deploy_script
+    assert "bobi deploy" in deploy_script
 
 
 def test_teams_deploy_binds_tenant_environment_and_per_key_secrets():
     """#385: one GitHub Environment per TENANT (not per deployment), and per-key
-    `<TEAM>__<KEY>` secrets filtered from toJSON(secrets) — no MODASTACK_ENV blob."""
+    `<TEAM>__<KEY>` secrets filtered from toJSON(secrets) — no BOBI_ENV blob."""
     deploy = _jobs(_load(WF_TEAMS))["deploy"]
     # bound to the deployment's tenant Environment (from the plan matrix)
     assert deploy["environment"] == "${{ matrix.entry.tenant }}"
@@ -214,15 +214,15 @@ def test_teams_deploy_binds_tenant_environment_and_per_key_secrets():
     # per-key interface: dump all secrets, filter by the <TEAM>__ prefix
     assert "toJSON(secrets)" in script
     assert "startswith($p)" in script
-    assert "MODASTACK_ENV" not in script   # the opaque blob is retired
+    assert "BOBI_ENV" not in script   # the opaque blob is retired
     assert "umask 077" in script
     assert "--env-file" in script
-    # installs the CLI so `modastack deploy` is available in CI
+    # installs the CLI so `bobi deploy` is available in CI
     assert "pip install" in script
 
 
 def test_teams_deploy_is_idempotent_no_added_vs_changed_split():
-    """`modastack deploy` is provision-or-update internally, so the workflow has
+    """`bobi deploy` is provision-or-update internally, so the workflow has
     a single deploy path — no separate provision/update jobs keyed on Fly state."""
     jobs = _jobs(_load(WF_TEAMS))
     assert "provision" not in jobs and "update" not in jobs
@@ -239,8 +239,8 @@ def test_teams_reconciles_active_set_and_skips_inactive():
 
 def test_teams_surfaces_orphans_for_human_destroy():
     orphans = _step_scripts(_jobs(_load(WF_TEAMS))["orphans"])
-    # surfaces unmanaged apps for a human `modastack destroy`, never auto-destroys
-    assert "modastack destroy" in orphans
+    # surfaces unmanaged apps for a human `bobi destroy`, never auto-destroys
+    assert "bobi destroy" in orphans
     assert "apps destroy" not in orphans and "destroy-instance.sh" not in orphans
 
 
@@ -285,12 +285,12 @@ def test_release_canary_is_built_from_the_wheel_and_smoked():
     # consumes the built wheel and builds the image in wheel mode
     assert "download-artifact" in _uses_blob(canary)
     script = _step_scripts(canary)
-    assert "MODASTACK_BUILD=wheel" in script
+    assert "BOBI_BUILD=wheel" in script
     # functional smoke with an abort-on-failure gate — the ask loop lives in
     # canary-smoke.sh (cold-boot-robust), invoked from the workflow.
     assert "scripts/canary-smoke.sh" in script
     smoke = CANARY_SMOKE_SH.read_text()
-    assert "modastack ask" in smoke and "CANARY-OK" in smoke
+    assert "bobi ask" in smoke and "CANARY-OK" in smoke
     assert "aborting release" in smoke
     # round-trips live config + resolves the built image digest (reused by roll-fleet)
     assert "config save" in script and "-c " in script and " -o " not in script
@@ -322,7 +322,7 @@ def test_release_reuses_canary_image_and_is_team_aware():
     assert "scripts/fleet.sh list" in script
     assert "--image" in script                       # generic: reuse the digest
     assert "render-team-deps.py" in script           # team-flavored detection
-    assert "TEAM_DEPS=" in script and "MODASTACK_BUILD=wheel" in script  # team rebuild from wheel
+    assert "TEAM_DEPS=" in script and "BOBI_BUILD=wheel" in script  # team rebuild from wheel
     assert "config save" in script and "-c " in script and " -o " not in script
 
 
@@ -360,14 +360,14 @@ def test_release_smokes_homebrew_bottle_urls_after_dispatch():
 
 
 def _run_homebrew_smoke(formula: str, tmp_path: Path) -> subprocess.CompletedProcess:
-    formula_path = tmp_path / "modastack.rb"
+    formula_path = tmp_path / "bobi.rb"
     formula_path.write_text(formula)
     env = {
         **os.environ,
-        "MODASTACK_HOMEBREW_FORMULA_FILE": str(formula_path),
-        "MODASTACK_HOMEBREW_SKIP_HEAD": "1",
-        "MODASTACK_HOMEBREW_SMOKE_ATTEMPTS": "1",
-        "MODASTACK_HOMEBREW_SMOKE_SLEEP": "0",
+        "BOBI_HOMEBREW_FORMULA_FILE": str(formula_path),
+        "BOBI_HOMEBREW_SKIP_HEAD": "1",
+        "BOBI_HOMEBREW_SMOKE_ATTEMPTS": "1",
+        "BOBI_HOMEBREW_SMOKE_SLEEP": "0",
     }
     return subprocess.run(
         [str(HOMEBREW_SMOKE_SH), "0.33.0"],
@@ -379,10 +379,10 @@ def _run_homebrew_smoke(formula: str, tmp_path: Path) -> subprocess.CompletedPro
 
 def test_homebrew_smoke_accepts_valid_bottle_formula(tmp_path):
     formula = """
-class Modastack < Formula
-  url "https://files.pythonhosted.org/packages/modastack-0.33.0.tar.gz"
+class Bobi < Formula
+  url "https://files.pythonhosted.org/packages/bobi-0.33.0.tar.gz"
   bottle do
-    root_url "https://github.com/moda-labs/homebrew-modastack/releases/download/modastack-0.33.0"
+    root_url "https://github.com/moda-labs/homebrew-bobi/releases/download/bobi-0.33.0"
     sha256 cellar: :any_skip_relocation, arm64_sequoia: "aaaaaaaa"
     sha256 cellar: :any_skip_relocation, arm64_sonoma: "bbbbbbbb"
   end
@@ -390,16 +390,16 @@ end
 """
     result = _run_homebrew_smoke(formula, tmp_path)
     assert result.returncode == 0, result.stderr
-    assert "modastack-0.33.0.arm64_sequoia.bottle.tar.gz" in result.stdout
-    assert "modastack-0.33.0.arm64_sonoma.bottle.tar.gz" in result.stdout
+    assert "bobi-0.33.0.arm64_sequoia.bottle.tar.gz" in result.stdout
+    assert "bobi-0.33.0.arm64_sonoma.bottle.tar.gz" in result.stdout
 
 
 def test_homebrew_smoke_rejects_current_version_malformed_root_url(tmp_path):
     formula = """
-class Modastack < Formula
-  url "https://files.pythonhosted.org/packages/modastack-0.33.0.tar.gz"
+class Bobi < Formula
+  url "https://files.pythonhosted.org/packages/bobi-0.33.0.tar.gz"
   bottle do
-    root_url "https://github.com/moda-labs/homebrew-modastack/releases/download/modastack-0.33.0.arm64_sequoia.bottle.tar"
+    root_url "https://github.com/moda-labs/homebrew-bobi/releases/download/bobi-0.33.0.arm64_sequoia.bottle.tar"
     sha256 cellar: :any_skip_relocation, arm64_sequoia: "aaaaaaaa"
   end
 end
@@ -411,8 +411,8 @@ end
 
 def test_homebrew_smoke_waits_for_incomplete_bottle_formula(tmp_path):
     formula = """
-class Modastack < Formula
-  url "https://files.pythonhosted.org/packages/modastack-0.33.0.tar.gz"
+class Bobi < Formula
+  url "https://files.pythonhosted.org/packages/bobi-0.33.0.tar.gz"
 end
 """
     result = _run_homebrew_smoke(formula, tmp_path)

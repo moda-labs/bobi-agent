@@ -8,23 +8,23 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
-from modastack.__version__ import __version__
-from modastack.cli import main
-from modastack.subagent import CheckResult
-from modastack import http as pooled
+from bobi.__version__ import __version__
+from bobi.cli import main
+from bobi.subagent import CheckResult
+from bobi import http as pooled
 
 
 def test_version_flag():
     runner = CliRunner()
     result = runner.invoke(main, ["--version"])
     assert result.exit_code == 0
-    assert "modastack" in result.output
+    assert "bobi" in result.output
     assert __version__ in result.output
 
 
 def _fresh_publish():
     """Clear the memoized event-server URL between tests."""
-    from modastack.events import publish
+    from bobi.events import publish
     publish._es_url_cache.clear()
     return publish
 
@@ -43,8 +43,8 @@ def test_post_event_posts_to_event_server():
     mock_client = httpx.Client(transport=transport)
 
     with patch.object(pooled, '_client', mock_client), \
-         patch("modastack.config.Config.load") as mock_pc, \
-         patch("modastack.config.load_bubble_state",
+         patch("bobi.config.Config.load") as mock_pc, \
+         patch("bobi.config.load_bubble_state",
                return_value={"bubble_id": "bub_t", "bubble_key": "bkey_t"}):
         mock_pc.return_value = type("PC", (), {"event_server_url": "https://events.test"})()
         ok = publish.post_event("monitor/deploy.down", {"summary": "down"},
@@ -70,8 +70,8 @@ def test_post_event_defaults_source_when_no_slash():
     mock_client = httpx.Client(transport=transport)
 
     with patch.object(pooled, '_client', mock_client), \
-         patch("modastack.config.Config.load") as mock_pc, \
-         patch("modastack.config.load_bubble_state",
+         patch("bobi.config.Config.load") as mock_pc, \
+         patch("bobi.config.load_bubble_state",
                return_value={"bubble_id": "bub_t", "bubble_key": "bkey_t"}):
         mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
         publish.post_event("deploy_down", {}, project_path=Path("/tmp/repo"))
@@ -90,54 +90,54 @@ def test_post_event_returns_false_on_connection_error():
     mock_client = httpx.Client(transport=transport)
 
     with patch.object(pooled, '_client', mock_client), \
-         patch("modastack.config.Config.load") as mock_pc, \
-         patch("modastack.config.load_bubble_state",
+         patch("bobi.config.Config.load") as mock_pc, \
+         patch("bobi.config.load_bubble_state",
                return_value={"bubble_id": "bub_t", "bubble_key": "bkey_t"}):
         mock_pc.return_value = type("PC", (), {"event_server_url": "http://localhost:8080"})()
         assert publish.post_event("monitor/x", {}, project_path=Path("/tmp/repo")) is False
 
 
-# --- modastack workflows list ------------------------------------------------
+# --- bobi workflows list ------------------------------------------------
 
 
-def test_workflow_list_shows_installed_workflows(modastack_install):
+def test_workflow_list_shows_installed_workflows(bobi_install):
     """Workflows resolve only from the installed pack, not from the framework."""
     runner = CliRunner()
-    with patch("modastack.cli._detect_project_root",
-               return_value=modastack_install.repo_path):
+    with patch("bobi.cli._detect_project_root",
+               return_value=bobi_install.repo_path):
         result = runner.invoke(main, ["workflows", "list"])
     assert result.exit_code == 0
-    # The modastack_install fixture installs an adhoc workflow in .modastack/workflows/
+    # The bobi_install fixture installs an adhoc workflow in .bobi/workflows/
     assert "adhoc" in result.output
 
 
 def test_workflow_list_empty_without_pack(tmp_path):
     """Without an installed pack, no workflows should resolve."""
     runner = CliRunner()
-    with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+    with patch("bobi.cli._detect_project_root", return_value=tmp_path):
         result = runner.invoke(main, ["workflows", "list"])
     assert result.exit_code == 0
     assert "No workflows loaded" in result.output
 
 
 def test_workflow_list_no_errors(tmp_path):
-    (tmp_path / ".modastack" / "workflows").mkdir(parents=True)
-    (tmp_path / ".modastack" / "agent.yaml").write_text("name: t\n")
+    (tmp_path / ".bobi" / "workflows").mkdir(parents=True)
+    (tmp_path / ".bobi" / "agent.yaml").write_text("name: t\n")
     runner = CliRunner()
-    with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+    with patch("bobi.cli._detect_project_root", return_value=tmp_path):
         result = runner.invoke(main, ["workflows", "list"])
     assert result.exit_code == 0
 
 
-# --- modastack agents (unified command) --------------------------------------
+# --- bobi agents (unified command) --------------------------------------
 
 
 class TestAgentCommand:
     def test_adhoc_workflow(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-42") as mock, \
-             patch("modastack.cli._detect_project_root", return_value=tmp_path), \
-             patch("modastack.prompts.resolver.validate_role", return_value=True):
+        with patch("bobi.subagent.launch_agent", return_value="wf-adhoc-42") as mock, \
+             patch("bobi.cli._detect_project_root", return_value=tmp_path), \
+             patch("bobi.prompts.resolver.validate_role", return_value=True):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "engineer",
                 "--task", "Fix #42",
@@ -151,9 +151,9 @@ class TestAgentCommand:
 
     def test_issue_lifecycle_workflow(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.subagent.launch_agent", return_value="wf-issue-lifecycle-42") as mock, \
-             patch("modastack.cli._detect_project_root", return_value=tmp_path), \
-             patch("modastack.prompts.resolver.validate_role", return_value=True):
+        with patch("bobi.subagent.launch_agent", return_value="wf-issue-lifecycle-42") as mock, \
+             patch("bobi.cli._detect_project_root", return_value=tmp_path), \
+             patch("bobi.prompts.resolver.validate_role", return_value=True):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "issue-lifecycle", "--role", "engineer",
                 "--task", "Work on #42",
@@ -169,14 +169,14 @@ class TestAgentCommand:
 
     def test_role_required(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, ["agents", "launch", "-w", "adhoc", "--task", "X"])
         assert result.exit_code != 0
         assert "--role" in result.output
 
     def test_invalid_role(self, tmp_path):
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "nonexistent",
                 "--task", "X",
@@ -187,8 +187,8 @@ class TestAgentCommand:
     def test_wait_mode_runs_check(self, tmp_path):
         runner = CliRunner()
         check = CheckResult(success=True, finding=False)
-        with patch("modastack.subagent.run_check_blocking", return_value=check), \
-             patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.subagent.run_check_blocking", return_value=check), \
+             patch("bobi.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "engineer",
                 "--wait", "--task", "Check prod URL",
@@ -198,20 +198,20 @@ class TestAgentCommand:
     def test_requires_repo(self):
         import click
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root",
-                   side_effect=click.UsageError("no Modastack installation found above /x")):
+        with patch("bobi.cli._detect_project_root",
+                   side_effect=click.UsageError("no Bobi installation found above /x")):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "engineer", "--task", "do a thing",
             ])
         assert result.exit_code != 0
-        assert "no modastack installation" in result.output.lower()
+        assert "no bobi installation" in result.output.lower()
 
     def test_passes_requested_by(self, tmp_path):
         runner = CliRunner()
         req = '{"from":"Alice","channel":"C1"}'
-        with patch("modastack.subagent.launch_agent", return_value="wf-adhoc-1") as mock, \
-             patch("modastack.cli._detect_project_root", return_value=tmp_path), \
-             patch("modastack.prompts.resolver.validate_role", return_value=True):
+        with patch("bobi.subagent.launch_agent", return_value="wf-adhoc-1") as mock, \
+             patch("bobi.cli._detect_project_root", return_value=tmp_path), \
+             patch("bobi.prompts.resolver.validate_role", return_value=True):
             result = runner.invoke(main, [
                 "agents", "launch", "-w", "adhoc", "--role", "engineer",
                 "--task", "Fix #1",
@@ -228,7 +228,7 @@ class TestMonitorEventSubscription:
     """Regression for #216: coordinator must subscribe to monitor events
     even when all event services use native adapters."""
 
-    def test_monitor_events_subscribed_from_registry(self, modastack_install):
+    def test_monitor_events_subscribed_from_registry(self, bobi_install):
         """Monitor events from defaults.yaml must appear in the subscribe list,
         regardless of adapter configuration.
 
@@ -236,16 +236,16 @@ class TestMonitorEventSubscription:
         passes the discovered topics to ``spawn_adhoc(subscribe=...)``, and the
         Session subscribes to ``inbox/<self>`` plus those on start.
         """
-        with patch("modastack.cli._manager_session_name", return_value="moda-director-repo"), \
-             patch("modastack.monitors.scheduler.MonitorScheduler"), \
-             patch("modastack.prompts.resolver.build_startup_prompt", return_value="go"), \
-             patch("modastack.subagent.spawn_adhoc") as mock_spawn, \
-             patch("modastack.events.subscriptions.discover_subscriptions",
+        with patch("bobi.cli._manager_session_name", return_value="moda-director-repo"), \
+             patch("bobi.monitors.scheduler.MonitorScheduler"), \
+             patch("bobi.prompts.resolver.build_startup_prompt", return_value="go"), \
+             patch("bobi.subagent.spawn_adhoc") as mock_spawn, \
+             patch("bobi.events.subscriptions.discover_subscriptions",
                    return_value=["github:o/r"]):
-            from modastack.config import Config
-            cfg = Config.load(modastack_install.repo_path)
-            from modastack.cli import _run_from_config
-            _run_from_config(modastack_install.repo_path, cfg)
+            from bobi.config import Config
+            cfg = Config.load(bobi_install.repo_path)
+            from bobi.cli import _run_from_config
+            _run_from_config(bobi_install.repo_path, cfg)
 
         mock_spawn.assert_called_once()
         subscribe = mock_spawn.call_args[1]["subscribe"]
@@ -254,14 +254,14 @@ class TestMonitorEventSubscription:
         )
 
 
-# --- modastack events (malformed line handling) --------------------------------
+# --- bobi events (malformed line handling) --------------------------------
 
 
 class TestEventsCommand:
     """The events command must not crash on malformed JSONL lines."""
 
     def test_skips_malformed_lines_in_events_jsonl(self, tmp_path):
-        state = tmp_path / ".modastack" / "state"
+        state = tmp_path / ".bobi" / "state"
         state.mkdir(parents=True)
         good = {"timestamp": "2026-01-01T00:00:00", "source": "github", "type": "push", "data": {}}
         # Write a good line, a corrupted line, and another good line
@@ -271,7 +271,7 @@ class TestEventsCommand:
             + json.dumps({**good, "type": "pr"}) + "\n"
         )
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, ["events"])
         assert result.exit_code == 0, result.output
         assert "push" in result.output
@@ -279,7 +279,7 @@ class TestEventsCommand:
         assert "1 malformed" in result.output
 
     def test_skips_malformed_lines_in_decisions_jsonl(self, tmp_path):
-        state = tmp_path / ".modastack" / "state"
+        state = tmp_path / ".bobi" / "state"
         state.mkdir(parents=True)
         good = {"timestamp": "2026-01-01T00:00:00", "actions": [{"type": "deploy"}], "reasoning": "ship it"}
         (state / "decisions.jsonl").write_text(
@@ -287,22 +287,22 @@ class TestEventsCommand:
             + "CORRUPTED\n"
         )
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, ["events"])
         assert result.exit_code == 0, result.output
         assert "deploy" in result.output
         assert "1 malformed" in result.output
 
     def test_reads_per_session_event_files(self, tmp_path):
-        """modastack events reads events-*.jsonl files and merges them."""
-        state = tmp_path / ".modastack" / "state"
+        """bobi events reads events-*.jsonl files and merges them."""
+        state = tmp_path / ".bobi" / "state"
         state.mkdir(parents=True)
         ev1 = {"timestamp": "2026-01-01T00:00:01", "source": "github", "type": "push", "seq": 1, "deployment_id": "d1"}
         ev2 = {"timestamp": "2026-01-01T00:00:02", "source": "github", "type": "pr", "seq": 2, "deployment_id": "d1"}
         (state / "events-sess-a.jsonl").write_text(json.dumps(ev1) + "\n")
         (state / "events-sess-b.jsonl").write_text(json.dumps(ev2) + "\n")
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, ["events"])
         assert result.exit_code == 0, result.output
         assert "push" in result.output
@@ -310,13 +310,13 @@ class TestEventsCommand:
 
     def test_deduplicates_events_by_seq_deployment(self, tmp_path):
         """Same (seq, deployment_id) from different session files is shown once."""
-        state = tmp_path / ".modastack" / "state"
+        state = tmp_path / ".bobi" / "state"
         state.mkdir(parents=True)
         ev = {"timestamp": "2026-01-01T00:00:01", "source": "github", "type": "push", "seq": 5, "deployment_id": "d1"}
         (state / "events-sess-a.jsonl").write_text(json.dumps(ev) + "\n")
         (state / "events-sess-b.jsonl").write_text(json.dumps(ev) + "\n")
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, ["events"])
         assert result.exit_code == 0, result.output
         # "push" should appear exactly once in the output
@@ -324,7 +324,7 @@ class TestEventsCommand:
 
     def test_inbox_event_renders_payload_text(self, tmp_path):
         """inbox/* events stored with 'payload' key surface their text."""
-        state = tmp_path / ".modastack" / "state"
+        state = tmp_path / ".bobi" / "state"
         state.mkdir(parents=True)
         ev = {
             "timestamp": "2026-01-01T00:00:01",
@@ -334,7 +334,7 @@ class TestEventsCommand:
         }
         (state / "events-sess-a.jsonl").write_text(json.dumps(ev) + "\n")
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, ["events"])
         assert result.exit_code == 0, result.output
         assert "inbox" in result.output
@@ -343,7 +343,7 @@ class TestEventsCommand:
 
     def test_payload_event_renders_text_without_sender(self, tmp_path):
         """Non-inbox events stored with 'payload' key render text detail."""
-        state = tmp_path / ".modastack" / "state"
+        state = tmp_path / ".bobi" / "state"
         state.mkdir(parents=True)
         ev = {
             "timestamp": "2026-01-01T00:00:01",
@@ -353,21 +353,21 @@ class TestEventsCommand:
         }
         (state / "events-sess-a.jsonl").write_text(json.dumps(ev) + "\n")
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, ["events"])
         assert result.exit_code == 0, result.output
         assert "pushed to main" in result.output
 
     def test_ignores_legacy_events_jsonl(self, tmp_path):
         """Legacy events.jsonl (without session prefix) is not read."""
-        state = tmp_path / ".modastack" / "state"
+        state = tmp_path / ".bobi" / "state"
         state.mkdir(parents=True)
         legacy = {"timestamp": "2026-01-01T00:00:01", "source": "github", "type": "legacy_push"}
         session = {"timestamp": "2026-01-01T00:00:02", "source": "github", "type": "new_pr", "seq": 1, "deployment_id": "d1"}
         (state / "events.jsonl").write_text(json.dumps(legacy) + "\n")
         (state / "events-sess-a.jsonl").write_text(json.dumps(session) + "\n")
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.cli._detect_project_root", return_value=tmp_path):
             result = runner.invoke(main, ["events"])
         assert result.exit_code == 0, result.output
         assert "legacy_push" not in result.output
@@ -385,7 +385,7 @@ class TestSetupCommand:
 
     def test_missing_claude_cli_fails_with_hint(self, tmp_path, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda name: None)
-        monkeypatch.setattr("modastack.sdk.get_cli_path",
+        monkeypatch.setattr("bobi.sdk.get_cli_path",
                             lambda: "/nonexistent/claude")
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
@@ -394,10 +394,10 @@ class TestSetupCommand:
         assert "Claude Code CLI" in result.output
 
     def test_interrupted_setup_requires_confirmation(self, tmp_path, monkeypatch):
-        from modastack.setup.state import SetupState, Stage
+        from bobi.setup.state import SetupState, Stage
 
         called = {}
-        monkeypatch.setattr("modastack.setup.run_setup",
+        monkeypatch.setattr("bobi.setup.run_setup",
                             lambda *a, **k: called.setdefault("ran", True) and 0)
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
@@ -420,7 +420,7 @@ class TestSetupCommand:
             seen.update(project=project_path, model=model, resume=resume)
             return 0
 
-        monkeypatch.setattr("modastack.setup.run_setup", fake_run_setup)
+        monkeypatch.setattr("bobi.setup.run_setup", fake_run_setup)
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
             result = runner.invoke(main, ["setup", "--model", "sonnet"])
@@ -431,11 +431,11 @@ class TestSetupCommand:
 
     def test_existing_install_requires_confirmation(self, tmp_path, monkeypatch):
         called = {}
-        monkeypatch.setattr("modastack.setup.run_setup",
+        monkeypatch.setattr("bobi.setup.run_setup",
                             lambda *a, **k: called.setdefault("ran", True) and 0)
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            dot = Path(".modastack")
+            dot = Path(".bobi")
             dot.mkdir()
             (dot / "agent.yaml").write_text("agent: eng-team\n")
             declined = runner.invoke(main, ["setup"], input="n\n")
@@ -446,10 +446,10 @@ class TestSetupCommand:
             assert called.get("ran") is True
 
     def test_resume_skips_confirmation(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.setup.run_setup", lambda *a, **k: 0)
+        monkeypatch.setattr("bobi.setup.run_setup", lambda *a, **k: 0)
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            dot = Path(".modastack")
+            dot = Path(".bobi")
             dot.mkdir()
             (dot / "agent.yaml").write_text("agent: eng-team\n")
             result = runner.invoke(main, ["setup", "--resume"])
@@ -460,21 +460,21 @@ class TestSetupCommand:
 
 
 class TestDiscoveryCommandsNoRoot:
-    """Commands that should work on a fresh install (no .modastack/agent.yaml)."""
+    """Commands that should work on a fresh install (no .bobi/agent.yaml)."""
 
     def _no_root(self):
         """Patch that makes root detection fail, simulating a fresh install."""
         from click import UsageError
         return patch(
-            "modastack.cli._detect_project_root",
-            side_effect=UsageError("No modastack installation found"),
+            "bobi.cli._detect_project_root",
+            side_effect=UsageError("No bobi installation found"),
         )
 
     def test_agents_browse_without_root(self):
         runner = CliRunner()
         fake_remote = [{"name": "eng-team", "version": "1.0", "description": "test"}]
         with self._no_root(), \
-             patch("modastack.registry.list_remote", return_value=fake_remote):
+             patch("bobi.registry.list_remote", return_value=fake_remote):
             result = runner.invoke(main, ["agents", "browse"])
         assert result.exit_code == 0, result.output
         assert "eng-team" in result.output
@@ -505,7 +505,7 @@ class TestDiscoveryCommandsNoRoot:
         assert result.exit_code != 0
 
 
-# --- modastack monitors add (weekly scheduling, #216 / MOD-216) ----------------
+# --- bobi monitors add (weekly scheduling, #216 / MOD-216) ----------------
 
 
 class TestMonitorAdd:
@@ -514,12 +514,12 @@ class TestMonitorAdd:
 
     def _add(self, tmp_path, args):
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+        with patch("bobi.cli._detect_project_root", return_value=tmp_path):
             return runner.invoke(main, ["monitors", "add", *args])
 
     def _written(self, tmp_path):
         import yaml
-        path = tmp_path / ".modastack" / "monitors.yaml"
+        path = tmp_path / ".bobi" / "monitors.yaml"
         return yaml.safe_load(path.read_text())["monitors"]
 
     def test_interval_monitor_still_works(self, tmp_path):

@@ -1,7 +1,7 @@
 # deployments/canary.yaml — the fleet's permanent pipeline canary.
 #
 # An always-on instance that revalidates the whole deploy path on every release:
-# the GitOps thin client → `modastack deploy` → the base image → the event
+# the GitOps thin client → `bobi deploy` → the base image → the event
 # server. It is the ONLY deployment in this repo — the production agent teams
 # moved to moda-labs/moda-agent-teams (the `moda` fleet), leaving this repo's
 # `ci` fleet as the release self-gate alone.
@@ -11,7 +11,7 @@
 # delivery mode (no SSH needed; a Fly deploy token suffices). The smoke team has
 # no `requires:` gate, so it DISPATCHES in the bare generic image. App: ci-canary
 # (fleet `ci` from defaults.yaml).
-team-url: https://github.com/moda-labs/modastack/releases/download/teams-latest/smoke-team.tar.gz
+team-url: https://github.com/moda-labs/bobi-agent-team/releases/download/teams-latest/smoke-team.tar.gz
 
 # Right-sized to keep an always-on canary cheap (~$6/mo vs ~$25 at the 4gb/2cpu
 # defaults). The smoke team uses no knowledge base, so the baked fastembed model
@@ -31,6 +31,6 @@ tenant: canary
 
 # Secrets: the `canary` GitHub Environment holds this instance's per-key secrets
 # (#385) — for this api_key-mode team, just CANARY__ANTHROPIC_API_KEY. The Action
-# filters them by the CANARY__ prefix into an --env-file for `modastack deploy`.
+# filters them by the CANARY__ prefix into an --env-file for `bobi deploy`.
 secrets:
   env: canary

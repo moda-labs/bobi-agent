@@ -1,4 +1,4 @@
-"""E2E: drive the modastack agent UI (`modastack ui`) in a real browser.
+"""E2E: drive the bobi agent UI (`bobi ui`) in a real browser.
 
 Like the setup e2e, but for the running-team dashboard: boots
 ``agentui.server.build_app`` in-process on a loopback port with a **fake
@@ -24,8 +24,8 @@ pytest.importorskip("playwright.sync_api")
 import uvicorn  # noqa: E402
 from playwright.sync_api import expect  # noqa: E402
 
-from modastack.agentui import server as ui_server  # noqa: E402
-from modastack.sdk import SessionEntry  # noqa: E402
+from bobi.agentui import server as ui_server  # noqa: E402
+from bobi.sdk import SessionEntry  # noqa: E402
 
 TOKEN = "e2e-token"
 # A reply that exercises the markdown renderer (bold, list, inline code).
@@ -34,7 +34,7 @@ REPLY = "Here's the plan:\n\n- **Triage** the issue\n- Add `tests`\n\nThen ship.
 
 def _entries():
     return [
-        SessionEntry(name="moda-manager-acme", role="manager",
+        SessionEntry(name="bobi-manager-acme", role="manager",
                      title="Coordinating the team", status="running",
                      model="claude-opus-4-8", total_cost_usd=0.5),
         SessionEntry(name="eng-1-impl", role="engineer",
@@ -53,7 +53,7 @@ def agent_ui(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     app = ui_server.build_app(project, token=TOKEN, registry_fn=_entries,
-                              deliver_fn=_deliver, manager_name="moda-manager-acme")
+                              deliver_fn=_deliver, manager_name="bobi-manager-acme")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -88,8 +88,8 @@ def agent_ui_url(agent_ui):
 def _open_manager(page, url):
     page.goto(url)
     expect(page.locator(".card")).to_have_count(2)
-    page.locator(".card", has_text="moda-manager-acme").click()
-    expect(page.locator("#chat-name")).to_have_text("moda-manager-acme")
+    page.locator(".card", has_text="bobi-manager-acme").click()
+    expect(page.locator("#chat-name")).to_have_text("bobi-manager-acme")
 
 
 # --- tests ---------------------------------------------------------------
@@ -99,7 +99,7 @@ def test_roster_lists_agents(page, agent_ui_url):
     expect(page.locator("#subtitle")).to_have_text("2 agents")
     expect(page.locator(".card")).to_have_count(2)
     # the manager card carries the MGR badge
-    mgr = page.locator(".card", has_text="moda-manager-acme")
+    mgr = page.locator(".card", has_text="bobi-manager-acme")
     expect(mgr.locator(".badge")).to_have_text("mgr")
     # before selecting anything, the main pane shows the placeholder
     expect(page.locator("#placeholder")).to_be_visible()
@@ -128,7 +128,7 @@ def test_history_persists_across_reload(page, agent_ui_url):
     # A full reload drops the browser's in-memory history; selecting the agent
     # must reload it from disk (webui-chat.jsonl).
     page.reload()
-    page.locator(".card", has_text="moda-manager-acme").click()
+    page.locator(".card", has_text="bobi-manager-acme").click()
     expect(page.locator(".msg")).to_have_count(2)
     expect(page.locator(".msg.user .body")).to_have_text("show me the plan")
     expect(page.locator(".msg.agent .body strong")).to_have_text("Triage")

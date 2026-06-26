@@ -12,8 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from modastack.sdk import SessionEntry
-from modastack.subagent import (
+from bobi.sdk import SessionEntry
+from bobi.subagent import (
     AgentResult,
     _build_prompt,
     _resolve_project_name,
@@ -36,7 +36,7 @@ class TestBuildPrompt:
         """_build_prompt reads handoffs via the session registry, which
         requires a bound root — don't depend on one leaking from tests
         that ran earlier."""
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
 
     def test_includes_phase_and_issue(self):
         prompt = _build_prompt("pickup", "AGD-12")
@@ -75,24 +75,24 @@ def _mock_registry(entries):
 
 class TestAgentLifecycle:
     def test_cancel_no_agent(self):
-        with patch("modastack.subagent.get_registry",
+        with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([])):
             assert not cancel_agent("AGD-99")
 
     def test_find_agent_none(self):
-        with patch("modastack.subagent.get_registry",
+        with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([])):
             assert find_agent("AGD-99") is None
 
     def test_list_agents_empty(self):
-        with patch("modastack.subagent.get_registry",
+        with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([])):
             assert list_agents() == []
 
     def test_find_agent_by_run_key(self):
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
                              phase="implement", status="running", pid=0)
-        with patch("modastack.subagent.get_registry",
+        with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([entry])):
             found = find_agent("AGD-12")
             assert found is not None
@@ -101,7 +101,7 @@ class TestAgentLifecycle:
     def test_find_agent_by_session_name(self):
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
                              phase="implement", status="running", pid=0)
-        with patch("modastack.subagent.get_registry",
+        with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([entry])):
             assert find_agent("agent-agd-12-implement") is entry
 
@@ -110,7 +110,7 @@ class TestAgentLifecycle:
                             phase="spec", status="done", pid=0)
         active = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
                               phase="implement", status="running", pid=0)
-        with patch("modastack.subagent.get_registry",
+        with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([done, active])):
             assert find_agent("AGD-12") is active
 
@@ -119,7 +119,7 @@ class TestAgentLifecycle:
                            status="running", pid=0)
         eng = SessionEntry(name="agent-1-implement", run_key="1",
                            phase="implement", status="running", pid=0)
-        with patch("modastack.subagent.get_registry",
+        with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([mgr, eng])):
             names = [a["name"] for a in list_agents()]
             assert names == ["agent-1-implement"]
@@ -128,7 +128,7 @@ class TestAgentLifecycle:
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
                              phase="implement", status="running", pid=0)
         registry = _mock_registry([entry])
-        with patch("modastack.subagent.get_registry", return_value=registry):
+        with patch("bobi.subagent.get_registry", return_value=registry):
             assert cancel_agent("AGD-12")
         registry.update.assert_called_once_with(
             "agent-agd-12-implement", status="cancelled", pid=0)
@@ -136,7 +136,7 @@ class TestAgentLifecycle:
     def test_cancel_done_agent_returns_false(self):
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
                              phase="implement", status="done", pid=0)
-        with patch("modastack.subagent.get_registry",
+        with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([entry])):
             assert not cancel_agent("AGD-12")
 
@@ -144,23 +144,23 @@ class TestAgentLifecycle:
 class TestLaunchDetached:
     """Test the shared _launch_detached helper."""
 
-    @patch("modastack.subagent.sp.Popen")
+    @patch("bobi.subagent.sp.Popen")
     def test_uses_start_new_session(self, mock_popen):
-        from modastack.subagent import _launch_detached
+        from bobi.subagent import _launch_detached
         _launch_detached("print('hi')", [], Path("/tmp/test.log"))
         _, kwargs = mock_popen.call_args
         assert kwargs.get("start_new_session") is True
 
-    @patch("modastack.subagent.sp.Popen")
+    @patch("bobi.subagent.sp.Popen")
     def test_creates_log_dir(self, mock_popen, tmp_path):
-        from modastack.subagent import _launch_detached
+        from bobi.subagent import _launch_detached
         log_file = tmp_path / "nested" / "dir" / "test.log"
         _launch_detached("print('hi')", [], log_file)
         assert log_file.parent.exists()
 
-    @patch("modastack.subagent.sp.Popen")
+    @patch("bobi.subagent.sp.Popen")
     def test_passes_args(self, mock_popen):
-        from modastack.subagent import _launch_detached
+        from bobi.subagent import _launch_detached
         _launch_detached("import sys; print(sys.argv)", ["a", "b"], Path("/tmp/t.log"))
         cmd = mock_popen.call_args[0][0]
         assert cmd[-2:] == ["a", "b"]
@@ -170,9 +170,9 @@ class TestCheckRequires:
     """Test the dispatch-time requires check with TTL cache."""
 
     def test_returns_pass_for_healthy_deps(self, tmp_path):
-        from modastack.subagent import check_requires, _requires_cache
+        from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
             "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n")
@@ -181,9 +181,9 @@ class TestCheckRequires:
         assert results[0][1] is True
 
     def test_returns_fail_for_broken_deps(self, tmp_path):
-        from modastack.subagent import check_requires, _requires_cache
+        from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
             "entry_point: x\nrequires:\n  - name: bad\n    check: 'false'\n")
@@ -192,9 +192,9 @@ class TestCheckRequires:
         assert results[0][1] is False
 
     def test_cache_hit_within_ttl(self, tmp_path):
-        from modastack.subagent import check_requires, _requires_cache
+        from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
             "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n")
@@ -208,9 +208,9 @@ class TestCheckRequires:
 
     def test_cache_expired(self, tmp_path):
         import time as _time
-        from modastack.subagent import check_requires, _requires_cache
+        from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
             "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n")
@@ -226,16 +226,16 @@ class TestCheckRequires:
         assert results[0][1] is False  # re-ran, got fresh fail
 
     def test_empty_requires(self, tmp_path):
-        from modastack.subagent import check_requires, _requires_cache
+        from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("entry_point: x\n")
         results = check_requires(tmp_path)
         assert results == []
 
     def test_no_config(self, tmp_path):
-        from modastack.subagent import check_requires, _requires_cache
+        from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
         results = check_requires(tmp_path)
         assert results == []
@@ -244,11 +244,11 @@ class TestCheckRequires:
 class TestAlertRequiresFailure:
     """Test the Slack alerting helper for failed requires checks."""
 
-    @patch("modastack.slack.post_slack_message")
+    @patch("bobi.slack.post_slack_message")
     def test_posts_to_slack(self, mock_post, tmp_path):
-        from modastack.config import RequiresEntry
-        from modastack.subagent import _alert_requires_failure
-        config_dir = tmp_path / ".modastack"
+        from bobi.config import RequiresEntry
+        from bobi.subagent import _alert_requires_failure
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
             "entry_point: x\nservices:\n  - name: slack\n    channels: [C123]\n"
@@ -260,11 +260,11 @@ class TestAlertRequiresFailure:
         args = mock_post.call_args
         assert "gstack" in args[0][2] or "gstack" in str(args)
 
-    @patch("modastack.slack.post_slack_message", side_effect=Exception("network error"))
+    @patch("bobi.slack.post_slack_message", side_effect=Exception("network error"))
     def test_slack_failure_does_not_crash(self, mock_post, tmp_path):
-        from modastack.config import RequiresEntry
-        from modastack.subagent import _alert_requires_failure
-        config_dir = tmp_path / ".modastack"
+        from bobi.config import RequiresEntry
+        from bobi.subagent import _alert_requires_failure
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
             "entry_point: x\nservices:\n  - name: slack\n    channels: [C123]\n"
@@ -275,9 +275,9 @@ class TestAlertRequiresFailure:
         _alert_requires_failure(tmp_path, failures)
 
     def test_no_slack_service_does_not_crash(self, tmp_path):
-        from modastack.config import RequiresEntry
-        from modastack.subagent import _alert_requires_failure
-        config_dir = tmp_path / ".modastack"
+        from bobi.config import RequiresEntry
+        from bobi.subagent import _alert_requires_failure
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("entry_point: x\n")
         failures = [(RequiresEntry(name="gstack", check="false",
@@ -293,57 +293,57 @@ class TestLaunchAgent:
     def bound_root(self, tmp_path, monkeypatch):
         """launch_agent reads the bound installation root; binding is the
         spawning process's job, so tests bind explicitly."""
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_returns_deterministic_name(self, mock_launch, mock_reg, mock_check):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         name = launch_agent(task="Fix issue #42", cwd="/tmp/test", workflow_name="adhoc", run_key="42")
         assert "adhoc" in name
         assert "42" in name
         mock_launch.assert_called_once()
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_subprocess_calls_entry(self, mock_launch, mock_reg, mock_check):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc")
         script = mock_launch.call_args[0][0]
         assert "_run_agent_entry" in script
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_rejects_active_run(self, mock_launch, mock_reg, mock_check):
         active = MagicMock()
         active.status = "running"
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=active))
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         with pytest.raises(RuntimeError, match="already active"):
             launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc")
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_allows_after_done(self, mock_launch, mock_reg, mock_check):
         done = MagicMock()
         done.status = "done"
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=done))
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         name = launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc")
         assert name  # no exception
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_passes_requested_by(self, mock_launch, mock_reg, mock_check):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         req = {"from": "Alice", "channel": "C1"}
         launch_agent(task="Fix #1", cwd="/tmp/test", workflow_name="adhoc", requested_by=req)
         args = mock_launch.call_args[0][1]
@@ -351,33 +351,33 @@ class TestLaunchAgent:
         parsed = json.loads(args[0])
         assert parsed["requested_by"] == req
 
-    @patch("modastack.subagent._alert_requires_failure")
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent._alert_requires_failure")
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_blocks_on_failed_requires(self, mock_launch, mock_reg, mock_alert, tmp_path):
-        from modastack.config import RequiresEntry
+        from bobi.config import RequiresEntry
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
         failed = [(RequiresEntry(name="gstack", check="false"), False, "check failed")]
-        with patch("modastack.subagent.check_requires", return_value=failed):
-            from modastack.subagent import launch_agent
+        with patch("bobi.subagent.check_requires", return_value=failed):
+            from bobi.subagent import launch_agent
             with pytest.raises(RuntimeError, match="dependency check failed"):
                 launch_agent(task="Fix #1", cwd=str(tmp_path), workflow_name="adhoc")
         mock_alert.assert_called_once()
         mock_launch.assert_not_called()
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_passes_installation_root_to_child(self, mock_launch, mock_reg,
                                                mock_check, tmp_path, monkeypatch):
         """The spawner's bound root travels in the args blob — the child
         inherits its identity instead of inferring it from cwd."""
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
         repo = tmp_path / "repos" / "jobtack"
         repo.mkdir(parents=True)
 
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         launch_agent(task="Fix #1", cwd=str(repo), workflow_name="adhoc")
 
         parsed = json.loads(mock_launch.call_args[0][1][0])
@@ -386,23 +386,23 @@ class TestLaunchAgent:
         # Preflight also runs against the root, not the working dir
         mock_check.assert_called_once_with(tmp_path)
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_project_lead_launch_passes_configured_codex_brain_to_child(
         self, mock_launch, mock_reg, mock_check, tmp_path, monkeypatch,
     ):
         """A codex-backed project lead must not inherit the default Claude brain."""
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
-        monkeypatch.setenv("MODASTACK_BRAIN", "claude")
-        config_dir = tmp_path / ".modastack"
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        monkeypatch.setenv("BOBI_BRAIN", "claude")
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
             "agent: eng-team\nbrain:\n  kind: codex\n"
         )
 
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         launch_agent(
             task="Lead #507",
             cwd=str(tmp_path),
@@ -411,21 +411,21 @@ class TestLaunchAgent:
         )
 
         child_env = mock_launch.call_args.kwargs["env"]
-        assert child_env["MODASTACK_BRAIN"] == "codex"
+        assert child_env["BOBI_BRAIN"] == "codex"
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_raises_when_spawner_unbound(self, mock_launch, mock_reg,
                                          mock_check, tmp_path, monkeypatch):
         """An unbound spawning process is a bug — no resolution from cwd,
         no guessing. It raises before anything is registered or launched."""
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        monkeypatch.setattr("modastack.paths._root", None)
+        monkeypatch.setattr("bobi.paths._root", None)
         repo = tmp_path / "repos" / "jobtack"
         repo.mkdir(parents=True)
 
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         with pytest.raises(RuntimeError, match="not bound"):
             launch_agent(task="Fix #1", cwd=str(repo), workflow_name="adhoc")
         mock_launch.assert_not_called()
@@ -434,17 +434,17 @@ class TestLaunchAgent:
 class TestRunAgentEntryRootBinding:
     """_run_agent_entry binds the root its spawner passed, never cwd."""
 
-    @patch("modastack.subagent.spawn_adhoc")
+    @patch("bobi.subagent.spawn_adhoc")
     def test_binds_passed_root(self, mock_spawn, tmp_path, monkeypatch):
-        import modastack.sdk as sdk
-        monkeypatch.setattr("modastack.paths._root", None)
+        import bobi.sdk as sdk
+        monkeypatch.setattr("bobi.paths._root", None)
         root = tmp_path / "dev"
         repo = root / "jobtack"
-        (root / ".modastack").mkdir(parents=True)
-        (root / ".modastack" / "agent.yaml").write_text("name: t\n")
+        (root / ".bobi").mkdir(parents=True)
+        (root / ".bobi" / "agent.yaml").write_text("name: t\n")
         repo.mkdir()
 
-        from modastack.subagent import _run_agent_entry
+        from bobi.subagent import _run_agent_entry
         _run_agent_entry({
             "task": "t", "cwd": str(repo), "root": str(root),
             "workflow_name": "adhoc", "persistent": True, "subscribe": [],
@@ -454,21 +454,21 @@ class TestRunAgentEntryRootBinding:
         # cwd stays the working dir for the spawned session
         assert mock_spawn.call_args.kwargs["cwd"] == str(repo)
 
-    @patch("modastack.subagent.spawn_adhoc")
+    @patch("bobi.subagent.spawn_adhoc")
     def test_sets_process_brain_from_passed_root(self, mock_spawn, tmp_path,
                                                 monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", None)
-        monkeypatch.setenv("MODASTACK_BRAIN", "claude")
+        monkeypatch.setattr("bobi.paths._root", None)
+        monkeypatch.setenv("BOBI_BRAIN", "claude")
         root = tmp_path / "dev"
         repo = root / "jobtack"
-        (root / ".modastack").mkdir(parents=True)
-        (root / ".modastack" / "agent.yaml").write_text(
+        (root / ".bobi").mkdir(parents=True)
+        (root / ".bobi" / "agent.yaml").write_text(
             "name: t\nbrain:\n  kind: codex\n"
         )
         repo.mkdir()
 
-        from modastack.brain import BRAIN_ENV
-        from modastack.subagent import _run_agent_entry
+        from bobi.brain import BRAIN_ENV
+        from bobi.subagent import _run_agent_entry
         _run_agent_entry({
             "task": "t", "cwd": str(repo), "root": str(root),
             "workflow_name": "adhoc", "persistent": True, "subscribe": [],
@@ -476,20 +476,20 @@ class TestRunAgentEntryRootBinding:
 
         assert os.environ[BRAIN_ENV] == "codex"
 
-    @patch("modastack.subagent.spawn_adhoc")
+    @patch("bobi.subagent.spawn_adhoc")
     def test_clears_stale_process_brain_when_passed_root_has_default_brain(
         self, mock_spawn, tmp_path, monkeypatch,
     ):
-        monkeypatch.setattr("modastack.paths._root", None)
-        monkeypatch.setenv("MODASTACK_BRAIN", "codex")
+        monkeypatch.setattr("bobi.paths._root", None)
+        monkeypatch.setenv("BOBI_BRAIN", "codex")
         root = tmp_path / "dev"
         repo = root / "jobtack"
-        (root / ".modastack").mkdir(parents=True)
-        (root / ".modastack" / "agent.yaml").write_text("name: t\n")
+        (root / ".bobi").mkdir(parents=True)
+        (root / ".bobi" / "agent.yaml").write_text("name: t\n")
         repo.mkdir()
 
-        from modastack.brain import BRAIN_ENV
-        from modastack.subagent import _run_agent_entry
+        from bobi.brain import BRAIN_ENV
+        from bobi.subagent import _run_agent_entry
         _run_agent_entry({
             "task": "t", "cwd": str(repo), "root": str(root),
             "workflow_name": "adhoc", "persistent": True, "subscribe": [],
@@ -497,16 +497,16 @@ class TestRunAgentEntryRootBinding:
 
         assert BRAIN_ENV not in os.environ
 
-    @patch("modastack.subagent.spawn_adhoc")
+    @patch("bobi.subagent.spawn_adhoc")
     def test_missing_root_is_a_spawner_bug(self, mock_spawn, tmp_path,
                                            monkeypatch):
         """An args blob without a root fails loudly — the child never
         guesses its identity from cwd."""
-        monkeypatch.setattr("modastack.paths._root", None)
+        monkeypatch.setattr("bobi.paths._root", None)
         repo = tmp_path / "dev" / "jobtack"
         repo.mkdir(parents=True)
 
-        from modastack.subagent import _run_agent_entry
+        from bobi.subagent import _run_agent_entry
         with pytest.raises(RuntimeError, match="missing 'root'|no 'root'"):
             _run_agent_entry({
                 "task": "t", "cwd": str(repo),
@@ -514,17 +514,17 @@ class TestRunAgentEntryRootBinding:
             })
         mock_spawn.assert_not_called()
 
-    @patch("modastack.subagent.spawn_adhoc")
+    @patch("bobi.subagent.spawn_adhoc")
     def test_rejects_root_without_marker(self, mock_spawn, tmp_path,
                                          monkeypatch):
         """A root that is not a real installation must be refused — binding
-        it would mkdir a fresh scattered .modastack at a bogus path."""
-        monkeypatch.setattr("modastack.paths._root", None)
+        it would mkdir a fresh scattered .bobi at a bogus path."""
+        monkeypatch.setattr("bobi.paths._root", None)
         bogus = tmp_path / "not-an-install"
         bogus.mkdir()
 
-        from modastack.subagent import _run_agent_entry
-        with pytest.raises(RuntimeError, match="not a Modastack installation"):
+        from bobi.subagent import _run_agent_entry
+        with pytest.raises(RuntimeError, match="not a Bobi installation"):
             _run_agent_entry({
                 "task": "t", "cwd": str(bogus), "root": str(bogus),
                 "workflow_name": "adhoc", "persistent": True, "subscribe": [],
@@ -536,37 +536,37 @@ class TestResolveSelfGitHubLogin:
     """The bot's own GitHub login backs the reactor self-author guard (#411)."""
 
     def _reset_cache(self):
-        import modastack.subagent as sub
+        import bobi.subagent as sub
         sub._self_github_login = None
         sub._self_github_login_resolved = False
 
-    @patch("modastack.subagent.sp.run")
+    @patch("bobi.subagent.sp.run")
     def test_resolves_login_from_gh(self, mock_run):
         self._reset_cache()
-        mock_run.return_value = MagicMock(returncode=0, stdout="modastack\n")
-        from modastack.subagent import _resolve_self_github_login
-        assert _resolve_self_github_login() == "modastack"
+        mock_run.return_value = MagicMock(returncode=0, stdout="bobi\n")
+        from bobi.subagent import _resolve_self_github_login
+        assert _resolve_self_github_login() == "bobi"
 
-    @patch("modastack.subagent.sp.run")
+    @patch("bobi.subagent.sp.run")
     def test_caches_result_across_calls(self, mock_run):
         self._reset_cache()
-        mock_run.return_value = MagicMock(returncode=0, stdout="modastack\n")
-        from modastack.subagent import _resolve_self_github_login
+        mock_run.return_value = MagicMock(returncode=0, stdout="bobi\n")
+        from bobi.subagent import _resolve_self_github_login
         _resolve_self_github_login()
         _resolve_self_github_login()
         mock_run.assert_called_once()  # cached, not re-shelled
 
-    @patch("modastack.subagent.sp.run")
+    @patch("bobi.subagent.sp.run")
     def test_fail_open_on_gh_error(self, mock_run):
         """gh missing/unauthenticated → None (guard stays off, fail open)."""
         self._reset_cache()
         mock_run.side_effect = OSError("gh not found")
-        from modastack.subagent import _resolve_self_github_login
+        from bobi.subagent import _resolve_self_github_login
         assert _resolve_self_github_login() is None
 
-    @patch("modastack.subagent.sp.run")
+    @patch("bobi.subagent.sp.run")
     def test_fail_open_on_nonzero_exit(self, mock_run):
         self._reset_cache()
         mock_run.return_value = MagicMock(returncode=1, stdout="")
-        from modastack.subagent import _resolve_self_github_login
+        from bobi.subagent import _resolve_self_github_login
         assert _resolve_self_github_login() is None

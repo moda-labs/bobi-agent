@@ -16,19 +16,19 @@ import yaml
 class TestWorkflowSchemaLoading:
     """Load workflow YAML into Workflow/StepDef dataclasses."""
 
-    def test_load_simple_workflow(self, modastack_env):
+    def test_load_simple_workflow(self, bobi_env):
         """adhoc.yaml from the fixture loads correctly."""
-        from modastack.workflow.schema import load_workflow
-        wf = load_workflow(modastack_env.workflows_dir / "adhoc.yaml")
+        from bobi.workflow.schema import load_workflow
+        wf = load_workflow(bobi_env.workflows_dir / "adhoc.yaml")
 
         assert wf.name == "adhoc"
         assert len(wf.steps) == 1
         assert wf.steps[0].name == "task"
 
-    def test_load_multi_step(self, modastack_env):
+    def test_load_multi_step(self, bobi_env):
         """two-step.yaml from the fixture has two steps with timeouts."""
-        from modastack.workflow.schema import load_workflow
-        wf = load_workflow(modastack_env.workflows_dir / "two-step.yaml")
+        from bobi.workflow.schema import load_workflow
+        wf = load_workflow(bobi_env.workflows_dir / "two-step.yaml")
 
         assert wf.name == "two-step"
         assert len(wf.steps) == 2
@@ -55,7 +55,7 @@ class TestWorkflowSchemaLoading:
                 prompt: "Build it"
         """))
 
-        from modastack.workflow.schema import load_workflow
+        from bobi.workflow.schema import load_workflow
         wf = load_workflow(wf_path)
 
         route = wf.step_by_name("route")
@@ -78,7 +78,7 @@ class TestWorkflowSchemaLoading:
                 prompt: "Merge it"
         """))
 
-        from modastack.workflow.schema import load_workflow
+        from bobi.workflow.schema import load_workflow
         wf = load_workflow(wf_path)
 
         await_step = wf.step_by_name("wait-review")
@@ -89,14 +89,14 @@ class TestVariableResolution:
     """VariableContext resolves ${{scope.key}} and conditions."""
 
     def test_scope_resolution(self):
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.variables import VariableContext
         ctx = VariableContext()
         ctx.set_scope("triage", {"complexity": "medium", "needs_spec": "true"})
 
         assert ctx.resolve("complexity=${{triage.complexity}}") == "complexity=medium"
 
     def test_pipe_filter(self):
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.variables import VariableContext
         ctx = VariableContext()
         ctx.set_scope("input", {"name": "MyProject"})
 
@@ -104,7 +104,7 @@ class TestVariableResolution:
         assert ctx.resolve("${{input.name | upper}}") == "MYPROJECT"
 
     def test_condition_evaluation(self):
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.variables import VariableContext
         ctx = VariableContext()
         ctx.set_scope("triage", {"complexity": "large"})
         ctx.set_flat("complexity", "large")
@@ -113,7 +113,7 @@ class TestVariableResolution:
         assert ctx.evaluate_condition("complexity == 'small'") is False
 
     def test_boolean_operators(self):
-        from modastack.workflow.variables import VariableContext
+        from bobi.workflow.variables import VariableContext
         ctx = VariableContext()
         ctx.set_flat("a", "true")
         ctx.set_flat("b", "false")
@@ -126,8 +126,8 @@ class TestVariableResolution:
 class TestWorkflowRunState:
     """WorkflowRun state persistence and queries."""
 
-    def test_create_and_save(self, modastack_env):
-        from modastack.workflow.state import WorkflowRun
+    def test_create_and_save(self, bobi_env):
+        from bobi.workflow.state import WorkflowRun
 
         run = WorkflowRun.create("test-wf", {"type": "test", "data": {"run_key": "X-1"}})
         run.save()
@@ -136,8 +136,8 @@ class TestWorkflowRunState:
         assert loaded.workflow_name == "test-wf"
         assert loaded.status == "running"
 
-    def test_find_waiting(self, modastack_env):
-        from modastack.workflow.state import WorkflowRun
+    def test_find_waiting(self, bobi_env):
+        from bobi.workflow.state import WorkflowRun
 
         run = WorkflowRun.create("await-wf", {"type": "test", "data": {"run_key": "Y-2"}})
         run.status = "waiting"
@@ -148,12 +148,12 @@ class TestWorkflowRunState:
         assert found is not None
         assert found.run_id == run.run_id
 
-    def test_find_waiting_no_match(self, modastack_env):
-        from modastack.workflow.state import WorkflowRun
+    def test_find_waiting_no_match(self, bobi_env):
+        from bobi.workflow.state import WorkflowRun
         assert WorkflowRun.find_waiting("nonexistent.event") is None
 
-    def test_list_runs(self, modastack_env):
-        from modastack.workflow.state import WorkflowRun
+    def test_list_runs(self, bobi_env):
+        from bobi.workflow.state import WorkflowRun
 
         run = WorkflowRun.create("list-wf", {"type": "test", "data": {}})
         run.save()
@@ -161,9 +161,9 @@ class TestWorkflowRunState:
         runs = WorkflowRun.list_runs()
         assert any(r.run_id == run.run_id for r in runs)
 
-    def test_claim_atomicity(self, modastack_env):
+    def test_claim_atomicity(self, bobi_env):
         """Only one caller can claim a run for resume."""
-        from modastack.workflow.state import WorkflowRun
+        from bobi.workflow.state import WorkflowRun
 
         run = WorkflowRun.create("claim-wf", {"type": "test", "data": {}})
         run.status = "waiting"
@@ -180,7 +180,7 @@ class TestWorkflowStepHelpers:
     """Workflow navigation helpers."""
 
     def test_step_by_name(self):
-        from modastack.workflow.schema import Workflow, StepDef
+        from bobi.workflow.schema import Workflow, StepDef
         wf = Workflow(
             name="test",
             steps=[
@@ -192,7 +192,7 @@ class TestWorkflowStepHelpers:
         assert wf.step_by_name("c") is None
 
     def test_step_index(self):
-        from modastack.workflow.schema import Workflow, StepDef
+        from bobi.workflow.schema import Workflow, StepDef
         wf = Workflow(
             name="test",
             steps=[

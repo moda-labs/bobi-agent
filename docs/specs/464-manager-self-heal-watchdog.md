@@ -1,12 +1,12 @@
 # Spec — #464: Manager self-heal watchdog (restart a wedged director, defense-in-depth)
 
-- **Issue:** [#464](https://github.com/moda-labs/modastack/issues/464)
+- **Issue:** [#464](https://github.com/moda-labs/bobi-agent-team/issues/464)
 - **Status:** Draft — awaiting Zach's approval on this PR. **No implementation lands until approved.**
 - **Complexity:** Medium/High (infra; spec-first because the restart-authority and stall-signal design questions are open).
 - **Build-vs-adopt:** **Build** — there is no off-the-shelf supervisor that understands our `last_activity`/turn-state semantics. The watchdog is ~150 lines on top of the existing health endpoint; the restart authority is the container init we already run under.
 
 This spec is a superset of the issue body and of Zach's R5 review of #460
-(comment [4785980738](https://github.com/moda-labs/modastack/pull/460#issuecomment-4785980738),
+(comment [4785980738](https://github.com/moda-labs/bobi-agent-team/pull/460#issuecomment-4785980738),
 item #4, "Manager self-heal watchdog"), which raised this as an explicit
 separate follow-up. It cross-references the #456 spec
 (`docs/specs/456-policy-curator.md`, *Out of scope* and *Related*), which
@@ -71,7 +71,7 @@ healthy idle director** the moment the team goes quiet for T. That is the
 trap, and it is why this needs a spec rather than a one-liner.
 
 **The discriminator already exists in the session status machine** (verified in
-`modastack/session.py`):
+`bobi/session.py`):
 
 - `_drain_turn()` sets `status="running"` on entry (`:249`) and only flips to
   `status="idle"` when a `ResultMessage` arrives (`:299`).
@@ -102,15 +102,15 @@ rotation reconnect).
 The issue requires "a layer below the application that restarts a wedged
 manager regardless of why it wedged." Today the container `exec`s the manager
 directly as PID 1 (`docker/docker-entrypoint.sh:158`:
-`exec gosu … modastack start --foreground "$@"`), so **nothing in-container
+`exec gosu … bobi start --foreground "$@"`), so **nothing in-container
 parents the manager** — only Fly's machine-level init does, and Fly only acts
 on process death, not on a live-but-wedged process.
 
-**Recommended (D1 = A): a thin supervisor parent — `modastack supervise`.**
-The entrypoint execs `modastack supervise -- --foreground "$@"` instead of
-`modastack start`. The supervisor:
+**Recommended (D1 = A): a thin supervisor parent — `bobi supervise`.**
+The entrypoint execs `bobi supervise -- --foreground "$@"` instead of
+`bobi start`. The supervisor:
 
-1. Spawns `modastack start --foreground …` as a **child process**.
+1. Spawns `bobi start --foreground …` as a **child process**.
 2. Runs the watchdog **loop in the supervisor process itself** — the supervisor
    never runs the agent event loop, so it *cannot* wedge from the same cause.
 3. On a confirmed wedge → terminates the manager child (`SIGTERM`, grace,
@@ -216,8 +216,8 @@ Behavior:
 
 ```
 Fly Machines init (machine restart policy)        ← outermost backstop
-  └─ modastack supervise (NEW: watchdog)          ← restarts the DIRECTOR
-       └─ modastack start (manager process)
+  └─ bobi supervise (NEW: watchdog)          ← restarts the DIRECTOR
+       └─ bobi start (manager process)
             └─ director session (claude subprocess)
                  └─ stall-recovery (director→ENGINEER)   ← restarts engineers
 ```
@@ -274,7 +274,7 @@ today. Flag for Zach if he wants it in v1.
 > *"Do we need protection against crash restart loops? Or is it because the
 > length is long enough (10+ minutes) crash restarting is acceptable? … If we
 > do detect crash/restart, it's not clear what we would do about it."* — R1
-> review, [comment 4792397284](https://github.com/moda-labs/modastack/pull/476#issuecomment-4792397284)
+> review, [comment 4792397284](https://github.com/moda-labs/bobi-agent-team/pull/476#issuecomment-4792397284)
 
 Good catch — these are **two distinct restart paths**, and only one of them is
 gated by the 10-minute stall threshold. The 10-min length makes a *wedge* loop
@@ -336,10 +336,10 @@ restarting into the same wall.
 
 ## Open decisions (recommendations inline — for Zach)
 
-- **D1 — Restart authority.** **(A) `modastack supervise` parent (recommended)**
+- **D1 — Restart authority.** **(A) `bobi supervise` parent (recommended)**
   vs (B) daemon-thread watchdog inside the manager vs (C) healthcheck-only.
   Rec A: genuinely below the app, locally testable, clean restart-to-addressable.
-- **D2 — Config surface.** Env vars (recommended, matches `MODASTACK_*`
+- **D2 — Config surface.** Env vars (recommended, matches `BOBI_*`
   entrypoint knobs) vs `agent.yaml` block vs both. Rec: env vars with
   documented defaults; no per-team config needed for v1.
 - **D3 — Threshold value.** `600s` stall / `30s` poll / `2` confirm
@@ -382,13 +382,13 @@ restarting into the same wall.
 - Additive `manager` block (`session`, `status`, `last_activity`,
   `idle_seconds`) in the `/health` payload; thread the manager session name in
   from `cli.py`.
-- New `modastack/watchdog.py` + `modastack supervise` CLI command: spawn-manage
+- New `bobi/watchdog.py` + `bobi supervise` CLI command: spawn-manage
   the manager child, poll health, apply the active-state+stall discriminator,
   bounded restart with backoff and loud logging, SIGTERM propagation, non-zero
   exit on budget exhaustion. Includes **crash-loop containment** (§6): the
   crash-relaunch path shares the bounded budget + backoff and uses
   `WATCHDOG_MIN_HEALTHY_UPTIME` fast-crash classification.
-- Entrypoint switch: `exec … modastack supervise -- --foreground "$@"`.
+- Entrypoint switch: `exec … bobi supervise -- --foreground "$@"`.
 - Tests: the acceptance integration test + unit tests for the discriminator,
   the bounded-retry/backoff state machine, and the payload.
 - Docs: a short section in `DESIGN.md`/`CLAUDE.md` on the recovery layering.
@@ -402,14 +402,14 @@ restarting into the same wall.
 - **No** restart of arbitrary non-director sessions — engineers stay with
   stall-recovery.
 - **No** distributed/multi-machine coordination — one supervisor per container.
-- **No** `VERSION`/`CHANGELOG.md` bump in this PR (modastack release policy —
+- **No** `VERSION`/`CHANGELOG.md` bump in this PR (bobi release policy —
   versioning happens at release time only).
 
 ---
 
 ## Technical Approach
 
-### A. Health payload (`modastack/manager_health.py`, `modastack/cli.py`)
+### A. Health payload (`bobi/manager_health.py`, `bobi/cli.py`)
 
 1. `manager_health.start(state_dir, project_name, manager_session=None,
    session_status_fn=None)` — accept the entry-point session name. `cli.py`
@@ -421,10 +421,10 @@ restarting into the same wall.
    (pre-spawn window → `status:"starting"`, `idle_seconds:0`).
 3. Keep `sessions` unchanged for backward compatibility.
 
-### B. Watchdog / supervisor (`modastack/watchdog.py`, `modastack/cli.py`)
+### B. Watchdog / supervisor (`bobi/watchdog.py`, `bobi/cli.py`)
 
-1. `modastack supervise -- <start-args>`: `subprocess.Popen` the manager
-   (`modastack start <start-args>`), inheriting stdio (logs flow straight to the
+1. `bobi supervise -- <start-args>`: `subprocess.Popen` the manager
+   (`bobi start <start-args>`), inheriting stdio (logs flow straight to the
    container log). The forwarded args **must** include `--foreground` (the
    entrypoint already passes it) so the manager stays a supervisable child and
    does **not** daemonize out from under the supervisor.
@@ -453,7 +453,7 @@ restarting into the same wall.
 ### C. Entrypoint (`docker/docker-entrypoint.sh`)
 
 Change the final `exec` to launch the supervisor as PID 1:
-`exec gosu … modastack supervise -- --foreground "$@"`. Health/`healthcheck.sh`
+`exec gosu … bobi supervise -- --foreground "$@"`. Health/`healthcheck.sh`
 unaffected (still reads the port file, written by the manager child).
 
 ---
@@ -465,7 +465,7 @@ unaffected (still reads the port file, written by the manager child).
 `tests/test_watchdog_restart.py` — **real processes, no MagicMock** (the #454
 lesson, reinforced by Zach's R5):
 
-1. Start `modastack supervise` against a **stub manager** — a tiny real process
+1. Start `bobi supervise` against a **stub manager** — a tiny real process
    that starts the health server (`manager_health.start`) and registers an
    entry-point session whose `last_activity` is **frozen** while
    `status="running"` (simulating a wedge inside a turn).
@@ -510,7 +510,7 @@ lesson, reinforced by Zach's R5):
    tests 4, 7.
 3. **Supervisor process management** (spawn/term/relaunch/backoff/exit) +
    unit test 5.
-4. **`modastack supervise` CLI** wiring.
+4. **`bobi supervise` CLI** wiring.
 5. **Acceptance + negative integration tests** (§Verification 1–3).
 6. **Entrypoint switch** (§C) + a smoke check that the container still boots and
    `healthcheck.sh` passes.
@@ -527,7 +527,7 @@ Gate: **no implementation until Zach's formal approval on this PR.**
   in its *Out of scope* / *Related* sections. This spec is the deferred
   follow-up; the two compose (bound-the-known + backstop-the-unknown).
 - **Zach's R5 review of #460**, comment
-  [4785980738](https://github.com/moda-labs/modastack/pull/460#issuecomment-4785980738),
+  [4785980738](https://github.com/moda-labs/bobi-agent-team/pull/460#issuecomment-4785980738),
   item #4 — origin of this ticket as a separate defense-in-depth follow-up.
 - **#454** — rotation metric over-count (mechanism #1); orthogonal.
 - **#443** (`session.py:393`) — turn-level API-error clearing; orthogonal to the

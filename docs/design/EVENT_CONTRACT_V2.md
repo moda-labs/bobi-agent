@@ -41,11 +41,11 @@ hardcoding the three launch services (github/slack/linear) and one agent team's
 role vocabulary (engineer) into framework code.
 
 ### Finding 1 — Service config is hardcoded (#164)
-- `modastack/config.py`: `Config` has first-class fields `slack_bot_token`,
+- `bobi/config.py`: `Config` has first-class fields `slack_bot_token`,
   `linear_api_key`, `venn_api_key`; `native_services` is the literal list
   `["github", "slack", "linear"]`.
-- `modastack/validate.py`: per-service if/elif credential checks.
-- `modastack/events/subscriptions.py:_resolve_source`: if/elif over the same
+- `bobi/validate.py`: per-service if/elif credential checks.
+- `bobi/events/subscriptions.py:_resolve_source`: if/elif over the same
   three names for auto-detection.
 - `event-server/src/core.ts`: `NormalizedEvent` carries one optional field per
   service (`repo`, `team_key`, `workspace`, `channel`, `installation_id`);
@@ -168,7 +168,7 @@ on its own judgment with rationale for veto.
 1. **No framework opinions.** The whole point. If the design names github/
    slack/linear/engineer anywhere in framework code, it has failed. Service and
    role specifics live in agent-team config, prompts, tool guides, and
-   normalizers/detectors — never in `modastack/` or the event-server routing.
+   normalizers/detectors — never in `bobi/` or the event-server routing.
 2. **Two runtimes stay in sync.** The event server is now unified behind
    `core.ts` handlers over a `StorageAdapter` (shipped in #169). The envelope
    and routing-key logic live in `core.ts`; the Python client mirrors envelope
@@ -177,7 +177,7 @@ on its own judgment with rationale for veto.
    (`events/client.py`, `events/subscriptions.py`). Don't let them drift — that
    was the #163/#166 lesson.
 3. **Migration is breaking — plan it explicitly.** Installed teams have
-   `.modastack/agent.yaml` (services, credentials, subscribe lists) and
+   `.bobi/agent.yaml` (services, credentials, subscribe lists) and
    workflow YAML that reference the current contract. The reference team
    (`agents/eng-team` or `software_team`) and the dogfood team
    (`dogfood-content-review`) must both migrate as part of the change, and the dogfood
@@ -213,15 +213,15 @@ cleaner than the issues were written against.
 1. `event-server/src/core.ts` — `NormalizedEvent`, the normalizers,
    `subscriptionKeysForEvent`, and the unified handlers. The envelope contract
    lives here.
-2. `modastack/events/subscriptions.py` — `discover_subscriptions` +
+2. `bobi/events/subscriptions.py` — `discover_subscriptions` +
    `_resolve_source`; the Python mirror of routing-key construction.
-3. `modastack/events/client.py` — `format_event_for_manager` (Finding 4) and
+3. `bobi/events/client.py` — `format_event_for_manager` (Finding 4) and
    envelope reading.
-4. `modastack/config.py` — `Config`, `native_services`, service parsing
+4. `bobi/config.py` — `Config`, `native_services`, service parsing
    (Finding 1).
-5. `modastack/subagent.py` — `_session_name`, `_parse_issue_number`,
+5. `bobi/subagent.py` — `_session_name`, `_parse_issue_number`,
    `_emit_session_*`, `PHASE_TIMEOUT`/role strings (Finding 2).
-6. `modastack/events/drain.py` — the Slack special case (Finding 3).
+6. `bobi/events/drain.py` — the Slack special case (Finding 3).
 7. A current installed `agent.yaml` (e.g. `dogfood-content-review`) — to see
    what teams actually declare today, which constrains the migration.
 
@@ -428,7 +428,7 @@ github/slack/linear normalizers move out of `core.ts` into
 `adapters/{github,slack,linear}.ts`. Webhook routes resolve their adapter by
 name.
 
-**Python side (`modastack/events/adapters.py`):** a registry keyed by
+**Python side (`bobi/events/adapters.py`):** a registry keyed by
 service name; each entry provides
 `detect(project_path, cfg) -> list[str]` (subscription keys). The current
 `_detect_github/_detect_slack/_detect_linear` bodies move here unchanged;
@@ -495,7 +495,7 @@ shell out (`gh`, tool guides) as designed.
 **Strategy: hard cutover. No shims.** (Decided with the user 2026-06-10 —
 the soft-cutover draft was defending constituencies that don't exist. There
 are no external installs; every consumer of the contract is a deployment we
-control: the prod EC2 director, modastack-dogfood, and local dev. Each
+control: the prod EC2 director, bobi-dogfood, and local dev. Each
 proposed shim only protected a deploy-ordering window we can close by
 runbook, so the complexity bought nothing.)
 
@@ -505,7 +505,7 @@ What ships, with no compatibility layer:
   field stays — it's one line, and it makes the *next* contract change
   debuggable.
 - Loader reads only the `services:` + `credentials:` format. Legacy
-  `slack:`/`linear:` blocks are simply unknown keys; `modastack install`
+  `slack:`/`linear:` blocks are simply unknown keys; `bobi install`
   regenerates agent.yaml.
 - State readers read only `run_key`. In-flight workflow runs and session
   state from v1 are discarded by the `--fresh` re-install (accepted: at
@@ -522,7 +522,7 @@ Reference migrations (in the same change):
 2. `agents/market-research` (this repo, about to merge) — same treatment;
    coordinate with that branch so it lands already on v2 or migrates
    immediately after.
-3. `dogfood-content-review` — **decided 2026-06-10: the modastack-dogfood repo is
+3. `dogfood-content-review` — **decided 2026-06-10: the bobi-dogfood repo is
    retired.** Isolated per-project installs make a standing dogfood repo
    unnecessary: the pack moves into `agents/dogfood-content-review/` in this repo
    and the battery installs it into throwaway temp projects instead
@@ -531,11 +531,11 @@ Reference migrations (in the same change):
    round-trip, webhook→manager pipeline) must pass.
 
 Cutover runbook (per deployment, prod EC2 + dogfood):
-1. `modastack stop`
+1. `bobi stop`
 2. Deploy the v2 event server (worker / local)
-3. Upgrade the CLI (`uv tool upgrade modastack` / pull + reinstall)
-4. `modastack install <team>` (regenerates `.modastack/` config) +
-   `modastack start --fresh`
+3. Upgrade the CLI (`uv tool upgrade bobi` / pull + reinstall)
+4. `bobi install <team>` (regenerates `.bobi/` config) +
+   `bobi start --fresh`
 
 The only degradation window is between steps 2 and 4 *if a deployment is
 left running against a v2 server*: old clients still receive and route
@@ -575,15 +575,15 @@ The three coding tickets touch **disjoint file-sets**:
   monitor `role:`, session naming, in `subagent.py` / `orchestrator.py` /
   `state.py` / `monitors/` / `cli.py`.
   *Gate:* unit + integration.
-- **D (#180). chore: absorb dogfood-content-review + retire modastack-dogfood** —
+- **D (#180). chore: absorb dogfood-content-review + retire bobi-dogfood** —
   (decided 2026-06-10: isolated per-project installs make a standing
   dogfood repo unnecessary). Move `agents/dogfood-content-review/` from
-  modastack-dogfood into this repo's `agents/` (+ `registry.yaml`);
+  bobi-dogfood into this repo's `agents/` (+ `registry.yaml`);
   migrate it to v2 in the same diff; re-point its `context.content_dirs`
   (guides/runbooks/research) at in-repo fixture content; rewrite the
   `/dogfood` command to install the pack from the local path into a
   throwaway temp project instead of cloning the dogfood repo; archive
-  moda-labs/modastack-dogfood.
+  moda-labs/bobi-dogfood.
   Scoping notes (2026-06-10): the pack is nearly v2-shaped already (no
   legacy `slack:`/`linear:` credential blocks; zero
   `issue_id`/`engineer/*`/`await` references), so the migration itself is
@@ -598,14 +598,14 @@ The three coding tickets touch **disjoint file-sets**:
   proven.
   **Open question (settle at filing):** the webhook→manager pipeline test
   needs a real GitHub repo with webhooks pointed at the event server —
-  the role modastack-dogfood's remote plays today. Either point webhooks
-  at the modastack repo itself (labeled test-noise issues land on the
+  the role bobi-dogfood's remote plays today. Either point webhooks
+  at the bobi repo itself (labeled test-noise issues land on the
   framework repo) or keep one minimal repo alive purely as a webhook
   sink.
   *Gate:* dogfood battery green against a v2 framework build, running
   from the in-repo pack.
 - **E (#181). cutover (ops checklist, not a dispatch)** — market-research branch
-  coordination, prod runbook per §6, archive modastack-dogfood once D's
+  coordination, prod runbook per §6, archive bobi-dogfood once D's
   battery is green.
   *Gate:* dogfood battery green on the upgraded prod install.
 

@@ -21,7 +21,7 @@ closed" list. These are what you'll reconcile.
 ## Phase 2 — Gather live GitHub state
 
 ```bash
-cd ~/dev/modastack
+cd ~/dev/bobi
 # Open issues (the authoritative set the doc must match)
 gh issue list --state open --limit 200 \
   --json number,title,labels,assignees,updatedAt \
@@ -45,12 +45,12 @@ Linear is **not** in my Venn connection — query its GraphQL API directly with 
 key in `.env`. **Gotchas (learned the hard way):**
 - Use **`curl`**, not Python `urllib` — urllib fails with `CERTIFICATE_VERIFY_FAILED` on this Mac.
 - **Don't** inline an f-string in a `bash -c` python heredoc (line-continuation/escaping breaks). Write the parser to a temp file, then run it.
-- Team keys: **`MDS`** = modastack engineering (maps to the GitHub repo). **`MOD`** = the moda/storyteller product + GTM/marketing — *mostly not tracked by `docs/TICKET_STATE.md`*; only flag MOD tickets that clearly mirror a GitHub track.
+- Team keys: **`MDS`** = bobi engineering (maps to the GitHub repo). **`MOD`** = the moda/storyteller product + GTM/marketing — *mostly not tracked by `docs/TICKET_STATE.md`*; only flag MOD tickets that clearly mirror a GitHub track.
 
 List open (non-completed/canceled) Linear issues:
 
 ```bash
-cd ~/dev/modastack
+cd ~/dev/bobi
 cat > /tmp/parse_linear.py <<'PYEOF'
 import sys, json
 d = json.load(sys.stdin)
@@ -114,7 +114,7 @@ If Phase 4 found Linear sync gaps, propose the specific mutations and get a yes
 before applying (these are outward-facing). Pattern that works (curl, not urllib):
 
 ```bash
-cd ~/dev/modastack
+cd ~/dev/bobi
 cat > /tmp/linear_mutate.py <<'PYEOF'
 import json, subprocess, pathlib
 KEY = next(l.split("=",1)[1].strip().strip('"').strip("'")

@@ -13,7 +13,7 @@ Status: **two layers.**
   (**PR #143**) are both closed as superseded — #142's GitHub-OAuth-App
   approach was reversed by the one-GitHub-App decision below, and its package
   paths (`manager/`) are deleted. Read the
-  [#143 salvage map](https://github.com/moda-labs/modastack/pull/143) before
+  [#143 salvage map](https://github.com/moda-labs/bobi-agent-team/pull/143) before
   writing v2 code; the login-flow mechanics carry over (see Salvage, bottom).
 
 Sequencing: v1 ships now (no dependencies). v2 lands **after #177** (event
@@ -57,7 +57,7 @@ blocked on the GitHub-App login flow and the v2 adapter cutover — and
 meanwhile `POST /events/{topic}` drives autonomous agents while
 unauthenticated. v1 closes that now, without identity.
 
-**Bubbles.** A bubble is a trust domain on the event server. Every modastack
+**Bubbles.** A bubble is a trust domain on the event server. Every bobi
 instance owns one bubble, shared by all its agents. Events are scoped to a
 bubble — a publish reaches only same-bubble subscribers; cross-bubble read
 and write are impossible. Registration is **open and self-namespacing**:
@@ -66,7 +66,7 @@ only*. A stranger who registers lands in their own empty bubble — harmless.
 So there is **no registration gate, no shared registration token, no
 `wrangler secret put`**; the boundary is "what a registration grants" (its
 own bubble), not "who may register." Registration becomes **mint-or-join**:
-the first `modastack start` mints the bubble (server returns `bubble_id` +
+the first `bobi start` mints the bubble (server returns `bubble_id` +
 key); each agent session then joins by signing its registration with the
 stored key.
 
@@ -117,7 +117,7 @@ credential.
 - **One GitHub App for everything — login, ACL, and webhook ingestion.**
   This supersedes the #142-era decision ("OAuth App, not GitHub App") —
   superseded on new input, not re-litigated:
-  - The modastack GitHub App **already exists and is public**, giving
+  - The bobi GitHub App **already exists and is public**, giving
     one-click webhook onboarding: install it on a repo and that repo's
     events flow to the cloud event server, signed with the app's webhook
     secret (which only the worker holds).
@@ -157,7 +157,7 @@ credential.
   two-step. Not v1.
 - **Hard cutover, no grace mode.** Exactly one anonymous deployment exists
   (the prod director). Rollout: deploy worker with auth required → login
-  on the EC2 box (copy `auth.yaml`, see open questions) → `modastack
+  on the EC2 box (copy `auth.yaml`, see open questions) → `bobi
   restart`. A grace mode is compatibility machinery for a fleet that
   doesn't exist.
 - **Local event server is safe by loopback, not by an ACL.** v1 binds the
@@ -202,7 +202,7 @@ can't be mislabeled without breaking a webhook signature.
 ## System sketch
 
 ```
-┌──────────────┐   1. modastack login          ┌─────────────────────────┐
+┌──────────────┐   1. bobi login          ┌─────────────────────────┐
 │   CLI        │ ────────────────────────────▶ │  Event server (worker)  │
 │              │   GET /auth/config            │                         │
 │  auth.py     │ ◀──────────────────────────── │  GitHub App client id/  │
@@ -215,7 +215,7 @@ can't be mislabeled without breaking a webhook signature.
 │  auth.yaml   │                               │                         │
 └──────────────┘                               └─────────────────────────┘
 
-┌──────────────┐   2. modastack start          ┌─────────────────────────┐
+┌──────────────┐   2. bobi start          ┌─────────────────────────┐
 │   CLI        │   POST /deployments           │  per subscription key:  │
 │  (Bearer     │   {keys, project, hostname}   │  authorizeSubscription( │
 │   session    │ ────────────────────────────▶ │    key, account)        │
@@ -225,7 +225,7 @@ can't be mislabeled without breaking a webhook signature.
 │              │   WS w/ api_key (unchanged)   │  "install the app")     │
 └──────────────┘                               └─────────────────────────┘
 
-┌──────────────┐   3. modastack stop / prune   ┌─────────────────────────┐
+┌──────────────┐   3. bobi stop / prune   ┌─────────────────────────┐
 │   CLI        │   DELETE /deployments/{id}    │  verify account owns    │
 │              │   GET  /deployments (mine)    │  deployment; clean      │
 │              │ ────────────────────────────▶ │  subscription index     │
@@ -237,13 +237,13 @@ can't be mislabeled without breaking a webhook signature.
 One account, many deployments — across projects on one machine and across
 machines — is the normal case, not an edge case.
 
-- Session is per-machine (`~/.modastack/auth.yaml`); deployment identity is
-  per-project (`deployment_id` + `api_key` persisted in `.modastack/state/`
+- Session is per-machine (`~/.bobi/auth.yaml`); deployment identity is
+  per-project (`deployment_id` + `api_key` persisted in `.bobi/state/`
   by `save_deployment_state`). N machines × M projects works with no new
   machinery, *provided* the many-sessions-per-account invariant above holds.
 - **Registration is insert-only** (`handleRegisterDeployment` mints a fresh
   UUID per call). The persisted state covers normal restarts, but
-  `--fresh`, a deleted `.modastack/`, or a rebuilt machine orphans the old
+  `--fresh`, a deleted `.bobi/`, or a rebuilt machine orphans the old
   record, which stays in the subscription index receiving fan-out. With
   owned deployments the broom is cheap and is part of v1:
   - `GET /deployments` — list the account's deployments.
@@ -262,10 +262,10 @@ machines — is the normal case, not an edge case.
 
 ### GitHub (login + events, one app)
 
-Install the public modastack GitHub App on a repo → that repo's events
+Install the public bobi GitHub App on a repo → that repo's events
 flow to the worker, signed with the app webhook secret. Subscribe-time ACL:
 `GET /repos/{owner}/{repo}` with the user-to-server token; 200 = allowed.
-A 403 response should hint "install the modastack GitHub App on this repo" —
+A 403 response should hint "install the bobi GitHub App on this repo" —
 the auth error doubles as the onboarding instruction.
 
 **Public repos: deliberately allowed.** Any authenticated account may
@@ -274,7 +274,7 @@ installed it. It's public data. This is a decision, not an accident.
 
 ### Slack
 
-A modastack Slack app with an "Add to Slack" OAuth flow, mirroring login:
+A bobi Slack app with an "Add to Slack" OAuth flow, mirroring login:
 server-side code exchange, install yields `team_id` + a per-workspace bot
 token, stored as a connection bound to the installing account. ACL for a
 `slack:{team_id}` key is one lookup: team_id ∈ account's connections.
@@ -285,7 +285,7 @@ The key shape is already workspace-scoped and server-derived
 **Bot token custody is an open fork** (see open questions): proxy outbound
 sends through the server (token never leaves the server; `/slack/send`
 already exists) vs. handing the token down into the project's
-`.modastack/.env` (today's model, agents call Slack directly).
+`.bobi/.env` (today's model, agents call Slack directly).
 
 ### Linear
 
@@ -318,9 +318,9 @@ outbound, not just to event delivery.**
 
 ## Storage
 
-- **Client:** `~/.modastack/auth.yaml` — account identity, deliberately
+- **Client:** `~/.bobi/auth.yaml` — account identity, deliberately
   *not* per-project ("who am I", not "what does this project use"). The
-  one sanctioned exception to "no global `~/.modastack/`" — identity is
+  one sanctioned exception to "no global `~/.bobi/`" — identity is
   per-human. Signed off.
 - **Server**, via `StorageAdapter` (handlers in `core.ts` so the local
   server *could* mount them, though it doesn't):
@@ -352,7 +352,7 @@ outbound, not just to event delivery.**
   v1. Device flow is the real fix and the prerequisite for ever turning
   expiry on.
 - **Bot token custody (Slack)** — proxy sends through the server vs. copy
-  token to `.modastack/.env`. Lean: proxy — the send path exists, tokens
+  token to `.bobi/.env`. Lean: proxy — the send path exists, tokens
   never leave the server, and revocation is instant; cost is migrating
   agents off direct Slack API calls and the server becoming a send
   dependency. Decide before building the Slack connection flow.
@@ -378,13 +378,13 @@ is no secret to set, so v1 ships with no cutover and no manual step.
 1. Deploy worker with auth required (hard cutover — new registrations
    need a session; existing deployment api_keys keep working for WS/event
    delivery, so the running director doesn't drop mid-deploy).
-2. `modastack login` locally; copy `auth.yaml` to the EC2 box.
-3. `modastack restart` on the box — re-registers authenticated.
+2. `bobi login` locally; copy `auth.yaml` to the EC2 box.
+3. `bobi restart` on the box — re-registers authenticated.
 4. Delete the old anonymous deployment record (first use of the broom).
 
 ## Salvage from PR #143 (closed, branch preserved)
 
-Full map on the [PR close comment](https://github.com/moda-labs/modastack/pull/143).
+Full map on the [PR close comment](https://github.com/moda-labs/bobi-agent-team/pull/143).
 Still accurate with one amendment: the OAuth flow in `auth.py` carries over
 nearly as-is, but the `client_id` it fetches from `/auth/config` is now the
 **GitHub App's**, and no OAuth App ever gets created. Carry over:

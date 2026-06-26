@@ -1,5 +1,5 @@
 # Keep the build context small and the wheel reproducible. The sdist build
-# needs: modastack/, event-server/, agents/, README.md, CHANGELOG.md
+# needs: bobi/, event-server/, agents/, README.md, CHANGELOG.md
 # (see pyproject [tool.hatch.build.targets.sdist]). Everything else is noise.
 
 .git
@@ -7,6 +7,7 @@
 .venv
 venv
 .claude
+.bobi
 .modastack
 workspace
 
@@ -23,7 +24,7 @@ dist
 # the build context. Re-include just that subtree.
 !dist/team-deps
 !dist/team-deps/**
-# …and the prebuilt wheel (MODASTACK_BUILD=wheel): the release pipeline stages the
+# …and the prebuilt wheel (BOBI_BUILD=wheel): the release pipeline stages the
 # artifact into dist/ and builder-wheel COPYs it. Present only in wheel-mode builds.
 !dist/*.whl
 build

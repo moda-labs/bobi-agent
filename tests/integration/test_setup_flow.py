@@ -1,4 +1,4 @@
-"""Integration test for `modastack setup` — a real Claude-backed create flow
+"""Integration test for `bobi setup` — a real Claude-backed create flow
 driven through the HTTP API against an isolated tmp project.
 
 The web server's `build_app` is exercised with Starlette's TestClient and
@@ -19,8 +19,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from modastack.setup.state import SetupState
-from modastack.setup.webui import server
+from bobi.setup.state import SetupState
+from bobi.setup.webui import server
 from .conftest import requires_claude
 
 pytestmark = pytest.mark.claude
@@ -95,7 +95,7 @@ class TestCreateFlow:
         role_text = (pack / "roles" / entry / "ROLE.md").read_text()
         assert len(role_text) > 200, "role prompt looks like a placeholder"
 
-        from modastack.workflow.schema import load_workflow
+        from bobi.workflow.schema import load_workflow
         load_workflow(pack / "workflows" / "adhoc.yaml")
 
         # 3. Validate — the real structural validator must pass.
@@ -106,7 +106,7 @@ class TestCreateFlow:
         i = c.post("/api/install").json()
         assert i["installed"] == team
         installed = yaml.safe_load(
-            (project / ".modastack" / "agent.yaml").read_text())
+            (project / ".bobi" / "agent.yaml").read_text())
         assert installed.get("agent") == team
-        assert (project / ".modastack" / "install-manifest.json").exists()
-        assert (project / ".modastack" / ".gitignore").exists()
+        assert (project / ".bobi" / "install-manifest.json").exists()
+        assert (project / ".bobi" / ".gitignore").exists()

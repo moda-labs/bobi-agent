@@ -52,11 +52,11 @@ jobs:
 
       - name: Dockerfile build-check (source + binary modes)
         # BuildKit lint + stage-graph resolution for both build modes, so a
-        # regression in the MODASTACK_BUILD=pypi path (binary deploy) is caught
+        # regression in the BOBI_BUILD=pypi path (binary deploy) is caught
         # without a full image build.
         run: |
           docker build --check .
-          docker build --check --build-arg MODASTACK_BUILD=pypi --build-arg MODASTACK_VERSION=0.0.0 .
+          docker build --check --build-arg BOBI_BUILD=pypi --build-arg BOBI_VERSION=0.0.0 .
 
   event-server:
     name: Event server (Worker/miniflare)
@@ -173,7 +173,7 @@ jobs:
 
       - name: Run event-server integration tests against wrangler dev
         env:
-          MODASTACK_TEST_WRANGLER: "1"
+          BOBI_TEST_WRANGLER: "1"
         run: >-
           pytest tests/integration/test_event_server.py
           -k "wrangler"

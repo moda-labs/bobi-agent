@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# destroy-instance.sh — tear down one modastack instance on Fly (C10 / #340).
+# destroy-instance.sh — tear down one bobi instance on Fly (C10 / #340).
 #
 # Destroying the app removes its machines AND its volume. The volume is the only
 # copy of the instance's state: project config, sessions, ~/.claude transcripts,

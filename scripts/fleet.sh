@@ -2,8 +2,8 @@
 #
 # fleet.sh — fleet-state helpers over the Fly API (C22 GitOps, #342).
 #
-# A "fleet" is the set of modastack instances sharing one operator namespace,
-# stamped MODASTACK_FLEET=<prefix> into each app's [env] by provision-instance.sh.
+# A "fleet" is the set of bobi instances sharing one operator namespace,
+# stamped BOBI_FLEET=<prefix> into each app's [env] by provision-instance.sh.
 # The Fly API is the ONLY state store — no database, no committed manifest. These
 # helpers are the enumeration/classification primitive that gitops-teams.yml and
 # release.yml build on, and that a future provisioner service (design §9,
@@ -12,8 +12,8 @@
 #
 # Identity model (design §9.1, SaaS-extensible):
 #   * App name = "<fleet>-<slug>" — a deterministic DISCOVERY HINT.
-#   * MODASTACK_FLEET app env stamp = the AUTHORITATIVE membership key. Two fleets
-#     can share one Fly org; a future MODASTACK_TENANT filter slots into the same
+#   * BOBI_FLEET app env stamp = the AUTHORITATIVE membership key. Two fleets
+#     can share one Fly org; a future BOBI_TENANT filter slots into the same
 #     query. Enumeration trusts the stamp, not the name string.
 #
 # Dual use — source it as a library, or run a subcommand:
@@ -21,7 +21,7 @@
 #   scripts/fleet.sh app   <prefix> <slug>      # -> "<prefix>-<slug>"
 #   scripts/fleet.sh list  <prefix>             # -> member app names, one per line
 #   scripts/fleet.sh classify <prefix> <slug>...# -> added=[...] / changed=[...]
-#   scripts/fleet.sh fleet-of <app>             # -> the app's MODASTACK_FLEET stamp
+#   scripts/fleet.sh fleet-of <app>             # -> the app's BOBI_FLEET stamp
 #
 # classify partitions by Fly STATE, not git: a team slug whose app does not exist
 # is "added" (provision); one whose app exists is "changed" (in-place update).
@@ -38,16 +38,16 @@ fleet_app() { printf '%s-%s\n' "$1" "$2"; }
 # Separate function so unit tests can stub it without touching Fly.
 fleet_exists() { "$FLEET_FLY" status -a "$1" >/dev/null 2>&1; }
 
-# fleet_of APP -> echo the app's MODASTACK_FLEET stamp ("" if none/unreadable).
+# fleet_of APP -> echo the app's BOBI_FLEET stamp ("" if none/unreadable).
 # `fly config show` returns the live app config as JSON, including the [env] block.
 fleet_of() {
   "$FLEET_FLY" config show -a "$1" 2>/dev/null \
-    | jq -r '.env.MODASTACK_FLEET // empty' 2>/dev/null
+    | jq -r '.env.BOBI_FLEET // empty' 2>/dev/null
 }
 
 # fleet_list PREFIX -> every member app name, one per line. Candidates come from a
 # single `fly apps list` name-prefix filter (cheap); each is then confirmed by its
-# MODASTACK_FLEET stamp so an unrelated "<prefix>-website" can't sneak in.
+# BOBI_FLEET stamp so an unrelated "<prefix>-website" can't sneak in.
 fleet_list() {
   local prefix="$1" app
   "$FLEET_FLY" apps list --json 2>/dev/null \

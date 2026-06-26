@@ -3,9 +3,9 @@
 import asyncio
 import json
 
-from modastack.setup import automate
-from modastack.setup.automate import _parse_suggestions
-from modastack.setup.state import SetupState
+from bobi.setup import automate
+from bobi.setup.automate import _parse_suggestions
+from bobi.setup.state import SetupState
 
 
 def _run(coro):

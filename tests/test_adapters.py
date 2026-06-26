@@ -5,15 +5,15 @@ from unittest.mock import patch
 
 import httpx
 
-from modastack.config import Config, ServiceConfig
-from modastack.events.adapters import (
+from bobi.config import Config, ServiceConfig
+from bobi.events.adapters import (
     is_registered,
     detect,
     _parse_github_url,
     _is_channel_id,
     _resolve_channel_names,
 )
-from modastack import http as pooled
+from bobi import http as pooled
 
 
 def _mock_httpx_response(json_data):
@@ -46,10 +46,10 @@ class TestAdapterRegistry:
 class TestGithubDetector:
 
     def test_parse_https_url(self):
-        assert _parse_github_url("https://github.com/moda-labs/modastack.git") == "moda-labs/modastack"
+        assert _parse_github_url("https://github.com/moda-labs/bobi-agent-team.git") == "moda-labs/bobi-agent-team"
 
     def test_parse_ssh_url(self):
-        assert _parse_github_url("git@github.com:moda-labs/modastack.git") == "moda-labs/modastack"
+        assert _parse_github_url("git@github.com:moda-labs/bobi-agent-team.git") == "moda-labs/bobi-agent-team"
 
     def test_parse_non_github_url(self):
         assert _parse_github_url("https://gitlab.com/foo/bar") == ""
@@ -245,7 +245,7 @@ class TestChannelNameResolution:
 
 
 def test_slack_keys_helper():
-    from modastack.events.adapters import _slack_keys
+    from bobi.events.adapters import _slack_keys
     assert _slack_keys("T1", []) == ["slack:T1"]
     assert _slack_keys("T1", ["C1", "C2"]) == ["slack:T1:C1", "slack:T1:C2"]
     assert _slack_keys("T1", [], "A1") == ["slack:T1:app:A1"]

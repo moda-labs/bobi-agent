@@ -1,5 +1,5 @@
 # Incident Response
-> What to do when a modastack manager or agent is misbehaving.
+> What to do when a bobi manager or agent is misbehaving.
 
 ## Trigger
 
@@ -12,45 +12,45 @@
 1. **Check manager status**
    ```bash
    cd ~/dev/<repo>
-   modastack status
+   bobi status
    ```
    Expected: "Manager: running (session ...)"
 
 2. **Check event server**
    ```bash
-   modastack event-server status
+   bobi event-server status
    ```
    Expected: "Event server: running on port 8080"
 
 3. **Review recent events**
    ```bash
-   modastack events
+   bobi events
    ```
    Look for missing events or delivery failures.
 
 4. **Check manager log**
    ```bash
-   modastack log manager
+   bobi log manager
    ```
    Look for errors, stuck decision loops, or unexpected behavior.
 
 5. **Restart if needed**
    ```bash
-   modastack restart
+   bobi restart
    ```
    This preserves the session — the manager resumes where it left off.
 
 6. **Force restart (last resort)**
    ```bash
-   modastack stop --force
-   modastack start
+   bobi stop --force
+   bobi start
    ```
    This kills the process and starts fresh.
 
 ## Escalation
 
 If the manager is consistently making bad decisions or agents are
-producing incorrect output, file an issue in the modastack repo
+producing incorrect output, file an issue in the bobi repo
 with the manager log attached.
 
 Last verified: 2026-06-04

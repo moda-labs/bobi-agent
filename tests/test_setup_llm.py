@@ -7,8 +7,8 @@ import asyncio
 
 import pytest
 
-from modastack.setup import llm
-from modastack.setup.llm import LLMError
+from bobi.setup import llm
+from bobi.setup.llm import LLMError
 
 
 def _run(coro):

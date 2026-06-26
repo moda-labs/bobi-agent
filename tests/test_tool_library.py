@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from modastack import compose, tool_library
+from bobi import compose, tool_library
 
 
 # --- fixtures ----------------------------------------------------------------
@@ -46,7 +46,7 @@ def project(tmp_path: Path) -> Path:
 
 def _compose(project, leaf, dest=None):
     chain = compose.resolve_chain(leaf, project)
-    dest = dest or (project / ".modastack")
+    dest = dest or (project / ".bobi")
     prov = compose.compose(chain, dest)
     return dest, prov
 
@@ -277,11 +277,11 @@ requires:
   - name: codex
     why: "Delegate a coding sub-task to the Codex CLI (tools/codex.md)."
     check: "command -v codex >/dev/null 2>&1 && { test -n \\"${OPENAI_API_KEY:-}\\" || codex --version >/dev/null 2>&1; }"
-    fix: "npm install -g @openai/codex@0.142.0 && (codex auth login || echo 'Set OPENAI_API_KEY in .modastack/.env')"
+    fix: "npm install -g @openai/codex@0.142.0 && (codex auth login || echo 'Set OPENAI_API_KEY in .bobi/.env')"
   - name: venn
     why: "Reach external services (email, calendar, CRM) via the Venn CLI (tools/venn.md). Auth via VENN_API_KEY."
     check: "command -v venn >/dev/null 2>&1 && venn --help >/dev/null 2>&1"
-    fix: "python3 -m venv /opt/venn-cli && /opt/venn-cli/bin/pip install venn-cli==0.2.0 && ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn && echo 'Set VENN_API_KEY in .modastack/.env'"
+    fix: "python3 -m venv /opt/venn-cli && /opt/venn-cli/bin/pip install venn-cli==0.2.0 && ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn && echo 'Set VENN_API_KEY in .bobi/.env'"
 build:
   apt: [nodejs, npm, python3-venv]
   npm: ["@openai/codex@0.142.0"]

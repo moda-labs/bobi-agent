@@ -6,7 +6,7 @@
 # TOOL DEPS into an image.
 #
 # For each team dir that declares a `build:` spec (or ships a raw Dockerfile
-# escape hatch), render the team-deps hook (modastack.build_render) and build the
+# escape hatch), render the team-deps hook (bobi.build_render) and build the
 # ONE repo Dockerfile with --build-arg TEAM_DEPS=<rendered>. The hook runs as a
 # stable layer BELOW the framework wheel, and its final step re-runs the team's
 # `requires[].check` — so a missing tool fails THIS build (CI), not production.
@@ -23,11 +23,11 @@
 #                  native auth via `fly auth docker`, no extra service, and Fly
 #                  pulls it without public-package/token-scope hassle). For Fly,
 #                  each image repo maps to a Fly app, so this script ensures a
-#                  holder app `modastack-<team>` exists before pushing.
+#                  holder app `bobi-<team>` exists before pushing.
 #   PUSH           "1" to docker push after build. Default: "0" (build only).
 #   ORG            Fly org for the holder app (Fly registry only). Default: personal.
-#   MODASTACK_BUILD  source (default; build the wheel from this checkout) or pypi.
-#   MODASTACK_VERSION  required when MODASTACK_BUILD=pypi (the published version).
+#   BOBI_BUILD  source (default; build the wheel from this checkout) or pypi.
+#   BOBI_VERSION  required when BOBI_BUILD=pypi (the published version).
 #   TAG            Extra tag besides :latest (default: the short git SHA).
 #
 # Examples:
@@ -37,7 +37,7 @@ set -euo pipefail
 
 REGISTRY="${REGISTRY:-registry.fly.io}"
 PUSH="${PUSH:-0}"
-BUILD_MODE="${MODASTACK_BUILD:-source}"
+BUILD_MODE="${BOBI_BUILD:-source}"
 ORG="${ORG:-}"
 
 # `fly` is the current binary; `flyctl` is the legacy name. Accept either.
@@ -89,24 +89,24 @@ DEPS_DIR="$REPO_ROOT/dist/team-deps"
 mkdir -p "$DEPS_DIR"
 
 declare -a EXTRA_BUILD_ARGS=()
-[ "$BUILD_MODE" = "pypi" ] && EXTRA_BUILD_ARGS+=(--build-arg "MODASTACK_VERSION=${MODASTACK_VERSION:?MODASTACK_VERSION required in pypi mode}")
+[ "$BUILD_MODE" = "pypi" ] && EXTRA_BUILD_ARGS+=(--build-arg "BOBI_VERSION=${BOBI_VERSION:?BOBI_VERSION required in pypi mode}")
 
 built=0
 for dir in "${DIRS[@]}"; do
   team="$(basename "$dir")"
-  if ! python -m modastack.build_render "$dir" --check 2>/dev/null; then
+  if ! python -m bobi.build_render "$dir" --check 2>/dev/null; then
     echo "skip ${team}: no build spec — deploys on the generic image"
     continue
   fi
   # Render the team-deps hook INTO the build context (repo root) so the
   # Dockerfile's `COPY ${TEAM_DEPS}` can reach it.
   deps_rel="dist/team-deps/${team}.sh"
-  python -m modastack.build_render "$dir" --out "$REPO_ROOT/${deps_rel}"
+  python -m bobi.build_render "$dir" --out "$REPO_ROOT/${deps_rel}"
 
-  img="${REGISTRY}/modastack-${team}"
+  img="${REGISTRY}/bobi-${team}"
   echo "== building ${img}:${TAG} (mode=${BUILD_MODE}) =="
   docker build \
-    --build-arg "MODASTACK_BUILD=${BUILD_MODE}" \
+    --build-arg "BOBI_BUILD=${BUILD_MODE}" \
     "${EXTRA_BUILD_ARGS[@]}" \
     --build-arg "TEAM_DEPS=${deps_rel}" \
     -t "${img}:${TAG}" -t "${img}:latest" \
@@ -114,7 +114,7 @@ for dir in "${DIRS[@]}"; do
 
   if [ "$PUSH" = "1" ]; then
     # Fly registry repos are app-scoped — ensure the holder app exists first.
-    case "$REGISTRY" in registry.fly.io*) ensure_fly_repo "modastack-${team}";; esac
+    case "$REGISTRY" in registry.fly.io*) ensure_fly_repo "bobi-${team}";; esac
     echo "== pushing ${img}:${TAG} + :latest =="
     push_with_retry "${img}:${TAG}"
     push_with_retry "${img}:latest"

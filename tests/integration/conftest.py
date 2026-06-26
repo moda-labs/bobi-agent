@@ -1,7 +1,7 @@
-"""Integration test fixtures — fully isolated modastack installation.
+"""Integration test fixtures — fully isolated bobi installation.
 
-Every integration test runs against a temporary modastack installation
-in tmp_path. Nothing touches the real repo's .modastack/ directory
+Every integration test runs against a temporary bobi installation
+in tmp_path. Nothing touches the real repo's .bobi/ directory
 or any production state.
 """
 
@@ -19,8 +19,8 @@ PACKAGE_ROOT = Path(__file__).parent.parent.parent
 
 
 @dataclass
-class ModastackEnv:
-    """Paths for an isolated modastack installation."""
+class BobiEnv:
+    """Paths for an isolated bobi installation."""
     project_path: Path
     state_dir: Path
     sessions_dir: Path
@@ -28,17 +28,17 @@ class ModastackEnv:
 
 
 @pytest.fixture(scope="session")
-def modastack_env(tmp_path_factory):
-    """Create a fully isolated modastack installation in a temp directory.
+def bobi_env(tmp_path_factory):
+    """Create a fully isolated bobi installation in a temp directory.
 
     Session-scoped: created once, shared across all integration tests.
     Includes a real git repo (for worktree support), config files,
     workflows, and empty credentials.
     """
-    base = tmp_path_factory.mktemp("modastack")
+    base = tmp_path_factory.mktemp("bobi")
     project_path = base / "test-repo"
 
-    config_dir = project_path / ".modastack"
+    config_dir = project_path / ".bobi"
     state_dir = config_dir / "state"
     sessions_dir = config_dir / "sessions"
     workflows_dir = config_dir / "workflows"
@@ -47,7 +47,7 @@ def modastack_env(tmp_path_factory):
               state_dir / "workflow" / "runs", state_dir / "logs"]:
         d.mkdir(parents=True)
 
-    # Build a local agent team, then install it via modastack install
+    # Build a local agent team, then install it via bobi install
     pack_dir = base / "software_team"
     pack_dir.mkdir()
     (pack_dir / "agent.yaml").write_text(yaml.dump({
@@ -67,7 +67,7 @@ def modastack_env(tmp_path_factory):
         (pack_dir / "roles" / role_name / "ROLE.md").write_text(content)
 
     result = subprocess.run(
-        [sys.executable, "-m", "modastack.cli", "install", str(pack_dir)],
+        [sys.executable, "-m", "bobi.cli", "install", str(pack_dir)],
         capture_output=True, text=True, timeout=30,
         cwd=str(project_path),
     )
@@ -114,10 +114,10 @@ def modastack_env(tmp_path_factory):
         "    timeout: 60\n"
     )
 
-    from modastack.sdk import set_project_root
+    from bobi.sdk import set_project_root
     set_project_root(project_path)
 
-    yield ModastackEnv(
+    yield BobiEnv(
         project_path=project_path,
         state_dir=state_dir,
         sessions_dir=sessions_dir,
@@ -134,25 +134,25 @@ requires_claude = pytest.mark.skipif(
 
 
 @pytest.fixture
-def cli_run(modastack_env):
-    """Run modastack CLI commands against the isolated install."""
+def cli_run(bobi_env):
+    """Run bobi CLI commands against the isolated install."""
     def _run(*args, timeout=10):
         return subprocess.run(
-            [sys.executable, "-m", "modastack.cli", *args],
+            [sys.executable, "-m", "bobi.cli", *args],
             capture_output=True, text=True, timeout=timeout,
-            cwd=str(modastack_env.project_path),
+            cwd=str(bobi_env.project_path),
         )
     return _run
 
 
 @pytest.fixture
-def clean_session(modastack_env):
+def clean_session(bobi_env):
     """Clean up a named session from the registry."""
     names = []
 
     def _register(name):
         names.append(name)
-        from modastack.sdk import get_registry, SessionRegistry
+        from bobi.sdk import get_registry, SessionRegistry
         registry = get_registry()
         registry.mark_done(name)
         session_dir = SessionRegistry.session_dir(name)
@@ -162,7 +162,7 @@ def clean_session(modastack_env):
     yield _register
 
     for name in names:
-        from modastack.sdk import get_registry, SessionRegistry
+        from bobi.sdk import get_registry, SessionRegistry
         registry = get_registry()
         registry.mark_done(name)
         session_dir = SessionRegistry.session_dir(name)

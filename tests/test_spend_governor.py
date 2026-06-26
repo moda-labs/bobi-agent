@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from modastack.spend_governor import (
+from bobi.spend_governor import (
     DEFAULT_CAP,
     WINDOW_SECONDS,
     _load_state,
@@ -22,11 +22,11 @@ from modastack.spend_governor import (
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    """A minimal project directory with a .modastack/state/ tree."""
-    modastack_dir = tmp_path / ".modastack"
-    modastack_dir.mkdir()
-    (modastack_dir / "agent.yaml").write_text("entry_point: x\n")
-    monkeypatch.setattr("modastack.paths._root", tmp_path)
+    """A minimal project directory with a .bobi/state/ tree."""
+    bobi_dir = tmp_path / ".bobi"
+    bobi_dir.mkdir()
+    (bobi_dir / "agent.yaml").write_text("entry_point: x\n")
+    monkeypatch.setattr("bobi.paths._root", tmp_path)
     return tmp_path
 
 
@@ -142,7 +142,7 @@ class TestRecordInvocation:
 
 
 class TestEmitAlert:
-    @patch("modastack.events.publish.post_event")
+    @patch("bobi.events.publish.post_event")
     def test_emits_event(self, mock_post, project):
         emit_spend_cap_alert(project, count=50, cap=50)
         mock_post.assert_called_once()
@@ -153,7 +153,7 @@ class TestEmitAlert:
         assert payload["cap"] == 50
         assert "blocked" in payload["text"]
 
-    @patch("modastack.events.publish.post_event", side_effect=Exception("boom"))
+    @patch("bobi.events.publish.post_event", side_effect=Exception("boom"))
     def test_alert_failure_does_not_raise(self, mock_post, project):
         # Must not raise — alert is best-effort
         emit_spend_cap_alert(project, count=50, cap=50)
@@ -161,18 +161,18 @@ class TestEmitAlert:
 
 class TestConfigIntegration:
     def test_spend_cap_parsed_from_yaml(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("entry_point: x\nspend_cap: 25\n")
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
         assert cfg.spend_cap == 25
 
     def test_spend_cap_defaults_to_zero(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("entry_point: x\n")
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
         assert cfg.spend_cap == 0
 
@@ -182,13 +182,13 @@ class TestLaunchAgentGovernor:
 
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
-        (tmp_path / ".modastack").mkdir(parents=True, exist_ok=True)
-        (tmp_path / ".modastack" / "agent.yaml").write_text("entry_point: x\n")
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        (tmp_path / ".bobi").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".bobi" / "agent.yaml").write_text("entry_point: x\n")
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_blocks_when_cap_exceeded(self, mock_launch, mock_reg, mock_check, tmp_path):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
         # Seed governor state at the cap
@@ -196,47 +196,47 @@ class TestLaunchAgentGovernor:
         now = time.time()
         _save_state(state_file, [now - i for i in range(DEFAULT_CAP)])
 
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         with pytest.raises(RuntimeError, match="Spend governor"):
             launch_agent(task="Fix #1", cwd=str(tmp_path), workflow_name="adhoc")
         mock_launch.assert_not_called()
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_allows_under_cap(self, mock_launch, mock_reg, mock_check, tmp_path):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         name = launch_agent(task="Fix #1", cwd=str(tmp_path), workflow_name="adhoc")
         assert name
         mock_launch.assert_called_once()
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_records_invocation_after_launch(self, mock_launch, mock_reg,
                                              mock_check, tmp_path):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         launch_agent(task="Fix #1", cwd=str(tmp_path), workflow_name="adhoc")
         state_file = _state_path(tmp_path)
         timestamps = _load_state(state_file)
         assert len(timestamps) == 1
 
-    @patch("modastack.subagent.check_requires", return_value=[])
-    @patch("modastack.subagent.get_registry")
-    @patch("modastack.subagent._launch_detached")
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
     def test_respects_custom_cap(self, mock_launch, mock_reg, mock_check, tmp_path):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
         # Set a low custom cap
-        (tmp_path / ".modastack" / "agent.yaml").write_text(
+        (tmp_path / ".bobi" / "agent.yaml").write_text(
             "entry_point: x\nspend_cap: 2\n")
         # Seed 2 invocations
         state_file = _state_path(tmp_path)
         now = time.time()
         _save_state(state_file, [now - 10, now - 5])
 
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
         with pytest.raises(RuntimeError, match="Spend governor"):
             launch_agent(task="Fix #1", cwd=str(tmp_path), workflow_name="adhoc")
         mock_launch.assert_not_called()

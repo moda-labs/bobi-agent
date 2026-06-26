@@ -4,8 +4,8 @@ import queue
 import time
 from unittest.mock import patch, MagicMock
 
-from modastack.events.drain import drain_loop
-from modastack.events.reactor import AutoDispatchRule, EventReactor
+from bobi.events.drain import drain_loop
+from bobi.events.reactor import AutoDispatchRule, EventReactor
 
 
 def _wait_calls(mock, n, timeout=2.0):
@@ -57,7 +57,7 @@ class TestDrainAutoDispatch:
 
     def _run_drain_one_batch(self, events, reactor=None):
         """Run drain_loop for exactly one batch and capture pushed messages."""
-        from modastack.inbox import register_local_inbox, unregister_local_inbox
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         q = _OneShotQueue(events)
         delivered = []
@@ -71,7 +71,7 @@ class TestDrainAutoDispatch:
 
         register_local_inbox("test-session", _CaptureInbox())
         try:
-            with patch("modastack.events.drain.time.sleep"):
+            with patch("bobi.events.drain.time.sleep"):
                 try:
                     drain_loop("test-session", queue=q,
                                formatter=fake_formatter,
@@ -83,7 +83,7 @@ class TestDrainAutoDispatch:
 
         return delivered
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_matching_event_gets_annotation(self, mock_launch):
         """Auto-dispatched events get annotation appended to text."""
         mock_launch.return_value = "wf-pr-feedback-test-1"
@@ -105,7 +105,7 @@ class TestDrainAutoDispatch:
         _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_non_matching_event_passes_through(self, mock_launch):
         """Non-matching events are delivered without annotation."""
         reactor = self._make_reactor()
@@ -123,7 +123,7 @@ class TestDrainAutoDispatch:
         assert "AUTO-DISPATCHED" not in delivered[0]
         mock_launch.assert_not_called()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_suppressed_event_gets_suppressed_annotation(self, mock_launch):
         """Suppressed events get a SUPPRESSED annotation, not AUTO-DISPATCHED."""
         rules = [

@@ -1,4 +1,4 @@
-"""Unit tests for the `modastack deploy` engine (modastack/deploy.py).
+"""Unit tests for the `bobi deploy` engine (bobi/deploy.py).
 
 The deployment PRIMITIVE: config precedence, delivery-mode selection, identity
 naming, secret resolution/validation, and the idempotent provision-or-update
@@ -16,13 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from modastack import deploy as D
+from bobi import deploy as D
 
 
 # --- fixtures ----------------------------------------------------------------
 
 def _make_repo(tmp_path: Path) -> Path:
-    """A minimal modastack source root: scripts/ + Dockerfile + a local team."""
+    """A minimal bobi source root: scripts/ + Dockerfile + a local team."""
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     (repo / "scripts" / "provision-instance.sh").write_text("#!/usr/bin/env bash\n")
@@ -147,7 +147,7 @@ def test_find_repo_root_walks_up(repo):
 
 
 def test_find_repo_root_raises_without_scripts(tmp_path):
-    with pytest.raises(D.DeployError, match="not a modastack checkout"):
+    with pytest.raises(D.DeployError, match="not a bobi checkout"):
         D.find_repo_root(tmp_path)
 
 
@@ -174,13 +174,13 @@ def test_resolve_assets_binary_mode_from_packaged(tmp_path, monkeypatch):
     monkeypatch.setattr(D, "find_repo_root",
                         lambda p=None: (_ for _ in ()).throw(D.DeployError("x")))
     monkeypatch.setattr(D, "_packaged_deploy_dir", lambda: pkg)
-    monkeypatch.setattr(D, "_modastack_version", lambda: "9.9.9")
+    monkeypatch.setattr(D, "_bobi_version", lambda: "9.9.9")
 
     staging = tmp_path / "staging"
     staging.mkdir()
     a = D.resolve_assets(tmp_path / "elsewhere", staging)
     assert a.mode == "binary"
-    assert a.build_args == {"MODASTACK_BUILD": "pypi", "MODASTACK_VERSION": "9.9.9"}
+    assert a.build_args == {"BOBI_BUILD": "pypi", "BOBI_VERSION": "9.9.9"}
     # build context assembled: Dockerfile + docker/ copied into staging
     assert (a.build_context / "Dockerfile").exists()
     assert (a.build_context / "docker" / "docker-entrypoint.sh").exists()
@@ -244,17 +244,17 @@ def test_secrets_materialized_from_process_env(repo, tmp_path, monkeypatch):
     assert vals["ANTHROPIC_API_KEY"] == "sk-ant-env"
 
 
-def test_modastack_vars_are_not_treated_as_required_secrets(repo, tmp_path, monkeypatch):
-    """A package's ${MODASTACK_EVENT_SERVER} ref is identity the provisioner
+def test_bobi_vars_are_not_treated_as_required_secrets(repo, tmp_path, monkeypatch):
+    """A package's ${BOBI_EVENT_SERVER} ref is identity the provisioner
     stamps into [env] from flags — never a secret to demand in the env-file."""
-    monkeypatch.delenv("MODASTACK_EVENT_SERVER", raising=False)
+    monkeypatch.delenv("BOBI_EVENT_SERVER", raising=False)
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     pkg = repo / "agents" / "eng-team" / "agent.yaml"
-    pkg.write_text(pkg.read_text() + "event_server: ${MODASTACK_EVENT_SERVER}\n")
+    pkg.write_text(pkg.read_text() + "event_server: ${BOBI_EVENT_SERVER}\n")
     cfg = D.load_deploy_config(repo, "eng-team")
     out = D.resolve_env_file(cfg, repo, tmp_path)  # must NOT raise
-    assert "MODASTACK_EVENT_SERVER" not in out.read_text()
+    assert "BOBI_EVENT_SERVER" not in out.read_text()
 
 
 def test_subscription_mode_rejects_anthropic_key(repo, tmp_path):
@@ -427,7 +427,7 @@ def test_outage_unset_required_secret_is_restored_on_update(repo, recorder, monk
 def test_existing_app_syncs_reconciled_secrets_to_volume_env(repo, recorder,
                                                             monkeypatch):
     """A rotated Fly secret must also refresh the persisted volume .env. Codex
-    tool shells can lose inherited env and fall back to .modastack/.env, so Fly
+    tool shells can lose inherited env and fall back to .bobi/.env, so Fly
     secrets alone are not enough (#501)."""
     monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
     monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
@@ -443,7 +443,7 @@ def test_existing_app_syncs_reconciled_secrets_to_volume_env(repo, recorder,
         c for c in recorder
         if "ssh" in c["cmd"] and "/opt/venv/bin/python -c" in " ".join(c["cmd"])
     ]
-    assert syncs, "expected deploy to refresh /data/project/.modastack/.env"
+    assert syncs, "expected deploy to refresh /data/project/.bobi/.env"
     payload = json.loads(syncs[0]["input"].decode())
     assert payload["set"]["SLACK_BOT_TOKEN"] == "xoxb-new"
     assert payload["set"]["ANTHROPIC_API_KEY"] == "sk-ant"
@@ -452,13 +452,13 @@ def test_existing_app_syncs_reconciled_secrets_to_volume_env(repo, recorder,
 
 
 def test_prune_removes_undeclared_live_secret(repo, recorder, monkeypatch):
-    """A live, non-MODASTACK_ secret absent from the declared set is pruned; the
-    declared keys and MODASTACK_* identity are left alone."""
+    """A live, non-BOBI_ secret absent from the declared set is pruned; the
+    declared keys and BOBI_* identity are left alone."""
     monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
     monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
     monkeypatch.setattr(D, "_fly_machine_ids", lambda app: ["m1"])
     monkeypatch.setattr(D, "fly_secrets_list", lambda app: {
-        "SLACK_BOT_TOKEN", "ANTHROPIC_API_KEY", "STALE_KEY", "MODASTACK_FLEET"})
+        "SLACK_BOT_TOKEN", "ANTHROPIC_API_KEY", "STALE_KEY", "BOBI_FLEET"})
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     D.deploy(repo, "eng-team")
@@ -466,7 +466,7 @@ def test_prune_removes_undeclared_live_secret(repo, recorder, monkeypatch):
     assert unsets, "expected the undeclared live secret to be pruned"
     flat = [a for c in unsets for a in c["cmd"]]
     assert "STALE_KEY" in flat
-    assert "MODASTACK_FLEET" not in flat   # identity — never pruned
+    assert "BOBI_FLEET" not in flat   # identity — never pruned
     assert "SLACK_BOT_TOKEN" not in flat   # declared — kept
     syncs = [
         c for c in recorder
@@ -522,7 +522,7 @@ def test_team_url_existing_app_updates_in_place(repo, recorder, monkeypatch):
     D.deploy(repo, "eng")
     joined = _flat(recorder)
     assert not any("provision-instance.sh" in c for c in joined)  # no re-provision
-    assert any("modastack install \"https://r/eng.tar.gz\"" in c for c in joined)
+    assert any("bobi install \"https://r/eng.tar.gz\"" in c for c in joined)
     assert any("machine\nrestart\n48ed1234" in c for c in joined)
 
 
@@ -538,7 +538,7 @@ def test_ssh_push_new_app_provisions_blank_then_pushes(repo, recorder, monkeypat
     assert "--team" not in prov.replace("--team-url", "")  # neither team nor team-url
     # team pushed: base64 onto the volume, then install from the tarball
     assert any("base64 -d" in c for c in joined)
-    assert any("modastack install /data/incoming-team.tar.gz --non-interactive" in c
+    assert any("bobi install /data/incoming-team.tar.gz --non-interactive" in c
                for c in joined)
     # NEW provision releases the waiting entrypoint — no restart.
     assert not any("machine\nrestart" in c for c in joined)
@@ -553,7 +553,7 @@ def test_ssh_push_existing_app_pushes_and_restarts(repo, recorder, monkeypatch):
     D.deploy(repo, "eng-team")
     joined = _flat(recorder)
     assert not any("provision-instance.sh" in c for c in joined)
-    assert any("modastack install /data/incoming-team.tar.gz" in c for c in joined)
+    assert any("bobi install /data/incoming-team.tar.gz" in c for c in joined)
     # reload after reinstall — `fly machine restart` needs an explicit machine ID
     # non-interactively (a bare `-a <app>` errors; caught in the live e2e).
     assert any("machine\nrestart\n48ed1234" in c for c in joined)
@@ -667,12 +667,12 @@ def test_image_mode_deploys_by_ref_not_build(repo, recorder, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
     (repo / "deployments" / "eng.yaml").write_text(
         "team-url: https://r/eng.tar.gz\n"
-        "image: ghcr.io/moda-labs/modastack-eng-team:latest\n"
+        "image: ghcr.io/moda-labs/bobi-eng-team:latest\n"
     )
     D.deploy(repo, "eng")
     prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
     assert "--image" in prov
-    assert "ghcr.io/moda-labs/modastack-eng-team:latest" in prov
+    assert "ghcr.io/moda-labs/bobi-eng-team:latest" in prov
     # build path is skipped entirely in image mode
     assert "--build-context" not in prov
     assert "--dockerfile" not in prov
@@ -731,20 +731,20 @@ def test_ssh_push_deps_drift_rebuilds_in_place(repo, recorder, monkeypatch):
     # rebuilds the image on the existing app (idempotent provision, blank)…
     assert any("provision-instance.sh" in c and "--blank" in c for c in joined)
     # …then refreshes the definition + reloads
-    assert any("modastack install /data/incoming-team.tar.gz" in c for c in joined)
+    assert any("bobi install /data/incoming-team.tar.gz" in c for c in joined)
 
 
 def test_ssh_push_deps_match_takes_fast_path(repo, recorder, monkeypatch):
     """Deps unchanged → the in-place hot-push fast path is correct (no rebuild)."""
     _running_app(monkeypatch)
     _with_build_spec(repo)
-    from modastack.build_render import load_team_config, team_deps_hash
+    from bobi.build_render import load_team_config, team_deps_hash
     h = team_deps_hash(load_team_config(repo / "agents" / "eng-team").build)
     monkeypatch.setattr(D, "_running_team_deps_hash", lambda app: h)
     D.deploy(repo, "eng-team")
     joined = _flat(recorder)
     assert not any("provision-instance.sh" in c for c in joined)  # no rebuild
-    assert any("modastack install /data/incoming-team.tar.gz" in c for c in joined)
+    assert any("bobi install /data/incoming-team.tar.gz" in c for c in joined)
 
 
 def test_ssh_push_deps_unknown_stamp_hot_pushes(repo, recorder, monkeypatch):
@@ -765,7 +765,7 @@ def test_ssh_push_rebuild_flag_forces_rebuild(repo, recorder, monkeypatch):
     _running_app(monkeypatch)
     _with_build_spec(repo)
     # stamp MATCHES → no drift; the flag forces a rebuild anyway
-    from modastack.build_render import load_team_config, team_deps_hash
+    from bobi.build_render import load_team_config, team_deps_hash
     h = team_deps_hash(load_team_config(repo / "agents" / "eng-team").build)
     monkeypatch.setattr(D, "_running_team_deps_hash", lambda app: h)
     D.deploy(repo, "eng-team", {"rebuild": True})
@@ -786,7 +786,7 @@ def test_generic_team_skips_deps_probe_entirely(repo, recorder, monkeypatch):
     assert any("incoming-team.tar.gz" in c for c in joined)
 
 
-def test_binary_mode_pins_modastack_version_as_build_arg(repo, recorder, monkeypatch, tmp_path):
+def test_binary_mode_pins_bobi_version_as_build_arg(repo, recorder, monkeypatch, tmp_path):
     """Binary mode builds the PyPI image pinned to the installed version."""
     monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
@@ -801,11 +801,11 @@ def test_binary_mode_pins_modastack_version_as_build_arg(repo, recorder, monkeyp
     monkeypatch.setattr(D, "find_repo_root",
                         lambda p=None: (_ for _ in ()).throw(D.DeployError("x")))
     monkeypatch.setattr(D, "_packaged_deploy_dir", lambda: pkg)
-    monkeypatch.setattr(D, "_modastack_version", lambda: "1.2.3")
+    monkeypatch.setattr(D, "_bobi_version", lambda: "1.2.3")
     D.deploy(repo, "eng")
     prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
-    assert "--build-arg" in prov and "MODASTACK_VERSION=1.2.3" in prov
-    assert "MODASTACK_BUILD=pypi" in prov
+    assert "--build-arg" in prov and "BOBI_VERSION=1.2.3" in prov
+    assert "BOBI_BUILD=pypi" in prov
 
 
 # --- Fly onboarding preflight ------------------------------------------------
@@ -853,7 +853,7 @@ def test_half_provisioned_app_reprovisions_not_ssh_updates(repo, recorder, monke
     # re-provisions (rebuilds the image) — provision-instance.sh is idempotent
     assert any("provision-instance.sh" in c and "--team-url" in c for c in joined)
     # does NOT try to ssh-install into a dead app
-    assert not any("modastack install \"https://r/eng.tar.gz\"" in c for c in joined)
+    assert not any("bobi install \"https://r/eng.tar.gz\"" in c for c in joined)
 
 
 def test_destroy_resolves_app_and_passes_yes(repo, recorder, monkeypatch):

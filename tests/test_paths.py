@@ -1,25 +1,25 @@
-"""Contract tests for modastack.paths — the single root resolver and the
+"""Contract tests for bobi.paths — the single root resolver and the
 binding rules every process relies on."""
 
 import os
 
 import pytest
 
-from modastack import paths
+from bobi import paths
 
 
 @pytest.fixture(autouse=True)
 def unbound(monkeypatch):
     monkeypatch.setattr(paths, "_root", None)
     # The inherited-pin snapshot is captured at import; reset it per test so
-    # the ambient MODASTACK_ROOT of the test runner cannot leak in.
+    # the ambient BOBI_ROOT of the test runner cannot leak in.
     monkeypatch.setattr(paths, "_inherited_root_env", None)
-    monkeypatch.delenv("MODASTACK_ROOT", raising=False)
+    monkeypatch.delenv("BOBI_ROOT", raising=False)
 
 
 def _install(root):
-    (root / ".modastack").mkdir(parents=True)
-    (root / ".modastack" / "agent.yaml").write_text("name: t\n")
+    (root / ".bobi").mkdir(parents=True)
+    (root / ".bobi" / "agent.yaml").write_text("name: t\n")
 
 
 class TestBindRoot:
@@ -30,12 +30,12 @@ class TestBindRoot:
         link.symlink_to(real)
 
         paths.bind_root(link)
-        assert paths.modastack_root() == real
+        assert paths.bobi_root() == real
 
     def test_rebind_same_path_is_noop(self, tmp_path):
         paths.bind_root(tmp_path)
         paths.bind_root(tmp_path)
-        assert paths.modastack_root() == tmp_path.resolve()
+        assert paths.bobi_root() == tmp_path.resolve()
 
     def test_rebind_different_path_raises(self, tmp_path):
         """A process binds its identity exactly once — silently re-binding
@@ -50,18 +50,18 @@ class TestBindRoot:
         assert paths.bound_root() is None
 
     def test_bind_sets_env_var(self, tmp_path, monkeypatch):
-        """bind_root propagates MODASTACK_ROOT into os.environ so child
+        """bind_root propagates BOBI_ROOT into os.environ so child
         processes inherit the pinned root without re-walking (#249)."""
-        monkeypatch.delenv("MODASTACK_ROOT", raising=False)
+        monkeypatch.delenv("BOBI_ROOT", raising=False)
         paths.bind_root(tmp_path)
-        assert os.environ["MODASTACK_ROOT"] == str(tmp_path.resolve())
+        assert os.environ["BOBI_ROOT"] == str(tmp_path.resolve())
 
     def test_unbind_clears_env_var(self, tmp_path, monkeypatch):
-        """Unbinding removes MODASTACK_ROOT from the environment."""
+        """Unbinding removes BOBI_ROOT from the environment."""
         paths.bind_root(tmp_path)
-        assert "MODASTACK_ROOT" in os.environ
+        assert "BOBI_ROOT" in os.environ
         paths.bind_root(None)
-        assert "MODASTACK_ROOT" not in os.environ
+        assert "BOBI_ROOT" not in os.environ
 
 
 class TestResolveRoot:
@@ -79,7 +79,7 @@ class TestResolveRoot:
         assert paths.resolve_root(tmp_path) == tmp_path
 
     def test_skips_linked_worktree(self, tmp_path):
-        """A git linked worktree that carries .modastack/agent.yaml from
+        """A git linked worktree that carries .bobi/agent.yaml from
         its repo must NOT capture root resolution (#247). resolve_root
         detects linked worktrees via .git being a file (not a directory)
         and skips them, continuing to walk up to the real installation."""
@@ -99,7 +99,7 @@ class TestResolveRoot:
                capture_output=True, check=True)
 
         # Worktree has the marker (checked-in) but .git is a file
-        assert (wt / ".modastack" / "agent.yaml").is_file()
+        assert (wt / ".bobi" / "agent.yaml").is_file()
         assert (wt / ".git").is_file()
 
         deep = wt / "src"
@@ -120,7 +120,7 @@ class TestResolveRoot:
         assert paths.resolve_root(repo) == repo
 
     def test_env_var_overrides_walk(self, tmp_path, monkeypatch):
-        """A MODASTACK_ROOT pin inherited at process start short-circuits the
+        """A BOBI_ROOT pin inherited at process start short-circuits the
         walk-up resolver, pinning the root for managed child processes
         (#247). Simulated by setting the import-time snapshot."""
         real_root = tmp_path / "real"
@@ -134,7 +134,7 @@ class TestResolveRoot:
         assert paths.resolve_root(decoy / "src") == real_root
 
     def test_env_var_invalid_raises(self, tmp_path, monkeypatch):
-        """A set-but-invalid inherited MODASTACK_ROOT must raise — the
+        """A set-but-invalid inherited BOBI_ROOT must raise — the
         spawning process is broken and silently falling back to walk-up
         would risk binding a different root (identity-fork)."""
         real_root = tmp_path / "real"
@@ -146,14 +146,14 @@ class TestResolveRoot:
 
         deep = real_root / "src"
         deep.mkdir()
-        with pytest.raises(RuntimeError, match="MODASTACK_ROOT"):
+        with pytest.raises(RuntimeError, match="BOBI_ROOT"):
             paths.resolve_root(deep)
 
     def test_honors_start_after_self_bind(self, tmp_path):
         """#375: resolve_root(start) must honor `start` even after THIS
         process has already resolved+bound a different root.
 
-        bind_root writes MODASTACK_ROOT into os.environ so spawned
+        bind_root writes BOBI_ROOT into os.environ so spawned
         subprocesses inherit the pin (#249). That self-written value must
         NOT make a later in-process resolve_root ignore an explicit,
         different `start` — only a pin INHERITED at process start does."""
@@ -163,9 +163,9 @@ class TestResolveRoot:
         _install(root2)
 
         # Warm: resolve + bind root1 like a CLI command does. This sets
-        # MODASTACK_ROOT=root1 in os.environ.
+        # BOBI_ROOT=root1 in os.environ.
         paths.bind_root(paths.resolve_root(root1))
-        assert os.environ["MODASTACK_ROOT"] == str(root1.resolve())
+        assert os.environ["BOBI_ROOT"] == str(root1.resolve())
 
         # A second resolution from a DIFFERENT start must honor it, not
         # return the warm root1.
@@ -180,11 +180,11 @@ class TestResolveRoot:
 
         empty = tmp_path / "empty"
         empty.mkdir()
-        with pytest.raises(RuntimeError, match="no Modastack installation found"):
+        with pytest.raises(RuntimeError, match="no Bobi installation found"):
             paths.resolve_root(empty)
 
     def test_skips_foreign_owned_marker(self, tmp_path, monkeypatch):
-        """A .modastack/ owned by a different uid must be skipped —
+        """A .bobi/ owned by a different uid must be skipped —
         prevents a second party on a shared host from capturing
         identity by planting a marker in a writable ancestor (#249)."""
         # Set up two installations: a foreign-owned inner one and a
@@ -202,7 +202,7 @@ class TestResolveRoot:
         original = paths._is_owned_by_current_user
 
         def _mock_ownership(marker_dir):
-            if marker_dir == inner / ".modastack":
+            if marker_dir == inner / ".bobi":
                 return False
             return original(marker_dir)
 
@@ -219,7 +219,7 @@ class TestResolveRoot:
 
         monkeypatch.setattr(paths, "_is_owned_by_current_user", lambda _: False)
 
-        with pytest.raises(RuntimeError, match="no Modastack installation found"):
+        with pytest.raises(RuntimeError, match="no Bobi installation found"):
             paths.resolve_root(foreign)
 
 
@@ -247,7 +247,7 @@ class TestIsLinkedWorktree:
 class TestIsOwnedByCurrentUser:
     def test_own_directory_passes(self, tmp_path):
         """A directory owned by the current user passes the check."""
-        marker = tmp_path / ".modastack"
+        marker = tmp_path / ".bobi"
         marker.mkdir()
         assert paths._is_owned_by_current_user(marker) is True
 
@@ -267,13 +267,13 @@ class TestNoSideEffects:
     def test_find_runtime_root_probe_creates_nothing(self, tmp_path):
         """The live-manager probe walks unowned ancestor dirs — it must
         never mkdir. Routing it through state_dir() (which creates) would
-        recreate the scattered .modastack dirs this design removes."""
-        from modastack.sdk import find_runtime_root
+        recreate the scattered .bobi dirs this design removes."""
+        from bobi.sdk import find_runtime_root
         deep = tmp_path / "a" / "b" / "c"
         deep.mkdir(parents=True)
 
         assert find_runtime_root(deep) is None
-        assert not list(tmp_path.rglob(".modastack"))
+        assert not list(tmp_path.rglob(".bobi"))
 
     def test_state_path_does_not_mkdir(self, tmp_path):
         p = paths.state_path(tmp_path)
@@ -282,11 +282,11 @@ class TestNoSideEffects:
 
 class TestUnboundRaises:
     def test_post_event_unbound_raises(self):
-        from modastack.events.publish import post_event
+        from bobi.events.publish import post_event
         with pytest.raises(RuntimeError, match="not bound"):
             post_event("test.event", {})
 
     def test_load_all_workflows_unbound_raises(self):
-        from modastack.workflow.triggers import WorkflowDispatcher
+        from bobi.workflow.triggers import WorkflowDispatcher
         with pytest.raises(RuntimeError, match="not bound"):
             WorkflowDispatcher().load_all_workflows()

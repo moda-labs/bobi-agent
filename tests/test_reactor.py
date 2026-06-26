@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from modastack.events.reactor import AutoDispatchRule, EventReactor
+from bobi.events.reactor import AutoDispatchRule, EventReactor
 
 
 def _wait_calls(mock, n, timeout=2.0):
@@ -275,7 +275,7 @@ class TestEventReactor:
             },
         }
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatches_on_matching_event(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -290,7 +290,7 @@ class TestEventReactor:
         assert call_kwargs[1]["workflow_name"] == "pr-feedback"
         assert "PR #42" in call_kwargs[1]["task"]
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_no_dispatch_on_non_matching_event(self, mock_launch):
         reactor = self._make_reactor()
         event = {"type": "github.issues", "fields": {"action": "opened"}}
@@ -300,7 +300,7 @@ class TestEventReactor:
         assert result is None
         mock_launch.assert_not_called()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_no_dispatch_when_review_state_is_approved(self, mock_launch):
         reactor = self._make_reactor()
         event = self._make_review_event(review_state="approved")
@@ -310,7 +310,7 @@ class TestEventReactor:
         assert result is None
         mock_launch.assert_not_called()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatches_on_review_comment(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -322,7 +322,7 @@ class TestEventReactor:
         _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dedup_prevents_rapid_double_dispatch(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -333,7 +333,7 @@ class TestEventReactor:
         _wait_calls(mock_launch, 1)
         assert mock_launch.call_count == 1
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dedup_allows_dispatch_after_cooldown(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor(cooldown=0)  # zero cooldown
@@ -344,7 +344,7 @@ class TestEventReactor:
         _wait_calls(mock_launch, 2)
         assert mock_launch.call_count == 2
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_distinct_comments_same_pr_each_dispatch_within_cooldown(self, mock_launch):
         """Two distinct comments on one PR both dispatch despite the cooldown.
 
@@ -361,7 +361,7 @@ class TestEventReactor:
         _wait_calls(mock_launch, 2)
         assert mock_launch.call_count == 2
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_same_comment_redelivered_dedups_within_cooldown(self, mock_launch):
         """Replay of the identical event (same id) dedups to one dispatch."""
         mock_launch.return_value = "wf-pr-feedback-test-42"
@@ -373,7 +373,7 @@ class TestEventReactor:
         _wait_calls(mock_launch, 1)
         assert mock_launch.call_count == 1
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_different_prs_dispatch_independently(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -385,7 +385,7 @@ class TestEventReactor:
         _wait_calls(mock_launch, 2)
         assert mock_launch.call_count == 2
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_graceful_on_launch_failure_active_session(self, mock_launch):
         """If launch_agent raises because session is already active, handle gracefully."""
         mock_launch.side_effect = RuntimeError("A run is already active")
@@ -396,7 +396,7 @@ class TestEventReactor:
         result = reactor.process(event)
         assert result == "dispatched"
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatch_does_not_block_on_slow_launch(self, mock_launch):
         """process() must return promptly even when launch_agent blocks (the
         concurrency-semaphore wait can sleep up to ~120s). The launch runs off
@@ -423,7 +423,7 @@ class TestEventReactor:
         assert started.wait(1.0), "launch did not run on a background thread"
         release.set()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_task_includes_pr_context(self, mock_launch):
         mock_launch.return_value = "wf-pr-feedback-test-42"
         reactor = self._make_reactor()
@@ -436,7 +436,7 @@ class TestEventReactor:
         assert "#42" in task
         assert "moda-labs/test" in task
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_empty_rules_never_dispatches(self, mock_launch):
         reactor = EventReactor(rules=[], cwd="/tmp")
         event = self._make_review_event()
@@ -444,7 +444,7 @@ class TestEventReactor:
         assert reactor.process(event) is None
         mock_launch.assert_not_called()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_suppress_rule_returns_suppressed_without_dispatch(self, mock_launch):
         """Suppress rules match the event but don't launch a workflow."""
         rules = [
@@ -478,7 +478,7 @@ class TestEventReactor:
         assert result == "suppressed"
         mock_launch.assert_not_called()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_suppress_rule_respects_cooldown(self, mock_launch):
         """Suppress rules use cooldown to prevent re-suppressing the same event."""
         rules = [
@@ -503,7 +503,7 @@ class TestEventReactor:
         assert reactor.process(event) is None
         mock_launch.assert_not_called()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_suppress_does_not_block_other_pr_events(self, mock_launch):
         """Suppress rule for review_requested doesn't affect other pull_request actions."""
         mock_launch.return_value = "wf-test"
@@ -616,15 +616,15 @@ class TestEventReactorFromConfig:
             {"event": "github.issue_comment", "workflow": "pr-feedback"},
         ]
         reactor = EventReactor.from_config(config, cwd="/tmp/project",
-                                           self_login="modastack")
-        assert reactor.self_login == "modastack"
+                                           self_login="bobi")
+        assert reactor.self_login == "bobi"
 
 
 class TestConfigAutoDispatch:
     """Config.load parses auto_dispatch rules from agent.yaml."""
 
     def test_auto_dispatch_parsed_from_yaml(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(
             "agent: test\n"
@@ -637,23 +637,23 @@ class TestConfigAutoDispatch:
             "  - event: github.pull_request_review_comment\n"
             "    workflow: pr-feedback\n"
         )
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
         assert len(cfg.auto_dispatch) == 2
         assert cfg.auto_dispatch[0]["event"] == "github.pull_request_review"
         assert cfg.auto_dispatch[0]["workflow"] == "pr-feedback"
 
     def test_auto_dispatch_defaults_to_empty(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text("agent: test\n")
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
         assert cfg.auto_dispatch == []
 
     def test_auto_dispatch_missing_config(self, tmp_path):
         """No agent.yaml → empty auto_dispatch."""
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
         assert cfg.auto_dispatch == []
 
@@ -698,17 +698,17 @@ class TestPrFeedbackDispatchHygiene:
             "type": "github.issue_comment",
             "source": "github",
             "id": delivery,
-            "topics": ["github:moda-labs/modastack"],
+            "topics": ["github:moda-labs/bobi"],
             "fields": fields,
         }
 
     # --- (a) bot-authored comments ---
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_skips_bot_authored_comment(self, mock_launch):
         reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
-        event = self._issue_comment_event(sender="modastack")
+                               self_login="bobi")
+        event = self._issue_comment_event(sender="bobi")
 
         result = reactor.process(event)
 
@@ -716,12 +716,12 @@ class TestPrFeedbackDispatchHygiene:
         time.sleep(0.05)
         mock_launch.assert_not_called()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatches_on_human_comment(self, mock_launch):
         """A genuine human comment still dispatches pr-feedback."""
         mock_launch.return_value = "wf-x"
         reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
+                               self_login="bobi")
         event = self._issue_comment_event(sender="zach")
 
         result = reactor.process(event)
@@ -730,19 +730,19 @@ class TestPrFeedbackDispatchHygiene:
         _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_self_author_skip_inactive_without_self_login(self, mock_launch):
         """No resolved bot identity → fail open (don't silently drop)."""
         mock_launch.return_value = "wf-x"
         reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
                                self_login=None)
-        event = self._issue_comment_event(sender="modastack")
+        event = self._issue_comment_event(sender="bobi")
 
         assert reactor.process(event) == "dispatched"
         _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_allow_self_authored_opt_in_dispatches(self, mock_launch):
         """The escape hatch: a rule with allow_self_authored=True still
         dispatches on the bot's own event (per review, underminedsk 2026-06-22).
@@ -758,13 +758,13 @@ class TestPrFeedbackDispatchHygiene:
             cooldown=60,
             allow_self_authored=True,
         )
-        reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="modastack")
+        reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="bobi")
         event = {
             "type": "github.pull_request",
             "source": "github",
             "id": "d1",
-            "topics": ["github:moda-labs/modastack"],
-            "fields": {"number": 99, "action": "closed", "sender": "modastack"},
+            "topics": ["github:moda-labs/bobi"],
+            "fields": {"number": 99, "action": "closed", "sender": "bobi"},
         }
 
         assert reactor.process(event) == "dispatched"
@@ -773,7 +773,7 @@ class TestPrFeedbackDispatchHygiene:
 
     # --- draft PRs stay watchable (reverted draft-skip, underminedsk 2026-06-22) ---
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatches_on_draft_pr(self, mock_launch):
         """A human comment on a DRAFT PR still dispatches pr-feedback.
 
@@ -783,7 +783,7 @@ class TestPrFeedbackDispatchHygiene:
         """
         mock_launch.return_value = "wf-x"
         reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
+                               self_login="bobi")
         event = self._issue_comment_event(sender="zach")
         event["fields"]["draft"] = True
 
@@ -791,13 +791,13 @@ class TestPrFeedbackDispatchHygiene:
         _wait_calls(mock_launch, 1)
         mock_launch.assert_called_once()
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_skips_bot_comment_even_on_draft(self, mock_launch):
         """The loop guard still fires on a draft: the bot's own comment on a
         draft PR must NOT dispatch (self-author skip, not draft skip)."""
         reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
-        event = self._issue_comment_event(sender="modastack")
+                               self_login="bobi")
+        event = self._issue_comment_event(sender="bobi")
         event["fields"]["draft"] = True
 
         assert reactor.process(event) is None
@@ -806,7 +806,7 @@ class TestPrFeedbackDispatchHygiene:
 
     # --- (c) per-comment dedup (no fan-out) ---
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_one_comment_dispatches_at_most_one_engine(self, mock_launch):
         """One comment redelivered with different per-delivery ids → one engine.
 
@@ -815,7 +815,7 @@ class TestPrFeedbackDispatchHygiene:
         """
         mock_launch.return_value = "wf-x"
         reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
+                               self_login="bobi")
         first = self._issue_comment_event(sender="zach", comment_id=777,
                                           delivery="delivery-aaa")
         second = self._issue_comment_event(sender="zach", comment_id=777,
@@ -826,12 +826,12 @@ class TestPrFeedbackDispatchHygiene:
         _wait_calls(mock_launch, 1)
         assert mock_launch.call_count == 1
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_distinct_comments_dispatch_independently(self, mock_launch):
         """Two genuinely different comments each dispatch (preserves #326)."""
         mock_launch.return_value = "wf-x"
         reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
+                               self_login="bobi")
         first = self._issue_comment_event(sender="zach", comment_id=1,
                                           delivery="delivery-aaa")
         second = self._issue_comment_event(sender="zach", comment_id=2,
@@ -844,7 +844,7 @@ class TestPrFeedbackDispatchHygiene:
 
     # --- (c) deterministic run_key → cross-process fan-out guard ---
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatch_uses_deterministic_run_key_for_comment(self, mock_launch):
         """The launch gets a run_key derived from the stable comment id (#411).
 
@@ -857,7 +857,7 @@ class TestPrFeedbackDispatchHygiene:
         """
         mock_launch.return_value = "wf-x"
         reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="modastack")
+                               self_login="bobi")
         event = self._issue_comment_event(sender="zach", comment_id=777,
                                           number=410)
 
@@ -866,7 +866,7 @@ class TestPrFeedbackDispatchHygiene:
         _wait_calls(mock_launch, 1)
         assert mock_launch.call_args[1]["run_key"] == "410-comment-777"
 
-    @patch("modastack.subagent.launch_agent")
+    @patch("bobi.subagent.launch_agent")
     def test_dispatch_run_key_uses_review_id(self, mock_launch):
         """A review event's run_key derives from its stable review id."""
         mock_launch.return_value = "wf-x"
@@ -875,12 +875,12 @@ class TestPrFeedbackDispatchHygiene:
             workflow="pr-feedback",
             match={"review_state": "changes_requested"},
         )
-        reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="modastack")
+        reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="bobi")
         event = {
             "type": "github.pull_request_review",
             "source": "github",
             "id": "d1",
-            "topics": ["github:moda-labs/modastack"],
+            "topics": ["github:moda-labs/bobi"],
             "fields": {
                 "number": 7, "sender": "zach",
                 "review_state": "changes_requested",

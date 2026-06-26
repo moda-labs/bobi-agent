@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from modastack.setup import actions
-from modastack.setup.actions import ActionError
-from modastack.setup.state import SetupState, source_tree_hash
+from bobi.setup import actions
+from bobi.setup.actions import ActionError
+from bobi.setup.state import SetupState, source_tree_hash
 
 
 def _write_minimal_pack(pack_dir: Path, entry="manager", with_adhoc=True):
@@ -138,7 +138,7 @@ class TestInstalledTeamName:
         assert actions.installed_team_name(project) is None
 
     def test_reads_agent_name(self, project):
-        from modastack import paths
+        from bobi import paths
         agent_yaml = paths.agent_yaml_path(project)
         agent_yaml.parent.mkdir(parents=True, exist_ok=True)
         agent_yaml.write_text(yaml.dump({"agent": "eng-team"}))
@@ -152,12 +152,12 @@ class TestResolveOrFetch:
         _write_minimal_pack(project / "agents" / "local-team")
         def boom(*a, **k):
             raise AssertionError("should not fetch a locally-resolvable team")
-        monkeypatch.setattr("modastack.registry.fetch", boom)
+        monkeypatch.setattr("bobi.registry.fetch", boom)
         resolved = actions.resolve_or_fetch("local-team", project)
         assert resolved == project / "agents" / "local-team"
 
     def test_returns_none_when_unresolvable(self, project, monkeypatch):
-        monkeypatch.setattr("modastack.registry.fetch", lambda *a, **k: None)
+        monkeypatch.setattr("bobi.registry.fetch", lambda *a, **k: None)
         assert actions.resolve_or_fetch("ghost-team", project) is None
 
 
@@ -212,7 +212,7 @@ class TestSaveCredential:
     def test_framework_var_raises(self, project):
         with pytest.raises(ActionError):
             actions.save_credential(SetupState(), project,
-                                    "MODASTACK_VENN_API_BASE", "", "",
+                                    "BOBI_VENN_API_BASE", "", "",
                                     prompt_fn=lambda v, s, i: "x")
 
 
@@ -280,8 +280,8 @@ class TestInstallTeam:
         payload = actions.install_team(build_state, project)
         assert payload["installed"] == "my-team"
         assert "SLACK_BOT_TOKEN" in payload["missing_credentials"]
-        assert (project / ".modastack" / "agent.yaml").exists()
-        assert (project / ".modastack" / "install-manifest.json").exists()
+        assert (project / ".bobi" / "agent.yaml").exists()
+        assert (project / ".bobi" / "install-manifest.json").exists()
         assert build_state.installed is True
         assert SetupState.load(project).installed is True
 
@@ -309,7 +309,7 @@ class TestRunPreflight:
         def fake_validate_config(p):
             seen["project"] = p
             return sentinel
-        monkeypatch.setattr("modastack.validate.validate_config",
+        monkeypatch.setattr("bobi.validate.validate_config",
                             fake_validate_config)
         assert actions.run_preflight(project) is sentinel
         assert seen["project"] == project

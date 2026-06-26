@@ -10,7 +10,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from modastack.monitors.schema import Condition
+from bobi.monitors.schema import Condition
 
 
 def disk_free(monitor, projects: list[Path]) -> list[Condition]:

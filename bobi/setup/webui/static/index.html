@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en" data-retro="on">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="bobi-nonce" content="{{NONCE}}" />
+  <title>bobi setup</title>
+  <link rel="icon" type="image/svg+xml" href="/static/bobi-mark.svg" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div class="app">
+    <div class="titlebar">
+      <div class="tdots"><i></i><i></i><i></i></div>
+      <div class="addr">
+        <svg class="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+        127.0.0.1 / setup
+      </div>
+      <div class="spacer"></div>
+      <button class="brand" type="button" data-home title="Go to homepage" aria-label="Go to homepage">
+        <span class="mk"><svg viewBox="0 0 32 32" aria-hidden="true"><g transform="translate(2,-2)"><circle cx="14" cy="18" r="6" fill="#FAF7EE"/><circle cx="14" cy="18" r="12.5" fill="none" stroke="#FAF7EE" stroke-width="1.2" stroke-dasharray="2 4" opacity="0.6"/><circle cx="23.5" cy="9.5" r="3" fill="#9690F1"/></g></svg></span>
+        <b>bobi</b>
+      </button>
+    </div>
+    <div class="panes" id="panes">
+      <div id="main" style="display:contents"></div>
+    </div>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

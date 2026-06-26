@@ -12,12 +12,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import yaml
 
-from modastack.monitors.schema import Condition, Monitor
+from bobi.monitors.schema import Condition, Monitor
 
 
 def _make_scheduler(tmp_path, monitors, publish=None, checks=None, now=None):
     """Create a MonitorScheduler with given monitors and state path."""
-    from modastack.monitors.scheduler import MonitorScheduler
+    from bobi.monitors.scheduler import MonitorScheduler
 
     class FakeRegistry:
         def effective_monitors(self):
@@ -38,8 +38,8 @@ class TestMonitorRegistryLoading:
     """MonitorRegistry loads and merges defaults + project monitors."""
 
     def test_loads_project_monitors(self, tmp_path):
-        """Monitors from .modastack/monitors.yaml are loaded."""
-        config_dir = tmp_path / ".modastack"
+        """Monitors from .bobi/monitors.yaml are loaded."""
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text("entry_point: manager\n")
         (config_dir / "monitors.yaml").write_text(yaml.dump({
@@ -48,7 +48,7 @@ class TestMonitorRegistryLoading:
             ]
         }))
 
-        from modastack.monitors.registry import MonitorRegistry
+        from bobi.monitors.registry import MonitorRegistry
         reg = MonitorRegistry.load(project_path=tmp_path)
 
         effective = reg.effective_monitors()
@@ -56,7 +56,7 @@ class TestMonitorRegistryLoading:
 
     def test_project_disables_default(self, tmp_path):
         """enabled: false in project config disables a default monitor."""
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         monitors_dir = config_dir / "monitors"
         monitors_dir.mkdir(parents=True)
 
@@ -75,7 +75,7 @@ class TestMonitorRegistryLoading:
         }))
         (config_dir / "agent.yaml").write_text("entry_point: manager\n")
 
-        from modastack.monitors.registry import MonitorRegistry
+        from bobi.monitors.registry import MonitorRegistry
         reg = MonitorRegistry.load(project_path=tmp_path)
 
         effective = reg.effective_monitors()

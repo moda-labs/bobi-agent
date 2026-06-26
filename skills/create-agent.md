@@ -1,6 +1,6 @@
 # Create Agent Teams
 
-Guide the user through designing and generating a modastack agent team.
+Guide the user through designing and generating a bobi agent team.
 An agent team is a portable bundle — role prompts, workflows, monitors,
 and tool guides — that defines a multi-agent system. The output is a
 runnable `agents/<pack-name>/` directory.
@@ -62,8 +62,8 @@ Write files in this order, explaining each as you go:
 
 ### 4. Finalize
 
-Show the directory tree, explain how to run (`modastack install
-agents/<pack-name>` then `modastack start`), and mention `.modastack/`
+Show the directory tree, explain how to run (`bobi install
+agents/<pack-name>` then `bobi start`), and mention `.bobi/`
 overrides for per-project customization.
 
 ## File format reference
@@ -88,8 +88,8 @@ linear:
   api_key: ${LINEAR_API_KEY}
 ```
 
-Only include services the team actually needs. `modastack install`
-prompts for any `${VAR}` references and writes them to `.modastack/.env`.
+Only include services the team actually needs. `bobi install`
+prompts for any `${VAR}` references and writes them to `.bobi/.env`.
 
 ### Inheriting from a base team (`from:`)
 
@@ -138,7 +138,7 @@ even when several layers reference the same tool. Available `cli` entries:
 `tools/<id>.md` or an explicit `requires:` entry for the same name **wins** — the
 catalog never clobbers a local declaration. `tool_library:` is consumed at
 compose and never written to the frozen `agent.yaml`. Catalog source +
-contribution guide: `modastack/tool_library/` and `docs/specs/416-tool-library.md`.
+contribution guide: `bobi/tool_library/` and `docs/specs/416-tool-library.md`.
 
 ### agent.md
 
@@ -158,8 +158,8 @@ One-paragraph description of what this agent system does.
 
 ## Setup
 
-modastack install agents/pack-name
-modastack start
+bobi install agents/pack-name
+bobi start
 ```
 
 ### Role prompts (roles/<name>/ROLE.md)
@@ -297,7 +297,7 @@ evaluates the description and posts an event only if something is found.
 
 Team-shipped reference content — rubrics, methodology, output format
 specs, examples — that agents read on demand. Installed frozen to
-`.modastack/context/`; reinstall restores them and `modastack doctor`
+`.bobi/context/`; reinstall restores them and `bobi doctor`
 flags hand-edits. Agents see an index (path + first line) in their
 prompt, so make the first line of each file a one-line description.
 
@@ -319,13 +319,13 @@ fill in before starting the team.
 
 ## Built-in CLI tools
 
-Every agent has access to the full `modastack` CLI — messaging
+Every agent has access to the full `bobi` CLI — messaging
 (`message`, `ask`, `slack-reply`), agent management (`agents launch`,
 `agents list`, `agents cancel`), and observability (`status`, `events`,
 `transcript`). Reference these in role prompts so agents know how to
 communicate and delegate.
 
-See [`skills/modastack.md`](../skills/modastack.md) for the complete
+See [`skills/bobi.md`](../skills/bobi.md) for the complete
 command reference.
 
 ## Design principles
@@ -343,11 +343,11 @@ command reference.
    webhook covers (stale items, drift, health checks).
 
 5. **Keep it simple**: Fewer roles and workflows to start. Users add more
-   via `.modastack/` overrides.
+   via `.bobi/` overrides.
 
 ## Important
 
 - Generate a complete, working team — no placeholders or TODOs.
-- Role prompts should reference `modastack` CLI commands the agent will use.
+- Role prompts should reference `bobi` CLI commands the agent will use.
 - Don't copy engineering-specific content into non-engineering packs.
 - Write files to `agents/<pack-name>/` in the current working directory.

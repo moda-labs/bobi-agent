@@ -1,6 +1,6 @@
-"""Integration tests for every modastack CLI command.
+"""Integration tests for every bobi CLI command.
 
-Exercises each command against the isolated modastack_env install.
+Exercises each command against the isolated bobi_env install.
 No running manager or Claude CLI needed — these verify that commands
 parse arguments, read config, and produce sensible output without crashing.
 """
@@ -96,8 +96,8 @@ class TestWorkflows:
         result = cli_run("workflows", "status")
         assert result.returncode == 0
 
-    def test_workflows_validate_valid(self, modastack_env, cli_run):
-        wf_file = modastack_env.workflows_dir / "test-valid.yaml"
+    def test_workflows_validate_valid(self, bobi_env, cli_run):
+        wf_file = bobi_env.workflows_dir / "test-valid.yaml"
         wf_file.write_text(textwrap.dedent("""\
             name: test-valid
             trigger: "test trigger"
@@ -108,8 +108,8 @@ class TestWorkflows:
         result = cli_run("workflows", "validate", str(wf_file))
         assert result.returncode == 0
 
-    def test_workflows_validate_invalid(self, modastack_env, cli_run):
-        bad_file = modastack_env.state_dir / "bad-workflow.yaml"
+    def test_workflows_validate_invalid(self, bobi_env, cli_run):
+        bad_file = bobi_env.state_dir / "bad-workflow.yaml"
         bad_file.write_text("not: a: valid: workflow: [[[")
         result = cli_run("workflows", "validate", str(bad_file))
         assert result.returncode != 0
@@ -128,7 +128,7 @@ class TestMonitors:
         result = cli_run("monitors", "list")
         assert result.returncode == 0
 
-    def test_monitors_add(self, modastack_env, cli_run):
+    def test_monitors_add(self, bobi_env, cli_run):
         result = cli_run(
             "monitors", "add", "test-monitor",
             "--interval", "15m",
@@ -137,11 +137,11 @@ class TestMonitors:
         assert result.returncode == 0
         assert "test-monitor" in result.stdout
 
-        monitors_file = modastack_env.project_path / ".modastack" / "monitors.yaml"
+        monitors_file = bobi_env.project_path / ".bobi" / "monitors.yaml"
         assert monitors_file.exists()
         assert "test-monitor" in monitors_file.read_text()
 
-    def test_monitors_remove(self, modastack_env, cli_run):
+    def test_monitors_remove(self, bobi_env, cli_run):
         cli_run(
             "monitors", "add", "remove-me",
             "--interval", "10m",
@@ -181,51 +181,51 @@ class TestSlackReply:
 
 
 class TestOutsideProject:
-    """CLI commands run from a directory with no .modastack/.
+    """CLI commands run from a directory with no .bobi/.
 
-    These tests must strip MODASTACK_ROOT from the subprocess env —
+    These tests must strip BOBI_ROOT from the subprocess env —
     bind_root() now propagates it (#249), and a stale value from a prior
     test would make resolve_root() short-circuit to the wrong root.
     """
 
     @staticmethod
     def _clean_env():
-        """Env dict without MODASTACK_ROOT so the subprocess walks from cwd."""
+        """Env dict without BOBI_ROOT so the subprocess walks from cwd."""
         env = {**os.environ}
-        env.pop("MODASTACK_ROOT", None)
+        env.pop("BOBI_ROOT", None)
         return env
 
     def _run_outside(self, *args, tmp_path_factory=None, tmp_dir=None):
         cwd = str(tmp_dir)
         return subprocess.run(
-            [sys.executable, "-m", "modastack.cli", *args],
+            [sys.executable, "-m", "bobi.cli", *args],
             capture_output=True, text=True, timeout=10,
             cwd=cwd, env=self._clean_env(),
         )
 
     def test_status_outside_project(self, tmp_path):
         result = subprocess.run(
-            [sys.executable, "-m", "modastack.cli", "status"],
+            [sys.executable, "-m", "bobi.cli", "status"],
             capture_output=True, text=True, timeout=10,
             cwd=str(tmp_path), env=self._clean_env(),
         )
         # No installation → clean usage error, never an invented root.
         assert result.returncode != 0
-        assert "no modastack installation" in (result.stdout + result.stderr).lower()
+        assert "no bobi installation" in (result.stdout + result.stderr).lower()
 
     def test_agents_list_outside_project(self, tmp_path):
         result = subprocess.run(
-            [sys.executable, "-m", "modastack.cli", "agents", "list"],
+            [sys.executable, "-m", "bobi.cli", "agents", "list"],
             capture_output=True, text=True, timeout=10,
             cwd=str(tmp_path), env=self._clean_env(),
         )
         combined = result.stdout + result.stderr
         assert result.returncode != 0
-        assert "no modastack installation" in combined.lower()
+        assert "no bobi installation" in combined.lower()
 
     def test_doctor_outside_project(self, tmp_path):
         result = subprocess.run(
-            [sys.executable, "-m", "modastack.cli", "doctor"],
+            [sys.executable, "-m", "bobi.cli", "doctor"],
             capture_output=True, text=True, timeout=10,
             cwd=str(tmp_path), env=self._clean_env(),
         )
@@ -238,22 +238,22 @@ class TestOutsideProject:
         """Group-level binding: transcript subcommands fail with a clean
         usage error, not a raw 'root not bound' RuntimeError."""
         result = subprocess.run(
-            [sys.executable, "-m", "modastack.cli", "transcript", "sessions"],
+            [sys.executable, "-m", "bobi.cli", "transcript", "sessions"],
             capture_output=True, text=True, timeout=10,
             cwd=str(tmp_path), env=self._clean_env(),
         )
         combined = result.stdout + result.stderr
         assert result.returncode != 0
-        assert "no modastack installation" in combined.lower()
+        assert "no bobi installation" in combined.lower()
         assert "Traceback" not in combined
 
     def test_workflows_status_outside_project(self, tmp_path):
         result = subprocess.run(
-            [sys.executable, "-m", "modastack.cli", "workflows", "status"],
+            [sys.executable, "-m", "bobi.cli", "workflows", "status"],
             capture_output=True, text=True, timeout=10,
             cwd=str(tmp_path), env=self._clean_env(),
         )
         combined = result.stdout + result.stderr
         assert result.returncode != 0
-        assert "no modastack installation" in combined.lower()
+        assert "no bobi installation" in combined.lower()
         assert "Traceback" not in combined

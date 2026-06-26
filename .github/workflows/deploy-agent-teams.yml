@@ -14,25 +14,25 @@ name: Deploy agent teams
 #   workflow_dispatch    -> manual; optional `only:` to scope to one deployment.
 #
 # Team-package updates do NOT need an image rebuild: the definition (prompts,
-# roles, workflows) lives on the volume and is hot-pushed by `modastack deploy`;
+# roles, workflows) lives on the volume and is hot-pushed by `bobi deploy`;
 # only a framework bump or a team `build:` (host-deps) change rebuilds the image,
 # which is the release pipeline's job. So the deploy-* tag / dispatch path ships a
 # team edit on its own; the release pipeline's image roll precedes this reconcile.
 #
 # This workflow is a THIN CLIENT: all deployment business logic lives in the
-# `modastack deploy` primitive (idempotent provision-or-update, delivery-mode
+# `bobi deploy` primitive (idempotent provision-or-update, delivery-mode
 # selection, secret validation, the Fly mechanics). The Action only orchestrates —
 # list the active deployments, materialize each one's secrets, loop the primitive.
 # Because deploy is idempotent, a release simply reconciles ALL active deployments
 # (provision the new, update the rest) — no git-diff needed. Nothing
-# GitHub-specific reaches into the engine, so the same `modastack deploy` runs from
+# GitHub-specific reaches into the engine, so the same `bobi deploy` runs from
 # a laptop, this Action, Terraform, or a SaaS plane. To wire your own repo, copy
 # this file; see docs/DEPLOYMENT.md (bring-your-own-repo runbook).
 #
 #   active deployment   = deployments/<name>.yaml (defaults.yaml excluded).
 #   inactive            = anything else (e.g. <name>.yaml.example) — never deployed.
 #   removed deployment  -> nothing automatic; the orphans job surfaces the
-#                          now-unmanaged Fly app for a human `modastack destroy`.
+#                          now-unmanaged Fly app for a human `bobi destroy`.
 #
 # State store = the Fly API (no DB, no committed manifest). Fleet identity comes
 # from deployments/defaults.yaml (`fleet:`), not a repo var.
@@ -45,7 +45,7 @@ name: Deploy agent teams
 #   own), holding this tenant's per-key secrets keyed `<TEAM>__<KEY>` (#385) — e.g.
 #   ENG_TEAM__SLACK_BOT_TOKEN. The deploy job filters them from toJSON(secrets) by
 #   the <TEAM>__ prefix into an --env-file; the engine reconciles to the team's
-#   declared agent.yaml set and prunes the rest. No opaque MODASTACK_ENV blob. No
+#   declared agent.yaml set and prunes the rest. No opaque BOBI_ENV blob. No
 #   protection rules (a required reviewer would pause the matrix).
 #   NOTE: the <tenant> prefix is organization, not isolation — toJSON(secrets) in
 #   any cell sees every secret in scope. Real multi-tenant isolation needs an
@@ -117,7 +117,7 @@ jobs:
           ONLY: ${{ inputs.only }}
         run: |
           set -euo pipefail
-          # A release/tag deploy reconciles the WHOLE active set — `modastack
+          # A release/tag deploy reconciles the WHOLE active set — `bobi
           # deploy` is idempotent (provision new, update existing), so deploying
           # all is correct and needs no git-diff. An active deployment is a
           # deployments/<name>.yaml (the shared defaults file excluded; an
@@ -172,7 +172,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install modastack CLI
+      - name: Install bobi CLI
         run: pip install -e .
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
@@ -203,11 +203,11 @@ jobs:
           # prune of undeclared keys, identity stamps) is the primitive's job. Prune
           # is on by default — the Environment is the source of truth; the engine
           # accepts --no-prune to disable it.
-          modastack deploy "$name" --env-file "$envfile"
+          bobi deploy "$name" --env-file "$envfile"
 
   orphans:
     # Report Fly apps in the fleet that no longer have a deployments/ file, so a
-    # human can `modastack destroy` them. Never auto-destroys (the volume is the
+    # human can `bobi destroy` them. Never auto-destroys (the volume is the
     # only copy of an instance's state). Pure orchestration: a cross-fleet diff.
     needs: plan
     if: ${{ needs.plan.outputs.configured == 'true' }}
@@ -242,7 +242,7 @@ jobs:
 
           if [ "${#orphans[@]}" -gt 0 ]; then
             echo "::warning::Unmanaged fleet instances (no deployments/ file): ${orphans[*]}"
-            echo "Run \`modastack destroy <name>\` to remove each one (human-gated)."
+            echo "Run \`bobi destroy <name>\` to remove each one (human-gated)."
           else
             echo "No unmanaged instances."
           fi

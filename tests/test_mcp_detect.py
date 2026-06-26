@@ -4,7 +4,7 @@ import textwrap
 
 import pytest
 
-from modastack.setup import mcp_detect
+from bobi.setup import mcp_detect
 
 
 def _write(folder, rel, text):

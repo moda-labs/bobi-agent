@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from modastack.workflow.state import WorkflowRun
+from bobi.workflow.state import WorkflowRun
 
 
 @pytest.fixture
@@ -14,7 +14,7 @@ def runs_dir(tmp_path, monkeypatch):
     """Redirect _runs_dir to a temp directory for test isolation."""
     d = tmp_path / "runs"
     d.mkdir()
-    monkeypatch.setattr("modastack.workflow.state._runs_dir", lambda: d)
+    monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: d)
     return d
 
 
@@ -95,7 +95,7 @@ class TestSaveLoad:
         run = _make_run(
             runs_dir, run_id="full",
             session_name="session-1",
-            repo="moda-labs/modastack",
+            repo="moda-labs/bobi",
             cwd="/tmp/worktree",
             run_key="42",
         )
@@ -105,7 +105,7 @@ class TestSaveLoad:
         run.save()
         loaded = WorkflowRun.load("full")
         assert loaded.session_name == "session-1"
-        assert loaded.repo == "moda-labs/modastack"
+        assert loaded.repo == "moda-labs/bobi"
         assert loaded.cwd == "/tmp/worktree"
         assert loaded.run_key == "42"
         assert loaded.variable_scopes == {"handoff": {"complexity": "medium"}}
@@ -145,7 +145,7 @@ class TestFindWaiting:
         assert WorkflowRun.find_waiting("approval") is None
 
     def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state._runs_dir",
+        monkeypatch.setattr("bobi.workflow.state._runs_dir",
                             lambda: tmp_path / "nonexistent")
         assert WorkflowRun.find_waiting("approval") is None
 
@@ -153,7 +153,7 @@ class TestFindWaiting:
         """find_waiting with repo filters out runs from other repos."""
         _make_run(runs_dir, run_id="w-mod", status="waiting",
                   await_event="approval", run_key="42",
-                  repo="moda-labs/modastack")
+                  repo="moda-labs/bobi")
         _make_run(runs_dir, run_id="w-job", status="waiting",
                   await_event="approval", run_key="42",
                   repo="moda-labs/jobtack")
@@ -166,7 +166,7 @@ class TestFindWaiting:
         """find_waiting with repo='' matches any repo (backward compat)."""
         _make_run(runs_dir, run_id="w-any", status="waiting",
                   await_event="approval", run_key="10",
-                  repo="moda-labs/modastack")
+                  repo="moda-labs/bobi")
         found = WorkflowRun.find_waiting("approval", run_key="10", repo="")
         assert found is not None
         assert found.run_id == "w-any"
@@ -175,7 +175,7 @@ class TestFindWaiting:
         """find_waiting with wrong repo returns None even if run_key matches."""
         _make_run(runs_dir, run_id="w-other", status="waiting",
                   await_event="approval", run_key="42",
-                  repo="moda-labs/modastack")
+                  repo="moda-labs/bobi")
         found = WorkflowRun.find_waiting("approval", run_key="42",
                                          repo="moda-labs/jobtack")
         assert found is None
@@ -259,7 +259,7 @@ class TestListRuns:
         assert WorkflowRun.list_runs() == []
 
     def test_returns_empty_when_dir_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.workflow.state._runs_dir",
+        monkeypatch.setattr("bobi.workflow.state._runs_dir",
                             lambda: tmp_path / "nonexistent")
         assert WorkflowRun.list_runs() == []
 

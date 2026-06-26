@@ -14,14 +14,14 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from modastack import http as pooled
-from modastack.config import Config, ServiceConfig
-from modastack.events.server import (
+from bobi import http as pooled
+from bobi.config import Config, ServiceConfig
+from bobi.events.server import (
     authorize_resources,
     register,
     UnauthorizedTopics,
 )
-from modastack.subagent import _start_event_subscription
+from bobi.subagent import _start_event_subscription
 
 
 def _cfg(github_token="", linear_key=""):
@@ -196,7 +196,7 @@ def test_startup_authorizes_resources_before_register(tmp_path):
     """_start_event_subscription must authorize resource grants before it
     registers the deployment, so a github:/linear: topic has its grant by the
     time the server checks it."""
-    ms = tmp_path / ".modastack"
+    ms = tmp_path / ".bobi"
     ms.mkdir()
     (ms / "agent.yaml").write_text(
         "agent: test\nentry_point: manager\nevent_server: https://es.invalid\n"
@@ -214,15 +214,15 @@ def test_startup_authorizes_resources_before_register(tmp_path):
         return ("dep-1", "key-1")
 
     # The names are imported INTO subagent at call time via
-    # `from modastack.events.server import ...`, so patch them on the source
+    # `from bobi.events.server import ...`, so patch them on the source
     # module (the same convention the other subscription tests use).
-    with patch("modastack.events.server.ensure_bubble",
+    with patch("bobi.events.server.ensure_bubble",
                return_value={"bubble_id": "bub", "bubble_key": "bkey"}), \
-         patch("modastack.events.server.register_slack_workspaces", return_value=[]), \
-         patch("modastack.events.server.authorize_resources", side_effect=fake_authorize), \
-         patch("modastack.events.server.register", side_effect=fake_register), \
-         patch("modastack.events.client.EventServerClient"), \
-         patch("modastack.events.drain.drain_loop"):
+         patch("bobi.events.server.register_slack_workspaces", return_value=[]), \
+         patch("bobi.events.server.authorize_resources", side_effect=fake_authorize), \
+         patch("bobi.events.server.register", side_effect=fake_register), \
+         patch("bobi.events.client.EventServerClient"), \
+         patch("bobi.events.drain.drain_loop"):
         _start_event_subscription("sess", ["github:o/r"], tmp_path)
 
     assert order.index("authorize") < order.index("register")

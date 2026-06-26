@@ -1,4 +1,4 @@
-"""Tests for the modastack setup web server — security, serialization, and the
+"""Tests for the bobi setup web server — security, serialization, and the
 deterministic + streaming endpoints. Driven by Starlette's TestClient with
 an injected fake LLM source: no network, no CLI."""
 
@@ -8,15 +8,15 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from modastack.setup import services
-from modastack.setup.state import SetupState, Stage
-from modastack.setup.webui import server
+from bobi.setup import services
+from bobi.setup.state import SetupState, Stage
+from bobi.setup.webui import server
 
 NONCE = "test-nonce-123"
 
 
 def _fake_digest(reply, **payload):
-    sentinel = "===MODASTACK-SPEC==="
+    sentinel = "===BOBI-SPEC==="
 
     async def fn(*, system_prompt, user_prompt, model, cwd):
         yield reply + "\n" + sentinel + "\n" + json.dumps(payload)
@@ -64,7 +64,7 @@ def project(tmp_path):
 
 @pytest.fixture
 def home(tmp_path):
-    """A stand-in for the user's home, so the ~/modastack-agents library and the
+    """A stand-in for the user's home, so the ~/bobi-agents library and the
     folder picker stay off the real filesystem. Pass home_root=home to _client."""
     h = tmp_path / "home"
     h.mkdir()
@@ -230,7 +230,7 @@ class TestConnect:
             "value": "xoxb-secret-value-1234"})
         assert r.status_code == 200
         assert r.json()["saved"] is True
-        env = (project / ".modastack" / ".env").read_text()
+        env = (project / ".bobi" / ".env").read_text()
         assert "SLACK_BOT_TOKEN=xoxb-secret-value-1234" in env
         # the secret never appears in the response
         assert "xoxb-secret-value-1234" not in r.text
@@ -259,7 +259,7 @@ class TestConnect:
 class TestVennSetup:
     def _verified(self, monkeypatch, names):
         """Stub list_servers_verified to return these available service names."""
-        import modastack.venn as venn_mod
+        import bobi.venn as venn_mod
 
         class _S:
             def __init__(self, name):
@@ -269,7 +269,7 @@ class TestVennSetup:
                             lambda key: [_S(n) for n in names])
 
     def _verified_raises(self, monkeypatch):
-        import modastack.venn as venn_mod
+        import bobi.venn as venn_mod
         def boom(key):
             raise venn_mod.VennError("Venn rejected the API key (unauthorized).")
         monkeypatch.setattr(venn_mod, "list_servers_verified", boom)
@@ -302,7 +302,7 @@ class TestVennSetup:
         data = c.post("/api/venn/connect", json={"key": "venn_good"}).json()
         assert data["ok"] is True and "gmail" in data["servers"]
         # the verified key is now persisted
-        env = (project / ".modastack" / ".env").read_text()
+        env = (project / ".bobi" / ".env").read_text()
         assert "VENN_API_KEY=venn_good" in env
 
     def test_connect_bad_key_not_saved(self, project, monkeypatch):
@@ -311,7 +311,7 @@ class TestVennSetup:
         c = _client(SetupState(), project)
         data = c.post("/api/venn/connect", json={"key": "venn_bad"}).json()
         assert data["ok"] is False
-        envf = project / ".modastack" / ".env"
+        envf = project / ".bobi" / ".env"
         assert not envf.exists() or "VENN_API_KEY" not in envf.read_text()
 
     def test_apply_reconciles_toggles(self, project):
@@ -377,7 +377,7 @@ class TestBuildInstall:
 
         i = c.post("/api/install").json()
         assert i["installed"] == "triage-bot"
-        assert (project / ".modastack" / "agent.yaml").exists()
+        assert (project / ".bobi" / "agent.yaml").exists()
 
     def test_install_blocked_when_unvalidated(self, project):
         state = self._ready_state()
@@ -516,7 +516,7 @@ class TestPanelEdits:
         assert any((x.get("name") or "").lower() == "posthog" for x in s.spec.services)
         # the key landed in .env, never in the response
         assert "ph_secret_123" not in r.text
-        assert "POSTHOG_API_KEY=ph_secret_123" in (project / ".modastack" / ".env").read_text()
+        assert "POSTHOG_API_KEY=ph_secret_123" in (project / ".bobi" / ".env").read_text()
 
     def test_mcp_add_rejects_oauth(self, project):
         # OAuth-authed MCPs aren't supported yet — only api_key / none.
@@ -590,7 +590,7 @@ class TestPanelEdits:
         c = _client(SetupState(), project)
         r = c.post("/api/mcp/add", json={
             "name": "Evil", "url": "https://mcp.evil.com/mcp",
-            "auth": "api_key", "api_key": "abc\nMODASTACK_X=1"})
+            "auth": "api_key", "api_key": "abc\nBOBI_X=1"})
         assert r.status_code == 400
 
     def test_mcp_add_stdio_command_connection(self, project, monkeypatch):
@@ -613,7 +613,7 @@ class TestPanelEdits:
                    for x in s.spec.services)
         # the value landed in .env as a ${VAR} ref, never in the response
         assert "sk_123" not in r.text
-        env_text = (project / ".modastack" / ".env").read_text()
+        env_text = (project / ".bobi" / ".env").read_text()
         assert "SUBSTACK_API_KEY=sk_123" in env_text
 
     def test_mcp_add_stdio_requires_command(self, project):
@@ -688,7 +688,7 @@ class TestPanelEdits:
         entry = s.spec.mcp_servers["substack_mcp"]
         assert entry["args"][-2] == "/y"                      # edit applied
         assert entry["env_vars"] == ["SUBSTACK_COOKIE"]       # declaration kept
-        env_text = (project / ".modastack" / ".env").read_text()
+        env_text = (project / ".bobi" / ".env").read_text()
         assert "SUBSTACK_COOKIE=sek" in env_text              # secret preserved
 
     def test_edit_rename_rekeys_without_leaving_stale_entry(self, project, monkeypatch):
@@ -715,7 +715,7 @@ class TestPanelEdits:
             "args": "run x", "env": [{"name": "SUBSTACK_COOKIE"}]})
         # The UI needs the stored config to repopulate the edit form.
         spec = c.get("/api/connect")  # touch
-        from modastack.setup.webui.server import serialize_state
+        from bobi.setup.webui.server import serialize_state
         sp = serialize_state(s)["spec"]
         assert "substack_mcp" in sp["mcp_servers"]
         assert sp["mcp_servers"]["substack_mcp"]["command"] == "uv"
@@ -723,7 +723,7 @@ class TestPanelEdits:
     def _stub_probe(self, monkeypatch, *, run_result):
         """Fake probe: a propose call (call_name=None) lists tools + a suggestion;
         a run call (call_name=...) returns the given run_result."""
-        import modastack.setup.mcp_probe as mcp_probe
+        import bobi.setup.mcp_probe as mcp_probe
 
         async def fake_probe(entry, proj, *, call_name=None, **kw):
             if call_name is None:
@@ -810,7 +810,7 @@ class TestPanelEdits:
 
     def test_ordinary_chat_does_not_trigger_a_test(self, project, monkeypatch):
         # A normal design message must fall through to digestion, not the probe.
-        import modastack.setup.mcp_probe as mcp_probe
+        import bobi.setup.mcp_probe as mcp_probe
         called = {"probe": False}
 
         async def fake_probe(*a, **k):
@@ -821,7 +821,7 @@ class TestPanelEdits:
         async def fake_digest(state, project, msg, **kw):
             state.messages.append({"role": "assistant", "content": "ok"})
             yield "ok"
-        monkeypatch.setattr("modastack.setup.digestion.digest_turn", fake_digest)
+        monkeypatch.setattr("bobi.setup.digestion.digest_turn", fake_digest)
         s = SetupState()
         s.spec.mcp_servers = {"substack_mcp": {"type": "stdio", "command": "uv"}}
         c = _client(s, project)
@@ -877,8 +877,8 @@ class TestPanelEdits:
         assert card["status"] == "needs_auth"
         assert "SUBSTACK_API_KEY" in card["note"]
         assert card["summary"] == "substack-mcp"
-        envf = project / ".modastack" / ".env"
-        assert not envf.exists() or "MODASTACK_X" not in envf.read_text()
+        envf = project / ".bobi" / ".env"
+        assert not envf.exists() or "BOBI_X" not in envf.read_text()
 
 
 # --- review file endpoints -----------------------------------------------
@@ -971,7 +971,7 @@ class TestHome:
 
 
 class TestRunStart:
-    def test_spawns_modastack_start_in_project(self, project, monkeypatch):
+    def test_spawns_bobi_start_in_project(self, project, monkeypatch):
         calls = {}
 
         def fake_popen(args, **kw):
@@ -983,7 +983,7 @@ class TestRunStart:
         c = _client(SetupState(stage=Stage.DONE), project)
         r = c.post("/api/run-start")
         assert r.status_code == 200 and r.json()["ok"] is True
-        assert calls["args"][1:] == ["-m", "modastack", "start"]
+        assert calls["args"][1:] == ["-m", "bobi", "start"]
         assert calls["cwd"] == str(project)
 
     def test_reports_error_when_spawn_fails(self, project, monkeypatch):
@@ -1012,23 +1012,23 @@ def _seed_team(project, name="legacy-bot", *, parent="agents"):
 
 
 def _seed_library_team(home, name="legacy-bot"):
-    """Write a minimal valid team source into the ~/modastack-agents library."""
-    return _seed_team(home / "modastack-agents", name, parent=".")
+    """Write a minimal valid team source into the ~/bobi-agents library."""
+    return _seed_team(home / "bobi-agents", name, parent=".")
 
 
 class TestListTeamsIn:
     def test_missing_directory_is_empty(self, tmp_path):
-        from modastack.setup import open_mode
+        from bobi.setup import open_mode
         assert open_mode.list_teams_in(tmp_path / "nope") == []
 
     def test_a_path_thats_a_file_is_empty(self, tmp_path):
-        from modastack.setup import open_mode
+        from bobi.setup import open_mode
         f = tmp_path / "f.txt"
         f.write_text("x")
         assert open_mode.list_teams_in(f) == []
 
     def test_scans_dir_itself_and_children(self, tmp_path):
-        from modastack.setup import open_mode
+        from bobi.setup import open_mode
         # the dir itself is a team AND it contains a child team
         (tmp_path / "agent.yaml").write_text("agent: root-team\n")
         (tmp_path / "child").mkdir()
@@ -1040,13 +1040,13 @@ class TestListTeamsIn:
 class TestIntro:
     def test_intro_scans_the_library_by_default(self, project, home):
         # The default scan + create location is the machine-wide library
-        # (~/modastack-agents), not the cwd — a team isn't tied to where it installs.
+        # (~/bobi-agents), not the cwd — a team isn't tied to where it installs.
         _seed_library_team(home, "legacy-bot")
         c = _client(SetupState(), project, home_root=home)
         data = c.get("/api/intro").json()
         names = {t["name"] for t in data["teams"]}
         assert "legacy-bot" in names
-        library = str((home / "modastack-agents").resolve())
+        library = str((home / "bobi-agents").resolve())
         assert data["default_location"] == library
         assert data["scan_dir"] == library
 
@@ -1054,7 +1054,7 @@ class TestIntro:
         # The library folder itself may be a team (create writes straight into
         # its named subfolder, but a flat layout is fine too) — show the
         # agent.yaml name, not the folder name.
-        src = home / "modastack-agents"
+        src = home / "bobi-agents"
         (src / "roles" / "aide").mkdir(parents=True)
         (src / "agent.yaml").write_text(
             "agent: personal-assistant\nversion: 0.1.0\nentry_point: aide\n")
@@ -1067,7 +1067,7 @@ class TestIntro:
 
     def test_intro_includes_team_at_custom_source_dir(self, project, home):
         # A team authored at the location the user gave at /api/start lives
-        # outside the default library. modastack persisted that path in
+        # outside the default library. bobi persisted that path in
         # source_dir, so the home screen must surface the team — scanning only
         # the library hides a team the user explicitly placed elsewhere.
         src = home / "projects" / "moda"
@@ -1101,7 +1101,7 @@ class TestIntro:
         _seed_library_team(home, "legacy-bot")
         c = _client(SetupState(), project, home_root=home)
         d = c.get("/api/teams").json()
-        assert d["dir"] == str((home / "modastack-agents").resolve())
+        assert d["dir"] == str((home / "bobi-agents").resolve())
         assert "legacy-bot" in {t["name"] for t in d["teams"]}
 
     def test_teams_accepts_relative_path_under_home(self, project, home):
@@ -1113,7 +1113,7 @@ class TestIntro:
         assert "triage-bot" in {t["name"] for t in d["teams"]}
 
     def test_start_open_rejects_fork_inside_source(self, project, home):
-        src = home / "modastack-agents" / "pa"
+        src = home / "bobi-agents" / "pa"
         src.mkdir(parents=True)
         (src / "agent.yaml").write_text("agent: pa\n")
         c = _client(SetupState(), project, home_root=home)
@@ -1168,16 +1168,16 @@ class TestIntro:
         assert "github" in opener["content"]      # its services are recapped
         assert "Slack" in opener["content"]        # its chat channel is recapped
 
-    def test_start_rejects_modastack_location(self, project):
+    def test_start_rejects_bobi_location(self, project):
         c = _client(SetupState(), project)
         r = c.post("/api/start", json={"mode": "create",
-                                       "location": ".modastack/team"})
+                                       "location": ".bobi/team"})
         assert r.status_code == 400
 
     def test_start_open_unknown_team_400(self, project, home):
         c = _client(SetupState(), project, home_root=home)
         r = c.post("/api/start", json={
-            "mode": "open", "team_path": str(home / "modastack-agents" / "ghost"),
+            "mode": "open", "team_path": str(home / "bobi-agents" / "ghost"),
             "location": "agent-teams/ghost"})
         assert r.status_code == 400  # not a team (no agent.yaml)
 
@@ -1203,7 +1203,7 @@ class TestIntro:
     def test_start_registry_fetches_and_reverse_fills(self, project, monkeypatch):
         # The registry fetch is stubbed: it materializes a team at `dest`,
         # mirroring registry.fetch + copy_into without hitting the network.
-        from modastack.setup import open_mode
+        from bobi.setup import open_mode
 
         def fake_fetch_into(proj, name, dest):
             _seed_team(proj, name)  # writes agents/<name>/
@@ -1212,14 +1212,14 @@ class TestIntro:
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         c = _client(SetupState(), project)
         r = c.post("/api/start", json={"mode": "registry", "team": "eng-team",
-                                       "location": "modastack/eng-team"})
+                                       "location": "bobi/eng-team"})
         assert r.status_code == 200
         d = r.json()
         assert d["stage"] == "design"
         # Registry-derived teams use the non-lossy edit path (mode "open").
         assert d["mode"] == "open"
         assert d["spec"]["goal"]
-        assert (project / "modastack" / "eng-team" / "agent.yaml").is_file()
+        assert (project / "bobi" / "eng-team" / "agent.yaml").is_file()
 
     def test_start_registry_refuses_to_clobber_an_existing_team(self, project, home):
         # Selecting a (bundled/registry) template into a location already holding
@@ -1237,7 +1237,7 @@ class TestIntro:
     def test_start_registry_without_team_400(self, project):
         c = _client(SetupState(), project)
         r = c.post("/api/start", json={"mode": "registry",
-                                       "location": "modastack/x"})
+                                       "location": "bobi/x"})
         assert r.status_code == 400
 
     def test_browse_lists_home_dirs(self, project, home):
@@ -1255,8 +1255,8 @@ class TestIntro:
     def test_browse_defaults_to_library(self, project, home):
         c = _client(SetupState(), project, home_root=home)
         d = c.get("/api/browse").json()  # no path → the library, created on demand
-        assert d["path"] == str((home / "modastack-agents").resolve())
-        assert (home / "modastack-agents").is_dir()
+        assert d["path"] == str((home / "bobi-agents").resolve())
+        assert (home / "bobi-agents").is_dir()
 
     def test_browse_confined_to_home(self, project, home):
         c = _client(SetupState(), project, home_root=home)
@@ -1272,9 +1272,9 @@ class TestIntro:
         assert r.status_code == 404
 
     def test_browse_survives_library_taken_by_a_file(self, project, home):
-        # If ~/modastack-agents already exists as a FILE, the lazy mkdir must
+        # If ~/bobi-agents already exists as a FILE, the lazy mkdir must
         # not 500 the GET — it falls back to listing home.
-        (home / "modastack-agents").write_text("not a dir")
+        (home / "bobi-agents").write_text("not a dir")
         (home / "work").mkdir()
         c = _client(SetupState(), project, home_root=home)
         d = c.get("/api/browse").json()
@@ -1296,32 +1296,32 @@ class TestIntro:
         # modify/registry put the source at <location>/<team-name>; renaming
         # must move that folder and repoint source_dir so the folder on disk
         # matches the new name.
-        src = project / "modastack" / "a-personal-assistant-team"
+        src = project / "bobi" / "a-personal-assistant-team"
         src.mkdir(parents=True)
         (src / "agent.yaml").write_text("agent: a-personal-assistant-team\n")
         st = SetupState(stage=Stage.DESIGN, team_name="a-personal-assistant-team",
-                        source_dir="modastack/a-personal-assistant-team")
+                        source_dir="bobi/a-personal-assistant-team")
         c = _client(st, project)
         d = c.post("/api/rename", json={"name": "personal-assistant"}).json()
         assert d["team_name"] == "personal-assistant"
-        assert d["source_dir"] == "modastack/personal-assistant"
-        assert (project / "modastack" / "personal-assistant" / "agent.yaml").is_file()
-        assert not (project / "modastack" / "a-personal-assistant-team").exists()
+        assert d["source_dir"] == "bobi/personal-assistant"
+        assert (project / "bobi" / "personal-assistant" / "agent.yaml").is_file()
+        assert not (project / "bobi" / "a-personal-assistant-team").exists()
 
     def test_rename_leaves_non_team_named_folder_alone(self, project):
-        # create's folder is "modastack", not named after the team — left as chosen.
-        (project / "modastack").mkdir()
-        st = SetupState(stage=Stage.DESIGN, team_name="triage", source_dir="modastack")
+        # create's folder is "bobi", not named after the team — left as chosen.
+        (project / "bobi").mkdir()
+        st = SetupState(stage=Stage.DESIGN, team_name="triage", source_dir="bobi")
         c = _client(st, project)
         d = c.post("/api/rename", json={"name": "triage-bot"}).json()
         assert d["team_name"] == "triage-bot"
-        assert d["source_dir"] == "modastack"
+        assert d["source_dir"] == "bobi"
 
     def test_rename_conflict_when_target_folder_exists(self, project):
-        (project / "modastack" / "old").mkdir(parents=True)
-        (project / "modastack" / "taken").mkdir(parents=True)
-        st = SetupState(stage=Stage.DESIGN, team_name="old", source_dir="modastack/old")
+        (project / "bobi" / "old").mkdir(parents=True)
+        (project / "bobi" / "taken").mkdir(parents=True)
+        st = SetupState(stage=Stage.DESIGN, team_name="old", source_dir="bobi/old")
         c = _client(st, project)
         r = c.post("/api/rename", json={"name": "taken"})
         assert r.status_code == 409
-        assert (project / "modastack" / "old").exists()  # original untouched
+        assert (project / "bobi" / "old").exists()  # original untouched

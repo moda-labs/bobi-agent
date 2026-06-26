@@ -1,4 +1,4 @@
-"""Tests for agent discovery under the single .modastack root.
+"""Tests for agent discovery under the single .bobi root.
 
 Covers:
 - find_runtime_root live-manager detection (nested-start guard)
@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from modastack.sdk import (
+from bobi.sdk import (
     SessionEntry,
     SessionRegistry,
     _pid_file_alive,
@@ -40,21 +40,21 @@ def tree(tmp_path):
     """Create a directory tree simulating a director + child repo layout.
 
     ~/dev/                  ← director (parent)
-    ~/dev/.modastack/
-    ~/dev/.modastack/state/
+    ~/dev/.bobi/
+    ~/dev/.bobi/state/
     ~/dev/jobtack/          ← child repo
-    ~/dev/jobtack/.modastack/
-    ~/dev/jobtack/.modastack/state/
+    ~/dev/jobtack/.bobi/
+    ~/dev/jobtack/.bobi/state/
     """
     parent = tmp_path / "dev"
     parent.mkdir()
-    (parent / ".modastack" / "state").mkdir(parents=True)
-    (parent / ".modastack" / "sessions").mkdir(parents=True)
-    (parent / ".modastack" / "agent.yaml").write_text("name: test-agent\n")
+    (parent / ".bobi" / "state").mkdir(parents=True)
+    (parent / ".bobi" / "sessions").mkdir(parents=True)
+    (parent / ".bobi" / "agent.yaml").write_text("name: test-agent\n")
 
     child = parent / "jobtack"
     child.mkdir()
-    (child / ".modastack" / "state").mkdir(parents=True)
+    (child / ".bobi" / "state").mkdir(parents=True)
 
     return parent, child
 
@@ -62,8 +62,8 @@ def tree(tmp_path):
 @pytest.fixture(autouse=True)
 def reset_project_root():
     """Reset the global project root after each test."""
-    import modastack.sdk as sdk
-    from modastack import paths
+    import bobi.sdk as sdk
+    from bobi import paths
     old = paths._root
     sdk._registry = None
     yield
@@ -104,7 +104,7 @@ class TestFindRuntimeRoot:
     def test_finds_parent_with_live_manager(self, tree):
         parent, child = tree
         # Simulate a live manager in parent
-        pid_file = parent / ".modastack" / "state" / "manager.pid"
+        pid_file = parent / ".bobi" / "state" / "manager.pid"
         pid_file.write_text(str(os.getpid()))
 
         result = find_runtime_root(child)
@@ -112,7 +112,7 @@ class TestFindRuntimeRoot:
 
     def test_finds_self_with_live_manager(self, tree):
         parent, child = tree
-        pid_file = parent / ".modastack" / "state" / "manager.pid"
+        pid_file = parent / ".bobi" / "state" / "manager.pid"
         pid_file.write_text(str(os.getpid()))
 
         result = find_runtime_root(parent)
@@ -125,14 +125,14 @@ class TestFindRuntimeRoot:
 
     def test_returns_none_with_stale_pid(self, tree):
         parent, child = tree
-        pid_file = parent / ".modastack" / "state" / "manager.pid"
+        pid_file = parent / ".bobi" / "state" / "manager.pid"
         pid_file.write_text("99999999")  # dead PID
 
         result = find_runtime_root(child)
         assert result is None
 
     def test_returns_none_when_start_is_none(self):
-        from modastack import paths
+        from bobi import paths
         old = paths._root
         paths._root = None
         try:
@@ -142,7 +142,7 @@ class TestFindRuntimeRoot:
 
     def test_uses_project_root_as_default(self, tree):
         parent, _ = tree
-        pid_file = parent / ".modastack" / "state" / "manager.pid"
+        pid_file = parent / ".bobi" / "state" / "manager.pid"
         pid_file.write_text(str(os.getpid()))
 
         set_project_root(parent)
@@ -155,11 +155,11 @@ class TestFindRuntimeRoot:
         parent = grandparent / "b"
         child = parent / "c"
         for d in (grandparent, parent, child):
-            (d / ".modastack" / "state").mkdir(parents=True)
+            (d / ".bobi" / "state").mkdir(parents=True)
 
         # Both grandparent and parent have live managers
-        (grandparent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
-        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
+        (grandparent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
+        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
 
         # From child, should find parent (closest)
         result = find_runtime_root(child)
@@ -175,18 +175,18 @@ class TestSessionsDirBoundRoot:
         parent, _ = tree
         set_project_root(parent)
         sd = _sessions_dir()
-        assert sd == parent / ".modastack" / "sessions"
+        assert sd == parent / ".bobi" / "sessions"
 
     def test_no_walk_up_even_with_live_ancestor_manager(self, tree):
         """Sessions never escape the bound root. The old walk-up to a live
         manager.pid let a mis-bound agent scatter state across repo
         checkouts; binding is explicit now, so the bound root is final."""
         parent, child = tree
-        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
+        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
 
         set_project_root(child)
         sd = _sessions_dir()
-        assert sd == child / ".modastack" / "sessions"
+        assert sd == child / ".bobi" / "sessions"
 
     def test_raises_without_project_root(self):
         set_project_root(None)
@@ -202,7 +202,7 @@ class TestRegistryCrossProject:
     def test_agent_working_in_child_visible_from_parent(self, tree):
         parent, child = tree
         # Manager at parent
-        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
+        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
 
         # Sub-agent works in the child repo but binds the installation
         # root its spawner passed — identity is inherited, not inferred.
@@ -223,13 +223,13 @@ class TestRegistryCrossProject:
         registry.register(entry)
 
         # Verify it was written to parent's sessions dir
-        assert (parent / ".modastack" / "sessions" / "agent-42-implement" / "state.json").exists()
+        assert (parent / ".bobi" / "sessions" / "agent-42-implement" / "state.json").exists()
         # NOT in child's sessions dir
-        assert not (child / ".modastack" / "sessions" / "agent-42-implement" / "state.json").exists()
+        assert not (child / ".bobi" / "sessions" / "agent-42-implement" / "state.json").exists()
 
         # Now switch perspective: director sets project root to parent
         set_project_root(parent)
-        import modastack.sdk as sdk
+        import bobi.sdk as sdk
         sdk._registry = None  # reset singleton
         director_registry = SessionRegistry()
         active = director_registry.list_active()
@@ -253,7 +253,7 @@ class TestRegistryCrossProject:
         registry.register(entry)
 
         # Should be in child's own sessions dir
-        assert (child / ".modastack" / "sessions" / "agent-99-spec" / "state.json").exists()
+        assert (child / ".bobi" / "sessions" / "agent-99-spec" / "state.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -263,12 +263,12 @@ class TestRegistryCrossProject:
 class TestListAgentsRegistry:
     def test_includes_registry_agents(self, tree):
         parent, child = tree
-        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
+        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
 
         set_project_root(parent)
 
         # Manually create a session entry on disk (simulating a detached agent)
-        session_dir = parent / ".modastack" / "sessions" / "agent-42-implement"
+        session_dir = parent / ".bobi" / "sessions" / "agent-42-implement"
         session_dir.mkdir(parents=True)
         entry = SessionEntry(
             name="agent-42-implement",
@@ -284,7 +284,7 @@ class TestListAgentsRegistry:
         from dataclasses import asdict
         (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
 
-        from modastack.subagent import list_agents
+        from bobi.subagent import list_agents
         agents = list_agents()
         assert len(agents) >= 1
         names = [a.get("name") for a in agents]
@@ -292,12 +292,12 @@ class TestListAgentsRegistry:
 
     def test_excludes_managers_from_registry(self, tree):
         parent, _ = tree
-        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
+        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
 
         set_project_root(parent)
 
         # Create a manager session entry on disk
-        session_dir = parent / ".modastack" / "sessions" / "moda-manager-dev"
+        session_dir = parent / ".bobi" / "sessions" / "moda-manager-dev"
         session_dir.mkdir(parents=True)
         entry = SessionEntry(
             name="moda-manager-dev",
@@ -308,7 +308,7 @@ class TestListAgentsRegistry:
         from dataclasses import asdict
         (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
 
-        from modastack.subagent import list_agents
+        from bobi.subagent import list_agents
         agents = list_agents()
         names = [a.get("name") for a in agents]
         assert "moda-manager-dev" not in names
@@ -322,16 +322,16 @@ class TestNestedRuntimePrevention:
     def test_start_rejects_when_ancestor_has_manager(self, tree):
         parent, child = tree
         # Manager running at parent
-        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
+        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
 
         # Create agent.yaml in child so start doesn't fail for missing agent
-        (child / ".modastack" / "agent.yaml").write_text("agent: software_team\n")
+        (child / ".bobi" / "agent.yaml").write_text("agent: software_team\n")
 
         from click.testing import CliRunner
-        from modastack.cli import main
+        from bobi.cli import main
 
         runner = CliRunner()
-        with patch("modastack.cli._detect_project_root", return_value=child):
+        with patch("bobi.cli._detect_project_root", return_value=child):
             result = runner.invoke(main, ["start"])
 
         assert result.exit_code == 1
@@ -343,7 +343,7 @@ class TestNestedRuntimePrevention:
         # No manager running at parent
 
         # We just verify the nested-runtime check passes (not the full start flow)
-        from modastack.sdk import find_runtime_root
+        from bobi.sdk import find_runtime_root
         ancestor = find_runtime_root(child.parent)
         assert ancestor is None  # no blocking ancestor
 
@@ -358,10 +358,10 @@ class TestMessageRoutingCrossProject:
         installation root (agent.yaml walk-up), so the registry they see
         is the manager's — the child's stray state dir doesn't fork it."""
         parent, child = tree
-        (parent / ".modastack" / "state" / "manager.pid").write_text(str(os.getpid()))
+        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
 
         # Register an agent in parent's sessions dir
-        session_dir = parent / ".modastack" / "sessions" / "agent-42-implement"
+        session_dir = parent / ".bobi" / "sessions" / "agent-42-implement"
         session_dir.mkdir(parents=True)
         entry = SessionEntry(
             name="agent-42-implement",
@@ -376,11 +376,11 @@ class TestMessageRoutingCrossProject:
         (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
 
         # CLI entry points bind via the agent.yaml walk-up, not raw cwd —
-        # the child's .modastack here is state-only, so resolution must
+        # the child's .bobi here is state-only, so resolution must
         # pass over it and land on the installed root.
-        from modastack.paths import resolve_root
+        from bobi.paths import resolve_root
         set_project_root(resolve_root(child))
-        import modastack.sdk as sdk
+        import bobi.sdk as sdk
         sdk._registry = None
 
         registry = get_registry()

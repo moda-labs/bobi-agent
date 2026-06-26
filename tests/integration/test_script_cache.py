@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
-from modastack.monitors.schema import Condition, Monitor
-from modastack.monitors.tool_checks import (
+from bobi.monitors.schema import Condition, Monitor
+from bobi.monitors.tool_checks import (
     _run_command,
     _script_path,
     tool_poll,
@@ -26,7 +26,7 @@ def scripts_dir(tmp_path):
     """Redirect the script cache to a temp directory."""
     d = tmp_path / "scripts"
     d.mkdir()
-    with patch("modastack.monitors.tool_checks._scripts_dir", return_value=d):
+    with patch("bobi.monitors.tool_checks._scripts_dir", return_value=d):
         yield d
 
 
@@ -148,8 +148,8 @@ class TestScriptCacheIntegration:
 # script_cache runner (#327) — self-learning monitor runner
 # ===========================================================================
 
-import modastack.monitors.script_cache_checks as sc
-from modastack.monitors.script_cache_checks import GenResult, script_cache
+import bobi.monitors.script_cache_checks as sc
+from bobi.monitors.script_cache_checks import GenResult, script_cache
 
 
 _SC_PUBLISHED: list = []
@@ -167,9 +167,9 @@ def sc_scripts_dir(tmp_path):
         _SC_PUBLISHED.append((event, data))
         return True
 
-    with patch("modastack.monitors.script_cache_checks._scripts_dir", return_value=d), \
-         patch("modastack.monitors.script_cache_checks.publish", side_effect=fake_publish), \
-         patch("modastack.monitors.script_cache_checks._install_policy", return_value={}):
+    with patch("bobi.monitors.script_cache_checks._scripts_dir", return_value=d), \
+         patch("bobi.monitors.script_cache_checks.publish", side_effect=fake_publish), \
+         patch("bobi.monitors.script_cache_checks._install_policy", return_value={}):
         yield d
 
 
@@ -234,7 +234,7 @@ class TestScriptCacheRunnerIntegration:
         """Full scheduler _reconcile: new IDs fire, same IDs dedup, disappeared
         drop, reappeared refire — identical to tool_poll."""
         from datetime import datetime, timezone
-        from modastack.monitors.scheduler import MonitorScheduler
+        from bobi.monitors.scheduler import MonitorScheduler
 
         monitor = _sc_monitor()
         fired: list = []
@@ -285,8 +285,8 @@ class TestScriptCacheRunnerIntegration:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("MODASTACK_RUN_CLAUDE_TESTS"),
-    reason="requires a real Claude CLI session (set MODASTACK_RUN_CLAUDE_TESTS=1)",
+    not os.environ.get("BOBI_RUN_CLAUDE_TESTS"),
+    reason="requires a real Claude CLI session (set BOBI_RUN_CLAUDE_TESTS=1)",
 )
 class TestScriptCacheRealAgent:
     """One real-agent test: an NL prompt generates → validates → pins an
@@ -303,5 +303,5 @@ class TestScriptCacheRealAgent:
         # the agent both produced this tick's items and a pinnable script
         assert result is not None
         if (sc_scripts_dir / "real-gen.sc.sh").exists():
-            from modastack.monitors.script_cache_checks import validate_script
+            from bobi.monitors.script_cache_checks import validate_script
             assert validate_script((sc_scripts_dir / "real-gen.sc.sh").read_text()).ok

@@ -1,16 +1,16 @@
-"""Integration tests for the modastack instance image (containerized-8 / #338).
+"""Integration tests for the bobi instance image (containerized-8 / #338).
 
 These verify the C8 image contract from CONTAINERIZED_INSTANCES.md §5/§6.1/§10:
 non-root agent, no Node, native `claude` CLI on PATH, fastembed model baked in,
 and the entrypoint's auth-mode guards. They build the image once per session.
 
 The full acceptance criterion — a `docker run` reaching a healthy manager that
-completes one `modastack ask` round-trip against the real API — needs live
+completes one `bobi ask` round-trip against the real API — needs live
 credentials and is covered by ``test_image_ask_roundtrip`` (skipped unless
 ANTHROPIC_API_KEY is present).
 
 Gated on a working Docker daemon, so they no-op in environments without one.
-Set MODASTACK_TEST_IMAGE=<tag> to reuse an already-built image and skip the build.
+Set BOBI_TEST_IMAGE=<tag> to reuse an already-built image and skip the build.
 """
 from __future__ import annotations
 
@@ -57,11 +57,11 @@ def _run(*args: str, **kw) -> subprocess.CompletedProcess:
 @pytest.fixture(scope="session")
 def image() -> str:
     """Build (or reuse) the instance image; return its tag."""
-    prebuilt = os.environ.get("MODASTACK_TEST_IMAGE")
+    prebuilt = os.environ.get("BOBI_TEST_IMAGE")
     if prebuilt:
         return prebuilt
 
-    tag = "modastack:pytest"
+    tag = "bobi:pytest"
     proc = _run(
         "docker", "build", "-t", tag, str(REPO_ROOT),
         timeout=1800,
@@ -98,7 +98,7 @@ def test_fastembed_model_baked(image: str):
     """The embedding model is pre-downloaded into the image at HF_HOME."""
     proc = _run(
         "docker", "run", "--rm", "--entrypoint", "sh", image,
-        "-c", "test -n \"$(ls -A /opt/modastack/models 2>/dev/null)\" && echo BAKED || echo EMPTY",
+        "-c", "test -n \"$(ls -A /opt/bobi/models 2>/dev/null)\" && echo BAKED || echo EMPTY",
     )
     assert "BAKED" in proc.stdout, proc.stdout + proc.stderr
 
@@ -108,7 +108,7 @@ def test_fastembed_model_baked(image: str):
 def test_api_key_mode_requires_key(image: str):
     """api_key mode with no ANTHROPIC_API_KEY fails fast, before touching the volume."""
     proc = _run(
-        "docker", "run", "--rm", "-e", "MODASTACK_AUTH=api_key", image,
+        "docker", "run", "--rm", "-e", "BOBI_AUTH=api_key", image,
     )
     assert proc.returncode != 0
     assert "ANTHROPIC_API_KEY is unset" in (proc.stdout + proc.stderr)
@@ -121,7 +121,7 @@ def test_subscription_mode_rejects_api_key(image: str):
     it silently outranks subscription OAuth creds and bills the API (§6.1)."""
     proc = _run(
         "docker", "run", "--rm",
-        "-e", "MODASTACK_AUTH=subscription",
+        "-e", "BOBI_AUTH=subscription",
         "-e", "ANTHROPIC_API_KEY=sk-ant-should-not-be-here",
         image,
     )
@@ -133,44 +133,44 @@ def test_subscription_mode_rejects_api_key(image: str):
 @pytest.mark.timeout(120)
 def test_unknown_auth_mode_rejected(image: str):
     proc = _run(
-        "docker", "run", "--rm", "-e", "MODASTACK_AUTH=bogus", image,
+        "docker", "run", "--rm", "-e", "BOBI_AUTH=bogus", image,
     )
     assert proc.returncode != 0
-    assert "unknown MODASTACK_AUTH" in (proc.stdout + proc.stderr)
+    assert "unknown BOBI_AUTH" in (proc.stdout + proc.stderr)
 
 
 @requires_docker
 @pytest.mark.timeout(120)
 def test_config_dir_survives_privilege_drop(image: str):
-    """Regression: the agent's HOME stays on the IMAGE (/home/modastack) so baked
+    """Regression: the agent's HOME stays on the IMAGE (/home/bobi) so baked
     tools are read in place; only Claude's DURABLE state is redirected to the
     volume via CLAUDE_CONFIG_DIR. The entrypoint carries both through the gosu
     privilege drop with `env HOME=... CLAUDE_CONFIG_DIR=...` — verify that
     mechanism yields the image HOME and the volume config dir in-image."""
     proc = _run(
         "docker", "run", "--rm", "--entrypoint", "sh", image, "-c",
-        'gosu modastack env HOME=/home/modastack CLAUDE_CONFIG_DIR=/data/claude '
+        'gosu bobi env HOME=/home/bobi CLAUDE_CONFIG_DIR=/data/claude '
         'sh -c \'printf "%s:%s" "$HOME" "$CLAUDE_CONFIG_DIR"\'',
     )
-    assert proc.stdout.strip() == "/home/modastack:/data/claude", proc.stdout + proc.stderr
+    assert proc.stdout.strip() == "/home/bobi:/data/claude", proc.stdout + proc.stderr
 
 
 @requires_docker
 @pytest.mark.timeout(120)
 def test_empty_volume_without_team_waits_for_push(image: str, tmp_path: Path):
-    """An empty volume with neither MODASTACK_TEAM nor MODASTACK_TEAM_URL enters
+    """An empty volume with neither BOBI_TEAM nor BOBI_TEAM_URL enters
     the wait-for-team state (ssh-push delivery) — it does NOT crash; it logs that
     it's waiting and stays alive until a team is pushed onto the volume."""
     import time
 
     vol = tmp_path / "data"
     vol.mkdir()
-    name = "modastack-waitforteam"
+    name = "bobi-waitforteam"
     _run("docker", "rm", "-f", name)
     try:
         up = _run(
             "docker", "run", "-d", "--name", name,
-            "-e", "MODASTACK_AUTH=api_key",
+            "-e", "BOBI_AUTH=api_key",
             "-e", "ANTHROPIC_API_KEY=sk-ant-test",
             "-v", f"{vol}:/data",
             image,
@@ -201,21 +201,21 @@ def test_empty_volume_without_team_waits_for_push(image: str, tmp_path: Path):
 @requires_docker
 @pytest.mark.timeout(120)
 def test_unresolvable_team_fails_loudly(image: str, tmp_path: Path):
-    """An unresolvable MODASTACK_TEAM (no team registry in the image) must fail
-    with an ACTIONABLE error pointing at MODASTACK_TEAM_URL, not crash-loop on a
+    """An unresolvable BOBI_TEAM (no team registry in the image) must fail
+    with an ACTIONABLE error pointing at BOBI_TEAM_URL, not crash-loop on a
     bare `set -e` pipefail trace (C9/#339)."""
     import time
 
     vol = tmp_path / "data"
     vol.mkdir()
-    name = "modastack-badteam"
+    name = "bobi-badteam"
     _run("docker", "rm", "-f", name)
     try:
         up = _run(
             "docker", "run", "-d", "--name", name,
-            "-e", "MODASTACK_AUTH=api_key",
+            "-e", "BOBI_AUTH=api_key",
             "-e", "ANTHROPIC_API_KEY=sk-ant-test",
-            "-e", "MODASTACK_TEAM=does-not-exist-anywhere",
+            "-e", "BOBI_TEAM=does-not-exist-anywhere",
             "-v", f"{vol}:/data",
             image,
         )
@@ -236,7 +236,7 @@ def test_unresolvable_team_fails_loudly(image: str, tmp_path: Path):
         assert running == "false", f"container didn't exit:\n{text}"
         # Actionable guidance, not a raw pipefail trace.
         assert "couldn't install team 'does-not-exist-anywhere'" in text, text
-        assert "MODASTACK_TEAM_URL" in text, text
+        assert "BOBI_TEAM_URL" in text, text
     finally:
         _run("docker", "rm", "-f", name)
 
@@ -253,7 +253,7 @@ SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "smoke-team"
 @pytest.mark.timeout(600)
 def test_image_ask_roundtrip(image: str, tmp_path: Path):
     """C8 acceptance, live: an empty volume + api_key auth + a reachable event
-    server reaches a healthy manager that completes one `modastack ask`
+    server reaches a healthy manager that completes one `bobi ask`
     round-trip against the real API.
 
     Spins up an EPHEMERAL event server (the real Worker code via `wrangler dev`,
@@ -288,16 +288,16 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
 
     vol = tmp_path / "data"
     vol.mkdir()
-    name = "modastack-c8-acceptance"
+    name = "bobi-c8-acceptance"
     _run("docker", "rm", "-f", name)
     try:
         up = _run(
             "docker", "run", "-d", "--name", name,
             "--network", "host",
-            "-e", "MODASTACK_AUTH=api_key",
+            "-e", "BOBI_AUTH=api_key",
             "-e", f"ANTHROPIC_API_KEY={os.environ['ANTHROPIC_API_KEY']}",
-            "-e", f"MODASTACK_EVENT_SERVER={container_es_url}",
-            "-e", "MODASTACK_TEAM=/mnt/team",
+            "-e", f"BOBI_EVENT_SERVER={container_es_url}",
+            "-e", "BOBI_TEAM=/mnt/team",
             "-v", f"{vol}:/data",
             "-v", f"{SMOKE_TEAM}:/mnt/team:ro",
             image,
@@ -320,12 +320,12 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
             time.sleep(5)
         assert status == "healthy", f"never became healthy (last={status!r})"
 
-        # Run as the modastack user: the entrypoint chowns the volume to that
-        # uid, and resolve_root (#249) skips a .modastack/ not owned by the
+        # Run as the bobi user: the entrypoint chowns the volume to that
+        # uid, and resolve_root (#249) skips a .bobi/ not owned by the
         # current uid — so a root `docker exec` would not find the install.
         ask = _run(
-            "docker", "exec", "-u", "modastack", "-w", "/data/project", name,
-            "modastack", "ask", "Reply with the single word: pong",
+            "docker", "exec", "-u", "bobi", "-w", "/data/project", name,
+            "bobi", "ask", "Reply with the single word: pong",
             timeout=180,
         )
         if ask.returncode != 0 or "pong" not in ask.stdout.lower():

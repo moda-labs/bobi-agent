@@ -24,7 +24,7 @@ import time
 
 import pytest
 
-from modastack.events.client import EventServerClient
+from bobi.events.client import EventServerClient
 
 
 class FakeWebSocketApp:

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from modastack import compose, registry
+from bobi import compose, registry
 
 
 # --- fixtures ----------------------------------------------------------------
@@ -188,7 +188,7 @@ def test_pinned_lock_pins_latest_ref(project, monkeypatch):
 
 def _compose(project, leaf, dest=None):
     chain = compose.resolve_chain(leaf, project)
-    dest = dest or (project / ".modastack")
+    dest = dest or (project / ".bobi")
     prov = compose.compose(chain, dest)
     return dest, prov
 
@@ -332,21 +332,21 @@ def test_prune_nothing_warns(project):
     leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
                  'prune:\n  tools: [does-not-exist]\n')
     chain = compose.resolve_chain(leaf, project)
-    prov = compose.compose(chain, project / ".modastack")
+    prov = compose.compose(chain, project / ".bobi")
     assert any("does-not-exist" in w for w in prov.warnings)
 
 
 # --- framework-default monitors (#471) ---------------------------------------
 
 # An eng-team-shaped policy-curator record, byte-identical to what the
-# framework now seeds (modastack/monitors/framework_defaults.yaml). Used to prove
+# framework now seeds (bobi/monitors/framework_defaults.yaml). Used to prove
 # that removing a team's own copy is a no-op.
 _POLICY_CURATOR_RECORD = (
     "  - name: policy-curator\n"
     "    description: >\n"
     "      Distill new agent transcripts since the last run into the team's\n"
     "      policy.md (#456). Runs out-of-band on an interval; the curator agent\n"
-    "      works from a dedicated prompt (modastack/prompts/curator.md, team-\n"
+    "      works from a dedicated prompt (bobi/prompts/curator.md, team-\n"
     "      overridable) — this description is a human-readable label, not the\n"
     "      agent's working instructions. The `curator: true` marker routes this\n"
     "      monitor to the artifact-writing curator path, not the verdict path.\n"
@@ -479,7 +479,7 @@ def test_deploy_flatten_carries_overlay_workspace(project):
     # The real deploy-path regression: a `from:` overlay's workspace must ride the
     # flattened tarball, else the per-principal assistant-context.md never reaches
     # the box (and the assistant runs context-less).
-    from modastack import deploy
+    from bobi import deploy
     _team(project, "pa", 'version: "1.0.0"\nentry_point: assistant\n',
           workspace={"assistant-context.md": "TEMPLATE"})
     _team(project, "zpa", 'from: pa\nversion: "1.0.0"\nentry_point: assistant\n',
@@ -508,7 +508,7 @@ def test_reject_path_from_allows_name_ref(tmp_path):
 
 
 def test_deploy_resolve_team_dir_flattens_chain(project):
-    from modastack import deploy
+    from bobi import deploy
     _team(project, "core", 'version: "1.0.0"\nentry_point: director\n'
           'build:\n  apt: [nodejs]\n', tools={"github.md": "gh"})
     _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
@@ -523,7 +523,7 @@ def test_deploy_resolve_team_dir_flattens_chain(project):
 
 
 def test_deploy_resolve_team_dir_passthrough_no_from(project):
-    from modastack import deploy
+    from bobi import deploy
     src = _team(project, "solo", 'version: "1.0.0"\nentry_point: director\n')
     out = deploy.resolve_team_dir(project, "solo")
     assert out == src.resolve()  # unchanged when there's no `from:`
@@ -544,7 +544,7 @@ def test_eng_team_core_installs_standalone(tmp_path):
     shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team")
     chain = compose.resolve_chain(proj / "agents" / "eng-team", proj)
     assert [l.dir.name for l in chain] == ["eng-team"]
-    dest = proj / ".modastack"
+    dest = proj / ".bobi"
     compose.compose(chain, dest)
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())
     assert {s["name"] for s in cfg["services"]} == {"github", "slack"}  # no linear
@@ -573,7 +573,7 @@ def test_synthetic_outside_org_overlay_composes(tmp_path):
     _write(acme / "tools" / "jira.md", "jira guide")
     chain = compose.resolve_chain(acme, proj)
     assert [l.dir.name for l in chain] == ["eng-team", "acme-eng-team"]
-    dest = proj / ".modastack"
+    dest = proj / ".bobi"
     compose.compose(chain, dest)
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())
     # core services + the overlay's jira; core's generic build accreted the linter.
@@ -594,14 +594,14 @@ def test_synthetic_outside_org_overlay_composes(tmp_path):
 def test_reinstall_drops_stale_surface_files(tmp_path, monkeypatch):
     """A reinstall clears the previously frozen copy of each surface the chain
     contributes, so a file the team no longer ships is dropped."""
-    from modastack.cli import _install_pack
+    from bobi.cli import _install_pack
     proj = tmp_path
     (proj / "agents").mkdir()
     team = _team(proj, "t", 'version: "1.0.0"\nentry_point: director\n',
                  tools={"a.md": "A", "b.md": "B"})
     monkeypatch.chdir(proj)
     _install_pack(team, proj, local_source=True)
-    dest = proj / ".modastack"
+    dest = proj / ".bobi"
     assert {p.name for p in (dest / "tools").iterdir()} == {"a.md", "b.md"}
     # Drop b.md from the source and reinstall — the frozen b.md must go.
     (team / "tools" / "b.md").unlink()
@@ -611,8 +611,8 @@ def test_reinstall_drops_stale_surface_files(tmp_path, monkeypatch):
 
 def test_reinstall_keeps_uncontributed_project_dirs(tmp_path, monkeypatch):
     """A surface NO layer contributes is left untouched on reinstall — so a
-    project-added `.modastack/workflows/*.yaml` survives (pre-compose semantics)."""
-    from modastack.cli import _install_pack
+    project-added `.bobi/workflows/*.yaml` survives (pre-compose semantics)."""
+    from bobi.cli import _install_pack
     proj = tmp_path
     (proj / "agents").mkdir()
     team = _team(proj, "t", 'version: "1.0.0"\nentry_point: director\n',
@@ -620,7 +620,7 @@ def test_reinstall_keeps_uncontributed_project_dirs(tmp_path, monkeypatch):
     monkeypatch.chdir(proj)
     _install_pack(team, proj, local_source=True)
     # A project adds its own workflow after install.
-    proj_wf = proj / ".modastack" / "workflows"
+    proj_wf = proj / ".bobi" / "workflows"
     proj_wf.mkdir(parents=True, exist_ok=True)
     (proj_wf / "adhoc.yaml").write_text("name: adhoc\nsteps: []\n")
     _install_pack(team, proj, local_source=True)  # reinstall
@@ -631,14 +631,14 @@ def test_reinstall_keeps_uncontributed_project_dirs(tmp_path, monkeypatch):
 
 
 def test_install_versioned_from_team_fetches_base_from_registry(tmp_path, monkeypatch):
-    """The end-to-end new-system path: `modastack install over@2.0.0` for a team
+    """The end-to-end new-system path: `bobi install over@2.0.0` for a team
     whose agent.yaml declares `from: core@1.0.0` composes by fetching the
     *versioned base* from the registry — proving versioned tarballs (#440),
     resolution (#446) and merge (#451) work together for install/setup.
 
     Mirrors how setup's `fetch_into` lands the leaf overlay and install then
     composes its base from the registry (the base isn't a local sibling)."""
-    from modastack.cli import _install_pack
+    from bobi.cli import _install_pack
 
     proj = tmp_path
     (proj / "agents").mkdir()
@@ -677,7 +677,7 @@ def test_install_versioned_from_team_fetches_base_from_registry(tmp_path, monkey
     monkeypatch.chdir(proj)
     _install_pack(over, proj, local_source=False)
 
-    dest = proj / ".modastack"
+    dest = proj / ".bobi"
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())
     # Composed from the registry-fetched base + the overlay leaf.
     assert {s["name"] for s in cfg["services"]} == {"github", "linear"}

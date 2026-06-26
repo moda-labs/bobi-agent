@@ -1,17 +1,17 @@
 # Deployment — how it actually works (Fly build + GitOps)
 
-How a modastack agent team becomes a running, self-managing instance on Fly,
+How a bobi agent team becomes a running, self-managing instance on Fly,
 and the hard-won nuances that make it work. This is the **operational** companion
 to the design docs: `docs/design/CONTAINERIZED_INSTANCES.md` is *why/what*,
 `docs/design/DEPLOY_INTERFACE.md` is the *deploy-primitive design*, and this is
-*how it works today + the gotchas*. Current as of the `modastack deploy`
+*how it works today + the gotchas*. Current as of the `bobi deploy`
 primitive + binary-only deploy, **merged to main 2026-06-19** (PR #365). Next:
 layered-deps (C24 #368) → eng-team on Fly → EC2 decommission
 (`HANDOFF-layered-deps-eng-team-fly.md`).
 
 Pieces:
 
-- `modastack deploy <name>` / `destroy <name>` (`modastack/deploy.py`) — **the
+- `bobi deploy <name>` / `destroy <name>` (`bobi/deploy.py`) — **the
   one-instance primitive**; everything else is mechanics it drives or
   orchestration that calls it
 - `deployments/<name>.yaml` (+ `defaults.yaml`) — per-instance operator config
@@ -27,22 +27,22 @@ Pieces:
 
 ## 1. Mental model
 
-**Git is what should be running; Fly is what is running; `modastack deploy` closes
+**Git is what should be running; Fly is what is running; `bobi deploy` closes
 the gap, one instance at a time.** A `deployments/<name>.yaml` is one instance an
-operator runs. Add/edit one and run `modastack deploy <name>` (or let the GitOps
+operator runs. Add/edit one and run `bobi deploy <name>` (or let the GitOps
 Action do it on the next release) → the instance appears or updates in place.
-Delete one → its Fly app is surfaced for a human `modastack destroy`. There is
+Delete one → its Fly app is surfaced for a human `bobi destroy`. There is
 **no database and no manifest** — the Fly API is the only state store.
 
 The layering that keeps this operator-agnostic:
 
 ```
 orchestration (per operator) : GitHub Action │ Terraform │ SaaS plane │ a for-loop
-the primitive (modastack)    : modastack deploy <name> / destroy <name>   ← ONE instance
+the primitive (bobi)    : bobi deploy <name> / destroy <name>   ← ONE instance
 mechanics                    : provision-instance.sh · fleet.sh · install · fly
 ```
 
-`modastack deploy` is **idempotent** — no Fly app yet ⇒ provision, app exists ⇒
+`bobi deploy` is **idempotent** — no Fly app yet ⇒ provision, app exists ⇒
 update — so the caller never decides provision-vs-update; it just names the
 instance. Anything that loops or diffs across instances is orchestration on top.
 
@@ -56,21 +56,21 @@ instances share **one image**; identity lives entirely in the volume + env.
 ## 2. The image (Fly build)
 
 `Dockerfile` at the repo root, two-stage:
-- **builder**: build the `modastack` wheel; install into a venv.
+- **builder**: build the `bobi` wheel; install into a venv.
 - **runtime**: slim Debian + the venv, the native pinned `claude` CLI (no Node),
   `git`/`curl`/`gosu`, the fastembed embedding model **baked at build time**, and
-  `docker-entrypoint.sh`. Runs as non-root uid 10001 (`modastack`).
+  `docker-entrypoint.sh`. Runs as non-root uid 10001 (`bobi`).
 
 First boot (the entrypoint): create the volume layout, install the team
-(`MODASTACK_TEAM_URL` or `MODASTACK_TEAM`), then `exec gosu` to the `modastack`
-user running `modastack start --foreground` (PID 1). The instance **self-mints its
+(`BOBI_TEAM_URL` or `BOBI_TEAM`), then `exec gosu` to the `bobi`
+user running `bobi start --foreground` (PID 1). The instance **self-mints its
 event-bus bubble and self-registers every session** (#240) — the provisioner never
 touches `deployment_id`/`api_key`.
 
 With **neither** team var set on an empty volume the entrypoint enters a
-**wait-for-team** state: it polls for `.modastack/agent.yaml` instead of crashing.
+**wait-for-team** state: it polls for `.bobi/agent.yaml` instead of crashing.
 That is the ssh-push hook — the instance boots blank and holds while
-`modastack deploy` pushes a local team onto the volume (next section); the moment
+`bobi deploy` pushes a local team onto the volume (next section); the moment
 the team lands, it proceeds to start. (This is the C9-adjacent first-boot change.)
 
 ### Fly build gotchas (each one cost real debugging — do not regress)
@@ -80,7 +80,7 @@ the team lands, it proceeds to start. (This is the C9-adjacent first-boot change
    container's cwd not exist at runtime → Fly's init can't `exec` *any* binary
    (your entrypoint *and* Fly's own `hallpass`) → `No such file or directory (os
    error 2)`, crash-loop to max-restart 10. Fix: **`WORKDIR /`**; the entrypoint
-   `cd`s into `${MODASTACK_PROJECT}` itself. *This was THE on-Fly boot bug.*
+   `cd`s into `${BOBI_PROJECT}` itself. *This was THE on-Fly boot bug.*
 2. **No `tini`.** Fly Machines inject their own PID-1 init; shipping `tini` is a
    documented Fly boot-failure trigger. Keep it out of the ENTRYPOINT and apt.
    (For non-Fly runtimes, use `docker run --init`.)
@@ -96,12 +96,12 @@ the team lands, it proceeds to start. (This is the C9-adjacent first-boot change
 6. **`--wait-timeout 10m`.** First boot installs the team and warms the model past
    the default 5-minute machine-state wait.
 7. **`[[mounts]]` array form** in the generated config (canonical).
-8. **`fly ssh` admin lands in `/`**, but `modastack` finds its project by walking
+8. **`fly ssh` admin lands in `/`**, but `bobi` finds its project by walking
    up from cwd — so admin commands must `cd` first, as the volume's uid-10001
    owner:
    ```
    fly ssh console -a <app> --command \
-     'gosu modastack env HOME=/home/modastack CLAUDE_CONFIG_DIR=/data/claude bash -c "cd /data/project && modastack <cmd>"'
+     'gosu bobi env HOME=/home/bobi CLAUDE_CONFIG_DIR=/data/claude bash -c "cd /data/project && bobi <cmd>"'
    ```
 9. **Concurrent `fly deploy --remote-only` builds race on the org's single shared
    remote builder** (`failed to parse daemon host "unix:///var/run/docker.sock":
@@ -111,9 +111,9 @@ the team lands, it proceeds to start. (This is the C9-adjacent first-boot change
 
 ---
 
-## 2.5. The primitive (`modastack deploy <name>`)
+## 2.5. The primitive (`bobi deploy <name>`)
 
-`modastack deploy <name>` resolves one instance's config, validates its secrets,
+`bobi deploy <name>` resolves one instance's config, validates its secrets,
 stamps identity, picks a delivery mode, and applies — idempotently. It is the
 single entry point the CLI, CI, and any future control plane share.
 
@@ -126,7 +126,7 @@ CLI flags  ›  deployments/<name>.yaml  ›  deployments/defaults.yaml  ›  bu
 - `deployments/<name>.yaml` = one instance (name = filename). `defaults.yaml` =
   shared operator *values* (fleet, event server, region) — **not** a deploy list;
   the deploy list is the set of `deployments/*.yaml` files.
-- App name = `<fleet>-<name>`; stamps `MODASTACK_FLEET` + `MODASTACK_INSTANCE`
+- App name = `<fleet>-<name>`; stamps `BOBI_FLEET` + `BOBI_INSTANCE`
   (the per-instance/SaaS-tenant key) into `[env]`.
 - A bare `<name>` with no file falls back to the local package `agents/<name>`
   (ssh-push) — the minimal dev path.
@@ -140,18 +140,18 @@ CLI flags  ›  deployments/<name>.yaml  ›  deployments/defaults.yaml  ›  bu
 | "I built it, ship it" — no hosting (single dev, or CI from its own checkout) | enterprise / SaaS / anyone publishing tarballs |
 
 The ssh-push push: `base64` the built tarball onto `/data` over `fly ssh`, then
-`modastack install <tarball> --non-interactive` as the volume owner (reads secrets
+`bobi install <tarball> --non-interactive` as the volume owner (reads secrets
 from the Fly-injected env, fails loudly on a gap). On a **new** instance this
 releases the wait-for-team loop (no restart); on an **existing** one it's a
 workspace-safe reinstall + `fly machine restart` to reload.
 
 **Secrets** come from `secrets.env-file:` (a local path) or the process env (the
 CI seam — the Action exports the team's GitHub-Environment blob and runs
-`modastack deploy`). For a local team the required `${VAR}`s are validated up
-front; `MODASTACK_*` refs are identity (stamped from flags), never demanded as
+`bobi deploy`). For a local team the required `${VAR}`s are validated up
+front; `BOBI_*` refs are identity (stamped from flags), never demanded as
 secrets.
 
-`modastack destroy <name>` resolves `<name>` → `<fleet>-<name>` and runs
+`bobi destroy <name>` resolves `<name>` → `<fleet>-<name>` and runs
 `destroy-instance.sh` (Fly app + volume, typed-confirm; `--yes` for automation).
 
 ---
@@ -168,7 +168,7 @@ its `agent.yaml`:
 build:
   apt: [nodejs, npm]              # installed as root (system-wide)
   npm: ["@openai/codex"]          # global → /usr/local/bin, on PATH
-  run:                            # as the modastack user, into the image HOME
+  run:                            # as the bobi user, into the image HOME
     - "git clone …/gstack ~/dev/gstack && cd ~/dev/gstack && ./setup"
   verify: requires                # re-run requires[].check at build → fail CI on a miss
 ```
@@ -177,8 +177,8 @@ build:
 (prompts/workflows) keeps flowing through the volume (ssh-push / team-url). A
 prompt edit is still a hot update — only a deps change rebuilds an image.
 
-**How it builds (built on Fly during deploy).** `modastack deploy` renders the
-`build:` spec to a shell hook (`modastack/build_render.py` →
+**How it builds (built on Fly during deploy).** `bobi deploy` renders the
+`build:` spec to a shell hook (`bobi/build_render.py` →
 `deploy.py:_render_team_deps_into_context`) into the build context and builds the
 ONE Dockerfile **on Fly's remote builder** with `--build-arg TEAM_DEPS=<rendered>`
 — Fly creates app + registry + machine together (no separate registry push), and
@@ -194,18 +194,18 @@ ref" optimization is deferred: Fly's registry rejects pushes to a never-deployed
 app, GHCR needs `write:packages`.)
 
 **Image HOME + volume config dir (no build/runtime split).** `$HOME` stays on the
-**image** (`/home/modastack`) at build AND runtime, so `run:` steps bake
+**image** (`/home/bobi`) at build AND runtime, so `run:` steps bake
 ~-relative tools in place and the build's `verify` checks the exact paths the
 agent uses. Claude's durable state lives on the **volume** via
 `CLAUDE_CONFIG_DIR=/data/claude`, and the entrypoint points the whole `~/.claude`
 at it — so any tool keyed off `~/.claude/{projects,settings.json,skills,…}` sees
-Claude's real state. Personal skills bake at `/opt/modastack/skills` (immutable
+Claude's real state. Personal skills bake at `/opt/bobi/skills` (immutable
 image content, outside `~/.claude`) and are surfaced under the config dir. No
 seed, no stamp, no copy. codex/gh need none of this (`npm i -g`/apt →
 `/usr/local/bin`, on PATH).
 
 **Deploying a prebuilt image (optional).** If a pullable image ref exists, add
-`image: <ref>` to `deployments/<name>.yaml`; `modastack deploy` then passes
+`image: <ref>` to `deployments/<name>.yaml`; `bobi deploy` then passes
 `--image` to the provisioner and **skips the build entirely** (no remote builder,
 no race per gotcha #9). Without `image:`, a `build:`-declaring team is built on
 Fly during deploy (above). The definition always flows via `team:`/`team-url:`.
@@ -224,17 +224,17 @@ generate a per-app `fly.toml` (identity in `[env]`, 4 GB/shared-2x, **no
 `[http_service]`** = dark/always-on) → `fly deploy`. **Idempotent** — re-running
 redeploys, so it doubles as "redeploy this instance."
 
-Most operators drive this through `modastack deploy` (§2.5), which fills these
+Most operators drive this through `bobi deploy` (§2.5), which fills these
 flags from `deployments/<name>.yaml`. Key flags:
 - Exactly one of `--team <name>` (bundled/registry), `--team-url <.tar.gz URL>`
   (the dark-instance injection seam — pulled at first boot), or `--blank` (no team
   source: boot into the wait-for-team state for ssh-push delivery).
-- `--env-file` — KEY=VALUE; `MODASTACK_*` keys become plaintext `[env]` identity,
+- `--env-file` — KEY=VALUE; `BOBI_*` keys become plaintext `[env]` identity,
   **everything else becomes a Fly secret**. This routing is what lets one blob
   carry both (see §5).
-- `--fleet <prefix>` — stamps `MODASTACK_FLEET` into `[env]` (see §4). Defaults to
+- `--fleet <prefix>` — stamps `BOBI_FLEET` into `[env]` (see §4). Defaults to
   the app name's leading dash-segment.
-- `--instance <name>` — stamps `MODASTACK_INSTANCE` (the per-instance/SaaS-tenant
+- `--instance <name>` — stamps `BOBI_INSTANCE` (the per-instance/SaaS-tenant
   key, enumerable next to the fleet). Defaults to the app name minus `<fleet>-`.
 - `--event-server <https URL>` — defaults to the shared moda Worker; the bubble key
   is refused over cleartext remote URLs, so it must be `https://` (or loopback).
@@ -246,7 +246,7 @@ What it deliberately does **not** do: pre-register a deployment, or write the
 volume's `agent.yaml`. After first boot the volume config is the source of truth;
 a reprovision sets only env + secrets, never project files.
 
-`MODASTACK_EVENT_SERVER` is the var name (an `https://` value; the client derives
+`BOBI_EVENT_SERVER` is the var name (an `https://` value; the client derives
 `wss://`). Tear down with `destroy-instance.sh --app <app>` — **removes the volume**
 (the only copy of state); human-only, never automated.
 
@@ -258,12 +258,12 @@ a reprovision sets only env + secrets, never project files.
 ## 4. Fleet identity & enumeration (`scripts/fleet.sh`)
 
 The Fly API is the state store. A **fleet** is the set of instances sharing one
-operator namespace, stamped `MODASTACK_FLEET=<prefix>` in each app's `[env]`.
+operator namespace, stamped `BOBI_FLEET=<prefix>` in each app's `[env]`.
 
 - **App name = `<prefix>-<team>`** — a deterministic *discovery hint*.
-- **The `MODASTACK_FLEET` stamp is the authoritative membership key** (name is only
+- **The `BOBI_FLEET` stamp is the authoritative membership key** (name is only
   a hint). This is the SaaS-extensible primitive: two fleets can share one Fly org,
-  and a future `MODASTACK_TENANT` filter slots into the same query.
+  and a future `BOBI_TENANT` filter slots into the same query.
 
 `fleet.sh` (sourceable lib + CLI):
 - `fleet.sh app <prefix> <team>` → `<prefix>-<team>`.
@@ -275,7 +275,7 @@ operator namespace, stamped `MODASTACK_FLEET=<prefix>` in each app's `[env]`.
 - `fleet.sh fleet-of <app>` → the app's stamp.
 
 > flyctl gotcha: `fly config show -a <app>` outputs **JSON by default** — passing
-> `--json` errors ("unknown flag"). `fleet.sh` reads `.env.MODASTACK_FLEET` from it.
+> `--json` errors ("unknown flag"). `fleet.sh` reads `.env.BOBI_FLEET` from it.
 
 ---
 
@@ -300,14 +300,14 @@ tenant lives only in the Environment name, never in the key.
 
 The deploy job binds `environment: <tenant>`, dumps `toJSON(secrets)`, selects keys
 with the `<TEAM>__` prefix, strips it, writes a temp env-file under `umask 077`, and
-hands it to `modastack deploy … --env-file`.
+hands it to `bobi deploy … --env-file`.
 
-**The reconcile** (`modastack/deploy.py`): on an existing app, deploy reads the live
+**The reconcile** (`bobi/deploy.py`): on an existing app, deploy reads the live
 Fly secret names (`fly secrets list`), then:
 - a live secret **satisfies the required check** — an update needn't re-supply what
   Fly already holds (kills the "re-paste the whole blob" friction);
 - supplied values are **set** (Fly no-ops identical ones — steady-state is quiet);
-- live, non-`MODASTACK_*` secrets **not in the team's declared set are pruned**
+- live, non-`BOBI_*` secrets **not in the team's declared set are pruned**
   (`--no-prune` to disable) — so the store converges on what `agent.yaml` declares;
 - it sets **only declared keys** — an undeclared key in the env-file (a `toJSON`
   dump's `FLY_API_TOKEN`, or a typo) is dropped with a warning, never provisioned.
@@ -336,7 +336,7 @@ Notes:
 
 ### 5.1. Migrating an Environment from the old blob (runbook)
 
-Pre-#385 Environments held a single opaque `MODASTACK_ENV` blob. To migrate one
+Pre-#385 Environments held a single opaque `BOBI_ENV` blob. To migrate one
 deployment to per-key (non-destructive — do this *before* deleting the blob):
 
 ```bash
@@ -351,12 +351,12 @@ for k in SLACK_BOT_TOKEN LINEAR_API_KEY OPENAI_API_KEY GH_TOKEN SLACK_CHANNELS; 
 done
 ```
 
-The per-key secrets and the old `MODASTACK_ENV` blob **coexist safely** — the
+The per-key secrets and the old `BOBI_ENV` blob **coexist safely** — the
 pre-#385 workflow reads the blob, the new one reads per-key. **At cutover** (after
 the per-key workflow has merged and a deploy is verified green), delete the blob:
 
 ```bash
-gh secret delete MODASTACK_ENV --env "$ENV" -R <owner>/<repo>
+gh secret delete BOBI_ENV --env "$ENV" -R <owner>/<repo>
 ```
 
 A subscription team (e.g. eng-team) has **no** `ANTHROPIC_API_KEY` — don't migrate
@@ -389,8 +389,8 @@ publish a GitHub Release   ─▶ release.yml  (the single gated pipeline)
 push a `deploy-*` tag / dispatch ─▶ deploy-agent-teams.yml   (standalone, NO image roll)
           plan   : list ACTIVE deployments/<name>.yaml (defaults excluded) + tenant
           deploy : matrix over {name,tenant}, environment=<tenant>
-                   └─ toJSON(secrets) | filter <TEAM>__ -> env-file -> `modastack deploy <name>`
-          orphans: Fly apps with no deployments/ file -> warn (human `modastack destroy`)
+                   └─ toJSON(secrets) | filter <TEAM>__ -> env-file -> `bobi deploy <name>`
+          orphans: Fly apps with no deployments/ file -> warn (human `bobi destroy`)
 ```
 
 **A release is the deploy gate** — an edit pushed to `main` does NOT auto-deploy;
@@ -402,7 +402,7 @@ package content + secrets (`deploy-teams`). Publish is gated on the **canary**, 
 the fleet roll, so a flaky non-canary instance can't block an already-proven
 publish. A team-definition or secret edit that needs **no** image rebuild ships on
 its own via a `deploy-*` tag, which runs `deploy-agent-teams.yml` standalone. Either
-way the reconcile **business logic lives in `modastack deploy`**, not the YAML — the
+way the reconcile **business logic lives in `bobi deploy`**, not the YAML — the
 Action only orchestrates: list
 the active deployments, hand each its secrets, loop the primitive. That is why the
 same engine runs from a laptop, this Action, Terraform, or a SaaS plane — see §7.2
@@ -417,11 +417,11 @@ branch, since tag pushes run from the tagged commit) or **`workflow_dispatch`**
 (optional `only:` to scope to one deployment). Jobs:
 - **plan**: list every **active** `deployments/<name>.yaml` (`defaults.yaml`
   excluded; an inactive deployment is a non-`.yaml` like `<name>.yaml.example`).
-  No git-diff — a release reconciles the whole set, and `modastack deploy` is
+  No git-diff — a release reconciles the whole set, and `bobi deploy` is
   idempotent. Gates the rest on `secrets.FLY_API_TOKEN` being set.
 - **deploy** (matrix over the active `{name, tenant}`, `environment: <tenant>`):
   install the CLI, filter this deployment's per-key `<TEAM>__<KEY>` secrets out of
-  `toJSON(secrets)` → env-file, then `modastack deploy <name> --env-file …`. One
+  `toJSON(secrets)` → env-file, then `bobi deploy <name> --env-file …`. One
   idempotent path — `deploy` itself decides provision-vs-update by Fly state and
   reconciles secrets to the declared set (§5).
 - **orphans**: enumerate the fleet (`fleet.sh list`, fleet from `defaults.yaml`),
@@ -453,10 +453,10 @@ exact wheel we publish, is the single functional gate for both PyPI and the flee
   bootstrap (a hermetic mock-code smoke; #388).
 - **build-wheel** — `python -m build` the wheel/sdist **once** and upload it, so the
   canary, the fleet, and PyPI all run the identical artifact. A fail-fast
-  `pip install dist/*.whl && modastack --version` rejects an obviously-broken wheel
+  `pip install dist/*.whl && bobi --version` rejects an obviously-broken wheel
   before the expensive canary build.
 - **build-canary** — deploy the canary from an image built **from that wheel**
-  (`--build-arg MODASTACK_BUILD=wheel`, the artifact staged into `dist/`), then a
+  (`--build-arg BOBI_BUILD=wheel`, the artifact staged into `dist/`), then a
   functional `ask` asserts `CANARY-OK` end-to-end. **This is the gate.** It resolves
   and outputs the built image digest for `roll-fleet` to reuse.
 - **publish** — `needs: build-canary` (the canary, **not** the fleet roll). Uploads
@@ -490,9 +490,9 @@ exact wheel we publish, is the single functional gate for both PyPI and the flee
 
 ## 7. Playbook — stand up your own agents
 
-Everything here is driven by the **`modastack` binary** — `uv tool install
-modastack` and you're done; no repo checkout required (for hosting too, the
-instance image installs modastack from PyPI). Pick where it runs:
+Everything here is driven by the **`bobi` binary** — `uv tool install
+bobi` and you're done; no repo checkout required (for hosting too, the
+instance image installs bobi from PyPI). Pick where it runs:
 
 - **7.1 Run it on your machine** — the simplest thing. Build a team, run it. No
   cloud, no Fly. This is the friends-and-family default. Start here.
@@ -501,8 +501,8 @@ instance image installs modastack from PyPI). Pick where it runs:
 
 | | event server | drive it with |
 |---|---|---|
-| **7.1 Local** | bundled, loopback (no cloud) | `modastack start` |
-| **7.2 Fly, self-service** | a Cloudflare Worker | `modastack deploy` from your laptop |
+| **7.1 Local** | bundled, loopback (no cloud) | `bobi start` |
+| **7.2 Fly, self-service** | a Cloudflare Worker | `bobi deploy` from your laptop |
 | **7.2 Fly, CI** | a Cloudflare Worker | a release / `deploy-*` tag → GitHub Actions |
 
 (There's no "local event server + Fly" cell: a hosted instance is dark and reaches
@@ -510,23 +510,23 @@ instance image installs modastack from PyPI). Pick where it runs:
 
 ### 7.1. Run it on your machine (start here)
 ```
-uv tool install modastack
-modastack setup                  # design + install a team in a browser UI…
-#   …or grab a bundled one:   modastack install eng-team
-modastack start                  # runs your agent — and a local event server
+uv tool install bobi
+bobi setup                  # design + install a team in a browser UI…
+#   …or grab a bundled one:   bobi install eng-team
+bobi start                  # runs your agent — and a local event server
                                  # (loopback) by default. No cloud, no accounts.
 ```
 The only credential you need is your Anthropic auth (`ANTHROPIC_API_KEY`, or a
-Claude subscription) — `modastack install` prompts for whatever a team requires.
-Talk to it with `modastack ask "…"` / `modastack message`; add `monitors` for
+Claude subscription) — `bobi install` prompts for whatever a team requires.
+Talk to it with `bobi ask "…"` / `bobi message`; add `monitors` for
 scheduled reactions. (Inbound webhooks from GitHub/Slack need a public URL — host
 it on Fly for that, or front the local server with a tunnel.)
 
 ### 7.2. Host it on Fly (always-on)
-For 24/7 operation off your machine. Still just the binary — `modastack deploy`
+For 24/7 operation off your machine. Still just the binary — `bobi deploy`
 builds the instance image from PyPI, so no checkout is needed. The image pins
-**the same modastack version you're running**, so run a *released* version
-(`uv tool install modastack` — the normal case): the instance image and the CLI
+**the same bobi version you're running**, so run a *released* version
+(`uv tool install bobi` — the normal case): the instance image and the CLI
 that deployed it match. (Deploying from an unreleased dev checkout pins the last
 *published* version, which can lag the entrypoint and crash-loop the instance —
 release first.) A hosted instance is **dark** (reaches out over WSS), so its
@@ -534,7 +534,7 @@ event server is a **Cloudflare Worker**:
 the built-in shared moda Worker (set nothing), your own (`cd event-server && npx
 wrangler deploy` → set `event_server:`), or any reachable `https://` server.
 
-**First time on Fly?** `modastack deploy` preflights your setup and prints exactly
+**First time on Fly?** `bobi deploy` preflights your setup and prints exactly
 what to do — install `flyctl`, `fly auth signup`/`login`, and (for a new org)
 the one-time `fly.io/high-risk-unlock`. The guidance is step-by-step, so a human
 *or* an agent can get from zero to a deployable account.
@@ -542,20 +542,20 @@ the one-time `fly.io/high-risk-unlock`. The guidance is step-by-step, so a human
 **A — Self-service (one developer).** From your laptop:
 ```
 printf 'ANTHROPIC_API_KEY=sk-ant-…\n' > ./my-team.env
-modastack deploy my-team --team my-team --env-file ./my-team.env   # ssh-push
-modastack destroy my-team                                          # tear down
+bobi deploy my-team --team my-team --env-file ./my-team.env   # ssh-push
+bobi destroy my-team                                          # tear down
 ```
 `--team` ssh-pushes your **local** team (no hosting to set up); edit + re-run to
 update in place. Or commit a `deployments/my-team.yaml` (`team: my-team`,
-`secrets.env-file: ./my-team.env`) and just `modastack deploy my-team`. Prefer a
+`secrets.env-file: ./my-team.env`) and just `bobi deploy my-team`. Prefer a
 published tarball? Use `team-url:` instead.
 
 **B — CI (GitHub Actions, always-fresh).** Cut a release (or push a `deploy-*`
 tag) and the Action deploys every active deployment.
 
-> **One command:** from your agent-teams repo root, `modastack deploy-init`
+> **One command:** from your agent-teams repo root, `bobi deploy-init`
 > scaffolds all of this — it writes the standalone `deploy-agent-teams.yml`
-> (already PyPI-pinned to your installed modastack, with the inline-orphans
+> (already PyPI-pinned to your installed bobi, with the inline-orphans
 > adaptation) + a `deployments/` skeleton for every team under `agents/`, then
 > **prints the exact `fly`/`gh` commands** for steps 3–4 below, with each team's
 > per-key secret list derived from its declared `${VAR}`s. `--fleet/--tenant/
@@ -565,10 +565,10 @@ tag) and the Action deploys every active deployment.
 Wire your repo once (or let `deploy-init` do 1–2 and print 3–4):
 1. Copy `.github/workflows/deploy-agent-teams.yml` + `deployments/`; set `fleet:`
    + `event_server:` in `defaults.yaml`. Two one-line adaptations for a repo with
-   **no modastack source** (the recommended shape — see *Bring your own repo*
-   below): `pip install -e .` → `pip install "modastack==<pin>"` (track a
+   **no bobi source** (the recommended shape — see *Bring your own repo*
+   below): `pip install -e .` → `pip install "bobi==<pin>"` (track a
    *published* framework version), and have the `orphans` job enumerate the fleet
-   inline (`fly apps list` + the `MODASTACK_FLEET` stamp) since `scripts/fleet.sh`
+   inline (`fly apps list` + the `BOBI_FLEET` stamp) since `scripts/fleet.sh`
    isn't present. Do **not** copy `release.yml` — that's the framework's own
    wheel-publish pipeline; you adopt new framework versions by bumping the pin.
 2. `deployments/<team>.yaml` with `team:` (local package → **ssh-push**) **or**
@@ -590,17 +590,17 @@ No `FLEET_PREFIX` var, no manifest, no database — the Fly API is the state sto
 
 **Bring your own repo (teams developed *independently* of the framework).** A
 team is pure config (role prompts, workflows, monitors, `agent.yaml`) with **zero
-framework imports**, and `modastack deploy` has a **binary mode**: outside a
-modastack checkout it falls back to the deploy assets bundled in the wheel
-(`modastack/_deploy`: a PyPI `Dockerfile` + provision/destroy/fleet scripts), so
-`pip install modastack==<pin>` is fully self-sufficient. That means your teams can
+framework imports**, and `bobi deploy` has a **binary mode**: outside a
+bobi checkout it falls back to the deploy assets bundled in the wheel
+(`bobi/_deploy`: a PyPI `Dockerfile` + provision/destroy/fleet scripts), so
+`pip install bobi==<pin>` is fully self-sufficient. That means your teams can
 live in their **own private repo** that never carries framework source — the
 "outside user runs their own teams on Fly" shape. The reference example is
 **`moda-labs/moda-agent-teams`** (it owns the `moda` fleet; this framework repo
 keeps only its `ci` self-gate canary). The split model:
 
 - **One Fly org, two (or more) fleets.** Fleets are distinguished by the exact
-  `MODASTACK_FLEET` stamp (§4), so repos that share an org never cross-enumerate.
+  `BOBI_FLEET` stamp (§4), so repos that share an org never cross-enumerate.
 - **Adopt vs. fresh.** Keep the same `fleet:` as the live app to **adopt** it at
   cutover (idempotent reconcile, no data migration — volume/login/identity
   preserved); pick a new `fleet:` to provision fresh.
@@ -615,12 +615,12 @@ keeps only its `ci` self-gate canary). The split model:
 
 ### Manual ops
 ```
-modastack deploy <name> [--env-file ./x.env]        # provision or update (idempotent)
-modastack destroy <name> [--yes]                     # tear down (removes volume!)
+bobi deploy <name> [--env-file ./x.env]        # provision or update (idempotent)
+bobi destroy <name> [--yes]                     # tear down (removes volume!)
 scripts/fleet.sh list <fleet>                        # what's running
 fly logs -a <app> ; fly status -a <app>              # observe
-fly ssh console -a <app> --command 'gosu modastack env HOME=/home/modastack \
-  CLAUDE_CONFIG_DIR=/data/claude bash -c "cd /data/project && modastack status"'  # admin
+fly ssh console -a <app> --command 'gosu bobi env HOME=/home/bobi \
+  CLAUDE_CONFIG_DIR=/data/claude bash -c "cd /data/project && bobi status"'  # admin
 ```
 Both GitOps workflows also accept `workflow_dispatch` for manual re-runs.
 
@@ -633,8 +633,8 @@ Both GitOps workflows also accept `workflow_dispatch` for manual re-runs.
 - *Changed `team-url` team didn't update* → confirm the in-place path used
   `install <url>`, not `agents update`, and that `teams-latest` republished (§6).
 - *ssh-push instance stuck "waiting for a pushed team"* → the blank provision
-  succeeded but the push didn't land `.modastack/agent.yaml`; check `fly logs` and
-  re-run `modastack deploy <name>` (idempotent — it re-pushes).
+  succeeded but the push didn't land `.bobi/agent.yaml`; check `fly logs` and
+  re-run `bobi deploy <name>` (idempotent — it re-pushes).
 - *Instance boots but agents won't dispatch* → a team with a `requires:` gate whose
   tools aren't in the image (e.g. eng-team's gstack/codex). That's the C24 gap —
   see `docs/design/CUSTOM_AGENT_DEPS.md`.
@@ -683,26 +683,26 @@ bubble/account) is #239 (auth-v2), part of the multitenant phase, not this.
 
 C10 + C22 were verified **live on Fly**, then torn down:
 - Single instance: empty volume → image build → boot → first-boot team install from
-  URL → healthy manager → `modastack ask` self-registers on the real Worker →
+  URL → healthy manager → `bobi ask` self-registers on the real Worker →
   `pong`. (The `team-url` delivery path, unchanged by the deploy refactor except
-  the added `MODASTACK_INSTANCE` stamp.)
+  the added `BOBI_INSTANCE` stamp.)
 - Two-instance fleet (C22): provision both, `fleet.sh list`/`classify` against real
   Fly state, changed-team update (`install <url>` + restart — role content updated,
   workspace file preserved), release rollout (cross-app image pull, config
   preserved, `pong`).
 
 The deploy refactor adds the **ssh-push** path, **verified live on Fly**
-(`modastack deploy sshe2e --team smoke-team`, then torn down):
+(`bobi deploy sshe2e --team smoke-team`, then torn down):
 - Blank provision (app + 15 GB volume + staged secret); `fly deploy` returns on the
   blank machine reaching **started** — it does *not* hang on the image healthcheck.
-- `MODASTACK_INSTANCE` confirmed in the live `[env]` (next to `MODASTACK_FLEET`).
-- base64 push over `fly ssh` → `modastack install /data/…tar.gz --non-interactive`
+- `BOBI_INSTANCE` confirmed in the live `[env]` (next to `BOBI_FLEET`).
+- base64 push over `fly ssh` → `bobi install /data/…tar.gz --non-interactive`
   (secrets read from the Fly-injected env — confirmed available in the ssh session)
   → the wait-for-team entrypoint detects the team and starts the manager (`status`
   shows it running).
 - In-place re-deploy: re-push → workspace-safe reinstall (a role marker propagated)
   → `fly machine restart <id>` → manager back up.
-- `modastack destroy sshe2e --yes` removes the app + volume.
+- `bobi destroy sshe2e --yes` removes the app + volume.
 
 > **flyctl gotcha (found in this e2e):** `fly machine restart -a <app>` errors
 > "a machine ID must be specified" outside a TTY. `deploy` resolves IDs via
@@ -710,21 +710,21 @@ The deploy refactor adds the **ssh-push** path, **verified live on Fly**
 
 The **team-url** path is verified live two ways:
 - **CI / GitOps:** a `deploy-canary-1` tag fired `deploy-agent-teams.yml` from the branch
-  → `modastack deploy canary` → provisioned `moda-canary` (1 GB/1 vCPU) via team-url;
-  manager healthy, `MODASTACK_INSTANCE` stamped.
-- **Binary-only (no repo):** from a directory with no modastack checkout,
-  `modastack deploy` resolved the bundled wheel assets ("binary mode"), built the
-  image from PyPI (`MODASTACK_BUILD=pypi`, version-pinned), and provisioned
+  → `bobi deploy canary` → provisioned `moda-canary` (1 GB/1 vCPU) via team-url;
+  manager healthy, `BOBI_INSTANCE` stamped.
+- **Binary-only (no repo):** from a directory with no bobi checkout,
+  `bobi deploy` resolved the bundled wheel assets ("binary mode"), built the
+  image from PyPI (`BOBI_BUILD=pypi`, version-pinned), and provisioned
   `bintest-bsmoke` — incl. the **re-provision-on-failure** fork (a half-built app
   with no started machine re-provisions instead of erroring "no started VMs").
 
 > **Release gate (found in the binary e2e):** the PyPI image pins the *installed*
-> modastack version, so the instance runs **published** code while the entrypoint
+> bobi version, so the instance runs **published** code while the entrypoint
 > ships with the *operator's* version. Deploying from an unreleased dev checkout
 > (entrypoint ahead of the pinned published package — e.g. an entrypoint that calls
 > `install --non-interactive` before that option was published) crash-loops the
 > instance. **Release these changes before binary-mode deploy boots cleanly**; a
-> released `uv tool install modastack` is always self-consistent.
+> released `uv tool install bobi` is always self-consistent.
 
 > **Lean image (found in the binary e2e):** install the kb deps the code uses
 > (fastembed) **explicitly**, not via the `[kb]` extra — some published releases
@@ -734,6 +734,6 @@ The **team-url** path is verified live two ways:
 <!-- e2e-status: ssh-push + canary(team-url) + binary-mode verified 2026-06-19 -->
 
 Smoke target: `tests/fixtures/smoke-team` (zero-secret; only needs
-`MODASTACK_EVENT_SERVER` + an Anthropic key for the `ask` round-trip).
+`BOBI_EVENT_SERVER` + an Anthropic key for the `ask` round-trip).
 Structural/unit coverage: `tests/test_gitops_c22.py`. Both workflows pass
 `actionlint` (+ shellcheck on run blocks).

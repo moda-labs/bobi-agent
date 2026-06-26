@@ -10,9 +10,9 @@ import sys
 
 import pytest
 
-from modastack.brain import get_brain
-from modastack.brain.base import AssistantText, TurnResult
-from modastack.brain.codex import (
+from bobi.brain import get_brain
+from bobi.brain.base import AssistantText, TurnResult
+from bobi.brain.codex import (
     CodexBrain,
     _CodexSession,
     _instructions,
