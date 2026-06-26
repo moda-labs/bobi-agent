@@ -7,7 +7,8 @@ blocked vs. ready, and which one-offs are ready to hand to the `modastack` bot.
 moves tracks, update it here in the same session. This file is the single place
 to get the lay of the land without re-reading every issue.
 
-- **Last reviewed:** 2026-06-25 (**23 open issues after closing #501/#502** — 0.34.1 bugfix release cut from #500/#503. **Closed:** #501 stale persisted `.modastack/.env` secrets on Fly volumes, and #502 Slack workspace-level DM cross-delivery between bots. Both shipped in PR #503; #500 shipped the Codex shell PATH fix.)
+- **Last reviewed:** 2026-06-26 (**28 open issues** — filed the **Unified agent dashboard** track: design record **#525** (merge `modastack setup` + `modastack ui` into one dashboard → onboarding → monitor app) plus four **do-now prep carve-outs** that are good regardless of the dashboard and shrink the eventual merge PR: **#526** canonical `~/.modastack/agents/<team>/` directory layout, **#527** shared web-server harness, **#528** consolidated design tokens, **#529** service-core extraction (CLI + web as thin adapters). The frontend-framework decision (vanilla vs lightweight framework) gates the *merge*, not the prep. New track added to "Tracks at a glance".)
+- **Prev reviewed:** 2026-06-25 (**23 open issues after closing #501/#502** — 0.34.1 bugfix release cut from #500/#503. **Closed:** #501 stale persisted `.modastack/.env` secrets on Fly volumes, and #502 Slack workspace-level DM cross-delivery between bots. Both shipped in PR #503; #500 shipped the Codex shell PATH fix.)
 - **Prev reviewed:** 2026-06-25 (**25 open issues** — filed live Codex fleet incident follow-ups: **#501** stale persisted `.modastack/.env` secrets on Fly volumes can make tool shells use the wrong Slack bot, and **#502** workspace-level Slack DM routing can cross-deliver inbound events between bots. #501 is outbound credential drift; #502 is inbound webhook routing isolation.)
 - **Prev reviewed:** 2026-06-24 (**17 open issues** — filed **epic #485 "Pluggable agent brain"** (Claude/Codex/Gemini/Grok behind one `BrainClient`; spec `pluggable-brain.md`; Phase 0 Codex spike done). Self-contained epic — work breakdown is in-issue checkboxes, no child tickets. New track added to "Tracks at a glance".)
 - **Prev reviewed:** 2026-06-24 (**16 open issues** — full table reconciliation against `gh issue list` + Linear. Header had been bumped for the #453 cutover but the body tables still showed the 2026-06-22 state; this pass fixes that. **Closed since last real table refresh, moved to "Recently closed":** #285, #397, #403, #411, #412, #417, #418, #425, #426, #433, #443, #454 — i.e. the **CLI-first cleanup track, the Codex track, and the Reliability track are all DONE**. **New tracks added:** Tool/Capability library (#416 cli, #428 skill, #398 mcp) and a curator-monitor one-off (#456, assigned to `modastack`). **Linear sync gap flagged:** MDS-47/48/49 still Backlog but their GitHub twins (#285, #363) are closed — they describe the retired gateway-harness/MCP-shim architecture; epic MDS-42 likely needs re-scoping.)
@@ -33,6 +34,7 @@ to get the lay of the land without re-reading every issue.
 | Codex integration | MDS-42 B | #285 | ✅ **DONE** — #285 shipped CLI-first (`codex exec` + `tools/codex.md`), CLOSED |
 | Reliability (post-#409) | — | #425, #433, #443, #454 | ✅ **DONE** — all CLOSED (#433/#454 rotation-metric + `compact`; #443/#425 wedge fixes) |
 | Pluggable agent brain | **Epic (#485)** | self-contained (work breakdown in-issue, no child tickets) | 🟡 **PROPOSED 2026-06-24** — Claude/Codex/Gemini/Grok behind one `BrainClient`. **Phase 0 Codex spike DONE** (exec/NDJSON/MCP/resume validated). Spec: `pluggable-brain.md`. Phases 1–4 tracked as checkboxes in the issue. |
+| Unified agent dashboard | **NEW (#525)** | #525 design; #526, #527, #528, #529 prep | 🟡 **PROPOSED 2026-06-26** — merge the create (`setup`) + monitor (`ui`) UIs into one dashboard → onboarding → launch → monitor app. **#526–#529 are do-now, dashboard-independent cleanup** (good regardless). Frontend-framework decision gates the *merge*, not the prep. |
 | Standalone one-offs | — | #327 | 🔴 Needs design |
 
 ---
@@ -127,6 +129,28 @@ opt-in and reusable across teams. #417/#418 (the define-once foundation) already
 |---|---|---|
 | #456 | Replace the append-only **decision log** with a **curator-monitor** that distills transcripts → a rewritten-in-place, size-capped `policy.md` (injected read-only), publishing `policy.updated` so agents re-read | 🟢 **OPEN — assigned to `modastack`.** Filed off the 2026-06-23 director wedge (the decision log grew to 127KB and aggravated the wedge). Rides existing monitor infra (out-of-band curator agent). Root-cause of the false over-cap was the rotation metric (#454, closed separately). |
 
+## Unified agent dashboard — NEW track 🟡
+
+Close the gap between the two existing local web apps — the creation/onboarding UI
+(`modastack setup`, `setup/webui/`) and the monitoring UI (`modastack ui`,
+`agentui/`) — into **one app**: opens as a dashboard of your teams, leads into the
+existing onboarding flow, **installs + launches + returns home**, and click-through
+to the existing monitor. Goal: never need the CLI except to start the app; keep the
+UI a static client over a relocatable HTTP API so it can be hosted later.
+
+**#525 is a design record (not a bot task).** **#526–#529 are independent, do-now
+cleanup** that's valuable regardless and shrinks the eventual merge PR. The one thing
+to settle *before the merge* (but after the prep) is the **frontend-framework
+decision** (stay vanilla vs a lightweight component framework) — not yet ticketed.
+
+| Issue | Role | What | Depends on / Status |
+|---|---|---|---|
+| #525 | Design | Unified dashboard decision record: merge, MVP cut (Dashboard + Onboarding-with-launch-and-return + Agents-&-Chat), screen inventory, distribution strategy | 🟡 **OPEN — awaiting approval.** No impl until approved. |
+| #526 | Prep | Canonical `~/.modastack/{config.yaml,sources/,agents/<team>/{.modastack,workspace}}` layout; `--team` selector; sources configurable, runtime fixed; path-only global config | 🟢 **OPEN — do-now.** Independent. Restores `paths.py` single-chokepoint (consolidates the `~/modastack-agents` literal in `setup/webui/server.py`). |
+| #527 | Prep | Shared local web-server harness (`webui_common`): bind/secret/host-guard/static-serving/browser-open + 6PN container mode; both servers adopt it | 🟢 **OPEN — do-now.** Independent; framework-agnostic (serves a static dir). Pairs with #528. |
+| #528 | Prep | Consolidate design-system tokens into one `tokens.css` from DESIGN.md (the two app.css have **drifted** — two ambers, two papers) | 🟢 **OPEN — do-now.** Pairs with #527. Survives any framework choice (CSS custom props). |
+| #529 | Prep | Service-core extraction: CLI + web as thin adapters over one engine; `launch_team()` the first brick (unblocks `/api/launch`) | 🟢 **OPEN — do-now.** Composes with #526. Pulls domain logic out of Click command bodies in `cli.py`. |
+
 ## DONE tracks (kept for context, all CLOSED)
 
 - **CLI-first connection cleanup** — #397 (image-gen → baked OpenAI CLI) + #403 (deleted `inject.py`/`codex_server.py`/`ConnectionEntry`/the `connections:` block). The middle MCP-shim layer is gone; two clean layers remain (baked CLIs + team-brought MCP). Both CLOSED 2026-06-22.
@@ -151,6 +175,10 @@ unresolved design decision, verifiable without infra/credentials the bot lacks.*
 | Issue | What | Caveat |
 |---|---|---|
 | #394 (form A) | `modastack remote <app>` SSH wrapper | Code is unit-testable; **acceptance needs live Fly** against moda-canary — human verifies |
+| #527 | Shared web-server harness (`webui_common`) | Bounded refactor; clear acceptance + unit tests in-issue. Pairs with #528. Verify both UIs launch unchanged. |
+| #528 | Consolidate design tokens → `tokens.css` | Bounded; pairs with #527 (shared static path). Reconcile drift to DESIGN.md values. |
+| #526 | Canonical `~/.modastack/` directory layout + `--team` | Bounded but touches `paths.py` (the path chokepoint) broadly; back-compat (cwd walk-up) is spelled out. Good first dashboard-prep brick. |
+| #529 | Service-core extraction (`launch_team`, …) | Bounded; **acceptance wants an integration test driving a real session** (dogfood) for the launch path. |
 
 ### 🔴 Not ready — needs decision/investigation first
 
