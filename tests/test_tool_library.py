@@ -334,6 +334,36 @@ def test_codex_requires_subscription_does_not_overwrite_oauth_auth(tmp_path, mon
     assert auth_file.read_text() == '{"tokens":"subscription"}\n'
 
 
+def test_codex_requires_subscription_rejects_api_key_auth_file(tmp_path, monkeypatch):
+    entry = tool_library.load_entry("codex")
+    check = entry.requires[0]["check"]
+    home = tmp_path / "home"
+    bin_dir = tmp_path / "bin"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "auth.json").write_text(
+        '{"OPENAI_API_KEY":"sk-stale"}\n'
+    )
+    bin_dir.mkdir()
+    codex = bin_dir / "codex"
+    codex.write_text("#!/usr/bin/env bash\nexit 0\n")
+    codex.chmod(0o755)
+    monkeypatch.setenv("MODASTACK_AUTH", "subscription")
+    monkeypatch.delenv("MODASTACK_VERIFY_PHASE", raising=False)
+
+    proc = subprocess.run(
+        ["bash", "-c", check],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        },
+    )
+
+    assert proc.returncode != 0
+
+
 def test_codex_requires_subscription_fails_without_oauth_auth(tmp_path, monkeypatch):
     entry = tool_library.load_entry("codex")
     check = entry.requires[0]["check"]
@@ -448,7 +478,7 @@ agent: acme
 requires:
   - name: codex
     why: "Delegate a coding sub-task to the Codex CLI (tools/codex.md)."
-    check: "command -v codex >/dev/null 2>&1 && { if [ \\"${MODASTACK_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if [ -f ~/.codex/auth.json ]; then python3 -c 'import subprocess, sys; sys.exit(subprocess.run([\\"codex\\", \\"exec\\", \\"-s\\", \\"read-only\\", \\"--skip-git-repo-check\\", \\"reply OK\\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=8).returncode)'; elif [ \\"${MODASTACK_VERIFY_PHASE:-}\\" = \\"build\\" ]; then codex --version >/dev/null 2>&1; else false; fi; }"
+    check: "command -v codex >/dev/null 2>&1 && { if [ \\"${MODASTACK_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if [ -f ~/.codex/auth.json ]; then if [ \\"${MODASTACK_AUTH:-api_key}\\" = \\"subscription\\" ] && python3 -c 'import json, pathlib, sys; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; data=json.loads(p.read_text()); sys.exit(0 if isinstance(data, dict) and \\"OPENAI_API_KEY\\" in data else 1)'; then false; else python3 -c 'import subprocess, sys; sys.exit(subprocess.run([\\"codex\\", \\"exec\\", \\"-s\\", \\"read-only\\", \\"--skip-git-repo-check\\", \\"reply OK\\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=8).returncode)'; fi; elif [ \\"${MODASTACK_VERIFY_PHASE:-}\\" = \\"build\\" ]; then codex --version >/dev/null 2>&1; else false; fi; }"
     fix: "npm install -g @openai/codex@0.142.0 && { if [ \\"${MODASTACK_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; else codex auth login || echo 'Set OPENAI_API_KEY in .modastack/.env or run codex auth login'; fi; }"
   - name: venn
     why: "Reach external services (email, calendar, CRM) via the Venn CLI (tools/venn.md). Auth via VENN_API_KEY."

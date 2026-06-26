@@ -193,6 +193,29 @@ materialize_codex_api_key_auth "{cred_dir}"
     assert auth_file.read_text() == '{"tokens":"subscription"}\n'
 
 
+def test_entrypoint_subscription_removes_codex_api_key_auth(tmp_path):
+    entry = (REPO / "docker" / "docker-entrypoint.sh").read_text()
+    start = entry.index("codex_auth_uses_api_key() {")
+    end = entry.index("\n\nAUTH_VALIDATED=", start)
+    helper = entry[start:end]
+    cred_dir = tmp_path / "codex"
+    cred_dir.mkdir()
+    auth_file = cred_dir / "auth.json"
+    auth_file.write_text('{"OPENAI_API_KEY":"sk-stale"}\n')
+
+    script = f"""
+set -euo pipefail
+APP_USER="$(id -un)"
+log() {{ :; }}
+chown() {{ :; }}
+{helper}
+codex_auth_uses_api_key "{cred_dir}" && rm -f "{auth_file}"
+"""
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert not auth_file.exists()
+
+
 def test_dockerfile_supports_wheel_build_mode():
     """The release pipeline builds the image from a PREBUILT wheel (builder-wheel),
     so the canary smokes — and the fleet runs — the exact bytes published to PyPI."""

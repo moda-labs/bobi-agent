@@ -110,6 +110,22 @@ PY
   chown -R "${APP_USER}:${APP_USER}" "${cred_dir}"
 }
 
+codex_auth_uses_api_key() {
+  local cred_dir="$1"
+  CODEX_CRED_DIR="${cred_dir}" python - <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads((Path(os.environ["CODEX_CRED_DIR"]) / "auth.json").read_text())
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(data, dict) and "OPENAI_API_KEY" in data else 1)
+PY
+}
+
 AUTH_VALIDATED=0
 if [ -n "${MODASTACK_BRAIN:-}" ] \
    || [ -f "${PROJECT_DIR}/.modastack/agent.yaml" ] \
@@ -300,6 +316,18 @@ if [ "${MODASTACK_AUTH:-api_key}" != "subscription" ]; then
   fi
 elif [ -n "${OPENAI_API_KEY:-}" ]; then
   log "Subscription mode: leaving OPENAI_API_KEY out of Codex auth materialization"
+fi
+
+if [ "${MODASTACK_AUTH:-api_key}" = "subscription" ]; then
+  if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
+    codex_dir="${BRAIN_CRED_DIR}"
+  else
+    codex_dir="${HOME}/.codex"
+  fi
+  if codex_auth_uses_api_key "${codex_dir}"; then
+    log "Subscription mode: removing Codex API-key auth file so OAuth can be used"
+    rm -f "${codex_dir}/auth.json"
+  fi
 fi
 
 # --- 4. Subscription auth: bootstrap login over Slack if no creds yet (C23) --
