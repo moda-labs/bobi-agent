@@ -152,6 +152,15 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     def get_state() -> dict:
         return serialize_state(state)
 
+    # The harness backing the wizard (and the installed team): which agent
+    # runs it, and whether it's authenticated. The welcome screen reads this
+    # to show "which agent runs your harness" + a log-in prompt; the Re-check
+    # button re-polls it after the user runs `claude auth login`.
+    @app.get("/api/harness")
+    def get_harness() -> dict:
+        from modastack.setup import harness
+        return harness.harness_status(app.state.model).to_dict()
+
     # A cheap liveness check for the client heartbeat: if this stops
     # answering (Ctrl-C, closed terminal, crash), the page knows the setup
     # server is gone and freezes itself instead of looking live.
@@ -475,6 +484,24 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             if not text:
                 yield _sse("error", {"message": "empty message"})
                 return
+            # The digestion brain runs on the Claude Code CLI. A missing CLI is
+            # a cheap, reliable signal (no keychain probe), so block early with
+            # a clear message — real path only; an injected stream_fn (tests)
+            # doesn't touch the CLI. Auth can't be detected reliably enough to
+            # pre-block on (Mac stores it in the keychain, and "present" isn't
+            # "valid"), so we never gate on it up front; we only probe it on
+            # failure to enrich the error. That keeps the keychain call off
+            # every happy turn and never blocks a working harness.
+            import shutil
+            from modastack.setup import harness
+            real_harness = app.state.stream_fn is None
+            if real_harness and shutil.which("claude") is None:
+                yield _sse("error", {"message":
+                    f"The {harness.AGENT_NAME} CLI isn't installed — setup's "
+                    "brain runs on it. Install it "
+                    "(https://claude.com/claude-code), then retry."})
+                yield _sse("state", serialize_state(state))
+                return
             from modastack.setup import digestion
             from modastack.setup.actions import redact_secrets
             # Scrub secrets at the trust boundary and tell the user. digest_turn
@@ -509,7 +536,20 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                         cwd=str(project), stream_fn=app.state.stream_fn):
                     yield _sse("delta", {"text": chunk})
             except Exception as e:  # surface, don't kill the stream silently
-                yield _sse("error", {"message": str(e)})
+                # Redact before surfacing: a CLI/transport error string can echo
+                # a path or key prefix, and it lands in the SSE stream + history.
+                safe_err = redact_secrets(str(e))[0]
+                # Probe auth only now (the rare failure path). If the harness
+                # looks unauthenticated, the failure is almost certainly the
+                # login — give the actionable hint instead of the raw error.
+                hs = harness.harness_status(app.state.model) if real_harness else None
+                if hs is not None and not hs.authenticated:
+                    yield _sse("error", {"message":
+                        f"Can't reach the agent harness — you may not be logged "
+                        f"into {hs.agent}. Run `{hs.login_command}` in your "
+                        f"terminal, then retry. (Details: {safe_err})"})
+                else:
+                    yield _sse("error", {"message": safe_err})
             yield _sse("state", serialize_state(state))
 
         return StreamingResponse(gen(), media_type="text/event-stream")
@@ -1063,22 +1103,6 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         from modastack.setup import open_mode
         return {"teams": open_mode.list_teams_in(library),
                 "library": str(library)}
-
-    @app.post("/api/run-start")
-    def run_start() -> JSONResponse:
-        # "Start it for me" — launch the installed agent in the background, the
-        # same as running `modastack start` in a terminal. Loopback + nonce
-        # guarded; runs on the same machine, in this project's install root.
-        import subprocess
-        import sys
-        try:
-            subprocess.Popen([sys.executable, "-m", "modastack", "start"],
-                             cwd=str(project),
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
-        return JSONResponse({"ok": True})
 
     return app
 

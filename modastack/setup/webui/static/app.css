@@ -61,7 +61,12 @@ html[data-retro="on"] .rail .grow{ background-image:radial-gradient(1px 1px at 2
 
 /* generic light node */
 .node{padding:34px 40px;overflow-y:auto;}
-.node.narrow{max-width:680px;}
+/* Full-width scroll container with a centered, readable column: the element
+   fills the pane (so the scrollbar is at the screen edge and the WHOLE screen
+   scrolls), and symmetric auto side-padding holds the content to ~680px,
+   centered — instead of a narrow box pinned to the left that scrolls on its
+   own. box-sizing:border-box (global) keeps the padding inside the width. */
+.node.narrow{max-width:none;padding-inline:max(40px,calc((100% - 680px) / 2));}
 .eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);font-weight:600;}
 .node h1{font-size:27px;line-height:1.16;letter-spacing:-.02em;margin:9px 0 8px;font-weight:680;}
 .node .lede{color:var(--muted);max-width:54ch;margin:0 0 22px;font-size:14.5px;}
@@ -252,6 +257,22 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .wmeta-row{display:flex;gap:14px;align-items:baseline;}
 .wmeta-k{flex:0 0 92px;font-family:var(--font-mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:600;}
 .wmeta-v{font-size:13.5px;color:var(--muted);line-height:1.5;}
+
+/* welcome: the agent harness card (which agent runs it + login state) */
+.mono{font-family:var(--font-mono);}
+.harness{border:1px solid var(--border);background:var(--raised);border-radius:var(--radius);padding:14px 16px;margin:0 0 26px;}
+.harness.harness-warn{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+.harness-rows{display:flex;flex-direction:column;gap:9px;}
+.harness-row{display:flex;gap:14px;align-items:baseline;}
+.harness-k{flex:0 0 64px;font-family:var(--font-mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:600;}
+.harness-v{font-size:13.5px;color:var(--text);line-height:1.5;}
+.harness-v .mono{font-size:12.5px;color:var(--muted);}
+.harness-ok{color:var(--ok);font-family:var(--font-mono);font-size:12.5px;}
+.harness-bad{color:var(--err);font-family:var(--font-mono);font-size:12.5px;}
+.harness-fix{margin-top:12px;border-top:1px solid var(--border);padding-top:12px;}
+.harness-fix p{font-size:13px;color:var(--muted);margin:0 0 4px;line-height:1.5;}
+.harness-fix .cmd{margin:8px 0 0;}
+.harness-actions{margin-top:12px;}
 
 /* welcome — the event-driven flow, a vertical companion column */
 .wflow-side{display:flex;flex-direction:column;min-width:0;}
@@ -540,7 +561,9 @@ html[data-retro="on"] .code{color:color-mix(in srgb,var(--slab-accent) 30%,var(-
 .tnode .ok{font-size:11px;}
 
 /* big success */
-.done-wrap{padding:48px 44px;max-width:640px;}
+/* Same full-width-scroll, centered-column treatment as .node.narrow (above):
+   the whole screen scrolls; content stays centered at ~640px. */
+.done-wrap{max-width:none;padding:48px max(44px,calc((100% - 640px) / 2)) 64px;overflow-y:auto;}
 .seal{width:46px;height:46px;border-radius:12px;background:var(--accent);display:grid;place-items:center;margin-bottom:18px;}
 .seal svg{width:26px;height:26px;color:#fff;}
 .cmd{font-family:var(--font-mono);font-size:13px;background:var(--slab-bg);color:var(--slab-text);border-radius:9px;padding:13px 15px;margin:14px 0;display:flex;align-items:center;gap:10px;}
@@ -553,6 +576,18 @@ html[data-retro="on"] .cmd{color:color-mix(in srgb,var(--slab-accent) 35%,var(--
 .done-h{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);font-weight:600;margin:26px 0 4px;}
 .exlink{color:var(--accent);text-decoration:underline;text-underline-offset:2px;}
 .exlink:hover{color:var(--accent-2);}
+
+/* final screen: the two deployment paths (local vs cloud) */
+.deploy{display:flex;flex-direction:column;gap:16px;margin:18px 0 0;}
+.deploy-opt{border:1px solid var(--border);background:var(--raised);border-radius:var(--radius);padding:15px 17px;}
+.deploy-head{display:flex;align-items:baseline;gap:10px;margin-bottom:4px;}
+.deploy-tag{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:#fff;background:var(--accent);border-radius:5px;padding:2px 8px;font-weight:600;}
+.deploy-sub{font-family:var(--font-mono);font-size:11px;letter-spacing:.06em;color:var(--faint);}
+.deploy-lede{font-size:13.5px;color:var(--muted);line-height:1.5;margin:0;}
+.deploy .cmd{align-items:flex-start;}
+.deploy .cmd .cmd-text{white-space:pre-wrap;word-break:break-word;}
+.deploy-note{font-size:12.5px;color:var(--muted);line-height:1.55;margin:2px 0 0;}
+.deploy-note .mono{font-size:11.5px;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:1px 5px;}
 
 /* post-build screen: a built-in file browser over the generated team */
 .filesdone{display:flex;flex-direction:column;height:100%;min-height:0;}

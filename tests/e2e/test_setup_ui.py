@@ -109,11 +109,15 @@ def test_finish_builds_to_file_browser(page, modastack_url):
     expect(page.locator("#fd-tree .tnode", has_text="agent.yaml")).to_be_visible()
     page.locator("#fd-tree .tnode", has_text="agent.yaml").click()
     expect(page.locator("#fd-code")).to_contain_text("agent:")
-    # Finish lands on the completion screen with the start command and a Done
+    # Finish lands on the completion screen offering two deployment paths —
+    # local (`modastack start`) and cloud (the Fly provisioner) — plus a Done
     # button into the team hub (the server stays alive — it's re-entrant now).
     page.click("#fd-finish")
     expect(page.locator(".done-wrap")).to_be_visible(timeout=10_000)
-    expect(page.locator(".cmd")).to_contain_text("modastack start")
+    expect(page.locator(".deploy-opt", has_text="Local")).to_contain_text(
+        "modastack start")
+    expect(page.locator(".deploy-opt", has_text="Cloud")).to_contain_text(
+        "provision-instance.sh")
     expect(page.locator("#done-home")).to_be_visible()
     # Done goes to the team hub, where the freshly built team is listed.
     page.click("#done-home")
