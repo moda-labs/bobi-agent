@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
 	type NormalizedEvent,
+	createTopicEvent,
 	normalizeSlackPayload,
 } from "../src/core";
 import {
@@ -187,6 +188,123 @@ describe("circuit-breaker", () => {
 				payload: {},
 			};
 			expect(conversationKey(event)).toBe("other:deploy.complete");
+		});
+
+		it("keys monitor findings by monitor and stable finding key", () => {
+			const event: NormalizedEvent = {
+				v: 2,
+				id: "x",
+				source: "monitor",
+				type: "eng.github_issue_audit",
+				topics: ["eng.github_issue_audit", "monitor/eng.github_issue_audit"],
+				delivery: "bulk",
+				text: "",
+				timestamp: new Date().toISOString(),
+				payload: {
+					monitor: "github-issue-audit",
+					finding_key: "moda-labs/modastack#519",
+				},
+			};
+			expect(conversationKey(event)).toBe("monitor:github-issue-audit:moda-labs%2Fmodastack%23519");
+		});
+
+		it("uses the real topic-event shape for monitor publishes", () => {
+			const event = createTopicEvent("eng.github_issue_audit", {
+				source: "monitor",
+				payload: {
+					monitor: "github-issue-audit",
+					finding_key: "moda-labs/modastack#519",
+				},
+			});
+			expect(event.source).toBe("monitor");
+			expect(conversationKey(event)).toBe("monitor:github-issue-audit:moda-labs%2Fmodastack%23519");
+		});
+
+		it("gives distinct keys to separate findings from the same monitor", () => {
+			const first: NormalizedEvent = {
+				v: 2,
+				id: "x",
+				source: "monitor",
+				type: "eng.github_issue_audit",
+				topics: ["eng.github_issue_audit", "monitor/eng.github_issue_audit"],
+				delivery: "bulk",
+				text: "",
+				timestamp: new Date().toISOString(),
+				payload: {
+					monitor: "github-issue-audit",
+					finding_key: "moda-labs/modastack#519",
+				},
+			};
+			const second: NormalizedEvent = {
+				...first,
+				id: "y",
+				payload: {
+					monitor: "github-issue-audit",
+					finding_key: "moda-labs/modastack#520",
+				},
+			};
+			expect(conversationKey(first)).not.toBe(conversationKey(second));
+		});
+
+		it("ignores non-string monitor identity fields", () => {
+			const event: NormalizedEvent = {
+				v: 2,
+				id: "x",
+				source: "monitor",
+				type: "eng.github_issue_audit",
+				topics: ["eng.github_issue_audit", "monitor/eng.github_issue_audit"],
+				delivery: "bulk",
+				text: "",
+				timestamp: new Date().toISOString(),
+				payload: {
+					monitor: "github-issue-audit",
+					finding_key: { unsafe: "object" },
+					key: 123,
+					id: "volatile-id",
+				},
+			};
+			expect(conversationKey(event)).toBe("monitor:github-issue-audit");
+		});
+
+		it("does not use volatile payload id as finding identity", () => {
+			const first: NormalizedEvent = {
+				v: 2,
+				id: "x",
+				source: "monitor",
+				type: "eng.github_issue_audit",
+				topics: ["eng.github_issue_audit", "monitor/eng.github_issue_audit"],
+				delivery: "bulk",
+				text: "",
+				timestamp: new Date().toISOString(),
+				payload: {
+					monitor: "github-issue-audit",
+					id: "run-1",
+				},
+			};
+			const second: NormalizedEvent = {
+				...first,
+				id: "y",
+				payload: {
+					monitor: "github-issue-audit",
+					id: "run-2",
+				},
+			};
+			expect(conversationKey(first)).toBe(conversationKey(second));
+		});
+
+		it("falls back to monitor name when finding key is absent", () => {
+			const event: NormalizedEvent = {
+				v: 2,
+				id: "x",
+				source: "monitor",
+				type: "status.roundup_due",
+				topics: ["status.roundup_due", "monitor/status.roundup_due"],
+				delivery: "bulk",
+				text: "",
+				timestamp: new Date().toISOString(),
+				payload: { monitor: "status-roundup" },
+			};
+			expect(conversationKey(event)).toBe("monitor:status-roundup");
 		});
 	});
 

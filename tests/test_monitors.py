@@ -517,7 +517,26 @@ class TestSchedulerReconcile:
         ev = injected[0]
         assert ev["event"] == "monitor/pr.conflict_detected"
         assert ev["data"]["monitor"] == "pr-conflict-check"
+        assert ev["data"]["finding_key"] == "r#1"
         assert ev["data"]["pr_number"] == 1
+
+    def test_condition_data_cannot_spoof_monitor_identity(self, tmp_path):
+        m = Monitor(name="real-monitor", event="monitor/x")
+        sched, injected = _scheduler(tmp_path, [m])
+        sched._reconcile(m, [
+            Condition(
+                key="real-key",
+                data={"monitor": "spoofed-monitor", "finding_key": "spoofed-key"},
+            )
+        ])
+        assert injected[0]["data"]["monitor"] == "real-monitor"
+        assert injected[0]["data"]["finding_key"] == "real-key"
+
+    def test_non_string_condition_key_is_stringified_for_publish(self, tmp_path):
+        m = Monitor(name="x", event="monitor/x")
+        sched, injected = _scheduler(tmp_path, [m])
+        sched._reconcile(m, [Condition(key=123, data={})])
+        assert injected[0]["data"]["finding_key"] == "123"
 
     def test_unchanged_condition_does_not_refire(self, tmp_path):
         m = Monitor(name="x", event="monitor/x")
