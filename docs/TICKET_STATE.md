@@ -1,7 +1,7 @@
 # Ticket State
 
 Living overview of all open GitHub issues — what tracks they belong to, what's
-blocked vs. ready, and which one-offs are ready to hand to the `modastack` bot.
+blocked vs. ready, and which one-offs are ready to hand to the `bobi` bot.
 
 **Keep this current.** When an issue is opened, closed, assigned, unblocked, or
 moves tracks, update it here in the same session. This file is the single place
@@ -79,7 +79,7 @@ without special-case operator intervention.
 | #507 | Codex skill/gate compatibility for issue-lifecycle | ✅ **CLOSED 2026-06-25.** Makes `/review`, `/qa`, `/browse` available to Codex-backed sessions. |
 | #513 | General parent→child environment propagation contract | ✅ **CLOSED 2026-06-25.** Contract landed for inherited brain/tool/service credentials. |
 | #484 | Claude CLI `initialize` timeout under CPU/IO contention | 🔴 **OPEN — blocks fresh engines.** Not OOM; needs configurable/retried initialize and possibly launch admission under high load. |
-| #481 | Memory-aware concurrency cap | 🟡 **OPEN, assigned to `modastack`, status:in-progress.** Replace static `max_concurrent_agents` with dispatch-time memory headroom gating plus static hard ceiling fallback. |
+| #481 | Memory-aware concurrency cap | 🟡 **OPEN, assigned to `bobi`, status:in-progress.** Replace static `max_concurrent_agents` with dispatch-time memory headroom gating plus static hard ceiling fallback. |
 
 ## Runtime / fleet bugs
 
@@ -145,7 +145,7 @@ Account/user identity is tracked separately in #239.
 
 | Issue | What | Status |
 |---|---|---|
-| #395 | Containerization: deployed instances and scale | 🟡 **OPEN EPIC.** Owns build-once team images, `modastack remote`/attach tooling, loop circuit breaker, spend governor, and per-deployment identity follow-ups. Deferred until there is a real scale/debug/safety driver. |
+| #395 | Containerization: deployed instances and scale | 🟡 **OPEN EPIC.** Owns build-once team images, `bobi remote`/attach tooling, loop circuit breaker, spend governor, and per-deployment identity follow-ups. Deferred until there is a real scale/debug/safety driver. |
 | #378 / #215 / #394 | Former child tickets for build-once images, loop-safety, and remote attach | ✅ **CLOSED 2026-06-25 as duplicate tracking tickets.** Scope preserved in #395. |
 
 ## Chat SDK / ChannelAdapter — epic #190 ⏸️
@@ -182,7 +182,7 @@ foundation; #515 now tracks the full CLI/skill/MCP catalog.
 ## Unified agent dashboard — NEW track 🟡
 
 Close the gap between the two existing local web apps — the creation/onboarding UI
-(`modastack setup`, `setup/webui/`) and the monitoring UI (`modastack ui`,
+(`bobi setup`, `setup/webui/`) and the monitoring UI (`bobi ui`,
 `agentui/`) — into **one app**: opens as a dashboard of your teams, leads into the
 existing onboarding flow, **installs + launches + returns home**, and click-through
 to the existing monitor. Goal: never need the CLI except to start the app; keep the
@@ -196,7 +196,7 @@ decision** (stay vanilla vs a lightweight component framework) — not yet ticke
 | Issue | Role | What | Depends on / Status |
 |---|---|---|---|
 | #525 | Design | Unified dashboard decision record: merge, MVP cut (Dashboard + Onboarding-with-launch-and-return + Agents-&-Chat), screen inventory, distribution strategy | 🟡 **OPEN — awaiting approval.** No impl until approved. |
-| #526 | Prep | Canonical `~/.modastack/{config.yaml,sources/,agents/<team>/{.modastack,workspace}}` layout; `--team` selector; sources configurable, runtime fixed; path-only global config | 🟢 **OPEN — do-now.** Independent. Restores `paths.py` single-chokepoint (consolidates the `~/modastack-agents` literal in `setup/webui/server.py`). |
+| #526 | Prep | Canonical `~/.bobi/{config.yaml,sources/,agents/<team>/{.bobi,workspace}}` layout; `--team` selector; sources configurable, runtime fixed; path-only global config | 🟢 **OPEN — do-now.** Independent. Restores `paths.py` single-chokepoint (consolidates the `~/bobi-agents` literal in `setup/webui/server.py`). |
 | #527 | Prep | Shared local web-server harness (`webui_common`): bind/secret/host-guard/static-serving/browser-open + 6PN container mode; both servers adopt it | 🟢 **OPEN — do-now.** Independent; framework-agnostic (serves a static dir). Pairs with #528. |
 | #528 | Prep | Consolidate design-system tokens into one `tokens.css` from DESIGN.md (the two app.css have **drifted** — two ambers, two papers) | 🟢 **OPEN — do-now.** Pairs with #527. Survives any framework choice (CSS custom props). |
 | #529 | Prep | Service-core extraction: CLI + web as thin adapters over one engine; `launch_team()` the first brick (unblocks `/api/launch`) | 🟢 **OPEN — do-now.** Composes with #526. Pulls domain logic out of Click command bodies in `cli.py`. |
@@ -211,10 +211,10 @@ decision** (stay vanilla vs a lightweight component framework) — not yet ticke
 
 ## One-offs — bot-readiness
 
-Grading for the `modastack` bot: **bounded scope, clear acceptance criteria, no
+Grading for the `bobi` bot: **bounded scope, clear acceptance criteria, no
 unresolved design decision, verifiable without infra/credentials the bot lacks.**
 
-### 🟢 Assigned to `modastack`
+### 🟢 Assigned to `bobi`
 
 | Issue | What | Note |
 |---|---|---|
@@ -226,7 +226,7 @@ unresolved design decision, verifiable without infra/credentials the bot lacks.*
 |---|---|---|
 | #527 | Shared web-server harness (`webui_common`) | Bounded refactor; clear acceptance + unit tests in-issue. Pairs with #528. Verify both UIs launch unchanged. |
 | #528 | Consolidate design tokens → `tokens.css` | Bounded; pairs with #527 (shared static path). Reconcile drift to DESIGN.md values. |
-| #526 | Canonical `~/.modastack/` directory layout + `--team` | Bounded but touches `paths.py` (the path chokepoint) broadly; back-compat (cwd walk-up) is spelled out. Good first dashboard-prep brick. |
+| #526 | Canonical `~/.bobi/` directory layout + `--team` | Bounded but touches `paths.py` (the path chokepoint) broadly; back-compat (cwd walk-up) is spelled out. Good first dashboard-prep brick. |
 | #529 | Service-core extraction (`launch_team`, …) | Bounded; **acceptance wants an integration test driving a real session** (dogfood) for the launch path. |
 | #428 | Tool library `kind: skill` spoke | `status:todo`; implementation is scoped by the issue body and #515. |
 | #398 | Tool library `kind: mcp` spoke | `status:todo`; implementation is scoped by the issue body and #515. |
