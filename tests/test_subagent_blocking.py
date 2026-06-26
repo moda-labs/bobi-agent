@@ -24,11 +24,11 @@ def bound_root(tmp_path, monkeypatch):
     """spawn_adhoc and prompt building read the bound installation root
     (roles, registry, memory) — bind explicitly instead of relying on a
     root leaked from earlier test files."""
-    (tmp_path / ".modastack").mkdir()
-    monkeypatch.setattr("modastack.paths._root", tmp_path)
+    (tmp_path / ".bobi").mkdir()
+    monkeypatch.setattr("bobi.paths._root", tmp_path)
 
 
-from modastack.subagent import (
+from bobi.subagent import (
     AgentResult,
     CheckResult,
     InputHandler,
@@ -133,7 +133,7 @@ class FakeClient:
 # ---------------------------------------------------------------------------
 
 class FakeSession:
-    """Mimics modastack.session.Session for unit tests."""
+    """Mimics bobi.session.Session for unit tests."""
 
     def __init__(self, success=True, response="done", session_id="sess-fake",
                  cost=0.10, duration=2000, turns=3, start_ok=True,
@@ -176,8 +176,8 @@ def _make_fake_session_class(**kwargs):
 # Patch targets
 # ---------------------------------------------------------------------------
 
-SDK_PATCH = "modastack.subagent"
-SESSION_PATCH = "modastack.session.Session"
+SDK_PATCH = "bobi.subagent"
+SESSION_PATCH = "bobi.session.Session"
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ class TestRunAgentSupervisedNormal:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -269,7 +269,7 @@ class TestRunAgentSupervisedNormal:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -300,7 +300,7 @@ class TestRunAgentSupervisedNormal:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -359,7 +359,7 @@ class TestRunAgentSupervisedDeferral:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -425,7 +425,7 @@ class TestRunAgentSupervisedDeferral:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -470,7 +470,7 @@ class TestRunAgentSupervisedDeferral:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -513,7 +513,7 @@ class TestRunAgentSupervisedResume:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -555,7 +555,7 @@ class TestRunAgentSupervisedExceptions:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -595,7 +595,7 @@ class TestRunAgentSupervisedExceptions:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -637,7 +637,7 @@ class TestRunAgentSupervisedTracking:
              patch(f"{SDK_PATCH}.save_session_id") as mock_save, \
              patch(f"{SDK_PATCH}.log_activity") as mock_log, \
              patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -687,7 +687,7 @@ class TestRunAgentSupervisedTracking:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             await _run_agent_supervised(
@@ -781,7 +781,7 @@ class TestSummarizeOutput:
 class TestEmitLifecycleEvent:
     def test_posts_via_cli_post_event(self):
         """_emit_lifecycle_event posts (issue_id, repo, ...) via events.publish.post_event."""
-        with patch("modastack.events.publish.post_event") as post:
+        with patch("bobi.events.publish.post_event") as post:
             _emit_lifecycle_event("agent/session.started",
                                   {"run_key": "X-1", "project": "r", "task": ""})
             # Runs on a daemon thread — wait for it to drain.
@@ -797,7 +797,7 @@ class TestEmitLifecycleEvent:
         assert "task" not in data
 
     def test_never_raises_on_post_failure(self):
-        with patch("modastack.events.publish.post_event", side_effect=RuntimeError("boom")):
+        with patch("bobi.events.publish.post_event", side_effect=RuntimeError("boom")):
             _emit_lifecycle_event("agent/session.failed", {"run_key": "X-2"})
             for t in threading.enumerate():
                 if t.name == "lifecycle-event":
@@ -816,7 +816,7 @@ class TestEmitLifecycleEvent:
             time.sleep(0.1)
             landed.set()
 
-        with patch("modastack.events.publish.post_event", side_effect=_slow_post):
+        with patch("bobi.events.publish.post_event", side_effect=_slow_post):
             _emit_lifecycle_event(
                 "agent/session.completed", {"issue_id": "X-3"}, blocking=True,
             )
@@ -830,7 +830,7 @@ class TestEmitLifecycleEvent:
         def _hang(event_type, payload):
             release.wait(5)
 
-        with patch("modastack.events.publish.post_event", side_effect=_hang):
+        with patch("bobi.events.publish.post_event", side_effect=_hang):
             start = time.time()
             _emit_lifecycle_event(
                 "agent/session.completed", {"issue_id": "X-4"},

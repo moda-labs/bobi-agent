@@ -11,20 +11,20 @@ from unittest.mock import patch, MagicMock
 import pytest
 import yaml
 
-from modastack.events.subscriptions import discover_subscriptions
-from modastack.events.drain import drain_loop, DRAIN_INTERVAL
-from modastack.events.client import format_event_for_manager, event_queue
+from bobi.events.subscriptions import discover_subscriptions
+from bobi.events.drain import drain_loop, DRAIN_INTERVAL
+from bobi.events.client import format_event_for_manager, event_queue
 
 
 # ---------------------------------------------------------------------------
-# modastack.events.subscriptions
+# bobi.events.subscriptions
 # ---------------------------------------------------------------------------
 
 
 class TestBuildSubscriptions:
 
     def test_reads_agent_yaml(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(
             "subscribe:\n  - github:org/repo\n  - slack:T123\n  - linear:MOD\n"
@@ -40,14 +40,14 @@ class TestBuildSubscriptions:
 
 
 # ---------------------------------------------------------------------------
-# modastack.events.drain
+# bobi.events.drain
 # ---------------------------------------------------------------------------
 
 
 class TestDrainLoop:
 
     def test_batches_and_delivers(self):
-        from modastack.inbox import register_local_inbox, unregister_local_inbox
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         queue = SimpleQueue()
         pushed = []
@@ -80,7 +80,7 @@ class TestDrainLoop:
 
     def test_chat_events_delivered_separately(self):
         """Chat-delivery events (e.g. Slack) are batched separately from bulk."""
-        from modastack.inbox import register_local_inbox, unregister_local_inbox
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         queue = SimpleQueue()
         pushed = []
@@ -121,7 +121,7 @@ class TestDrainLoop:
 class TestCanonicalImports:
 
     def test_direct_imports_work(self):
-        from modastack.events.client import (
+        from bobi.events.client import (
             EventServerClient,
             event_queue as eq,
             format_event_for_manager as fmt,
@@ -131,16 +131,16 @@ class TestCanonicalImports:
         assert fmt is format_event_for_manager
 
     def test_server_imports_work(self):
-        from modastack.events.server import ensure_running, register
+        from bobi.events.server import ensure_running, register
         assert callable(ensure_running)
         assert callable(register)
 
     def test_discover_subscriptions_direct(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text("subscribe:\n  - slack:T999\n")
 
-        from modastack.events.subscriptions import discover_subscriptions
+        from bobi.events.subscriptions import discover_subscriptions
         subs = discover_subscriptions(tmp_path)
         assert "slack:T999" in subs
 
@@ -157,53 +157,53 @@ class TestCanonicalImports:
 
 class TestPromptResolver:
 
-    def test_resolve_agent_prompt_loads_base_and_role(self, modastack_install):
-        from modastack.prompts.resolver import resolve_agent_prompt
-        mi = modastack_install
+    def test_resolve_agent_prompt_loads_base_and_role(self, bobi_install):
+        from bobi.prompts.resolver import resolve_agent_prompt
+        mi = bobi_install
         prompt = resolve_agent_prompt("director", mi.repo_path, agent_name=mi.agent_name)
-        assert "Modastack Agent" in prompt
+        assert "Bobi Agent" in prompt
         assert "Engineering Director" in prompt
 
-    def test_resolve_agent_prompt_includes_project_override(self, modastack_install):
-        mi = modastack_install
-        role_dir = mi.repo_path / ".modastack" / "roles" / "director"
+    def test_resolve_agent_prompt_includes_project_override(self, bobi_install):
+        mi = bobi_install
+        role_dir = mi.repo_path / ".bobi" / "roles" / "director"
         role_dir.mkdir(parents=True, exist_ok=True)
         (role_dir / "ROLE.md").write_text("Custom policy: always review PRs.")
-        from modastack.prompts.resolver import resolve_agent_prompt
+        from bobi.prompts.resolver import resolve_agent_prompt
         prompt = resolve_agent_prompt("director", mi.repo_path, agent_name=mi.agent_name)
         assert "Custom policy: always review PRs." in prompt
         assert "Engineering Director" not in prompt
 
-    def test_resolve_agent_prompt_engineer(self, modastack_install):
-        from modastack.prompts.resolver import resolve_agent_prompt
-        mi = modastack_install
+    def test_resolve_agent_prompt_engineer(self, bobi_install):
+        from bobi.prompts.resolver import resolve_agent_prompt
+        mi = bobi_install
         prompt = resolve_agent_prompt("engineer", mi.repo_path, agent_name=mi.agent_name)
-        assert "Modastack Agent" in prompt
+        assert "Bobi Agent" in prompt
         assert "staff engineer" in prompt
 
-    def test_build_startup_prompt_includes_workflows(self, modastack_install):
-        from modastack.prompts.resolver import build_startup_prompt
-        mi = modastack_install
+    def test_build_startup_prompt_includes_workflows(self, bobi_install):
+        from bobi.prompts.resolver import build_startup_prompt
+        mi = bobi_install
         prompt = build_startup_prompt("director", mi.repo_path, agent_name=mi.agent_name)
         assert "Available workflows" in prompt
 
-    def test_list_workflows_returns_string(self, modastack_install):
-        from modastack.prompts.resolver import list_workflows
-        mi = modastack_install
+    def test_list_workflows_returns_string(self, bobi_install):
+        from bobi.prompts.resolver import list_workflows
+        mi = bobi_install
         result = list_workflows(mi.repo_path, agent_name=mi.agent_name)
         assert isinstance(result, str)
 
-    def test_discover_roles_finds_director_and_engineer(self, modastack_install):
-        from modastack.prompts.resolver import discover_roles
-        mi = modastack_install
+    def test_discover_roles_finds_director_and_engineer(self, bobi_install):
+        from bobi.prompts.resolver import discover_roles
+        mi = bobi_install
         roles = discover_roles(project_path=mi.repo_path, agent_name=mi.agent_name)
         names = [r["name"] for r in roles]
         assert "director" in names
         assert "engineer" in names
 
-    def test_discover_roles_scans_all_packs_without_agent_name(self, modastack_install):
-        from modastack.prompts.resolver import discover_roles
-        mi = modastack_install
+    def test_discover_roles_scans_all_packs_without_agent_name(self, bobi_install):
+        from bobi.prompts.resolver import discover_roles
+        mi = bobi_install
         roles = discover_roles(project_path=mi.repo_path)
         names = [r["name"] for r in roles]
         assert "director" in names
@@ -213,8 +213,8 @@ class TestPromptResolver:
 class TestAgentConfig:
 
     def test_config_load_from_default_path(self, tmp_path):
-        from modastack.config import Config
-        config_dir = tmp_path / ".modastack"
+        from bobi.config import Config
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""
             agent: test-agent
@@ -229,14 +229,14 @@ class TestAgentConfig:
         assert cfg.services[0].name == "github"
 
     def test_config_load_missing_returns_defaults(self, tmp_path):
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
         assert cfg.agent == ""
         assert cfg.entry_point == ""
 
     def test_config_load_empty_file(self, tmp_path):
-        from modastack.config import Config
-        config_dir = tmp_path / ".modastack"
+        from bobi.config import Config
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text("")
         cfg = Config.load(tmp_path)
@@ -251,16 +251,16 @@ class TestAgentConfig:
 class TestSubscribeFlag:
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
 
 
     def test_subscribe_implies_persistent(self):
         from click.testing import CliRunner
-        from modastack.cli import main
+        from bobi.cli import main
 
-        with patch("modastack.subagent.launch_agent") as mock_launch, \
-             patch("modastack.cli._detect_project_root") as mock_root, \
-             patch("modastack.prompts.resolver.validate_role", return_value=True):
+        with patch("bobi.subagent.launch_agent") as mock_launch, \
+             patch("bobi.cli._detect_project_root") as mock_root, \
+             patch("bobi.prompts.resolver.validate_role", return_value=True):
             mock_root.return_value = Path("/tmp/project")
             mock_launch.return_value = "test-session"
 
@@ -270,21 +270,21 @@ class TestSubscribeFlag:
                 "-w", "adhoc",
                 "--role", "manager",
                 "--task", "watch events",
-                "--subscribe", "moda-labs/modastack",
+                "--subscribe", "moda-labs/bobi",
             ])
 
             assert result.exit_code == 0
             call_kwargs = mock_launch.call_args[1]
             assert call_kwargs["persistent"] is True
-            assert "moda-labs/modastack" in call_kwargs["subscribe"]
+            assert "moda-labs/bobi" in call_kwargs["subscribe"]
 
     def test_subscribe_multiple_topics(self):
         from click.testing import CliRunner
-        from modastack.cli import main
+        from bobi.cli import main
 
-        with patch("modastack.subagent.launch_agent") as mock_launch, \
-             patch("modastack.cli._detect_project_root") as mock_root, \
-             patch("modastack.prompts.resolver.validate_role", return_value=True):
+        with patch("bobi.subagent.launch_agent") as mock_launch, \
+             patch("bobi.cli._detect_project_root") as mock_root, \
+             patch("bobi.prompts.resolver.validate_role", return_value=True):
             mock_root.return_value = Path("/tmp/project")
             mock_launch.return_value = "test-session"
 
@@ -303,10 +303,10 @@ class TestSubscribeFlag:
             assert call_kwargs["subscribe"] == ["org/repo", "slack:T123"]
 
     def test_launch_agent_passes_subscribe_to_args(self):
-        from modastack.subagent import launch_agent
+        from bobi.subagent import launch_agent
 
-        with patch("modastack.subagent._launch_detached", return_value=12345) as mock_det, \
-             patch("modastack.subagent.get_registry") as mock_reg:
+        with patch("bobi.subagent._launch_detached", return_value=12345) as mock_det, \
+             patch("bobi.subagent.get_registry") as mock_reg:
             mock_reg.return_value = MagicMock()
             mock_reg.return_value.get.return_value = None
 

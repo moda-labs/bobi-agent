@@ -8,7 +8,7 @@ import pytest
 
 class TestSessionEntryNewFields:
     def test_session_entry_has_cost_fields(self):
-        from modastack.sdk import SessionEntry
+        from bobi.sdk import SessionEntry
         entry = SessionEntry(name="test")
         assert entry.model == ""
         assert entry.provider == ""
@@ -17,7 +17,7 @@ class TestSessionEntryNewFields:
 
     def test_session_entry_serializes_cost_fields(self):
         from dataclasses import asdict
-        from modastack.sdk import SessionEntry
+        from bobi.sdk import SessionEntry
         entry = SessionEntry(
             name="test", model="claude-sonnet-4-20250514",
             provider="anthropic", total_cost_usd=0.50,
@@ -30,7 +30,7 @@ class TestSessionEntryNewFields:
 
     def test_session_entry_roundtrip_with_new_fields(self):
         """SessionEntry can be deserialized from JSON that includes new fields."""
-        from modastack.sdk import SessionEntry
+        from bobi.sdk import SessionEntry
         data = {
             "name": "test",
             "session_id": "",
@@ -58,7 +58,7 @@ class TestSessionEntryNewFields:
 
     def test_session_entry_backward_compat(self):
         """Old state.json without new fields still deserializes."""
-        from modastack.sdk import SessionEntry
+        from bobi.sdk import SessionEntry
         # Simulate old format — no model/provider/total_cost_usd/model_usage
         data = {
             "name": "old-session",
@@ -85,7 +85,7 @@ class TestSessionEntryNewFields:
     def test_from_dict_drops_retired_keys(self):
         """from_dict ignores keys no longer in the schema (e.g. inbox_port)
         so state.json written by pre-#268 code still loads after upgrade."""
-        from modastack.sdk import SessionEntry
+        from bobi.sdk import SessionEntry
         entry = SessionEntry.from_dict({
             "name": "n", "cwd": "/tmp", "inbox_port": 5555,
             "some_future_field": "x",
@@ -95,8 +95,8 @@ class TestSessionEntryNewFields:
 
 
 class TestRecordCost:
-    def test_record_cost_accumulates(self, modastack_install):
-        from modastack.sdk import get_registry, SessionEntry
+    def test_record_cost_accumulates(self, bobi_install):
+        from bobi.sdk import get_registry, SessionEntry
         registry = get_registry()
         registry.register(SessionEntry(name="cost-test", role="engineer"))
 
@@ -117,8 +117,8 @@ class TestRecordCost:
         assert u["input_tokens"] == 8000
         assert u["output_tokens"] == 1500
 
-    def test_record_cost_multi_model(self, modastack_install):
-        from modastack.sdk import get_registry, SessionEntry
+    def test_record_cost_multi_model(self, bobi_install):
+        from bobi.sdk import get_registry, SessionEntry
         registry = get_registry()
         registry.register(SessionEntry(name="multi-model-test", role="engineer"))
 
@@ -133,9 +133,9 @@ class TestRecordCost:
         assert "anthropic:claude-sonnet-4-20250514" in entry.model_usage
         assert "openai:gpt-image-1" in entry.model_usage
 
-    def test_record_cost_nonexistent_session(self, modastack_install):
+    def test_record_cost_nonexistent_session(self, bobi_install):
         """recording cost on a nonexistent session is a silent no-op."""
-        from modastack.sdk import get_registry
+        from bobi.sdk import get_registry
         registry = get_registry()
         # Should not raise
         registry.record_cost("nonexistent", 0.10, model="test", provider="test")

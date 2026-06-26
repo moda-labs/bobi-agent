@@ -5,9 +5,9 @@
 #
 # Each team directory (one holding an `agent.yaml`) becomes `<out>/<team>.tar.gz`,
 # which extracts to a single `<team>/` dir containing `agent.yaml` — exactly the
-# shape `modastack install <url>` / `registry.fetch_from_url` expect. Upload the
+# shape `bobi install <url>` / `registry.fetch_from_url` expect. Upload the
 # results somewhere publicly fetchable and pass the URL as `--team-url` (or
-# MODASTACK_TEAM_URL) so a dark instance can pull its team at first boot.
+# BOBI_TEAM_URL) so a dark instance can pull its team at first boot.
 #
 # Usage:
 #   scripts/build-team-tarballs.sh [--out DIR] [TEAM_DIR ...]

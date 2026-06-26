@@ -14,7 +14,7 @@ import queue
 import time
 from unittest.mock import patch
 
-from modastack.inbox import (
+from bobi.inbox import (
     Inbox,
     Message,
     deliver,
@@ -83,7 +83,7 @@ class TestRespond:
         inbox = Inbox("test-resp")
         msg = Message(id="cid-1", sender="x", text="q", wait=True,
                       reply_to="reply/abc")
-        with patch("modastack.events.publish.publish_reply",
+        with patch("bobi.events.publish.publish_reply",
                    return_value=True) as pub:
             inbox.respond(msg, "the answer")
         pub.assert_called_once_with("reply/abc", "cid-1", "the answer")
@@ -93,7 +93,7 @@ class TestRespond:
         # try to publish anywhere.
         inbox = Inbox("test-resp-noop")
         msg = Message(id="cid-2", sender="x", text="q", wait=False)
-        with patch("modastack.events.publish.publish_reply") as pub:
+        with patch("bobi.events.publish.publish_reply") as pub:
             inbox.respond(msg, "ignored")
         pub.assert_not_called()
 
@@ -104,7 +104,7 @@ class TestRespond:
         inbox = Inbox("test-resp-evil")
         msg = Message(id="cid-3", sender="x", text="q", wait=True,
                       reply_to="inbox/victim")
-        with patch("modastack.events.publish.publish_reply") as pub:
+        with patch("bobi.events.publish.publish_reply") as pub:
             inbox.respond(msg, "secret agent output")
         pub.assert_not_called()
 
@@ -139,7 +139,7 @@ class TestAwaitReply:
 
 
 def _register_live_session(name):
-    from modastack.sdk import get_registry, SessionEntry
+    from bobi.sdk import get_registry, SessionEntry
     get_registry().register(SessionEntry(name=name, cwd="/tmp", pid=os.getpid()))
 
 
@@ -162,32 +162,32 @@ class _FakeChannel:
 class TestDeliver:
     """deliver() publishes inbox/<to> and preserves not-found/dead semantics."""
 
-    def test_deliver_to_nonexistent_session(self, modastack_install):
+    def test_deliver_to_nonexistent_session(self, bobi_install):
         ok, resp = deliver("no-such-session", "hello")
         assert not ok
         assert "not found" in resp
 
-    def test_deliver_to_dead_session(self, modastack_install):
-        from modastack.sdk import get_registry, SessionEntry
+    def test_deliver_to_dead_session(self, bobi_install):
+        from bobi.sdk import get_registry, SessionEntry
         # A pid that is not alive.
         get_registry().register(SessionEntry(name="dead", cwd="/tmp", pid=2_000_000_000))
         ok, resp = deliver("dead", "hello")
         assert not ok
         assert "dead" in resp
 
-    def test_deliver_rejects_terminal_status(self, modastack_install):
+    def test_deliver_rejects_terminal_status(self, bobi_install):
         # A live pid but a stopped session has torn down its inbox/subscription;
         # don't pretend it's reachable.
-        from modastack.sdk import get_registry, SessionEntry
+        from bobi.sdk import get_registry, SessionEntry
         get_registry().register(SessionEntry(
             name="gone", cwd="/tmp", pid=os.getpid(), status="stopped"))
         ok, resp = deliver("gone", "hello")
         assert not ok
         assert "stopped" in resp
 
-    def test_nonblocking_deliver_publishes(self, modastack_install):
+    def test_nonblocking_deliver_publishes(self, bobi_install):
         _register_live_session("test-nb")
-        with patch("modastack.events.publish.publish_inbox", return_value=True) as pub:
+        with patch("bobi.events.publish.publish_inbox", return_value=True) as pub:
             ok, resp = deliver("test-nb", "hello", sender="cli", wait=False)
         assert ok and resp == ""
         pub.assert_called_once()
@@ -197,14 +197,14 @@ class TestDeliver:
         assert payload["sender"] == "cli"
         assert payload["wait"] is False
 
-    def test_deliver_reports_publish_failure(self, modastack_install):
+    def test_deliver_reports_publish_failure(self, bobi_install):
         _register_live_session("test-fail")
-        with patch("modastack.events.publish.publish_inbox", return_value=False):
+        with patch("bobi.events.publish.publish_inbox", return_value=False):
             ok, resp = deliver("test-fail", "hello")
         assert not ok
         assert "could not publish" in resp
 
-    def test_blocking_deliver_round_trips_via_reply_topic(self, modastack_install):
+    def test_blocking_deliver_round_trips_via_reply_topic(self, bobi_install):
         _register_live_session("test-block")
         chan = _FakeChannel()
 
@@ -217,41 +217,41 @@ class TestDeliver:
                                         "response": "the answer"}})
             return True
 
-        with patch("modastack.inbox._open_reply_channel", return_value=chan), \
-             patch("modastack.events.publish.publish_inbox", side_effect=fake_publish):
+        with patch("bobi.inbox._open_reply_channel", return_value=chan), \
+             patch("bobi.events.publish.publish_inbox", side_effect=fake_publish):
             ok, resp = deliver("test-block", "question?", wait=True, timeout=10)
         assert ok
         assert resp == "the answer"
         assert chan.closed  # transient subscription torn down
 
-    def test_blocking_deliver_times_out(self, modastack_install):
+    def test_blocking_deliver_times_out(self, bobi_install):
         _register_live_session("test-timeout")
         chan = _FakeChannel()
         # publish succeeds but no reply ever lands on the channel.
-        with patch("modastack.inbox._open_reply_channel", return_value=chan), \
-             patch("modastack.events.publish.publish_inbox", return_value=True):
+        with patch("bobi.inbox._open_reply_channel", return_value=chan), \
+             patch("bobi.events.publish.publish_inbox", return_value=True):
             ok, resp = deliver("test-timeout", "question?", wait=True, timeout=1)
         assert not ok
         assert "no response" in resp
         assert chan.closed
 
-    def test_blocking_deliver_reports_channel_failure(self, modastack_install):
+    def test_blocking_deliver_reports_channel_failure(self, bobi_install):
         # If the reply channel can't be opened (event server unreachable),
         # a blocking deliver fails fast rather than hanging.
         _register_live_session("test-nochan")
-        with patch("modastack.inbox._open_reply_channel", return_value=None):
+        with patch("bobi.inbox._open_reply_channel", return_value=None):
             ok, resp = deliver("test-nochan", "q", wait=True, timeout=1)
         assert not ok
         assert "could not publish" in resp
 
-    def test_blocking_deliver_does_not_publish_until_connected(self, modastack_install):
+    def test_blocking_deliver_does_not_publish_until_connected(self, bobi_install):
         # Subscribe-before-publish: if the reply subscription never connects,
         # deliver must NOT publish the request (the reply would be lost) and
         # must report a timeout instead of hanging.
         _register_live_session("test-noconnect")
         chan = _FakeChannel(connected=False)
-        with patch("modastack.inbox._open_reply_channel", return_value=chan), \
-             patch("modastack.events.publish.publish_inbox") as pub:
+        with patch("bobi.inbox._open_reply_channel", return_value=chan), \
+             patch("bobi.events.publish.publish_inbox") as pub:
             ok, resp = deliver("test-noconnect", "q", wait=True, timeout=1)
         assert not ok
         assert "no response" in resp

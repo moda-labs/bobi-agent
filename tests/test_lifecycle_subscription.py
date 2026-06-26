@@ -3,8 +3,8 @@ so a detached agent's completion/failure reaches the launcher, and the reactor
 must treat those events as deliver-to-inbox (never an auto-dispatch trigger).
 """
 
-from modastack.events.reactor import AutoDispatchRule, EventReactor
-from modastack.events.subscriptions import (
+from bobi.events.reactor import AutoDispatchRule, EventReactor
+from bobi.events.subscriptions import (
     LIFECYCLE_EVENTS,
     lifecycle_subscription_keys,
     monitor_subscription_keys,

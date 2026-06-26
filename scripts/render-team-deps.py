@@ -17,11 +17,11 @@ from __future__ import annotations
 import pathlib
 import sys
 
-from modastack.build_render import (
+from bobi.build_render import (
     load_composed_team_config,
     render_team_deps_script,
 )
-from modastack.deploy import DeployError, load_deploy_config
+from bobi.deploy import DeployError, load_deploy_config
 
 
 def main(argv: list[str]) -> int:

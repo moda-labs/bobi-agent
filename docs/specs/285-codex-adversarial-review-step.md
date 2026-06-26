@@ -21,7 +21,7 @@ and dark.
 > `codex` (delegate to an agent), `gh`, `venn`. (Axis 2, lines 32–37)
 
 The legacy path — a `connections: kind: codex` block that auto-injects the
-`codex_exec` MCP shim (`modastack/mcp/codex_server.py`) — is being **retired**
+`codex_exec` MCP shim (`bobi/mcp/codex_server.py`) — is being **retired**
 (#397 → #403). This ticket must not depend on it.
 
 So: demonstrate Codex as an adversarial reviewer end-to-end inside a real
@@ -103,7 +103,7 @@ spec part of what the human sees when approving, and available to `implement`.
 
 Notes:
 - The step writes its handoff to
-  `.modastack/sessions/<session>/handoff-plan_review.yaml`; the orchestrator
+  `.bobi/sessions/<session>/handoff-plan_review.yaml`; the orchestrator
   validates `required` and injects the values for downstream steps and the
   Slack/approval surface. (Handoff contract, CLAUDE.md.)
 - `timeout: 600` gives headroom over the CLI's own ~330s wrapper.
@@ -171,7 +171,7 @@ for plan/spec text or when you must pass the diff explicitly.
   agent to write Codex's output into `handoff-plan_review.yaml`; the
   orchestrator validates it (re-prompts if missing).
 - **"visible in the transcript"** — the `codex exec` Bash call and its output
-  appear in the engineer session transcript (`modastack transcript show`).
+  appear in the engineer session transcript (`bobi transcript show`).
 - **"No new `connections:` block; the step uses the baked codex CLI"** — the
   step is a plain `prompt` step calling the CLI; `agent.yaml` is untouched.
 
@@ -190,7 +190,7 @@ role/workflow-assertion pattern, #296/#323 precedent):
 1. Run `issue-lifecycle` on a sample spec-gated issue.
 2. Confirm `handoff-plan_review.yaml` contains a non-empty `codex_critique`.
 3. Confirm the `codex exec` call + output are in the transcript.
-4. Confirm `modastack workflows validate issue-lifecycle.yaml` passes.
+4. Confirm `bobi workflows validate issue-lifecycle.yaml` passes.
 
 ## Implementation plan
 
@@ -199,7 +199,7 @@ role/workflow-assertion pattern, #296/#323 precedent):
    (deliverable 1) — see Decision 1.
 3. Add the assertions to `tests/test_role_constraints.py`; run
    `pytest tests/test_role_constraints.py -q`.
-4. `modastack workflows validate` the edited workflow.
+4. `bobi workflows validate` the edited workflow.
 5. Open the implementation PR against `main`, linking #285; run `/review`.
 
 This PR follows the changelog/version convention (#325): touches no `VERSION`,

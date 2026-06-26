@@ -6,8 +6,8 @@
 # (both execute inside the machine, where localhost is reachable).
 set -euo pipefail
 
-PROJECT_DIR="${MODASTACK_PROJECT:-/data/project}"
-PORT_FILE="${PROJECT_DIR}/.modastack/state/manager-health.port"
+PROJECT_DIR="${BOBI_PROJECT:-/data/project}"
+PORT_FILE="${PROJECT_DIR}/.bobi/state/manager-health.port"
 
 [ -f "${PORT_FILE}" ] || { echo "health: no port file at ${PORT_FILE}"; exit 1; }
 

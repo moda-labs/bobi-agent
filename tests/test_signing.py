@@ -11,7 +11,7 @@ path/query inclusion), one of the two suites fails instead of producing silent
 import hashlib
 import hmac
 
-from modastack.events.signing import (
+from bobi.events.signing import (
     ALGO,
     canonical_string,
     serialize_body,

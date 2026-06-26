@@ -1,7 +1,7 @@
-# Built-in monitor defaults — shipped with modastack.
+# Built-in monitor defaults — shipped with bobi.
 #
 # READ-ONLY at runtime. The manager never writes here.
-# Override or disable in your repo's .modastack/monitors.yaml.
+# Override or disable in your repo's .bobi/monitors.yaml.
 monitors:
   - name: pr-conflict-check
     description: Check open PRs across all registered repos for merge conflicts
@@ -35,7 +35,7 @@ monitors:
 
   # NOTE: policy-curator is no longer declared here. It is a FRAMEWORK DEFAULT
   # (#471) — seeded into every composed team image from
-  # modastack/monitors/framework_defaults.yaml, opt-out via `prune:`. Removing it
+  # bobi/monitors/framework_defaults.yaml, opt-out via `prune:`. Removing it
   # here is byte-neutral for the composed set (the framework seeds an identical
   # record); a test asserts that. Re-adding it here would be redundant.
 

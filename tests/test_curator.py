@@ -13,10 +13,10 @@ from unittest.mock import patch
 
 import pytest
 
-from modastack import history
-from modastack.monitors import curator as curator_mod
-from modastack.monitors.schema import Monitor
-from modastack.monitors.scheduler import MonitorScheduler
+from bobi import history
+from bobi.monitors import curator as curator_mod
+from bobi.monitors.schema import Monitor
+from bobi.monitors.scheduler import MonitorScheduler
 
 
 def _row(id: int, content: str = "", session_id: str = "s1",
@@ -225,7 +225,7 @@ def monitor():
 
 
 def _patch_history(harness):
-    return patch.multiple("modastack.history",
+    return patch.multiple("bobi.history",
                           index=lambda: None,
                           messages_since=harness.messages_since)
 
@@ -234,7 +234,7 @@ class TestCuratorDispatch:
     def test_reads_cursor_not_last_run(self, tmp_path, monitor):
         h = _CuratorHarness(tmp_path, [_row(10, "a"), _row(11, "b")])
         # Pre-seed the curator cursor; the curator must read THIS, not last_run.
-        from modastack import paths
+        from bobi import paths
         curator_mod.write_cursor(paths.policy_cursor_path(tmp_path), 9)
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])
@@ -242,7 +242,7 @@ class TestCuratorDispatch:
         assert "task" in h.captured  # dispatched
 
     def test_cursor_advances_to_highest_only_on_success(self, tmp_path, monitor):
-        from modastack import paths
+        from bobi import paths
         h = _CuratorHarness(tmp_path, [_row(10, "a"), _row(11, "b"), _row(12, "c")])
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])
@@ -253,7 +253,7 @@ class TestCuratorDispatch:
         assert curator_mod.read_cursor(cursor_path) == 12
 
     def test_failed_run_leaves_cursor_unmoved(self, tmp_path, monitor):
-        from modastack import paths
+        from bobi import paths
         h = _CuratorHarness(tmp_path, [_row(10, "a"), _row(11, "b")])
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])
@@ -294,7 +294,7 @@ class TestCuratorDispatch:
 
 class TestCuratorSeed:
     def _seed_journal(self, tmp_path, session, text):
-        from modastack import paths
+        from bobi import paths
         d = paths.state_path(tmp_path) / "memory" / session
         d.mkdir(parents=True, exist_ok=True)
         (d / "INDEX.md").write_text(text)
@@ -310,7 +310,7 @@ class TestCuratorSeed:
         assert "squash-merge" in h.captured["task"]
 
     def test_seed_skipped_once_policy_exists(self, tmp_path, monitor):
-        from modastack import paths
+        from bobi import paths
         self._seed_journal(tmp_path, "old-director", "some legacy decision")
         paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
         paths.policy_path(tmp_path).write_text("## Facts\n\n## Decisions\n")
@@ -354,8 +354,8 @@ class _OneShotQueue:
 
 
 def _run_drain_one_batch(events):
-    from modastack.events.drain import drain_loop
-    from modastack.inbox import register_local_inbox, unregister_local_inbox
+    from bobi.events.drain import drain_loop
+    from bobi.inbox import register_local_inbox, unregister_local_inbox
 
     delivered = []
 
@@ -365,7 +365,7 @@ def _run_drain_one_batch(events):
 
     register_local_inbox("test-policy-session", _CaptureInbox())
     try:
-        with patch("modastack.events.drain.time.sleep"):
+        with patch("bobi.events.drain.time.sleep"):
             try:
                 drain_loop("test-policy-session", queue=_OneShotQueue(events),
                            formatter=lambda e: e.get("text", ""))
@@ -390,7 +390,7 @@ class TestPolicyUpdatedDelivery:
             "payload": {"summary": "reversed a decision", "urgent": True},
         }])
         assert len(delivered) == 1
-        assert "Re-read .modastack/state/policy.md" in delivered[0].text
+        assert "Re-read .bobi/state/policy.md" in delivered[0].text
         assert "reversed a decision" in delivered[0].text
 
     def test_bare_topic_also_matched(self):

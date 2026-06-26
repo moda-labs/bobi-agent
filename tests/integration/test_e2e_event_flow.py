@@ -1,6 +1,6 @@
 """End-to-end test: webhook → event server → manager → workflow.
 
-Starts the full modastack stack (manager + event server + drain loop),
+Starts the full bobi stack (manager + event server + drain loop),
 posts a simulated GitHub issue assignment webhook, and verifies the
 manager receives the event and responds with a workflow dispatch.
 
@@ -25,10 +25,10 @@ pytestmark = pytest.mark.claude
 class TestEndToEndEventFlow:
 
     @pytest.fixture(autouse=True)
-    def _start_stack(self, modastack_env, cli_run):
-        """Start modastack (manager + event server) and wait for ready."""
-        log_file = modastack_env.state_dir / "manager.log"
-        pid_file = modastack_env.state_dir / "manager.pid"
+    def _start_stack(self, bobi_env, cli_run):
+        """Start bobi (manager + event server) and wait for ready."""
+        log_file = bobi_env.state_dir / "manager.log"
+        pid_file = bobi_env.state_dir / "manager.pid"
         log_pos = log_file.stat().st_size if log_file.exists() else 0
 
         cli_run("start", "software_team", timeout=15)
@@ -38,7 +38,7 @@ class TestEndToEndEventFlow:
         while time.monotonic() < deadline:
             if pid_file.exists() and log_file.exists():
                 new_content = log_file.read_text()[log_pos:]
-                if "drain loop active" in new_content or "Modastack running" in new_content:
+                if "drain loop active" in new_content or "Bobi running" in new_content:
                     ready = True
                     break
             time.sleep(1)
@@ -61,7 +61,7 @@ class TestEndToEndEventFlow:
             except (ProcessLookupError, ValueError):
                 pass
 
-    def test_github_issue_flows_through_to_manager(self, modastack_env):
+    def test_github_issue_flows_through_to_manager(self, bobi_env):
         """Post a GitHub issue webhook → event server → manager processes it."""
         base_url = f"http://localhost:{self._es_port}"
 
@@ -106,7 +106,7 @@ class TestEndToEndEventFlow:
 
         assert injected, f"Manager did not inject the event.\nLog:\n{self._log_file.read_text()[self._log_pos:][-500:]}"
 
-    def test_manager_response_logged(self, modastack_env):
+    def test_manager_response_logged(self, bobi_env):
         """After event injection, the manager produces a response."""
         base_url = f"http://localhost:{self._es_port}"
 
@@ -142,7 +142,7 @@ class TestEndToEndEventFlow:
         deadline = time.monotonic() + 60
         event_logged = False
         while time.monotonic() < deadline:
-            event_files = list(modastack_env.state_dir.glob("events-*.jsonl"))
+            event_files = list(bobi_env.state_dir.glob("events-*.jsonl"))
             for ef in event_files:
                 content = ef.read_text()
                 if "503" in content or "Update docs" in content:

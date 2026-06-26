@@ -60,11 +60,11 @@ HTTP servers on `127.0.0.1:<random>` that `deliver()` POSTs to directly
    not a transport so much as an implementation detail of "same box."
 3. **No durability, no observability.** The inbox queue is in-memory
    (`queue.SimpleQueue`); a session restart drops anything queued. Direct
-   messages never appear in `modastack events` or `events.jsonl` — only
+   messages never appear in `bobi events` or `events.jsonl` — only
    event-server traffic does. Agent↔agent chatter is invisible.
 4. **It's the odd one out.** Lifecycle `agent/*` events already publish through
    the event server (`events/publish.py:post_event` → `/events/{topic}` →
-   deployment WS → drain → inbox) and render in `modastack events`. Direct
+   deployment WS → drain → inbox) and render in `bobi events`. Direct
    messaging is the only sibling that didn't make the move. This design
    finishes the job.
 
@@ -96,8 +96,8 @@ top of — which is why it's sequenced first.
   delivery mechanism on one host.
 - **Synchronous ask** (`wait=True`): the handler holds the HTTP connection open
   on a `_PendingReply` (`threading.Event`) until the session calls
-  `respond(msg_id, ...)` or it times out. Used by `modastack message --wait`,
-  `modastack ask`, and `agents launch --wait`.
+  `respond(msg_id, ...)` or it times out. Used by `bobi message --wait`,
+  `bobi ask`, and `agents launch --wait`.
 
 **Already through the event server:** `agent/*` lifecycle events
 (`subagent.py:_emit_lifecycle_event` → `post_event`). These return to the
@@ -188,7 +188,7 @@ server-side per-connection granularity is needed.
   `post_event("inbox/<target>", {sender, text, ...})`. Session names are
   already the registry key (`{role}-{run_key}[-{phase}]`, `eng-42-implement`),
   so addressing reuses existing identity — no new namespace.
-- The manager's well-known name (`manager`) makes `modastack ask` /
+- The manager's well-known name (`manager`) makes `bobi ask` /
   `message --to manager` route unchanged at the API surface.
 - Shared/broadcast topics (e.g. "all sessions") remain ordinary v2 topics; a
   session subscribes to the set it cares about. No wildcard matching is
@@ -209,7 +209,7 @@ request/reply correlated on an id (reuse `msg_id`, or `run_key` where present):
 2. Target processes, publishes `inbox/<sender>` with `{corr_id, response}`.
 3. Sender matches `corr_id`, returns, drops the rest.
 
-**The hard case — the CLI is a one-shot process.** `modastack ask "q" --wait`
+**The hard case — the CLI is a one-shot process.** `bobi ask "q" --wait`
 isn't a long-lived subscriber; today it just holds an HTTP connection open.
 Over pub/sub it must: open a WS, subscribe to a transient reply topic
 (`reply/<uuid>`), publish the request, await the correlated reply, close. That's
@@ -315,7 +315,7 @@ atomic ticket (splitting leaves the repo half-migrated):
   `inbox/*`; depends on AUTH.md #240. *Gate:* two-deployment no-cross-delivery
   test.
 - **T4 — observability + loop-safety coordination.** `inbox/*` in
-  `modastack events`; exempt from / aligned with #215 circuit breaker. *Gate:*
+  `bobi events`; exempt from / aligned with #215 circuit breaker. *Gate:*
   events surfaced; breaker doesn't trip on legitimate comms.
 
 #215 (loop safety) and #240 (bubbles) are the cross-project dependencies to

@@ -9,17 +9,17 @@ from dataclasses import dataclass
 import httpx
 import pytest
 
-from modastack import http as pooled
+from bobi import http as pooled
 
-from modastack.workflow.schema import (
+from bobi.workflow.schema import (
     Workflow, StepDef, HandoffContract, load_workflow,
 )
-from modastack.workflow.orchestrator import (
+from bobi.workflow.orchestrator import (
     _execute_notify_step,
     run_workflow,
 )
-from modastack.workflow.variables import VariableContext
-from modastack.slack import format_slack_message, post_slack_message
+from bobi.workflow.variables import VariableContext
+from bobi.slack import format_slack_message, post_slack_message
 
 
 # ---------------------------------------------------------------------------
@@ -187,8 +187,8 @@ class TestExecuteNotifyStep:
             })
         return ctx
 
-    @patch("modastack.slack.post_slack_message")
-    @patch("modastack.workflow.orchestrator._emit_lifecycle_event")
+    @patch("bobi.slack.post_slack_message")
+    @patch("bobi.workflow.orchestrator._emit_lifecycle_event")
     def test_posts_to_slack(self, mock_emit, mock_post, tmp_path, monkeypatch):
         self._setup_config(tmp_path, monkeypatch)
 
@@ -206,8 +206,8 @@ class TestExecuteNotifyStep:
         mock_emit.assert_called_once()
         assert mock_emit.call_args[0][0] == "engineer/notify.sent"
 
-    @patch("modastack.slack.post_slack_message")
-    @patch("modastack.workflow.orchestrator._emit_lifecycle_event")
+    @patch("bobi.slack.post_slack_message")
+    @patch("bobi.workflow.orchestrator._emit_lifecycle_event")
     def test_skips_when_no_channel(self, mock_emit, mock_post, tmp_path, monkeypatch):
         """No channel in requested_by → skip without calling Slack."""
         self._setup_config(tmp_path, monkeypatch)
@@ -222,14 +222,14 @@ class TestExecuteNotifyStep:
         mock_post.assert_not_called()
         mock_emit.assert_not_called()
 
-    @patch("modastack.slack.post_slack_message")
-    @patch("modastack.workflow.orchestrator._emit_lifecycle_event")
+    @patch("bobi.slack.post_slack_message")
+    @patch("bobi.workflow.orchestrator._emit_lifecycle_event")
     def test_skips_when_no_token(self, mock_emit, mock_post, tmp_path, monkeypatch):
         # Config without slack token
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("entry_point: manager\n")
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
 
         step = StepDef(name="notify_start", notify="slack", message="Hello")
         ctx = self._make_ctx()
@@ -238,8 +238,8 @@ class TestExecuteNotifyStep:
 
         mock_post.assert_not_called()
 
-    @patch("modastack.slack.post_slack_message")
-    @patch("modastack.workflow.orchestrator._emit_lifecycle_event")
+    @patch("bobi.slack.post_slack_message")
+    @patch("bobi.workflow.orchestrator._emit_lifecycle_event")
     def test_unknown_notify_target_skips(self, mock_emit, mock_post, tmp_path, monkeypatch):
         self._setup_config(tmp_path, monkeypatch)
 
@@ -250,9 +250,9 @@ class TestExecuteNotifyStep:
 
         mock_post.assert_not_called()
 
-    @patch("modastack.slack.post_slack_message",
+    @patch("bobi.slack.post_slack_message",
            side_effect=RuntimeError("network error"))
-    @patch("modastack.workflow.orchestrator._emit_lifecycle_event")
+    @patch("bobi.workflow.orchestrator._emit_lifecycle_event")
     def test_slack_failure_is_non_fatal(self, mock_emit, mock_post, tmp_path, monkeypatch):
         self._setup_config(tmp_path, monkeypatch)
 
@@ -269,7 +269,7 @@ class TestExecuteNotifyStep:
         )
 
     def _setup_config(self, tmp_path, monkeypatch):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "agent.yaml").write_text(
             "entry_point: manager\n"
@@ -278,7 +278,7 @@ class TestExecuteNotifyStep:
             "    credentials:\n"
             "      bot_token: 'xoxb-test'\n"
         )
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -330,15 +330,15 @@ class FakeClient:
 class TestNotifyStepInWorkflow:
     def _mock_asyncio_run(self, workflow, tmp_path=None, **kwargs):
         cwd = kwargs.get("cwd", "/tmp")
-        with patch("modastack.workflow.orchestrator.get_registry") as mock_reg, \
-             patch("modastack.workflow.orchestrator._emit_lifecycle_event"), \
-             patch("modastack.workflow.orchestrator._setup_worktree", return_value=cwd), \
-             patch("modastack.workflow.orchestrator.load_session_id", return_value=""), \
-             patch("modastack.workflow.orchestrator.save_session_id"), \
-             patch("modastack.workflow.orchestrator.log_activity"), \
-             patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
-             patch("modastack.workflow.orchestrator._execute_notify_step") as mock_notify, \
-             patch("modastack.workflow.orchestrator._find_project_root", return_value=Path(tmp_path or "/tmp")), \
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.workflow.orchestrator._execute_notify_step") as mock_notify, \
+             patch("bobi.workflow.orchestrator._find_project_root", return_value=Path(tmp_path or "/tmp")), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -352,8 +352,8 @@ class TestNotifyStepInWorkflow:
 
     def test_notify_step_executed_not_sent_to_llm(self, tmp_path, monkeypatch):
         """Notify steps call _execute_notify_step and do not query the LLM."""
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
-        (tmp_path / ".modastack" / "sessions").mkdir(parents=True)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="notify_start", notify="slack",
@@ -370,8 +370,8 @@ class TestNotifyStepInWorkflow:
 
     def test_workflow_with_notify_at_both_ends(self, tmp_path, monkeypatch):
         """Workflow with notify at start and end completes successfully."""
-        monkeypatch.setattr("modastack.paths._root", tmp_path / "_repo")
-        sessions = tmp_path / "_repo" / ".modastack" / "sessions"
+        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
+        sessions = tmp_path / "_repo" / ".bobi" / "sessions"
         sessions.mkdir(parents=True)
 
         original_init = FakeClient.__init__

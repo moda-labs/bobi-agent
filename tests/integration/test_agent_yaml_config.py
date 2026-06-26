@@ -18,7 +18,7 @@ class TestAgentYamlConfig:
 
     def test_loads_unified_agent_yaml(self, tmp_path):
         """agent.yaml with entry_point + services + credentials is loaded correctly."""
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             version: "1.0.0"
@@ -36,7 +36,7 @@ class TestAgentYamlConfig:
             venn_api_key: venn_test
         """))
 
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
 
         assert cfg.entry_point == "director"
@@ -54,7 +54,7 @@ class TestAgentYamlConfig:
         monkeypatch.setenv("INTEG_SLACK_TOKEN", "xoxb-from-env-123")
         monkeypatch.setenv("INTEG_VENN_KEY", "venn_env_456")
 
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager
@@ -66,7 +66,7 @@ class TestAgentYamlConfig:
             venn_api_key: ${INTEG_VENN_KEY}
         """))
 
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
 
         assert cfg.credential("slack", "bot_token") == "xoxb-from-env-123"
@@ -74,7 +74,7 @@ class TestAgentYamlConfig:
 
     def test_no_agent_yaml_returns_empty_config(self, tmp_path):
         """Missing agent.yaml returns a default empty Config."""
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
 
         assert cfg.entry_point == ""
@@ -83,7 +83,7 @@ class TestAgentYamlConfig:
 
     def test_venn_services_vs_native(self, tmp_path):
         """Services with registered adapters are native; the rest need Venn."""
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: director
@@ -96,8 +96,8 @@ class TestAgentYamlConfig:
               - name: calendar
         """))
 
-        from modastack.config import Config
-        from modastack.events.adapters import is_registered
+        from bobi.config import Config
+        from bobi.events.adapters import is_registered
         cfg = Config.load(tmp_path)
 
         native_names = {s.name for s in cfg.services if is_registered(s.name)}
@@ -108,7 +108,7 @@ class TestAgentYamlConfig:
 
     def test_monitors_in_agent_yaml(self, tmp_path):
         """Monitor definitions in agent.yaml are parsed correctly."""
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager
@@ -126,7 +126,7 @@ class TestAgentYamlConfig:
                 event: salesforce/updated
         """))
 
-        from modastack.config import Config
+        from bobi.config import Config
         cfg = Config.load(tmp_path)
 
         assert len(cfg.monitors) == 2
@@ -141,8 +141,8 @@ class TestCommandMonitorIntegration:
     def test_command_monitor_end_to_end(self, tmp_path):
         """Full scheduler tick with a command monitor producing events."""
         from datetime import datetime, timezone
-        from modastack.monitors.schema import Monitor
-        from modastack.monitors.scheduler import MonitorScheduler
+        from bobi.monitors.schema import Monitor
+        from bobi.monitors.scheduler import MonitorScheduler
 
         injected = []
         m = Monitor(
@@ -181,8 +181,8 @@ class TestCommandMonitorIntegration:
     def test_command_monitor_with_changing_data(self, tmp_path):
         """Monitor fires new events when data changes between ticks."""
         from datetime import datetime, timedelta, timezone
-        from modastack.monitors.schema import Monitor
-        from modastack.monitors.scheduler import MonitorScheduler
+        from bobi.monitors.schema import Monitor
+        from bobi.monitors.scheduler import MonitorScheduler
 
         injected = []
         script = tmp_path / "data.sh"

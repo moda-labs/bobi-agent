@@ -8,7 +8,7 @@ is "how to reply to the principal on the configured surface."
 ## Reply in the principal's thread
 
 ```bash
-modastack slack-reply -w <workspace> -c <channel> -t <thread_ts> "message"
+bobi slack-reply -w <workspace> -c <channel> -t <thread_ts> "message"
 ```
 
 Take `workspace`, `channel`, and `thread_ts` from the event. Always reply in
@@ -22,7 +22,7 @@ The daily briefing and the watch nudges aren't replies — post a new
 top-level message to the principal's configured channel by omitting `-t`:
 
 ```bash
-modastack slack-reply -w <workspace> -c <channel> "message"
+bobi slack-reply -w <workspace> -c <channel> "message"
 ```
 
 The channel for proactive posts is the one in
@@ -31,7 +31,7 @@ The channel for proactive posts is the one in
 ## Share a file or image
 
 ```bash
-modastack slack-upload-file <file_path> -w <workspace> -c <channel>
+bobi slack-upload-file <file_path> -w <workspace> -c <channel>
 ```
 
 Use for a research write-up, a screenshot, or an exported document the

@@ -11,13 +11,13 @@ investigation: prod manager.log lines 34867-35008.
 
 from unittest.mock import patch
 
-from modastack import http as pooled
-from modastack.config import save_bubble_state
-from modastack.events import publish as pub
+from bobi import http as pooled
+from bobi.config import save_bubble_state
+from bobi.events import publish as pub
 
 
 def _project(tmp_path):
-    (tmp_path / ".modastack").mkdir()
+    (tmp_path / ".bobi").mkdir()
     return tmp_path
 
 

@@ -1,8 +1,8 @@
 # Open-Core / SaaS Repository & Deployment Strategy
 
 **Status:** Design / decision record
-**Audience:** modastack maintainers
-**Question it answers:** As modastack moves toward a hosted (SaaS) offering, what
+**Audience:** bobi maintainers
+**Question it answers:** As bobi moves toward a hosted (SaaS) offering, what
 code stays in the open-source repo and what moves into a private repo? Where does
 deployment/provisioning code live — and how do other open-core companies draw
 that line?
@@ -16,7 +16,7 @@ that line?
   runtime (open) vs. multi-tenant control plane (closed)**.
 - Deployment code splits *across* that line: "deploy one instance" is open;
   "provision, bill, and orchestrate many instances" is closed.
-- **Recommendation for modastack:** keep all single-instance deploy/provision
+- **Recommendation for bobi:** keep all single-instance deploy/provision
   code open (framework, container image, Fly provision script, `install <url>`);
   put the fleet orchestrator, billing/metering, and hosted dashboard in a private
   repo; have the private control plane **call** the open provisioning primitives
@@ -73,9 +73,9 @@ SSPL/AGPL) when the moat is **operations**, not **features**.
 
 ---
 
-## What this means for modastack
+## What this means for bobi
 
-modastack is a Python CLI framework on PyPI, single-tenant agent instances, now
+bobi is a Python CLI framework on PyPI, single-tenant agent instances, now
 containerized onto Fly. Its natural shape is a **control-plane / data-plane
 split** — also the most common modern open-source-SaaS architecture
 (split-plane).
@@ -84,7 +84,7 @@ split** — also the most common modern open-source-SaaS architecture
 - The framework itself (already published to PyPI).
 - The containerized runtime image (the C8 work).
 - **Single-instance provisioning** — `scripts/provision-instance.sh`, the Fly
-  machine config, `modastack install <url>`. This is valuable as a credibility
+  machine config, `bobi install <url>`. This is valuable as a credibility
   and self-host signal; hiding it buys nothing because it only provisions *one*
   bubble.
 - A reference deploy (Compose / single Fly app) so anyone can self-host one
@@ -94,7 +94,7 @@ split** — also the most common modern open-source-SaaS architecture
 - The **fleet orchestrator** — provisions/tears-down/upgrades *many* instances,
   assigns subdomains, manages quotas. A *superset* of the provision script, not a
   copy.
-- **Billing, metering, usage attribution.** (`modastack costs` is the local view;
+- **Billing, metering, usage attribution.** (`bobi costs` is the local view;
   the aggregated cross-tenant version is the SaaS asset.)
 - The **hosted dashboard UI + backend**, multi-tenant auth, SSO/RBAC/audit.
 - Anything touching other customers' data or your infra credentials.
@@ -117,14 +117,14 @@ Adopt **pattern 2 + 3 combined, deferring open-core (pattern 1)**:
 2. **Put deployment in the open repo; fleet/billing/dashboard in a private repo.**
    Split on control-plane vs. data-plane, per the table above.
 3. **Relicense the core from permissive to BSL/FSL early**, before there's SaaS
-   revenue to protect, so nobody can spin up "modastack-cloud" from the open
+   revenue to protect, so nobody can spin up "bobi-cloud" from the open
    provisioning scripts. Highest-leverage protective move; cheap early, painful
    late. It also lets *all* deployment code stay fully open without fear.
 4. **Revisit a real `ee/` open-core split only once** there are specific
    enterprise features (SSO, audit logs, RBAC) that genuinely differ from the OSS
    runtime.
 
-Net effect: the `modastack install <url>` / Fly provision story stays fully open
+Net effect: the `bobi install <url>` / Fly provision story stays fully open
 (great for trust and self-hosters), while the genuinely SaaS-only assets
 (multi-tenant provisioning, billing, dashboard) stay private, and licensing — not
 secrecy — protects against a competitor reselling the work.

@@ -51,24 +51,24 @@ def test_force_included_template_paths_exist_on_disk():
     assert not missing, f"force-include sources missing on disk: {missing}"
 
 
-# --- deploy assets (binary-mode `modastack deploy`) -------------------------
+# --- deploy assets (binary-mode `bobi deploy`) -------------------------
 
 def test_deploy_assets_force_included_under_deploy_dir():
-    """`modastack deploy` resolves its mechanics from modastack/_deploy in an
+    """`bobi deploy` resolves its mechanics from bobi/_deploy in an
     installed wheel (binary mode). Guard that the Dockerfile + docker/ + scripts/
     are force-included there — a broken mapping silently disables binary deploy."""
     cfg = _config()
     force_include = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
     wanted = {
-        "Dockerfile": "modastack/_deploy/Dockerfile",
-        "docker/docker-entrypoint.sh": "modastack/_deploy/docker/docker-entrypoint.sh",
-        "scripts/provision-instance.sh": "modastack/_deploy/scripts/provision-instance.sh",
-        "scripts/destroy-instance.sh": "modastack/_deploy/scripts/destroy-instance.sh",
+        "Dockerfile": "bobi/_deploy/Dockerfile",
+        "docker/docker-entrypoint.sh": "bobi/_deploy/docker/docker-entrypoint.sh",
+        "scripts/provision-instance.sh": "bobi/_deploy/scripts/provision-instance.sh",
+        "scripts/destroy-instance.sh": "bobi/_deploy/scripts/destroy-instance.sh",
     }
     for src, dest in wanted.items():
         assert force_include.get(src) == dest, (
             f"deploy asset '{src}' must force-include to '{dest}' (got "
-            f"{force_include.get(src)!r}) — binary `modastack deploy` needs it."
+            f"{force_include.get(src)!r}) — binary `bobi deploy` needs it."
         )
 
 
@@ -82,17 +82,17 @@ def test_deploy_assets_force_included_under_deploy_dir():
 # --- Dockerfile build modes (binary deploy + lean image) --------------------
 
 def test_dockerfile_has_source_and_pypi_build_modes():
-    """One Dockerfile, MODASTACK_BUILD={source|pypi}. Guard the stages + the
+    """One Dockerfile, BOBI_BUILD={source|pypi}. Guard the stages + the
     arg-selected builder so binary mode can't silently regress to source-only."""
     df = (PYPROJECT.parent / "Dockerfile").read_text()
     assert "FROM builder-base AS builder-source" in df
     assert "FROM builder-base AS builder-pypi" in df
-    assert "FROM builder-${MODASTACK_BUILD} AS builder" in df
-    assert "ARG MODASTACK_BUILD" in df
+    assert "FROM builder-${BOBI_BUILD} AS builder" in df
+    assert "ARG BOBI_BUILD" in df
 
 
 def test_dockerfile_pypi_stage_installs_fastembed_not_kb_extra():
-    """The pypi builder must install fastembed EXPLICITLY, never `modastack[kb]`
+    """The pypi builder must install fastembed EXPLICITLY, never `bobi[kb]`
     — some published `[kb]` extras stale-list sentence-transformers → torch +
     ~2 GB CUDA the dark CPU instance never uses (and that blows the build)."""
     df = (PYPROJECT.parent / "Dockerfile").read_text()
@@ -101,7 +101,7 @@ def test_dockerfile_pypi_stage_installs_fastembed_not_kb_extra():
     # mention [kb]/sentence-transformers to say "don't use them".
     install = " ".join(l for l in pypi.splitlines() if not l.lstrip().startswith("#"))
     assert "fastembed" in install and "sqlite-vec" in install
-    assert "modastack[kb]" not in install
+    assert "bobi[kb]" not in install
 
 
 def test_dockerfile_pins_aichat_version():

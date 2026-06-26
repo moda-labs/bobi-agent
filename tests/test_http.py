@@ -8,7 +8,7 @@ from unittest.mock import patch, MagicMock
 import httpx
 import pytest
 
-from modastack import http as pooled
+from bobi import http as pooled
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def _bubble_present():
     doomed unsigned POST when none is loaded. These transport tests use fake
     project paths with no bubble.json, so stand one in to exercise the real
     signed-publish path. Harmless to non-publish tests."""
-    with patch("modastack.config.load_bubble_state",
+    with patch("bobi.config.load_bubble_state",
                return_value={"bubble_id": "bub_test", "bubble_key": "bkey_test"}):
         yield
 
@@ -100,7 +100,7 @@ class TestConnectionReuse:
     def test_post_event_reuses_connection(self, httpx_mock_fixture):
         """Multiple post_event calls to the same host reuse the TCP
         connection via the shared client's pool."""
-        from modastack.events.publish import post_event
+        from bobi.events.publish import post_event
         from pathlib import Path
 
         call_count = 0
@@ -114,7 +114,7 @@ class TestConnectionReuse:
         mock_client = httpx.Client(transport=transport)
 
         with patch.object(pooled, '_client', mock_client):
-            with patch('modastack.events.publish._event_server_url',
+            with patch('bobi.events.publish._event_server_url',
                        return_value='http://localhost:8080'):
                 ok1 = post_event("monitor/test", {"a": 1},
                                  project_path=Path("/tmp/fake"))
@@ -136,7 +136,7 @@ class TestPostEventMigration:
     """Verify post_event works correctly after urllib→httpx migration."""
 
     def test_success_returns_true(self):
-        from modastack.events.publish import post_event
+        from bobi.events.publish import post_event
 
         transport = httpx.MockTransport(
             lambda request: httpx.Response(200, json={"ok": True})
@@ -144,7 +144,7 @@ class TestPostEventMigration:
         mock_client = httpx.Client(transport=transport)
 
         with patch.object(pooled, '_client', mock_client), \
-             patch('modastack.events.publish._event_server_url',
+             patch('bobi.events.publish._event_server_url',
                    return_value='http://localhost:8080'):
             result = post_event("monitor/test", {"key": "val"},
                                 project_path="/tmp/fake")
@@ -152,7 +152,7 @@ class TestPostEventMigration:
         assert result is True
 
     def test_failure_returns_false(self):
-        from modastack.events.publish import post_event
+        from bobi.events.publish import post_event
 
         transport = httpx.MockTransport(
             lambda request: httpx.Response(500, text="Internal Server Error")
@@ -160,7 +160,7 @@ class TestPostEventMigration:
         mock_client = httpx.Client(transport=transport)
 
         with patch.object(pooled, '_client', mock_client), \
-             patch('modastack.events.publish._event_server_url',
+             patch('bobi.events.publish._event_server_url',
                    return_value='http://localhost:8080'):
             result = post_event("monitor/test", {"key": "val"},
                                 project_path="/tmp/fake")
@@ -169,7 +169,7 @@ class TestPostEventMigration:
         assert result is False
 
     def test_network_error_returns_false(self):
-        from modastack.events.publish import post_event
+        from bobi.events.publish import post_event
 
         def _raise(request):
             raise httpx.ConnectError("Connection refused")
@@ -178,7 +178,7 @@ class TestPostEventMigration:
         mock_client = httpx.Client(transport=transport)
 
         with patch.object(pooled, '_client', mock_client), \
-             patch('modastack.events.publish._event_server_url',
+             patch('bobi.events.publish._event_server_url',
                    return_value='http://localhost:8080'):
             result = post_event("monitor/test", {"key": "val"},
                                 project_path="/tmp/fake")
@@ -186,7 +186,7 @@ class TestPostEventMigration:
         assert result is False
 
     def test_bare_event_type_defaults_source_to_monitor(self):
-        from modastack.events.publish import post_event
+        from bobi.events.publish import post_event
 
         captured = []
 
@@ -198,7 +198,7 @@ class TestPostEventMigration:
         mock_client = httpx.Client(transport=transport)
 
         with patch.object(pooled, '_client', mock_client), \
-             patch('modastack.events.publish._event_server_url',
+             patch('bobi.events.publish._event_server_url',
                    return_value='http://localhost:8080'):
             post_event("test_event", {"k": "v"}, project_path="/tmp/fake")
 
@@ -218,7 +218,7 @@ class TestPostEventSigning:
     """
 
     def test_signing_headers_present_when_bubble_exists(self):
-        from modastack.events.publish import post_event
+        from bobi.events.publish import post_event
 
         captured = []
 
@@ -231,9 +231,9 @@ class TestPostEventSigning:
         fake_bubble = {"bubble_id": "bub_smoke", "bubble_key": "bkey_test"}
 
         with patch.object(pooled, '_client', mock_client), \
-             patch('modastack.events.publish._event_server_url',
+             patch('bobi.events.publish._event_server_url',
                    return_value='http://localhost:8080'), \
-             patch('modastack.config.load_bubble_state',
+             patch('bobi.config.load_bubble_state',
                    return_value=fake_bubble):
             result = post_event("release-pipeline/smoke.ping",
                                 {"version": "0.21.0"},
@@ -251,7 +251,7 @@ class TestPostEventSigning:
 
     def test_no_publish_without_bubble(self):
         """Without bubble credentials the publish is skipped (no round-trip)."""
-        from modastack.events.publish import post_event
+        from bobi.events.publish import post_event
 
         captured = []
 
@@ -263,9 +263,9 @@ class TestPostEventSigning:
         mock_client = httpx.Client(transport=transport)
 
         with patch.object(pooled, '_client', mock_client), \
-             patch('modastack.events.publish._event_server_url',
+             patch('bobi.events.publish._event_server_url',
                    return_value='http://localhost:8080'), \
-             patch('modastack.config.load_bubble_state',
+             patch('bobi.config.load_bubble_state',
                    return_value={}):
             result = post_event("monitor/test", {"k": "v"}, project_path="/tmp/fake")
 
@@ -275,7 +275,7 @@ class TestPostEventSigning:
 
     def test_403_from_stale_bubble_returns_false(self):
         """A signed publish that gets 403 (stale bubble) returns False."""
-        from modastack.events.publish import post_event
+        from bobi.events.publish import post_event
 
         transport = httpx.MockTransport(
             lambda request: httpx.Response(403, json={"error": "missing signature"})
@@ -284,9 +284,9 @@ class TestPostEventSigning:
         fake_bubble = {"bubble_id": "bub_stale", "bubble_key": "bkey_old"}
 
         with patch.object(pooled, '_client', mock_client), \
-             patch('modastack.events.publish._event_server_url',
+             patch('bobi.events.publish._event_server_url',
                    return_value='http://localhost:8080'), \
-             patch('modastack.config.load_bubble_state',
+             patch('bobi.config.load_bubble_state',
                    return_value=fake_bubble):
             result = post_event("monitor/test", {"k": "v"},
                                 project_path="/tmp/fake")
@@ -298,13 +298,13 @@ class TestNoUrllibRemains:
     """Ensure urllib.request is no longer imported in converted modules."""
 
     def test_publish_no_urllib(self):
-        import modastack.events.publish as mod
+        import bobi.events.publish as mod
         import inspect
         source = inspect.getsource(mod)
         assert "urllib.request" not in source
 
     def test_slack_no_urllib(self):
-        import modastack.slack as mod
+        import bobi.slack as mod
         import inspect
         source = inspect.getsource(mod)
         assert "urllib.request" not in source

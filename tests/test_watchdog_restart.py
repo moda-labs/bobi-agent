@@ -1,7 +1,7 @@
 """Acceptance + negative integration test for the #464 watchdog.
 
 Real processes, no MagicMock (the #454 lesson, reinforced by Zach's R5): a
-`modastack supervise`-style Supervisor drives a real stub-manager child that
+`bobi supervise`-style Supervisor drives a real stub-manager child that
 serves the actual health endpoint. We assert the watchdog restarts a wedged
 director and — the trap — does NOT restart a healthy idle one.
 
@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from modastack import manager_health, paths
-from modastack.watchdog import Supervisor, WatchdogConfig
+from bobi import manager_health, paths
+from bobi.watchdog import Supervisor, WatchdogConfig
 
 STUB = Path(__file__).parent / "fixtures" / "watchdog_stub_manager.py"
 SIGNAL_HARNESS = Path(__file__).parent / "fixtures" / "watchdog_signal_harness.py"
@@ -85,7 +85,7 @@ def _run_supervisor_in_thread(sup: Supervisor):
 
 def test_watchdog_restarts_wedged_director(tmp_path):
     root = tmp_path / "proj"
-    (root / ".modastack" / "state").mkdir(parents=True)
+    (root / ".bobi" / "state").mkdir(parents=True)
     launch_log = tmp_path / "launches.log"
 
     sup = Supervisor([], _fast_config(), project_root=root,
@@ -125,7 +125,7 @@ def test_watchdog_restarts_wedged_director(tmp_path):
 def test_watchdog_does_not_restart_healthy_idle_director(tmp_path):
     """The trap: a frozen last_activity on an *idle* director must NOT restart."""
     root = tmp_path / "proj"
-    (root / ".modastack" / "state").mkdir(parents=True)
+    (root / ".bobi" / "state").mkdir(parents=True)
     launch_log = tmp_path / "launches.log"
 
     sup = Supervisor([], _fast_config(), project_root=root,

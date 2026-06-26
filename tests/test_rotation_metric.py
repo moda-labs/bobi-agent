@@ -23,9 +23,9 @@ import pytest
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
-from modastack.brain import AssistantText, BrainCost, BrainSession, TurnResult
-from modastack.inbox import Message
-from modastack.session import (
+from bobi.brain import AssistantText, BrainCost, BrainSession, TurnResult
+from bobi.inbox import Message
+from bobi.session import (
     COMPACT_SENTINEL,
     Session,
     _context_fill_tokens,
@@ -130,7 +130,7 @@ def test_context_fill_sums_cache_fields():
 
 
 @pytest.mark.asyncio
-async def test_rotation_triggers_when_context_is_cached(modastack_install):
+async def test_rotation_triggers_when_context_is_cached(bobi_install):
     """A warm turn (tiny input_tokens, huge cache_read) must trip the cap.
 
     This is the production failure: the old code read input_tokens=2 and
@@ -142,7 +142,7 @@ async def test_rotation_triggers_when_context_is_cached(modastack_install):
         "cache_creation_input_tokens": 1_262,
         "output_tokens": 3_432,
     }
-    s = Session(name="test-rot", cwd=str(modastack_install.repo_path))
+    s = Session(name="test-rot", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._rotation_token_cap = 275_000
     # A single-call turn: the one assistant message carries the warm usage; the
@@ -155,7 +155,7 @@ async def test_rotation_triggers_when_context_is_cached(modastack_install):
 
 
 @pytest.mark.asyncio
-async def test_no_rotation_below_cap(modastack_install):
+async def test_no_rotation_below_cap(bobi_install):
     """A small turn well under the cap leaves rotation un-pending."""
     small = {
         "input_tokens": 1_000,
@@ -163,7 +163,7 @@ async def test_no_rotation_below_cap(modastack_install):
         "cache_creation_input_tokens": 2_000,
         "output_tokens": 500,
     }
-    s = Session(name="test-rot-small", cwd=str(modastack_install.repo_path))
+    s = Session(name="test-rot-small", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._rotation_token_cap = 275_000
     s._client = _FakeClient([_b_assistant(small), _b_result(small)])
@@ -174,9 +174,9 @@ async def test_no_rotation_below_cap(modastack_install):
 
 
 @pytest.mark.asyncio
-async def test_compact_sentinel_requests_rotation_without_querying_model(modastack_install):
-    """`modastack compact` delivers a sentinel that flags rotation, not a prompt."""
-    s = Session(name="test-compact", cwd=str(modastack_install.repo_path))
+async def test_compact_sentinel_requests_rotation_without_querying_model(bobi_install):
+    """`bobi compact` delivers a sentinel that flags rotation, not a prompt."""
+    s = Session(name="test-compact", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._set_state("waiting_input")
     client = _FakeClient([])
@@ -191,7 +191,7 @@ async def test_compact_sentinel_requests_rotation_without_querying_model(modasta
 
 
 @pytest.mark.asyncio
-async def test_multi_call_turn_does_not_over_count_context(modastack_install):
+async def test_multi_call_turn_does_not_over_count_context(bobi_install):
     """A ≥3-model-call turn must measure ONE call's fill, not the turn aggregate.
 
     Failing-first reproduction of #454. In a multi-step turn (model → tool →
@@ -216,7 +216,7 @@ async def test_multi_call_turn_does_not_over_count_context(modastack_install):
         "output_tokens": 150,
     }
 
-    s = Session(name="test-multicall", cwd=str(modastack_install.repo_path))
+    s = Session(name="test-multicall", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._rotation_token_cap = 275_000
     s._client = _FakeClient([
@@ -233,7 +233,7 @@ async def test_multi_call_turn_does_not_over_count_context(modastack_install):
 
 
 @pytest.mark.asyncio
-async def test_multi_call_turn_rotates_when_single_call_is_over_cap(modastack_install):
+async def test_multi_call_turn_rotates_when_single_call_is_over_cap(bobi_install):
     """When a single call's real fill exceeds the cap, rotation fires.
 
     Complements the over-count test: the metric must still trip on a genuine
@@ -245,7 +245,7 @@ async def test_multi_call_turn_rotates_when_single_call_is_over_cap(modastack_in
         "cache_creation_input_tokens": 0,
         "output_tokens": 50,
     }
-    s = Session(name="test-multicall-over", cwd=str(modastack_install.repo_path))
+    s = Session(name="test-multicall-over", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._rotation_token_cap = 275_000
     s._client = _FakeClient([
@@ -306,7 +306,7 @@ class _ErrorTurnClient:
 
 @pytest.mark.asyncio
 async def test_rotation_reconnect_bounds_and_recovers_on_never_yields(
-    modastack_install, monkeypatch
+    bobi_install, monkeypatch
 ):
     """Mechanism #3 (the 2026-06-24 wedge): a connect turn that never yields a
     ResultMessage must NOT hang _rotate() forever. The reconnect is bounded by
@@ -315,7 +315,7 @@ async def test_rotation_reconnect_bounds_and_recovers_on_never_yields(
     never the terminal "error" state that would deafen the session (#443).
     """
     import claude_agent_sdk
-    from modastack import session as session_mod
+    from bobi import session as session_mod
 
     _HangingClient.instances = 0
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _HangingClient)
@@ -324,7 +324,7 @@ async def test_rotation_reconnect_bounds_and_recovers_on_never_yields(
     monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_BACKOFF", 0.0)
     monkeypatch.setattr(session_mod, "ROTATION_MAX_RECONNECT_ATTEMPTS", 2)
 
-    s = Session(name="test-reconnect-hang", cwd=str(modastack_install.repo_path))
+    s = Session(name="test-reconnect-hang", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._client = None  # nothing to disconnect
 
@@ -342,20 +342,20 @@ async def test_rotation_reconnect_bounds_and_recovers_on_never_yields(
 
 @pytest.mark.asyncio
 async def test_rotation_reconnect_clears_error_on_arrives_with_529(
-    modastack_install, monkeypatch
+    bobi_install, monkeypatch
 ):
     """A connect-turn ResultMessage that arrives with is_error/529 must clear
     via the #443 path and return the session to ready — NOT the terminal
     "error" state. This is the *arrives-with-error* shape; step 1's timeout
     covers the *never-arrives* shape (the test above)."""
     import claude_agent_sdk
-    from modastack import session as session_mod
+    from bobi import session as session_mod
 
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _ErrorTurnClient)
     monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_TIMEOUT", 2.0)
     monkeypatch.setattr(session_mod, "ROTATION_MAX_RECONNECT_ATTEMPTS", 2)
 
-    s = Session(name="test-reconnect-529", cwd=str(modastack_install.repo_path))
+    s = Session(name="test-reconnect-529", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._client = None
 
@@ -404,7 +404,7 @@ class _ConnectHangsClient:
 
 @pytest.mark.asyncio
 async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
-    modastack_install, monkeypatch
+    bobi_install, monkeypatch
 ):
     """#472 (the literal connect()-hang shape): a fresh ``connect()`` that hangs
     forever must NOT wedge ``_rotate()``. Every bounded reconnect attempt times
@@ -419,7 +419,7 @@ async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
     ``asyncio.wait_for``; removing it hangs this test forever.
     """
     import claude_agent_sdk
-    from modastack import session as session_mod
+    from bobi import session as session_mod
 
     _ConnectHangsClient.instances = 0
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _ConnectHangsClient)
@@ -429,7 +429,7 @@ async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
     monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_BACKOFF", 0.0)
     monkeypatch.setattr(session_mod, "ROTATION_MAX_RECONNECT_ATTEMPTS", 2)
 
-    s = Session(name="test-connect-hang", cwd=str(modastack_install.repo_path))
+    s = Session(name="test-connect-hang", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._client = None  # nothing to disconnect
 

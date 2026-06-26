@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from modastack import registry
-from modastack.cli import main
+from bobi import registry
+from bobi.cli import main
 
 
 def test_install_pins_version(tmp_path, monkeypatch):
@@ -65,7 +65,7 @@ def test_agents_update_pins_version(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "check_update", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("a pin must not call check_update")))
     runner = CliRunner()
-    with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+    with patch("bobi.cli._detect_project_root", return_value=tmp_path):
         result = runner.invoke(main, ["agents", "update", "eng-team@1.1.0"])
     assert calls == [("eng-team", "1.1.0")]
     assert "Pinned eng-team to v1.1.0" in result.output
@@ -79,7 +79,7 @@ def test_agents_update_bare_name_checks_latest(tmp_path, monkeypatch):
                         calls.append((name, version)) or (tmp_path / name))
     monkeypatch.setattr(registry, "_read_local_version", lambda pp, name: "1.1.0")
     runner = CliRunner()
-    with patch("modastack.cli._detect_project_root", return_value=tmp_path):
+    with patch("bobi.cli._detect_project_root", return_value=tmp_path):
         result = runner.invoke(main, ["agents", "update", "eng-team"])
     assert calls == [("eng-team", None)]
     assert "→ v1.1.0" in result.output

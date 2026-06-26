@@ -7,12 +7,12 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from modastack.sdk import SessionEntry, SessionRegistry
+from bobi.sdk import SessionEntry, SessionRegistry
 
 
 @pytest.fixture
 def tmp_registry(tmp_path, monkeypatch):
-    monkeypatch.setattr("modastack.paths._root", tmp_path)
+    monkeypatch.setattr("bobi.paths._root", tmp_path)
     return SessionRegistry()
 
 
@@ -84,7 +84,7 @@ class TestSessionRegistry:
     def test_dir_per_session(self, tmp_registry, tmp_path):
         """Each session gets its own directory."""
         tmp_registry.register(SessionEntry(name="agent-42", run_key="42"))
-        assert (tmp_path / ".modastack" / "sessions" / "agent-42" / "state.json").exists()
+        assert (tmp_path / ".bobi" / "sessions" / "agent-42" / "state.json").exists()
 
     def test_mark_done_clears_pid(self, tmp_registry):
         tmp_registry.register(SessionEntry(name="agent-1", pid=12345, status="running"))
@@ -94,18 +94,18 @@ class TestSessionRegistry:
         assert got.pid == 0
 
     def test_handoff_path(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
         path = SessionRegistry.handoff_path("agent-42", "setup")
-        assert path == tmp_path / ".modastack" / "sessions" / "agent-42" / "handoff-setup.yaml"
+        assert path == tmp_path / ".bobi" / "sessions" / "agent-42" / "handoff-setup.yaml"
 
     def test_log_path(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
         path = SessionRegistry.log_path("agent-42")
-        assert path == tmp_path / ".modastack" / "sessions" / "agent-42" / "log.jsonl"
+        assert path == tmp_path / ".bobi" / "sessions" / "agent-42" / "log.jsonl"
 
     def test_cross_process_visibility(self, tmp_path, monkeypatch):
         """Two registry instances see each other's entries."""
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
 
         r1 = SessionRegistry()
         r1.register(SessionEntry(name="agent-42", run_key="42", status="running"))
@@ -116,7 +116,7 @@ class TestSessionRegistry:
         assert got.run_key == "42"
 
     def test_completed_session_stays_for_history(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", tmp_path)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
 
         r = SessionRegistry()
         r.register(SessionEntry(name="agent-42", status="running"))

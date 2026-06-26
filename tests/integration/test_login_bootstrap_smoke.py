@@ -5,7 +5,7 @@ path with the *real* Slack adapter output shape and a FAKED `claude auth login`
 subprocess (driven over a real PTY). It would have caught the `_extract_code`
 bug fixed in #386 (commit 42f96be).
 
-The bug: `modastack/auth_bootstrap.py::_extract_code` read the message text from
+The bug: `bobi/auth_bootstrap.py::_extract_code` read the message text from
 `event["fields"]["text"]`, but the live Slack adapter
 (`event-server/src/adapters/slack.ts`) puts the text at the event TOP LEVEL and
 in `payload["text"]` — `fields` carries only channel/channel_type/user_id/ts.
@@ -42,7 +42,7 @@ from pathlib import Path
 
 import pytest
 
-from modastack import auth_bootstrap as ab
+from bobi import auth_bootstrap as ab
 
 
 # --- generate the event from the real adapter (slack.ts) --------------------
@@ -196,14 +196,14 @@ def test_full_bootstrap_smoke_real_event_through_pty(adapter_event, tmp_path, mo
     posted. Faked at the seams the design declares injectable (spawn_login,
     post_message, wait_for_code) but with a REAL pty subprocess and the REAL
     extractor, so the integration gap that #386 fixed is actually exercised."""
-    from modastack import paths
+    from bobi import paths
 
     monkeypatch.setattr(paths, "_root", None, raising=False)
 
     # Isolated project with a Slack bot_token (run_bootstrap requires it).
     project = tmp_path / "proj"
-    (project / ".modastack").mkdir(parents=True)
-    (project / ".modastack" / "agent.yaml").write_text(
+    (project / ".bobi").mkdir(parents=True)
+    (project / ".bobi" / "agent.yaml").write_text(
         "agent: test\n"
         "event_server_url: wss://example\n"
         "services:\n"

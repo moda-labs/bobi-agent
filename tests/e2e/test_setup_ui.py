@@ -1,4 +1,4 @@
-"""E2E: drive the modastack setup UI in a real browser.
+"""E2E: drive the bobi setup UI in a real browser.
 
 One screen: an objective-guided conversation (left) while the team materializes
 as cards (right); special setup (Venn, native tokens, Slack) opens popups. The
@@ -12,8 +12,8 @@ GOAL_MSG = "triage our github issues and route to the right engineer"
 
 
 def _seed_library_team(home, name="legacy-bot"):
-    """Write a minimal valid team source into the ~/modastack-agents library."""
-    src = home / "modastack-agents" / name
+    """Write a minimal valid team source into the ~/bobi-agents library."""
+    src = home / "bobi-agents" / name
     (src / "roles" / "lead").mkdir(parents=True)
     (src / "agent.yaml").write_text(
         "agent: " + name + "\nversion: 0.1.0\nentry_point: lead\n"
@@ -31,8 +31,8 @@ def _enter(page, url):
     expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
 
 
-def test_shows_chat_and_team_panel(page, modastack_url):
-    _enter(page, modastack_url)
+def test_shows_chat_and_team_panel(page, bobi_url):
+    _enter(page, bobi_url)
     expect(page.locator(".uni-chat #chinput")).to_be_visible()
     expect(page.locator(".uni-panel .up-title")).to_have_text("Your team")
     # Five cards: goal, roles, automations, connections, chat.
@@ -42,8 +42,8 @@ def test_shows_chat_and_team_panel(page, modastack_url):
     expect(page.locator("#uni-foot [data-go='build']")).to_have_count(0)
 
 
-def test_cards_materialize_after_goal(page, modastack_url):
-    _enter(page, modastack_url)
+def test_cards_materialize_after_goal(page, bobi_url):
+    _enter(page, bobi_url)
     page.fill("#chinput", GOAL_MSG)
     page.click("#chsend")
     goal = page.locator(".ucard").first
@@ -54,8 +54,8 @@ def test_cards_materialize_after_goal(page, modastack_url):
     expect(page.locator(".uconn", has_text="GitHub")).to_be_visible()
 
 
-def test_finish_appears_only_when_everything_gathered(page, modastack_url):
-    _enter(page, modastack_url)
+def test_finish_appears_only_when_everything_gathered(page, bobi_url):
+    _enter(page, bobi_url)
     page.fill("#chinput", GOAL_MSG)               # goal + roles (services need connection)
     page.click("#chsend")
     expect(page.locator("#uni-meter")).to_have_text("2/5 gathered", timeout=10_000)
@@ -83,8 +83,8 @@ def test_finish_appears_only_when_everything_gathered(page, modastack_url):
     expect(page.locator("#uni-foot [data-go='build']")).to_be_visible()
 
 
-def test_finish_builds_to_file_browser(page, modastack_url):
-    _enter(page, modastack_url)
+def test_finish_builds_to_file_browser(page, bobi_url):
+    _enter(page, bobi_url)
     page.fill("#chinput", GOAL_MSG + ", automatically flag stale PRs, via the command line")
     page.click("#chsend")
     # Wait for brain to process, then connect the implied GitHub service so the
@@ -110,12 +110,12 @@ def test_finish_builds_to_file_browser(page, modastack_url):
     page.locator("#fd-tree .tnode", has_text="agent.yaml").click()
     expect(page.locator("#fd-code")).to_contain_text("agent:")
     # Finish lands on the completion screen offering two deployment paths —
-    # local (`modastack start`) and cloud (the Fly provisioner) — plus a Done
+    # local (`bobi start`) and cloud (the Fly provisioner) — plus a Done
     # button into the team hub (the server stays alive — it's re-entrant now).
     page.click("#fd-finish")
     expect(page.locator(".done-wrap")).to_be_visible(timeout=10_000)
     expect(page.locator(".deploy-opt", has_text="Local")).to_contain_text(
-        "modastack start")
+        "bobi start")
     expect(page.locator(".deploy-opt", has_text="Cloud")).to_contain_text(
         "provision-instance.sh")
     expect(page.locator("#done-home")).to_be_visible()
@@ -124,9 +124,9 @@ def test_finish_builds_to_file_browser(page, modastack_url):
     expect(page.locator(".home-grid")).to_be_visible(timeout=10_000)
 
 
-def test_escape_closes_connection_overlay(page, modastack_url):
+def test_escape_closes_connection_overlay(page, bobi_url):
     # Escape closes the connection-setup popup too (not just the folder picker).
-    _enter(page, modastack_url)
+    _enter(page, bobi_url)
     page.fill("#chinput", GOAL_MSG)
     page.click("#chsend")
     expect(page.locator(".uconn", has_text="GitHub")).to_be_visible(timeout=10_000)
@@ -136,8 +136,8 @@ def test_escape_closes_connection_overlay(page, modastack_url):
     expect(page.locator("#secret-ov")).to_have_count(0)
 
 
-def test_native_secret_popup_captures_token(page, modastack_url):
-    _enter(page, modastack_url)
+def test_native_secret_popup_captures_token(page, bobi_url):
+    _enter(page, bobi_url)
     page.fill("#chinput", GOAL_MSG)
     page.click("#chsend")
     expect(page.locator(".uconn", has_text="GitHub")).to_be_visible(timeout=10_000)
@@ -156,8 +156,8 @@ def test_native_secret_popup_captures_token(page, modastack_url):
     expect(page.locator(".uconn", has_text="GitHub")).to_contain_text("connected")
 
 
-def test_venn_is_an_account_connection_with_per_service_rows(page, modastack_url):
-    _enter(page, modastack_url)
+def test_venn_is_an_account_connection_with_per_service_rows(page, bobi_url):
+    _enter(page, bobi_url)
     page.fill("#chinput", "read my email and calendar and triage what matters")
     page.click("#chsend")
     # Venn-backed services are their OWN rows (tagged "via Venn"), not grouped.
@@ -178,8 +178,8 @@ def test_venn_is_an_account_connection_with_per_service_rows(page, modastack_url
     expect(ov.locator(".steps li").first).to_be_visible()
 
 
-def test_chat_card_select_and_slack_setup(page, modastack_url):
-    _enter(page, modastack_url)
+def test_chat_card_select_and_slack_setup(page, bobi_url):
+    _enter(page, bobi_url)
     page.fill("#chinput", GOAL_MSG)
     page.click("#chsend")
     chat = page.locator(".ucard", has_text="Chat")
@@ -203,8 +203,8 @@ def test_chat_card_select_and_slack_setup(page, modastack_url):
     expect(saved.locator("[data-secretcopy='SLACK_BOT_TOKEN']")).to_be_visible()
 
 
-def test_saved_key_can_be_re_edited(page, modastack_url):
-    _enter(page, modastack_url)
+def test_saved_key_can_be_re_edited(page, bobi_url):
+    _enter(page, bobi_url)
     page.fill("#chinput", GOAL_MSG)
     page.click("#chsend")
     # Connect github, then the row offers an "edit" affordance to re-enter it.
@@ -221,17 +221,17 @@ def test_saved_key_can_be_re_edited(page, modastack_url):
     expect(ov2.locator("input[data-secret='GITHUB_TOKEN']")).to_be_visible()
 
 
-def test_pasted_secret_is_redacted_in_transcript(page, modastack_url):
-    _enter(page, modastack_url)
+def test_pasted_secret_is_redacted_in_transcript(page, bobi_url):
+    _enter(page, bobi_url)
     page.fill("#chinput", "my github token is ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     page.click("#chsend")
     expect(page.locator(".msg.you").last).to_contain_text("[redacted]", timeout=10_000)
     expect(page.locator(".msg.you").last).not_to_contain_text("ghp_aaaa")
 
 
-def test_welcome_leads_to_intro_with_custom_and_starts_editor(page, modastack_url):
+def test_welcome_leads_to_intro_with_custom_and_starts_editor(page, bobi_url):
     # New users land on the welcome on-ramp first.
-    page.goto(modastack_url)
+    page.goto(bobi_url)
     expect(page.get_by_role(
         "heading", name="Build a team of agents that runs your work")).to_be_visible()
     page.click("#welcome-go")
@@ -246,8 +246,8 @@ def test_welcome_leads_to_intro_with_custom_and_starts_editor(page, modastack_ur
     expect(page.locator(".uni-panel .up-title")).to_have_text("Your team")
 
 
-def test_change_location_picker_updates_fyi(page, modastack_url):
-    page.goto(modastack_url)
+def test_change_location_picker_updates_fyi(page, bobi_url):
+    page.goto(bobi_url)
     page.click("#welcome-go")
     expect(page.locator("#loc-path")).to_be_visible()
     page.click("#loc-change")
@@ -264,9 +264,9 @@ def test_change_location_picker_updates_fyi(page, modastack_url):
     expect(page.locator("#loc-path")).to_contain_text(name)
 
 
-def test_escape_closes_popup(page, modastack_url):
+def test_escape_closes_popup(page, bobi_url):
     # Escape dismisses the topmost popup (here, the folder picker).
-    page.goto(modastack_url)
+    page.goto(bobi_url)
     page.click("#welcome-go")
     page.click("#loc-change")
     expect(page.locator(".picker")).to_be_visible()
@@ -274,11 +274,11 @@ def test_escape_closes_popup(page, modastack_url):
     expect(page.locator(".picker")).to_have_count(0)
 
 
-def test_homepage_lists_teams_and_opens_one(page, modastack):
+def test_homepage_lists_teams_and_opens_one(page, bobi):
     # With a team in the library, setup boots straight to the team hub; each
     # card shows the team's description, and clicking one opens it in the editor.
-    _seed_library_team(modastack.home, "legacy-bot")
-    page.goto(modastack.url)
+    _seed_library_team(bobi.home, "legacy-bot")
+    page.goto(bobi.url)
     card = page.locator(".hcard", has_text="legacy-bot")
     expect(card).to_be_visible()
     expect(card).to_contain_text("Watch the repo")        # description from agent.md
@@ -287,10 +287,10 @@ def test_homepage_lists_teams_and_opens_one(page, modastack):
     expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
 
 
-def test_welcome_button_goes_to_homepage(page, modastack_url):
+def test_welcome_button_goes_to_homepage(page, bobi_url):
     # The welcome on-ramp offers a direct path to the team hub, so returning
     # users don't have to walk through setup to reach their teams.
-    page.goto(modastack_url)
+    page.goto(bobi_url)
     expect(page.get_by_role(
         "heading", name="Build a team of agents that runs your work")).to_be_visible()
     page.click("#welcome-home")
@@ -299,25 +299,25 @@ def test_welcome_button_goes_to_homepage(page, modastack_url):
     expect(page.locator("[data-addteam]")).to_be_visible()
 
 
-def test_brand_icon_navigates_home_from_anywhere(page, modastack_url):
+def test_brand_icon_navigates_home_from_anywhere(page, bobi_url):
     # The titlebar brand is a home button reachable from any screen — here,
     # mid-flow on the intro, clicking it jumps straight to the team hub.
-    page.goto(modastack_url)
+    page.goto(bobi_url)
     page.click("#welcome-go")
     expect(page.get_by_role("heading", name="Build an agent team")).to_be_visible()
     page.click(".brand[data-home]")
     expect(page.get_by_role("heading", name="Your agent teams")).to_be_visible()
 
 
-def test_disconnect_overlay_when_server_dies(page, modastack):
+def test_disconnect_overlay_when_server_dies(page, bobi):
     # The page is useless without its local server — if it dies, the UI must
     # say so and stop pretending to be live (heartbeat catches it within ~4s).
-    page.goto(modastack.url)
+    page.goto(bobi.url)
     # Empty library → the welcome on-ramp is the first screen.
     expect(page.get_by_role(
         "heading", name="Build a team of agents that runs your work")).to_be_visible()
     expect(page.locator("#disc-ov")).to_have_count(0)   # live: no overlay
-    modastack.stop()                                        # server gone
+    bobi.stop()                                        # server gone
     expect(page.locator("#disc-ov")).to_be_visible(timeout=8_000)
     expect(page.get_by_role("heading", name="Setup server disconnected")
            ).to_be_visible()

@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from modastack.monitors.schema import Condition, Monitor
+from bobi.monitors.schema import Condition, Monitor
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +31,7 @@ class TestToolPollRunner:
     """Unit tests for the general-purpose tool_poll check runner."""
 
     def _get_runner(self):
-        from modastack.monitors.tool_checks import CHECKS
+        from bobi.monitors.tool_checks import CHECKS
         return CHECKS["tool_poll"]
 
     def _monitor(self, command="echo '[]'", **extra):
@@ -46,9 +46,9 @@ class TestToolPollRunner:
         """tool_poll runs the command and normalizes JSON output to conditions."""
         runner = self._get_runner()
         items = [{"id": "item-1", "value": "a"}, {"id": "item-2", "value": "b"}]
-        with patch("modastack.monitors.tool_checks._run_cached_script", return_value=None), \
+        with patch("bobi.monitors.tool_checks._run_cached_script", return_value=None), \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._cache_script"):
+             patch("bobi.monitors.tool_checks._cache_script"):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=json.dumps(items), stderr="",
             )
@@ -61,9 +61,9 @@ class TestToolPollRunner:
     def test_empty_output_returns_empty_list(self, tmp_path):
         """No output = all clear."""
         runner = self._get_runner()
-        with patch("modastack.monitors.tool_checks._run_cached_script", return_value=None), \
+        with patch("bobi.monitors.tool_checks._run_cached_script", return_value=None), \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._cache_script"):
+             patch("bobi.monitors.tool_checks._cache_script"):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="", stderr="",
             )
@@ -75,9 +75,9 @@ class TestToolPollRunner:
         """id_field param selects which field becomes the condition key."""
         runner = self._get_runner()
         items = [{"uid": "abc", "text": "hi"}]
-        with patch("modastack.monitors.tool_checks._run_cached_script", return_value=None), \
+        with patch("bobi.monitors.tool_checks._run_cached_script", return_value=None), \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._cache_script"):
+             patch("bobi.monitors.tool_checks._cache_script"):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=json.dumps(items), stderr="",
             )
@@ -89,9 +89,9 @@ class TestToolPollRunner:
     def test_command_failure_returns_none(self):
         """A failed command is indeterminate (None)."""
         runner = self._get_runner()
-        with patch("modastack.monitors.tool_checks._run_cached_script", return_value=None), \
+        with patch("bobi.monitors.tool_checks._run_cached_script", return_value=None), \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._script_path", return_value=Path("/nonexistent")):
+             patch("bobi.monitors.tool_checks._script_path", return_value=Path("/nonexistent")):
             mock_run.return_value = MagicMock(
                 returncode=1, stdout="", stderr="connection error",
             )
@@ -102,7 +102,7 @@ class TestToolPollRunner:
     def test_timeout_returns_none(self):
         """A timed-out command is indeterminate."""
         runner = self._get_runner()
-        with patch("modastack.monitors.tool_checks._run_cached_script", return_value=None), \
+        with patch("bobi.monitors.tool_checks._run_cached_script", return_value=None), \
              patch("subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired("cmd", 60)
             result = runner(self._monitor(), [Path("/repo")])
@@ -120,9 +120,9 @@ class TestToolPollRunner:
         """Handles {"result": [...]} wrapper format."""
         runner = self._get_runner()
         items = [{"id": "x1", "data": "val"}]
-        with patch("modastack.monitors.tool_checks._run_cached_script", return_value=None), \
+        with patch("bobi.monitors.tool_checks._run_cached_script", return_value=None), \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._cache_script"):
+             patch("bobi.monitors.tool_checks._cache_script"):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=json.dumps({"result": items}), stderr="",
             )
@@ -135,9 +135,9 @@ class TestToolPollRunner:
         """Items without the id field get a hash-based key."""
         runner = self._get_runner()
         items = [{"text": "no id here"}]
-        with patch("modastack.monitors.tool_checks._run_cached_script", return_value=None), \
+        with patch("bobi.monitors.tool_checks._run_cached_script", return_value=None), \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._cache_script"):
+             patch("bobi.monitors.tool_checks._cache_script"):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=json.dumps(items), stderr="",
             )
@@ -155,7 +155,7 @@ class TestVennPollRunner:
     """Unit tests for the venn_poll convenience check runner."""
 
     def _get_runner(self):
-        from modastack.monitors.tool_checks import CHECKS
+        from bobi.monitors.tool_checks import CHECKS
         return CHECKS["venn_poll"]
 
     def _monitor(self, **extra):
@@ -180,10 +180,10 @@ class TestVennPollRunner:
             {"id": "msg-2", "subject": "World", "from": "c@d.com"},
         ]
         venn_output = json.dumps({"result": items})
-        with patch("modastack.monitors.tool_checks._venn_binary", return_value="/usr/bin/venn"), \
-             patch("modastack.monitors.tool_checks._run_cached_script", return_value=None), \
+        with patch("bobi.monitors.tool_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("bobi.monitors.tool_checks._run_cached_script", return_value=None), \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._cache_script"):
+             patch("bobi.monitors.tool_checks._cache_script"):
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=venn_output, stderr="",
             )
@@ -197,10 +197,10 @@ class TestVennPollRunner:
     def test_builds_correct_venn_command(self):
         """venn_poll invokes `venn tools execute -s <service> -t <tool> -a <query>`."""
         runner = self._get_runner()
-        with patch("modastack.monitors.tool_checks._venn_binary", return_value="/usr/bin/venn"), \
-             patch("modastack.monitors.tool_checks._run_cached_script", return_value=None), \
+        with patch("bobi.monitors.tool_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("bobi.monitors.tool_checks._run_cached_script", return_value=None), \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._cache_script"):
+             patch("bobi.monitors.tool_checks._cache_script"):
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout=json.dumps({"result": []}),
@@ -235,18 +235,18 @@ class TestVennPollRunner:
     def test_venn_not_installed_returns_none(self):
         """Returns None when venn CLI is not installed."""
         runner = self._get_runner()
-        with patch("modastack.monitors.tool_checks._venn_binary", return_value=None):
+        with patch("bobi.monitors.tool_checks._venn_binary", return_value=None):
             result = runner(self._monitor(), [Path("/repo")])
         assert result is None
 
     def test_injects_venn_api_key_in_env(self):
         """The VENN_API_KEY is passed through to the subprocess."""
         runner = self._get_runner()
-        with patch("modastack.monitors.tool_checks._venn_binary", return_value="/usr/bin/venn"), \
-             patch("modastack.monitors.tool_checks._run_cached_script", return_value=None), \
+        with patch("bobi.monitors.tool_checks._venn_binary", return_value="/usr/bin/venn"), \
+             patch("bobi.monitors.tool_checks._run_cached_script", return_value=None), \
              patch("subprocess.run") as mock_run, \
              patch.dict("os.environ", {"VENN_API_KEY": "test-key-123"}), \
-             patch("modastack.monitors.tool_checks._cache_script"):
+             patch("bobi.monitors.tool_checks._cache_script"):
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout=json.dumps({"result": []}),
@@ -267,10 +267,10 @@ class TestScriptCaching:
 
     def test_caches_script_on_success(self, tmp_path):
         """After a successful direct run, the command is cached as a script."""
-        from modastack.monitors.tool_checks import _run_command, _script_path
+        from bobi.monitors.tool_checks import _run_command, _script_path
 
-        with patch("modastack.monitors.tool_checks._scripts_dir", return_value=tmp_path), \
-             patch("modastack.monitors.tool_checks._script_path",
+        with patch("bobi.monitors.tool_checks._scripts_dir", return_value=tmp_path), \
+             patch("bobi.monitors.tool_checks._script_path",
                    side_effect=lambda name: tmp_path / f"{name}.sh"), \
              patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
@@ -292,14 +292,14 @@ class TestScriptCaching:
 
     def test_uses_cached_script_on_subsequent_run(self, tmp_path):
         """When a cached script exists and succeeds, direct execution is skipped."""
-        from modastack.monitors.tool_checks import _run_command
+        from bobi.monitors.tool_checks import _run_command
 
         cached_result = MagicMock(
             returncode=0,
             stdout=json.dumps([{"id": "cached-1"}]),
             stderr="",
         )
-        with patch("modastack.monitors.tool_checks._run_cached_script",
+        with patch("bobi.monitors.tool_checks._run_cached_script",
                    return_value=cached_result), \
              patch("subprocess.run") as direct_run:
             result = _run_command(
@@ -314,13 +314,13 @@ class TestScriptCaching:
 
     def test_falls_back_on_cached_script_failure(self, tmp_path):
         """When the cached script fails, falls back to direct execution."""
-        from modastack.monitors.tool_checks import _run_command
+        from bobi.monitors.tool_checks import _run_command
 
         # Cached script returns None (timeout/error)
-        with patch("modastack.monitors.tool_checks._run_cached_script",
+        with patch("bobi.monitors.tool_checks._run_cached_script",
                    return_value=None), \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._cache_script"):
+             patch("bobi.monitors.tool_checks._cache_script"):
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout=json.dumps([{"id": "direct-1"}]),
@@ -337,15 +337,15 @@ class TestScriptCaching:
 
     def test_invalidates_cache_on_direct_failure(self, tmp_path):
         """When direct execution also fails, the cached script is removed."""
-        from modastack.monitors.tool_checks import _run_command
+        from bobi.monitors.tool_checks import _run_command
 
         script_file = tmp_path / "test-mon.sh"
         script_file.write_text("#!/bin/bash\necho 'old'")
 
-        with patch("modastack.monitors.tool_checks._run_cached_script",
+        with patch("bobi.monitors.tool_checks._run_cached_script",
                    return_value=None), \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._script_path",
+             patch("bobi.monitors.tool_checks._script_path",
                    return_value=script_file):
             mock_run.return_value = MagicMock(
                 returncode=1, stdout="", stderr="error",
@@ -360,11 +360,11 @@ class TestScriptCaching:
 
     def test_cache_disabled_skips_script(self):
         """cache_scripts=False bypasses all caching logic."""
-        from modastack.monitors.tool_checks import _run_command
+        from bobi.monitors.tool_checks import _run_command
 
-        with patch("modastack.monitors.tool_checks._run_cached_script") as cached, \
+        with patch("bobi.monitors.tool_checks._run_cached_script") as cached, \
              patch("subprocess.run") as mock_run, \
-             patch("modastack.monitors.tool_checks._cache_script") as cache_fn:
+             patch("bobi.monitors.tool_checks._cache_script") as cache_fn:
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout=json.dumps([{"id": "1"}]),
@@ -388,7 +388,7 @@ class TestToolPollReconcile:
     dedup, disappeared IDs drop, reappeared IDs refire."""
 
     def _scheduler(self, tmp_path, monitors):
-        from modastack.monitors.scheduler import MonitorScheduler
+        from bobi.monitors.scheduler import MonitorScheduler
         published = []
 
         def _record(event, data):
@@ -447,18 +447,18 @@ class TestRegistration:
     """Both tool_poll and venn_poll are registered as framework-level checks."""
 
     def test_tool_poll_registered(self):
-        from modastack.monitors.tool_checks import CHECKS
+        from bobi.monitors.tool_checks import CHECKS
         assert "tool_poll" in CHECKS
         assert callable(CHECKS["tool_poll"])
 
     def test_venn_poll_registered(self):
-        from modastack.monitors.tool_checks import CHECKS
+        from bobi.monitors.tool_checks import CHECKS
         assert "venn_poll" in CHECKS
         assert callable(CHECKS["venn_poll"])
 
     def test_scheduler_loads_framework_checks(self, tmp_path):
         """The scheduler can find and load both tool_poll and venn_poll."""
-        from modastack.monitors.scheduler import MonitorScheduler
+        from bobi.monitors.scheduler import MonitorScheduler
 
         sched = MonitorScheduler(
             state_path=tmp_path / "state.json",

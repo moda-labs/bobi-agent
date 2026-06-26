@@ -1,5 +1,5 @@
 [project]
-name = "modastack"
+name = "bobi"
 version = "0.35.0"
 description = "Build teams of event-driven AI agents"
 requires-python = ">=3.11"
@@ -34,9 +34,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/moda-labs/modastack"
-Repository = "https://github.com/moda-labs/modastack"
-Issues = "https://github.com/moda-labs/modastack/issues"
+Homepage = "https://github.com/moda-labs/bobi-agent-team"
+Repository = "https://github.com/moda-labs/bobi-agent-team"
+Issues = "https://github.com/moda-labs/bobi-agent-team/issues"
 
 [project.optional-dependencies]
 kb = [
@@ -56,34 +56,34 @@ dev = [
 ]
 
 [project.scripts]
-modastack = "modastack.cli:main"
+bobi = "bobi.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["modastack"]
+packages = ["bobi"]
 
 # Bundle the event server source so standalone (PyPI) installs can run a
 # local event server — it is npm-installed and built on first use.
 [tool.hatch.build.targets.wheel.force-include]
-"event-server/src" = "modastack/event-server/src"
-"event-server/package.json" = "modastack/event-server/package.json"
-"event-server/package-lock.json" = "modastack/event-server/package-lock.json"
-"event-server/tsconfig.json" = "modastack/event-server/tsconfig.json"
+"event-server/src" = "bobi/event-server/src"
+"event-server/package.json" = "bobi/event-server/package.json"
+"event-server/package-lock.json" = "bobi/event-server/package-lock.json"
+"event-server/tsconfig.json" = "bobi/event-server/tsconfig.json"
 # Agent teams are NOT bundled into the wheel — they are versioned packages
 # fetched from the registry (`name@version`, #440/#446/#451). Baking a frozen
 # copy into the framework wheel would pin a team to the framework release and
-# defeat independent team versioning. `modastack setup` lists teams from the
+# defeat independent team versioning. `bobi setup` lists teams from the
 # registry (and, in a source checkout, the repo's `agents/` dir for dev).
-# Bundle the Fly deploy assets so `modastack deploy` works from the binary alone
-# — no repo checkout. The one Dockerfile builds in `pypi` mode (installs modastack
-# from PyPI), so its build context is just these files; modastack/deploy.py
+# Bundle the Fly deploy assets so `bobi deploy` works from the binary alone
+# — no repo checkout. The one Dockerfile builds in `pypi` mode (installs bobi
+# from PyPI), so its build context is just these files; bobi/deploy.py
 # resolves them from here in "binary mode".
-"Dockerfile" = "modastack/_deploy/Dockerfile"
-"docker/docker-entrypoint.sh" = "modastack/_deploy/docker/docker-entrypoint.sh"
-"docker/healthcheck.sh" = "modastack/_deploy/docker/healthcheck.sh"
-"docker/noop-deps.sh" = "modastack/_deploy/docker/noop-deps.sh"
-"scripts/provision-instance.sh" = "modastack/_deploy/scripts/provision-instance.sh"
-"scripts/destroy-instance.sh" = "modastack/_deploy/scripts/destroy-instance.sh"
-"scripts/fleet.sh" = "modastack/_deploy/scripts/fleet.sh"
+"Dockerfile" = "bobi/_deploy/Dockerfile"
+"docker/docker-entrypoint.sh" = "bobi/_deploy/docker/docker-entrypoint.sh"
+"docker/healthcheck.sh" = "bobi/_deploy/docker/healthcheck.sh"
+"docker/noop-deps.sh" = "bobi/_deploy/docker/noop-deps.sh"
+"scripts/provision-instance.sh" = "bobi/_deploy/scripts/provision-instance.sh"
+"scripts/destroy-instance.sh" = "bobi/_deploy/scripts/destroy-instance.sh"
+"scripts/fleet.sh" = "bobi/_deploy/scripts/fleet.sh"
 
 [tool.hatch.build.targets.sdist]
 # `Dockerfile`, `docker/`, and `scripts/` are force-included into the wheel (the
@@ -92,7 +92,7 @@ packages = ["modastack"]
 # Agent teams are deliberately NOT shipped in the distribution (wheel or sdist) —
 # they're fetched from the registry as versioned packages (see the wheel
 # force-include note above).
-include = ["modastack", "event-server", "Dockerfile", "docker",
+include = ["bobi", "event-server", "Dockerfile", "docker",
            "scripts", "README.md", "CHANGELOG.md"]
 exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
 

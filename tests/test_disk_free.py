@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from modastack.monitors.schema import Condition
+from bobi.monitors.schema import Condition
 
 
 def _find_system_checks() -> Path:
@@ -19,7 +19,7 @@ def _find_system_checks() -> Path:
     repo_root = Path(__file__).parent.parent
     search_dirs = [
         repo_root / "agents",
-        repo_root / ".modastack" / "agents",
+        repo_root / ".bobi" / "agents",
     ]
     for search_dir in search_dirs:
         if not search_dir.is_dir():
@@ -38,9 +38,9 @@ if _checks_path is None:
         allow_module_level=True,
     )
 
-_spec = importlib.util.spec_from_file_location("modastack.monitors.system_checks", _checks_path)
+_spec = importlib.util.spec_from_file_location("bobi.monitors.system_checks", _checks_path)
 _mod = importlib.util.module_from_spec(_spec)
-sys.modules["modastack.monitors.system_checks"] = _mod
+sys.modules["bobi.monitors.system_checks"] = _mod
 _spec.loader.exec_module(_mod)
 
 disk_free = _mod.disk_free

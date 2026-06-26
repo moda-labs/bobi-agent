@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from modastack.events import server as es
+from bobi.events import server as es
 
 
 def test_npm_failure_surfaces_stderr(tmp_path, monkeypatch, caplog):
@@ -55,7 +55,7 @@ class TestIsLocalUrl:
 
     @pytest.mark.parametrize("url", [
         "https://events.example.com",
-        "https://modastack-events.example.workers.dev",
+        "https://bobi-events.example.workers.dev",
         "http://10.0.0.5:8080",
         "http://event-server.internal:8080",
     ])
@@ -70,7 +70,7 @@ class TestEnsureRunningRemoteGuard:
     """ensure_running must refuse to start Node when event_server_url is remote."""
 
     def _write_agent_yaml(self, tmp_path, url):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "agent.yaml").write_text(
             f"agent: test\nevent_server_url: {url}\n"
@@ -117,7 +117,7 @@ class _StubCfg:
 
 def _capture_post(monkeypatch):
     """Patch pooled.post + Slack lookups; return a dict the call records into."""
-    import modastack.http as pooled
+    import bobi.http as pooled
 
     captured: dict = {}
 
@@ -162,7 +162,7 @@ def test_slack_registration_signs_when_bubble_key_present(monkeypatch):
     assert headers["x-moda-signature"]
 
     # The signature must verify over the EXACT transmitted bytes.
-    from modastack.events.signing import canonical_string
+    from bobi.events.signing import canonical_string
     import hashlib
     import hmac
 

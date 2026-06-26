@@ -2,17 +2,17 @@
 set -euo pipefail
 
 VERSION="${1:?usage: smoke-homebrew-bottles.sh <version>}"
-MAX_ATTEMPTS="${MODASTACK_HOMEBREW_SMOKE_ATTEMPTS:-60}"
-SLEEP_SECONDS="${MODASTACK_HOMEBREW_SMOKE_SLEEP:-30}"
-EXPECTED_ROOT_URL="https://github.com/moda-labs/homebrew-modastack/releases/download/modastack-${VERSION}"
+MAX_ATTEMPTS="${BOBI_HOMEBREW_SMOKE_ATTEMPTS:-60}"
+SLEEP_SECONDS="${BOBI_HOMEBREW_SMOKE_SLEEP:-30}"
+EXPECTED_ROOT_URL="https://github.com/moda-labs/homebrew-bobi/releases/download/bobi-${VERSION}"
 
 fetch_formula() {
-  if [ -n "${MODASTACK_HOMEBREW_FORMULA_FILE:-}" ]; then
-    cat "$MODASTACK_HOMEBREW_FORMULA_FILE"
+  if [ -n "${BOBI_HOMEBREW_FORMULA_FILE:-}" ]; then
+    cat "$BOBI_HOMEBREW_FORMULA_FILE"
     return
   fi
 
-  gh api repos/moda-labs/homebrew-modastack/contents/Formula/modastack.rb --jq .content | base64 -d
+  gh api repos/moda-labs/homebrew-bobi/contents/Formula/bobi.rb --jq .content | base64 -d
 }
 
 parse_formula() {
@@ -27,7 +27,7 @@ formula = os.environ["FORMULA"]
 version = os.environ["VERSION"]
 expected_root_url = os.environ["EXPECTED_ROOT_URL"]
 
-if f"modastack-{version}.tar.gz" not in formula:
+if f"bobi-{version}.tar.gz" not in formula:
     print(f"source formula is not at {version} yet")
     sys.exit(10)
 
@@ -44,7 +44,7 @@ if not root_match:
 
 root_url = root_match.group(1)
 if root_url != expected_root_url:
-    if root_url.startswith(expected_root_url + ".") or f"modastack-{version}" in root_url:
+    if root_url.startswith(expected_root_url + ".") or f"bobi-{version}" in root_url:
         print(
             f"Homebrew bottle root_url is malformed: expected {expected_root_url}, got {root_url}",
             file=sys.stderr,
@@ -84,9 +84,9 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     bottle_tags=("${parsed[@]:1}")
 
     for bottle_tag in "${bottle_tags[@]}"; do
-      bottle_url="${root_url}/modastack-${VERSION}.${bottle_tag}.bottle.tar.gz"
+      bottle_url="${root_url}/bobi-${VERSION}.${bottle_tag}.bottle.tar.gz"
       echo "Checking ${bottle_url}"
-      if [ "${MODASTACK_HOMEBREW_SKIP_HEAD:-}" = "1" ]; then
+      if [ "${BOBI_HOMEBREW_SKIP_HEAD:-}" = "1" ]; then
         continue
       fi
       curl --retry 3 --retry-delay 2 --retry-all-errors -IfS "$bottle_url" >/dev/null

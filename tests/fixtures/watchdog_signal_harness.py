@@ -12,7 +12,7 @@ Usage: ``python watchdog_signal_harness.py <child-pidfile>``
 import subprocess
 import sys
 
-from modastack.watchdog import Supervisor, WatchdogConfig
+from bobi.watchdog import Supervisor, WatchdogConfig
 
 
 def main() -> int:

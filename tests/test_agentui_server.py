@@ -1,4 +1,4 @@
-"""Tests for the `modastack ui` agent dashboard server — security, the agent
+"""Tests for the `bobi ui` agent dashboard server — security, the agent
 cards, and the blocking chat endpoint. Driven by Starlette's TestClient with
 injected `registry_fn`/`deliver_fn`: no live team, no event server."""
 
@@ -7,8 +7,8 @@ import inspect
 import pytest
 from fastapi.testclient import TestClient
 
-from modastack.agentui import server
-from modastack.sdk import SessionEntry
+from bobi.agentui import server
+from bobi.sdk import SessionEntry
 
 TOKEN = "test-token-123"
 

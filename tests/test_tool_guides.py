@@ -1,10 +1,10 @@
-"""Pack prompts must only reference modastack CLI commands that exist.
+"""Pack prompts must only reference bobi CLI commands that exist.
 
 Tool guides and role prompts teach agents CLI invocations. A guide that
 documents a nonexistent command ships agents that try to run it — this
-drift class reached main twice (`modastack slack-send`, a fictional
-`modastack linear` group). Mechanics belong to the CLI's own surfaces
-(--help, `modastack skill`); guides may name commands but every name
+drift class reached main twice (`bobi slack-send`, a fictional
+`bobi linear` group). Mechanics belong to the CLI's own surfaces
+(--help, `bobi skill`); guides may name commands but every name
 must be real.
 """
 
@@ -13,18 +13,18 @@ from pathlib import Path
 
 import pytest
 
-from modastack.cli import main as cli_main
+from bobi.cli import main as cli_main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# modastack invocations inside fenced code blocks or inline code spans.
+# bobi invocations inside fenced code blocks or inline code spans.
 _FENCE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE = re.compile(r"`[^`\n]+`")
-_INVOCATION = re.compile(r"\bmodastack\s+([a-z][a-z0-9-]*)")
+_INVOCATION = re.compile(r"\bbobi\s+([a-z][a-z0-9-]*)")
 
 
 def _prompt_files() -> list[Path]:
-    files = [REPO_ROOT / "modastack" / "prompts" / "base.md"]
+    files = [REPO_ROOT / "bobi" / "prompts" / "base.md"]
     agents_dir = REPO_ROOT / "agents"
     for pack in sorted(agents_dir.iterdir()):
         if pack.is_dir():
@@ -49,6 +49,6 @@ def test_prompt_references_real_cli_commands(path):
     referenced = _referenced_commands(path.read_text())
     unknown = sorted(referenced - real)
     assert not unknown, (
-        f"{path.relative_to(REPO_ROOT)} references nonexistent modastack "
+        f"{path.relative_to(REPO_ROOT)} references nonexistent bobi "
         f"command(s): {unknown}. Available: {sorted(real)}"
     )

@@ -11,16 +11,16 @@ import time
 
 import pytest
 
-from modastack.sdk import (
+from bobi.sdk import (
     SessionEntry, get_registry,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
-from modastack.reconcile import reconcile_sessions, RECONCILE_GRACE
+from bobi.reconcile import reconcile_sessions, RECONCILE_GRACE
 
 
 @pytest.fixture(autouse=True)
 def bound_root(tmp_path, monkeypatch):
-    monkeypatch.setattr("modastack.paths._root", tmp_path)
+    monkeypatch.setattr("bobi.paths._root", tmp_path)
 
 
 class _Emitter:

@@ -31,13 +31,13 @@ from unittest.mock import patch
 
 import yaml
 
-from modastack.events.drain import drain_loop
-from modastack.events.reactor import EventReactor
+from bobi.events.drain import drain_loop
+from bobi.events.reactor import EventReactor
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 ENG_TEAM_AGENT_YAML = PACKAGE_ROOT / "agents" / "eng-team" / "agent.yaml"
 
-BOT_LOGIN = "modastack"
+BOT_LOGIN = "bobi"
 
 
 def _wait_calls(mock, n, timeout=2.0):
@@ -99,8 +99,8 @@ def _pr_comment(*, number, delivery_id, comment_id, sender, draft=False):
         "id": delivery_id,
         "source": "github",
         "delivery": "bulk",
-        "topics": ["github:moda-labs/modastack"],
-        "text": f"[moda-labs/modastack] comment PR #{number}",
+        "topics": ["github:moda-labs/bobi"],
+        "text": f"[moda-labs/bobi] comment PR #{number}",
         "fields": {
             "action": "created",
             "number": number,
@@ -115,7 +115,7 @@ def _pr_comment(*, number, delivery_id, comment_id, sender, draft=False):
 
 def _drain_one_batch(events, reactor):
     """Run drain_loop for exactly one batch; return delivered inbox texts."""
-    from modastack.inbox import register_local_inbox, unregister_local_inbox
+    from bobi.inbox import register_local_inbox, unregister_local_inbox
 
     q = _OneShotQueue(events)
     delivered = []
@@ -129,7 +129,7 @@ def _drain_one_batch(events, reactor):
 
     register_local_inbox("test-session-411", _CaptureInbox())
     try:
-        with patch("modastack.events.drain.time.sleep"):
+        with patch("bobi.events.drain.time.sleep"):
             try:
                 drain_loop("test-session-411", queue=q,
                            formatter=fake_formatter, reactor=reactor)
@@ -150,7 +150,7 @@ def _drain_sequentially(events, reactor):
 
 # (a) the bot's own comment must not dispatch a feedback engineer ------------
 
-@patch("modastack.subagent.launch_agent")
+@patch("bobi.subagent.launch_agent")
 def test_bot_authored_comment_does_not_dispatch(mock_launch):
     """The lead's own 'Rendered spec' / 'held' comment must NOT dispatch (a)."""
     mock_launch.return_value = "wf-pr-feedback-411"
@@ -170,7 +170,7 @@ def test_bot_authored_comment_does_not_dispatch(mock_launch):
 
 # draft PRs stay watchable: a human comment on a held draft still dispatches --
 
-@patch("modastack.subagent.launch_agent")
+@patch("bobi.subagent.launch_agent")
 def test_human_comment_on_draft_pr_dispatches(mock_launch):
     """A human comment on a DRAFT PR held for approval still dispatches.
 
@@ -193,7 +193,7 @@ def test_human_comment_on_draft_pr_dispatches(mock_launch):
 
 # (c) one comment dispatches at most one engine (no fan-out) -----------------
 
-@patch("modastack.subagent.launch_agent")
+@patch("bobi.subagent.launch_agent")
 def test_same_comment_redelivered_dispatches_once(mock_launch):
     """The SAME comment via two deliveries → exactly one engine (c).
 
@@ -218,7 +218,7 @@ def test_same_comment_redelivered_dispatches_once(mock_launch):
 
 # regression: the happy path still works ------------------------------------
 
-@patch("modastack.subagent.launch_agent")
+@patch("bobi.subagent.launch_agent")
 def test_human_comment_on_ready_pr_dispatches(mock_launch):
     """A genuine human comment on a ready (non-draft) PR still dispatches."""
     mock_launch.return_value = "wf-pr-feedback-411"

@@ -4,8 +4,8 @@ from textwrap import dedent
 
 import pytest
 
-from modastack import build_render
-from modastack.build_render import (
+from bobi import build_render
+from bobi.build_render import (
     BAKED_SKILLS,
     TEAM_HOME,
     load_team_config,
@@ -90,9 +90,9 @@ def test_renders_apt_npm_run_verify(tmp_path):
     assert "apt-get install -y --no-install-recommends nodejs npm" in script
     # npm global
     assert "npm install -g @openai/codex" in script
-    # run step in the IMAGE home, as the modastack user, with CLAUDE_CONFIG_DIR
+    # run step in the IMAGE home, as the bobi user, with CLAUDE_CONFIG_DIR
     # stripped (so skills bake to the image ~/.claude, not the runtime volume).
-    assert f"gosu modastack env -u CLAUDE_CONFIG_DIR HOME={TEAM_HOME} bash -lc" in script
+    assert f"gosu bobi env -u CLAUDE_CONFIG_DIR HOME={TEAM_HOME} bash -lc" in script
     assert "git clone https://x/gstack ~/dev/gstack" in script
     # verify re-runs each requires.check
     assert "test -e ~/.claude/skills/browse/SKILL.md" in script
@@ -105,14 +105,14 @@ def test_run_steps_run_as_user_apt_as_root(tmp_path):
     apt_line = next(ln for ln in lines if "apt-get install" in ln)
     run_line = next(ln for ln in lines if "git clone" in ln and ln.startswith("gosu"))
     assert "gosu" not in apt_line          # apt is root
-    assert run_line.startswith("gosu modastack")  # run drops to the user
+    assert run_line.startswith("gosu bobi")  # run drops to the user
 
 
 def test_no_seed_or_stamp_machinery(tmp_path):
     # The image-home model copies nothing onto the volume — there is no seed
-    # dir, no tool stamp, and no /opt/modastack/home-seed anywhere.
+    # dir, no tool stamp, and no /opt/bobi/home-seed anywhere.
     script = render_team_deps_script(_team(tmp_path, ENG_TEAM))
-    assert ".modastack-tool-stamp" not in script
+    assert ".bobi-tool-stamp" not in script
     assert "home-seed" not in script
 
 
@@ -121,7 +121,7 @@ def test_skills_baked_outside_dotclaude(tmp_path):
     # build-time ~/.claude/skills symlink, so the entrypoint can later point the
     # whole ~/.claude at the volume without clobbering skills.
     script = render_team_deps_script(_team(tmp_path, ENG_TEAM))
-    assert f"install -d -o modastack -g modastack {BAKED_SKILLS}" in script
+    assert f"install -d -o bobi -g bobi {BAKED_SKILLS}" in script
     assert f"ln -sfn {BAKED_SKILLS} ~/.claude/skills" in script
     # ordering: the bake-setup precedes the run step that writes into ~/.claude/skills
     assert script.index(BAKED_SKILLS) < script.index("git clone")
@@ -131,7 +131,7 @@ def test_verify_uses_same_home_as_run(tmp_path):
     # The whole point of the redesign: build-time `verify` reads the SAME HOME
     # the `run` steps wrote and the runtime agent uses — no build/runtime gap.
     script = render_team_deps_script(_team(tmp_path, ENG_TEAM))
-    prefix = f"gosu modastack env -u CLAUDE_CONFIG_DIR HOME={TEAM_HOME} bash -lc"
+    prefix = f"gosu bobi env -u CLAUDE_CONFIG_DIR HOME={TEAM_HOME} bash -lc"
     run_line = next(ln for ln in script.splitlines()
                     if "git clone" in ln and ln.startswith("gosu"))
     verify_line = next(ln for ln in script.splitlines()
@@ -157,7 +157,7 @@ def test_apt_only_team_has_no_seed_or_stamp(tmp_path):
           apt: [nodejs, npm]
           npm: ["@openai/codex"]
     """))
-    assert ".modastack-tool-stamp" not in script
+    assert ".bobi-tool-stamp" not in script
     assert "install -d" not in script  # no seed dir created (deps-identity stamp uses mkdir -p)
 
 
@@ -170,7 +170,7 @@ def test_renders_deps_identity_stamp(tmp_path):
     assert f"> {build_render.TEAM_DEPS_STAMP}" in script
     assert team_deps_hash(cfg.build) in script
     # uses mkdir -p, never install -d (which would mark a seed-dir team)
-    assert "mkdir -p /opt/modastack" in script
+    assert "mkdir -p /opt/bobi" in script
 
 
 def test_deps_stamp_moves_with_the_spec(tmp_path):

@@ -1,6 +1,6 @@
 """Integration tests for manager start/stop lifecycle.
 
-Exercises the full modastack start → status → stop cycle via the CLI
+Exercises the full bobi start → status → stop cycle via the CLI
 against the isolated install. Requires the `claude` CLI.
 """
 
@@ -20,11 +20,11 @@ pytestmark = pytest.mark.claude
 @pytest.mark.timeout(120)
 class TestManagerStartStop:
 
-    def test_start_creates_pid_file(self, modastack_env, cli_run):
+    def test_start_creates_pid_file(self, bobi_env, cli_run):
         result = cli_run("start", timeout=15)
         assert result.returncode == 0, f"start failed: {result.stderr}"
 
-        pid_file = modastack_env.state_dir / "manager.pid"
+        pid_file = bobi_env.state_dir / "manager.pid"
 
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -41,11 +41,11 @@ class TestManagerStartStop:
         _wait_for_exit(pid)
         pid_file.unlink(missing_ok=True)
 
-    def test_start_writes_log(self, modastack_env, cli_run):
+    def test_start_writes_log(self, bobi_env, cli_run):
         result = cli_run("start", timeout=15)
         assert result.returncode == 0
 
-        log_file = modastack_env.state_dir / "manager.log"
+        log_file = bobi_env.state_dir / "manager.log"
 
         deadline = time.monotonic() + 15
         has_log = False
@@ -57,10 +57,10 @@ class TestManagerStartStop:
 
         assert has_log, "Manager log file not written"
         content = log_file.read_text()
-        assert "Modastack" in content or "starting" in content.lower()
+        assert "Bobi" in content or "starting" in content.lower()
 
         # Clean up
-        pid_file = modastack_env.state_dir / "manager.pid"
+        pid_file = bobi_env.state_dir / "manager.pid"
         if pid_file.exists():
             try:
                 os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
@@ -69,10 +69,10 @@ class TestManagerStartStop:
             _wait_for_exit_file(pid_file)
             pid_file.unlink(missing_ok=True)
 
-    def test_stop_removes_pid_file(self, modastack_env, cli_run):
+    def test_stop_removes_pid_file(self, bobi_env, cli_run):
         cli_run("start", timeout=15)
 
-        pid_file = modastack_env.state_dir / "manager.pid"
+        pid_file = bobi_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if pid_file.exists():
@@ -92,18 +92,18 @@ class TestManagerStartStop:
 
         assert not pid_file.exists(), "PID file not cleaned up after stop"
 
-    def test_stop_when_not_running(self, modastack_env, cli_run):
-        pid_file = modastack_env.state_dir / "manager.pid"
+    def test_stop_when_not_running(self, bobi_env, cli_run):
+        pid_file = bobi_env.state_dir / "manager.pid"
         pid_file.unlink(missing_ok=True)
 
         result = cli_run("stop", timeout=5)
         assert result.returncode == 0
         assert "not running" in result.stdout.lower()
 
-    def test_start_rejects_double_start(self, modastack_env, cli_run):
+    def test_start_rejects_double_start(self, bobi_env, cli_run):
         cli_run("start", timeout=15)
 
-        pid_file = modastack_env.state_dir / "manager.pid"
+        pid_file = bobi_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if pid_file.exists():
@@ -117,10 +117,10 @@ class TestManagerStartStop:
         cli_run("stop", timeout=15)
         _wait_for_exit_file(pid_file)
 
-    def test_status_shows_running_after_start(self, modastack_env, cli_run):
+    def test_status_shows_running_after_start(self, bobi_env, cli_run):
         cli_run("start", timeout=15)
 
-        pid_file = modastack_env.state_dir / "manager.pid"
+        pid_file = bobi_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if pid_file.exists():
@@ -133,10 +133,10 @@ class TestManagerStartStop:
         cli_run("stop", timeout=15)
         _wait_for_exit_file(pid_file)
 
-    def test_restart_swaps_pid(self, modastack_env, cli_run):
+    def test_restart_swaps_pid(self, bobi_env, cli_run):
         cli_run("start", timeout=15)
 
-        pid_file = modastack_env.state_dir / "manager.pid"
+        pid_file = bobi_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if pid_file.exists():
@@ -171,9 +171,9 @@ class TestManagerMessaging:
     """Tests that require a fully booted manager with drain loop active."""
 
     @pytest.fixture(autouse=True)
-    def _start_and_stop(self, modastack_env, cli_run):
-        log_file = modastack_env.state_dir / "manager.log"
-        pid_file = modastack_env.state_dir / "manager.pid"
+    def _start_and_stop(self, bobi_env, cli_run):
+        log_file = bobi_env.state_dir / "manager.log"
+        pid_file = bobi_env.state_dir / "manager.pid"
 
         # Record log position before start so we only check new output
         log_pos = log_file.stat().st_size if log_file.exists() else 0
@@ -185,7 +185,7 @@ class TestManagerMessaging:
         while time.monotonic() < deadline:
             if pid_file.exists() and log_file.exists():
                 new_content = log_file.read_text()[log_pos:]
-                if "drain loop active" in new_content or "Modastack running" in new_content:
+                if "drain loop active" in new_content or "Bobi running" in new_content:
                     ready = True
                     break
             time.sleep(1)
@@ -214,8 +214,8 @@ class TestManagerMessaging:
 class TestManagerNotRunning:
     """Tests for message/ask when the manager is stopped."""
 
-    def test_message_when_not_running(self, modastack_env, cli_run):
-        pid_file = modastack_env.state_dir / "manager.pid"
+    def test_message_when_not_running(self, bobi_env, cli_run):
+        pid_file = bobi_env.state_dir / "manager.pid"
         pid_file.unlink(missing_ok=True)
 
         result = cli_run("message", "should fail", timeout=5)
@@ -225,8 +225,8 @@ class TestManagerNotRunning:
             "not running", "no active session", "cannot reach", "process is dead",
         ])
 
-    def test_ask_when_not_running(self, modastack_env, cli_run):
-        pid_file = modastack_env.state_dir / "manager.pid"
+    def test_ask_when_not_running(self, bobi_env, cli_run):
+        pid_file = bobi_env.state_dir / "manager.pid"
         pid_file.unlink(missing_ok=True)
 
         result = cli_run("ask", "should fail", timeout=5)

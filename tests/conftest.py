@@ -1,6 +1,6 @@
 """Shared test fixtures.
 
-The `modastack_install` fixture creates a fully isolated modastack
+The `bobi_install` fixture creates a fully isolated bobi
 installation in a temp directory so tests never touch production
 config, Slack channels, event servers, or session state.
 """
@@ -10,12 +10,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# --- Worktree safety (must run before any `import modastack`) --------------
-# Pin BOTH this test process and every modastack subprocess it spawns to the
+# --- Worktree safety (must run before any `import bobi`) --------------
+# Pin BOTH this test process and every bobi subprocess it spawns to the
 # checkout these tests live in. The editable install's .pth points at the
 # primary checkout, and `python -m pytest` puts the launch cwd on sys.path —
-# so from a git worktree, `import modastack` (or a spawned
-# `python -m modastack.cli`) can silently resolve to the WRONG checkout. That
+# so from a git worktree, `import bobi` (or a spawned
+# `python -m bobi.cli`) can silently resolve to the WRONG checkout. That
 # tests the wrong code, or pairs a worktree manager with a primary-checkout
 # CLI over the event server. Anchored on this file's own location so it always
 # matches the tests actually being run, in a worktree or the primary checkout.
@@ -27,10 +27,10 @@ if _REPO_ROOT not in _existing_pythonpath.split(os.pathsep):
     os.environ["PYTHONPATH"] = (
         _REPO_ROOT + (os.pathsep + _existing_pythonpath if _existing_pythonpath else "")
     )
-# Stop a spawned `python -m modastack.cli` / `python -c` from prepending its
+# Stop a spawned `python -m bobi.cli` / `python -c` from prepending its
 # cwd to sys.path ahead of PYTHONPATH (Python 3.11+). The harness runs
 # subprocesses from the temp project dir — harmless there — but if cwd ever is
-# a modastack checkout, cwd would shadow our pinned PYTHONPATH and resolve the
+# a bobi checkout, cwd would shadow our pinned PYTHONPATH and resolve the
 # wrong code. This makes worktree pinning hold regardless of subprocess cwd.
 os.environ["PYTHONSAFEPATH"] = "1"
 
@@ -74,28 +74,28 @@ def _reset_paths_root():
     any test that binds via a real code path (CLI invoke, _run_agent_entry)
     poisons every later test that binds a different tmp root.
 
-    Must also clear MODASTACK_ROOT from os.environ since bind_root() now
+    Must also clear BOBI_ROOT from os.environ since bind_root() now
     propagates it (#249) — a stale env var causes resolve_root() to
     short-circuit to a prior test's root instead of walking from cwd.
 
     The inherited-pin snapshot (#375) is frozen at import, so an ambient
-    MODASTACK_ROOT in the CI/dev shell would otherwise short-circuit every
+    BOBI_ROOT in the CI/dev shell would otherwise short-circuit every
     in-process resolve_root for the whole session. Neutralize it per-test
     (None = no inherited pin → walk from cwd); tests that need a pin set it
     explicitly. The original snapshot is restored on teardown.
     """
-    from modastack import paths
+    from bobi import paths
     before = paths._root
-    env_before = os.environ.get("MODASTACK_ROOT")
+    env_before = os.environ.get("BOBI_ROOT")
     snapshot_before = paths._inherited_root_env
     paths._inherited_root_env = None
     yield
     paths._root = before
     paths._inherited_root_env = snapshot_before
     if env_before is None:
-        os.environ.pop("MODASTACK_ROOT", None)
+        os.environ.pop("BOBI_ROOT", None)
     else:
-        os.environ["MODASTACK_ROOT"] = env_before
+        os.environ["BOBI_ROOT"] = env_before
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +114,7 @@ def _no_event_server_io(request, monkeypatch):
         yield
         return
     monkeypatch.setattr(
-        "modastack.subagent._start_event_subscription",
+        "bobi.subagent._start_event_subscription",
         lambda *a, **k: None,
     )
     yield
@@ -125,7 +125,7 @@ TEST_AGENT_NAME = "test-agent"
 
 
 def _install_test_agent(config_dir: Path) -> None:
-    """Create installed agent state in .modastack/ (simulates `modastack install`)."""
+    """Create installed agent state in .bobi/ (simulates `bobi install`)."""
     for subdir in ["roles/director", "roles/project_lead", "roles/engineer",
                     "workflows", "monitors"]:
         (config_dir / subdir).mkdir(parents=True, exist_ok=True)
@@ -208,8 +208,8 @@ CHECKS = {
 
 
 @dataclass
-class ModastackInstall:
-    """Paths and ports for an isolated modastack installation."""
+class BobiInstall:
+    """Paths and ports for an isolated bobi installation."""
     repo_path: Path
     state_dir: Path
     sessions_dir: Path
@@ -218,18 +218,18 @@ class ModastackInstall:
 
 
 @pytest.fixture
-def modastack_install(tmp_path, monkeypatch):
-    """Create a fully isolated modastack installation in a temp directory.
+def bobi_install(tmp_path, monkeypatch):
+    """Create a fully isolated bobi installation in a temp directory.
 
     Binds the paths root so all per-project path resolution points at tmp_path.
-    No global ~/.modastack directory is created or referenced.
+    No global ~/.bobi directory is created or referenced.
 
     Creates a self-contained test agent team so tests never depend on
     remote-fetched packs or the user's cache.
     """
     repo_path = tmp_path / "repo"
 
-    config_dir = repo_path / ".modastack"
+    config_dir = repo_path / ".bobi"
     state_dir = config_dir / "state"
     sessions_dir = config_dir / "sessions"
     agents_dir = config_dir / "agents"
@@ -248,9 +248,9 @@ def modastack_install(tmp_path, monkeypatch):
         ],
     }))
 
-    monkeypatch.setattr("modastack.paths._root", repo_path)
+    monkeypatch.setattr("bobi.paths._root", repo_path)
 
-    return ModastackInstall(
+    return BobiInstall(
         repo_path=repo_path,
         state_dir=state_dir,
         sessions_dir=sessions_dir,

@@ -10,9 +10,9 @@ import asyncio
 
 import pytest
 
-import modastack.validate as validate
-from modastack.validate import _check_mcp_servers, _async_probe_mcp
-from modastack.config import Config
+import bobi.validate as validate
+from bobi.validate import _check_mcp_servers, _async_probe_mcp
+from bobi.config import Config
 
 
 class _FakeClient:
@@ -60,11 +60,11 @@ class _FakeClaudeBrain:
 
 
 def _install_fake_client(monkeypatch, snapshots, interval=0.0):
-    import modastack.brain
+    import bobi.brain
 
     _FakeClient.SNAPSHOTS = snapshots
-    monkeypatch.setattr(modastack.brain, "get_brain", lambda: _FakeClaudeBrain())
-    monkeypatch.setattr("modastack.sdk.get_cli_path", lambda: "claude")
+    monkeypatch.setattr(bobi.brain, "get_brain", lambda: _FakeClaudeBrain())
+    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "claude")
     # Don't actually sleep between polls.
     monkeypatch.setattr(validate, "MCP_PROBE_POLL_INTERVAL", interval)
 
@@ -146,10 +146,10 @@ class TestPollRace:
     def test_brain_without_mcp_status_warns_without_blocking(
         self, monkeypatch, tmp_path
     ):
-        import modastack.brain
+        import bobi.brain
 
         monkeypatch.setattr(
-            modastack.brain, "get_brain",
+            bobi.brain, "get_brain",
             lambda: _FakeBrainWithoutMcpStatus(),
         )
         results = asyncio.run(

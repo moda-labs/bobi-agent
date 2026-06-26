@@ -1,12 +1,12 @@
 # Spec — #471: policy-curator as a framework default monitor (opt-out)
 
-- **Issue:** [moda-labs/modastack#471](https://github.com/moda-labs/modastack/issues/471)
+- **Issue:** [moda-labs/bobi-agent-team#471](https://github.com/moda-labs/bobi-agent-team/issues/471)
 - **Type:** update (framework / compose + monitors)
 - **Status:** SPEC — held for Zach's approval. This is a unified spec+impl PR; the spec is posted on the issue for sign-off before merge.
 - **Author:** engineer (spec phase)
 - **Related:** #460 (curator content that silently missed prod — the motivating failure), #470 (the eng-team@1.1.0 content cutover that finally landed it), #456 (the curator mechanism), #454 (the rotation-wedge failure mode), #446/#451 (`from:` compose + merge), release v0.32.0 (#469)
 
-> This spec is a strict superset of the issue and the locked design comment ([issuecomment-4791052666](https://github.com/moda-labs/modastack/issues/471#issuecomment-4791052666)). Nothing in either is dropped.
+> This spec is a strict superset of the issue and the locked design comment ([issuecomment-4791052666](https://github.com/moda-labs/bobi-agent-team/issues/471#issuecomment-4791052666)). Nothing in either is dropped.
 
 ---
 
@@ -49,7 +49,7 @@ From the issue's design-decisions comment (treated as binding, not re-litigated 
 
 - The other monitor records in `eng-team/monitors/defaults.yaml` (`pr-conflict-check`, `stale-pr-check`, `disk-free-check`, `team-status-roundup`) stay team-declared. Only `policy-curator` moves to the framework. (Their *check runners* are already framework code; their *records* are team SDLC defaults — a separate decision, not this issue.)
 - The curator's runtime behavior (windowing, cap, cursor, `## Team Policy` injection) — unchanged.
-- The runtime `MonitorRegistry` read path — unchanged (it already reads the composed `.modastack/monitors/defaults.yaml`, which is where the seed lands).
+- The runtime `MonitorRegistry` read path — unchanged (it already reads the composed `.bobi/monitors/defaults.yaml`, which is where the seed lands).
 - No version bump / CHANGELOG edit (feature-PR policy).
 
 ---
@@ -58,7 +58,7 @@ From the issue's design-decisions comment (treated as binding, not re-litigated 
 
 ### 4.1 Where the seed goes: compose, as a synthetic base layer
 
-`compose()` is the single chokepoint for **every** install and deploy — a team with no `from:` still "composes to a single-layer image" (`cli.py`), and `deploy.py` composes too. The runtime `MonitorRegistry` reads only the composed `.modastack/monitors/defaults.yaml` (`registry.py`, no framework fallback). So seeding at compose time:
+`compose()` is the single chokepoint for **every** install and deploy — a team with no `from:` still "composes to a single-layer image" (`cli.py`), and `deploy.py` composes too. The runtime `MonitorRegistry` reads only the composed `.bobi/monitors/defaults.yaml` (`registry.py`, no framework fallback). So seeding at compose time:
 
 - reaches **all** teams (decision 3),
 - lands in the one place runtime already reads (no registry change), and
@@ -71,7 +71,7 @@ The framework default is modeled as **the most-base layer of the chain** — pro
 
 ### 4.2 The framework default record — single source of truth
 
-A new framework data file, `modastack/monitors/framework_defaults.yaml`, holds the canonical record. Its `policy-curator` entry is a **verbatim copy** of what `eng-team` declares today, so the cutover is byte-neutral:
+A new framework data file, `bobi/monitors/framework_defaults.yaml`, holds the canonical record. Its `policy-curator` entry is a **verbatim copy** of what `eng-team` declares today, so the cutover is byte-neutral:
 
 ```yaml
 monitors:
@@ -84,7 +84,7 @@ monitors:
     curator: true
 ```
 
-It ships as package data the same way `modastack/prompts/curator.md` already does (`packages = ["modastack"]` includes non-`.py` files). A path constant is exported from `modastack/monitors/__init__.py` (mirroring `prompts/__init__.py`'s `CURATOR_PATH`).
+It ships as package data the same way `bobi/prompts/curator.md` already does (`packages = ["bobi"]` includes non-`.py` files). A path constant is exported from `bobi/monitors/__init__.py` (mirroring `prompts/__init__.py`'s `CURATOR_PATH`).
 
 ### 4.3 Compose change
 
@@ -98,7 +98,7 @@ Delete the `policy-curator` entry (and its now-redundant comment lines) from `ag
 
 - `MonitorRegistry`, `scheduler.py` curator path, `curator.py`, `prompts/curator.md` — untouched.
 - `prune` logic — untouched; the seed rides the existing path.
-- `pyproject.toml` packaging — `packages = ["modastack"]` already ships the new YAML; no change needed (confirmed against how `curator.md` ships).
+- `pyproject.toml` packaging — `packages = ["bobi"]` already ships the new YAML; no change needed (confirmed against how `curator.md` ships).
 
 ---
 
@@ -124,7 +124,7 @@ Full gate: `pytest tests/ --ignore=tests/integration/` green; `/review` clean.
 # New team, no monitors → curator seeded at 6h
 python - <<'PY'
 from pathlib import Path; import tempfile, yaml
-from modastack import compose
+from bobi import compose
 # (construct a minimal no-from team, compose, print monitors/defaults.yaml)
 PY
 ```
@@ -134,8 +134,8 @@ PY
 
 ## 6. Implementation plan
 
-1. Add `modastack/monitors/framework_defaults.yaml` (verbatim `policy-curator` record).
-2. Export `FRAMEWORK_DEFAULTS_PATH` from `modastack/monitors/__init__.py`.
+1. Add `bobi/monitors/framework_defaults.yaml` (verbatim `policy-curator` record).
+2. Export `FRAMEWORK_DEFAULTS_PATH` from `bobi/monitors/__init__.py`.
 3. Seed it in `compose._compose_structured_dir` (monitors surface, first/base, force-write).
 4. Remove the `policy-curator` record from `agents/eng-team/monitors/defaults.yaml`.
 5. Add the five tests above; update `test_prune_drops_inherited`.

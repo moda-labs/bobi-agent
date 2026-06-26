@@ -23,17 +23,17 @@ def _write_policy(state_dir: Path, body: str) -> Path:
 
 class TestLoadPolicy:
     def test_returns_empty_when_absent(self, tmp_path):
-        from modastack.memory import load_policy
+        from bobi.memory import load_policy
         assert load_policy(tmp_path / "state") == ""
 
     def test_returns_empty_when_blank(self, tmp_path):
-        from modastack.memory import load_policy
+        from bobi.memory import load_policy
         state = tmp_path / "state"
         _write_policy(state, "   \n\n")
         assert load_policy(state) == ""
 
     def test_loads_two_section_content(self, tmp_path):
-        from modastack.memory import load_policy
+        from bobi.memory import load_policy
         state = tmp_path / "state"
         _write_policy(state, "## Facts\n\nThis repo uses GitHub.\n\n"
                              "## Decisions\n\nChose squash merges over rebase.")
@@ -44,7 +44,7 @@ class TestLoadPolicy:
         assert "squash merges" in result
 
     def test_truncates_oversized_policy(self, tmp_path):
-        from modastack.memory import load_policy, MAX_POLICY_CHARS
+        from bobi.memory import load_policy, MAX_POLICY_CHARS
         state = tmp_path / "state"
         _write_policy(state, "## Facts\n\n" + ("x" * (MAX_POLICY_CHARS + 5000)))
         result = load_policy(state)
@@ -58,14 +58,14 @@ class TestLoadPolicy:
 
 class TestFormatPolicyPrompt:
     def test_wraps_in_read_only_section(self):
-        from modastack.memory import format_policy_prompt
+        from bobi.memory import format_policy_prompt
         result = format_policy_prompt("## Facts\n\nlots of facts")
         assert "## Team Policy" in result
         assert "read-only" in result.lower()
         assert "lots of facts" in result
 
     def test_empty_content_yields_empty(self):
-        from modastack.memory import format_policy_prompt
+        from bobi.memory import format_policy_prompt
         assert format_policy_prompt("") == ""
 
 
@@ -75,20 +75,20 @@ class TestFormatPolicyPrompt:
 
 class TestPolicyPaths:
     def test_policy_path_under_state(self, tmp_path):
-        from modastack import paths
-        assert paths.policy_path(tmp_path) == tmp_path / ".modastack" / "state" / "policy.md"
+        from bobi import paths
+        assert paths.policy_path(tmp_path) == tmp_path / ".bobi" / "state" / "policy.md"
 
     def test_cursor_path_under_state(self, tmp_path):
-        from modastack import paths
+        from bobi import paths
         assert paths.policy_cursor_path(tmp_path) == (
-            tmp_path / ".modastack" / "state" / "policy_cursor"
+            tmp_path / ".bobi" / "state" / "policy_cursor"
         )
 
     def test_policy_path_does_not_mkdir(self, tmp_path):
-        from modastack import paths
+        from bobi import paths
         _ = paths.policy_path(tmp_path)
         # path-only constructor must not create the state dir (read-only safe)
-        assert not (tmp_path / ".modastack" / "state").exists()
+        assert not (tmp_path / ".bobi" / "state").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ class TestPolicyPaths:
 
 class TestStartupPromptInjection:
     def _install_role(self, tmp_path):
-        roles_dir = tmp_path / ".modastack" / "roles" / "director"
+        roles_dir = tmp_path / ".bobi" / "roles" / "director"
         roles_dir.mkdir(parents=True)
         (roles_dir / "ROLE.md").write_text("# Director\nYou direct things.")
 
@@ -107,9 +107,9 @@ class TestStartupPromptInjection:
     INJECTED_MARKER = "Below is the team's curated, durable policy"
 
     def test_injects_team_policy(self, tmp_path):
-        from modastack.prompts.resolver import build_startup_prompt
+        from bobi.prompts.resolver import build_startup_prompt
         self._install_role(tmp_path)
-        state = tmp_path / ".modastack" / "state"
+        state = tmp_path / ".bobi" / "state"
         _write_policy(state, "## Facts\n\nThis repo uses GitHub.\n\n## Decisions\n\n"
                              "Chose squash merges.")
         result = build_startup_prompt("director", tmp_path, agent_name="test",
@@ -120,7 +120,7 @@ class TestStartupPromptInjection:
         assert "## Decision Log" not in result
 
     def test_no_policy_no_section(self, tmp_path):
-        from modastack.prompts.resolver import build_startup_prompt
+        from bobi.prompts.resolver import build_startup_prompt
         self._install_role(tmp_path)
         result = build_startup_prompt("director", tmp_path, agent_name="test")
         assert self.INJECTED_MARKER not in result
@@ -129,9 +129,9 @@ class TestStartupPromptInjection:
 
 class TestSubagentPolicyInjection:
     def test_load_policy_prompt_reads_team_policy(self, tmp_path, monkeypatch):
-        from modastack import paths
-        import modastack.subagent as subagent
-        state = tmp_path / ".modastack" / "state"
+        from bobi import paths
+        import bobi.subagent as subagent
+        state = tmp_path / ".bobi" / "state"
         _write_policy(state, "## Decisions\n\nKey decision recorded.")
         monkeypatch.setattr(paths, "state_path", lambda *a, **k: state)
         out = subagent._load_policy_prompt()
@@ -139,35 +139,35 @@ class TestSubagentPolicyInjection:
         assert "Key decision recorded." in out
 
     def test_load_policy_prompt_empty_when_absent(self, tmp_path, monkeypatch):
-        from modastack import paths
-        import modastack.subagent as subagent
+        from bobi import paths
+        import bobi.subagent as subagent
         monkeypatch.setattr(paths, "state_path",
-                            lambda *a, **k: tmp_path / ".modastack" / "state")
+                            lambda *a, **k: tmp_path / ".bobi" / "state")
         assert subagent._load_policy_prompt() == ""
 
 
 class TestDoctorPolicyCheck:
     def test_ok_when_no_policy(self, tmp_path):
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_policy
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_policy
             r = _check_policy()
         assert r.ok
 
     def test_ok_when_policy_present(self, tmp_path):
-        state = tmp_path / ".modastack" / "state"
+        state = tmp_path / ".bobi" / "state"
         _write_policy(state, "## Facts\n\nsmall and bounded")
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_policy
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_policy
             r = _check_policy()
         assert r.ok
         assert "policy.md present" in r.detail
 
     def test_flags_oversized_policy(self, tmp_path):
-        from modastack.memory import MAX_POLICY_CHARS
-        state = tmp_path / ".modastack" / "state"
+        from bobi.memory import MAX_POLICY_CHARS
+        state = tmp_path / ".bobi" / "state"
         _write_policy(state, "x" * (MAX_POLICY_CHARS + 100))
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_policy
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_policy
             r = _check_policy()
         assert not r.ok
         assert "over" in r.detail

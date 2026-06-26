@@ -1,11 +1,11 @@
 # Slack
 
-Send and receive Slack messages, files, and images via `modastack` CLI.
+Send and receive Slack messages, files, and images via `bobi` CLI.
 
 ## Reply in a thread
 
 ```bash
-modastack slack-reply -w <workspace> -c <channel> -t <thread_ts> "message"
+bobi slack-reply -w <workspace> -c <channel> -t <thread_ts> "message"
 ```
 
 Always reply in the thread — use the event's `ts` as `thread_ts` if no
@@ -16,14 +16,14 @@ Always reply in the thread — use the event's `ts` as `thread_ts` if no
 Omit `-t` to post a new top-level message instead of a threaded reply:
 
 ```bash
-modastack slack-reply -w <workspace> -c <channel> "message"
+bobi slack-reply -w <workspace> -c <channel> "message"
 ```
 
 ## Upload a file or image
 
 ```bash
-modastack slack-upload-file <file_path> -w <workspace> -c <channel>
-modastack slack-upload-file ./screenshot.png -w <workspace> -c <channel> -t <thread_ts> --title "Screenshot" --comment "Here's what I see"
+bobi slack-upload-file <file_path> -w <workspace> -c <channel>
+bobi slack-upload-file ./screenshot.png -w <workspace> -c <channel> -t <thread_ts> --title "Screenshot" --comment "Here's what I see"
 ```
 
 Options: `--title`, `--comment`, `--thread/-t`, `--filename` (override name).
@@ -33,9 +33,9 @@ Options: `--title`, `--comment`, `--thread/-t`, `--filename` (override name).
 Fetch all messages (and file metadata) in a Slack thread:
 
 ```bash
-modastack slack-read-thread -w <workspace> -c <channel> -t <thread_ts>
-modastack slack-read-thread -w <workspace> -c <channel> -t <thread_ts> --json-output
-modastack slack-read-thread -w <workspace> -c <channel> -t <thread_ts> -n 50
+bobi slack-read-thread -w <workspace> -c <channel> -t <thread_ts>
+bobi slack-read-thread -w <workspace> -c <channel> -t <thread_ts> --json-output
+bobi slack-read-thread -w <workspace> -c <channel> -t <thread_ts> -n 50
 ```
 
 ## Receiving files and images

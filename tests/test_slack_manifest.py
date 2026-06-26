@@ -1,6 +1,6 @@
 """Tests for slack_manifest — manifest rendering, JSON conversion, deep link.
 
-The manifest is the one source of truth for the scopes + events the modastack
+The manifest is the one source of truth for the scopes + events the bobi
 Slack adapter (event-server/src/adapters/slack.ts) consumes. These tests pin
 that the rendered manifest stays wired to the event server's /webhooks/slack
 path and carries every event the adapter normalizes.
@@ -13,9 +13,9 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-from modastack.cli import main
-from modastack.deploy import DEFAULT_EVENT_SERVER
-from modastack.slack_manifest import (
+from bobi.cli import main
+from bobi.deploy import DEFAULT_EVENT_SERVER
+from bobi.slack_manifest import (
     WEBHOOK_PATH,
     create_app_url,
     manifest_to_dict,
@@ -26,7 +26,7 @@ from modastack.slack_manifest import (
 
 EVENT_SERVER = "https://my-worker.workers.dev"
 
-# Every event the Slack adapter turns into a modastack event must be subscribed.
+# Every event the Slack adapter turns into a bobi event must be subscribed.
 EXPECTED_BOT_EVENTS = {
     "app_mention",       # -> slack.mention
     "message.im",        # -> slack.dm
@@ -105,8 +105,8 @@ def test_create_app_url_embeds_valid_manifest_json():
 
 
 def test_cli_works_without_an_install_and_falls_back_to_cloud(tmp_path):
-    """The command must run before `modastack install` exists — no root, no
-    error; it falls back to the modastack cloud event server."""
+    """The command must run before `bobi install` exists — no root, no
+    error; it falls back to the bobi cloud event server."""
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
         result = runner.invoke(main, ["create-slack-bot", "--app-name", "Bot"])

@@ -1,6 +1,6 @@
 # Models, Runtimes, and Capabilities
 
-modastack touches "other models" along **two independent axes**. They were
+bobi touches "other models" along **two independent axes**. They were
 historically conflated under one "multi-model" connections registry — including
 an overloaded `gateway` kind that meant different things on each axis — which is
 the ambiguity this doc exists to remove.
@@ -9,7 +9,7 @@ the ambiguity this doc exists to remove.
 
 ### Axis 1 — the runtime the agent runs *on*
 
-Every modastack agent is an instance of an agent runtime ("harness"). Today that
+Every bobi agent is an instance of an agent runtime ("harness"). Today that
 is hardcoded to the Claude Code SDK (`session.py`, `subagent.py`). Two things
 live on this axis:
 
@@ -37,7 +37,7 @@ task to Codex.
   to an agent), `gh`, `venn`.
 - **Removed: connection-kind + built-in MCP injection.** Historically
   `agent.yaml` `connections` declared a `kind` and `mcp/inject.py` auto-injected
-  a modastack-shipped MCP server for it. Only `image` and `codex` were ever
+  a bobi-shipped MCP server for it. Only `image` and `codex` were ever
   implemented; both moved to the CLI-first model (`image` → #397, `codex` →
   #285), and the shim itself — `inject.py`, `codex_server.py`, the
   `ConnectionEntry` config primitive, and the `connections:` agent.yaml block —
@@ -58,7 +58,7 @@ task to Codex.
 (keyed by `provider:model`). Surfaced via:
 
 ```bash
-modastack costs [--by model|role|session]
+bobi costs [--by model|role|session]
 ```
 
 This is accounting; it applies regardless of which axis a model call came from.

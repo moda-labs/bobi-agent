@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# provision-instance.sh — stand up one modastack instance on Fly Machines (C10 / #340).
+# provision-instance.sh — stand up one bobi instance on Fly Machines (C10 / #340).
 #
-# A modastack instance is: one container image + one persistent volume (mounted
+# A bobi instance is: one container image + one persistent volume (mounted
 # as project root and $HOME) + a set of env vars + an outbound WSS connection to
 # one event-server deployment. Nothing reaches in; it reaches out only.
 # See docs/design/CONTAINERIZED_INSTANCES.md §2 (the instance contract).
@@ -18,15 +18,15 @@
 #     at boot (#240 bubble model — subagent.py:ensure_bubble/register). The
 #     provisioner's only event-server job is to hand the instance the Worker URL.
 #   * It never writes the volume's agent.yaml. After first boot installs the team
-#     (entrypoint, MODASTACK_TEAM), the volume config is the source of truth — a
+#     (entrypoint, BOBI_TEAM), the volume config is the source of truth — a
 #     reprovision must not clobber workspace edits (that's why this only sets env
 #     + secrets, never project files).
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # OPERATOR-AGNOSTIC (design §9.1): no moda-labs assumptions are baked in.
 #   * --app is the FULL, globally-unique Fly app name. Fly names are unique across
-#     all of Fly, so operator-namespace it (e.g. acme-modastack-eng); there is no
-#     fixed "modastack-<name>" that would squat on someone else's account.
+#     all of Fly, so operator-namespace it (e.g. acme-bobi-eng); there is no
+#     fixed "bobi-<name>" that would squat on someone else's account.
 #   * --event-server is a parameter. It defaults to the shared moda-labs Worker
 #     only as a convenience; point it at YOUR OWN Worker to run standalone.
 #
@@ -40,7 +40,7 @@
 #     npx wrangler deploy                # prints https://<name>.<you>.workers.dev
 #
 #   Then pass that URL:
-#     scripts/provision-instance.sh --app you-modastack-eng --team eng-team \
+#     scripts/provision-instance.sh --app you-bobi-eng --team eng-team \
 #       --event-server https://<name>.<you>.workers.dev --env-file ./instance.env
 #
 #   The URL MUST be https:// (or a loopback) — the bubble key is transmitted once
@@ -52,41 +52,41 @@
 #
 # Required:
 #   --app APP            Globally-unique Fly app name (operator-namespaced).
-#   --team TEAM          Team to install on first boot (MODASTACK_TEAM). Resolves
+#   --team TEAM          Team to install on first boot (BOBI_TEAM). Resolves
 #                        only a name/path the INSTANCE can already see (e.g. a
 #                        volume path) — there is NO team registry in the image, so
 #                        a bare name won't resolve at boot; the entrypoint fails
 #                        loud and tells you to use --team-url. For a published
-#                        team use --team-url; for a local package, `modastack
+#                        team use --team-url; for a local package, `bobi
 #                        deploy` ssh-pushes it (no team source on the instance).
 #       …or…
 #   --team-url URL       Public .tar.gz URL of one team package, fetched at first
-#                        boot (MODASTACK_TEAM_URL). The dark instance pulls it over
+#                        boot (BOBI_TEAM_URL). The dark instance pulls it over
 #                        HTTPS — works with a GitHub release/raw asset or your own
 #                        server, and is restageable later by swapping the asset.
 #       …or…
 #   --blank              Provision with NO team source. The instance boots into the
 #                        "wait for team" state (entrypoint §3) and holds until a team
 #                        is pushed in over `fly ssh` — the ssh-push delivery path that
-#                        `modastack deploy` uses for a LOCAL team package. Use this
+#                        `bobi deploy` uses for a LOCAL team package. Use this
 #                        instead of --team/--team-url; the caller pushes the team next.
 #                        Provide exactly one of --team / --team-url / --blank.
 #   --env-file FILE      KEY=VALUE file of service tokens (SLACK_BOT_TOKEN, GITHUB_TOKEN,
 #                        LINEAR_API_KEY, VENN_API_KEY, ...). In api_key mode it must also
 #                        contain ANTHROPIC_API_KEY; in subscription mode it must NOT.
-#                        Tokens are set as Fly secrets. Any MODASTACK_* keys in the file
+#                        Tokens are set as Fly secrets. Any BOBI_* keys in the file
 #                        are treated as plaintext [env], overridden by the flags below.
 #
 # Options:
 #   --fleet PREFIX       Operator/fleet namespace stamped into the instance as
-#                        MODASTACK_FLEET. The fleet-state primitive: enumerate a
+#                        BOBI_FLEET. The fleet-state primitive: enumerate a
 #                        fleet by `fly apps list` filtered on this stamp (the C22
 #                        GitOps Action and any future provisioner service share it).
 #                        Default: the leading dash-segment of --app (e.g. --app
-#                        acme-modastack-eng ⇒ fleet "acme"). Pass explicitly when
+#                        acme-bobi-eng ⇒ fleet "acme"). Pass explicitly when
 #                        the app name's first segment isn't your fleet namespace.
-#   --instance NAME      Per-instance identity stamped as MODASTACK_INSTANCE — the
-#                        SaaS tenant key (enumerable in [env] next to MODASTACK_FLEET).
+#   --instance NAME      Per-instance identity stamped as BOBI_INSTANCE — the
+#                        SaaS tenant key (enumerable in [env] next to BOBI_FLEET).
 #                        Default: the app name with the "<fleet>-" prefix stripped.
 #   --auth MODE          api_key (default) | subscription. See §6.1.
 #   --event-server URL   Worker URL (https://). Default: the shared moda-labs Worker.
@@ -96,7 +96,7 @@
 #   --memory SIZE        Machine memory, e.g. 4gb (default), 8gb for heavy teams.
 #   --cpus N             Shared vCPUs. Default: 2 (shared-cpu-2x at 4gb).
 #   --login-channel ID   subscription mode only: private Slack channel ID for the
-#                        first-boot login bootstrap (C23, MODASTACK_LOGIN_CHANNEL).
+#                        first-boot login bootstrap (C23, BOBI_LOGIN_CHANNEL).
 #   --claude-version V   Pin the claude CLI version baked into the image (build-arg).
 #   --image REF          Deploy a prebuilt image by ref (e.g. a team-flavored
 #                        image from CI) instead of building. Skips the build
@@ -111,11 +111,11 @@
 #
 # Examples:
 #   # api_key instance against the shared Worker
-#   scripts/provision-instance.sh --app acme-modastack-eng --team eng-team \
+#   scripts/provision-instance.sh --app acme-bobi-eng --team eng-team \
 #     --env-file ./eng.env --region sjc
 #
 #   # subscription (internal dogfood) instance, own Worker, first-boot Slack login
-#   scripts/provision-instance.sh --app acme-modastack-dog --team eng-team \
+#   scripts/provision-instance.sh --app acme-bobi-dog --team eng-team \
 #     --auth subscription --event-server https://ev.acme.workers.dev \
 #     --login-channel C0PRIVATE --env-file ./dog.env
 #
@@ -125,7 +125,7 @@ set -euo pipefail
 
 # Default event server: the shared moda-labs Worker. Override with --event-server
 # (and BRING YOUR OWN EVENT SERVER above) to run independently.
-DEFAULT_EVENT_SERVER="https://modastack-events.modalabs.workers.dev"
+DEFAULT_EVENT_SERVER="https://bobi-events.modalabs.workers.dev"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -134,7 +134,7 @@ APP="" TEAM="" TEAM_URL="" BLANK="0" ENV_FILE="" AUTH="api_key" FLEET="" INSTANC
 EVENT_SERVER="$DEFAULT_EVENT_SERVER"
 REGION="iad" ORG="" VOLUME_SIZE="15" MEMORY="4gb" CPUS="2"
 LOGIN_CHANNEL="" CLAUDE_VERSION="" VOLUME_NAME="data" ASSUME_YES="0" BRAIN=""
-# Build context + Dockerfile default to the repo (source build); `modastack
+# Build context + Dockerfile default to the repo (source build); `bobi
 # deploy` overrides them to a packaged context (Dockerfile.pypi, PyPI install)
 # in binary mode, so deploy needs no checkout. --build-arg K=V is repeatable.
 BUILD_CONTEXT="" DOCKERFILE=""
@@ -142,7 +142,7 @@ BUILD_CONTEXT="" DOCKERFILE=""
 # building one — the build context/Dockerfile/build-args are then unused.
 IMAGE=""
 # --local-build builds the image with local buildkit (--local-only, gzip layers)
-# instead of Fly's remote builder — the path `modastack deploy` takes on a
+# instead of Fly's remote builder — the path `bobi deploy` takes on a
 # macOS/Docker-Desktop laptop, where the remote builder is unreliable (#387).
 # DOCKER_HOST is supplied by the caller's env (deploy.py resolves it).
 LOCAL_BUILD=""
@@ -224,7 +224,7 @@ fi
 [ -n "$ENV_FILE" ] || fatal "--env-file is required (KEY=VALUE service tokens)."
 [ -f "$ENV_FILE" ] || fatal "--env-file '$ENV_FILE' not found."
 # Build context + Dockerfile: default to the repo (source build) unless the
-# caller passed a packaged context (binary-mode `modastack deploy`). Skipped
+# caller passed a packaged context (binary-mode `bobi deploy`). Skipped
 # entirely in --image mode (a prebuilt image is deployed, nothing is built).
 if [ -z "$IMAGE" ]; then
   [ -n "$BUILD_CONTEXT" ] || BUILD_CONTEXT="$REPO_ROOT"
@@ -261,8 +261,8 @@ if ! "$FLY" auth whoami >/dev/null 2>&1; then
   fatal "Not logged in to Fly. Run: $FLY auth login"
 fi
 
-# --- parse the env file: secrets vs MODASTACK_* identity --------------------
-# Anything MODASTACK_* is plaintext instance identity → fly.toml [env].
+# --- parse the env file: secrets vs BOBI_* identity --------------------
+# Anything BOBI_* is plaintext instance identity → fly.toml [env].
 # Everything else is sensitive → fly secrets. Flag-provided identity wins.
 declare -a SECRET_ARGS=()
 declare -A ENV_FROM_FILE=()
@@ -274,7 +274,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   key="${line%%=*}"; val="${line#*=}"
   key="$(echo -n "$key" | tr -d '[:space:]')"
   [ -n "$key" ] || continue
-  if [[ "$key" == MODASTACK_* ]]; then
+  if [[ "$key" == BOBI_* ]]; then
     ENV_FROM_FILE["$key"]="$val"
     continue
   fi
@@ -291,40 +291,40 @@ else
   # and bills the API instead — it must be entirely absent (§6.1).
   [ "$HAS_AUTH_KEY" = "0" ] \
     || fatal "--auth subscription but $AUTH_KEY is in $ENV_FILE. Remove it (it overrides subscription auth)."
-  [ -n "$LOGIN_CHANNEL" ] || [ -n "${ENV_FROM_FILE[MODASTACK_LOGIN_CHANNEL]:-}" ] \
+  [ -n "$LOGIN_CHANNEL" ] || [ -n "${ENV_FROM_FILE[BOBI_LOGIN_CHANNEL]:-}" ] \
     || log "WARNING: subscription mode without --login-channel. First-boot login (C23) will have no Slack channel; fall back to: $FLY ssh console -a $APP --command '$LOGIN_FALLBACK_CMD'"
 fi
 
 # --- assemble the instance's [env] identity ---------------------------------
-# eng-team's agent.yaml references ${MODASTACK_EVENT_SERVER}; that is the var the
+# eng-team's agent.yaml references ${BOBI_EVENT_SERVER}; that is the var the
 # image resolves the Worker URL from (config.py interpolates ${VAR} at load).
 declare -A ENV_VARS=()
 for k in "${!ENV_FROM_FILE[@]}"; do ENV_VARS["$k"]="${ENV_FROM_FILE[$k]}"; done
-[ -n "$TEAM" ]     && ENV_VARS["MODASTACK_TEAM"]="$TEAM"
-[ -n "$TEAM_URL" ] && ENV_VARS["MODASTACK_TEAM_URL"]="$TEAM_URL"
-ENV_VARS["MODASTACK_AUTH"]="$AUTH"
-ENV_VARS["MODASTACK_EVENT_SERVER"]="$EVENT_SERVER"
+[ -n "$TEAM" ]     && ENV_VARS["BOBI_TEAM"]="$TEAM"
+[ -n "$TEAM_URL" ] && ENV_VARS["BOBI_TEAM_URL"]="$TEAM_URL"
+ENV_VARS["BOBI_AUTH"]="$AUTH"
+ENV_VARS["BOBI_EVENT_SERVER"]="$EVENT_SERVER"
 # Fleet-membership stamp: this is the authoritative fleet-state key (the app name
 # is only a discovery hint). Enumerate a fleet by reading this back per app
 # (`fly config env`/`scripts/fleet.sh`), so two fleets can share one Fly org and
-# a future MODASTACK_TENANT filter slots into the same [env] block (design §9.1).
-ENV_VARS["MODASTACK_FLEET"]="$FLEET"
-# Per-instance identity (the SaaS tenant key). Enumerable alongside MODASTACK_FLEET;
-# `modastack deploy <name>` stamps and reads this back to find the app for <name>.
-ENV_VARS["MODASTACK_INSTANCE"]="$INSTANCE"
-[ -n "$LOGIN_CHANNEL" ] && ENV_VARS["MODASTACK_LOGIN_CHANNEL"]="$LOGIN_CHANNEL"
+# a future BOBI_TENANT filter slots into the same [env] block (design §9.1).
+ENV_VARS["BOBI_FLEET"]="$FLEET"
+# Per-instance identity (the SaaS tenant key). Enumerable alongside BOBI_FLEET;
+# `bobi deploy <name>` stamps and reads this back to find the app for <name>.
+ENV_VARS["BOBI_INSTANCE"]="$INSTANCE"
+[ -n "$LOGIN_CHANNEL" ] && ENV_VARS["BOBI_LOGIN_CHANNEL"]="$LOGIN_CHANNEL"
 # The agent brain (#485): the entrypoint reads it to branch credential dir +
 # first-boot login; get_brain() reads it to select the runtime adapter.
-[ -n "$BRAIN" ] && ENV_VARS["MODASTACK_BRAIN"]="$BRAIN"
+[ -n "$BRAIN" ] && ENV_VARS["BOBI_BRAIN"]="$BRAIN"
 # NB: the agent UI is on by default in the container (docker-entrypoint.sh sets
-# MODASTACK_UI=1), so it is NOT a provisioned [env] flag. Set MODASTACK_UI=0 here
+# BOBI_UI=1), so it is NOT a provisioned [env] flag. Set BOBI_UI=0 here
 # (or as a Fly env) only to disable it for an instance.
 
 # --- confirm ----------------------------------------------------------------
 echo
 echo "  Fly app        : $APP${ORG:+  (org: $ORG)}"
-echo "  Fleet          : $FLEET  (MODASTACK_FLEET stamp)"
-echo "  Instance       : $INSTANCE  (MODASTACK_INSTANCE stamp)"
+echo "  Fleet          : $FLEET  (BOBI_FLEET stamp)"
+echo "  Instance       : $INSTANCE  (BOBI_INSTANCE stamp)"
 echo "  Region         : $REGION"
 if [ "$BLANK" = "1" ]; then
   echo "  Team           : (blank — waits for an ssh-pushed team)"
@@ -384,7 +384,7 @@ trap 'rm -f "$CFG"' EXIT
   # NB: the Dockerfile is passed via `fly deploy --dockerfile`, not a
   # `[build] dockerfile = …` key — Fly resolves that key relative to THIS
   # config file's directory (a temp dir), where the Dockerfile isn't.
-  # Build args: CLAUDE_VERSION (pin) + any --build-arg (e.g. MODASTACK_VERSION,
+  # Build args: CLAUDE_VERSION (pin) + any --build-arg (e.g. BOBI_VERSION,
   # which the PyPI image installs). Emitted as a [build.args] TOML table. In
   # --image mode nothing is built, so the build table is omitted.
   if [ -z "$IMAGE" ] && { [ -n "$CLAUDE_VERSION" ] || [ "${#BUILD_ARGS[@]}" -gt 0 ]; }; then
@@ -419,8 +419,8 @@ sed 's/^/    /' "$CFG"
 # --- 5. deploy --------------------------------------------------------------
 # --remote-only builds the image on Fly's builders (no local Docker needed).
 # Build context + --dockerfile default to the repo (source build) but are
-# overridable (--build-context/--dockerfile): binary-mode `modastack deploy`
-# points them at a packaged context whose Dockerfile.pypi installs modastack from
+# overridable (--build-context/--dockerfile): binary-mode `bobi deploy`
+# points them at a packaged context whose Dockerfile.pypi installs bobi from
 # PyPI, so no checkout is needed. The generated config lives in a temp dir, so
 # the Dockerfile is pointed at explicitly rather than via a relative key.
 #
@@ -433,7 +433,7 @@ sed 's/^/    /' "$CFG"
 #
 # Build mode: --remote-only (default) builds on Fly's builders — correct for
 # CI/GitOps and any host with a working Docker daemon at /var/run/docker.sock.
-# --local-build flips to --local-only (local buildkit), the path `modastack
+# --local-build flips to --local-only (local buildkit), the path `bobi
 # deploy` takes on a macOS/Docker-Desktop laptop where the remote builder is
 # unreliable (#387). Local buildkit also emits gzip layers, so --depot=false is
 # moot but harmless there; we keep it for a single, consistent flag set.
@@ -466,13 +466,13 @@ echo
 log "Done. Instance '$APP' is provisioning."
 echo "  Logs   : $FLY logs -a $APP"
 echo "  Status : $FLY status -a $APP"
-# An ssh session lands in / (WORKDIR), but modastack discovers the project by
+# An ssh session lands in / (WORKDIR), but bobi discovers the project by
 # walking up from cwd — so cd into it (as the volume's uid-10001 owner) first.
-echo "  Admin  : $FLY ssh console -a $APP --command 'gosu modastack env HOME=/home/modastack CLAUDE_CONFIG_DIR=/data/claude bash -c \"cd /data/project && modastack status\"'"
+echo "  Admin  : $FLY ssh console -a $APP --command 'gosu bobi env HOME=/home/bobi CLAUDE_CONFIG_DIR=/data/claude bash -c \"cd /data/project && bobi status\"'"
 if [ "$AUTH" = "subscription" ]; then
   echo
   echo "  Subscription first boot: the entrypoint posts a login URL to the private"
-  echo "  Slack channel ${LOGIN_CHANNEL:-<MODASTACK_LOGIN_CHANNEL>}; open it, log in, and paste the code back in"
+  echo "  Slack channel ${LOGIN_CHANNEL:-<BOBI_LOGIN_CHANNEL>}; open it, log in, and paste the code back in"
   echo "  that channel (C23). Manual fallback:"
   echo "    $FLY ssh console -a $APP --command 'env CLAUDE_CONFIG_DIR=/data/claude claude auth login --claudeai'"
 fi

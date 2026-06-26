@@ -4,8 +4,8 @@ routing, the streaming reply splitter, and a full hermetic turn."""
 import asyncio
 import json
 
-from modastack.setup import digestion
-from modastack.setup.digestion import (
+from bobi.setup import digestion
+from bobi.setup.digestion import (
     SPEC_SENTINEL,
     DigestionResult,
     _ReplySplitter,
@@ -13,7 +13,7 @@ from modastack.setup.digestion import (
     assemble_context,
     parse_digestion,
 )
-from modastack.setup.state import Readiness, SetupState
+from bobi.setup.state import Readiness, SetupState
 
 
 def _run(coro):
@@ -158,7 +158,7 @@ class TestReplySplitter:
 
     def test_holds_back_split_sentinel(self):
         sp = _ReplySplitter(SPEC_SENTINEL)
-        chunks = ["reply text", "\n===MODA", "STACK-SPEC===\n", '{"summary":"s"}']
+        chunks = ["reply text", "\n===BO", "BI-SPEC===\n", '{"summary":"s"}']
         emitted = "".join(sp.feed(c) for c in chunks) + sp.flush()
         assert emitted == "reply text\n"
         assert sp.text.endswith('{"summary":"s"}')

@@ -159,7 +159,7 @@ class TestReleaseTimeOnlyVersionConvention:
     """Feature PRs must never bump the version or edit the changelog.
 
     Issue #325: version bumps and CHANGELOG.md entries are a release-time
-    concern only — modastack's own contributor convention, documented in
+    concern only — bobi's own contributor convention, documented in
     CLAUDE.md. These tests fail if the documented convention regresses.
 
     The *engineer-prompt* side of this guard (telling the engineer to revert

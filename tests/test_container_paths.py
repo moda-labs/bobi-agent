@@ -1,6 +1,6 @@
 """Container-safety contract for path/CLI assumptions (containerized-1, #332).
 
-A modastack instance runs in a Linux container with a volume-mounted ``$HOME``
+A bobi instance runs in a Linux container with a volume-mounted ``$HOME``
 and the pinned ``claude`` CLI on ``PATH`` (see
 ``docs/design/CONTAINERIZED_INSTANCES.md`` C1/C8). Two things must hold:
 
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from modastack import sdk
+from bobi import sdk
 
 PACKAGE_ROOT = Path(sdk.__file__).resolve().parent
 REPO_ROOT = PACKAGE_ROOT.parent
@@ -84,9 +84,9 @@ class TestNoUnguardedMacosPaths:
 
 
 class TestContainerCliPath:
-    def test_modastack_cli_is_on_codex_sanitized_path(self):
+    def test_bobi_cli_is_on_codex_sanitized_path(self):
         """Codex tool shells keep /usr/local/bin but may drop /opt/venv/bin."""
         dockerfile = (REPO_ROOT / "Dockerfile").read_text()
-        assert "> /usr/local/bin/modastack" in dockerfile
-        assert "/home/modastack/.local/bin/modastack" in dockerfile
-        assert 'exec /opt/venv/bin/modastack "$@"' in dockerfile
+        assert "> /usr/local/bin/bobi" in dockerfile
+        assert "/home/bobi/.local/bin/bobi" in dockerfile
+        assert 'exec /opt/venv/bin/bobi "$@"' in dockerfile

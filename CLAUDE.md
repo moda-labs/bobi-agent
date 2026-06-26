@@ -1,4 +1,4 @@
-# modastack
+# bobi
 
 Event-driven AI agent framework. Spawn persistent agents that subscribe
 to real-world events, react autonomously, and stay interactive. Domain
@@ -7,13 +7,13 @@ behavior comes from agent teams — the framework has no topology opinions.
 ## Install
 
 ```bash
-uv tool install modastack
+uv tool install bobi
 ```
 
 For development:
 
 ```bash
-cd ~/dev/modastack
+cd ~/dev/bobi
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
@@ -21,58 +21,58 @@ pip install -e ".[dev]"
 ## Commands
 
 ```bash
-modastack setup                   # interactive onboarding: design, build, and install a team
-modastack install <path>          # install an agent team from a local path or registry
-modastack start                   # start the installed agent
-modastack stop                    # stop the running instance
-modastack restart                 # stop and restart
-modastack start --fresh           # wipe session and start clean
+bobi setup                   # interactive onboarding: design, build, and install a team
+bobi install <path>          # install an agent team from a local path or registry
+bobi start                   # start the installed agent
+bobi stop                    # stop the running instance
+bobi restart                 # stop and restart
+bobi start --fresh           # wipe session and start clean
 
-modastack agents launch -w W --role R --task T  # launch an agent
-modastack agents list             # list active agents
-modastack agents show <id>        # inspect a specific agent
-modastack agents cancel <id>      # cancel a running agent
-modastack agents browse           # browse remote agent registry
-modastack agents update <name>    # update agent teams from remote
-modastack agents add-registry <repo>  # add a remote registry
+bobi agents launch -w W --role R --task T  # launch an agent
+bobi agents list             # list active agents
+bobi agents show <id>        # inspect a specific agent
+bobi agents cancel <id>      # cancel a running agent
+bobi agents browse           # browse remote agent registry
+bobi agents update <name>    # update agent teams from remote
+bobi agents add-registry <repo>  # add a remote registry
 
-modastack ask "question"          # ask an agent, block until response
-modastack message "text"          # inject a message into any session
-modastack compact                 # flush + rotate a session's context now (default: manager)
-modastack status                  # show active agents
-modastack events                  # show recent events and decisions
-modastack transcript show <sess>  # session transcript
-modastack transcript search <q>   # search conversation history
-modastack doctor                  # system health check
+bobi ask "question"          # ask an agent, block until response
+bobi message "text"          # inject a message into any session
+bobi compact                 # flush + rotate a session's context now (default: manager)
+bobi status                  # show active agents
+bobi events                  # show recent events and decisions
+bobi transcript show <sess>  # session transcript
+bobi transcript search <q>   # search conversation history
+bobi doctor                  # system health check
 
-modastack workflows list          # list available workflows
-modastack workflows status        # show active workflow runs
-modastack workflows validate <f>  # validate a workflow YAML
-modastack monitors list           # list background monitors
-modastack monitors add <name>     # add a monitor
-modastack monitors pause <name>   # disable a monitor
-modastack monitors remove <name>  # remove a user-added monitor
-modastack roles list              # list available agent roles
-modastack create-slack-bot        # generate a Slack app manifest + one-click create link
+bobi workflows list          # list available workflows
+bobi workflows status        # show active workflow runs
+bobi workflows validate <f>  # validate a workflow YAML
+bobi monitors list           # list background monitors
+bobi monitors add <name>     # add a monitor
+bobi monitors pause <name>   # disable a monitor
+bobi monitors remove <name>  # remove a user-added monitor
+bobi roles list              # list available agent roles
+bobi create-slack-bot        # generate a Slack app manifest + one-click create link
 
-modastack kb create <name>        # create a named knowledge base
-modastack kb add <name> --file F  # index a file into a KB
-modastack kb add <name> --text T  # add inline text to a KB
-modastack kb search <name> "q"    # hybrid FTS + semantic search
-modastack kb list                 # list all knowledge bases
-modastack kb info <name>          # show KB statistics
-modastack kb remove <name>        # delete a knowledge base
+bobi kb create <name>        # create a named knowledge base
+bobi kb add <name> --file F  # index a file into a KB
+bobi kb add <name> --text T  # add inline text to a KB
+bobi kb search <name> "q"    # hybrid FTS + semantic search
+bobi kb list                 # list all knowledge bases
+bobi kb info <name>          # show KB statistics
+bobi kb remove <name>        # delete a knowledge base
 
-modastack costs                   # show cost attribution by provider
-modastack costs --by model        # group by model
-modastack costs --by role         # group by agent role
-modastack costs --by session      # group by session
+bobi costs                   # show cost attribution by provider
+bobi costs --by model        # group by model
+bobi costs --by role         # group by agent role
+bobi costs --by session      # group by session
 
-modastack skill                   # print the modastack usage guide
-modastack skill <name>            # print a specific skill guide
+bobi skill                   # print the bobi usage guide
+bobi skill <name>            # print a specific skill guide
 
-modastack event-server start      # start the local event server
-modastack event-server stop       # stop the local event server
+bobi event-server start      # start the local event server
+bobi event-server stop       # stop the local event server
 ```
 
 ## Architecture
@@ -83,9 +83,9 @@ local Node.js). The event server supports topic-based pub/sub plus
 webhook ingestion for GitHub, Linear, Slack, and any custom source.
 
 ```
-modastack/                        # Framework (Python package)
+bobi/                        # Framework (Python package)
 ├── cli.py                        # Click CLI entrypoint
-├── config.py                     # Per-project config (.modastack/agent.yaml)
+├── config.py                     # Per-project config (.bobi/agent.yaml)
 ├── session.py                    # Brain session + inbox drain loop
 ├── subagent.py                   # Agent executor (blocking + detached)
 ├── sdk.py                        # Session registry, activity logging
@@ -119,9 +119,9 @@ modastack/                        # Framework (Python package)
     ├── checks.py                 # Native check runners (pr_conflicts, stale_prs)
     └── scheduler.py              # Interval scheduler; sole dedup + publish path for findings
 
-skills/                           # Claude Code skill files (also in modastack/skills/ as package data)
+skills/                           # Claude Code skill files (also in bobi/skills/ as package data)
 ├── create-agent.md               # Guide for designing new agent teams
-├── modastack.md                  # Guide for using modastack
+├── bobi.md                  # Guide for using bobi
 ├── linear-setup.md               # Linear API key setup
 └── slack-setup.md                # Slack bot setup
 
@@ -144,9 +144,9 @@ agents/                           # Agent teams (portable agent definitions)
                                   # Moda's house team = `from: eng-team` +
                                   # overlay, in the private moda-agent-teams repo.
 
-.modastack/                       # Per-project installed agent + runtime state
+.bobi/                       # Per-project installed agent + runtime state
 ├── agent.yaml                    # Installed config (check-in-able, ${VAR} refs for secrets)
-├── .env                          # Secrets (gitignored, created by `modastack install`)
+├── .env                          # Secrets (gitignored, created by `bobi install`)
 ├── .gitignore                    # Ignores .env
 ├── roles/                        # Installed role prompts
 ├── tools/                        # Installed tool guides
@@ -168,13 +168,13 @@ for a domain.
 
 **Resolution order:**
 1. `<project>/agents/<name>/` — project-level (checked in)
-2. `<project>/.modastack/agents/<name>/` — local agents (overrides + cached)
+2. `<project>/.bobi/agents/<name>/` — local agents (overrides + cached)
 
 **Inheritance (`from:`).** A team may declare `from: <base-team>` and contribute
-only its delta — Docker-style composition (`modastack/compose.py`, #446/#451). At
+only its delta — Docker-style composition (`bobi/compose.py`, #446/#451). At
 **install/deploy time**, compose walks the `from:` chain (`base → … → leaf`,
 local-always-wins + fail-fast on a pin mismatch) and freezes one flat
-`.modastack/` image: prose surfaces (agent.md, ROLE.md) **concatenate** in chain
+`.bobi/` image: prose surfaces (agent.md, ROLE.md) **concatenate** in chain
 order (`replace: true` frontmatter to override); structured surfaces (tools,
 workflows, monitors, agent.yaml) **deep-merge by key** (`build` deps accrete,
 `prune:` removes inherited items). Nothing downstream learns about layers — the
@@ -184,16 +184,16 @@ registry-only at locked versions for reproducible CI/deploy. The pristine
 `from: eng-team` + an overlay in the private `moda-agent-teams` repo.
 
 **Role prompts** are read by the runtime resolver from the frozen
-`<project>/.modastack/roles/<role>/ROLE.md` — which is now compose **output**.
+`<project>/.bobi/roles/<role>/ROLE.md` — which is now compose **output**.
 Customize by editing the leaf team source (or adding a `replace: true` overlay
-ROLE.md), not by dropping an override into `.modastack/`.
+ROLE.md), not by dropping an override into `.bobi/`.
 
 **Tools** are markdown service guides in `tools/`. All tools load into
 every role's context. In a `from:` chain, later layers' tools override
 earlier ones by filename.
 
 **Tool library** (`tool_library:` in `agent.yaml`) is an opt-in catalog of
-baked CLI tools (`modastack/tool_library/`). A team lists entries by id
+baked CLI tools (`bobi/tool_library/`). A team lists entries by id
 (`tool_library: [codex, venn]`) and `compose.py` expands each into its
 `requires:` + `build:` + a `tools/<id>.md` guide at build time — one pinned
 definition + one guide, reusable across teams, with the pin de-duped to a
@@ -204,7 +204,7 @@ consumed at compose and never emitted. See `docs/specs/416-tool-library.md`.
 
 **Context** files in `context/` are team-shipped reference content
 (rubrics, methodology, examples). Installed frozen to
-`.modastack/context/`; agents get an index (path + first line) in their
+`.bobi/context/`; agents get an index (path + first line) in their
 prompt and read files on demand — contents are never inlined.
 
 **Workspace** files in `workspace/` are user-owned domain content and
@@ -218,7 +218,7 @@ prompts, not the framework.
 YAML DAGs with three step types: **prompt** (agent executes + writes
 handoff), **route** (deterministic branch on handoff value), **await**
 (suspend until external event). Loaded exclusively from the installed
-pack image at `.modastack/workflows/`.
+pack image at `.bobi/workflows/`.
 
 See `skills/create-agent.md` for the full YAML reference.
 
@@ -237,7 +237,7 @@ The **`policy-curator`** (`curator: true`) is the one flavor whose check
 agent **writes an artifact** instead of returning a verdict: it distills new
 agent transcripts (windowed on `messages.id` since a success-advanced cursor,
 under a per-run input cap) into the team-scoped, capped, rewritten-in-place
-`.modastack/state/policy.md` — the curated learning substrate that replaces the
+`.bobi/state/policy.md` — the curated learning substrate that replaces the
 old append-only decision log, injected read-only into every agent's prompt as
 `## Team Policy`. On a rewrite it publishes `policy.updated`; delivery is
 passive by default (agents re-read on their next prompt), with an inbox push
@@ -250,15 +250,15 @@ the one inside it structurally cannot (#464):
 
 ```
 Fly Machines init (machine restart policy)     ← outermost backstop (process death)
-  └─ modastack supervise (self-heal watchdog)   ← restarts a wedged DIRECTOR
-       └─ modastack start (manager process)
+  └─ bobi supervise (self-heal watchdog)   ← restarts a wedged DIRECTOR
+       └─ bobi start (manager process)
             └─ director session (claude subprocess)
                  └─ stall-recovery (director→ENGINEER)  ← restarts wedged engineers
 ```
 
 - **stall-recovery** runs inside the director and recovers stalled *engineer*
   sessions; it cannot recover the director itself.
-- **`modastack supervise`** (`modastack/watchdog.py`) is the layer below the
+- **`bobi supervise`** (`bobi/watchdog.py`) is the layer below the
   director: the container entrypoint runs it as the parent, it spawns the
   manager as a child, and it polls the `/health` endpoint's `manager` block
   (`status` + server-derived `idle_seconds`). It restarts the manager **iff the
@@ -276,25 +276,25 @@ Fly Machines init (machine restart policy)     ← outermost backstop (process d
 ### Handoff contract
 
 Each workflow step writes a handoff to
-`<project>/.modastack/sessions/<session>/handoff-<step>.yaml`.
+`<project>/.bobi/sessions/<session>/handoff-<step>.yaml`.
 The orchestrator validates required fields and injects values into
 the variable context for downstream steps.
 
 ### Config
 
-All config is per-project. No global `~/.modastack/` directory — each
+All config is per-project. No global `~/.bobi/` directory — each
 project is fully self-contained.
 
-- `.modastack/agent.yaml` — check-in-able. Declares agent, roles,
+- `.bobi/agent.yaml` — check-in-able. Declares agent, roles,
   services, entry point, monitors. Secrets use `${ENV_VAR}` references.
   Optional `brain: {kind: claude|codex|…}` picks the agent brain (#485;
   default claude).
-- `.modastack/.env` — gitignored. Holds `SLACK_BOT_TOKEN`,
-  `LINEAR_API_KEY`, `VENN_API_KEY`, etc. Created by `modastack install`.
-- `.modastack/roles/`, `tools/`, `workflows/`, `monitors/` — installed
-  from the agent team by `modastack install`.
+- `.bobi/.env` — gitignored. Holds `SLACK_BOT_TOKEN`,
+  `LINEAR_API_KEY`, `VENN_API_KEY`, etc. Created by `bobi install`.
+- `.bobi/roles/`, `tools/`, `workflows/`, `monitors/` — installed
+  from the agent team by `bobi install`.
 
-Per-project overrides in `.modastack/` for roles, workflows, monitors,
+Per-project overrides in `.bobi/` for roles, workflows, monitors,
 and tools.
 
 ## Tests
@@ -315,14 +315,14 @@ first, then the fix makes it pass. No exceptions.
 
 `docs/TICKET_STATE.md` is the living overview of all open GitHub issues —
 tracks/epics, what's blocked vs. ready, and which one-offs are ready to hand to
-the `modastack` bot. **Keep it current:** whenever an issue is opened, closed,
+the `bobi` bot. **Keep it current:** whenever an issue is opened, closed,
 assigned, unblocked, or moves tracks during a session, update the relevant table
 there in the same session, and bump its "Last reviewed" date + open-count. Read
 it first when asked about the state of the work or what to pick up next.
 
-## Design System (modastack setup web UI)
+## Design System (bobi setup web UI)
 
-Before any visual or UX decision on the `modastack setup` web UI, read `DESIGN.md`
+Before any visual or UX decision on the `bobi setup` web UI, read `DESIGN.md`
 at the repo root. It defines the design direction (warm light chrome + single
 dark CRT slab, mono-accented identity, system-fonts-only, static space-retro),
 the mode-aware stage machine, the policy/customization model, and the

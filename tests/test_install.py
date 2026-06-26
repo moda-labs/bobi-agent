@@ -1,6 +1,6 @@
 """Tests for frozen-image pack install.
 
-.modastack/ mimics a runtime installation: install regenerates it
+.bobi/ mimics a runtime installation: install regenerates it
 verbatim from the pack source — no merge with prior installed state.
 Variance enters via ${VAR}/.env only. The install manifest lets doctor
 flag hand-edits before a reinstall silently destroys them.
@@ -13,9 +13,9 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-from modastack.cli import _install_pack, _write_install_gitignore, main
-from modastack.config import parse_env_file
-from modastack.doctor import _check_install_integrity
+from bobi.cli import _install_pack, _write_install_gitignore, main
+from bobi.config import parse_env_file
+from bobi.doctor import _check_install_integrity
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def pack(tmp_path):
     (pack_dir / "workflows").mkdir()
     (pack_dir / "workflows" / "adhoc.yaml").write_text("steps: []\n")
     pack_dir.joinpath("agent.yaml").write_text(
-        "version: '1.0'\nentry_point: manager\nevent_server: ${MODASTACK_EVENT_SERVER}\n"
+        "version: '1.0'\nentry_point: manager\nevent_server: ${BOBI_EVENT_SERVER}\n"
     )
     pack_dir.joinpath("agent.md").write_text("# my-team\n")
     (pack_dir / "context").mkdir()
@@ -47,44 +47,44 @@ def project(tmp_path):
 
 def test_install_writes_pack_yaml_verbatim_plus_name(pack, project):
     _install_pack(pack, project)
-    cfg = yaml.safe_load((project / ".modastack" / "agent.yaml").read_text())
+    cfg = yaml.safe_load((project / ".bobi" / "agent.yaml").read_text())
     assert cfg["entry_point"] == "manager"
-    assert cfg["event_server"] == "${MODASTACK_EVENT_SERVER}"
+    assert cfg["event_server"] == "${BOBI_EVENT_SERVER}"
     assert cfg["agent"] == "my-team"
 
 
 def test_reinstall_discards_hand_edits(pack, project):
     """The installed image is frozen — reinstall restores pack content."""
     _install_pack(pack, project)
-    installed = project / ".modastack" / "agent.yaml"
+    installed = project / ".bobi" / "agent.yaml"
     cfg = yaml.safe_load(installed.read_text())
     cfg["entry_point"] = "director"
     cfg["subscribe"] = ["github:o/r"]
     installed.write_text(yaml.dump(cfg))
-    (project / ".modastack" / "roles" / "manager" / "ROLE.md").write_text("edited\n")
+    (project / ".bobi" / "roles" / "manager" / "ROLE.md").write_text("edited\n")
 
     _install_pack(pack, project)
 
     cfg = yaml.safe_load(installed.read_text())
     assert cfg["entry_point"] == "manager"
     assert "subscribe" not in cfg
-    role = project / ".modastack" / "roles" / "manager" / "ROLE.md"
+    role = project / ".bobi" / "roles" / "manager" / "ROLE.md"
     assert role.read_text() == "# Manager\n"
 
 
 def test_install_is_idempotent(pack, project):
     _install_pack(pack, project)
-    first = (project / ".modastack" / "agent.yaml").read_text()
-    manifest_first = (project / ".modastack" / "install-manifest.json").read_text()
+    first = (project / ".bobi" / "agent.yaml").read_text()
+    manifest_first = (project / ".bobi" / "install-manifest.json").read_text()
     _install_pack(pack, project)
-    assert (project / ".modastack" / "agent.yaml").read_text() == first
-    assert (project / ".modastack" / "install-manifest.json").read_text() == manifest_first
+    assert (project / ".bobi" / "agent.yaml").read_text() == first
+    assert (project / ".bobi" / "install-manifest.json").read_text() == manifest_first
 
 
 def test_manifest_covers_installed_files(pack, project):
     _install_pack(pack, project)
     manifest = json.loads(
-        (project / ".modastack" / "install-manifest.json").read_text())
+        (project / ".bobi" / "install-manifest.json").read_text())
     assert manifest["agent"] == "my-team"
     assert manifest["frozen"] is True
     assert "agent.yaml" in manifest["files"]
@@ -95,12 +95,12 @@ def test_manifest_covers_installed_files(pack, project):
 def test_local_source_gitignore_covers_image(pack, project):
     _install_pack(pack, project)
     _write_install_gitignore(project, local_source=True)
-    entries = (project / ".modastack" / ".gitignore").read_text().splitlines()
+    entries = (project / ".bobi" / ".gitignore").read_text().splitlines()
     for artifact in ["agent.yaml", "agent.md", "roles/", "install-manifest.json",
                      ".gitignore"]:
         assert artifact in entries
     _write_install_gitignore(project, local_source=False)
-    entries = (project / ".modastack" / ".gitignore").read_text().splitlines()
+    entries = (project / ".bobi" / ".gitignore").read_text().splitlines()
     assert "agent.yaml" not in entries
     assert "install-manifest.json" in entries
 
@@ -108,14 +108,14 @@ def test_local_source_gitignore_covers_image(pack, project):
 class TestContextInstall:
     """context/ is part of the frozen image: pack-owned, read-only reference."""
 
-    def test_context_installs_to_dot_modastack(self, pack, project):
+    def test_context_installs_to_dot_bobi(self, pack, project):
         _install_pack(pack, project)
-        installed = project / ".modastack" / "context" / "style-guide.md"
+        installed = project / ".bobi" / "context" / "style-guide.md"
         assert installed.read_text().startswith("# House style guide")
 
     def test_reinstall_restores_context_edits(self, pack, project):
         _install_pack(pack, project)
-        installed = project / ".modastack" / "context" / "style-guide.md"
+        installed = project / ".bobi" / "context" / "style-guide.md"
         installed.write_text("edited\n")
         _install_pack(pack, project)
         assert installed.read_text().startswith("# House style guide")
@@ -123,10 +123,10 @@ class TestContextInstall:
     def test_context_in_manifest_and_gitignore(self, pack, project):
         _install_pack(pack, project)
         manifest = json.loads(
-            (project / ".modastack" / "install-manifest.json").read_text())
+            (project / ".bobi" / "install-manifest.json").read_text())
         assert "context/style-guide.md" in manifest["files"]
         _write_install_gitignore(project, local_source=True)
-        entries = (project / ".modastack" / ".gitignore").read_text().splitlines()
+        entries = (project / ".bobi" / ".gitignore").read_text().splitlines()
         assert "context/" in entries
 
 
@@ -158,7 +158,7 @@ class TestWorkspaceSeed:
     def test_workspace_not_in_manifest(self, pack, project):
         _install_pack(pack, project)
         manifest = json.loads(
-            (project / ".modastack" / "install-manifest.json").read_text())
+            (project / ".bobi" / "install-manifest.json").read_text())
         assert not any(p.startswith("workspace") for p in manifest["files"])
 
     def test_pack_without_workspace_seeds_nothing(self, pack, project):
@@ -172,16 +172,16 @@ class TestPromptSections:
     """The resolver indexes context files and points at workspace/."""
 
     def test_context_index_lists_files_with_descriptions(self, pack, project):
-        from modastack.prompts.resolver import resolve_agent_prompt
+        from bobi.prompts.resolver import resolve_agent_prompt
         _install_pack(pack, project)
         prompt = resolve_agent_prompt("manager", project)
         assert "## Context files" in prompt
-        assert "`.modastack/context/style-guide.md` — House style guide" in prompt
+        assert "`.bobi/context/style-guide.md` — House style guide" in prompt
         # Index only — contents are read on demand, never inlined.
         assert "Write tersely." not in prompt
 
     def test_workspace_note_present_when_seeded(self, pack, project):
-        from modastack.prompts.resolver import resolve_agent_prompt
+        from bobi.prompts.resolver import resolve_agent_prompt
         _install_pack(pack, project)
         prompt = resolve_agent_prompt("manager", project)
         assert "## Workspace" in prompt
@@ -189,7 +189,7 @@ class TestPromptSections:
 
     def test_sections_absent_without_context_or_workspace(self, pack, project):
         import shutil
-        from modastack.prompts.resolver import resolve_agent_prompt
+        from bobi.prompts.resolver import resolve_agent_prompt
         shutil.rmtree(pack / "context")
         shutil.rmtree(pack / "workspace")
         _install_pack(pack, project)
@@ -201,7 +201,7 @@ class TestPromptSections:
 class TestDoctorIntegrity:
 
     def _set_root(self, project, monkeypatch):
-        monkeypatch.setattr("modastack.paths._root", project)
+        monkeypatch.setattr("bobi.paths._root", project)
 
     def test_clean_install_passes(self, pack, project, monkeypatch):
         _install_pack(pack, project)
@@ -212,8 +212,8 @@ class TestDoctorIntegrity:
 
     def test_drift_is_flagged(self, pack, project, monkeypatch):
         _install_pack(pack, project)
-        (project / ".modastack" / "agent.yaml").write_text("agent: edited\n")
-        (project / ".modastack" / "workflows" / "adhoc.yaml").unlink()
+        (project / ".bobi" / "agent.yaml").write_text("agent: edited\n")
+        (project / ".bobi" / "workflows" / "adhoc.yaml").unlink()
         self._set_root(project, monkeypatch)
         result = _check_install_integrity()
         assert not result.ok
@@ -222,14 +222,14 @@ class TestDoctorIntegrity:
 
     def test_downloaded_pack_is_editable(self, pack, project, monkeypatch):
         _install_pack(pack, project, local_source=False)
-        (project / ".modastack" / "agent.yaml").write_text("agent: edited\n")
+        (project / ".bobi" / "agent.yaml").write_text("agent: edited\n")
         self._set_root(project, monkeypatch)
         result = _check_install_integrity()
         assert result.ok
         assert "editable" in result.detail
 
     def test_no_manifest_is_ok(self, project, monkeypatch):
-        (project / ".modastack").mkdir()
+        (project / ".bobi").mkdir()
         self._set_root(project, monkeypatch)
         assert _check_install_integrity().ok
 
@@ -246,7 +246,7 @@ class TestNonInteractiveInstall:
         pack_dir.joinpath("agent.yaml").write_text(
             "version: '1.0'\n"
             "entry_point: manager\n"
-            "event_server: ${MODASTACK_EVENT_SERVER}\n"
+            "event_server: ${BOBI_EVENT_SERVER}\n"
             "api_key: ${MY_API_KEY}\n"
         )
         pack_dir.joinpath("agent.md").write_text("# my-team\n")
@@ -254,11 +254,11 @@ class TestNonInteractiveInstall:
 
     def test_env_vars_written_to_dotenv(self, pack_with_creds, tmp_path, monkeypatch):
         """With --non-interactive, env vars present in os.environ are
-        written to .modastack/.env without prompting."""
+        written to .bobi/.env without prompting."""
         project = tmp_path / "proj"
         project.mkdir()
         monkeypatch.chdir(project)
-        monkeypatch.setenv("MODASTACK_EVENT_SERVER", "wss://events.example.com")
+        monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
         monkeypatch.setenv("MY_API_KEY", "sk-test-123")
 
         runner = CliRunner()
@@ -269,8 +269,8 @@ class TestNonInteractiveInstall:
         )
         assert result.exit_code == 0, result.output
 
-        env = parse_env_file(project / ".modastack" / ".env")
-        assert env["MODASTACK_EVENT_SERVER"] == "wss://events.example.com"
+        env = parse_env_file(project / ".bobi" / ".env")
+        assert env["BOBI_EVENT_SERVER"] == "wss://events.example.com"
         assert env["MY_API_KEY"] == "sk-test-123"
 
     def test_missing_required_secret_fails_fast(self, pack_with_creds, tmp_path, monkeypatch):
@@ -281,7 +281,7 @@ class TestNonInteractiveInstall:
         project = tmp_path / "proj"
         project.mkdir()
         monkeypatch.chdir(project)
-        monkeypatch.setenv("MODASTACK_EVENT_SERVER", "wss://events.example.com")
+        monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
         monkeypatch.delenv("MY_API_KEY", raising=False)
 
         runner = CliRunner()
@@ -302,7 +302,7 @@ class TestNonInteractiveInstall:
         pack_dir.joinpath("agent.yaml").write_text(
             "version: '1.0'\n"
             "entry_point: manager\n"
-            "event_server: ${MODASTACK_EVENT_SERVER}\n"
+            "event_server: ${BOBI_EVENT_SERVER}\n"
             "model: ${OPTIONAL_MODEL:-sonnet}\n"
         )
         pack_dir.joinpath("agent.md").write_text("# opt-team\n")
@@ -310,7 +310,7 @@ class TestNonInteractiveInstall:
         project = tmp_path / "proj"
         project.mkdir()
         monkeypatch.chdir(project)
-        monkeypatch.setenv("MODASTACK_EVENT_SERVER", "wss://events.example.com")
+        monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
         monkeypatch.delenv("OPTIONAL_MODEL", raising=False)
 
         runner = CliRunner()
@@ -320,19 +320,19 @@ class TestNonInteractiveInstall:
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output
-        env = parse_env_file(project / ".modastack" / ".env")
-        assert env["MODASTACK_EVENT_SERVER"] == "wss://events.example.com"
+        env = parse_env_file(project / ".bobi" / ".env")
+        assert env["BOBI_EVENT_SERVER"] == "wss://events.example.com"
 
     def test_existing_env_file_preserved(self, pack_with_creds, tmp_path, monkeypatch):
         """Vars already in .env are kept; env vars supplement them."""
         project = tmp_path / "proj"
         project.mkdir()
         monkeypatch.chdir(project)
-        dot_moda = project / ".modastack"
+        dot_moda = project / ".bobi"
         dot_moda.mkdir(parents=True)
         (dot_moda / ".env").write_text("MY_API_KEY=existing-key\n")
 
-        monkeypatch.setenv("MODASTACK_EVENT_SERVER", "wss://events.example.com")
+        monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
         monkeypatch.delenv("MY_API_KEY", raising=False)
 
         runner = CliRunner()
@@ -343,16 +343,16 @@ class TestNonInteractiveInstall:
         )
         assert result.exit_code == 0, result.output
 
-        env = parse_env_file(project / ".modastack" / ".env")
+        env = parse_env_file(project / ".bobi" / ".env")
         assert env["MY_API_KEY"] == "existing-key"
-        assert env["MODASTACK_EVENT_SERVER"] == "wss://events.example.com"
+        assert env["BOBI_EVENT_SERVER"] == "wss://events.example.com"
 
     def test_interactive_default_still_prompts(self, pack_with_creds, tmp_path, monkeypatch):
         """Without --non-interactive, install still prompts (baseline)."""
         project = tmp_path / "proj"
         project.mkdir()
         monkeypatch.chdir(project)
-        monkeypatch.delenv("MODASTACK_EVENT_SERVER", raising=False)
+        monkeypatch.delenv("BOBI_EVENT_SERVER", raising=False)
         monkeypatch.delenv("MY_API_KEY", raising=False)
 
         runner = CliRunner()

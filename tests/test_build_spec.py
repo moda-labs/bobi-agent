@@ -2,11 +2,11 @@
 
 from textwrap import dedent
 
-from modastack.config import BuildSpec, Config
+from bobi.config import BuildSpec, Config
 
 
 def _write_agent_yaml(tmp_path, body):
-    d = tmp_path / ".modastack"
+    d = tmp_path / ".bobi"
     d.mkdir(parents=True, exist_ok=True)
     (d / "agent.yaml").write_text(dedent(body))
 
@@ -79,10 +79,10 @@ def test_verify_only_block_is_kept(tmp_path):
 
 def test_sibling_dockerfile_escape_hatch(tmp_path):
     # A raw Dockerfile next to agent.yaml counts as a build even with no block.
-    d = tmp_path / ".modastack"
+    d = tmp_path / ".bobi"
     d.mkdir(parents=True)
     (d / "agent.yaml").write_text("agent: t\n")
-    (d / "Dockerfile").write_text("FROM ghcr.io/moda-labs/modastack-base\n")
+    (d / "Dockerfile").write_text("FROM ghcr.io/moda-labs/bobi-base\n")
     b = Config.load(tmp_path).build
     assert b is not None
     assert b.dockerfile.endswith("Dockerfile")

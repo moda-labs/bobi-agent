@@ -13,7 +13,7 @@ import json
 import apsw
 import pytest
 
-from modastack.kb.store import KBStore, EMBEDDING_DIM, _fetchone
+from bobi.kb.store import KBStore, EMBEDDING_DIM, _fetchone
 
 sqlite_vec = pytest.importorskip("sqlite_vec")
 

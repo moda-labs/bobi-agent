@@ -1,5 +1,5 @@
 {
-	"name": "modastack-events",
+	"name": "bobi-events",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-05-26",
 	"observability": {

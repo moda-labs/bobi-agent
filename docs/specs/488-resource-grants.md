@@ -158,7 +158,7 @@ restart.
 
 | service | check | pass condition |
 |---|---|---|
-| `github` | `GET https://api.github.com/repos/{owner}/{repo}` with `Authorization: Bearer <credential>`, `User-Agent: modastack-event-server` | HTTP `2xx` — the token can read the repo |
+| `github` | `GET https://api.github.com/repos/{owner}/{repo}` with `Authorization: Bearer <credential>`, `User-Agent: bobi-event-server` | HTTP `2xx` — the token can read the repo |
 | `linear` | GraphQL `POST https://api.linear.app/graphql`, `Authorization: <credential>`, query `{ teams(filter:{key:{eq:"TEAMKEY"}}){ nodes { id key organization { id } } } }` | a node with the requested key is returned |
 | `slack` | **converge on #487's flow** — no separate verify call (§6) | bubble-scoped workspace record (proving the bot token + signing secret) exists for this team |
 
@@ -262,7 +262,7 @@ surfacing. **Delivery (§3.5) remains the fail-closed security boundary**
 regardless — it re-checks the live grant for every event — so registration
 gating is the loud early layer and delivery is authoritative.
 
-The MINT path (`modastack start`'s first boot) registers `_bootstrap` and other
+The MINT path (`bobi start`'s first boot) registers `_bootstrap` and other
 non-global topics, which are never gated; global topics arrive after the bubble
 exists and has authorized (§3.6), so mint is unaffected.
 
@@ -292,7 +292,7 @@ carries a global topic, so the common bubble-scoped path pays nothing.
 
 ### 3.6 Client side (Python) — auto-authorize at startup
 
-New `authorize_resources(...)` in `modastack/events/server.py` (sits beside
+New `authorize_resources(...)` in `bobi/events/server.py` (sits beside
 `register` / `register_slack_workspaces`, signs with `signing.sign_headers`):
 
 - For each detected global resource subscription (`github:owner/repo`,
@@ -318,8 +318,8 @@ register()/update_subscriptions()   # global topics now have grants -> accepted
 ```
 
 Call sites that register the persistent deployment with auto-detected
-subscriptions — `modastack/inbox.py` (~L202-220), `modastack/subagent.py`
-(~L1029-1129), and `modastack/auth_bootstrap.py` — invoke
+subscriptions — `bobi/inbox.py` (~L202-220), `bobi/subagent.py`
+(~L1029-1129), and `bobi/auth_bootstrap.py` — invoke
 `authorize_resources()` between `ensure_bubble()` and `register()`.
 
 **KV eventual consistency.** Cloudflare KV is eventually consistent; a grant
@@ -500,7 +500,7 @@ to delivery gating.
 7. Python `authorize_resources()` in `events/server.py` + wire into `inbox.py`,
    `subagent.py`, `auth_bootstrap.py`. (tests 10-12)
 8. `/review` gate; run `event-server` tests + `pytest tests/ --ignore=integration`.
-9. Do **not** bump `VERSION` / `pyproject.toml` / `CHANGELOG.md` (modastack
+9. Do **not** bump `VERSION` / `pyproject.toml` / `CHANGELOG.md` (bobi
    release policy). Open PR against `main`.
 
 ## 9. Reviewer decisions (all four resolved — Zach `underminedsk`, PR #491 inline review, 2026-06-24)

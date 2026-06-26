@@ -1,5 +1,5 @@
-# Getting Started with Modastack
-> Set up modastack to manage AI agents in your repo.
+# Getting Started with Bobi
+> Set up bobi to manage AI agents in your repo.
 
 ## Prerequisites
 
@@ -11,7 +11,7 @@
 ## Install
 
 ```bash
-uv tool install modastack
+uv tool install bobi
 ```
 
 ## Setup
@@ -22,30 +22,30 @@ uv tool install modastack
    ```
 
 2. Install an agent team (from the directory that will own the
-   installation — this creates the single `.modastack/` with
+   installation — this creates the single `.bobi/` with
    `agent.yaml` inside):
    ```bash
-   modastack install eng-team
+   bobi install eng-team
    ```
 
 3. Start the manager:
    ```bash
-   modastack start
+   bobi start
    ```
 
 4. Verify it's running:
    ```bash
-   modastack status
+   bobi status
    ```
 
 ## First task
 
 1. Create a GitHub issue in your repo with the `agent` label
 2. The manager picks it up and runs the appropriate workflow
-3. Watch progress with `modastack log manager`
+3. Watch progress with `bobi log manager`
 
 ## Troubleshooting
 
-- **"no Modastack installation found"**: run from inside the installation tree — the directory where `modastack install` created `.modastack/agent.yaml`
-- **Manager not responding**: Check `modastack doctor` for diagnostics
-- **No events arriving**: Verify event server with `modastack event-server status`
+- **"no Bobi installation found"**: run from inside the installation tree — the directory where `bobi install` created `.bobi/agent.yaml`
+- **Manager not responding**: Check `bobi doctor` for diagnostics
+- **No events arriving**: Verify event server with `bobi event-server status`

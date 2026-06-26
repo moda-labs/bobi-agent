@@ -1,10 +1,10 @@
-"""Tests for the setup harness status read — which agent runs modastack and
+"""Tests for the setup harness status read — which agent runs bobi and
 whether it's authenticated. Pure function; everything external (the `claude`
 CLI on PATH, the env key, the on-disk subscription creds) is monkeypatched."""
 
 import pytest
 
-from modastack.setup import harness
+from bobi.setup import harness
 
 
 @pytest.fixture(autouse=True)
@@ -75,7 +75,7 @@ def test_macos_keychain_counts_as_authenticated(monkeypatch):
     # The Mac dev default: Claude Code stores OAuth in the login keychain, not
     # ~/.claude/.credentials.json. The keychain hit must read as logged in, or
     # working machines get a false "not logged in".
-    from modastack import auth_bootstrap
+    from bobi import auth_bootstrap
     monkeypatch.setattr(auth_bootstrap, "credentials_exist", lambda home=None: False)
     monkeypatch.setattr(harness, "_macos_keychain_has_claude", lambda: True)
     monkeypatch.setattr(harness.shutil, "which", lambda n: "/usr/bin/claude")

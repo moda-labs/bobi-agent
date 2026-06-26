@@ -3,7 +3,7 @@ slug resolution, ISO parsing, and the CHECKS registry.
 
 These tests load github_checks.py from the agent cache or skip if not found.
 The checks module is agent-pack content, not framework code — it lives in
-moda-agents and is fetched to ~/.modastack/agents/ at runtime.
+moda-agents and is fetched to ~/.bobi/agents/ at runtime.
 """
 
 import json
@@ -17,7 +17,7 @@ import pytest
 import importlib.util
 import sys
 
-from modastack.monitors.schema import Condition
+from bobi.monitors.schema import Condition
 
 
 def _find_checks_module() -> Path:
@@ -25,7 +25,7 @@ def _find_checks_module() -> Path:
     repo_root = Path(__file__).parent.parent
     search_dirs = [
         repo_root / "agents",
-        repo_root / ".modastack" / "agents",
+        repo_root / ".bobi" / "agents",
     ]
     for search_dir in search_dirs:
         if not search_dir.is_dir():
@@ -40,13 +40,13 @@ def _find_checks_module() -> Path:
 _checks_path = _find_checks_module()
 if _checks_path is None:
     pytest.skip(
-        "github_checks.py not found — run: modastack agents update eng-team",
+        "github_checks.py not found — run: bobi agents update eng-team",
         allow_module_level=True,
     )
 
-_spec = importlib.util.spec_from_file_location("modastack.monitors.checks", _checks_path)
+_spec = importlib.util.spec_from_file_location("bobi.monitors.checks", _checks_path)
 _mod = importlib.util.module_from_spec(_spec)
-sys.modules["modastack.monitors.checks"] = _mod
+sys.modules["bobi.monitors.checks"] = _mod
 _spec.loader.exec_module(_mod)
 
 CHECKS = _mod.CHECKS
@@ -64,10 +64,10 @@ class TestRepoSlug:
         with patch("subprocess.run") as m:
             m.return_value = MagicMock(
                 returncode=0,
-                stdout="moda-labs/modastack\n",
+                stdout="moda-labs/bobi\n",
             )
             _slug_cache.clear()
-            assert _repo_slug(Path("/tmp/repo")) == "moda-labs/modastack"
+            assert _repo_slug(Path("/tmp/repo")) == "moda-labs/bobi"
 
     def test_slug_fallback_to_dir_name(self):
         with patch("subprocess.run") as m:

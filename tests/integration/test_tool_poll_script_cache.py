@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from modastack.monitors.schema import Condition, Monitor
-from modastack.monitors.scheduler import MonitorScheduler
+from bobi.monitors.schema import Condition, Monitor
+from bobi.monitors.scheduler import MonitorScheduler
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ class TestToolPollScriptCacheIntegration:
     def test_cache_lifecycle(self, tmp_path, monkeypatch):
         """Full lifecycle: first run caches → second run uses cache →
         broken cache falls back and self-heals."""
-        from modastack.monitors import tool_checks
+        from bobi.monitors import tool_checks
 
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir()
@@ -120,7 +120,7 @@ class TestToolPollScriptCacheIntegration:
     def test_reconcile_with_cached_script(self, tmp_path, monkeypatch):
         """Conditions from a cached script flow through _reconcile correctly:
         new IDs fire events, same IDs dedup."""
-        from modastack.monitors import tool_checks
+        from bobi.monitors import tool_checks
 
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir()

@@ -7,7 +7,7 @@ Parametrized over TWO backends:
 
 Starts the event server, sends webhook payloads, and verifies events are
 delivered via the WebSocket subscription API.  All state is isolated to
-the modastack_env temp install.
+the bobi_env temp install.
 """
 
 import json
@@ -25,7 +25,7 @@ import pytest
 import websocket
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
-TEST_GRANTS_SECRET = "modastack-integration-test-grants"
+TEST_GRANTS_SECRET = "bobi-integration-test-grants"
 
 
 def _free_port() -> int:
@@ -50,7 +50,7 @@ def _seed_resource_grants(
     bubble_key: str,
     grants: list[dict],
 ) -> None:
-    from modastack.events.signing import serialize_body, sign_headers
+    from bobi.events.signing import serialize_body, sign_headers
 
     body = serialize_body({"grants": grants})
     headers = {"Content-Type": "application/json", "x-moda-test-secret": TEST_GRANTS_SECRET}
@@ -74,7 +74,7 @@ def _post_event_signed(base_url: str, topic: str, body_dict: dict,
                        bubble_id: str, bubble_key: str) -> dict:
     """Publish to /events/{topic} signed with a bubble key (generic publishes
     now require a bubble signature — namespacing is not authentication)."""
-    from modastack.events.signing import serialize_body, sign_headers
+    from bobi.events.signing import serialize_body, sign_headers
 
     body = serialize_body(body_dict)
     path = f"/events/{topic}"
@@ -94,9 +94,9 @@ def _has_wrangler() -> bool:
 def _event_server_backends():
     """Return the list of backend IDs to parametrize over."""
     backends = ["local"]
-    # wrangler backend is opt-in via the MODASTACK_TEST_WRANGLER env var or
+    # wrangler backend is opt-in via the BOBI_TEST_WRANGLER env var or
     # when wrangler is already installed in event-server/node_modules.
-    if os.environ.get("MODASTACK_TEST_WRANGLER") == "1" or _has_wrangler():
+    if os.environ.get("BOBI_TEST_WRANGLER") == "1" or _has_wrangler():
         backends.append("wrangler")
     return backends
 
@@ -113,23 +113,23 @@ def _wait_healthy(base_url: str, timeout: float = 15) -> bool:
     return False
 
 
-def _start_local_server(modastack_env):
+def _start_local_server(bobi_env):
     """Start the local Node.js event server, return (base_url, port, cleanup)."""
-    from modastack.events.server import ensure_running
+    from bobi.events.server import ensure_running
 
     for attempt in range(3):
         port = _free_port()
         base_url = f"http://localhost:{port}"
         ensure_running(
             port,
-            project_path=modastack_env.project_path,
-            extra_env={"MODASTACK_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET},
+            project_path=bobi_env.project_path,
+            extra_env={"BOBI_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET},
         )
 
         if _wait_healthy(base_url, timeout=10):
             break
 
-        pid_file = modastack_env.state_dir / "event-server.pid"
+        pid_file = bobi_env.state_dir / "event-server.pid"
         if pid_file.exists():
             try:
                 os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
@@ -140,7 +140,7 @@ def _start_local_server(modastack_env):
         raise RuntimeError("Local event server failed to start after 3 attempts")
 
     def _cleanup():
-        pid_file = modastack_env.state_dir / "event-server.pid"
+        pid_file = bobi_env.state_dir / "event-server.pid"
         if pid_file.exists():
             try:
                 os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
@@ -262,12 +262,12 @@ def _start_wrangler_server():
 
 
 @pytest.fixture(scope="module", params=_event_server_backends())
-def event_server(request, modastack_env):
+def event_server(request, bobi_env):
     """Start the event server on a free port, yield (base_url, port, backend), then stop it."""
     backend = request.param
 
     if backend == "local":
-        base_url, port, cleanup = _start_local_server(modastack_env)
+        base_url, port, cleanup = _start_local_server(bobi_env)
     else:
         base_url, port, cleanup = _start_wrangler_server()
 
@@ -558,7 +558,7 @@ class TestMonitorEventDelivery:
     """
 
     def test_monitor_finding_reaches_subscriber(self, event_server):
-        from modastack.events.subscriptions import monitor_subscription_keys
+        from bobi.events.subscriptions import monitor_subscription_keys
 
         base_url, *_ = event_server
         subs = monitor_subscription_keys(["monitor/support.email"])
@@ -621,7 +621,7 @@ class TestMonitorEventDelivery:
         """A deployment subscribed to BOTH forms (what
         monitor_subscription_keys produces) gets one copy, not two — deliver()
         dedupes deployments across matched topics."""
-        from modastack.events.subscriptions import monitor_subscription_keys
+        from bobi.events.subscriptions import monitor_subscription_keys
 
         base_url, *_ = event_server
         subs = monitor_subscription_keys(["monitor/support.email"])
@@ -697,7 +697,7 @@ class TestHeartbeatLiveness:
     tell a live receive path from a deaf-but-connected one (#425)."""
 
     def test_real_client_becomes_and_stays_live(self, deployment):
-        from modastack.events.client import EventServerClient
+        from bobi.events.client import EventServerClient
 
         base_url, dep_id, api_key = deployment
 
@@ -738,17 +738,17 @@ class TestEventServerCLI:
         data = _get_json(f"{base_url}/health")
         assert data["status"] == "ok"
 
-    def test_stop_and_restart(self, modastack_env):
-        from modastack.events.server import ensure_running
+    def test_stop_and_restart(self, bobi_env):
+        from bobi.events.server import ensure_running
 
         port = _free_port()
         base_url = f"http://localhost:{port}"
-        ensure_running(port, project_path=modastack_env.project_path)
+        ensure_running(port, project_path=bobi_env.project_path)
 
         data = _get_json(f"{base_url}/health")
         assert data["status"] == "ok"
 
-        pid_file = modastack_env.state_dir / "event-server.pid"
+        pid_file = bobi_env.state_dir / "event-server.pid"
         pid = int(pid_file.read_text().strip())
         os.kill(pid, signal.SIGTERM)
         time.sleep(1)
@@ -756,7 +756,7 @@ class TestEventServerCLI:
         with pytest.raises(Exception):
             _get_json(f"{base_url}/health")
 
-        ensure_running(port, project_path=modastack_env.project_path)
+        ensure_running(port, project_path=bobi_env.project_path)
         deadline = time.monotonic() + 10
         running = False
         while time.monotonic() < deadline:
@@ -858,7 +858,7 @@ def _register(base_url: str, name: str, subs: list[str],
               bubble_id: str = "", bubble_key: str = "") -> dict:
     """Register a deployment. MINT (unsigned) when no bubble_key; JOIN (signed)
     otherwise. Returns the full server response."""
-    from modastack.events.signing import serialize_body, sign_headers
+    from bobi.events.signing import serialize_body, sign_headers
 
     body = serialize_body({"name": name, "subscriptions": subs})
     headers = {"Content-Type": "application/json"}
@@ -907,7 +907,7 @@ def _live_subscriber(base_url: str, dep_id: str, api_key: str, timeout: float = 
 
 
 class TestBubbleIsolation:
-    """Bubbles minted per `modastack start` must NOT overlap on a shared event
+    """Bubbles minted per `bobi start` must NOT overlap on a shared event
     server — whether many VMs hit one server or several local instances from
     different dirs do. Exercised end to end against the real local.ts server.
     """
@@ -1051,18 +1051,18 @@ class TestSchedulerEndToEnd:
     """
 
     def test_native_check_finding_delivered_to_subscriber(
-            self, event_server, modastack_env):
-        from modastack.events import publish as publish_mod
-        from modastack.events.server import ensure_bubble
-        from modastack.events.subscriptions import monitor_subscription_keys
-        from modastack.monitors.schema import Condition, Monitor
-        from modastack.monitors.scheduler import MonitorScheduler
+            self, event_server, bobi_env):
+        from bobi.events import publish as publish_mod
+        from bobi.events.server import ensure_bubble
+        from bobi.events.subscriptions import monitor_subscription_keys
+        from bobi.monitors.schema import Condition, Monitor
+        from bobi.monitors.scheduler import MonitorScheduler
 
         base_url, *_ = event_server
 
         # Point the (session-scoped) project at this test server; restore
         # after, and drop publish's per-project URL cache both ways.
-        agent_yaml = modastack_env.project_path / ".modastack" / "agent.yaml"
+        agent_yaml = bobi_env.project_path / ".bobi" / "agent.yaml"
         original = agent_yaml.read_text()
         agent_yaml.write_text(original + f"\nevent_server_url: {base_url}\n")
         publish_mod._es_url_cache.clear()
@@ -1079,9 +1079,9 @@ class TestSchedulerEndToEnd:
                     return []
 
             sched = MonitorScheduler(
-                state_path=modastack_env.state_dir / "e2e_monitor_state.json",
+                state_path=bobi_env.state_dir / "e2e_monitor_state.json",
                 registry_loader=lambda: FakeRegistry(),
-                project_path=modastack_env.project_path,
+                project_path=bobi_env.project_path,
             )
             sched._checks["conflicts"] = lambda mon, repos: [
                 Condition(key="repo#7", data={"pr_number": 7, "repo": "org/repo"})
@@ -1090,7 +1090,7 @@ class TestSchedulerEndToEnd:
             # Mint the project's bubble; the subscriber JOINs it and the
             # scheduler's post_event signs with the same bubble.json — both must
             # share a bubble for the finding to be delivered.
-            bubble = ensure_bubble(base_url, modastack_env.project_path)
+            bubble = ensure_bubble(base_url, bobi_env.project_path)
             subs = monitor_subscription_keys(["monitor/pr.conflict_detected"])
             dep = _register(base_url, "scheduler-e2e-test", subs,
                             bubble["bubble_id"], bubble["bubble_key"])
@@ -1118,13 +1118,13 @@ class TestSchedulerEndToEnd:
 @pytest.mark.local_only
 class TestBindAddress:
     """The event server must default to loopback (127.0.0.1) and only widen
-    the listen address when MODASTACK_ES_BIND is set explicitly.  Bind
+    the listen address when BOBI_ES_BIND is set explicitly.  Bind
     address must be independent of any auth setting (#241)."""
 
     @staticmethod
-    def _start_server(modastack_env, port: int, extra_env: dict | None = None):
+    def _start_server(bobi_env, port: int, extra_env: dict | None = None):
         """Start an event server with explicit env control, return (proc, log_path)."""
-        from modastack.events.server import _find_event_server_dir, _needs_build, _run_npm
+        from bobi.events.server import _find_event_server_dir, _needs_build, _run_npm
 
         es_dir = _find_event_server_dir()
         if not (es_dir / "node_modules").exists():
@@ -1132,11 +1132,11 @@ class TestBindAddress:
         if _needs_build(es_dir):
             _run_npm(["npm", "run", "build:local"], es_dir)
 
-        log_path = modastack_env.state_dir / f"event-server-bind-{port}.log"
+        log_path = bobi_env.state_dir / f"event-server-bind-{port}.log"
 
-        # Start from a clean env without any inherited MODASTACK_ES_BIND
-        env = {k: v for k, v in os.environ.items() if k != "MODASTACK_ES_BIND"}
-        env["MODASTACK_ES_PORT"] = str(port)
+        # Start from a clean env without any inherited BOBI_ES_BIND
+        env = {k: v for k, v in os.environ.items() if k != "BOBI_ES_BIND"}
+        env["BOBI_ES_PORT"] = str(port)
         if extra_env:
             env.update(extra_env)
 
@@ -1170,27 +1170,27 @@ class TestBindAddress:
             proc.kill()
         lf.close()
 
-    def test_default_binds_loopback(self, modastack_env):
-        """Without MODASTACK_ES_BIND, the server binds 127.0.0.1 and logs the
+    def test_default_binds_loopback(self, bobi_env):
+        """Without BOBI_ES_BIND, the server binds 127.0.0.1 and logs the
         loopback-only advisory message."""
         port = _free_port()
-        proc, log_path, lf = self._start_server(modastack_env, port)
+        proc, log_path, lf = self._start_server(bobi_env, port)
         try:
             assert self._wait_healthy(f"http://127.0.0.1:{port}")
 
             log_text = log_path.read_text()
             assert f"127.0.0.1:{port}" in log_text
             assert "loopback-only" in log_text
-            assert "MODASTACK_ES_BIND" in log_text
+            assert "BOBI_ES_BIND" in log_text
         finally:
             self._stop(proc, lf)
 
-    def test_explicit_bind_all_interfaces(self, modastack_env):
-        """MODASTACK_ES_BIND=0.0.0.0 widens the listener; the log omits the
+    def test_explicit_bind_all_interfaces(self, bobi_env):
+        """BOBI_ES_BIND=0.0.0.0 widens the listener; the log omits the
         loopback advisory."""
         port = _free_port()
         proc, log_path, lf = self._start_server(
-            modastack_env, port, {"MODASTACK_ES_BIND": "0.0.0.0"})
+            bobi_env, port, {"BOBI_ES_BIND": "0.0.0.0"})
         try:
             assert self._wait_healthy(f"http://127.0.0.1:{port}")
 
@@ -1200,12 +1200,12 @@ class TestBindAddress:
         finally:
             self._stop(proc, lf)
 
-    def test_bind_decoupled_from_webhook_secret(self, modastack_env):
-        """Setting MODASTACK_ES_WEBHOOK_SECRET must not change the bind address.
+    def test_bind_decoupled_from_webhook_secret(self, bobi_env):
+        """Setting BOBI_ES_WEBHOOK_SECRET must not change the bind address.
         Regression guard: an earlier draft coupled auth and bind."""
         port = _free_port()
         proc, log_path, lf = self._start_server(
-            modastack_env, port, {"MODASTACK_ES_WEBHOOK_SECRET": "s3cret"})
+            bobi_env, port, {"BOBI_ES_WEBHOOK_SECRET": "s3cret"})
         try:
             assert self._wait_healthy(f"http://127.0.0.1:{port}")
 

@@ -1,6 +1,6 @@
 # Container image (instance deployment)
 
-The modastack instance image packages the framework, a pinned native `claude`
+The bobi instance image packages the framework, a pinned native `claude`
 CLI, and the embedding model into one immutable image. Tenant identity lives
 entirely in the mounted volume and env vars — see
 [`docs/design/CONTAINERIZED_INSTANCES.md`](design/CONTAINERIZED_INSTANCES.md)
@@ -13,14 +13,14 @@ entirely in the mounted volume and env vars — see
 | Property | Why |
 |---|---|
 | `python:3.11-slim` base | small, matches `requires-python` |
-| Non-root `modastack` user (uid 10001) | Claude Code refuses `bypassPermissions` as root unless `IS_SANDBOX=1` (§5); we drop privileges instead |
+| Non-root `bobi` user (uid 10001) | Claude Code refuses `bypassPermissions` as root unless `IS_SANDBOX=1` (§5); we drop privileges instead |
 | Native `claude` CLI (no Node) | the local Node event server is never run in deployed instances (C6); the CLI is the standalone binary |
 | `DISABLE_AUTOUPDATER=1` | freeze the CLI at the built version (the image is the unit of update) |
-| fastembed model baked at `HF_HOME=/opt/modastack/models` | cold-start speed; no first-run download |
+| fastembed model baked at `HF_HOME=/opt/bobi/models` | cold-start speed; no first-run download |
 | `gosu` (privilege drop); no `tini` | Fly injects its own PID-1 init (reaps zombies / forwards signals); tini-on-Fly is a known boot-failure trigger. For other runtimes, use `docker run --init`. |
-| `modastack start --foreground` entrypoint | container mode (C2) |
+| `bobi start --foreground` entrypoint | container mode (C2) |
 
-The agent's `$HOME` stays on the **image** (`/home/modastack`), so baked team
+The agent's `$HOME` stays on the **image** (`/home/bobi`), so baked team
 tools (`~/dev/gstack`, skills) are read in place. Claude's durable state is
 redirected to the **volume** via `CLAUDE_CONFIG_DIR=/data/claude`, and the
 entrypoint points the whole `~/.claude` at it — so `~/.claude/.credentials.json`
@@ -31,13 +31,13 @@ across image updates while remaining reachable at their usual `~/.claude` paths.
 
 ```bash
 # default: 'stable' channel of the claude CLI
-docker build -t modastack:dev .
+docker build -t bobi:dev .
 
 # reproducible production build: pin an exact claude CLI version
-docker build -t modastack:dev --build-arg CLAUDE_VERSION=2.1.89 .
+docker build -t bobi:dev --build-arg CLAUDE_VERSION=2.1.89 .
 ```
 
-Build args: `CLAUDE_VERSION` (default `stable`), `MODASTACK_UID` (default
+Build args: `CLAUDE_VERSION` (default `stable`), `BOBI_UID` (default
 `10001`).
 
 ## Run
@@ -48,14 +48,14 @@ event-server URL, and the service tokens the team uses.
 ### api_key mode (fleet default)
 
 ```bash
-docker run --rm -v modastack-a:/data \
-  -e MODASTACK_AUTH=api_key \
-  -e MODASTACK_TEAM=eng-team \
+docker run --rm -v bobi-a:/data \
+  -e BOBI_AUTH=api_key \
+  -e BOBI_TEAM=eng-team \
   -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e MODASTACK_EVENT_SERVER=https://your-worker.example.workers.dev \
+  -e BOBI_EVENT_SERVER=https://your-worker.example.workers.dev \
   -e SLACK_BOT_TOKEN=xoxb-... \
   -e GITHUB_TOKEN=ghp_... \
-  modastack:dev
+  bobi:dev
 ```
 
 ### subscription mode (internal dogfood only)
@@ -66,19 +66,19 @@ outranks subscription auth and bills the API (§6.1). The image refuses to
 start if both are set.
 
 ```bash
-docker run --rm -v modastack-a:/data \
-  -e MODASTACK_AUTH=subscription \
-  -e MODASTACK_TEAM=eng-team \
-  -e MODASTACK_EVENT_SERVER=https://your-worker.example.workers.dev \
-  -e MODASTACK_LOGIN_CHANNEL=C0PRIVATE \
+docker run --rm -v bobi-a:/data \
+  -e BOBI_AUTH=subscription \
+  -e BOBI_TEAM=eng-team \
+  -e BOBI_EVENT_SERVER=https://your-worker.example.workers.dev \
+  -e BOBI_LOGIN_CHANNEL=C0PRIVATE \
   -e SLACK_BOT_TOKEN=xoxb-... \
-  modastack:dev
+  bobi:dev
 ```
 
 **First-boot login is automated (C23).** When the volume has no credentials,
-the entrypoint runs `modastack login-bootstrap` before starting the manager:
+the entrypoint runs `bobi login-bootstrap` before starting the manager:
 it drives `claude auth login --claudeai` under a pty, posts the OAuth URL to
-the private Slack channel `MODASTACK_LOGIN_CHANNEL`, and waits for you to paste
+the private Slack channel `BOBI_LOGIN_CHANNEL`, and waits for you to paste
 the auth code back **in that channel** — the code arrives as a normal
 Slack→Worker→deployment event over the event bus. The channel **must be
 private**: the code is single-use but grants the login to whoever pastes it
@@ -88,8 +88,8 @@ Manual fallback (if Slack/event-bus isn't wired yet):
 
 ```bash
 # one-time, interactive, writes /data/claude/.credentials.json
-docker run --rm -it -v modastack-a:/data \
-  -e CLAUDE_CONFIG_DIR=/data/claude --entrypoint claude modastack:dev auth login --claudeai
+docker run --rm -it -v bobi-a:/data \
+  -e CLAUDE_CONFIG_DIR=/data/claude --entrypoint claude bobi:dev auth login --claudeai
 ```
 
 Never copy a `.credentials.json` between machines — shared refresh chains
@@ -99,21 +99,21 @@ invalidate each other.
 
 | Var | Required | Meaning |
 |---|---|---|
-| `MODASTACK_AUTH` | no (default `api_key`) | `api_key` or `subscription` |
-| `MODASTACK_TEAM` | on first boot* | team to install into an empty volume, by bundled/registry name |
-| `MODASTACK_TEAM_URL` | on first boot* | public `.tar.gz` URL of one team package, fetched at first boot; takes precedence over `MODASTACK_TEAM`. *Set exactly one of `MODASTACK_TEAM` / `MODASTACK_TEAM_URL`.* |
+| `BOBI_AUTH` | no (default `api_key`) | `api_key` or `subscription` |
+| `BOBI_TEAM` | on first boot* | team to install into an empty volume, by bundled/registry name |
+| `BOBI_TEAM_URL` | on first boot* | public `.tar.gz` URL of one team package, fetched at first boot; takes precedence over `BOBI_TEAM`. *Set exactly one of `BOBI_TEAM` / `BOBI_TEAM_URL`.* |
 | `ANTHROPIC_API_KEY` | api_key mode | **must be absent** in subscription mode |
-| `MODASTACK_LOGIN_CHANNEL` | subscription mode | private Slack channel ID for the first-boot login bootstrap (C23) |
-| `MODASTACK_EVENT_SERVER` | yes | the Worker URL (`https://`) the team config references via `${MODASTACK_EVENT_SERVER}`; the client derives `wss://` from it |
-| `MODASTACK_FLEET` | no (default: app-name prefix) | operator/fleet namespace stamp; the authoritative fleet-membership key the GitOps automation enumerates by (C22). The app name is only a discovery hint |
+| `BOBI_LOGIN_CHANNEL` | subscription mode | private Slack channel ID for the first-boot login bootstrap (C23) |
+| `BOBI_EVENT_SERVER` | yes | the Worker URL (`https://`) the team config references via `${BOBI_EVENT_SERVER}`; the client derives `wss://` from it |
+| `BOBI_FLEET` | no (default: app-name prefix) | operator/fleet namespace stamp; the authoritative fleet-membership key the GitOps automation enumerates by (C22). The app name is only a discovery hint |
 | `SLACK_BOT_TOKEN`, `GITHUB_TOKEN`, `LINEAR_API_KEY`, … | per team | service tokens (`${VAR}` refs in `agent.yaml`) |
-| `DATA_DIR` / `MODASTACK_PROJECT` / `MODASTACK_HOME` | no | layout overrides (default `/data`, `/data/project`, `/home/modastack`). `MODASTACK_HOME` is the IMAGE home — baked tools live there |
+| `DATA_DIR` / `BOBI_PROJECT` / `BOBI_HOME` | no | layout overrides (default `/data`, `/data/project`, `/home/bobi`). `BOBI_HOME` is the IMAGE home — baked tools live there |
 | `CLAUDE_CONFIG_DIR` | no (default `/data/claude`) | Claude's durable config dir on the volume (creds, transcripts, settings); the entrypoint links `~/.claude` to it |
 
 ## Health
 
 The manager exposes `GET /health` on a localhost port written to
-`/data/project/.modastack/state/manager-health.port`. The image `HEALTHCHECK`
+`/data/project/.bobi/state/manager-health.port`. The image `HEALTHCHECK`
 (and Fly script checks) read that file and probe the endpoint:
 
 ```bash
@@ -125,11 +125,11 @@ docker inspect -f '{{.State.Health.Status}}' <container>
 ```bash
 # api_key: empty volume -> healthy manager -> one ask round-trip
 docker run -d --name c8 -v "$(mktemp -d):/data" \
-  -e MODASTACK_AUTH=api_key -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e MODASTACK_TEAM=eng-team -e MODASTACK_EVENT_SERVER=https://... \
-  modastack:dev
+  -e BOBI_AUTH=api_key -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e BOBI_TEAM=eng-team -e BOBI_EVENT_SERVER=https://... \
+  bobi:dev
 # wait for healthy, then:
-docker exec c8 modastack ask "Reply with: pong"
+docker exec c8 bobi ask "Reply with: pong"
 ```
 
 `tests/integration/test_container_image.py` automates the image-contract
@@ -157,14 +157,14 @@ back up first). The script header documents the operator-agnostic flags and the
 ### Smoke testing
 
 `tests/fixtures/smoke-team` is the zero-secret smoke target — it needs only
-`MODASTACK_EVENT_SERVER` (no service tokens, no `requires`, no monitors), so an
-instance reaches a healthy manager and answers one `modastack ask` with nothing
+`BOBI_EVENT_SERVER` (no service tokens, no `requires`, no monitors), so an
+instance reaches a healthy manager and answers one `bobi ask` with nothing
 but an Anthropic credential. The `team-packages` workflow publishes it to the
 rolling `teams-latest` release, so a full provisioner → boot → ask round-trip is:
 
 ```bash
-scripts/provision-instance.sh --app <you>-modastack-smoke \
-  --team-url https://github.com/moda-labs/modastack/releases/download/teams-latest/smoke-team.tar.gz \
+scripts/provision-instance.sh --app <you>-bobi-smoke \
+  --team-url https://github.com/moda-labs/bobi-agent-team/releases/download/teams-latest/smoke-team.tar.gz \
   --env-file ./smoke.env --region sjc          # smoke.env: just ANTHROPIC_API_KEY
 ```
 
@@ -180,21 +180,21 @@ state store (no DB, no manifest); `scripts/fleet.sh` is the enumeration helper,
 and the same contract a future provisioner service inherits (design §9).
 
 **Fleet identity.** An app is named `<fleet>-<team>` and stamped
-`MODASTACK_FLEET=<fleet>` in its `[env]`. The stamp — not the name — is the
+`BOBI_FLEET=<fleet>` in its `[env]`. The stamp — not the name — is the
 membership key, so two fleets can share one Fly org and a later
-`MODASTACK_TENANT` filter slots into the same query for multitenant SaaS.
+`BOBI_TENANT` filter slots into the same query for multitenant SaaS.
 
-**One-time repo setup** (in `moda-labs/modastack` settings):
+**One-time repo setup** (in `moda-labs/bobi-agent-team` settings):
 
 | What | Where | Value |
 |---|---|---|
 | `FLEET_PREFIX` | repo **variable** | operator namespace, e.g. `moda` (apps become `moda-<team>`) |
-| `MODASTACK_EVENT_SERVER` | repo **variable** (optional) | Worker URL; omit to use the provisioner default |
+| `BOBI_EVENT_SERVER` | repo **variable** (optional) | Worker URL; omit to use the provisioner default |
 | `FLY_API_TOKEN` | repo **secret** | an org-scoped Fly deploy token (`fly tokens create deploy`) |
-| `MODASTACK_ENV` | **per-team** GitHub *Environment* named `<team>` | the team's entire KEY=VALUE env-file as one secret blob (the same content you'd pass to `--env-file`) |
+| `BOBI_ENV` | **per-team** GitHub *Environment* named `<team>` | the team's entire KEY=VALUE env-file as one secret blob (the same content you'd pass to `--env-file`) |
 
-The single-blob `MODASTACK_ENV` secret is the only secret interface — it routes
-exactly like `--env-file` (`MODASTACK_*` → `[env]`, everything else → Fly
+The single-blob `BOBI_ENV` secret is the only secret interface — it routes
+exactly like `--env-file` (`BOBI_*` → `[env]`, everything else → Fly
 secrets) and is the seam a token broker later fills. Team Environments must have
 **no required-reviewer protection rule** (it would pause the provision matrix).
 
@@ -203,9 +203,9 @@ secrets) and is the seam a token broker later fills. Team Environments must have
 - **Add a team** → push a new `agents/<team>/` to `main`. `team-packages.yml`
   publishes its tarball; `deploy-agent-teams.yml` (triggered on that completing) sees
   no `<fleet>-<team>` app yet → runs the provisioner with the team's
-  `MODASTACK_ENV`. No manual step beyond the one-time Environment secret.
+  `BOBI_ENV`. No manual step beyond the one-time Environment secret.
 - **Edit a team** → push changes under an existing `agents/<team>/`. The matching
-  instance is updated in place: `modastack install <teams-latest-url>` over
+  instance is updated in place: `bobi install <teams-latest-url>` over
   `fly ssh` (workspace-safe reinstall — *not* `agents update`, which can't
   resolve a `url:`-sourced pack) then `fly machine restart`. The volume's
   `agent.yaml` and workspace edits survive.

@@ -5,7 +5,7 @@
 #
 #   - rolling   <team>.tar.gz           -> uploaded WITH --clobber. The floating
 #                                          "latest main" pointer (team_url: /
-#                                          MODASTACK_TEAM_URL consumers). Mutable
+#                                          BOBI_TEAM_URL consumers). Mutable
 #                                          by design.
 #   - versioned <team>-<ver>.tar.gz     -> uploaded WITHOUT --clobber. An
 #                                          immutable, pinnable per-team package.

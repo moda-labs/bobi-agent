@@ -40,7 +40,7 @@ def main() -> None:
     with open(log, "a") as fh:
         fh.write(f"launch {launch_index} pid={os.getpid()}\n")
 
-    from modastack.sdk import set_project_root, get_registry, SessionEntry
+    from bobi.sdk import set_project_root, get_registry, SessionEntry
     set_project_root(root)
 
     frozen = time.time() - 100_000  # far past any test threshold
@@ -54,8 +54,8 @@ def main() -> None:
         pid=os.getpid(), last_activity=frozen,
     ))
 
-    from modastack import manager_health
-    from modastack import paths
+    from bobi import manager_health
+    from bobi import paths
     manager_health.start(paths.state_dir(root), root.name,
                          manager_session=a.session)
 

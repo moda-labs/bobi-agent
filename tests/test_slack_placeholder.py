@@ -17,8 +17,8 @@ from unittest.mock import patch, MagicMock, call
 import httpx
 import pytest
 
-from modastack import http as pooled
-from modastack.slack import (
+from bobi import http as pooled
+from bobi.slack import (
     post_slack_message,
     update_slack_message,
     set_thread_status,
@@ -53,7 +53,7 @@ def _make_mock_client(response_data, *, requests_log=None, side_effect=None):
 
 def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
     """Set up project config with a Slack bot token."""
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir(parents=True)
     if slack_bot_token:
         yaml = (
@@ -184,8 +184,8 @@ class TestSetThreadStatus:
 # ---------------------------------------------------------------------------
 
 class TestPostPlaceholder:
-    @patch("modastack.slack.set_thread_status")
-    @patch("modastack.slack.post_slack_message")
+    @patch("bobi.slack.set_thread_status")
+    @patch("bobi.slack.post_slack_message")
     def test_posts_and_sets_status(self, mock_post, mock_status):
         mock_post.return_value = {"ok": True, "ts": "171.99"}
 
@@ -202,8 +202,8 @@ class TestPostPlaceholder:
             "xoxb-test", "C123", "171.42", "is thinking\u2026",
         )
 
-    @patch("modastack.slack.set_thread_status")
-    @patch("modastack.slack.post_slack_message")
+    @patch("bobi.slack.set_thread_status")
+    @patch("bobi.slack.post_slack_message")
     def test_custom_placeholder_text(self, mock_post, mock_status):
         mock_post.return_value = {"ok": True, "ts": "171.99"}
 
@@ -214,8 +214,8 @@ class TestPostPlaceholder:
 
         assert mock_post.call_args[0][2] == "Processing..."
 
-    @patch("modastack.slack.set_thread_status")
-    @patch("modastack.slack.post_slack_message")
+    @patch("bobi.slack.set_thread_status")
+    @patch("bobi.slack.post_slack_message")
     def test_no_thread_ts_posts_without_status(self, mock_post, mock_status):
         """Without thread context, posts placeholder but skips status."""
         mock_post.return_value = {"ok": True, "ts": "171.99"}
@@ -226,8 +226,8 @@ class TestPostPlaceholder:
         mock_post.assert_called_once()
         mock_status.assert_not_called()
 
-    @patch("modastack.slack.set_thread_status")
-    @patch("modastack.slack.post_slack_message")
+    @patch("bobi.slack.set_thread_status")
+    @patch("bobi.slack.post_slack_message")
     def test_post_failure_returns_empty(self, mock_post, mock_status):
         """If posting fails, return empty string and don't set status."""
         mock_post.side_effect = RuntimeError("network")
@@ -243,7 +243,7 @@ class TestPostPlaceholder:
 # ---------------------------------------------------------------------------
 
 class TestStatusRefreshLoop:
-    @patch("modastack.slack.set_thread_status")
+    @patch("bobi.slack.set_thread_status")
     def test_starts_and_stops(self, mock_status):
         loop = StatusRefreshLoop(
             "xoxb-test", "C123", "171.42", interval=0.05
@@ -255,7 +255,7 @@ class TestStatusRefreshLoop:
         loop.join(timeout=1)
         assert not loop.is_alive()
 
-    @patch("modastack.slack.set_thread_status")
+    @patch("bobi.slack.set_thread_status")
     def test_refreshes_status_periodically(self, mock_status):
         loop = StatusRefreshLoop(
             "xoxb-test", "C123", "171.42", interval=0.05
@@ -270,7 +270,7 @@ class TestStatusRefreshLoop:
         for c in mock_status.call_args_list:
             assert c == call("xoxb-test", "C123", "171.42", "is thinking\u2026")
 
-    @patch("modastack.slack.set_thread_status")
+    @patch("bobi.slack.set_thread_status")
     def test_stop_clears_status(self, mock_status):
         loop = StatusRefreshLoop(
             "xoxb-test", "C123", "171.42", interval=0.05
@@ -284,7 +284,7 @@ class TestStatusRefreshLoop:
         last_call = mock_status.call_args_list[-1]
         assert last_call == call("xoxb-test", "C123", "171.42", "")
 
-    @patch("modastack.slack.set_thread_status")
+    @patch("bobi.slack.set_thread_status")
     def test_self_terminates_at_max_seconds(self, mock_status):
         # Safety cap: even if nothing ever calls stop(), the loop must clear
         # the status and exit on its own — no forever "is thinking…".
@@ -302,12 +302,12 @@ class TestStatusRefreshLoop:
 # ---------------------------------------------------------------------------
 
 class TestSlackInputChannel:
-    @patch("modastack.slack.StatusRefreshLoop")
-    @patch("modastack.slack.post_placeholder")
+    @patch("bobi.slack.StatusRefreshLoop")
+    @patch("bobi.slack.post_placeholder")
     def test_prepare_posts_placeholder_and_injects_ts(self, mock_placeholder,
                                                        mock_loop_cls):
         """Channel handler posts placeholder and injects placeholder_ts into fields."""
-        from modastack.events.channels import SlackInputChannel
+        from bobi.events.channels import SlackInputChannel
 
         mock_placeholder.return_value = "171.99"
         mock_loop = MagicMock()
@@ -329,12 +329,12 @@ class TestSlackInputChannel:
         assert result["fields"]["channel"] == "C123"
         assert result["fields"]["user_id"] == "U123"
 
-    @patch("modastack.slack.StatusRefreshLoop")
-    @patch("modastack.slack.post_placeholder")
+    @patch("bobi.slack.StatusRefreshLoop")
+    @patch("bobi.slack.post_placeholder")
     def test_prepare_uses_ts_when_no_thread_ts(self, mock_placeholder,
                                                 mock_loop_cls):
         """When thread_ts is empty, uses ts as the thread anchor."""
-        from modastack.events.channels import SlackInputChannel
+        from bobi.events.channels import SlackInputChannel
 
         mock_placeholder.return_value = "171.99"
         mock_loop_cls.return_value = MagicMock()
@@ -347,10 +347,10 @@ class TestSlackInputChannel:
             "xoxb-test", "C123", thread_ts="171.50",
         )
 
-    @patch("modastack.slack.post_placeholder")
+    @patch("bobi.slack.post_placeholder")
     def test_prepare_no_refresh_without_thread(self, mock_placeholder):
         """No refresh loop started when there's no thread context."""
-        from modastack.events.channels import SlackInputChannel
+        from bobi.events.channels import SlackInputChannel
 
         mock_placeholder.return_value = "171.99"
 
@@ -360,10 +360,10 @@ class TestSlackInputChannel:
 
         assert result["fields"]["placeholder_ts"] == "171.99"
 
-    @patch("modastack.slack.post_placeholder")
+    @patch("bobi.slack.post_placeholder")
     def test_prepare_failure_returns_original_event(self, mock_placeholder):
         """If placeholder posting fails, returns the original event unchanged."""
-        from modastack.events.channels import SlackInputChannel
+        from bobi.events.channels import SlackInputChannel
 
         mock_placeholder.side_effect = RuntimeError("network")
 
@@ -373,10 +373,10 @@ class TestSlackInputChannel:
 
         assert "placeholder_ts" not in result["fields"]
 
-    @patch("modastack.slack.post_placeholder")
+    @patch("bobi.slack.post_placeholder")
     def test_prepare_empty_placeholder_returns_original(self, mock_placeholder):
         """If placeholder returns empty ts, original event is returned."""
-        from modastack.events.channels import SlackInputChannel
+        from bobi.events.channels import SlackInputChannel
 
         mock_placeholder.return_value = ""
 
@@ -388,7 +388,7 @@ class TestSlackInputChannel:
 
     def test_prepare_no_channel_returns_original(self):
         """Events without a channel field are returned unchanged."""
-        from modastack.events.channels import SlackInputChannel
+        from bobi.events.channels import SlackInputChannel
 
         handler = SlackInputChannel()
         event = {"source": "slack", "type": "slack.mention",
@@ -397,10 +397,10 @@ class TestSlackInputChannel:
 
         assert result is event
 
-    @patch("modastack.slack.post_placeholder")
+    @patch("bobi.slack.post_placeholder")
     def test_prepare_does_not_mutate_original(self, mock_placeholder):
         """Channel handler returns a new event dict, doesn't mutate the original."""
-        from modastack.events.channels import SlackInputChannel
+        from bobi.events.channels import SlackInputChannel
 
         mock_placeholder.return_value = "171.99"
 
@@ -421,24 +421,24 @@ class TestSlackInputChannel:
 
 class TestChannelRegistry:
     def test_slack_handler_registered(self):
-        from modastack.events.channels import get_channel_handler
+        from bobi.events.channels import get_channel_handler
         handler = get_channel_handler("slack")
         assert handler is not None
 
     def test_slack_handler_credential_key(self):
-        from modastack.events.channels import get_channel_handler
+        from bobi.events.channels import get_channel_handler
         handler = get_channel_handler("slack")
         assert handler.credential_key == "bot_token"
 
     def test_unknown_source_returns_none(self):
-        from modastack.events.channels import get_channel_handler
+        from bobi.events.channels import get_channel_handler
         assert get_channel_handler("github") is None
         assert get_channel_handler("unknown") is None
 
 
 class TestStopRefreshLoop:
     def test_stops_and_removes_active_loop(self):
-        from modastack.events.channels import _active_loops, stop_refresh_loop
+        from bobi.events.channels import _active_loops, stop_refresh_loop
 
         mock_loop = MagicMock()
         _active_loops[("C123", "171.42")] = mock_loop
@@ -449,7 +449,7 @@ class TestStopRefreshLoop:
         assert ("C123", "171.42") not in _active_loops
 
     def test_noop_when_no_loop_exists(self):
-        from modastack.events.channels import stop_refresh_loop
+        from bobi.events.channels import stop_refresh_loop
 
         # Should not raise
         stop_refresh_loop("C999", "999.99")
@@ -458,7 +458,7 @@ class TestStopRefreshLoop:
         # This is what actually clears the indicator on turn completion (the
         # per-reply stop_refresh_loop runs in the CLI subprocess and can't
         # reach the manager's loops).
-        from modastack.events.channels import _active_loops, stop_all_refresh_loops
+        from bobi.events.channels import _active_loops, stop_all_refresh_loops
 
         l1, l2 = MagicMock(), MagicMock()
         _active_loops[("C1", "1.1")] = l1
@@ -482,7 +482,7 @@ class TestSlackReplyEdit:
         mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
         from click.testing import CliRunner
-        from modastack.cli import main
+        from bobi.cli import main
 
         runner = CliRunner()
         with patch.object(pooled, '_client', mock_client):
@@ -502,15 +502,15 @@ class TestSlackReplyEdit:
         assert body["channel"] == "C456"
         assert body["text"] == "Real response here"
 
-    @patch("modastack.slack.set_thread_status")
-    @patch("modastack.slack.update_slack_message")
+    @patch("bobi.slack.set_thread_status")
+    @patch("bobi.slack.update_slack_message")
     def test_edit_clears_thread_status(self, mock_update, mock_status,
                                         tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
         mock_update.return_value = {"ok": True}
 
         from click.testing import CliRunner
-        from modastack.cli import main
+        from bobi.cli import main
 
         runner = CliRunner()
         result = runner.invoke(main, [
@@ -534,7 +534,7 @@ class TestSlackReplyEdit:
         mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
         from click.testing import CliRunner
-        from modastack.cli import main
+        from bobi.cli import main
 
         runner = CliRunner()
         with patch.object(pooled, '_client', mock_client):
@@ -554,7 +554,7 @@ class TestSlackReplyEdit:
         mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
 
         from click.testing import CliRunner
-        from modastack.cli import main
+        from bobi.cli import main
 
         runner = CliRunner()
         with patch.object(pooled, '_client', mock_client):
@@ -583,12 +583,12 @@ class _FakeConfig:
 
 
 class TestDrainChannelIntegration:
-    @patch("modastack.events.channels.SlackInputChannel.prepare")
+    @patch("bobi.events.channels.SlackInputChannel.prepare")
     def test_drain_calls_channel_handler_for_slack(self, mock_prepare,
                                                     monkeypatch):
         """Drain loop invokes the Slack channel handler for chat events."""
         from queue import SimpleQueue
-        from modastack.events.drain import drain_loop
+        from bobi.events.drain import drain_loop
 
         event = _make_slack_event()
         augmented = dict(event, fields=dict(event["fields"], placeholder_ts="171.99"))
@@ -599,7 +599,7 @@ class TestDrainChannelIntegration:
 
         delivered = []
 
-        from modastack.inbox import register_local_inbox, unregister_local_inbox
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
             def push(self, msg):
@@ -613,7 +613,7 @@ class TestDrainChannelIntegration:
             return "\n".join(lines)
 
         cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
-        monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
+        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
 
         register_local_inbox("test-session", _CaptureInbox())
         try:
@@ -630,7 +630,7 @@ class TestDrainChannelIntegration:
     def test_drain_skips_handler_for_non_slack(self, monkeypatch):
         """Non-Slack events are delivered without channel handler processing."""
         from queue import SimpleQueue
-        from modastack.events.drain import drain_loop
+        from bobi.events.drain import drain_loop
 
         q = SimpleQueue()
         q.put({
@@ -643,7 +643,7 @@ class TestDrainChannelIntegration:
 
         delivered = []
 
-        from modastack.inbox import register_local_inbox, unregister_local_inbox
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
             def push(self, msg):
@@ -663,19 +663,19 @@ class TestDrainChannelIntegration:
         assert len(delivered) == 1
         assert "github.push" in delivered[0]
 
-    @patch("modastack.events.channels.SlackInputChannel.prepare")
+    @patch("bobi.events.channels.SlackInputChannel.prepare")
     def test_drain_skips_handler_without_token(self, mock_prepare,
                                                 monkeypatch):
         """No channel handler called when service token is unavailable."""
         from queue import SimpleQueue
-        from modastack.events.drain import drain_loop
+        from bobi.events.drain import drain_loop
 
         q = SimpleQueue()
         q.put(_make_slack_event())
 
         delivered = []
 
-        from modastack.inbox import register_local_inbox, unregister_local_inbox
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
             def push(self, msg):
@@ -686,7 +686,7 @@ class TestDrainChannelIntegration:
             return f"Event: {event['source']}/{event['type']}"
 
         cfg = _FakeConfig()  # No credentials configured
-        monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
+        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
 
         register_local_inbox("test-session", _CaptureInbox())
         try:
@@ -698,13 +698,13 @@ class TestDrainChannelIntegration:
         mock_prepare.assert_not_called()
         assert len(delivered) == 1
 
-    @patch("modastack.events.channels.SlackInputChannel.prepare")
+    @patch("bobi.events.channels.SlackInputChannel.prepare")
     def test_drain_deduplicates_placeholders_per_thread(self, mock_prepare,
                                                          monkeypatch):
         """When multiple Slack events for the same thread are batched,
         only one placeholder is posted and all events share its ts."""
         from queue import SimpleQueue
-        from modastack.events.drain import drain_loop, DRAIN_INTERVAL
+        from bobi.events.drain import drain_loop, DRAIN_INTERVAL
 
         e1 = _make_slack_event(ts="171.50", text="first message")
         e2 = _make_slack_event(ts="171.51", text="second message")
@@ -719,7 +719,7 @@ class TestDrainChannelIntegration:
 
         delivered = []
 
-        from modastack.inbox import register_local_inbox, unregister_local_inbox
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
             def push(self, msg):
@@ -733,8 +733,8 @@ class TestDrainChannelIntegration:
             return "\n".join(lines)
 
         cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
-        monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
-        monkeypatch.setattr("modastack.events.drain.DRAIN_INTERVAL", 0)
+        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
+        monkeypatch.setattr("bobi.events.drain.DRAIN_INTERVAL", 0)
 
         register_local_inbox("test-session", _CaptureInbox())
         try:
@@ -750,12 +750,12 @@ class TestDrainChannelIntegration:
         assert delivered[0].count("placeholder_ts") == 2
         assert delivered[0].count("171.99") == 2
 
-    @patch("modastack.events.channels.SlackInputChannel.prepare")
+    @patch("bobi.events.channels.SlackInputChannel.prepare")
     def test_drain_separate_placeholders_for_different_threads(self, mock_prepare,
                                                                 monkeypatch):
         """Events in different threads each get their own placeholder."""
         from queue import SimpleQueue
-        from modastack.events.drain import drain_loop
+        from bobi.events.drain import drain_loop
 
         e1 = _make_slack_event(thread_ts="171.42", ts="171.50")
         e2 = _make_slack_event(thread_ts="172.00", ts="172.01")
@@ -770,7 +770,7 @@ class TestDrainChannelIntegration:
 
         delivered = []
 
-        from modastack.inbox import register_local_inbox, unregister_local_inbox
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
             def push(self, msg):
@@ -784,8 +784,8 @@ class TestDrainChannelIntegration:
             return "\n".join(lines)
 
         cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
-        monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: cfg)
-        monkeypatch.setattr("modastack.events.drain.DRAIN_INTERVAL", 0)
+        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
+        monkeypatch.setattr("bobi.events.drain.DRAIN_INTERVAL", 0)
 
         register_local_inbox("test-session", _CaptureInbox())
         try:
@@ -797,19 +797,19 @@ class TestDrainChannelIntegration:
         # prepare() should be called once per distinct thread
         assert mock_prepare.call_count == 2
 
-    @patch("modastack.events.channels.SlackInputChannel.prepare")
+    @patch("bobi.events.channels.SlackInputChannel.prepare")
     def test_drain_skips_handler_without_config(self, mock_prepare,
                                                  monkeypatch):
         """No channel handler called when project config is unavailable."""
         from queue import SimpleQueue
-        from modastack.events.drain import drain_loop
+        from bobi.events.drain import drain_loop
 
         q = SimpleQueue()
         q.put(_make_slack_event())
 
         delivered = []
 
-        from modastack.inbox import register_local_inbox, unregister_local_inbox
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
             def push(self, msg):
@@ -819,7 +819,7 @@ class TestDrainChannelIntegration:
         def fake_formatter(event):
             return f"Event: {event['source']}/{event['type']}"
 
-        monkeypatch.setattr("modastack.events.drain._get_project_config", lambda: None)
+        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: None)
 
         register_local_inbox("test-session", _CaptureInbox())
         try:

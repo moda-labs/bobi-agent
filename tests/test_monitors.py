@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from modastack.monitors.schema import Monitor, parse_at, parse_days, parse_interval
-from modastack.monitors import registry as registry_mod
-from modastack.monitors.registry import MonitorRegistry
-from modastack.monitors.schema import Condition
-from modastack.monitors.scheduler import MonitorScheduler
+from bobi.monitors.schema import Monitor, parse_at, parse_days, parse_interval
+from bobi.monitors import registry as registry_mod
+from bobi.monitors.registry import MonitorRegistry
+from bobi.monitors.schema import Condition
+from bobi.monitors.scheduler import MonitorScheduler
 
 
 # === Interval parsing ===
@@ -160,7 +160,7 @@ def _write(path: Path, monitors: list[dict]):
 class TestRegistryMerge:
     def test_project_specific_monitor_scoped(self, tmp_path):
         project = tmp_path / "jobtack"
-        _write(project / ".modastack" / "monitors.yaml", [
+        _write(project / ".bobi" / "monitors.yaml", [
             {"name": "deploy-health", "interval": "5m", "url": "https://j"},
         ])
         reg = MonitorRegistry.load(project_path=project)
@@ -171,7 +171,7 @@ class TestRegistryMerge:
 
     def test_project_opt_out_of_default(self, tmp_path):
         project = tmp_path / "jobtack"
-        _write(project / ".modastack" / "monitors.yaml", [{"name": "stale-pr-check", "enabled": False}])
+        _write(project / ".bobi" / "monitors.yaml", [{"name": "stale-pr-check", "enabled": False}])
         reg = MonitorRegistry.load(project_path=project)
         stale = [m for m in reg.effective_monitors() if m.name == "stale-pr-check"]
         for s in stale:
@@ -179,7 +179,7 @@ class TestRegistryMerge:
 
     def test_project_override_of_default(self, tmp_path):
         project = tmp_path / "jobtack"
-        _write(project / ".modastack" / "monitors.yaml", [{"name": "pr-conflict-check", "interval": "5m"}])
+        _write(project / ".bobi" / "monitors.yaml", [{"name": "pr-conflict-check", "interval": "5m"}])
         reg = MonitorRegistry.load(project_path=project)
         glob = reg.globals.get("pr-conflict-check")
         if glob:
@@ -192,12 +192,12 @@ class TestRegistryMerge:
 
 class TestDefaultsPath:
     def test_returns_installed_path_only(self, tmp_path):
-        """_defaults_path must only return .modastack/monitors/defaults.yaml —
+        """_defaults_path must only return .bobi/monitors/defaults.yaml —
         no framework fallback, no get_project_root fallback."""
         project = tmp_path / "proj"
         project.mkdir()
         result = registry_mod._defaults_path(project)
-        assert result == project / ".modastack" / "monitors" / "defaults.yaml"
+        assert result == project / ".bobi" / "monitors" / "defaults.yaml"
 
     def test_returns_none_without_project(self):
         """_defaults_path returns None when no project path is available."""
@@ -205,12 +205,12 @@ class TestDefaultsPath:
         # Without monkeypatching get_project_root, this may return None or a
         # real path — but it must never return a framework source path.
         if result is not None:
-            assert ".modastack" in str(result)
+            assert ".bobi" in str(result)
 
     def test_loads_defaults_from_installed_pack(self, tmp_path):
-        """Registry loads defaults from .modastack/monitors/defaults.yaml."""
+        """Registry loads defaults from .bobi/monitors/defaults.yaml."""
         project = tmp_path / "proj"
-        _write(project / ".modastack" / "monitors" / "defaults.yaml", [
+        _write(project / ".bobi" / "monitors" / "defaults.yaml", [
             {"name": "my-check", "interval": "10m", "check": "pr_conflicts"},
         ])
         reg = MonitorRegistry.load(project_path=project)
@@ -228,7 +228,7 @@ class TestInstallFrameworkCuratorDefault:
     def test_install_injects_only_the_framework_curator(self, tmp_path):
         """A pack with no monitors/ directory still gets exactly the framework
         policy-curator default (and nothing else) — opt-out is via `prune:`."""
-        from modastack.cli import _install_pack
+        from bobi.cli import _install_pack
 
         pack = tmp_path / "minimal-pack"
         pack.mkdir()
@@ -239,7 +239,7 @@ class TestInstallFrameworkCuratorDefault:
 
         _install_pack(pack, project)
 
-        defaults = project / ".modastack" / "monitors" / "defaults.yaml"
+        defaults = project / ".bobi" / "monitors" / "defaults.yaml"
         assert defaults.exists()
         raw = yaml.safe_load(defaults.read_text())
         names = [m["name"] for m in raw["monitors"]]
@@ -250,7 +250,7 @@ class TestInstallFrameworkCuratorDefault:
     def test_install_pack_monitors_resolve_on_top_of_curator(self, tmp_path):
         """When a pack ships its own monitors/, they compose ON TOP of the
         framework curator (curator first, as the base layer)."""
-        from modastack.cli import _install_pack
+        from bobi.cli import _install_pack
 
         pack = tmp_path / "full-pack"
         pack.mkdir()
@@ -266,7 +266,7 @@ class TestInstallFrameworkCuratorDefault:
 
         _install_pack(pack, project)
 
-        defaults = project / ".modastack" / "monitors" / "defaults.yaml"
+        defaults = project / ".bobi" / "monitors" / "defaults.yaml"
         assert defaults.exists()
         raw = yaml.safe_load(defaults.read_text())
         names = [m["name"] for m in raw["monitors"]]
@@ -282,7 +282,7 @@ class TestRegistryWrites:
         repo = tmp_path / "r"
         repo.mkdir()
         MonitorRegistry.add_project(Monitor(name="dh", extra={"url": "u"}), repo)
-        monitors_path = repo / ".modastack" / "monitors.yaml"
+        monitors_path = repo / ".bobi" / "monitors.yaml"
         assert monitors_path.exists()
         raw = yaml.safe_load(monitors_path.read_text())
         assert raw["monitors"][0]["name"] == "dh"
@@ -473,7 +473,7 @@ class TestWeeklyJobRouting:
     subscribes to — so a handler actually receives it."""
 
     def test_weekly_notify_fires_and_event_is_subscribable(self, tmp_path):
-        from modastack.events.subscriptions import monitor_subscription_keys
+        from bobi.events.subscriptions import monitor_subscription_keys
 
         m = Monitor(name="weekly-prep-doc", at=["21:00"], tz="UTC", days=["sun"],
                     notify=True, event="monitor/prep.weekly_due",
@@ -704,23 +704,23 @@ class TestCommandMonitor:
 
 class TestDefaultSpawnCheckEntryPoint:
     """Regression tests for #212: monitor spawn checks use entry_point
-    for --role, matching how `modastack start` resolves the role."""
+    for --role, matching how `bobi start` resolves the role."""
 
     def test_entry_point_used_for_role(self, tmp_path, monkeypatch):
         """entry_point from agent.yaml produces --role <entry_point>
         in the spawn command."""
-        from modastack.monitors.scheduler import _default_spawn_check
-        import modastack.sdk as sdk_mod
+        from bobi.monitors.scheduler import _default_spawn_check
+        import bobi.sdk as sdk_mod
 
         # Minimal project: entry_point set, no defaults.role
         project = tmp_path / "proj"
-        (project / ".modastack" / "state").mkdir(parents=True)
-        (project / ".modastack" / "agent.yaml").write_text(
+        (project / ".bobi" / "state").mkdir(parents=True)
+        (project / ".bobi" / "agent.yaml").write_text(
             "agent: test-pack\nentry_point: support_manager\n"
         )
 
         monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
-        from modastack import paths as paths_mod
+        from bobi import paths as paths_mod
         monkeypatch.setattr(paths_mod, "_root", project)
 
         captured_cmds = []
@@ -753,18 +753,18 @@ class TestDefaultSpawnCheckEntryPoint:
     def test_entry_point_used_even_when_defaults_role_set(self, tmp_path, monkeypatch):
         """entry_point is always used for monitor spawns, even when
         defaults.role is set (defaults.role is for ad-hoc launches)."""
-        from modastack.monitors.scheduler import _default_spawn_check
-        import modastack.sdk as sdk_mod
+        from bobi.monitors.scheduler import _default_spawn_check
+        import bobi.sdk as sdk_mod
 
         project = tmp_path / "proj"
-        (project / ".modastack" / "state").mkdir(parents=True)
-        (project / ".modastack" / "agent.yaml").write_text(
+        (project / ".bobi" / "state").mkdir(parents=True)
+        (project / ".bobi" / "agent.yaml").write_text(
             "agent: test-pack\nentry_point: monitor_role\n"
             "defaults:\n  role: adhoc_role\n"
         )
 
         monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
-        from modastack import paths as paths_mod
+        from bobi import paths as paths_mod
         monkeypatch.setattr(paths_mod, "_root", project)
 
         captured_cmds = []
@@ -913,7 +913,7 @@ class TestPublishRetry:
 
 class TestParseVerdict:
     def test_extracts_trailing_verdict_line(self):
-        from modastack.monitors.scheduler import _parse_verdict
+        from bobi.monitors.scheduler import _parse_verdict
         out = ('Launching check...\n'
                '{"success": true, "finding": true, "summary": "s", "details": {}}\n')
         v = _parse_verdict(out)
@@ -921,16 +921,16 @@ class TestParseVerdict:
                      "details": {}}
 
     def test_ignores_non_verdict_json(self):
-        from modastack.monitors.scheduler import _parse_verdict
+        from bobi.monitors.scheduler import _parse_verdict
         assert _parse_verdict('{"unrelated": 1}\n') is None
 
     def test_no_output_is_none(self):
-        from modastack.monitors.scheduler import _parse_verdict
+        from bobi.monitors.scheduler import _parse_verdict
         assert _parse_verdict("") is None
         assert _parse_verdict(None) is None
 
     def test_last_verdict_wins(self):
-        from modastack.monitors.scheduler import _parse_verdict
+        from bobi.monitors.scheduler import _parse_verdict
         out = ('{"finding": false}\n'
                '{"success": true, "finding": true, "summary": "s"}\n')
         assert _parse_verdict(out)["finding"] is True

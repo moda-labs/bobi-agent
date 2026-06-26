@@ -12,13 +12,13 @@ from unittest.mock import patch
 
 import pytest
 
-import modastack.monitors.script_cache_checks as sc
-from modastack.monitors.script_cache_checks import (
+import bobi.monitors.script_cache_checks as sc
+from bobi.monitors.script_cache_checks import (
     GenResult,
     run_sandboxed,
     script_cache,
 )
-from modastack.monitors.schema import Monitor
+from bobi.monitors.schema import Monitor
 
 
 GOOD_SCRIPT = (
@@ -45,9 +45,9 @@ def scripts_dir(tmp_path):
         PUBLISHED.append((event, data))
         return True
 
-    with patch("modastack.monitors.script_cache_checks._scripts_dir", return_value=d), \
-         patch("modastack.monitors.script_cache_checks.publish", side_effect=fake_publish), \
-         patch("modastack.monitors.script_cache_checks._install_policy", return_value={}):
+    with patch("bobi.monitors.script_cache_checks._scripts_dir", return_value=d), \
+         patch("bobi.monitors.script_cache_checks.publish", side_effect=fake_publish), \
+         patch("bobi.monitors.script_cache_checks._install_policy", return_value={}):
         yield d
 
 
@@ -302,7 +302,7 @@ class TestApprovalModes:
         # recorded capability envelope auto-promotes (a mechanical repair). The
         # smoke run hits the network for gh, so we stub it — smoke is covered by
         # its own test; here we exercise the envelope/approval routing.
-        from modastack.monitors.script_cache_checks import approve_pending
+        from bobi.monitors.script_cache_checks import approve_pending
         m = _monitor(approval="review")
         s1 = "#!/usr/bin/env bash\nset -euo pipefail\ngh pr list --json number\n"
         with patch.object(sc, "_smoke_ok", return_value=True), \
@@ -322,7 +322,7 @@ class TestApprovalModes:
             _state(scripts_dir)["sha256"]
 
     def test_review_self_heal_new_capability_reenters_review(self, scripts_dir):
-        from modastack.monitors.script_cache_checks import approve_pending
+        from bobi.monitors.script_cache_checks import approve_pending
         m = _monitor(approval="review", allow_http=True, http_hosts=["api.example.com"])
         s1 = "#!/usr/bin/env bash\nset -euo pipefail\ngh pr list --json number\n"
         with patch.object(sc, "_smoke_ok", return_value=True), \

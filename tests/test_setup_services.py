@@ -2,8 +2,8 @@
 
 import pytest
 
-from modastack.setup import services
-from modastack.setup.services import AuthMethod
+from bobi.setup import services
+from bobi.setup.services import AuthMethod
 
 
 class TestCanonicalServiceKey:
@@ -62,7 +62,7 @@ class TestResolve:
 
     def test_unknown_not_in_catalog_becomes_custom(self):
         # Neither native, a curated bucket, on Venn, nor a hosted MCP → custom:
-        # modastack captures an API key and authors a tools guide for it.
+        # bobi captures an API key and authors a tools guide for it.
         conn = services.resolve("posthog", venn_catalog=set())
         assert conn.kind == "custom"
         assert conn.key == "posthog"
@@ -214,7 +214,7 @@ class TestCardsForSpec:
 
     def test_native_status_reads_env(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
-        from modastack.setup.actions import write_env
+        from bobi.setup.actions import write_env
         write_env(tmp_path, {"SLACK_BOT_TOKEN": "xoxb-something"})
         cards = services.cards_for(["slack"], tmp_path)
         assert cards[0]["status"] == "connected"
@@ -260,14 +260,14 @@ class TestLiveVennCatalog:
         assert services.VENN_CATALOG <= cat
 
     def test_live_source_prefers_cli_then_rest(self, tmp_path, monkeypatch):
-        from modastack.setup import venn_cli
+        from bobi.setup import venn_cli
         monkeypatch.setattr(venn_cli, "venn_binary", lambda: "/usr/bin/venn")
         monkeypatch.setattr(venn_cli, "list_service_names",
                             lambda key: {"from-cli"})
         assert services._live_service_names("k") == {"from-cli"}
         # CLI absent → REST fallback
         monkeypatch.setattr(venn_cli, "venn_binary", lambda: None)
-        import modastack.venn as venn_mod
+        import bobi.venn as venn_mod
         monkeypatch.setattr(venn_mod, "list_available_services",
                             lambda key: {"from-rest"})
         assert services._live_service_names("k") == {"from-rest"}

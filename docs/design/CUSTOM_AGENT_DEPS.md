@@ -6,16 +6,16 @@ C22 (provision/update/release automation). Tracking: `[containerized-24]`.
 ## What shipped (MVP) — read this first
 
 Two design choices were refined during implementation; they supersede the
-"FROM modastack-base" framing in §1/§2 below:
+"FROM bobi-base" framing in §1/§2 below:
 
-1. **Wheel-on-top via a team-deps HOOK, not `FROM modastack-base`.** A team that
-   declares `build:` is rendered to a shell hook (`modastack/build_render.py` →
+1. **Wheel-on-top via a team-deps HOOK, not `FROM bobi-base`.** A team that
+   declares `build:` is rendered to a shell hook (`bobi/build_render.py` →
    `team-deps.sh`) that the ONE Dockerfile runs via a `TEAM_DEPS` build-arg, as a
    stable layer **below** the volatile framework-wheel copy. So a code-only
    framework release rebuilds only the wheel layer — the team's tools stay
    cached. (FROM-base would re-run every team's apt/npm/run each release, because
    the FROM digest moves.) The default `TEAM_DEPS=docker/noop-deps.sh` makes a
-   no-build team byte-identical to the generic image. A published `modastack-base`
+   no-build team byte-identical to the generic image. A published `bobi-base`
    is therefore NOT needed for declarative teams (deferred — only the raw-
    Dockerfile escape hatch + solo `install <url>` pulls would want one).
 
@@ -28,7 +28,7 @@ Two design choices were refined during implementation; they supersede the
    HOME the agent actually uses, so a copy that dropped a file passed CI and
    broke production (build path ≠ runtime path).
 
-   The revised model keeps **`$HOME` on the IMAGE** (`/home/modastack`) — the
+   The revised model keeps **`$HOME` on the IMAGE** (`/home/bobi`) — the
    SAME path at build and runtime, so `verify` proves the live paths and any
    `$HOME`-relative tool (`~/dev/gstack`) is read in place, never copied. Only
    Claude's DURABLE state (creds, transcripts, settings) is redirected to the
@@ -37,9 +37,9 @@ Two design choices were refined during implementation; they supersede the
    `~/.claude` at that volume dir (`~/.claude -> /data/claude`), so a tool keyed
    off `~/.claude/{projects,settings.json,skills,…}` sees Claude's real state —
    one coherent home tree, split underneath only by storage lifecycle. Personal
-   skills bake at `/opt/modastack/skills` (immutable image content, OUTSIDE
+   skills bake at `/opt/bobi/skills` (immutable image content, OUTSIDE
    `~/.claude` so the repoint can't clobber them) via a build-time
-   `~/.claude/skills -> /opt/modastack/skills` symlink, and are surfaced under
+   `~/.claude/skills -> /opt/bobi/skills` symlink, and are surfaced under
    the config dir's `skills/` entry. No seed, no stamp, no `cp -a`, no drift.
    (codex/gh differ: system installs land in `/usr/local/bin`, on PATH, outside
    HOME entirely.) See `build_render.py` + `docker-entrypoint.sh` §2b.
@@ -47,7 +47,7 @@ Two design choices were refined during implementation; they supersede the
 3. **Built on Fly during deploy, not pushed to a registry (MVP).** The intended
    "build once in CI → push to a registry → deploy many by ref" hit Fly friction:
    Fly's registry rejects a push to a never-deployed ("pending") app, and GHCR
-   needs `write:packages`. So `modastack deploy` renders the team-deps hook into
+   needs `write:packages`. So `bobi deploy` renders the team-deps hook into
    the build context and builds the team-flavored image **on Fly's remote
    builder** during deploy (`deploy.py:_render_team_deps_into_context` →
    `--build-arg TEAM_DEPS`). Fly creates app + registry + machine together, and
@@ -64,7 +64,7 @@ Two design choices were refined during implementation; they supersede the
    `npx playwright install-deps chromium` so Playwright resolves the right
    packages for the running Debian instead of hand-listing `t64` names.
 
-Pieces: `build:` schema (`modastack/config.py` `BuildSpec`, incl. `run_root`),
+Pieces: `build:` schema (`bobi/config.py` `BuildSpec`, incl. `run_root`),
 renderer (`build_render.py`), Dockerfile `TEAM_DEPS` hook + `docker/noop-deps.sh`,
 entrypoint `~/.claude` coincidence (`docker/docker-entrypoint.sh` §2b), build-on-deploy
 (`deploy.py:_render_team_deps_into_context`) + `--image` short-circuit +
@@ -103,14 +103,14 @@ Today this team **provisions but cannot work**:
 
 1. `requires[].check` runs at **dispatch time** (`subagent.py:check_requires`) and
    *blocks agent launch* if it fails — so the tools must genuinely be present.
-2. `requires[].fix` is only ever run **interactively** (`modastack doctor` →
+2. `requires[].fix` is only ever run **interactively** (`bobi doctor` →
    `click.confirm`, `cli.py:1303`). Nothing auto-runs it; a dark container has no
    TTY, so that path can never fire.
 3. The C8 image **deliberately ships no Node/npm** (`Dockerfile`: the `claude` CLI
    is a native binary, "no Node"). But `codex` is `npm install -g`, and `gstack`'s
    `./setup` is Node-based too — neither can install even if we did run `fix`.
 
-Net: secrets already materialize (the C22 `MODASTACK_ENV` blob → Fly secrets/env,
+Net: secrets already materialize (the C22 `BOBI_ENV` blob → Fly secrets/env,
 unchanged), but **dependency binaries don't materialize at all.** And this isn't
 eng-team-specific — *anyone building a custom agent* will hit it. It needs a
 first-class, team-agnostic mechanism.
@@ -121,7 +121,7 @@ first-class, team-agnostic mechanism.
   any team's tools. The dependency declaration travels *with the team*, in the
   team directory, like prompts and workflows.
 - **Operator-agnostic** (design §9.1): works for the moda-labs GitOps fleet **and**
-  the solo `modastack install <url>` + `provision-instance.sh` path.
+  the solo `bobi install <url>` + `provision-instance.sh` path.
 - **Build once, deploy many** (§2): the per-team image is the unit; the
   provisioner/release deploy it by reference — which the C22 release flow already
   does (`fly deploy --image`).
@@ -134,7 +134,7 @@ fastest-changing to slowest so the cheap update stays cheap:
 | | Changes | Lives in | On change |
 |---|---|---|---|
 | **Definition** (prompts, workflows) | constantly | the **volume** | hot `install <url>` + restart (~30 s, no rebuild) |
-| **Framework** (the `modastack` wheel) | per release | the **image** (a thin top layer) | rebuild the last layer → redeploy |
+| **Framework** (the `bobi` wheel) | per release | the **image** (a thin top layer) | rebuild the last layer → redeploy |
 | **Tool deps** (codex, gstack, node…) | rarely | the **image** (cached lower layers) | rebuild image → redeploy |
 
 This preserves the C22 "changed team" flow: a prompt edit is a hot update with
@@ -143,12 +143,12 @@ This preserves the C22 "changed team" flow: a prompt edit is a hot update with
 the image — that turns every prompt tweak into a multi-minute build).
 
 **Layer ordering is load-bearing.** The image is a single `Dockerfile`
-(`MODASTACK_BUILD={source|pypi|wheel}`, shipped in C22/#365). Today it inverts the
+(`BOBI_BUILD={source|pypi|wheel}`, shipped in C22/#365). Today it inverts the
 order — the `claude` install and the **fastembed model bake** sit *after* the
-modastack venv, so any framework change re-bakes the model every build (~minutes).
+bobi venv, so any framework change re-bakes the model every build (~minutes).
 A team image must order layers **stable → volatile**: (1) base OS + sys pkgs →
 (2) **tool deps** (node, codex, gstack) → (3) `claude` CLI + **model bake** →
-(4) modastack's python deps → (5) **the modastack wheel** as the LAST thin layer.
+(4) bobi's python deps → (5) **the bobi wheel** as the LAST thin layer.
 Then a framework-version bump rebuilds only the final layer (seconds), and a
 tool-deps change rebuilds from (2). That's what keeps image-baked fast enough to
 keep its immutability/atomic-deploy/rollback guarantees instead of mutating live
@@ -160,10 +160,10 @@ never uses.)
 
 ### 1. Base image becomes a published artifact
 
-The unified C8/C22 `Dockerfile` (`MODASTACK_BUILD=pypi`, version-pinned, lean
-`fastembed` — shipped in #365) is published as `modastack-base` to a registry,
-tagged per framework release (e.g. `ghcr.io/moda-labs/modastack-base:<version>`).
-Team images do `FROM ghcr.io/moda-labs/modastack-base:<version>` and add only
+The unified C8/C22 `Dockerfile` (`BOBI_BUILD=pypi`, version-pinned, lean
+`fastembed` — shipped in #365) is published as `bobi-base` to a registry,
+tagged per framework release (e.g. `ghcr.io/moda-labs/bobi-base:<version>`).
+Team images do `FROM ghcr.io/moda-labs/bobi-base:<version>` and add only
 their tool-deps layers (the framework wheel is already baked, version-matched).
 (Registry choice is an open question — see below; GHCR is the leaning.)
 
@@ -176,10 +176,10 @@ generic base image (today's behavior; smoke-team, market-research need nothing).
 
 ```yaml
 build:
-  base: ghcr.io/moda-labs/modastack-base   # optional pin; default = matching release
+  base: ghcr.io/moda-labs/bobi-base   # optional pin; default = matching release
   apt:  [nodejs, npm]                       # root, build-time
   npm:  ["@openai/codex"]                   # global installs
-  run:                                      # arbitrary build steps, as the modastack user
+  run:                                      # arbitrary build steps, as the bobi user
     - "git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && ./setup"
   verify: requires                          # run requires[].check at build; fail build on miss
 ```
@@ -187,10 +187,10 @@ build:
 The framework renders this to a Dockerfile fragment appended to `FROM <base>`,
 choosing the right `USER`, `HOME`, and `WORKDIR` (the renderer owns the
 volume-shadows-WORKDIR trap from C10 — build-time has no volume, but `HOME`/paths
-must match runtime). `apt` runs as root; `npm`/`run` as the `modastack` user.
+must match runtime). `apt` runs as root; `npm`/`run` as the `bobi` user.
 
 **Escape hatch — a raw `Dockerfile` in the team dir.** If present, it wins; the
-framework only asserts `FROM …/modastack-base…` and builds it. The team owns
+framework only asserts `FROM …/bobi-base…` and builds it. The team owns
 everything. For the long tail the declarative block can't express.
 
 **Pin deps for reproducible rebuilds (#380).** Pin `npm` to exact versions
@@ -208,7 +208,7 @@ so it tracks the pinned base image's Debian release instead. A lint test
 ### 3. CI builds + publishes per-team images
 
 Extend `team-packages.yml`: for each team with a build spec (declarative or
-Dockerfile), build `modastack-<team>:<sha>` (+ rolling `:latest`) and push to the
+Dockerfile), build `bobi-<team>:<sha>` (+ rolling `:latest`) and push to the
 registry. The **definition tarball still builds unchanged** (deps and definition,
 two artifacts). `requires[].check` runs as the **final build step** so a missing
 tool fails CI, not production. Teams with no build spec publish no image (they use
@@ -218,7 +218,7 @@ the base).
 
 - `provision-instance.sh` gains **`--image <ref>`**: deploy a prebuilt image
   instead of building the generic one from the local Dockerfile. The C22 provision
-  job passes `--image modastack-<team>:latest` when the team has one; otherwise the
+  job passes `--image bobi-<team>:latest` when the team has one; otherwise the
   generic path (unchanged).
 - `release.yml`: a framework release rebuilds each team image `FROM` the new
   base, then rolls. The C22 release loop already deploys by image ref — it iterates
@@ -233,13 +233,13 @@ the base).
 
 ### 6. GitOps trigger split (deps vs definition) — SHIPPED (#379)
 
-> **BUILT.** `modastack deploy` of an already-running ssh-push app now **decides**
+> **BUILT.** `bobi deploy` of an already-running ssh-push app now **decides**
 > between a hot-push and an in-place rebuild *in the deploy primitive* — so the
 > behavior is identical from a laptop and from the `deploy-agent-teams` reconcile, and a
 > deps edit to a live instance self-heals instead of being a silent no-op.
 
 **Mechanism — a deps-identity stamp.** The team-deps hook stamps
-`team_deps_hash(build:)` into the image at `/opt/modastack/team-deps.hash`
+`team_deps_hash(build:)` into the image at `/opt/bobi/team-deps.hash`
 (`build_render.py`). On an in-place update the deploy primitive reads that stamp
 off the running instance over `fly ssh` (`deploy._running_team_deps_hash`) and
 compares it to the hash a fresh build would bake (`_local_team_deps_hash`):
@@ -250,7 +250,7 @@ compares it to the hash a fresh build would bake (`_local_team_deps_hash`):
 - **deps unchanged** → the **hot-push fast path** (`push_team(..., restart=True)`),
   exactly as before. Most pushes are prompt-only and stay here.
 - **no stamp** (image built before #379) → can't tell deps apart; warn + hot-push.
-  `modastack deploy --rebuild` forces the rebuild path (and re-stamps).
+  `bobi deploy --rebuild` forces the rebuild path (and re-stamps).
 
 `--rebuild` also lets an operator force a rebuild unconditionally. After #378, the
 team image's Fly-registry digest becomes the deps identity, so the same decision
@@ -262,7 +262,7 @@ collapses to a digest comparison (no `fly ssh` probe needed).
 image build/push in CI; `provision-instance.sh --image`; the deps-vs-definition
 trigger split.
 
-**Unchanged:** the C22 secret model, fleet enumeration (`MODASTACK_FLEET`), the
+**Unchanged:** the C22 secret model, fleet enumeration (`BOBI_FLEET`), the
 changed-team hot-install flow for prompt edits, and the release loop's
 deploy-by-ref mechanic. This is purely additive.
 
@@ -278,10 +278,10 @@ deploy-by-ref mechanic. This is purely additive.
   is fine for the first-party `agents/` repo. For *third-party* teams (future SaaS),
   arbitrary build steps are a supply-chain surface → sandbox the build or restrict
   to an allowlisted declarative subset. **Note now, don't solve in MVP.**
-- **Dev-box parity:** the same `build:` spec could drive `modastack doctor --fix`
+- **Dev-box parity:** the same `build:` spec could drive `bobi doctor --fix`
   (run the install steps locally), so a contributor's laptop matches the container.
   Nice-to-have, not MVP.
-- **Base-image size:** adding Node to `modastack-base` for the common case vs
+- **Base-image size:** adding Node to `bobi-base` for the common case vs
   keeping it lean and letting each team's `apt` pull Node. Leaning lean base +
   per-team `apt` (keeps the no-Node promise for teams that don't need it).
 
@@ -298,7 +298,7 @@ deploy-by-ref mechanic. This is purely additive.
 ## Acceptance
 
 - A team with **no** build spec still deploys on the generic base image (regression).
-- `eng-team` declares `build:` → CI builds `modastack-eng-team` → provision →
+- `eng-team` declares `build:` → CI builds `bobi-eng-team` → provision →
   `requires.check` passes → the dispatch gate no longer blocks → a real eng
   workflow runs end-to-end on a Fly instance.
 - A **prompt-only** edit to `eng-team` hot-installs via the existing C22

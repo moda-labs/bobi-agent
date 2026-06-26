@@ -1,7 +1,7 @@
-# MOD-216 — Weekly recurring scheduled jobs (weekly cron) in modastack
+# MOD-216 — Weekly recurring scheduled jobs (weekly cron) in bobi
 
 **Status:** DRAFT spec — awaiting human approval. Implementation is HELD until this PR is approved.
-**Ticket:** [MOD-216](https://linear.app/moda-labs/issue/MOD-216) — *Enable scheduling of weekly cron jobs in modastack/bobi*
+**Ticket:** [MOD-216](https://linear.app/moda-labs/issue/MOD-216) — *Enable scheduling of weekly cron jobs in bobi/bobi*
 **Type:** Feature · MEDIUM · spec-first
 **Revised:** 2026-06-22 per Zach's `changes_requested` review on PR #424 — re-architected to
 cleanly separate the **framework** (a generic day-of-week filter) from the **use-case**
@@ -17,7 +17,7 @@ one *example*, not a framework primitive. All §7 decisions are resolved below.
 > doc for the week. I want the scheduler to be able to accommodate this.
 
 The driving use case is a **recurring weekly job** — "every Sunday at 9pm, generate
-my prep doc for the upcoming week." Today modastack has a scheduler, but it cannot
+my prep doc for the upcoming week." Today bobi has a scheduler, but it cannot
 express *weekly* (day-of-week) recurrence. That is the one gap the **framework** must
 close. *Generating a prep doc* is **not** a framework concern — it is one example of a
 task, and tasks belong in a **prose skill** that lives in the agent package.
@@ -26,15 +26,15 @@ task, and tasks belong in a **prose skill** that lives in the agent package.
 
 This is the central design correction from review. Two cleanly separated layers:
 
-1. **Framework (modastack core) — a generic, task-agnostic day-of-week filter.**
+1. **Framework (bobi core) — a generic, task-agnostic day-of-week filter.**
    Add an optional `days:` field that *gates* the existing `at:`/`tz:` wall-clock
    scheduling to specific weekdays (e.g. Sunday 21:00 America/Los_Angeles). This is the
-   **only** change to modastack. It knows nothing about prep docs, sources, outputs, or
+   **only** change to bobi. It knows nothing about prep docs, sources, outputs, or
    delivery. Any monitor — any schedule trigger, weekly or otherwise — can use it.
 
 2. **Use-case (agent package) — a prose skill that defines the task.**
    The task is expressed as a **skill markdown file that ships in the agent package, not
-   in modastack.** The flow:
+   in bobi.** The flow:
 
    1. A monitor fires on its schedule (weekly cadence here, but the pattern works for
       *any* schedule trigger).
@@ -57,7 +57,7 @@ agent package), proving the framework change end-to-end without baking any use-c
 
 A survey of what already exists, so we design around it rather than reinventing.
 
-### 2.1 The monitor scheduler — `modastack/monitors/`
+### 2.1 The monitor scheduler — `bobi/monitors/`
 The framework's one scheduling primitive. A background thread (`MonitorScheduler`,
 `monitors/scheduler.py`) runs inside the manager process, ticks every **30 s**
 (`TICK_INTERVAL`), reloads the monitor registry each tick (runtime adds take effect
@@ -94,7 +94,7 @@ server's topic routing like any other event:
 - **`check:`** — a native Python runner in `*_checks.py` (`pr_conflicts`,
   `stale_prs`, `disk_free`).
 - **description-only** — launches a short-lived, **non-interactive check agent**
-  out-of-band (`modastack agents launch --wait`) that *observes and returns a
+  out-of-band (`bobi agents launch --wait`) that *observes and returns a
   verdict only*; the scheduler converts the verdict to conditions.
 
 > **Note on "monitors generate content":** the monitor record itself still only *fires an
@@ -113,7 +113,7 @@ effective monitor's event topic** at startup (`cli.py` →
 what to do with it.
 
 ### 2.3 Closest prior art — the shipped `team-status-roundup` default
-`.modastack/monitors/defaults.yaml` already ships a scheduled-notification monitor
+`.bobi/monitors/defaults.yaml` already ships a scheduled-notification monitor
 that is *structurally identical* to what we need, minus weekly recurrence:
 
 ```yaml
@@ -135,7 +135,7 @@ schedule whose event an agent reacts to.** The only thing it cannot yet express 
   no way to say "Sundays only." `interval: 7d` is **not** a substitute: it anchors to
   `last_run` (drifts off "Sunday night"), fires immediately on first sight, and a
   manager restart re-anchors it.
-- **CLI can't express wall-clock/weekly scheduling.** `modastack monitors add` only
+- **CLI can't express wall-clock/weekly scheduling.** `bobi monitors add` only
   exposes `--interval`/`--description`/`--event`/`--check`/`--url`. `at:`, `tz:`,
   `notify:`, and (proposed) weekday gating are YAML-edit-only today.
 
@@ -149,7 +149,7 @@ schedule whose event an agent reacts to.** The only thing it cannot yet express 
 
 ### In scope
 1. **Framework:** a generic, task-agnostic **day-of-week (`days:`) filter** on the
-   existing `at:`/`tz:` scheduler. This is the only modastack-core change.
+   existing `at:`/`tz:` scheduler. This is the only bobi-core change.
 2. **Framework:** **CLI** support (`monitors add --at/--tz/--days/--notify`) to create a
    weekly scheduled monitor without hand-editing YAML.
 3. **Framework docs:** monitor-schema reference for `days:` + a short, *use-case-neutral*
@@ -157,7 +157,7 @@ schedule whose event an agent reacts to.** The only thing it cannot yet express 
 4. **Agent package (worked example):** the **prep-doc use case** — a `notify` monitor whose
    `description` references a **prep-doc skill markdown shipped in the agent package**. The
    skill defines the task, sources, outputs, and delivery (§5). Nothing prep-doc-specific
-   ships in modastack core.
+   ships in bobi core.
 5. **Tests:** unit tests for weekday due-logic (incl. tz/DST and no-catch-up), schema
    parsing, and CLI; a routing test that a scheduled event reaches a subscribed handler.
 
@@ -225,11 +225,11 @@ This is intentionally the **smallest** framework change that satisfies the ticke
 "`at:` + a weekday filter," reusing existing tz/dedup logic, adding no catch-up.
 
 ### 4.3 CLI: expose wall-clock + weekly scheduling
-Extend `modastack monitors add` with `--at`, `--tz`, `--days`, and `--notify` so a
+Extend `bobi monitors add` with `--at`, `--tz`, `--days`, and `--notify` so a
 user can do:
 
 ```bash
-modastack monitors add weekly-prep-doc \
+bobi monitors add weekly-prep-doc \
   --at 21:00 --days sun --tz America/Los_Angeles \
   --notify --event monitor/prep.weekly_due \
   --description "Every Sunday night, run the prep-doc skill to assemble and deliver next week's prep doc"
@@ -242,7 +242,7 @@ exclusive — error if both given.)
 
 ## 5. Technical approach — the skill-based task boundary (use-case)
 
-This layer ships **in the agent package, not in modastack**. The prep-doc is the worked
+This layer ships **in the agent package, not in bobi**. The prep-doc is the worked
 **example** of a general pattern.
 
 ### 5.1 The pattern (**D2 = skill-based, confirmed; monitors may generate content**)
@@ -258,7 +258,7 @@ flavor. Reuse the `team-status-roundup` path exactly:
 4. The agent **executes the skill**, which both *defines* and *performs* the task —
    including generating and delivering content.
 
-**Why this over a first-class job flavor (the rejected D2 Option B):** it keeps modastack
+**Why this over a first-class job flavor (the rejected D2 Option B):** it keeps bobi
 core entirely task-agnostic; the task *logic* lives in a skill + monitor description (easy
 to evolve, test, and reuse, and portable with the agent package) rather than in framework
 internals; and it matches how scheduled agent work already happens here. The earlier worry
@@ -266,7 +266,7 @@ internals; and it matches how scheduled agent work already happens here. The ear
 generate content. No new scheduler machinery, no new flavor.
 
 ### 5.2 The prep-doc skill (worked example — ships in the agent package)
-A skill markdown file packaged with the agent team (**not** modastack core). It is the
+A skill markdown file packaged with the agent team (**not** bobi core). It is the
 single source of truth for the task and owns every use-case decision:
 
 - **Task:** assemble a markdown **prep doc for the week ahead** (the worked example; the
@@ -284,7 +284,7 @@ single source of truth for the task and owns every use-case decision:
 ### 5.3 Where it ships (**D6 = one per project; D7 = skill-based**)
 - The **framework** ships only the generic `days:` capability + CLI + use-case-neutral docs.
 - The **skill markdown and the example monitor ship in the agent package** (e.g. the
-  eng-team package), installed to the project under `.modastack/` like other package
+  eng-team package), installed to the project under `.bobi/` like other package
   content. v1 targets **one configured prep-doc monitor per project** (project-level
   monitors, not per-end-user). The use case is delivered **via the skill-based approach** —
   not as a forced framework default and not via a special recipe mechanism: it is simply a
@@ -294,7 +294,7 @@ single source of truth for the task and owns every use-case decision:
 > packages today resolve `roles/`, `tools/`, `context/`, `workflows/`, `monitors/`, and
 > `workspace/` (see CLAUDE.md), but there is **no established home for a task skill inside
 > an agent package**. Proposed: ship it at `agents/<team>/skills/<name>.md`, installed to
-> `.modastack/skills/`, and reference it by that path from the monitor `description`. The
+> `.bobi/skills/`, and reference it by that path from the monitor `description`. The
 > exact location and the discovery/resolution mechanism (how the agent locates and invokes
 > the referenced skill — plain prose path vs. an installed Claude Code `/skill`) are the two
 > genuinely-open points (§7). Flagging rather than silently picking.
@@ -374,7 +374,7 @@ These were *created* by the re-architecture and are not yet pinned (flagged, not
 
 1. **Skill location in the agent package.** Agent packages have no established `skills/`
    home today. Proposed: `agents/<team>/skills/<name>.md` → installed to
-   `.modastack/skills/`. Needs a yes/where.
+   `.bobi/skills/`. Needs a yes/where.
 2. **Skill discovery / invocation mechanism.** How the consuming agent locates and runs the
    referenced skill — a plain prose path in the monitor `description` that the agent reads,
    vs. an installed Claude Code `/skill` the agent invokes. Affects packaging and the
@@ -384,7 +384,7 @@ These were *created* by the re-architecture and are not yet pinned (flagged, not
 
 ## 8. Implementation plan (HELD until spec approval)
 
-**Framework (modastack core) — the only core changes:**
+**Framework (bobi core) — the only core changes:**
 1. **Schema** — `parse_days()` + `days` field + `weekdays` property +
    `from_dict`/`to_dict`/`_RESERVED` (`monitors/schema.py`). Tests first. Accept both
    Sunday numbers (D3).

@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from textwrap import dedent
 
-from modastack.config import Config, ServiceConfig, load_deployment_state, save_deployment_state, load_dotenv, find_required_env_vars
+from bobi.config import Config, ServiceConfig, load_deployment_state, save_deployment_state, load_dotenv, find_required_env_vars
 
 
 def test_defaults_when_no_config(tmp_path):
@@ -16,13 +16,13 @@ def test_defaults_when_no_config(tmp_path):
 
 
 def _write_agent_yaml(tmp_path, body):
-    d = tmp_path / ".modastack"
+    d = tmp_path / ".bobi"
     d.mkdir(parents=True, exist_ok=True)
     (d / "agent.yaml").write_text(dedent(body))
 
 
 def test_parse_channels_helper():
-    from modastack.config import _parse_channels
+    from bobi.config import _parse_channels
     assert _parse_channels(None) == []
     assert _parse_channels("") == []
     assert _parse_channels(["C1", "C2"]) == ["C1", "C2"]
@@ -91,7 +91,7 @@ def test_deployment_state_is_per_session(tmp_path):
 
 
 def test_loads_agent_yaml(tmp_path):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         version: "1.0.0"
@@ -129,7 +129,7 @@ def test_agent_yaml_env_var_interpolation(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_BOT_TOKEN", "xoxb-from-env")
     monkeypatch.setenv("TEST_VENN_KEY", "venn_from_env")
 
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -148,7 +148,7 @@ def test_agent_yaml_env_var_interpolation(tmp_path, monkeypatch):
 
 
 def test_agent_yaml_missing_env_var_becomes_empty(tmp_path):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -162,7 +162,7 @@ def test_agent_yaml_missing_env_var_becomes_empty(tmp_path):
 
 
 def test_agent_yaml_services_as_strings(tmp_path):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -209,7 +209,7 @@ def test_service_required_string_form_defaults_false(tmp_path):
 
 
 def test_agent_yaml_monitors(tmp_path):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -230,7 +230,7 @@ def test_agent_yaml_monitors(tmp_path):
 
 
 def test_agent_yaml_mcp_servers(tmp_path):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -260,7 +260,7 @@ def test_agent_yaml_mcp_servers(tmp_path):
 def test_mcp_servers_env_var_interpolation(tmp_path, monkeypatch):
     monkeypatch.setenv("CRM_TOKEN", "secret-123")
 
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -280,7 +280,7 @@ def test_mcp_servers_env_var_interpolation(tmp_path, monkeypatch):
 
 
 def test_load_dotenv(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / ".env").write_text("MY_TOKEN=secret123\nOTHER_KEY=abc\n")
 
@@ -297,7 +297,7 @@ def test_load_dotenv(tmp_path, monkeypatch):
 
 
 def test_load_dotenv_does_not_override_existing(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / ".env").write_text("MY_TOKEN=from-dotenv\n")
 
@@ -308,7 +308,7 @@ def test_load_dotenv_does_not_override_existing(tmp_path, monkeypatch):
 
 
 def test_load_dotenv_skips_comments_and_blanks(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / ".env").write_text("# comment\n\nVALID=yes\n")
 
@@ -319,7 +319,7 @@ def test_load_dotenv_skips_comments_and_blanks(tmp_path, monkeypatch):
 
 
 def test_load_dotenv_strips_quotes(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / ".env").write_text("SINGLE='quoted'\nDOUBLE=\"quoted\"\n")
 
@@ -337,7 +337,7 @@ def test_load_dotenv_missing_file(tmp_path):
 
 
 def test_find_required_env_vars(tmp_path):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         services:
@@ -358,7 +358,7 @@ def test_find_required_env_vars_no_config(tmp_path):
 
 def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
     """Full integration: .env values resolve through ${VAR} in agent.yaml."""
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -377,7 +377,7 @@ def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
 
 
 def test_venn_services_property(tmp_path):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -398,7 +398,7 @@ def test_venn_services_property(tmp_path):
 
 
 def test_credential_returns_value(tmp_path):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         services:
@@ -423,7 +423,7 @@ def test_credential_missing_service():
 
 
 def test_credential_missing_key(tmp_path):
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         services:
@@ -438,7 +438,7 @@ def test_credential_missing_key(tmp_path):
 
 def test_service_config_credentials_parsed(tmp_path):
     """ServiceConfig.credentials dict is populated from agent.yaml."""
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         services:
@@ -533,7 +533,7 @@ def test_requires_not_env_interpolated(tmp_path, monkeypatch):
 
 
 def test_run_requires_checks_all_pass():
-    from modastack.config import RequiresEntry, run_requires_checks
+    from bobi.config import RequiresEntry, run_requires_checks
     entries = [
         RequiresEntry(name="true-cmd", check="true"),
         RequiresEntry(name="echo-cmd", check="echo ok"),
@@ -545,7 +545,7 @@ def test_run_requires_checks_all_pass():
 
 
 def test_run_requires_checks_failure():
-    from modastack.config import RequiresEntry, run_requires_checks
+    from bobi.config import RequiresEntry, run_requires_checks
     entries = [RequiresEntry(name="fail", check="false")]
     results = run_requires_checks(entries)
     assert len(results) == 1
@@ -554,7 +554,7 @@ def test_run_requires_checks_failure():
 
 
 def test_run_requires_checks_timeout():
-    from modastack.config import RequiresEntry, run_requires_checks
+    from bobi.config import RequiresEntry, run_requires_checks
     entries = [RequiresEntry(name="slow", check="sleep 60")]
     results = run_requires_checks(entries, timeout=0.1)
     entry, ok, detail = results[0]
@@ -563,7 +563,7 @@ def test_run_requires_checks_timeout():
 
 
 def test_run_requires_checks_command_not_found():
-    from modastack.config import RequiresEntry, run_requires_checks
+    from bobi.config import RequiresEntry, run_requires_checks
     entries = [RequiresEntry(name="missing", check="nonexistent_cmd_xyz_12345")]
     results = run_requires_checks(entries)
     entry, ok, detail = results[0]
@@ -571,5 +571,5 @@ def test_run_requires_checks_command_not_found():
 
 
 def test_run_requires_checks_empty():
-    from modastack.config import run_requires_checks
+    from bobi.config import run_requires_checks
     assert run_requires_checks([]) == []

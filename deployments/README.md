@@ -1,9 +1,9 @@
 # `deployments/` — per-instance deploy config
 
 Each `deployments/<name>.yaml` is **one instance an operator runs**. Adding a
-file (and running `modastack deploy <name>`, or letting the GitOps Action pick
+file (and running `bobi deploy <name>`, or letting the GitOps Action pick
 it up) deploys; deleting it surfaces the orphaned Fly app for a human-gated
-`modastack destroy`. This decouples **what a team is** (`agents/<team>/`, a
+`bobi destroy`. This decouples **what a team is** (`agents/<team>/`, a
 portable package) from **where/how an operator runs it** (here) — one team can
 back many deployments (`acme-eng`, `staging-eng`, …).
 
@@ -18,7 +18,7 @@ team: my-team               # local package agents/my-team → ssh-push delivery
 # team-url: https://…/my-team.tar.gz   # …OR a published tarball → HTTPS-fetch
                                         # (set exactly one of team / team-url)
 
-fleet: acme                 # app = "<fleet>-<name>"; MODASTACK_FLEET stamp
+fleet: acme                 # app = "<fleet>-<name>"; BOBI_FLEET stamp
 event_server: https://ev.acme.workers.dev
 region: sjc
 memory: 8gb
@@ -51,4 +51,4 @@ you: `fleet: acme` + `eng-team.yaml` → app `acme-eng-team`).
 CLI flags  ›  deployments/<name>.yaml  ›  deployments/defaults.yaml  ›  built-ins
 ```
 
-`modastack deploy <name>` performs this merge itself, so it works standalone.
+`bobi deploy <name>` performs this merge itself, so it works standalone.

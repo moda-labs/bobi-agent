@@ -14,7 +14,7 @@ import pytest
 
 import numpy as np
 
-from modastack.kb.sidecar import _make_handler, MODEL_NAME, EMBEDDING_DIM
+from bobi.kb.sidecar import _make_handler, MODEL_NAME, EMBEDDING_DIM
 
 
 class _StubModel:
@@ -139,7 +139,7 @@ class TestEmbeddingCompatibility:
     def test_embedding_dim_matches_store(self, server):
         """Embeddings must be EMBEDDING_DIM (384) floats — the sqlite-vec
         table is created with this dimension and rejects mismatches."""
-        from modastack.kb.store import EMBEDDING_DIM as STORE_DIM
+        from bobi.kb.store import EMBEDDING_DIM as STORE_DIM
         status, data = _post(server, "/embed", {"texts": ["compatibility check"]})
         assert status == 200
         assert len(data["embeddings"][0]) == STORE_DIM
@@ -147,7 +147,7 @@ class TestEmbeddingCompatibility:
     def test_embedding_model_matches_store(self, server):
         """Health endpoint model name must match the constant stored in KB
         metadata so hybrid search uses the same model for query and doc."""
-        from modastack.kb.store import EMBEDDING_MODEL as STORE_MODEL
+        from bobi.kb.store import EMBEDDING_MODEL as STORE_MODEL
         _, data = _get(server, "/health")
         assert data["model"] == STORE_MODEL
 
@@ -173,19 +173,19 @@ class TestResolveCacheDir:
     """
 
     def test_prefers_fastembed_cache_path(self, monkeypatch):
-        from modastack.kb.sidecar import _resolve_cache_dir
+        from bobi.kb.sidecar import _resolve_cache_dir
         monkeypatch.setenv("FASTEMBED_CACHE_PATH", "/img/fe-cache")
         monkeypatch.setenv("HF_HOME", "/img/hf")
         assert _resolve_cache_dir() == "/img/fe-cache"
 
     def test_falls_back_to_hf_home(self, monkeypatch):
-        from modastack.kb.sidecar import _resolve_cache_dir
+        from bobi.kb.sidecar import _resolve_cache_dir
         monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
         monkeypatch.setenv("HF_HOME", "/img/hf")
         assert _resolve_cache_dir() == "/img/hf/fastembed"
 
     def test_none_when_unset(self, monkeypatch):
-        from modastack.kb.sidecar import _resolve_cache_dir
+        from bobi.kb.sidecar import _resolve_cache_dir
         monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
         monkeypatch.delenv("HF_HOME", raising=False)
         assert _resolve_cache_dir() is None

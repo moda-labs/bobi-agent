@@ -1,6 +1,6 @@
-# Design System — modastack setup
+# Design System — bobi setup
 
-> Source of truth for the `modastack setup` web UI. Read this before any visual or
+> Source of truth for the `bobi setup` web UI. Read this before any visual or
 > UX decision.
 >
 > **Status (2026-06-16):** shipped and iterating. The original 8-stage rail
@@ -13,21 +13,21 @@
 > supersedes any "stage rail" description elsewhere.
 
 ## Product context
-- **What:** a local web wizard a developer runs (`modastack setup`, served on
+- **What:** a local web wizard a developer runs (`bobi setup`, served on
   `127.0.0.1`) to design, build, install, and later edit a portable
   **agent-team package**. The editable team source lives in a machine-wide
-  library the user can change (default `~/modastack-agents/<team>/`), so a team
+  library the user can change (default `~/bobi-agents/<team>/`), so a team
   isn't tied to the cwd it installs into; **Finish** authors the source there
-  and installs a frozen image into the project's `.modastack/`.
+  and installs a frozen image into the project's `.bobi/`.
 - **Who:** developers/engineers comfortable in IDEs and terminals. v1 of this
   product was a terminal REPL.
 - **Hard constraints:** fully **offline** — system fonts only, no CDN, no web
   fonts; vanilla HTML/CSS/JS, no build step; inline SVG only.
-- **Brand:** ships as **modastack** for now. A rebrand to **bobbi** ("team
+- **Brand:** ships as **bobi** for now. A rebrand to **bobbi** ("team
   bobbi", "we are legion") — after the Bobiverse novels, one engineer's mind
   forking into a legion of autonomous copies, which is the product's pitch — is
   the intended direction but **deferred** until the whole-codebase rename lands.
-  Until then, all user-facing copy, commands, and paths say `modastack`. The
+  Until then, all user-facing copy, commands, and paths say `bobi`. The
   retro-futurist *aesthetic* below already nods to that lineage. See
   `memory/project_bobbi_rebrand.md`.
 
@@ -48,10 +48,10 @@ fun from screen one and reach a delightful, visible result fast. Everything else
 is subordinate to this.
 - **The intro is a short on-ramp, not a heavy chooser.** Three ways in (create /
   modify / registry — see below) on one calm screen, then you're talking to
-  modastack within seconds. Create needs no name and no decisions up front — modastack
+  bobi within seconds. Create needs no name and no decisions up front — bobi
   names the team for you as you describe it.
 - **Three escalating magic beats — front-load the first:** (1) **Design
-  reflection** — type a rough line, modastack instantly reflects back a smart, alive
+  reflection** — type a rough line, bobi instantly reflects back a smart, alive
   understanding *and the cards on the right start filling in* (~seconds, the
   early hook); (2) **Automate suggestions** — "it thought of things I didn't";
   (3) **the Build pour** — the payoff. Don't make the user climb to (3) to feel
@@ -65,7 +65,7 @@ is subordinate to this.
 **The team is alive and evolving, not set-once** (the openclaw/hermes feeling).
 The product is a living workshop you return to, built on the re-entrant editor
 (open/edit any team = same screen).
-- **Done is a launchpad, not a finish line** — "modastack's live, change it anytime."
+- **Done is a launchpad, not a finish line** — "bobi's live, change it anytime."
 - **A fast evolve loop for small changes** — open your team, say "also post a
   Friday recap," it adapts; modify mode is **non-lossy** so you never lose the
   team's existing depth (below).
@@ -181,7 +181,7 @@ and artifacts on screen, buttons that look like tools.
 ## UX architecture — one screen
 
 There is **one screen**, not a stage rail. *Conversation proposes, the panel
-disposes:* you talk to modastack on the left; the team materializes as cards on the
+disposes:* you talk to bobi on the left; the team materializes as cards on the
 right. Special, deliberate steps (credential capture, Venn, Slack-as-chat) open
 as **popup overlays** so they never derail the conversation. Three render routes
 bracket the one screen: **intro** (before), the **build pour** (the automated
@@ -195,12 +195,12 @@ middle), and the **file browser** (after).
 ### The intro — three ways in
 One calm screen, three tabs, each landing in the same chat+cards editor:
 
-- **Create new** — author from scratch. No name field (modastack auto-names the team
+- **Create new** — author from scratch. No name field (bobi auto-names the team
   from the goal as you talk; rename anytime). One field: the **location**,
-  defaulting to the `~/modastack-agents/` library, with a **Browse…** button.
+  defaulting to the `~/bobi-agents/` library, with a **Browse…** button.
 - **Modify existing** — always available. A **scan-directory field** (default the
-  `~/modastack-agents/` library, changeable + Browse) asks which folder holds your
-  teams; modastack lists every `agent.yaml`-bearing folder it finds there (the
+  `~/bobi-agents/` library, changeable + Browse) asks which folder holds your
+  teams; bobi lists every `agent.yaml`-bearing folder it finds there (the
   folder itself or its children). Pick one to copy into the working location and
   **reverse-fill** the cards from it. Stays enabled even when the default library
   is empty, so you can point the scan elsewhere.
@@ -211,14 +211,14 @@ One calm screen, three tabs, each landing in the same chat+cards editor:
 dialog, so **Browse…** opens a small **server-side directory lister** (`/api/browse`),
 **rooted at the user's home** (the library and most dev repos live there; confined
 to home so the page can't list the whole filesystem) and returning absolute paths.
-Default source location is the `~/modastack-agents/` library; install still targets
-the project's `.modastack/` unchanged (a source outside the project copies in like
+Default source location is the `~/bobi-agents/` library; install still targets
+the project's `.bobi/` unchanged (a source outside the project copies in like
 a registry team). Anything outside home can still be typed into the location field.
-Source dirs are confined out of `.modastack/`.
+Source dirs are confined out of `.bobi/`.
 
 ### The one screen — chat + the team as cards
 - **Left: the conversation.** A single centered chat. You say what you want in
-  your own words; modastack reflects it back (typed out) and asks at most one good
+  your own words; bobi reflects it back (typed out) and asks at most one good
   follow-up. **Contextual quick-add chips** (emitted by the digestion brain, not
   hardcoded) sit by the input as one-tap conversational adds.
 - **Right: the team panel.** Five cards fill in and check off live:
@@ -247,17 +247,17 @@ mcp → custom) and handles it accordingly:
   below), not a guess. Venn wins ahead of the MCP registry — it's the 1-click
   path.
 - **mcp** — a service Venn doesn't cover but that ships a **hosted MCP server**
-  (`modastack/setup/mcp_registry.py`, a curated seed of public hosted MCPs).
+  (`bobi/setup/mcp_registry.py`, a curated seed of public hosted MCPs).
   Wired straight into the team's `agent.yaml` `mcp_servers:` block, so the agent
   connects at runtime — no authored guide. A static-key server captures one
   `<SVC>_API_KEY` (sent as a `${VAR}` auth header); an OAuth/public server
   captures nothing and reads as "✓ wired" (authorized at first connect). Tagged
   "hosted MCP · 1-click".
 - **custom** — neither native, on Venn, nor in the MCP registry (e.g. PostHog).
-  modastack captures a service-specific API key (`<SVC>_API_KEY`) **and authors a
+  bobi captures a service-specific API key (`<SVC>_API_KEY`) **and authors a
   `tools/<svc>.md` usage guide** at build, so the agent knows how to call that
   service's API. This is the "you'll need to build an MCP for this" terminal
-  state. Tagged "custom · modastack writes a guide".
+  state. Tagged "custom · bobi writes a guide".
 
 > The full ticket cascade (MOD-203) has two further rungs between mcp and
 > custom — a **live web search** for a hosted MCP, then a **CLI fallback** —
@@ -265,9 +265,9 @@ mcp → custom) and handles it accordingly:
 > straight through to custom.
 
 **The real Venn catalog (not guessing).** Classification uses the live list of
-services Venn supports, sourced **CLI-first**: `modastack/setup/venn_cli.py`
+services Venn supports, sourced **CLI-first**: `bobi/setup/venn_cli.py`
 shells out to the canonical `venn` binary (`venn --json help list_servers`),
-falling back to the REST client in `modastack/venn.py` when the CLI is absent.
+falling back to the REST client in `bobi/venn.py` when the CLI is absent.
 A small static seed covers the pre-key case; the live list (unioned on top when
 a `VENN_API_KEY` is present) is authoritative. Connection status for venn
 services is verified live against the user's connected servers.
@@ -283,13 +283,13 @@ connected.
 with time (Automate = when it acts on its own); keep internal structure (roles,
 workflows) invisible.* Automate is its own card because **granting initiative is
 a trust decision** — proactive behavior should be consciously opted into. Human
-framing, not "monitors": *"anything modastack should do on its own?"* Maps to
+framing, not "monitors": *"anything bobi should do on its own?"* Maps to
 `monitors/` (description-only checks) + scheduled/triggered workflows.
 - **Per-behavior leash:** each item carries **notify** (tells you) / **ask
   first** (proposes, waits) / **act** (does it, reports). (Named **Automate**
   2026-06-14 over "Autopilot", which read as unsupervised; the leash plus the
   plain verb keep "you're in control".)
-- **modastack suggests, doesn't just collect.** A dedicated suggestion prompt
+- **bobi suggests, doesn't just collect.** A dedicated suggestion prompt
   ideates concrete, non-spammy proactive behaviors from the team's intent — a
   "did more than I expected" beat. The user toggles, edits, adds, or skips;
   committing is explicit even when the answer is "nothing".
@@ -309,7 +309,7 @@ framing, not "monitors": *"anything modastack should do on its own?"* Maps to
 - **Finish ends cleanly.** `/api/finish` marks the state complete and **stops the
   local setup server**, then the page transitions to a **static completion
   screen** (no server-dependent buttons left to strand the user) with the
-  `modastack start` command. Open-folder/file-browsing happen *before* Finish, while
+  `bobi start` command. Open-folder/file-browsing happen *before* Finish, while
   the server is alive.
 
 ### Modify mode is non-lossy
@@ -366,7 +366,7 @@ the specialists are tuned for jobs the brain shouldn't do inline.
 ## Architecture (as built)
 
 ```
-modastack/setup/
+bobi/setup/
 ├── state.py        # SetupState: stage enum + hard-floor gating + 4-slot spec
 │                   #   (goal/roles/autonomous/services) + soft readiness; JSON
 │                   #   persistence, source_tree_hash, validated-hash freeze.
@@ -419,13 +419,13 @@ inspecting proxies (Zscaler, etc.) whose root is in the keychain but not certifi
 2. ~~Stage names / is the rail right~~ — **RESOLVED: no rail** (2026-06-15). The
    8-stage rail collapsed into one screen; the stage enum survives only as the
    build/install pipeline.
-3. **Command name.** `modastack setup` reads one-shot but the UI is also the
+3. **Command name.** `bobi setup` reads one-shot but the UI is also the
    re-entrant editor — may want a broader command later.
-4. ~~`modastack/` vs `.modastack/` proximity~~ — **SUPERSEDED (2026-06-16):** the
-   editable source moved to a machine-wide `~/modastack-agents/` library, so it no
-   longer sits one dotfile away from the project's `.modastack/` install target.
+4. ~~`bobi/` vs `.bobi/` proximity~~ — **SUPERSEDED (2026-06-16):** the
+   editable source moved to a machine-wide `~/bobi-agents/` library, so it no
+   longer sits one dotfile away from the project's `.bobi/` install target.
 
-## Agent UI (runtime dashboard — `modastack ui`)
+## Agent UI (runtime dashboard — `bobi ui`)
 
 A second, separate surface from the `setup` wizard: a minimal dashboard for a
 *running* team. One card per active agent session (manager + workers, read from
@@ -437,17 +437,17 @@ language verbatim**: warm light chrome for the roster + composer, the single dar
 CRT slab for the chat transcript (the machine writes in the dark), amber accent,
 mono labels, system fonts, no build step.
 
-- **Two run modes, one app.** Local (`modastack ui`) binds `127.0.0.1` + a
+- **Two run modes, one app.** Local (`bobi ui`) binds `127.0.0.1` + a
   per-launch token and opens a browser, exactly like setup. In-container it's
-  **on by default** (the entrypoint sets `MODASTACK_UI=1`; disable with
-  `MODASTACK_UI=0`) — the manager binds the Fly **6PN** address in a daemon
-  thread, and `modastack ui <deployment>` resolves the app, reads the token off
+  **on by default** (the entrypoint sets `BOBI_UI=1`; disable with
+  `BOBI_UI=0`) — the manager binds the Fly **6PN** address in a daemon
+  thread, and `bobi ui <deployment>` resolves the app, reads the token off
   the machine, runs `fly proxy`, and opens the browser. Being image behavior
   (not a per-instance flag) means existing instances get it on their next deploy
   — which is what lets the release canary gate on UI reachability.
 - **No public ingress.** The Fly box stays dark (no `[http_service]`); 6PN
   reachability via `fly proxy` is the trust boundary, and a token (env
-  `MODASTACK_UI_TOKEN`, else auto-written to `.modastack/state/ui.token`) is
+  `BOBI_UI_TOKEN`, else auto-written to `.bobi/state/ui.token`) is
   defense-in-depth. In both modes the browser talks to *localhost*, so the same
   loopback Host guard + token check as setup applies unchanged.
 
@@ -471,11 +471,11 @@ mono labels, system fonts, no build step.
 | 2026-06-16 | **Real Venn catalog via the `venn` CLI** (CLI-first, REST fallback); non-Venn services → custom + authored `tools/*.md` | stop guessing what Venn supports; give custom services a real usage guide |
 | 2026-06-16 | **Auto-name from goal; rename moves the folder + updates `agent:`** | the name has to actually stick on disk |
 | 2026-06-16 | **OS system trust store (truststore) for Venn TLS** | works behind Zscaler-style inspecting proxies; certifi alone fails |
-| 2026-06-16 | Default team folder `modastack/` everywhere; keep `.modastack/` install target | one consistent, obvious location |
-| 2026-06-16 | **Editable source → machine-wide `~/modastack-agents/` library** (was cwd `modastack/`); install into project `.modastack/` unchanged | a team isn't tied to where it installs; stop littering the cwd |
+| 2026-06-16 | Default team folder `bobi/` everywhere; keep `.bobi/` install target | one consistent, obvious location |
+| 2026-06-16 | **Editable source → machine-wide `~/bobi-agents/` library** (was cwd `bobi/`); install into project `.bobi/` unchanged | a team isn't tied to where it installs; stop littering the cwd |
 | 2026-06-16 | **Modify asks which folder to scan** (`/api/teams`); tab always enabled; folder picker re-rooted at `$HOME`, absolute paths | teams can live anywhere; pick the scan dir even when the library is empty |
 | 2026-06-16 | **Server-disconnect overlay** (ping heartbeat + fetch/SSE failure) + **Escape closes popups** | the page must stop pretending to be live when the local server dies |
-| 2026-06-16 | **Branding reverted to `modastack`** in the shipping UI; `bobbi` rebrand deferred to the whole-codebase rename | don't ship `bobbi` ahead of the rename; also fixed wrong commands/paths (`.bobbi/`→`.modastack/`, `bobbi <cmd>`→`modastack <cmd>`) |
-| 2026-06-23 | **Runtime Agent UI (`modastack ui`)**: cards per live agent + blocking click-to-chat; reuses the setup design language | a running team had no visual surface; private-via-`fly proxy` keeps the Fly box dark (no public ingress) |
+| 2026-06-16 | **Branding reverted to `bobi`** in the shipping UI; `bobbi` rebrand deferred to the whole-codebase rename | don't ship `bobbi` ahead of the rename; also fixed wrong commands/paths (`.bobbi/`→`.bobi/`, `bobbi <cmd>`→`bobi <cmd>`) |
+| 2026-06-23 | **Runtime Agent UI (`bobi ui`)**: cards per live agent + blocking click-to-chat; reuses the setup design language | a running team had no visual surface; private-via-`fly proxy` keeps the Fly box dark (no public ingress) |
 | 2026-06-18 | **Connections cascade gains an `mcp` rung** (native → venn → mcp → custom); hosted MCPs from a static registry wire into `agent.yaml` `mcp_servers:` (MOD-203) | a service Venn doesn't cover often ships a hosted MCP — wire it in directly instead of dropping to a hand-authored guide; live-search + CLI rungs deferred |
 ```

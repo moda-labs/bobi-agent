@@ -2,7 +2,7 @@
 
 - **Tickets:** [MDS-63](https://linear.app/moda-labs/issue/MDS-63), [MDS-64](https://linear.app/moda-labs/issue/MDS-64) (sibling bugs, same files)
 - **Type:** Bug fix (×2) · **Priority:** 2 (medium) · **Status:** spec — HELD for approval
-- **Files:** `modastack/validate.py` (`_check_mcp_servers`, `_probe_mcp_server`, `_async_probe_mcp`), `modastack/subagent.py` (agent-spawn env), plus tests.
+- **Files:** `bobi/validate.py` (`_check_mcp_servers`, `_probe_mcp_server`, `_async_probe_mcp`), `bobi/subagent.py` (agent-spawn env), plus tests.
 
 > Two independent bugs in the **stdio** MCP preflight path, shipped as **one branch / one PR**
 > because they touch the same functions and would collide otherwise. HTTP/SSE MCP servers
@@ -12,7 +12,7 @@
 
 ## 1. Problem
 
-`modastack start` / `restart` / `doctor` run a preflight that connects to each configured MCP
+`bobi start` / `restart` / `doctor` run a preflight that connects to each configured MCP
 server and reports its health. For **stdio** servers, the preflight is wrong in two distinct ways:
 
 ### MDS-63 — single-poll race: healthy stdio servers false-fail as `pending`
@@ -30,7 +30,7 @@ window and treats that as failure:
 Result: `✗ substack    mcp — pending` → `Startup blocked — fix the issues above.` (exit 1),
 with **no bypass flag**. A correctly-configured, working stdio MCP cannot be brought online
 without a code change. Affects **any** stdio MCP, including built-ins injected by
-`modastack/mcp/inject.py` (e.g. `modastack-codex`).
+`bobi/mcp/inject.py` (e.g. `bobi-codex`).
 
 ### MDS-64 — env mismatch: bare commands pass preflight, fail at agent spawn (false-green)
 
@@ -81,8 +81,8 @@ one set of regression tests, one review.
 - Broader MCP config schema changes.
 
 > **Forward dependency (informational — no work here).** This PR is foundational plumbing for the
-> `kind: mcp` capability spoke ([#398](https://github.com/moda-labs/modastack/issues/398)), under
-> the reusable-tool-library umbrella ([#416](https://github.com/moda-labs/modastack/issues/416)).
+> `kind: mcp` capability spoke ([#398](https://github.com/moda-labs/bobi-agent-team/issues/398)), under
+> the reusable-tool-library umbrella ([#416](https://github.com/moda-labs/bobi-agent-team/issues/416)).
 > #398 sequences *after* this lands and should **consume** what ships here, not re-derive it:
 > its "probe/validate on add" reuses MDS-63's hardened poll-until-settled probe, and MDS-64's
 > shared spawn-env helper (D-64a, option A) is the seed of #398's per-runtime MCP registration
@@ -132,7 +132,7 @@ build `PATH` differently. The four upstream options from the ticket, with the le
 **Lead recommendation — unify around a single spawn-env helper (Opt 4 + Opt 1), add Opt 3 as
 cheap defense-in-depth:**
 
-1. Introduce one helper, e.g. `modastack/env.py:agent_spawn_env()`, that returns the env used to
+1. Introduce one helper, e.g. `bobi/env.py:agent_spawn_env()`, that returns the env used to
    spawn agents — `{**os.environ}` with `PATH` normalized to **prepend** the standard user-bin
    dirs (`~/.local/bin`, and `$XDG_BIN_HOME` / `/opt/homebrew/bin` etc. as chosen in D-64b).
 2. Use it in **both** places: `subagent.py` `_launch_detached` `child_env` (so runtime resolves
@@ -205,7 +205,7 @@ Per CLAUDE.md (**production bug = integration-test gap**): each fix gets a regre
   `CheckResult` (`required=False`).
 - **Full suite:** `pytest tests/ --ignore=tests/integration/` (unit, ~30s) before push; integration
   tests before merge.
-- **Manual smoke:** with a bare-name stdio MCP installed in `~/.local/bin`, `modastack restart`
+- **Manual smoke:** with a bare-name stdio MCP installed in `~/.local/bin`, `bobi restart`
   reports it healthy *and* a real agent run actually sees its tools (the MDS-64 repro, now green
   for the right reason); a slow-spawning stdio server no longer false-fails as `pending` (MDS-63
   repro).

@@ -2,9 +2,9 @@
 description: Run integration tests against the in-repo dogfood-content-review pack. Installs into a throwaway temp project. Tests CLI, event server, workflows, config, and SDK. Writes failing tests before fixing bugs.
 ---
 
-# Modastack Dogfood Integration Tests
+# Bobi Dogfood Integration Tests
 
-You are running a comprehensive integration test battery against modastack
+You are running a comprehensive integration test battery against bobi
 using the in-repo `agents/dogfood-content-review/` pack installed into a throwaway
 temp project. No external repo is needed — the pack lives in this repo.
 
@@ -15,24 +15,24 @@ manager). Discover the team name from `agents/registry.yaml` — don't assume it
 
 1. Ensure the dev install is active:
    ```bash
-   source ~/dev/modastack/.venv/bin/activate
-   pip install -e ~/dev/modastack -q
+   source ~/dev/bobi/.venv/bin/activate
+   pip install -e ~/dev/bobi -q
    ```
 
 2. Create a throwaway temp project and install the pack:
    ```bash
-   DOGFOOD_DIR=$(mktemp -d /tmp/modastack-dogfood-XXXXXX)
+   DOGFOOD_DIR=$(mktemp -d /tmp/bobi-dogfood-XXXXXX)
    cd "$DOGFOOD_DIR"
    git init
-   # Copy the pack source so `modastack install` can find it
-   cp -r ~/dev/modastack/agents/ "$DOGFOOD_DIR/agents/"
-   modastack install agents/dogfood-content-review
+   # Copy the pack source so `bobi install` can find it
+   cp -r ~/dev/bobi/agents/ "$DOGFOOD_DIR/agents/"
+   bobi install agents/dogfood-content-review
    ```
    Save `$DOGFOOD_DIR` — all subsequent commands run from there.
 
 3. Stop any running instances to start clean:
    ```bash
-   cd "$DOGFOOD_DIR" && modastack stop 2>/dev/null; modastack event-server stop 2>/dev/null
+   cd "$DOGFOOD_DIR" && bobi stop 2>/dev/null; bobi event-server stop 2>/dev/null
    ```
    **Orphan check**: the event server's pid file can be lost while the
    process survives (CLI stop will then claim it's not running). Verify
@@ -45,15 +45,15 @@ manager). Discover the team name from `agents/registry.yaml` — don't assume it
 
 ## Phase 2: Feature Scan
 
-Before running tests, scan the modastack source to see if the test battery
+Before running tests, scan the bobi source to see if the test battery
 is current. Compare the test sections below against the actual codebase.
 
-1. **Scan CLI commands**: Run `modastack --help` and each subgroup's `--help`.
+1. **Scan CLI commands**: Run `bobi --help` and each subgroup's `--help`.
    Note commands added or removed relative to the battery.
 2. **Scan event server endpoints**: Read `event-server/src/local.ts` (the
    local server) and `index.ts` (the Cloudflare worker) route tables.
-3. **Scan config**: Read `modastack/config.py` — all config is per-project
-   (`Config.load(project_path)`); there is no global `~/.modastack/`.
+3. **Scan config**: Read `bobi/config.py` — all config is per-project
+   (`Config.load(project_path)`); there is no global `~/.bobi/`.
 4. **Report findings**: what's new, removed, unchanged. Add inline test
    cases for new features; skip tests for removed ones. If the drift is
    significant, update THIS file as part of the run.
@@ -62,7 +62,7 @@ is current. Compare the test sections below against the actual codebase.
 
 For each test: print the name, run the action, check the expectation,
 print PASS/FAIL. On FAIL continue (don't stop). Summarize at the end.
-Run Python checks with `~/dev/modastack/.venv/bin/python`; run CLI
+Run Python checks with `~/dev/bobi/.venv/bin/python`; run CLI
 commands from `$DOGFOOD_DIR`.
 
 ### Section 1: Project Detection, Config, Team Resolution
@@ -76,12 +76,12 @@ TEST 1.4: cfg.event_services includes the team's event-enabled services (e.g. gi
 TEST 1.5: cfg.monitors parses the agent.yaml monitors list (commands kept verbatim,
           NOT env-interpolated)
 TEST 1.6: cli._resolve_agent_pack("<team-name>", dogfood_path) → <project>/agents/<team-name>
-          (resolution: <project>/agents/ first, then <project>/.modastack/agents/)
+          (resolution: <project>/agents/ first, then <project>/.bobi/agents/)
 TEST 1.7: _resolve_agent_pack("nonexistent", dogfood_path) → None
 TEST 1.8: cli._list_agent_packs(dogfood_path) → [("<team-name>", "local"), ...]
 TEST 1.9: cli._manager_session_name(dogfood_path) == "moda-<entry_point>-<dirname>"
           (the single definition used by start, --fresh, and transcript lookup)
-TEST 1.10: config.parse_env_file(dogfood/.modastack/.env) → dict (quotes stripped)
+TEST 1.10: config.parse_env_file(dogfood/.bobi/.env) → dict (quotes stripped)
 ```
 
 ### Section 1b: Email Service Subscription (4th-service verification)
@@ -100,30 +100,30 @@ TEST 1.15: The CLI monitor-topic logic adds "email/received" to subscriptions
 
 ### Section 2: CLI Lifecycle
 
-`modastack start` takes NO team argument — it reads `.modastack/agent.yaml`.
+`bobi start` takes NO team argument — it reads `.bobi/agent.yaml`.
 
 ```
-TEST 2.1: modastack start → banner with project, pid, agent, workflows, monitors, logs
-TEST 2.2: .modastack/state/manager.pid exists, numeric, kill -0 succeeds
-TEST 2.3: modastack start again → "Already running"
-TEST 2.4: modastack status (after ~10s) → manager shown as running
-TEST 2.5: modastack stop → "Stopped." — and if the event server is still up,
+TEST 2.1: bobi start → banner with project, pid, agent, workflows, monitors, logs
+TEST 2.2: .bobi/state/manager.pid exists, numeric, kill -0 succeeds
+TEST 2.3: bobi start again → "Already running"
+TEST 2.4: bobi status (after ~10s) → manager shown as running
+TEST 2.5: bobi stop → "Stopped." — and if the event server is still up,
           a note: "Event server is still running"
 TEST 2.6: pid file removed after stop
-TEST 2.7: modastack stop again → "No PID file found" / "not running"
+TEST 2.7: bobi stop again → "No PID file found" / "not running"
 TEST 2.8: start --fresh → "Cleared manager session" AND the saved id file
-          .modastack/sessions/moda-<entry_point>-<project>.id is actually emptied
+          .bobi/sessions/moda-<entry_point>-<project>.id is actually emptied
           (regression guard: --fresh used to clear a "moda-mgr-*" name that never existed)
-TEST 2.9: start in a directory with no .modastack/agent.yaml → error suggesting
-          `modastack install`, non-zero exit
+TEST 2.9: start in a directory with no .bobi/agent.yaml → error suggesting
+          `bobi install`, non-zero exit
 ```
 
 ### Section 3: Event Server (local Node server on :8080)
 
 ```
-TEST 3.1: modastack event-server start → "running on port"
+TEST 3.1: bobi event-server start → "running on port"
 TEST 3.2: GET /health → {"status":"ok","mode":"local","deployments":N}
-TEST 3.3: modastack event-server status → "running on port 8080" + mode + deployments
+TEST 3.3: bobi event-server status → "running on port 8080" + mode + deployments
 TEST 3.4: POST /deployments {"name":...,"subscriptions":["github:test/dogfood"]}
           → 201 with non-empty deployment_id + api_key. SAVE both.
 TEST 3.5: /health deployments count incremented
@@ -148,11 +148,11 @@ TEST 3.16: replay — reconnect with last_seen=K where K < current max seq →
            expect replays on a first connect.
 TEST 3.17: connect with a bad token → socket rejected/closed
 TEST 3.18: POST /events/<topic> (generic topic) → responds with delivered_to
-TEST 3.19: modastack event-server stop → stopped; port 8080 freed
+TEST 3.19: bobi event-server stop → stopped; port 8080 freed
 ```
 
 Webhook signatures: the local server only enforces GitHub/Slack signatures
-when started with `MODASTACK_ES_WEBHOOK_SECRET` / `MODASTACK_ES_SLACK_SIGNING_SECRET`
+when started with `BOBI_ES_WEBHOOK_SECRET` / `BOBI_ES_SLACK_SIGNING_SECRET`
 in its environment. Default dogfood runs have no secrets, so unsigned
 payloads are accepted. (The production Cloudflare worker config differs.)
 
@@ -163,7 +163,7 @@ bubble/comms smoke against the **real Cloudflare Worker** (`index.ts` + the
 `DeploymentSession` Durable Object + KV) on the `workerd` runtime via
 `wrangler dev`. It is the faithful end-to-end Worker check: real runtime, real
 HTTP/WS over the wire, exercised by the REAL Python client (`httpx` +
-`websocket-client` + `modastack.events.signing`) — so it catches Python↔Worker
+`websocket-client` + `bobi.events.signing`) — so it catches Python↔Worker
 HMAC-canonicalization drift and real WS-via-DO issues that the miniflare unit
 suite (`event-server/test/index.spec.ts`, in CI per #307/#308) cannot.
 
@@ -203,13 +203,13 @@ coverage: `wrangler deploy` to staging + run this smoke against the URL.
 ### Section 4: Workflow System
 
 ```
-TEST 4.1: modastack workflows list → the team's workflows (from .modastack/workflows/)
+TEST 4.1: bobi workflows list → the team's workflows (from .bobi/workflows/)
 TEST 4.2: built-in workflows (e.g. "adhoc") also listed
 TEST 4.3: agent prompts see the same menu — prompts.resolver.list_workflows()
           delegates to WorkflowDispatcher (same tiers + dedup as the CLI)
 TEST 4.4: workflow.schema.load_workflow(<team workflow yaml>) → name + steps parsed
-TEST 4.5: modastack workflows validate <yaml> → exit 0, no errors
-TEST 4.6: modastack workflows status → exit 0; shows run_id/name/status/issue,
+TEST 4.5: bobi workflows validate <yaml> → exit 0, no errors
+TEST 4.6: bobi workflows status → exit 0; shows run_id/name/status/issue,
           step=N and awaiting=<event> for suspended runs (NO node counts —
           the node DAG was removed; the orchestrator is a linear step executor)
 ```
@@ -217,12 +217,12 @@ TEST 4.6: modastack workflows status → exit 0; shows run_id/name/status/issue,
 ### Section 5: Role System
 
 Roles are folder-format: `roles/<role>/ROLE.md`, installed into
-`.modastack/roles/` by `modastack install`. There is NO framework
+`.bobi/roles/` by `bobi install`. There is NO framework
 built-in roles tier.
 
 ```
-TEST 5.1: modastack roles list → exit 0, lists the team's roles
-TEST 5.2: ls .modastack/roles/ → one folder per role, each with ROLE.md
+TEST 5.1: bobi roles list → exit 0, lists the team's roles
+TEST 5.2: ls .bobi/roles/ → one folder per role, each with ROLE.md
 TEST 5.3: prompts.resolver.build_startup_prompt("<entry_point>", dogfood_path,
           agent_name="<team-name>") → length > 100 and contains the workflow menu
 ```
@@ -233,49 +233,49 @@ TEST 5.3: prompts.resolver.build_startup_prompt("<entry_point>", dogfood_path,
 TEST 6.1: set_project_root / get_project_root roundtrip
 TEST 6.2: SessionRegistry register/get/mark_done roundtrip
           (register an entry, read it back, mark done, status == "done")
-TEST 6.3: _sessions_dir() → <dogfood>/.modastack/sessions
+TEST 6.3: _sessions_dir() → <dogfood>/.bobi/sessions
           (resolution is cached per project root; set_project_root clears the cache)
-TEST 6.4: sdk.state_dir() → <dogfood>/.modastack/state (shared helper —
+TEST 6.4: sdk.state_dir() → <dogfood>/.bobi/state (shared helper —
           events client, monitors, workflow runs, history, kb all use it)
 ```
 
 ### Section 7: Manager Communication (requires running manager — costs a real session)
 
 ```
-TEST 7.1: modastack start; wait ~30s for the Claude session to initialize
-TEST 7.2: modastack message "ping" → "Sent to moda-<entry_point>-<project>"
-TEST 7.3: modastack ask "Reply with exactly: DOGFOOD_TEST_OK" --timeout 120
+TEST 7.1: bobi start; wait ~30s for the Claude session to initialize
+TEST 7.2: bobi message "ping" → "Sent to moda-<entry_point>-<project>"
+TEST 7.3: bobi ask "Reply with exactly: DOGFOOD_TEST_OK" --timeout 120
           → output contains DOGFOOD_TEST_OK
           (ask is a hidden alias for message --wait targeting the manager)
-TEST 7.4: modastack events → exit 0, recent events listed
-TEST 7.5: modastack agents list → "No active agents." (managers are excluded;
+TEST 7.4: bobi events → exit 0, recent events listed
+TEST 7.5: bobi agents list → "No active agents." (managers are excluded;
           listing is purely registry-backed — there is no in-process agent dict)
-TEST 7.6: modastack agents show moda-<entry_point>-<project> →
+TEST 7.6: bobi agents show moda-<entry_point>-<project> →
           Session/Phase/Status lines (find_agent resolves by session name or issue id)
-TEST 7.7: modastack transcript show manager -n 10 → recent activity
+TEST 7.7: bobi transcript show manager -n 10 → recent activity
           (resolves the manager session via _manager_session_name)
 ```
 
 There is no dashboard — no port file, no /api/status, no /api/event.
 Synthetic events go through the event server's generic topic endpoint
-(`POST /events/<topic>`), which is what `modastack.events.publish.post_event`
+(`POST /events/<topic>`), which is what `bobi.events.publish.post_event`
 uses (lifecycle emits, monitor verdicts).
 
 ### Section 8: Doctor and Version
 
 ```
-TEST 8.1: modastack --version → version string
-TEST 8.2: modastack doctor → checkmark lines; includes Claude CLI/auth,
+TEST 8.1: bobi --version → version string
+TEST 8.2: bobi doctor → checkmark lines; includes Claude CLI/auth,
           project config, install integrity (manifest hash drift),
           services, workflows, event server, recent events
 ```
 
-There is no `modastack init` command.
+There is no `bobi init` command.
 
 ### Section 9: Monitor System
 
 ```
-TEST 9.1: modastack monitors list → exit 0, shows monitors from agent.yaml
+TEST 9.1: bobi monitors list → exit 0, shows monitors from agent.yaml
           (regression guard: this command once broke on a stale
           MonitorRegistry.load(agent_name=...) call — the loader takes
           only project_path)
@@ -292,11 +292,11 @@ TEST 10.1: With event server AND manager running (manager auto-starts the
            (or a synthetic one registered via the subscription) →
            delivered_to >= 1
 TEST 10.2: Within ~15s: manager.log contains "Event queued", and
-           .modastack/state/events.jsonl gains an entry with the test
+           .bobi/state/events.jsonl gains an entry with the test
            event's type/payload
-TEST 10.3: modastack transcript show manager → the event appears in the
+TEST 10.3: bobi transcript show manager → the event appears in the
            manager's activity
-TEST 10.4: Clean up — modastack stop && modastack event-server stop;
+TEST 10.4: Clean up — bobi stop && bobi event-server stop;
            verify pid files gone AND port 8080 actually free (orphan check
            from Phase 1)
 ```
@@ -318,11 +318,11 @@ assertions (topology-irrelevant); 3 tests the local node server specifically.
 Driving those "through Fly" only adds latency + flake and conflates "framework
 correct" with "deploy path works." Fly is a separate axis → a separate tier.
 
-Gated: **skip** unless `fly auth whoami` succeeds AND `MODASTACK_DOGFOOD_FLY=1`.
+Gated: **skip** unless `fly auth whoami` succeeds AND `BOBI_DOGFOOD_FLY=1`.
 Needs the personal org + `fly.io/high-risk-unlock`. **Always tear down (11.6),
 even on failure.** Serialize — never run two `fly deploy --remote-only` at once
 (shared remote-builder race: `docker.sock missing hostname`). Build mode is
-**auto-selected, not a flag**: run from a modastack checkout → builds from
+**auto-selected, not a flag**: run from a bobi checkout → builds from
 **source** on Fly's remote builder; from the bare binary → builds from **PyPI**
 (only works once the version is published — for an unpublished rc, run from a
 checkout). Isolate the app from the real fleet: pass `--fleet mdftest` (app =
@@ -336,7 +336,7 @@ obviously-throwaway; resolve image refs as `registry.fly.io/<Repo>@<Digest>`.
 > volume preserved). 11.5 remains the step-4 gap.
 
 ```
-TEST 11.1: modastack deploy <throwaway> --team-url <smoke-team url> (source mode)
+TEST 11.1: bobi deploy <throwaway> --team-url <smoke-team url> (source mode)
            → provisions Fly app + volume, boots; exit 0
 TEST 11.2: fly status -a <throwaway> → exactly one machine, state "started"
 TEST 11.3: instance self-registered on the event server — GET <event-server>/health
@@ -353,7 +353,7 @@ TEST 11.5 [BLOCKED ON STEP 4 — the residual gap]: outside-world → RC.
            canary functional probe and SHARE one smoke routine between this
            section and the CI canary gate (build the deploy+webhook+ask smoke
            ONCE; drive it manually here and as the release gate in CI).
-TEST 11.6: modastack destroy <throwaway> --yes → Fly app AND volume removed;
+TEST 11.6: bobi destroy <throwaway> --yes → Fly app AND volume removed;
            `fly status -a <throwaway>` errors / app gone. ALWAYS run, even on fail.
 ```
 
@@ -375,13 +375,13 @@ After all tests complete:
 
 2. **For each FAIL** — red-green cycle:
    a. Diagnose root cause: test issue or real bug?
-   b. Real bug → **write a failing test first** in `~/dev/modastack/tests/`
+   b. Real bug → **write a failing test first** in `~/dev/bobi/tests/`
       that reproduces it. Confirm it fails (red).
-   c. Fix the bug in modastack source.
+   c. Fix the bug in bobi source.
    d. Confirm the new test passes (green), then re-run the dogfood test.
    e. Commit test + fix together.
 
-3. **Print coverage gap report**: modastack areas with no coverage per the
+3. **Print coverage gap report**: bobi areas with no coverage per the
    feature scan.
 
 4. **Update this file** if the battery drifted from the codebase during
@@ -389,7 +389,7 @@ After all tests complete:
 
 ## Notes
 
-- Always `source ~/dev/modastack/.venv/bin/activate` first.
+- Always `source ~/dev/bobi/.venv/bin/activate` first.
 - The event server runs on port 8080; the local implementation is
   `event-server/dist/local.js` (rebuilt automatically when src is newer).
 - WebSocket tests: use the `websocket-client` Python library (installed
@@ -397,6 +397,6 @@ After all tests complete:
 - Manager tests spawn real Claude Code sessions — give them ~30s after
   start before messaging, and always stop them when done.
 - Stopping the manager does NOT stop the event server (by design) —
-  `modastack stop` prints a reminder when it's still up.
+  `bobi stop` prints a reminder when it's still up.
 - The temp project is disposable — no standing install state to drift
   between runs.

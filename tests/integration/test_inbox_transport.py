@@ -31,22 +31,22 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def inbox_event_server(modastack_env):
+def inbox_event_server(bobi_env):
     """Start a local event server on a free port and point config at it."""
-    from modastack.events.server import ensure_running
-    from modastack.events import publish as _pub
+    from bobi.events.server import ensure_running
+    from bobi.events import publish as _pub
 
     port = _free_port()
     url = f"http://localhost:{port}"
 
-    agent_yaml = modastack_env.project_path / ".modastack" / "agent.yaml"
+    agent_yaml = bobi_env.project_path / ".bobi" / "agent.yaml"
     original = agent_yaml.read_text()
     data = yaml.safe_load(original)
     data["event_server_url"] = url
     agent_yaml.write_text(yaml.dump(data))
     _pub._es_url_cache.clear()  # resolved URL is cached per project root
 
-    ensure_running(port, project_path=modastack_env.project_path)
+    ensure_running(port, project_path=bobi_env.project_path)
 
     deadline = time.monotonic() + 15
     healthy = False
@@ -63,7 +63,7 @@ def inbox_event_server(modastack_env):
 
     yield url
 
-    pid_file = modastack_env.state_dir / "event-server.pid"
+    pid_file = bobi_env.state_dir / "event-server.pid"
     if pid_file.exists():
         try:
             os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
@@ -75,9 +75,9 @@ def inbox_event_server(modastack_env):
 
 def _make_addressable(name, root):
     """Register a session + start its inbox subscription, as Session.start does."""
-    from modastack.inbox import Inbox
-    from modastack.subagent import _start_event_subscription
-    from modastack.sdk import get_registry, SessionEntry
+    from bobi.inbox import Inbox
+    from bobi.subagent import _start_event_subscription
+    from bobi.sdk import get_registry, SessionEntry
 
     inbox = Inbox(name)
     inbox.start()
@@ -86,11 +86,11 @@ def _make_addressable(name, root):
     return inbox
 
 
-def test_inbox_message_round_trips_over_event_server(inbox_event_server, modastack_env):
+def test_inbox_message_round_trips_over_event_server(inbox_event_server, bobi_env):
     """A non-wait deliver() reaches the target's inbox via the event server."""
-    from modastack.inbox import deliver, get_local_inbox
+    from bobi.inbox import deliver, get_local_inbox
 
-    root = modastack_env.project_path
+    root = bobi_env.project_path
     sender_inbox = _make_addressable("agent-x", root)
     target_inbox = _make_addressable("agent-y", root)
 
@@ -121,7 +121,7 @@ def _echo_responder(target_name, stop):
     to the message's reply_to topic (``Inbox.respond``) — the real target-side
     path exercised by ``Session._process_message``.
     """
-    from modastack.inbox import get_local_inbox
+    from bobi.inbox import get_local_inbox
 
     def run():
         inbox = get_local_inbox(target_name)
@@ -137,16 +137,16 @@ def _echo_responder(target_name, stop):
     return t
 
 
-def test_blocking_ask_round_trips_over_event_server(inbox_event_server, modastack_env):
+def test_blocking_ask_round_trips_over_event_server(inbox_event_server, bobi_env):
     """A wait=True deliver() round-trips via a transient reply/<uuid> topic.
 
     The sender (deliver) opens its own throwaway reply subscription, publishes
     the request carrying it as reply_to, and matches the reply on corr_id — the
     full #269 request/reply path over the live event server, no files.
     """
-    from modastack.inbox import deliver
+    from bobi.inbox import deliver
 
-    root = modastack_env.project_path
+    root = bobi_env.project_path
     sender_inbox = _make_addressable("ask-x", root)
     target_inbox = _make_addressable("ask-y", root)
 
@@ -171,15 +171,15 @@ def _deployment_count(es_url: str) -> int:
         return json.loads(r.read()).get("deployments", -1)
 
 
-def test_ask_teardown_leaves_zero_residual_reply_deployments(inbox_event_server, modastack_env):
+def test_ask_teardown_leaves_zero_residual_reply_deployments(inbox_event_server, bobi_env):
     """A completed ask round-trip deregisters its transient reply deployment.
 
     After deliver(wait=True) completes, the reply/<uuid> deployment must be
     gone from the event server — no leak (#277).
     """
-    from modastack.inbox import deliver
+    from bobi.inbox import deliver
 
-    root = modastack_env.project_path
+    root = bobi_env.project_path
     sender_inbox = _make_addressable("leak-x", root)
     target_inbox = _make_addressable("leak-y", root)
 
@@ -208,16 +208,16 @@ def test_ask_teardown_leaves_zero_residual_reply_deployments(inbox_event_server,
         target_inbox.close()
 
 
-def test_concurrent_asks_do_not_cross_replies(inbox_event_server, modastack_env):
+def test_concurrent_asks_do_not_cross_replies(inbox_event_server, bobi_env):
     """Multiple in-flight wait=True asks each get their OWN reply (corr_id).
 
     Each deliver() opens a distinct reply/<uuid> topic, so even with several
     asks to the same target outstanding at once, no reply lands on the wrong
     sender. Guards the correlation contract (epic #267 acceptance).
     """
-    from modastack.inbox import deliver
+    from bobi.inbox import deliver
 
-    root = modastack_env.project_path
+    root = bobi_env.project_path
     sender_inbox = _make_addressable("c-x", root)
     target_inbox = _make_addressable("c-y", root)
 
@@ -252,24 +252,24 @@ def test_concurrent_asks_do_not_cross_replies(inbox_event_server, modastack_env)
 
 
 @pytest.fixture
-def fast_eviction_event_server(modastack_env):
+def fast_eviction_event_server(bobi_env):
     """Start a local event server with a very short eviction threshold (2s)."""
-    from modastack.events.server import ensure_running
-    from modastack.events import publish as _pub
+    from bobi.events.server import ensure_running
+    from bobi.events import publish as _pub
 
     port = _free_port()
     url = f"http://localhost:{port}"
 
-    agent_yaml = modastack_env.project_path / ".modastack" / "agent.yaml"
+    agent_yaml = bobi_env.project_path / ".bobi" / "agent.yaml"
     original = agent_yaml.read_text()
     data = yaml.safe_load(original)
     data["event_server_url"] = url
     agent_yaml.write_text(yaml.dump(data))
     _pub._es_url_cache.clear()
 
-    ensure_running(port, project_path=modastack_env.project_path, extra_env={
-        "MODASTACK_ES_EVICTION_STALE_MS": "2000",
-        "MODASTACK_ES_EVICTION_SWEEP_MS": "1000",
+    ensure_running(port, project_path=bobi_env.project_path, extra_env={
+        "BOBI_ES_EVICTION_STALE_MS": "2000",
+        "BOBI_ES_EVICTION_SWEEP_MS": "1000",
     })
 
     deadline = time.monotonic() + 15
@@ -287,7 +287,7 @@ def fast_eviction_event_server(modastack_env):
 
     yield url
 
-    pid_file = modastack_env.state_dir / "event-server.pid"
+    pid_file = bobi_env.state_dir / "event-server.pid"
     if pid_file.exists():
         try:
             os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
@@ -298,7 +298,7 @@ def fast_eviction_event_server(modastack_env):
 
 
 def test_eviction_backstop_cleans_up_disconnected_deployments(
-    fast_eviction_event_server, modastack_env
+    fast_eviction_event_server, bobi_env
 ):
     """A deployment whose WS never connects is evicted after the stale threshold (#279)."""
     es_url = fast_eviction_event_server

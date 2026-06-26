@@ -1,6 +1,6 @@
 # 489 — Require internal Worker-to-Durable-Object auth for DeploymentSession
 
-**Issue:** moda-labs/modastack#489
+**Issue:** moda-labs/bobi-agent-team#489
 **Type:** security / defense-in-depth (medium+)
 **Status:** spec — awaiting Zach approval before implementation
 
@@ -40,7 +40,7 @@ entrypoints.
 
 1. A new env binding `INTERNAL_DO_SECRET`, present in both the Worker env and the
    DO env (Cloudflare injects the same binding into both).
-2. The Worker adds header `x-modastack-internal: <INTERNAL_DO_SECRET>` to **every**
+2. The Worker adds header `x-bobi-internal: <INTERNAL_DO_SECRET>` to **every**
    request it sends to a DO stub.
 3. `DeploymentSession.fetch()` verifies that header (constant-time) at the **top**,
    before any route dispatch. Missing/invalid → `403`. Applies to `/event`,
@@ -83,7 +83,7 @@ body, and the secret is never exposed to clients.
   added to `local.ts`. (See "Local/dev" below for the one place the local *Worker*
   test path needs a value.)
 - Bubble auth (#487), resource grants (#488), deployment auth — different layers.
-- Any propagation of the secret to Fly apps, agent teams, `.modastack/.env`,
+- Any propagation of the secret to Fly apps, agent teams, `.bobi/.env`,
   bubble state, or user/account credentials. **The secret lives only in the
   Cloudflare event-server deployment.**
 - Rotation tooling / multiple-secret support. A single secret, rotated by
@@ -118,7 +118,7 @@ for the WS upgrade — so every Worker→DO path goes through a helper (no raw
 `stub.fetch(request)` remains):
 
 ```ts
-export const INTERNAL_HEADER = "x-modastack-internal";
+export const INTERNAL_HEADER = "x-bobi-internal";
 
 function internalEventRequest(env: Env, path: string, body: string): Request {
   return new Request(`https://internal${path}`, {
@@ -265,7 +265,7 @@ Plus: `npm test` (vitest) green, `tsc` typecheck clean.
 
 ## Release / coordination notes
 
-- **No version bump, no `CHANGELOG.md` edit** (feature PR — modastack release policy).
+- **No version bump, no `CHANGELOG.md` edit** (feature PR — bobi release policy).
 - **Trio merge order: #487 → #488 → #489.** #489 is a distinct layer (internal DO
   auth) and does not depend on #487/#488 logic, so spec + impl proceed in
   parallel. The only overlap is co-editing `event-server/src/index.ts` (Worker→DO
@@ -289,7 +289,7 @@ Plus: `npm test` (vitest) green, `tsc` typecheck clean.
   randomly generated secret via `wrangler secret put`. Fail-closed catches an
   *unset* secret but not a *weak* one — call this out in the deploy runbook.
 - **One env-var name only.** The binding is `INTERNAL_DO_SECRET` everywhere
-  (prod secret, `.dev.vars`, test pool). The issue's `MODASTACK_ES_INTERNAL_SECRET`
+  (prod secret, `.dev.vars`, test pool). The issue's `BOBI_ES_INTERNAL_SECRET`
   refers to the local Node backend, which is out of scope here; we do **not**
   introduce a second env-var name into the Worker/DO code path — `INTERNAL_DO_SECRET`
   is canonical, no aliasing/mapping.

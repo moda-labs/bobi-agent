@@ -4,7 +4,7 @@ from pathlib import Path
 from textwrap import dedent
 from unittest.mock import patch, MagicMock
 
-from modastack.validate import (
+from bobi.validate import (
     validate_config,
     _check_entry_point,
     _check_service_credentials,
@@ -14,7 +14,7 @@ from modastack.validate import (
     supports_unicode,
     CheckResult,
 )
-from modastack.config import Config, ServiceConfig
+from bobi.config import Config, ServiceConfig
 
 
 class _FakeStream:
@@ -53,14 +53,14 @@ class TestStatusGlyph:
         assert supports_unicode(_FakeStream("definitely-not-a-codec")) is False
 
     def test_format_falls_back_to_text_markers(self):
-        from modastack.validate import ValidationResult
+        from bobi.validate import ValidationResult
         checks = [
             CheckResult("github", ok=True, detail="native"),
             CheckResult("email", ok=False, detail="venn — not connected", required=False),
             CheckResult("slack", ok=False, detail="native — missing bot_token", required=True),
         ]
         vr = ValidationResult(ok=False, checks=checks)
-        with patch("modastack.validate.supports_unicode", return_value=False):
+        with patch("bobi.validate.supports_unicode", return_value=False):
             output = vr.format()
         assert "[OK]" in output
         assert "[WARN]" in output   # optional failure
@@ -71,13 +71,13 @@ class TestStatusGlyph:
 class TestCheckEntryPoint:
 
     def test_valid_role(self, tmp_path):
-        (tmp_path / ".modastack" / "roles" / "director").mkdir(parents=True)
+        (tmp_path / ".bobi" / "roles" / "director").mkdir(parents=True)
         cfg = Config(entry_point="director")
         result = _check_entry_point(cfg, tmp_path)
         assert result.ok
 
     def test_missing_role(self, tmp_path):
-        (tmp_path / ".modastack" / "roles" / "engineer").mkdir(parents=True)
+        (tmp_path / ".bobi" / "roles" / "engineer").mkdir(parents=True)
         cfg = Config(entry_point="director")
         result = _check_entry_point(cfg, tmp_path)
         assert not result.ok
@@ -160,9 +160,9 @@ class TestCheckServiceCredentials:
 
 class TestCheckVennServices:
 
-    @patch("modastack.venn.check_services")
+    @patch("bobi.venn.check_services")
     def test_all_connected(self, mock_check):
-        from modastack.venn import ServiceCheck
+        from bobi.venn import ServiceCheck
         mock_check.return_value = ServiceCheck(connected=["email", "calendar"], missing=[])
 
         cfg = Config(
@@ -173,9 +173,9 @@ class TestCheckVennServices:
         assert all(c.ok for c in checks)
         assert len(checks) == 2
 
-    @patch("modastack.venn.check_services")
+    @patch("bobi.venn.check_services")
     def test_missing_service(self, mock_check):
-        from modastack.venn import ServiceCheck
+        from bobi.venn import ServiceCheck
         mock_check.return_value = ServiceCheck(connected=["email"], missing=["salesforce"])
 
         cfg = Config(
@@ -212,10 +212,10 @@ class TestCheckVennServices:
         assert checks["email"].required is False
         assert checks["salesforce"].required is True
 
-    @patch("modastack.venn.check_services")
+    @patch("bobi.venn.check_services")
     def test_missing_service_carries_required(self, mock_check):
         # The live-`missing` branch: per-service required is threaded through.
-        from modastack.venn import ServiceCheck
+        from bobi.venn import ServiceCheck
         mock_check.return_value = ServiceCheck(connected=[], missing=["email", "salesforce"])
 
         cfg = Config(
@@ -229,11 +229,11 @@ class TestCheckVennServices:
         assert checks["email"].required is False
         assert checks["salesforce"].required is True
 
-    @patch("modastack.venn.check_services")
+    @patch("bobi.venn.check_services")
     def test_missing_service_duplicate_name_fails_safe(self, mock_check):
         # A name declared twice (required + optional) must block: a required
         # declaration anywhere wins, regardless of declaration order.
-        from modastack.venn import ServiceCheck
+        from bobi.venn import ServiceCheck
         mock_check.return_value = ServiceCheck(connected=[], missing=["email"])
 
         cfg = Config(
@@ -278,7 +278,7 @@ class TestCheckMcpServers:
 class TestValidateConfig:
 
     def test_minimal_valid_config(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\
             entry_point: manager
@@ -295,7 +295,7 @@ class TestValidateConfig:
             CheckResult("github", ok=True, detail="native"),
             CheckResult("venn (email)", ok=False, detail="not connected", hint="Connect at venn.ai"),
         ]
-        from modastack.validate import ValidationResult
+        from bobi.validate import ValidationResult
         vr = ValidationResult(ok=False, checks=result.checks)
         output = vr.format()
         assert "✓" in output
@@ -303,7 +303,7 @@ class TestValidateConfig:
         assert "venn.ai" in output
 
     def test_ok_passes_when_only_optional_failures(self):
-        from modastack.validate import ValidationResult
+        from bobi.validate import ValidationResult
         checks = [
             CheckResult("github", ok=True, detail="native"),
             CheckResult("email", ok=False, detail="venn — not connected", required=False),
@@ -315,7 +315,7 @@ class TestValidateConfig:
         assert vr.ok is True
 
     def test_ok_blocks_on_required_failure(self):
-        from modastack.validate import ValidationResult
+        from bobi.validate import ValidationResult
         checks = [
             CheckResult("email", ok=False, detail="venn — not connected", required=False),
             CheckResult("slack", ok=False, detail="native — missing bot_token", required=True),
@@ -327,7 +327,7 @@ class TestValidateConfig:
         assert vr.ok is False
 
     def test_format_warns_on_optional_blocks_on_required(self):
-        from modastack.validate import ValidationResult
+        from bobi.validate import ValidationResult
         checks = [
             CheckResult("github", ok=True, detail="native"),
             CheckResult("email", ok=False, detail="venn — not connected", required=False),
@@ -342,8 +342,8 @@ class TestValidateConfig:
     def test_pack_with_optional_venn_service_starts_degraded(self, tmp_path):
         # github (native, zero-config) + an unconfigured venn service explicitly
         # marked required: false: validate_config must return ok=True so
-        # `modastack start` proceeds and the optional service degrades.
-        config_dir = tmp_path / ".modastack"
+        # `bobi start` proceeds and the optional service degrades.
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\
             entry_point: manager
@@ -364,7 +364,7 @@ class TestValidateConfig:
         # Mirrors the dogfood-content-review decision (#329 / PR #405): a venn
         # service marked required: true (dogfood's email) hard-blocks startup
         # when its credential is missing — it does NOT degrade.
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\
             entry_point: manager

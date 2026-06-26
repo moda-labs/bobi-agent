@@ -48,8 +48,8 @@ const MAX_BUFFER = 10_000;
 // NOT activity — a live manager session can idle for hours with zero
 // events but its WS stays connected, so activity-based TTL would break
 // inbox delivery.
-const EVICTION_STALE_MS = parseInt(process.env.MODASTACK_ES_EVICTION_STALE_MS || "60000", 10);
-const EVICTION_SWEEP_MS = parseInt(process.env.MODASTACK_ES_EVICTION_SWEEP_MS || "30000", 10);
+const EVICTION_STALE_MS = parseInt(process.env.BOBI_ES_EVICTION_STALE_MS || "60000", 10);
+const EVICTION_SWEEP_MS = parseInt(process.env.BOBI_ES_EVICTION_SWEEP_MS || "30000", 10);
 
 // ---------------------------------------------------------------------------
 // In-memory state — extends DeploymentRecord with runtime fields
@@ -79,9 +79,9 @@ const slackWorkspaces = new Map<string, SlackWorkspaceRecord>();
 // strongly consistent, so the Worker's KV-propagation race never applies here.
 const resourceGrants = new Map<string, ResourceGrant>();
 
-const webhookSecret = process.env.MODASTACK_ES_WEBHOOK_SECRET || "";
-const slackSigningSecret = process.env.MODASTACK_ES_SLACK_SIGNING_SECRET || "";
-const testGrantsSecret = process.env.MODASTACK_ES_TEST_GRANTS_SECRET || "";
+const webhookSecret = process.env.BOBI_ES_WEBHOOK_SECRET || "";
+const slackSigningSecret = process.env.BOBI_ES_SLACK_SIGNING_SECRET || "";
+const testGrantsSecret = process.env.BOBI_ES_TEST_GRANTS_SECRET || "";
 
 // ---------------------------------------------------------------------------
 // Map-based storage adapter
@@ -646,8 +646,8 @@ function evictStaleDeployments() {
 // Start
 // ---------------------------------------------------------------------------
 
-const port = parseInt(process.env.MODASTACK_ES_PORT || "8080", 10);
-const bind = process.env.MODASTACK_ES_BIND || "127.0.0.1";
+const port = parseInt(process.env.BOBI_ES_PORT || "8080", 10);
+const bind = process.env.BOBI_ES_BIND || "127.0.0.1";
 
 const server = http.createServer(async (req, res) => {
 	try {
@@ -671,10 +671,10 @@ evictionTimer.unref();
 server.listen(port, bind, () => {
 	if (bind === "127.0.0.1" || bind === "::1") {
 		console.log(
-			`modastack event server (local) listening on ${bind}:${port} ` +
-				`(loopback-only; set MODASTACK_ES_BIND to serve remotely)`,
+			`bobi event server (local) listening on ${bind}:${port} ` +
+				`(loopback-only; set BOBI_ES_BIND to serve remotely)`,
 		);
 	} else {
-		console.log(`modastack event server (local) listening on ${bind}:${port}`);
+		console.log(`bobi event server (local) listening on ${bind}:${port}`);
 	}
 });

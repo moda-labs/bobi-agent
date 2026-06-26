@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from modastack import compose, tool_library
+from bobi import compose, tool_library
 
 
 # --- fixtures ----------------------------------------------------------------
@@ -48,7 +48,7 @@ def project(tmp_path: Path) -> Path:
 
 def _compose(project, leaf, dest=None):
     chain = compose.resolve_chain(leaf, project)
-    dest = dest or (project / ".modastack")
+    dest = dest or (project / ".bobi")
     prov = compose.compose(chain, dest)
     return dest, prov
 
@@ -316,8 +316,8 @@ def test_codex_requires_subscription_does_not_overwrite_oauth_auth(tmp_path, mon
     codex.write_text("#!/usr/bin/env bash\nexit 0\n")
     codex.chmod(0o755)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-materialize")
-    monkeypatch.setenv("MODASTACK_AUTH", "subscription")
-    monkeypatch.delenv("MODASTACK_VERIFY_PHASE", raising=False)
+    monkeypatch.setenv("BOBI_AUTH", "subscription")
+    monkeypatch.delenv("BOBI_VERIFY_PHASE", raising=False)
 
     proc = subprocess.run(
         ["bash", "-c", check],
@@ -347,8 +347,8 @@ def test_codex_requires_subscription_rejects_api_key_auth_file(tmp_path, monkeyp
     codex = bin_dir / "codex"
     codex.write_text("#!/usr/bin/env bash\nexit 0\n")
     codex.chmod(0o755)
-    monkeypatch.setenv("MODASTACK_AUTH", "subscription")
-    monkeypatch.delenv("MODASTACK_VERIFY_PHASE", raising=False)
+    monkeypatch.setenv("BOBI_AUTH", "subscription")
+    monkeypatch.delenv("BOBI_VERIFY_PHASE", raising=False)
 
     proc = subprocess.run(
         ["bash", "-c", check],
@@ -375,7 +375,7 @@ def test_codex_requires_subscription_fails_without_oauth_auth(tmp_path, monkeypa
     codex.write_text("#!/usr/bin/env bash\nexit 0\n")
     codex.chmod(0o755)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("MODASTACK_AUTH", "subscription")
+    monkeypatch.setenv("BOBI_AUTH", "subscription")
 
     proc = subprocess.run(
         ["bash", "-c", check],
@@ -405,8 +405,8 @@ def test_codex_requires_api_key_mode_fails_without_api_key_or_auth(
     codex.write_text("#!/usr/bin/env bash\nexit 0\n")
     codex.chmod(0o755)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("MODASTACK_AUTH", raising=False)
-    monkeypatch.delenv("MODASTACK_VERIFY_PHASE", raising=False)
+    monkeypatch.delenv("BOBI_AUTH", raising=False)
+    monkeypatch.delenv("BOBI_VERIFY_PHASE", raising=False)
 
     proc = subprocess.run(
         ["bash", "-c", check],
@@ -448,7 +448,7 @@ def test_codex_requires_allows_binary_probe_during_build_verify(tmp_path, monkey
             "HOME": str(home),
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "CODEX_LOG": str(log),
-            "MODASTACK_VERIFY_PHASE": "build",
+            "BOBI_VERIFY_PHASE": "build",
         },
     )
 
@@ -460,7 +460,7 @@ def test_codex_requires_fix_preserves_subscription_login_path():
     entry = tool_library.load_entry("codex")
     fix = entry.requires[0]["fix"]
 
-    assert '[ "${MODASTACK_AUTH:-api_key}" != "subscription" ]' in fix
+    assert '[ "${BOBI_AUTH:-api_key}" != "subscription" ]' in fix
     assert '[ -n "${OPENAI_API_KEY:-}" ]' in fix
     assert "codex auth login" in fix
 
@@ -478,12 +478,12 @@ agent: acme
 requires:
   - name: codex
     why: "Delegate a coding sub-task to the Codex CLI (tools/codex.md)."
-    check: "command -v codex >/dev/null 2>&1 && { if [ \\"${MODASTACK_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if [ -f ~/.codex/auth.json ]; then if [ \\"${MODASTACK_AUTH:-api_key}\\" = \\"subscription\\" ] && python3 -c 'import json, pathlib, sys; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; data=json.loads(p.read_text()); sys.exit(0 if isinstance(data, dict) and \\"OPENAI_API_KEY\\" in data else 1)'; then false; else python3 -c 'import subprocess, sys; sys.exit(subprocess.run([\\"codex\\", \\"exec\\", \\"-s\\", \\"read-only\\", \\"--skip-git-repo-check\\", \\"reply OK\\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=8).returncode)'; fi; elif [ \\"${MODASTACK_VERIFY_PHASE:-}\\" = \\"build\\" ]; then codex --version >/dev/null 2>&1; else false; fi; }"
-    fix: "npm install -g @openai/codex@0.142.0 && { if [ \\"${MODASTACK_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; else codex auth login || echo 'Set OPENAI_API_KEY in .modastack/.env or run codex auth login'; fi; }"
+    check: "command -v codex >/dev/null 2>&1 && { if [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if [ -f ~/.codex/auth.json ]; then if [ \\"${BOBI_AUTH:-api_key}\\" = \\"subscription\\" ] && python3 -c 'import json, pathlib, sys; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; data=json.loads(p.read_text()); sys.exit(0 if isinstance(data, dict) and \\"OPENAI_API_KEY\\" in data else 1)'; then false; else python3 -c 'import subprocess, sys; sys.exit(subprocess.run([\\"codex\\", \\"exec\\", \\"-s\\", \\"read-only\\", \\"--skip-git-repo-check\\", \\"reply OK\\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=8).returncode)'; fi; elif [ \\"${BOBI_VERIFY_PHASE:-}\\" = \\"build\\" ]; then codex --version >/dev/null 2>&1; else false; fi; }"
+    fix: "npm install -g @openai/codex@0.142.0 && { if [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; else codex auth login || echo 'Set OPENAI_API_KEY in .bobi/.env or run codex auth login'; fi; }"
   - name: venn
     why: "Reach external services (email, calendar, CRM) via the Venn CLI (tools/venn.md). Auth via VENN_API_KEY."
     check: "command -v venn >/dev/null 2>&1 && venn --help >/dev/null 2>&1"
-    fix: "python3 -m venv /opt/venn-cli && /opt/venn-cli/bin/pip install venn-cli==0.2.0 && ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn && echo 'Set VENN_API_KEY in .modastack/.env'"
+    fix: "python3 -m venv /opt/venn-cli && /opt/venn-cli/bin/pip install venn-cli==0.2.0 && ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn && echo 'Set VENN_API_KEY in .bobi/.env'"
 build:
   apt: [nodejs, npm, python3-venv]
   npm: ["@openai/codex@0.142.0"]

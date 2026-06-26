@@ -16,8 +16,8 @@ from unittest.mock import patch, MagicMock
 import httpx
 import pytest
 
-from modastack import http as pooled
-from modastack.slack import (
+from bobi import http as pooled
+from bobi.slack import (
     download_slack_file,
     upload_slack_file,
     fetch_slack_thread,
@@ -37,7 +37,7 @@ def _make_mock_client(handler):
 
 def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
     """Set up project config with a Slack bot token."""
-    config_dir = tmp_path / ".modastack"
+    config_dir = tmp_path / ".bobi"
     config_dir.mkdir(parents=True)
     if slack_bot_token:
         yaml = (
@@ -434,7 +434,7 @@ class TestSlackUploadCommand:
         mock_client = _make_mock_client(handler)
         with patch.object(pooled, "_client", mock_client):
             from click.testing import CliRunner
-            from modastack.cli import main
+            from bobi.cli import main
 
             runner = CliRunner()
             result = runner.invoke(main, [
@@ -471,7 +471,7 @@ class TestSlackUploadCommand:
         mock_client = _make_mock_client(handler)
         with patch.object(pooled, "_client", mock_client):
             from click.testing import CliRunner
-            from modastack.cli import main
+            from bobi.cli import main
 
             runner = CliRunner()
             result = runner.invoke(main, [
@@ -494,7 +494,7 @@ class TestSlackUploadCommand:
         _setup_project(tmp_path, monkeypatch)
 
         from click.testing import CliRunner
-        from modastack.cli import main
+        from bobi.cli import main
 
         runner = CliRunner()
         result = runner.invoke(main, [
@@ -517,7 +517,7 @@ class TestSlackUploadCommand:
         mock_client = _make_mock_client(handler)
         with patch.object(pooled, "_client", mock_client):
             from click.testing import CliRunner
-            from modastack.cli import main
+            from bobi.cli import main
 
             runner = CliRunner()
             result = runner.invoke(main, [
@@ -549,7 +549,7 @@ class TestSlackThreadCommand:
         mock_client = _make_mock_client(handler)
         with patch.object(pooled, "_client", mock_client):
             from click.testing import CliRunner
-            from modastack.cli import main
+            from bobi.cli import main
 
             runner = CliRunner()
             result = runner.invoke(main, [
@@ -576,7 +576,7 @@ class TestSlackThreadCommand:
         mock_client = _make_mock_client(handler)
         with patch.object(pooled, "_client", mock_client):
             from click.testing import CliRunner
-            from modastack.cli import main
+            from bobi.cli import main
 
             runner = CliRunner()
             result = runner.invoke(main, [
@@ -615,7 +615,7 @@ class TestSlackThreadCommand:
         mock_client = _make_mock_client(handler)
         with patch.object(pooled, "_client", mock_client):
             from click.testing import CliRunner
-            from modastack.cli import main
+            from bobi.cli import main
 
             runner = CliRunner()
             result = runner.invoke(main, [
@@ -638,7 +638,7 @@ class TestSlackThreadCommand:
         mock_client = _make_mock_client(handler)
         with patch.object(pooled, "_client", mock_client):
             from click.testing import CliRunner
-            from modastack.cli import main
+            from bobi.cli import main
 
             runner = CliRunner()
             result = runner.invoke(main, [

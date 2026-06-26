@@ -1,6 +1,6 @@
 # Spec — pluggable agent "brain" (Claude Code / Codex / Gemini / Grok)
 
-- **Issue:** [moda-labs/modastack#485](https://github.com/moda-labs/modastack/issues/485) — epic (work breakdown lives in the issue, not separate tickets).
+- **Issue:** [moda-labs/bobi-agent-team#485](https://github.com/moda-labs/bobi-agent-team/issues/485) — epic (work breakdown lives in the issue, not separate tickets).
 - **Type:** feature (framework / runtime abstraction)
 - **Status:** 🟡 PROPOSED — research + Phase 0 spike done, no production code yet.
 - **Author:** design session (Zach + Claude)
@@ -26,11 +26,11 @@ its message types (`AssistantMessage`, `ResultMessage`, `TextBlock`,
 
 | Layer | File | Coupling |
 |---|---|---|
-| Manager session | `modastack/session.py` | Long-lived client; **context rotation** (`_rotate()` ~ln 236); decision-log re-inject into system prompt; mid-turn `query()` injection |
-| Sub / supervised agents | `modastack/subagent.py` | One-shot + supervised loops; `PreToolUse` `HookMatcher("AskUserQuestion")` deferral (~ln 239); `skills="all"` |
-| Workflow steps | `modastack/workflow/orchestrator.py` | Persistent client, per-step `query()`, resume-by-id |
-| Setup wizard | `modastack/setup/llm.py` | One-shot streaming via `query()`; parses `content_block_delta`/`text_delta` |
-| MCP validation | `modastack/validate.py` | `client.get_mcp_status()` |
+| Manager session | `bobi/session.py` | Long-lived client; **context rotation** (`_rotate()` ~ln 236); decision-log re-inject into system prompt; mid-turn `query()` injection |
+| Sub / supervised agents | `bobi/subagent.py` | One-shot + supervised loops; `PreToolUse` `HookMatcher("AskUserQuestion")` deferral (~ln 239); `skills="all"` |
+| Workflow steps | `bobi/workflow/orchestrator.py` | Persistent client, per-step `query()`, resume-by-id |
+| Setup wizard | `bobi/setup/llm.py` | One-shot streaming via `query()`; parses `content_block_delta`/`text_delta` |
+| MCP validation | `bobi/validate.py` | `client.get_mcp_status()` |
 
 **The coupling that actually matters is the *shape* of the SDK, not "it's
 Anthropic."** Concretely, the seams an abstraction must cover:
@@ -244,7 +244,7 @@ normalizable — Phase 1/2 are unblocked. Not yet tested (deferred to Phase 3):
 persistent `app-server` hot session, live mid-turn injection, context rotation.
 
 **Phase 1 — extract `BrainClient`, Claude as default (no behavior change). ✅
-DONE.** Landed the `modastack/brain/` package — the provider-agnostic contract
+DONE.** Landed the `bobi/brain/` package — the provider-agnostic contract
 (`BrainSession`/`BrainFactory` protocols + normalized `AssistantText` /
 `TurnResult` / `StreamDelta` / `BrainCost` / `DeferredTool`), a `get_brain(kind)`
 selector (default `claude`), and the `ClaudeBrain` adapter (behavior-preserving
@@ -258,7 +258,7 @@ Claude-specific `_make_defer_hook` (the `HookMatcher`/`AskUserQuestion` deferral
 — open Q5). Cost attribution now reads the brain's `provider`, not a hardcoded
 `"anthropic"`. **Full unit suite green: 2269 passed / 7 skipped** (2258 + 11 new
 `test_brain.py`); unit mocks moved from raw SDK messages to the brain seam (and
-the `get_cli_path` patches re-pointed to `modastack.sdk`, the adapter's read
+the `get_cli_path` patches re-pointed to `bobi.sdk`, the adapter's read
 site). **Latent bug found + preserved + tracked:** the SDK types `model_usage`
 as `dict[str, Any]`, but the legacy code iterates it as a list-of-objects, so
 real-run per-model cost attribution has always recorded empty model + 0 tokens.
@@ -296,10 +296,10 @@ brain:
 
 `Config` parses `brain` + exposes `brain_kind`. At the agent process entry
 (`cli._run_from_config`) `set_process_brain(cfg.brain_kind)` exports
-`MODASTACK_BRAIN`, which `get_brain()` reads (precedence: explicit arg →
-`MODASTACK_BRAIN` → `claude`) — so the choice propagates to in-process and
+`BOBI_BRAIN`, which `get_brain()` reads (precedence: explicit arg →
+`BOBI_BRAIN` → `claude`) — so the choice propagates to in-process and
 subprocess agents with zero churn at the call sites, exactly like
-`MODASTACK_AUTH`. An unknown kind fails loud at session construction.
+`BOBI_AUTH`. An unknown kind fails loud at session construction.
 
 **Codex subscription auth on a headless box. ✅ FEASIBLE + bootstrap core
 landed.** Verified empirically: `codex login --device-auth` prints a fixed
@@ -316,7 +316,7 @@ flow shape). Two flows:
 - **Codex — `device_poll`:** scrape URL **and** code → post both to Slack → wait
   for the CLI to poll-authorize → verify `~/.codex/auth.json`.
 
-Driven by `MODASTACK_BRAIN`/`brain.kind`; credential path, shadow-key guard
+Driven by `BOBI_BRAIN`/`brain.kind`; credential path, shadow-key guard
 (`OPENAI_API_KEY` for codex), and the login CLI all follow the brain. Unit-tested
 (`tests/test_auth_bootstrap.py`: codex credential path, URL+code scrape, the full
 device-poll bootstrap, and the `OPENAI_API_KEY`-shadow refusal); the Claude path
@@ -324,7 +324,7 @@ is byte-for-byte preserved.
 
 **Deploy-side wiring. ✅ DONE (2026-06-24).** Landed alongside the `CodexBrain`,
 unit-tested + shellcheck-clean:
-1. `docker-entrypoint.sh`: reads `MODASTACK_BRAIN`; brain-aware shadow-key guard
+1. `docker-entrypoint.sh`: reads `BOBI_BRAIN`; brain-aware shadow-key guard
    (`OPENAI_API_KEY` for codex via indirect expansion), a `~/.codex` → `/data/codex`
    volume symlink (mirrors the `~/.claude` → `CLAUDE_CONFIG_DIR` link) so the
    ChatGPT subscription survives a redeploy, and the first-boot check now waits on
@@ -332,13 +332,13 @@ unit-tested + shellcheck-clean:
 2. `deploy.py`: `DeployConfig.brain` resolved from the team's `agent.yaml`
    `brain.kind`; the api_key *required* and subscription *forbidden* key are the
    brain's (`_brain_api_key`); `--brain` flows to the provisioner.
-3. `provision-instance.sh`: `--brain` arg → `MODASTACK_BRAIN` in the instance
+3. `provision-instance.sh`: `--brain` arg → `BOBI_BRAIN` in the instance
    `[env]`; brain-aware auth-key invariants + login fallback hint.
 
 **MVP deployment created:** `agents/codex-test/` (minimal Slack-only single-manager
 team, `brain: {kind: codex}` + `tool_library: [codex]`) and
 `deployments/codex-test.yaml` (app `ci-codex-test`, `auth: subscription`). Deploy
-is `modastack deploy codex-test --login-channel <private-channel>` once a Slack
+is `bobi deploy codex-test --login-channel <private-channel>` once a Slack
 app + a Fly app + the ChatGPT device login are in place — the first boot runs the
 codex device-auth bootstrap.
 
@@ -373,7 +373,7 @@ is unwanted.)
 Build **our own thin `BrainClient` protocol with per-CLI adapters (§4)**, not a
 wholesale ACP adoption — because ACP would force the Claude path off its
 first-party SDK onto a TS shim, the Python ACP story is immature, and a per-adapter
-layer matches modastack's existing CLI-first philosophy ([[project_cli_first_capabilities]]).
+layer matches bobi's existing CLI-first philosophy ([[project_cli_first_capabilities]]).
 Keep the protocol *shaped* like ACP so we can swap in an ACP transport per-adapter
 (natural for Gemini/Grok hot sessions) without redesigning.
 

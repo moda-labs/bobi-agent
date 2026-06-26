@@ -15,7 +15,7 @@ import httpx
 import pytest
 import yaml
 
-from modastack import registry
+from bobi import registry
 
 
 # --- helpers -----------------------------------------------------------------
@@ -43,7 +43,7 @@ def _asset_tarball(name: str = "eng-team", version: str | None = "1.1.0") -> byt
 def _repo_tarball(name: str = "eng-team", version: str = "1.1.0") -> bytes:
     """A whole-repo GitHub tarball: `<prefix>/agents/<name>/…` (fallback path)."""
     buf = BytesIO()
-    prefix = "moda-labs-modastack-deadbee"
+    prefix = "moda-labs-bobi-deadbee"
     body = f"agent: {name}\nversion: '{version}'\nentry_point: manager\n".encode()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         info = tarfile.TarInfo(f"{prefix}/agents/{name}/agent.yaml")
@@ -54,7 +54,7 @@ def _repo_tarball(name: str = "eng-team", version: str = "1.1.0") -> bytes:
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    monkeypatch.setattr("modastack.paths._root", tmp_path)
+    monkeypatch.setattr("bobi.paths._root", tmp_path)
     # A stable fake token so the asset download carries the auth header.
     monkeypatch.setattr(registry, "_github_token", lambda: "tok-abc")
     return tmp_path
@@ -76,7 +76,7 @@ def _router(monkeypatch, routes: dict, *, capture: list | None = None):
                                       request=httpx.Request("GET", url))
         return httpx.Response(404, content=b"", request=httpx.Request("GET", url))
 
-    monkeypatch.setattr("modastack.http.get", fake_get)
+    monkeypatch.setattr("bobi.http.get", fake_get)
 
 
 # --- D-6: name@version parse rule --------------------------------------------

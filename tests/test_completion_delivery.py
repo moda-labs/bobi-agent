@@ -14,11 +14,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from modastack.sdk import (
+from bobi.sdk import (
     SessionEntry, get_registry,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
-from modastack.subagent import _run_agent_supervised, _session_name
+from bobi.subagent import _run_agent_supervised, _session_name
 
 
 # --- minimal SDK fakes (mirror test_subagent_blocking) ---------------------
@@ -71,7 +71,7 @@ class FakeClient:
         self.disconnected = True
 
 
-SDK_PATCH = "modastack.subagent"
+SDK_PATCH = "bobi.subagent"
 
 
 def _sdk_module(client):
@@ -86,7 +86,7 @@ def _sdk_module(client):
 
 @pytest.fixture(autouse=True)
 def bound_root(tmp_path, monkeypatch):
-    monkeypatch.setattr("modastack.paths._root", tmp_path)
+    monkeypatch.setattr("bobi.paths._root", tmp_path)
 
 
 def _register(run_key, phase, role=""):
@@ -101,7 +101,7 @@ async def _run(client, run_key, phase):
     with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
          patch(f"{SDK_PATCH}.save_session_id"), \
          patch(f"{SDK_PATCH}.log_activity"), \
-         patch("modastack.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+         patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
          patch.dict("sys.modules", {"claude_agent_sdk": _sdk_module(client)}):
         return await _run_agent_supervised(
             prompt="do it", cwd="/tmp", run_key=run_key, phase=phase, timeout=60,

@@ -1,36 +1,36 @@
 #!/usr/bin/env bash
 #
-# modastack container entrypoint (containerized-8 / #338).
+# bobi container entrypoint (containerized-8 / #338).
 #
 # Runs as root (PID 1, under Fly's injected init — no tini; see Dockerfile) only
 # long enough to prepare the mounted volume, then drops to the non-root
-# `modastack` user and exec's the manager. Because the final step is
-# `exec gosu ... modastack start --foreground`, SIGTERM is forwarded straight to
+# `bobi` user and exec's the manager. Because the final step is
+# `exec gosu ... bobi start --foreground`, SIGTERM is forwarded straight to
 # the manager, which shuts sessions down gracefully (C2).
 #
-# First-boot install (empty volume -> `modastack install`) lives here for now so
+# First-boot install (empty volume -> `bobi install`) lives here for now so
 # the image is independently testable; #339 (C9) hardens the idempotency and
 # edge cases of this path.
 set -euo pipefail
 
-APP_USER="modastack"
+APP_USER="bobi"
 DATA_DIR="${DATA_DIR:-/data}"
-PROJECT_DIR="${MODASTACK_PROJECT:-${DATA_DIR}/project}"
-# $HOME stays on the IMAGE (/home/modastack) — that's where baked team tools
+PROJECT_DIR="${BOBI_PROJECT:-${DATA_DIR}/project}"
+# $HOME stays on the IMAGE (/home/bobi) — that's where baked team tools
 # (~/.claude/skills, ~/dev/gstack) live, read in place, never copied. Only
 # Claude's DURABLE state (credentials + transcripts + session history) is
 # redirected onto the volume via CLAUDE_CONFIG_DIR, the supported override.
 # Splitting the two this way (vs. seeding tools onto a volume HOME) keeps build
 # HOME == runtime HOME, so the image's `verify: requires` proves the live paths.
-export HOME="${MODASTACK_HOME:-/home/modastack}"
+export HOME="${BOBI_HOME:-/home/bobi}"
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-${DATA_DIR}/claude}"
 
 # The agent brain (#485). Decides the provider API key (api_key/subscription),
 # the durable OAuth credential dir on the volume, and the credential file the
 # first-boot subscription bootstrap waits for. Default claude for entrypoint
 # branching only; do not export that default because agent.yaml must still be
-# able to select a non-Claude brain when MODASTACK_BRAIN was not explicit.
-ENTRYPOINT_BRAIN="${MODASTACK_BRAIN:-claude}"
+# able to select a non-Claude brain when BOBI_BRAIN was not explicit.
+ENTRYPOINT_BRAIN="${BOBI_BRAIN:-claude}"
 
 configure_brain_paths() {
   case "$ENTRYPOINT_BRAIN" in
@@ -52,33 +52,33 @@ configure_brain_paths() {
 validate_auth_mode() {
   # The provider API key is brain-specific (ANTHROPIC_API_KEY / OPENAI_API_KEY);
   # ${!BRAIN_SHADOW_KEY} is its live value via bash indirect expansion.
-  case "${MODASTACK_AUTH:-api_key}" in
+  case "${BOBI_AUTH:-api_key}" in
     api_key)
       [ -n "${!BRAIN_SHADOW_KEY:-}" ] \
-        || fatal "MODASTACK_AUTH=api_key but ${BRAIN_SHADOW_KEY} is unset."
+        || fatal "BOBI_AUTH=api_key but ${BRAIN_SHADOW_KEY} is unset."
       ;;
     subscription)
       # The provider API key silently outranks subscription OAuth creds and bills
       # the API instead — it must be entirely absent in this mode (§6.1).
       [ -z "${!BRAIN_SHADOW_KEY:-}" ] \
-        || fatal "MODASTACK_AUTH=subscription but ${BRAIN_SHADOW_KEY} is set; it overrides subscription auth. Unset it."
+        || fatal "BOBI_AUTH=subscription but ${BRAIN_SHADOW_KEY} is set; it overrides subscription auth. Unset it."
       ;;
     *)
-      fatal "unknown MODASTACK_AUTH='${MODASTACK_AUTH}' (expected api_key|subscription)."
+      fatal "unknown BOBI_AUTH='${BOBI_AUTH}' (expected api_key|subscription)."
       ;;
   esac
 }
 
 resolve_configured_brain() {
-  [ -z "${MODASTACK_BRAIN:-}" ] || return 0
-  [ -f "${PROJECT_DIR}/.modastack/agent.yaml" ] || return 0
+  [ -z "${BOBI_BRAIN:-}" ] || return 0
+  [ -f "${PROJECT_DIR}/.bobi/agent.yaml" ] || return 0
 
   local configured
   if configured="$(PROJECT_DIR="${PROJECT_DIR}" python - <<'PY' 2>/dev/null
 import os
 from pathlib import Path
 
-from modastack.config import Config
+from bobi.config import Config
 
 print(Config.load(Path(os.environ["PROJECT_DIR"])).brain_kind or "", end="")
 PY
@@ -127,9 +127,9 @@ PY
 }
 
 AUTH_VALIDATED=0
-if [ -n "${MODASTACK_BRAIN:-}" ] \
-   || [ -f "${PROJECT_DIR}/.modastack/agent.yaml" ] \
-   || { [ -z "${MODASTACK_TEAM_URL:-}" ] && [ -z "${MODASTACK_TEAM:-}" ]; }; then
+if [ -n "${BOBI_BRAIN:-}" ] \
+   || [ -f "${PROJECT_DIR}/.bobi/agent.yaml" ] \
+   || { [ -z "${BOBI_TEAM_URL:-}" ] && [ -z "${BOBI_TEAM:-}" ]; }; then
   validate_auth_mode
   AUTH_VALIDATED=1
 fi
@@ -142,10 +142,10 @@ mkdir -p "${PROJECT_DIR}" "${CLAUDE_CONFIG_DIR}"
 # Fly/EC2/k8s mount fresh volumes owned by root. Take ownership once so the
 # non-root user can write; a stamp keeps subsequent boots from re-walking a
 # large, already-correct tree.
-if [ ! -e "${DATA_DIR}/.modastack-owned" ]; then
+if [ ! -e "${DATA_DIR}/.bobi-owned" ]; then
   log "Taking ownership of ${DATA_DIR} for ${APP_USER} (first boot)"
   chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}"
-  : > "${DATA_DIR}/.modastack-owned"
+  : > "${DATA_DIR}/.bobi-owned"
 else
   chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${PROJECT_DIR}" "${CLAUDE_CONFIG_DIR}"
 fi
@@ -158,14 +158,14 @@ fi
 # coherent home tree, split underneath only by storage lifecycle (image vs
 # volume), invisible to anything using `~`.
 #
-# Personal skills are baked OUTSIDE ~/.claude at /opt/modastack/skills (immutable
+# Personal skills are baked OUTSIDE ~/.claude at /opt/bobi/skills (immutable
 # image content; build-render.py put them there) and surfaced via the config
 # dir's skills/ entry — a symlinked DIRECTORY is safe (files read inside it) and
 # resolves to the exact path the build's `verify: requires` checked. No baked
 # skills (generic image) → that link is skipped; Claude finds project skills.
-if [ -d /opt/modastack/skills ]; then
-  log "Linking ${CLAUDE_CONFIG_DIR}/skills -> /opt/modastack/skills (baked team skills)"
-  ln -sfn /opt/modastack/skills "${CLAUDE_CONFIG_DIR}/skills"
+if [ -d /opt/bobi/skills ]; then
+  log "Linking ${CLAUDE_CONFIG_DIR}/skills -> /opt/bobi/skills (baked team skills)"
+  ln -sfn /opt/bobi/skills "${CLAUDE_CONFIG_DIR}/skills"
 fi
 # Replace the image's real ~/.claude (created at build) with a symlink to the
 # volume config dir. Idempotent: rewrite only when it isn't already that link
@@ -184,50 +184,50 @@ cd "${PROJECT_DIR}"
 # is the same path here, but be explicit) and CLAUDE_CONFIG_DIR (the volume dir
 # holding durable creds/transcripts) into every privilege drop.
 as_app() {
-  if [ -n "${MODASTACK_BRAIN:-}" ] || [ "${ENTRYPOINT_BRAIN}" != "claude" ]; then
-    gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_BRAIN=${ENTRYPOINT_BRAIN}" "$@"
+  if [ -n "${BOBI_BRAIN:-}" ] || [ "${ENTRYPOINT_BRAIN}" != "claude" ]; then
+    gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_BRAIN=${ENTRYPOINT_BRAIN}" "$@"
   else
     gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "$@"
   fi
 }
 
 # --- 2. First boot: install a team if the volume has no agent (C9 hardens) ---
-# Team source precedence: a public MODASTACK_TEAM_URL (fetched at boot — the
-# dark instance reaches out, nothing reaches in) wins over MODASTACK_TEAM (a
+# Team source precedence: a public BOBI_TEAM_URL (fetched at boot — the
+# dark instance reaches out, nothing reaches in) wins over BOBI_TEAM (a
 # bundled/registry name).
 #
 # With NEITHER set on an empty volume the instance enters the "wait for team"
 # state instead of crashing: it was provisioned blank for ssh-push delivery
-# (`modastack deploy` with a local `team:` package — DEPLOY_INTERFACE.md). The
-# operator pushes the team over `fly ssh` (sftp the tarball + `modastack install`),
-# which lands .modastack/agent.yaml on the volume; we poll for it, then start.
+# (`bobi deploy` with a local `team:` package — DEPLOY_INTERFACE.md). The
+# operator pushes the team over `fly ssh` (sftp the tarball + `bobi install`),
+# which lands .bobi/agent.yaml on the volume; we poll for it, then start.
 # This is the single-developer "I built it, ship it — no hosting" path, and it
 # keeps PID 1 alive so the Fly machine stays "started" while we wait.
-if [ ! -f "${PROJECT_DIR}/.modastack/agent.yaml" ]; then
-  if [ -n "${MODASTACK_TEAM_URL:-}" ]; then
-    log "First boot: installing team from URL ${MODASTACK_TEAM_URL} (non-interactive)"
-    as_app modastack install "${MODASTACK_TEAM_URL}" --non-interactive
-  elif [ -n "${MODASTACK_TEAM:-}" ]; then
-    log "First boot: installing team '${MODASTACK_TEAM}' (non-interactive)"
-    # MODASTACK_TEAM must resolve to something the INSTANCE can see: a path on the
+if [ ! -f "${PROJECT_DIR}/.bobi/agent.yaml" ]; then
+  if [ -n "${BOBI_TEAM_URL:-}" ]; then
+    log "First boot: installing team from URL ${BOBI_TEAM_URL} (non-interactive)"
+    as_app bobi install "${BOBI_TEAM_URL}" --non-interactive
+  elif [ -n "${BOBI_TEAM:-}" ]; then
+    log "First boot: installing team '${BOBI_TEAM}' (non-interactive)"
+    # BOBI_TEAM must resolve to something the INSTANCE can see: a path on the
     # volume (e.g. an ssh-pushed /mnt/team) or a local package — there is NO team
     # registry baked into the image, so a bare name won't resolve. Fail LOUD with
     # the actionable alternative instead of letting `set -e` crash-loop the Fly
     # machine on a bare pipefail trace (C9/#339).
-    if ! as_app modastack install "${MODASTACK_TEAM}" --non-interactive; then
-      log "ERROR: couldn't install team '${MODASTACK_TEAM}'. The container has no"
-      log "       team registry, so MODASTACK_TEAM only resolves a path/package the"
+    if ! as_app bobi install "${BOBI_TEAM}" --non-interactive; then
+      log "ERROR: couldn't install team '${BOBI_TEAM}'. The container has no"
+      log "       team registry, so BOBI_TEAM only resolves a path/package the"
       log "       instance can already see. To deliver a PUBLISHED team, set"
-      log "       MODASTACK_TEAM_URL=<https .tar.gz> instead; to deliver a LOCAL"
-      log "       package, use 'modastack deploy <name>' (ssh-push, no team source"
+      log "       BOBI_TEAM_URL=<https .tar.gz> instead; to deliver a LOCAL"
+      log "       package, use 'bobi deploy <name>' (ssh-push, no team source"
       log "       on the instance). See DEPLOYMENT.md / DEPLOY_INTERFACE.md."
       exit 1
     fi
   else
     log "No team source and empty volume — blank instance, waiting for an"
-    log "ssh-push team delivery (modastack deploy). Poll for .modastack/agent.yaml..."
+    log "ssh-push team delivery (bobi deploy). Poll for .bobi/agent.yaml..."
     waited=0
-    while [ ! -f "${PROJECT_DIR}/.modastack/agent.yaml" ]; do
+    while [ ! -f "${PROJECT_DIR}/.bobi/agent.yaml" ]; do
       sleep 2
       waited=$((waited + 2))
       # Heartbeat every ~2 min so `fly logs` shows the instance is alive, not hung.
@@ -259,7 +259,7 @@ fi
 if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
   mkdir -p "${BRAIN_CRED_DIR}"
   chown "${APP_USER}:${APP_USER}" "${BRAIN_CRED_DIR}"
-  if [ -d /opt/modastack/skills ]; then
+  if [ -d /opt/bobi/skills ]; then
     log "Linking baked team skills into ${BRAIN_CRED_DIR}/skills for codex"
     mkdir -p "${BRAIN_CRED_DIR}/skills"
     chown "${APP_USER}:${APP_USER}" "${BRAIN_CRED_DIR}/skills"
@@ -267,7 +267,7 @@ if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
       [ -L "${existing_skill}" ] || continue
       existing_target="$(readlink "${existing_skill}")"
       case "${existing_target}" in
-        /opt/modastack/skills/*)
+        /opt/bobi/skills/*)
           if [ ! -e "${existing_target}" ]; then
             log "Removing stale baked codex skill link ${existing_skill}"
             rm -f "${existing_skill}"
@@ -275,7 +275,7 @@ if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
           ;;
       esac
     done
-    for skill_path in /opt/modastack/skills/*; do
+    for skill_path in /opt/bobi/skills/*; do
       [ -e "${skill_path}" ] || continue
       skill_name="$(basename "${skill_path}")"
       skill_dest="${BRAIN_CRED_DIR}/skills/${skill_name}"
@@ -283,7 +283,7 @@ if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
         if [ -L "${skill_dest}" ]; then
           skill_dest_target="$(readlink "${skill_dest}")"
           case "${skill_dest_target}" in
-            /opt/modastack/skills/*) ;;
+            /opt/bobi/skills/*) ;;
             *)
               log "Leaving existing codex skill link at ${skill_dest}; baked skill ${skill_name} not linked"
               continue
@@ -308,7 +308,7 @@ fi
 # (`tool_library: [codex]`). Unlike Claude, Codex does not read OPENAI_API_KEY
 # directly; it expects ~/.codex/auth.json. In subscription mode, never turn an
 # ambient API key into Codex auth: subscription OAuth must remain authoritative.
-if [ "${MODASTACK_AUTH:-api_key}" != "subscription" ]; then
+if [ "${BOBI_AUTH:-api_key}" != "subscription" ]; then
   if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
     materialize_codex_api_key_auth "${BRAIN_CRED_DIR}"
   else
@@ -318,7 +318,7 @@ elif [ -n "${OPENAI_API_KEY:-}" ]; then
   log "Subscription mode: leaving OPENAI_API_KEY out of Codex auth materialization"
 fi
 
-if [ "${MODASTACK_AUTH:-api_key}" = "subscription" ]; then
+if [ "${BOBI_AUTH:-api_key}" = "subscription" ]; then
   if [ "${ENTRYPOINT_BRAIN}" = "codex" ]; then
     codex_dir="${BRAIN_CRED_DIR}"
   else
@@ -333,21 +333,21 @@ fi
 # --- 4. Subscription auth: bootstrap login over Slack if no creds yet (C23) --
 # Idempotent: a no-op once the credentials exist. They live under
 # CLAUDE_CONFIG_DIR (the volume), not HOME — that's the durable state we keep.
-if [ "${MODASTACK_AUTH:-api_key}" = "subscription" ] \
+if [ "${BOBI_AUTH:-api_key}" = "subscription" ] \
    && [ ! -f "${BRAIN_CRED_DIR}/${BRAIN_CRED_FILE}" ]; then
   log "Subscription mode, no ${ENTRYPOINT_BRAIN} credentials on volume — running login bootstrap"
-  as_app modastack login-bootstrap
+  as_app bobi login-bootstrap
 fi
 
 # --- 5. Hand off to the manager as the non-root user ------------------------
 # Agent UI on by default IN THE CONTAINER (the manager starts it on the private
-# 6PN; reach it with `modastack ui <deployment>` / `fly proxy`). It's image
+# 6PN; reach it with `bobi ui <deployment>` / `fly proxy`). It's image
 # behavior, not a per-instance flag, so existing instances pick it up on their
-# next image swap. Disable with MODASTACK_UI=0 in the Fly env. The dark instance
+# next image swap. Disable with BOBI_UI=0 in the Fly env. The dark instance
 # has no public route, so this exposes nothing — see DESIGN.md "Agent UI".
-export MODASTACK_UI="${MODASTACK_UI:-1}"
+export BOBI_UI="${BOBI_UI:-1}"
 log "Starting manager under self-heal watchdog (user=${APP_USER}, project=${PROJECT_DIR}, home=${HOME}, claude_config=${CLAUDE_CONFIG_DIR})"
-# #464: launch the manager under `modastack supervise` instead of directly.
+# #464: launch the manager under `bobi supervise` instead of directly.
 # The supervisor is the entrypoint process (parent); it spawns the manager as a
 # child, watches the director's progress via the health endpoint, and restarts
 # a wedged director from below — the one recovery layer stall-recovery cannot
@@ -356,8 +356,8 @@ log "Starting manager under self-heal watchdog (user=${APP_USER}, project=${PROJ
 # escalates. `healthcheck.sh` is unaffected (the manager child still writes the
 # port file). The forwarded `--foreground` keeps the manager a supervisable
 # child rather than letting it daemonize.
-if [ -n "${MODASTACK_BRAIN:-}" ] || [ "${ENTRYPOINT_BRAIN}" != "claude" ]; then
-  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_BRAIN=${ENTRYPOINT_BRAIN}" "MODASTACK_UI=${MODASTACK_UI}" modastack supervise -- --foreground "$@"
+if [ -n "${BOBI_BRAIN:-}" ] || [ "${ENTRYPOINT_BRAIN}" != "claude" ]; then
+  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_BRAIN=${ENTRYPOINT_BRAIN}" "BOBI_UI=${BOBI_UI}" bobi supervise -- --foreground "$@"
 else
-  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "MODASTACK_UI=${MODASTACK_UI}" modastack supervise -- --foreground "$@"
+  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_UI=${BOBI_UI}" bobi supervise -- --foreground "$@"
 fi

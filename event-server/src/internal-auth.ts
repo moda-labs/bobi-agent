@@ -1,7 +1,7 @@
-export const INTERNAL_HEADER = "x-modastack-internal";
-export const INTERNAL_WS_QUERY_PARAM = "__modastack_internal";
-export const INTERNAL_WS_PROTOCOL_PREFIX = "modastack-internal.";
-export const PUBLIC_WS_BEARER_PROTOCOL_PREFIX = "modastack-bearer.";
+export const INTERNAL_HEADER = "x-bobi-internal";
+export const INTERNAL_WS_QUERY_PARAM = "__bobi_internal";
+export const INTERNAL_WS_PROTOCOL_PREFIX = "bobi-internal.";
+export const PUBLIC_WS_BEARER_PROTOCOL_PREFIX = "bobi-bearer.";
 
 interface InternalEnv {
 	INTERNAL_DO_SECRET: string;

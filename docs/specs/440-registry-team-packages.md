@@ -1,6 +1,6 @@
 # Spec: Registry-based agent-team install + deploy — versioned per-team packages (`name@version`)
 
-- **Issue:** [#440](https://github.com/moda-labs/modastack/issues/440)
+- **Issue:** [#440](https://github.com/moda-labs/bobi-agent-team/issues/440)
 - **Status:** Approved by reviewer (`@underminedsk`, 2026-06-23, comment on PR #441
   — "all the recommended options"); §4 design decisions D-1–D-6 now **locked**.
   Implementation is staged/gated separately (§5.2) — Phase 1 first; merge of this
@@ -26,15 +26,15 @@ Agent-team distribution today has **two weak, divergent paths**, and neither
 honors a version:
 
 1. **Install clones the whole repo at `main`, ignoring versions.**
-   `registry.fetch()` (`modastack/registry.py:160`) downloads
+   `registry.fetch()` (`bobi/registry.py:160`) downloads
    `https://api.github.com/repos/{repo}/tarball/main` — the *entire* repo at
    whatever `main` is right now — and extracts one `agents/<name>/` subdir. There
    is no `version` parameter. `registry.yaml` carries a `version:` per team that
-   the download never honors. `modastack install eng-team` gives you "whatever is
+   the download never honors. `bobi install eng-team` gives you "whatever is
    on main this second" — unpinnable and irreproducible.
 
 2. **Deploy can't consume a registry team as a first-class team.**
-   `DeployConfig.delivery` (`modastack/deploy.py:108`) has exactly two modes:
+   `DeployConfig.delivery` (`bobi/deploy.py:108`) has exactly two modes:
    - local `team:` → on-disk package → **team-flavored** image (bakes `build:`
      deps), `ssh-push` delivery, secret **prune** (the package's `${VAR}` refs
      are the prune authority).
@@ -93,12 +93,12 @@ inherit registry deploy for free, with no behavioral change to the local path.
 - **`FROM <team>` inheritance / "extend" tier** — a derived team checking in only
   its deltas atop a base. Separate future feature.
 - **Re-bundling teams into the wheel** — intentionally NOT doing. Offline
-  `modastack setup` templates are deprioritized; **PR #438 de-bundles all teams
+  `bobi setup` templates are deprioritized; **PR #438 de-bundles all teams
   and that stays** (see §7).
 - **Changing the rolling-release mechanism** for floating consumers — the rolling
   `<team>.tar.gz` remains exactly as today.
 - **A public starter-registry** for `pip install` users behind a private
-  `moda-labs/modastack` — flagged by #438 as a possible follow-up; not this
+  `moda-labs/bobi-agent-team` — flagged by #438 as a possible follow-up; not this
   ticket (noted in §7 as a known gap).
 - **Version-bump / changelog edits** — none in this PR (release-time only, per
   CLAUDE.md Contributing).
@@ -164,7 +164,7 @@ to the **workflow step** to avoid touching `test_packaging.py` while #438 is ope
 
 ### 3.2 Phase 2 — versioned fetch + install
 
-**`modastack/registry.py` — `fetch(project_path, name, version=None, repo=None)`**
+**`bobi/registry.py` — `fetch(project_path, name, version=None, repo=None)`**
 
 New signature (additive, keyword-only `version` defaulting to `None` → existing
 callers unaffected):
@@ -178,7 +178,7 @@ callers unaffected):
   we already trust for URL installs.
   - **Download must be token-authed (review fix).** Do **not** route the asset
     download through `fetch_from_url`, whose `pooled.get` is **un-authenticated** —
-    that 404s on a private `moda-labs/modastack`. Download the asset bytes via the
+    that 404s on a private `moda-labs/bobi-agent-team`. Download the asset bytes via the
     token-aware `_urlopen` (used everywhere else in `registry.py`), then hand the
     bytes to the shared `_install_team_tar` core. (Refactor: split
     `fetch_from_url` so the extraction core is callable with pre-fetched bytes.)
@@ -212,12 +212,12 @@ callers unaffected):
 - `_write_meta` records `version` (the resolved concrete version, never
   `"unknown"` when pinned) and `source` (the asset URL).
 
-**CLI** (`modastack/cli.py`)
-- `modastack install <name>[@version]` (`cli.py:568`): parse a trailing
+**CLI** (`bobi/cli.py`)
+- `bobi install <name>[@version]` (`cli.py:568`): parse a trailing
   `@version` off the registry-name branch (the URL / local-archive / local-dir
   branches are unaffected — an `@` only has meaning on the bare-name branch).
   Pass `version` through to `fetch`.
-- `modastack agents update <name>[@version]`: same parse; `@version` pins,
+- `bobi agents update <name>[@version]`: same parse; `@version` pins,
   bare name takes latest. `agents update` with no version keeps today's
   "update to latest remote" behavior.
 - Helpful errors: an unknown `name@version` (asset 404 and no fallback) reports
@@ -225,7 +225,7 @@ callers unaffected):
 
 ### 3.3 Phase 3 — deploy a registry team first-class (team-flavored)
 
-**`modastack/deploy.py`** — the change is deliberately concentrated in **one
+**`bobi/deploy.py`** — the change is deliberately concentrated in **one
 resolver** so every consumer inherits it.
 
 - `DeployConfig.team` may carry `@version` (e.g. `team: eng-team@1.1.0`). Add a
@@ -279,8 +279,8 @@ resolver** so every consumer inherits it.
 ### 3.4 Caching location for deploy fetches
 
 Deploy resolution fetches into the **project cache** (`paths.agents_dir`), the
-same place `install` populates, so a machine that has run `modastack install
-eng-team@1.1.0` and then `modastack deploy` reuses the cached package with no
+same place `install` populates, so a machine that has run `bobi install
+eng-team@1.1.0` and then `bobi deploy` reuses the cached package with no
 second download. (D-3 in §4: an isolated deploy-only cache vs. the shared install
 cache. Recommend shared — fewer moving parts, and the immutable pin makes
 sharing safe.)
@@ -354,7 +354,7 @@ until we deliberately re-pin it.**
    on `teams-latest`. **No consumer reads them yet** → zero runtime change to any
    running instance. Verify a couple of `<team>-<version>.tar.gz` assets exist and
    are immutable (re-run is a no-op).
-2. **Land Phase 2** (fetch/install). Effect: `modastack install` and `agents
+2. **Land Phase 2** (fetch/install). Effect: `bobi install` and `agents
    update` *can* pin, and unpinned install now pulls the per-team latest asset.
    Running deployed instances are **unaffected** (they don't re-install
    themselves). A developer's `install eng-team` now resolves the published latest
@@ -419,7 +419,7 @@ Write each test **failing first**, then implement.
   fetches that per-team asset (assert URL), not the repo tarball.
 - **Fetch (fallback):** asset 404 → falls back to repo tarball with a logged
   warning; still installs.
-- **Install CLI:** `modastack install eng-team@1.1.0` populates cache + pins
+- **Install CLI:** `bobi install eng-team@1.1.0` populates cache + pins
   meta; `install eng-team` (latest) works; `@version` ignored/irrelevant on URL
   and local-path branches.
 - **`agents update name@version`** pins; bare name updates to latest.
@@ -461,10 +461,10 @@ Write each test **failing first**, then implement.
 This ticket is one of a cluster reshaping how teams ship. Explicit interactions:
 
 ### #438 — `chore/debundle-agent-teams` (OPEN, human PR by Zach)
-- **Touches:** `modastack/setup/open_mode.py`, `pyproject.toml`,
+- **Touches:** `bobi/setup/open_mode.py`, `pyproject.toml`,
   `tests/test_packaging.py`.
-- **This spec touches:** `modastack/registry.py`, `modastack/deploy.py`,
-  `modastack/cli.py`, `.github/workflows/team-packages.yml`,
+- **This spec touches:** `bobi/registry.py`, `bobi/deploy.py`,
+  `bobi/cli.py`, `.github/workflows/team-packages.yml`,
   `scripts/build-team-tarballs.sh`, and **adds** test files.
 - **File collision: none.** The only at-risk file is `tests/test_packaging.py`
   (#438 adds `test_no_agent_teams_bundled_in_binary`). **Mitigation:** we put the
@@ -472,21 +472,21 @@ This ticket is one of a cluster reshaping how teams ship. Explicit interactions:
   `test_packaging.py`, while #438 is open. If a packaging test is later wanted, it
   lands in a follow-up after #438 merges.
 - **Thematic dependency (important):** #438 makes a published wheel ship **zero**
-  teams → `modastack setup` falls back to the **registry**. That makes Phase 2's
+  teams → `bobi setup` falls back to the **registry**. That makes Phase 2's
   registry-fetch the **primary** acquisition path for `pip install` users — so the
   per-team-asset fetch + fallback robustness in this spec directly de-risks #438.
-- **Known gap #438 raised (out of scope, flagged):** if `moda-labs/modastack` is
+- **Known gap #438 raised (out of scope, flagged):** if `moda-labs/bobi-agent-team` is
   private, `pip install` users get no offline teams *and* an auth-walled registry.
   A public starter-registry is a possible follow-up; not this ticket.
 - **Sequencing:** independent; either can merge first. If #438 merges first, no
   change here. If this merges first, #438 still applies cleanly (disjoint files).
 
-### #439 — `modastack deploy-init` scaffold (MERGED)
-- **Touched:** `docs/DEPLOYMENT.md`, `modastack/cli.py`, `modastack/scaffold.py`,
+### #439 — `bobi deploy-init` scaffold (MERGED)
+- **Touched:** `docs/DEPLOYMENT.md`, `bobi/cli.py`, `bobi/scaffold.py`,
   `tests/test_scaffold.py`. Already on `main`; this branch is cut from current
   `main` (commit `8226a6c`), so we build on top.
 - **Interaction:** `deploy-init` scaffolds a bring-your-own-repo CI that does
-  `modastack deploy`. Phase 3 makes the scaffolded deploy able to pin
+  `bobi deploy`. Phase 3 makes the scaffolded deploy able to pin
   `team: <name>@<version>` — i.e. this spec is the natural payoff for the BYOR
   flow #439 set up. The scaffold templates may later want a `@version` example;
   out of scope here (doc/scaffold follow-up).
@@ -505,7 +505,7 @@ This ticket is one of a cluster reshaping how teams ship. Explicit interactions:
 ### Net: our own fleet
 - #436 (where our fleet lives) + #438 (wheel ships no teams) + #439 (BYOR deploy
   scaffold) + **#440 (this — versioned pin)** together move us to: *eng-team
-  lives once in `modastack/agents/eng-team`, is published as immutable versioned
+  lives once in `bobi/agents/eng-team`, is published as immutable versioned
   packages, and is deployed from `moda-agent-teams` by `team: eng-team@<version>`.*
   Per §5.2 the migration of the live fleet is **deliberate and out of this PR**,
   so merging #440 cannot by itself redeploy or disturb running director/lead
@@ -533,16 +533,16 @@ phased commits. Lead's call at implementation time; this spec covers all three.
 
 ## 9. Key file anchors
 
-- `modastack/registry.py:146` `fetch()`, `:107` `_read_remote_version`,
+- `bobi/registry.py:146` `fetch()`, `:107` `_read_remote_version`,
   `:98` `_write_meta`, `:30` `DEFAULT_REPO`, `:300` `_install_team_tar`
   (reuse for pinned extraction)
-- `modastack/deploy.py:76` `DeployConfig` (`team`/`team_url`/`delivery`),
+- `bobi/deploy.py:76` `DeployConfig` (`team`/`team_url`/`delivery`),
   `:123` `validate()`, `:341` `local_package_dir`, `:383` `_secret_sets`
   (the `declared=None` team-url branch), `:790` `_render_team_deps_into_context`,
   `:819` `_local_team_deps_hash`
 - `.github/workflows/team-packages.yml`, `scripts/build-team-tarballs.sh`,
   `scripts/render-team-deps.py`
-- `modastack/cli.py:568` `install`, deploy + `agents update` command group
+- `bobi/cli.py:568` `install`, deploy + `agents update` command group
 - `agents/registry.yaml` (per-team `version:` = latest-published pointer)
 
 ---

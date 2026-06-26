@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from modastack.workflow.triggers import WorkflowDispatcher
-from modastack.workflow.schema import Workflow, StepDef, load_workflow
+from bobi.workflow.triggers import WorkflowDispatcher
+from bobi.workflow.schema import Workflow, StepDef, load_workflow
 
 
 def _make_workflow_yaml(path: Path, name: str, trigger: str, description: str = ""):
@@ -198,14 +198,14 @@ class TestLoadFrom:
 
 
 class TestNoFrameworkFallback:
-    """Verify workflows resolve only from .modastack/, not from the framework package."""
+    """Verify workflows resolve only from .bobi/, not from the framework package."""
 
     def test_no_bundled_workflow_yamls_in_package(self):
-        """The modastack/workflow/ directory must not contain any YAML files.
+        """The bobi/workflow/ directory must not contain any YAML files.
 
         Domain workflows belong in agent packs, not the framework package.
         """
-        package_dir = Path(__file__).parent.parent / "modastack" / "workflow"
+        package_dir = Path(__file__).parent.parent / "bobi" / "workflow"
         yamls = list(package_dir.glob("*.yaml"))
         assert yamls == [], (
             f"Framework package must not ship workflow YAMLs: {[f.name for f in yamls]}"
@@ -216,14 +216,14 @@ class TestNoFrameworkFallback:
         silently loading nothing was the failure mode that dispatched
         engineers with no workflows."""
         import pytest
-        monkeypatch.setattr("modastack.paths._root", None)
+        monkeypatch.setattr("bobi.paths._root", None)
         dispatcher = WorkflowDispatcher()
         with pytest.raises(RuntimeError, match="not bound"):
             dispatcher.load_all_workflows(project_path=None)
 
     def test_load_all_uses_only_installed_pack(self, tmp_path):
-        """Workflows load exclusively from .modastack/workflows/."""
-        wf_dir = tmp_path / ".modastack" / "workflows"
+        """Workflows load exclusively from .bobi/workflows/."""
+        wf_dir = tmp_path / ".bobi" / "workflows"
         wf_dir.mkdir(parents=True)
         _make_workflow_yaml(wf_dir / "my-wf.yaml", "my-workflow",
                            "When something custom happens.")

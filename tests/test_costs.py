@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from modastack.costs import (
+from bobi.costs import (
     CostSummary,
     estimate_cost,
     format_costs,

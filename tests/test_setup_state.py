@@ -3,7 +3,7 @@ readiness, gating, the accumulating Spec, and persistence."""
 
 import pytest
 
-from modastack.setup.state import (
+from bobi.setup.state import (
     SPEC_SLOTS,
     Readiness,
     SetupState,
@@ -209,7 +209,7 @@ class TestPersistence:
         assert SetupState.load(tmp_path) is None
 
     def test_load_corrupt_returns_none(self, tmp_path):
-        f = tmp_path / ".modastack" / "state" / "setup.json"
+        f = tmp_path / ".bobi" / "state" / "setup.json"
         f.parent.mkdir(parents=True)
         f.write_text("{not json")
         assert SetupState.load(tmp_path) is None
@@ -228,7 +228,7 @@ class TestPersistence:
 
     def test_ignores_unknown_fields(self, tmp_path):
         SetupState().save(tmp_path)
-        f = tmp_path / ".modastack" / "state" / "setup.json"
+        f = tmp_path / ".bobi" / "state" / "setup.json"
         import json
         data = json.loads(f.read_text())
         data["from_the_future"] = True

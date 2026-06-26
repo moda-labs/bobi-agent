@@ -6,8 +6,8 @@ import asyncio
 import pytest
 import yaml
 
-from modastack.setup import actions, authoring
-from modastack.setup.authoring import (
+from bobi.setup import actions, authoring
+from bobi.setup.authoring import (
     build_adhoc_yaml,
     build_agent_yaml,
     build_monitors_yaml,
@@ -16,7 +16,7 @@ from modastack.setup.authoring import (
     compute_manifest,
     slug,
 )
-from modastack.setup.state import SetupState
+from bobi.setup.state import SetupState
 
 
 def _run(coro):
@@ -66,7 +66,7 @@ class TestDeterministicBodies:
 
     def test_venn_services_declare_the_shared_key(self):
         # A team using Venn-backed services must declare venn_api_key so
-        # `modastack start` resolves it from the env / .env (else preflight
+        # `bobi start` resolves it from the env / .env (else preflight
         # fails "venn — no API key" despite the key being set).
         s = SetupState(team_name="inbox-monitor")
         s.spec.goal = "Watch the inbox."
@@ -101,7 +101,7 @@ class TestDeterministicBodies:
         assert "${SLACK_BOT_TOKEN}" in text
 
     def test_adhoc_workflow_parses_with_real_loader(self, tmp_path):
-        from modastack.workflow.schema import load_workflow
+        from bobi.workflow.schema import load_workflow
         f = tmp_path / "adhoc.yaml"
         f.write_text(build_adhoc_yaml())
         wf = load_workflow(f)
@@ -120,7 +120,7 @@ class TestDeterministicBodies:
         # event-shaped cadence falls back to a sane default interval
         assert mons[1]["interval"] == "15m"
         # every record is schema-valid
-        from modastack.monitors.schema import Monitor, parse_interval
+        from bobi.monitors.schema import Monitor, parse_interval
         for rec in mons:
             Monitor.from_dict(dict(rec))
             parse_interval(rec["interval"])
@@ -185,23 +185,23 @@ class TestAuthorPour:
         # Create's location is a BASE; the team lands at <base>/<name> so every
         # team gets its own folder (no collision between two creates).
         s = _spec_state()                 # team_name="triage-bot", mode=create
-        s.source_dir = "modastack"            # the base the user chose
+        s.source_dir = "bobi"            # the base the user chose
         _run(_collect(authoring.author_pack(
             s, tmp_path, stream_fn=self._fake_stream())))
-        assert (tmp_path / "modastack" / "triage-bot" / "agent.yaml").is_file()
+        assert (tmp_path / "bobi" / "triage-bot" / "agent.yaml").is_file()
         # the concrete path is persisted (idempotent — not re-appended)
-        assert s.source_dir == "modastack/triage-bot"
+        assert s.source_dir == "bobi/triage-bot"
         s.team_name = "triage-bot"
-        assert actions.team_source_dir(tmp_path, s) == tmp_path / "modastack" / "triage-bot"
+        assert actions.team_source_dir(tmp_path, s) == tmp_path / "bobi" / "triage-bot"
 
     def test_create_refuses_to_overwrite_an_existing_library_team(self, tmp_path):
         # Two creates auto-named the same slug must not clobber each other —
         # the second blocks instead of silently overwriting the first's source.
-        existing = tmp_path / "modastack" / "triage-bot"
+        existing = tmp_path / "bobi" / "triage-bot"
         existing.mkdir(parents=True)
         (existing / "agent.yaml").write_text("agent: the-original\n")
         s = _spec_state()                 # team_name="triage-bot", mode=create
-        s.source_dir = "modastack"        # the base — not yet claimed
+        s.source_dir = "bobi"        # the base — not yet claimed
         with pytest.raises(actions.ActionError, match="already exists"):
             _run(_collect(authoring.author_pack(
                 s, tmp_path, stream_fn=self._fake_stream())))
@@ -211,11 +211,11 @@ class TestAuthorPour:
     def test_create_reauthors_its_own_claimed_folder(self, tmp_path):
         # Re-running build once the team is claimed (source_dir already points at
         # <base>/<slug>) is fine — not a collision with a different team.
-        existing = tmp_path / "modastack" / "triage-bot"
+        existing = tmp_path / "bobi" / "triage-bot"
         existing.mkdir(parents=True)
         (existing / "agent.yaml").write_text("agent: triage-bot\n")
         s = _spec_state()
-        s.source_dir = "modastack/triage-bot"   # already ours
+        s.source_dir = "bobi/triage-bot"   # already ours
         _run(_collect(authoring.author_pack(
             s, tmp_path, stream_fn=self._fake_stream())))
         assert (existing / "agent.yaml").is_file()   # re-authored, no error
@@ -225,10 +225,10 @@ class TestAuthorPour:
         # model stalls past the idle timeout) must NOT truncate the user's
         # existing file. In open/modify mode the original agent.md/ROLE.md must
         # survive an authoring failure intact, never be left half-written.
-        from modastack.setup import open_mode
-        from modastack.setup.llm import LLMError
+        from bobi.setup import open_mode
+        from bobi.setup.llm import LLMError
 
-        src = tmp_path / "modastack-agents" / "myteam"
+        src = tmp_path / "bobi-agents" / "myteam"
         (src / "roles" / "lead").mkdir(parents=True)
         (src / "agent.yaml").write_text("agent: myteam\nentry_point: lead\n")
         original_md = "# myteam\n\nORIGINAL BASE PROMPT — do not lose me.\n"
@@ -486,7 +486,7 @@ class TestAuthorOpenModeNonLossy:
     manifest never models and never blank an existing prose file."""
 
     def _existing_team(self, root, name="legacy"):
-        src = root / "modastack" / name
+        src = root / "bobi" / name
         (src / "roles" / "lead").mkdir(parents=True)
         (src / "agent.yaml").write_text(
             f"agent: {name}\nversion: 0.1.0\nentry_point: lead\n")
@@ -498,7 +498,7 @@ class TestAuthorOpenModeNonLossy:
         return src
 
     def _open_state(self, name="legacy"):
-        s = SetupState(team_name=name, mode="open", source_dir=f"modastack/{name}")
+        s = SetupState(team_name=name, mode="open", source_dir=f"bobi/{name}")
         s.spec.goal = "Watch the repo."
         s.spec.roles = [{"name": "lead", "responsibility": "classify"}]
         return s
@@ -513,7 +513,7 @@ class TestAuthorOpenModeNonLossy:
             yield "EDITED.\n"
 
         _run(_collect(authoring.author_pack(s, tmp_path, stream_fn=fake)))
-        pack = tmp_path / "modastack" / "legacy"
+        pack = tmp_path / "bobi" / "legacy"
         # a file outside the manifest is never touched
         assert (pack / "tools" / "github.md").read_text() == "custom tool guide\n"
         # prose files went through the EDIT path (editing prompt + original shown)
@@ -529,7 +529,7 @@ class TestAuthorOpenModeNonLossy:
             yield  # pragma: no cover
 
         _run(_collect(authoring.author_pack(s, tmp_path, stream_fn=blank)))
-        role = (tmp_path / "modastack" / "legacy"
+        role = (tmp_path / "bobi" / "legacy"
                 / "roles" / "lead" / "ROLE.md").read_text()
         assert "specifics A, B, C" in role  # original survived an empty edit
 

@@ -1,8 +1,8 @@
 # Spec: Reusable tool library — opt-in catalog of baked CLI tools (#416)
 
-- **Ticket:** [#416](https://github.com/moda-labs/modastack/issues/416) · **Type:** Enhancement · **Priority:** 2 (medium) · **Status:** approved — implementing
-- **Track:** the **hub** of the Tool/Capability library track. Sibling spokes: [#428](https://github.com/moda-labs/modastack/issues/428) (`kind: skill`), [#398](https://github.com/moda-labs/modastack/issues/398) (`kind: mcp`). This issue ships `kind: cli` and the catalog/resolver foundation the spokes build on.
-- **Files:** `modastack/tool_library.py` (new), `modastack/tool_library/<name>/` catalog (new package data), `modastack/compose.py` (one merge branch + one expand call), tests. **No** changes to `subagent.py`/runtime — this is build/config-time sugar.
+- **Ticket:** [#416](https://github.com/moda-labs/bobi-agent-team/issues/416) · **Type:** Enhancement · **Priority:** 2 (medium) · **Status:** approved — implementing
+- **Track:** the **hub** of the Tool/Capability library track. Sibling spokes: [#428](https://github.com/moda-labs/bobi-agent-team/issues/428) (`kind: skill`), [#398](https://github.com/moda-labs/bobi-agent-team/issues/398) (`kind: mcp`). This issue ships `kind: cli` and the catalog/resolver foundation the spokes build on.
+- **Files:** `bobi/tool_library.py` (new), `bobi/tool_library/<name>/` catalog (new package data), `bobi/compose.py` (one merge branch + one expand call), tests. **No** changes to `subagent.py`/runtime — this is build/config-time sugar.
 
 ---
 
@@ -27,7 +27,7 @@ A library entry collapses this to **one pinned definition + one guide, opted int
 
 ## 2. Key insight — ride the existing compose pipeline (#457)
 
-#416 was filed **before** `from:` composition (#451/#457) landed. That changes the design: `modastack/compose.py` already merges precisely the three surfaces a tool entry contributes —
+#416 was filed **before** `from:` composition (#451/#457) landed. That changes the design: `bobi/compose.py` already merges precisely the three surfaces a tool entry contributes —
 
 | Surface | Existing merge in `compose.py` |
 |---|---|
@@ -65,7 +65,7 @@ So a tool-library entry is **a bundle of those three surfaces**, and `tool_libra
 Framework package data, one directory per entry:
 
 ```
-modastack/tool_library/
+bobi/tool_library/
   codex/   { tool.yaml, guide.md }
   venn/    { tool.yaml, guide.md }
   openai/  { tool.yaml, guide.md }
@@ -74,13 +74,13 @@ modastack/tool_library/
 The **directory name is the entry id** referenced in `tool_library: [codex]`; `guide.md` becomes `tools/<id>.md`. `tool.yaml` mirrors the agent.yaml surfaces verbatim, so expansion is a literal splice:
 
 ```yaml
-# modastack/tool_library/codex/tool.yaml
+# bobi/tool_library/codex/tool.yaml
 kind: cli                       # only 'cli' now; mcp/skill reserved (#398/#428)
 requires:                       # spliced into agent.yaml `requires:` (list-merge by name)
   - name: codex
     why: "Delegate a coding sub-task to the Codex CLI (tools/codex.md)."
     check: "command -v codex >/dev/null 2>&1 && { test -n \"${OPENAI_API_KEY:-}\" || codex --version >/dev/null 2>&1; }"
-    fix: "npm install -g @openai/codex@0.142.0 && (codex auth login || echo 'Set OPENAI_API_KEY in .modastack/.env')"
+    fix: "npm install -g @openai/codex@0.142.0 && (codex auth login || echo 'Set OPENAI_API_KEY in .bobi/.env')"
 build:                          # spliced into agent.yaml `build:` (list-accrete + de-dupe)
   npm: ["@openai/codex@0.142.0"]
 ```
@@ -97,7 +97,7 @@ Entries carry **whatever build surface the tool needs** — not just `npm`. The 
 
 The pin appears once per entry — but still in two *fields* (`requires.fix` and `build`) **within the single entry file**. A test (§6) asserts the entry's `requires.fix` install ref and its `build` pin agree, so the one remaining co-location is guarded rather than scattered across teams.
 
-### 4.2 Resolver — `modastack/tool_library.py`
+### 4.2 Resolver — `bobi/tool_library.py`
 
 ```python
 CATALOG_DIR = Path(__file__).parent / "tool_library"
@@ -155,7 +155,7 @@ Without this, the top-level list would hit the `else: last-wins` branch and an o
 ```python
     merged_yaml = _compose_agent_yaml(chain, prov)
 
-    from modastack import tool_library
+    from bobi import tool_library
     tool_library.expand(merged_yaml, dest)      # splice requires/build, write guides, pop key
 
     _apply_prune(chain, dest, merged_yaml, prov)
@@ -200,8 +200,8 @@ Per CLAUDE.md (**production pattern ⇒ test gap**): tests-first, each failing o
 ## 7. Implementation plan
 
 1. **Tests first** (failing): the §6 set, headline = pin de-dup.
-2. **Catalog**: `modastack/tool_library/{codex,venn,openai}/{tool.yaml,guide.md}` at the pins in §4.1 (all public registries). Hatchling ships non-`.py` files under `modastack/` as package data automatically (same path `modastack/skills/*.md` uses) — no `pyproject.toml` change needed.
-3. **Resolver**: `modastack/tool_library.py` — `load_entry` + kind-dispatched `expand` (the `EXPANDERS` table) + `_expand_cli` (reusing `compose._merge_build` / `_dedupe`).
+2. **Catalog**: `bobi/tool_library/{codex,venn,openai}/{tool.yaml,guide.md}` at the pins in §4.1 (all public registries). Hatchling ships non-`.py` files under `bobi/` as package data automatically (same path `bobi/skills/*.md` uses) — no `pyproject.toml` change needed.
+3. **Resolver**: `bobi/tool_library.py` — `load_entry` + kind-dispatched `expand` (the `EXPANDERS` table) + `_expand_cli` (reusing `compose._merge_build` / `_dedupe`).
 4. **compose.py**: `tool_library` union branch in `_merge_agent_yaml`; `expand()` call in `compose()`.
 5. **Pin lint** test extending the #380 convention to the catalog.
 6. **Docs**: `skills/create-agent.md` + `CLAUDE.md` (agent-teams section) document `tool_library:`.
@@ -221,7 +221,7 @@ This is the **hub** of the capability-library track. The `kind` field answers on
 | `kind` | Expands into | New compose machinery | Effort |
 |---|---|---|---|
 | **cli** (#416, this PR) | `requires` + `build` (apt/npm/run) + `tools/<name>.md` | none — every surface already merges | — |
-| **skill** ([#428](https://github.com/moda-labs/modastack/issues/428)) | `build.run` (clone `<repo>@<SHA>` → install skill `.md`s) + optional `requires`/guide | **none** — still a build-time bake | **thin** — register `_expand_skill` + SHA-pin/supply-chain lint. gstack becomes the canonical `skill` entry. |
-| **mcp** ([#398](https://github.com/moda-labs/modastack/issues/398)) | `mcp_servers:` (dict) + optional `build` + optional `requires` + guide | **yes** — `mcp_servers` is a dict `compose.py` does **not** deep-merge today; #398 adds that merge branch. | **heavy** — register `_expand_mcp`, add the merge branch, runtime-coupled, gated behind PR #435. |
+| **skill** ([#428](https://github.com/moda-labs/bobi-agent-team/issues/428)) | `build.run` (clone `<repo>@<SHA>` → install skill `.md`s) + optional `requires`/guide | **none** — still a build-time bake | **thin** — register `_expand_skill` + SHA-pin/supply-chain lint. gstack becomes the canonical `skill` entry. |
+| **mcp** ([#398](https://github.com/moda-labs/bobi-agent-team/issues/398)) | `mcp_servers:` (dict) + optional `build` + optional `requires` + guide | **yes** — `mcp_servers` is a dict `compose.py` does **not** deep-merge today; #398 adds that merge branch. | **heavy** — register `_expand_mcp`, add the merge branch, runtime-coupled, gated behind PR #435. |
 
 **Sequencing:** #416 (this) → #428 fast-follow (cheap, reuses everything here) → #398 later, gated behind #435. Nothing for the spokes is built in this PR; D-5 is the only thing that keeps them additive.

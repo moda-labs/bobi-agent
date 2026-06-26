@@ -1,43 +1,43 @@
 # syntax=docker/dockerfile:1
 #
-# modastack instance image (containerized-8 / #338).
+# bobi instance image (containerized-8 / #338).
 #
 # ONE image, every tenant. Identity lives entirely in the mounted volume
 # (project root + $HOME) and env vars — see docs/design/CONTAINERIZED_INSTANCES.md
 # §2 (the instance contract). Nothing reaches in; the manager reaches out to the
 # event server over WSS only.
 #
-# ONE Dockerfile, three BUILD modes (MODASTACK_BUILD build-arg) — the runtime stage
+# ONE Dockerfile, three BUILD modes (BOBI_BUILD build-arg) — the runtime stage
 # is shared, so there's nothing to keep in sync:
 #   * source (default) — build the wheel from a repo checkout (`COPY . .`). Dev +
 #     the repo's own CI, so unreleased branch code is tested.
-#   * pypi             — install a published `modastack==$MODASTACK_VERSION` from
+#   * pypi             — install a published `bobi==$BOBI_VERSION` from
 #     PyPI; the build context is just this file + docker/. This is what binary-mode
-#     `modastack deploy` uses, so deploying needs no checkout (DEPLOY_INTERFACE.md).
+#     `bobi deploy` uses, so deploying needs no checkout (DEPLOY_INTERFACE.md).
 #   * wheel            — install a PREBUILT local wheel staged in dist/. The release
 #     pipeline (release.yml) builds the wheel once, then bakes THAT artifact so the
 #     canary smokes — and the fleet runs — the exact bytes published to PyPI.
 #
 # Design-mandated properties (CONTAINERIZED_INSTANCES.md §5, §6.1, §10 C8):
 #   * Runs the agent as a NON-ROOT user. Claude Code refuses bypassPermissions
-#     as root unless IS_SANDBOX=1; we drop privileges to `modastack` first.
+#     as root unless IS_SANDBOX=1; we drop privileges to `bobi` first.
 #   * No Node.js. The `claude` CLI is the native standalone binary (no npm).
 #   * fastembed model baked into the image at build (cold-start speed; immutable).
 #   * Pinned `claude` CLI; auto-updater disabled so the image version is frozen.
-#   * `modastack start --foreground` as the entrypoint (C2); no tini — Fly's
+#   * `bobi start --foreground` as the entrypoint (C2); no tini — Fly's
 #     init is PID 1 (tini-on-Fly is a known boot-failure trigger).
 #
 # Build:
-#   docker build -t modastack:dev .                                  # source mode
-#   docker build --build-arg MODASTACK_BUILD=pypi \
-#     --build-arg MODASTACK_VERSION=0.22.0 -t modastack:dev .        # pypi mode
-#   docker build --build-arg MODASTACK_BUILD=wheel -t modastack:dev . # wheel (dist/*.whl)
+#   docker build -t bobi:dev .                                  # source mode
+#   docker build --build-arg BOBI_BUILD=pypi \
+#     --build-arg BOBI_VERSION=0.22.0 -t bobi:dev .        # pypi mode
+#   docker build --build-arg BOBI_BUILD=wheel -t bobi:dev . # wheel (dist/*.whl)
 
-# Which builder produces /opt/venv: `source`, `pypi`, or `wheel`. modastack deploy
-# passes `pypi` (+ MODASTACK_VERSION) in binary mode; the release pipeline passes
+# Which builder produces /opt/venv: `source`, `pypi`, or `wheel`. bobi deploy
+# passes `pypi` (+ BOBI_VERSION) in binary mode; the release pipeline passes
 # `wheel` (with the prebuilt artifact in dist/); a plain `docker build` defaults to
 # `source` so the repo's own CI keeps building from the branch.
-ARG MODASTACK_BUILD=source
+ARG BOBI_BUILD=source
 
 #####################################################################
 # Builder base — build tools live here only; runtime never sees them.#
@@ -69,18 +69,18 @@ RUN python -m venv /opt/venv \
 # --- wheel layer (thin; rebuilds on any code change) ---------------#
 # pyproject builds the wheel FROM the sdist, so the sdist must carry the
 # force-included templates + event-server (it does — see pyproject sdist include).
-# --no-deps: deps are already in the venv above, so this is just modastack.
+# --no-deps: deps are already in the venv above, so this is just bobi.
 COPY . .
 RUN python -m build --wheel --outdir /dist \
     && /opt/venv/bin/pip install --no-cache-dir --no-deps /dist/*.whl
 
 #####################################################################
-# builder-pypi — install a published modastack (binary-mode deploy).#
+# builder-pypi — install a published bobi (binary-mode deploy).#
 #####################################################################
 FROM builder-base AS builder-pypi
 # Pinned to the operator's CLI so the instance runs the same code as the binary
 # that deployed it.
-ARG MODASTACK_VERSION
+ARG BOBI_VERSION
 # Install the kb deps the code actually uses (fastembed — the lightweight ONNX
 # embedder — and sqlite-vec) EXPLICITLY, not via the `[kb]` extra: some published
 # releases stale-list `sentence-transformers` in `[kb]`, dragging in torch + ~2 GB
@@ -88,7 +88,7 @@ ARG MODASTACK_VERSION
 # timeout). Keep in sync with pyproject's `[project.optional-dependencies].kb`.
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir \
-        "modastack==${MODASTACK_VERSION}" "fastembed>=0.4" "sqlite-vec>=0.1.6"
+        "bobi==${BOBI_VERSION}" "fastembed>=0.4" "sqlite-vec>=0.1.6"
 
 #####################################################################
 # builder-wheel — install a PREBUILT local wheel (release pipeline). #
@@ -109,10 +109,10 @@ RUN python -m venv /opt/venv \
 COPY dist/ /dist/
 RUN /opt/venv/bin/pip install --no-cache-dir --no-deps /dist/*.whl
 
-# Select the builder. With MODASTACK_BUILD=pypi, builder-source isn't in the graph
+# Select the builder. With BOBI_BUILD=pypi, builder-source isn't in the graph
 # (its `COPY . .` never runs), so the tiny binary context needs no source tree.
-# MODASTACK_BUILD=wheel (the release pipeline) installs the prebuilt dist/ wheel.
-FROM builder-${MODASTACK_BUILD} AS builder
+# BOBI_BUILD=wheel (the release pipeline) installs the prebuilt dist/ wheel.
+FROM builder-${BOBI_BUILD} AS builder
 
 #####################################################################
 # model-baker — pre-download the fastembed model. Keyed ONLY on the  #
@@ -123,10 +123,10 @@ FROM builder-${MODASTACK_BUILD} AS builder
 # never `[kb]` — see builder-source for the torch-bloat rationale.)   #
 #####################################################################
 FROM python:3.11-slim AS model-baker
-ENV HF_HOME=/opt/modastack/models
+ENV HF_HOME=/opt/bobi/models
 RUN pip install --no-cache-dir "fastembed>=0.4" \
     && python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2')" \
-    && chmod -R a+rX /opt/modastack/models
+    && chmod -R a+rX /opt/bobi/models
 
 #####################################################################
 # Runtime — slim image, no build tools, no Node. (Shared by both.)  #
@@ -137,19 +137,19 @@ FROM python:3.11-slim AS runtime
 # `stable` channel (one week behind latest, skips major regressions); pass an
 # exact version (e.g. 2.1.89) for fully reproducible production builds.
 ARG CLAUDE_VERSION=stable
-ARG MODASTACK_UID=10001
+ARG BOBI_UID=10001
 # Pinned aichat (the general-purpose LLM gateway CLI). Bump deliberately via
 # `gh api repos/sigoden/aichat/releases/latest --jq .tag_name`.
 ARG AICHAT_VERSION=0.30.0
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PATH="/opt/venv/bin:/home/modastack/.local/bin:${PATH}" \
-    HF_HOME=/opt/modastack/models \
+    PATH="/opt/venv/bin:/home/bobi/.local/bin:${PATH}" \
+    HF_HOME=/opt/bobi/models \
     DISABLE_AUTOUPDATER=1 \
     DATA_DIR=/data \
-    MODASTACK_PROJECT=/data/project \
-    MODASTACK_HOME=/home/modastack
+    BOBI_PROJECT=/data/project \
+    BOBI_HOME=/home/bobi
 # NB: HOME is the IMAGE home (above), NOT the volume — baked team tools
 # (~/.claude/skills, ~/dev/gstack) are read in place. Claude's durable state
 # (creds + transcripts) is redirected to the volume at runtime via
@@ -158,7 +158,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Runtime packages only:
 #   curl, ca-certificates — fetch the claude installer; TLS
-#   gosu                  — drop privileges from root setup to the modastack user
+#   gosu                  — drop privileges from root setup to the bobi user
 #   git                   — agents clone/operate on repos
 # NB: no tini. Fly Machines (the deploy target) inject their own PID-1 init that
 # reaps zombies + forwards signals, and layering tini on top is a documented
@@ -170,18 +170,18 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root runtime user (see header: bypassPermissions-as-root guard).
-RUN useradd --create-home --uid ${MODASTACK_UID} --shell /bin/bash modastack
+RUN useradd --create-home --uid ${BOBI_UID} --shell /bin/bash bobi
 
 # Layers are ordered stable → volatile so a code-only rebuild touches only the
 # last (cheap) layers — the model download and `claude` fetch stay cached. See
 # docs/design/CUSTOM_AGENT_DEPS.md §"three clocks" for the ordering rationale.
 
 # --- stable layers (cached across code/framework changes) ----------#
-# Pinned native `claude` CLI (no Node) installed as the modastack user so it
+# Pinned native `claude` CLI (no Node) installed as the bobi user so it
 # lands in ~/.local/bin (on PATH above). Cache key is CLAUDE_VERSION alone.
-USER modastack
+USER bobi
 RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_VERSION}" \
-    && /home/modastack/.local/bin/claude --version
+    && /home/bobi/.local/bin/claude --version
 USER root
 
 # General-purpose LLM gateway CLI (aichat): lets any agent call out to other
@@ -206,17 +206,17 @@ RUN arch="$(dpkg --print-architecture)" \
 # here at both build and run, so it's a cache hit at runtime. Copied from
 # model-baker, whose only cache key is the fastembed version — so an ordinary
 # code change never re-downloads the model.
-COPY --from=model-baker /opt/modastack/models /opt/modastack/models
+COPY --from=model-baker /opt/bobi/models /opt/bobi/models
 
 # --- team-deps hook (C24 team-flavored images) ---------------------#
 # A team's baked host tools (node, codex, gstack, …) as ONE stable layer,
-# rendered from its `build:` spec by modastack/build_render.py and injected via
+# rendered from its `build:` spec by bobi/build_render.py and injected via
 # the TEAM_DEPS build-arg. The default is a no-op, so a plain build / a no-deps
 # team is byte-identical to the generic image. Positioned as the LAST stable
 # layer — just BELOW the volatile venv COPY — so a code-only framework release
 # rebuilds only the wheel, never re-runs the team's apt/npm/run. The hook runs
-# as root (USER is root here); it `gosu`s to modastack to bake ~-relative tools
-# into the image HOME (/home/modastack/.claude/skills, ~/dev/gstack), which the
+# as root (USER is root here); it `gosu`s to bobi to bake ~-relative tools
+# into the image HOME (/home/bobi/.claude/skills, ~/dev/gstack), which the
 # agent reads in place at runtime — the entrypoint redirects only Claude's
 # durable state to the volume (CLAUDE_CONFIG_DIR) and symlinks skills back.
 # See docs/design/CUSTOM_AGENT_DEPS.md §"three clocks".
@@ -225,19 +225,19 @@ COPY ${TEAM_DEPS} /tmp/team-deps.sh
 RUN bash /tmp/team-deps.sh && rm -f /tmp/team-deps.sh
 
 # --- volatile layer (rebuilds on any framework/code change) --------#
-# The prebuilt venv (modastack + deps) is the LAST heavy layer, so a code-only
+# The prebuilt venv (bobi + deps) is the LAST heavy layer, so a code-only
 # rebuild is just this copy plus the thin layers below — seconds, not minutes.
 # Root-owned, world-readable.
 COPY --from=builder /opt/venv /opt/venv
 # Codex tool shells sanitize PATH and drop /opt/venv/bin. Surface the
 # framework CLI in both user-local and system bins so agents can call
-# `modastack` by bare name from Codex's current shell.
-RUN mkdir -p /home/modastack/.local/bin \
-    && printf '%s\n' '#!/bin/sh' 'exec /opt/venv/bin/modastack "$@"' \
-        > /usr/local/bin/modastack \
-    && cp /usr/local/bin/modastack /home/modastack/.local/bin/modastack \
-    && chown modastack:modastack /home/modastack/.local/bin/modastack \
-    && chmod +x /usr/local/bin/modastack /home/modastack/.local/bin/modastack
+# `bobi` by bare name from Codex's current shell.
+RUN mkdir -p /home/bobi/.local/bin \
+    && printf '%s\n' '#!/bin/sh' 'exec /opt/venv/bin/bobi "$@"' \
+        > /usr/local/bin/bobi \
+    && cp /usr/local/bin/bobi /home/bobi/.local/bin/bobi \
+    && chown bobi:bobi /home/bobi/.local/bin/bobi \
+    && chmod +x /usr/local/bin/bobi /home/bobi/.local/bin/bobi
 
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker/healthcheck.sh /usr/local/bin/healthcheck.sh
@@ -248,7 +248,7 @@ VOLUME ["/data"]
 # WORKDIR must NOT be under /data: a volume mounted there shadows the
 # build-time dir, so the container's cwd ceases to exist at runtime and the
 # platform init (e.g. Fly Machines) fails to spawn the entrypoint with ENOENT.
-# The entrypoint cd's into ${MODASTACK_PROJECT} itself after creating it.
+# The entrypoint cd's into ${BOBI_PROJECT} itself after creating it.
 WORKDIR /
 
 # Liveness: read the manager's health port from the volume and probe /health.
@@ -257,6 +257,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
     CMD ["/usr/local/bin/healthcheck.sh"]
 
 # The entrypoint is PID 1 (under Fly's injected init): it does root-only volume
-# setup, then `exec gosu`s to the modastack user running `modastack start
+# setup, then `exec gosu`s to the bobi user running `bobi start
 # --foreground`, so SIGTERM reaches the manager directly for graceful shutdown.
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

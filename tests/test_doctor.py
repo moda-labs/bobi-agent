@@ -1,4 +1,4 @@
-"""Tests for modastack doctor health checks."""
+"""Tests for bobi doctor health checks."""
 
 from pathlib import Path
 from unittest.mock import patch
@@ -8,7 +8,7 @@ import pytest
 
 # --- CheckResult ---
 
-from modastack.doctor import CheckResult
+from bobi.doctor import CheckResult
 
 
 class TestCheckResult:
@@ -28,7 +28,7 @@ class TestCheckResult:
 class TestCheckCLI:
     def test_found(self):
         with patch("shutil.which", return_value="/usr/local/bin/claude"):
-            from modastack.doctor import _check_claude_cli
+            from bobi.doctor import _check_claude_cli
             r = _check_claude_cli()
         assert r.ok
 
@@ -39,40 +39,40 @@ class TestCheckCLI:
 class TestCheckProjectConfig:
 
     def test_passes_when_exists(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text("entry_point: manager\nevent_server_url: https://events.test\n")
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_local_config
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_local_config
             r = _check_local_config()
         assert r.ok
 
     def test_fails_when_missing(self, tmp_path):
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_local_config
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_local_config
             r = _check_local_config()
         assert not r.ok
         assert "missing" in r.detail
 
 
-# --- Single .modastack root ---
+# --- Single .bobi root ---
 
 class TestCheckSingleRoot:
 
-    def test_passes_with_only_root_modastack(self, tmp_path):
-        (tmp_path / ".modastack" / "worktrees" / "x").mkdir(parents=True)
+    def test_passes_with_only_root_bobi(self, tmp_path):
+        (tmp_path / ".bobi" / "worktrees" / "x").mkdir(parents=True)
         (tmp_path / "jobtack").mkdir()
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_single_root
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_single_root
             r = _check_single_root()
         assert r.ok
 
     def test_flags_stray_in_repo_checkout(self, tmp_path):
-        (tmp_path / ".modastack").mkdir()
-        (tmp_path / "jobtack" / ".modastack" / "state").mkdir(parents=True)
-        (tmp_path / "repos" / "other" / ".modastack").mkdir(parents=True)
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_single_root
+        (tmp_path / ".bobi").mkdir()
+        (tmp_path / "jobtack" / ".bobi" / "state").mkdir(parents=True)
+        (tmp_path / "repos" / "other" / ".bobi").mkdir(parents=True)
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_single_root
             r = _check_single_root()
         assert not r.ok
         assert "jobtack" in r.detail
@@ -81,12 +81,12 @@ class TestCheckSingleRoot:
 
     def test_flags_stray_at_any_depth(self, tmp_path):
         """Depth must not bound the scan — monorepo packages and worktree
-        layouts nest .modastack leftovers 3+ levels down."""
-        (tmp_path / ".modastack").mkdir()
-        deep = tmp_path / "repos" / "org" / "app" / ".modastack"
+        layouts nest .bobi leftovers 3+ levels down."""
+        (tmp_path / ".bobi").mkdir()
+        deep = tmp_path / "repos" / "org" / "app" / ".bobi"
         deep.mkdir(parents=True)
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_single_root
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_single_root
             r = _check_single_root()
         assert not r.ok
         assert "repos/org/app" in r.detail
@@ -94,31 +94,31 @@ class TestCheckSingleRoot:
     def test_classifies_nested_install_as_capture_risk(self, tmp_path):
         """A stray containing agent.yaml CAPTURES root resolution — it must
         be called out separately from removable state-only leftovers."""
-        (tmp_path / ".modastack").mkdir()
-        nested = tmp_path / "checkout" / ".modastack"
+        (tmp_path / ".bobi").mkdir()
+        nested = tmp_path / "checkout" / ".bobi"
         nested.mkdir(parents=True)
         (nested / "agent.yaml").write_text("name: rogue\n")
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_single_root
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_single_root
             r = _check_single_root()
         assert not r.ok
         assert "checkout" in r.detail
         assert "CAPTURE" in r.detail
         assert "hijack" in r.hint
 
-    def test_ignores_roots_own_modastack_subtree(self, tmp_path):
-        """worktrees/sessions inside the root's own .modastack aren't strays,
-        even when a checkout inside it carries a .modastack dir."""
-        stray_in_worktree = tmp_path / ".modastack" / "worktrees" / ".modastack"
+    def test_ignores_roots_own_bobi_subtree(self, tmp_path):
+        """worktrees/sessions inside the root's own .bobi aren't strays,
+        even when a checkout inside it carries a .bobi dir."""
+        stray_in_worktree = tmp_path / ".bobi" / "worktrees" / ".bobi"
         stray_in_worktree.mkdir(parents=True)
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_single_root
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_single_root
             r = _check_single_root()
         assert r.ok
 
     def test_passes_without_bound_root(self):
-        with patch("modastack.doctor.bound_root", return_value=None):
-            from modastack.doctor import _check_single_root
+        with patch("bobi.doctor.bound_root", return_value=None):
+            from bobi.doctor import _check_single_root
             r = _check_single_root()
         assert r.ok
 
@@ -130,7 +130,7 @@ class TestCheckPackageRequires:
 
     def _write_config(self, tmp_path, requires_yaml):
         from textwrap import dedent
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "agent.yaml").write_text(dedent(f"""
             entry_point: manager
@@ -143,8 +143,8 @@ class TestCheckPackageRequires:
               - name: good-dep
                 check: "true"
                 fix: "install it" """)
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_package_requires
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_package_requires
             results = _check_package_requires()
         assert len(results) == 1
         assert results[0].ok
@@ -156,24 +156,24 @@ class TestCheckPackageRequires:
                 check: "false"
                 why: "needed for tests"
                 fix: "run setup" """)
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_package_requires
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_package_requires
             results = _check_package_requires()
         assert len(results) == 1
         assert not results[0].ok
         assert "run setup" in results[0].hint
 
     def test_no_requires(self, tmp_path):
-        config_dir = tmp_path / ".modastack"
+        config_dir = tmp_path / ".bobi"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "agent.yaml").write_text("entry_point: manager\n")
-        with patch("modastack.doctor.bound_root", return_value=tmp_path):
-            from modastack.doctor import _check_package_requires
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_package_requires
             results = _check_package_requires()
         assert results == []
 
     def test_no_project_root(self):
-        with patch("modastack.doctor.bound_root", return_value=None):
-            from modastack.doctor import _check_package_requires
+        with patch("bobi.doctor.bound_root", return_value=None):
+            from bobi.doctor import _check_package_requires
             results = _check_package_requires()
         assert results == []

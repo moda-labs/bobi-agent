@@ -61,7 +61,7 @@ dependency (`requires:`) and is baked into the team's container image
 
 The two watch monitors are proactive by design but gated hard against noise
 and silenced during quiet hours (see `assistant-context.md`). Pause either
-in `.modastack/monitors.yaml` if you want a purely reactive assistant.
+in `.bobi/monitors.yaml` if you want a purely reactive assistant.
 
 ## The autonomy policy
 
@@ -76,14 +76,14 @@ on others, making a purchase. Raise or lower that line per principal.
 ## Setup
 
 ```bash
-modastack install agents/personal-assistant        # copies the pack into
-                                                    # .modastack/, seeds
+bobi install agents/personal-assistant        # copies the pack into
+                                                    # .bobi/, seeds
                                                     # workspace/, prompts for env vars
-modastack start                                     # runs the installed assistant
+bobi start                                     # runs the installed assistant
 ```
 
 `install` prompts for the `${VAR}`s declared in `agent.yaml` and writes them
-to `.modastack/.env`: `SLACK_BOT_TOKEN` (the chat surface) and `VENN_API_KEY`
+to `.bobi/.env`: `SLACK_BOT_TOKEN` (the chat surface) and `VENN_API_KEY`
 (email / calendar / tasks via Venn).
 
 Then, before starting:

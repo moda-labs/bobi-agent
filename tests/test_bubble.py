@@ -15,19 +15,19 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from modastack.config import (
+from bobi.config import (
     bubble_state_path,
     load_bubble_state,
     save_bubble_state,
     save_deployment_state,
     session_cursor_path,
 )
-from modastack.events import server as es
+from bobi.events import server as es
 
 
 @pytest.fixture
 def project(tmp_path):
-    (tmp_path / ".modastack").mkdir()
+    (tmp_path / ".bobi").mkdir()
     return tmp_path
 
 
@@ -107,7 +107,7 @@ def test_concurrent_ensure_bubble_converges_on_one(project):
 
 def test_post_register_raises_bubble_rejected_on_403(project):
     transport = httpx.MockTransport(lambda req: httpx.Response(403, json={"error": "forbidden"}))
-    from modastack import http as pooled
+    from bobi import http as pooled
     with patch.object(pooled, "_client", httpx.Client(transport=transport)):
         with pytest.raises(es.BubbleRejected):
             es._post_register("http://localhost:8080", "s", ["inbox/s"],
@@ -115,7 +115,7 @@ def test_post_register_raises_bubble_rejected_on_403(project):
 
 
 def test_clear_manager_session_wipes_bubble_and_state(project):
-    from modastack.cli import _clear_manager_session
+    from bobi.cli import _clear_manager_session
 
     # Seed bubble + per-session deployment + cursor state.
     save_bubble_state(project, "bub_1", "bkey_1")
@@ -126,7 +126,7 @@ def test_clear_manager_session_wipes_bubble_and_state(project):
 
     # save_session_id resolves the bound process root (CLI binds it); not under
     # test here — patch it so we exercise only the wipe.
-    with patch("modastack.sdk.save_session_id"):
+    with patch("bobi.sdk.save_session_id"):
         _clear_manager_session(project)
 
     assert load_bubble_state(project) == {}

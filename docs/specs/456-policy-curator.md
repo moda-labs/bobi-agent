@@ -4,7 +4,7 @@
 > director) sign-off before implementation. This spec is a **superset** of the
 > original issue; the original issue text is preserved verbatim at the bottom.
 >
-> This is a **self-modifying** change — it rewrites how modastack itself
+> This is a **self-modifying** change — it rewrites how bobi itself
 > persists durable knowledge across every agent team. Treat the removal of the
 > decision log and its rotation flush as the riskiest part: it touches the
 > session rotation path that wedged the director live on 2026-06-23.
@@ -85,7 +85,7 @@ current decision log does the opposite.
 Today every agent gets a **per-session, append-only journal** injected into its
 prompt:
 
-- It lives at `.modastack/state/memory/<session>/INDEX.md`
+- It lives at `.bobi/state/memory/<session>/INDEX.md`
   (`memory.py:memory_dir_for_session`, line 22) and is read +
   formatted into the prompt under a `## Decision Log` heading
   (`memory.py:load_memory`/`format_memory_prompt`, lines 27–88), injected at
@@ -152,7 +152,7 @@ the stall. Notes on adjacent fixes that do **not** cover #3:
 Replace the append-only decision log with a single, small, **rewritten-in-place**
 `policy.md`, maintained **out-of-band by a curator that runs as a monitor**.
 
-modastack monitors already run an agent out-of-band on a schedule and treat its
+bobi monitors already run an agent out-of-band on a schedule and treat its
 output as data ("a description-only monitor's check agent runs out-of-band, only
 observes, and returns a verdict" — CLAUDE.md, Monitors). The curator is the same
 pattern, with exactly **one** new seam: its check agent **writes an artifact**
@@ -278,7 +278,7 @@ pattern, with exactly **one** new seam: its check agent **writes an artifact**
 
 - **No** index/retrieval/KB machinery, **no** per-type schema, **no** embeddings.
   One markdown file, rewritten in place, capped, injected. (The existing
-  `modastack kb` subsystem is *not* involved.)
+  `bobi kb` subsystem is *not* involved.)
 - **No** change to the rotation **metric** — that is #454. This spec removes the
   bloat source; #454 fixes why rotation falsely fired. They ship independently.
   (Bounding/recovering the rotation **reconnect** — mechanism #3 — *is* in scope,
@@ -312,8 +312,8 @@ release v0.31.0).
 
 ### 1. Where `policy.md` lives
 
-- Path: **`.modastack/state/policy.md`** (single, team-scoped, not under
-  `memory/<session>/`). Add `policy_path()` to `modastack/paths.py` returning
+- Path: **`.bobi/state/policy.md`** (single, team-scoped, not under
+  `memory/<session>/`). Add `policy_path()` to `bobi/paths.py` returning
   `state_dir() / "policy.md"`.
 - **Structure: two fixed sections in the one file**, written and parsed as plain
   markdown headings (no schema, no frontmatter):
@@ -329,7 +329,7 @@ release v0.31.0).
   The curator owns both. The whole file is still capped (`MAX_POLICY_CHARS`)
   and injected as one block; the sections only carry *different curator rules*
   (below), not different files or schemas.
-- The existing `.modastack/state/memory/` tree is **no longer read** for prompt
+- The existing `.bobi/state/memory/` tree is **no longer read** for prompt
   injection. The directory mechanics in `memory.py` may be reused for reading
   `policy.md`, but the per-session journal semantics are removed.
 
@@ -366,12 +366,12 @@ to publish. A distinct marker keeps the verdict path untouched.
 
 - **Dispatch** reuses the existing out-of-band subprocess path the scheduler
   already uses for description-only monitors (`scheduler.py:_default_spawn_check`
-  166–234), which shells out to `modastack agents launch -w adhoc --non-interactive
+  166–234), which shells out to `bobi agents launch -w adhoc --non-interactive
   --wait --task <…>`. The curator runs with `permission_mode="bypassPermissions"`
   (`session.py:420–432`), so its `Write` tool is available — no new permission
   plumbing.
 - The curator's working instructions come from a **dedicated curator prompt**
-  (new `modastack/prompts/curator.md`, or a framework role), not from the
+  (new `bobi/prompts/curator.md`, or a framework role), not from the
   monitor `description`. **The prompt is team-overridable** (Q1): the framework
   ships a default `curator.md`, and a team may replace it via the normal
   prompt-override path — "what counts as durable" is domain-flavored and a
@@ -387,7 +387,7 @@ to publish. A distinct marker keeps the verdict path untouched.
      (noted in the summary) — see the watermark subsection for why this direction
      (not highest-id-first-drop), and how an oversized single message is truncated
      rather than allowed to stall the cursor.
-  2. Read the **current `.modastack/state/policy.md`** (both sections).
+  2. Read the **current `.bobi/state/policy.md`** (both sections).
   3. Distill durable, reusable learnings **not already in** the team prose
      (role prompts, `tools/*.md`, `agent.md`) — promote only patterns seen
      across runs, never one-off operational details — and **file each into the
@@ -433,7 +433,7 @@ to publish. A distinct marker keeps the verdict path untouched.
 
 #### Reading transcripts since the watermark — and bounding the input
 
-Transcripts are indexed in SQLite at `.modastack/state/history.db`
+Transcripts are indexed in SQLite at `.bobi/state/history.db`
 (`history.py:16–18`) from the raw JSONL under the Claude projects dir. The
 `messages` table carries a unique **`id INTEGER PRIMARY KEY AUTOINCREMENT`**
 (`history.py:33`) plus a (non-unique, sometimes empty) per-message `timestamp`
@@ -513,7 +513,7 @@ the delta collapses to ≈empty and it distills nothing. The watermark it actual
 needs (the *previous* run's time) has already been clobbered.
 
 Fix: the curator maintains its **own cursor** at
-`.modastack/state/policy_cursor` (the integer **`messages.id`** of the last row
+`.bobi/state/policy_cursor` (the integer **`messages.id`** of the last row
 it ingested, not an ISO timestamp), and **advances it only after a successful
 rewrite** — to the **highest id it actually ingested** (which, because it ingests
 oldest-first by id and contiguously from the cursor, is the upper edge of an
@@ -605,7 +605,7 @@ The scheduler already owns the single publish chokepoint
   - `events/drain.py` gains a small filter: an external event of type
     `policy.updated` (or `system/policy.updated`) whose payload `urgent` is not
     truthy is **dropped before `inbox.push`** — it does not become an inbox
-    message. (It remains observable in the events feed / `modastack events`, so
+    message. (It remains observable in the events feed / `bobi events`, so
     the publish-for-observability property holds.) Passive pickup is the
     **next-prompt rebuild** (§5/§6), independent of this event.
   - This drain-side filter is **net-new** (currently unmentioned) and is the only
@@ -620,7 +620,7 @@ The scheduler already owns the single publish chokepoint
   - **`urgent: true`:** the drain passes it through and delivers the inbox message
     via the existing path (WS client → `events/drain.py` batches →
     `inbox.push(Message(...))` → `_inbox_loop`): *"policy.md updated — <summary>.
-    Re-read .modastack/state/policy.md and reconcile any in-flight plan."* The
+    Re-read .bobi/state/policy.md and reconcile any in-flight plan."* The
     curator sets `urgent` only for changes worth the interruption (e.g. a reversed
     decision that invalidates work in flight).
 - **Dedup caveat**: the scheduler's dedup keys on condition identity
@@ -718,7 +718,7 @@ the run loop the way the unbounded `await` does today.
 
 ### 7. Single-writer invariant
 
-- Only the curator agent writes `.modastack/state/policy.md`. Working agents get
+- Only the curator agent writes `.bobi/state/policy.md`. Working agents get
   it injected as **read-only** (prompt wording + it is not in any working
   agent's task instructions to edit it).
 - **Curator-vs-curator concurrency is already guarded by the interval, not the
@@ -956,7 +956,7 @@ All five are now decided from the review's leans; recorded here with rationale.
   §6b reconnect hardening builds on it (confirms it covers the connect-turn
   drain) and adds the orthogonal *never-receives-a-message* timeout it does not
   cover.
-- **Manager self-heal watchdog** ([#464](https://github.com/moda-labs/modastack/issues/464)) — a follow-up ticket (out of scope here) for a
+- **Manager self-heal watchdog** ([#464](https://github.com/moda-labs/bobi-agent-team/issues/464)) — a follow-up ticket (out of scope here) for a
   health-endpoint watchdog that restarts a wedged *director* on a stalled
   `last_activity`, covering **unknown** wedge classes beyond the three enumerated.
 - Mirrors the framework's own context-files pattern (index + read-on-demand) and
@@ -973,7 +973,7 @@ The agent team should **get smarter as it's used** — accumulate durable, reusa
 The director wedged for ~2h40m and required a manual nuke (clear session + delete the decision-log `INDEX.md`). The append-only decision log was a contributing aggravator: it grew unbounded (the agent appends a RESTART/RESUME block every restart and **never prunes** — asked to prune while over-cap, it *grew* the log instead), and it's redundant with the transcripts we already keep. Root-cause of the false "over-cap" that triggered the wedge is the rotation metric (#454, separate). This ticket removes the decision log entirely and replaces it with a curated, bounded knowledge doc.
 
 ### Design (rides existing infra — small net new work)
-A **curator runs as a monitor**. modastack monitors already run an agent **out-of-band on a schedule** and treat its output as data ("a description-only monitor's check agent runs out-of-band, only observes, returns a verdict"). The curator is the same pattern, except its output is a rewritten document instead of a verdict.
+A **curator runs as a monitor**. bobi monitors already run an agent **out-of-band on a schedule** and treat its output as data ("a description-only monitor's check agent runs out-of-band, only observes, returns a verdict"). The curator is the same pattern, except its output is a rewritten document instead of a verdict.
 
 - **New default monitor `policy-curator`**, fires on an interval.
 - On fire → dispatch an **out-of-band curator agent** (subagent executor) that:
@@ -990,7 +990,7 @@ A **curator runs as a monitor**. modastack monitors already run an agent **out-o
 - **Closes the transcript loop** = transcripts are the system of record (history, never injected); `policy.md` is the distilled knowledge (injected). Volatile operational state (live leads, in-flight tickets) is **re-derived from source** (GitHub/Linear/`agents list`), not stored.
 
 ### Remove
-- The append-only **decision log** (`.modastack/state/memory/<session>/INDEX.md` as a journal) and its **rotation flush** step. `policy.md` replaces it. (Keep the memory dir mechanics if reused for `policy.md`; drop the append-on-rotation behavior.)
+- The append-only **decision log** (`.bobi/state/memory/<session>/INDEX.md` as a journal) and its **rotation flush** step. `policy.md` replaces it. (Keep the memory dir mechanics if reused for `policy.md`; drop the append-on-rotation behavior.)
 
 ### Scope guardrails (keep it MVP)
 - **No** index/retrieval/KB machinery, **no** per-type schema, **no** embeddings. One markdown file, rewritten in place, capped, injected.

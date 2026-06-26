@@ -1,6 +1,6 @@
 # Slack Setup
 
-Create a Slack bot that modastack uses to scan for work requests and post status updates.
+Create a Slack bot that bobi uses to scan for work requests and post status updates.
 
 **Time:** ~5 minutes. No code, no server, no OAuth redirect URI.
 
@@ -38,10 +38,10 @@ That's it. No user scopes needed.
 3. Review and **Allow**
 4. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
 
-## 4. Add the token to modastack
+## 4. Add the token to bobi
 
 ```bash
-modastack init
+bobi init
 # Paste the xoxb- token when prompted for Slack bot token
 ```
 
@@ -49,7 +49,7 @@ Or for named credentials (multiple workspaces):
 
 ```bash
 # Edit directly
-cat >> ~/.config/modastack/credentials.yaml << 'EOF'
+cat >> ~/.config/bobi/credentials.yaml << 'EOF'
 my-workspace:
   linear_api_key: "lin_api_..."
   slack_bot_token: "xoxb-..."
@@ -85,7 +85,7 @@ No OAuth redirect server. No ngrok. No callback URL. The bot token is a static c
 If you have repos across different Slack workspaces, create one app per workspace and store each token as a named credential:
 
 ```yaml
-# ~/.config/modastack/credentials.yaml
+# ~/.config/bobi/credentials.yaml
 workspace-a:
   slack_bot_token: "xoxb-workspace-a-token"
   linear_api_key: "lin_api_team_a"

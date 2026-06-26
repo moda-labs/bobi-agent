@@ -55,7 +55,7 @@ already had one.
 - **Prod incident (2026-06-24):** `moda-eng-team` (`modabot`, bot_id
   `B0B4ZRGBT5F`) spammed `#bobi-eng-team` (PR #463) with ~20 "Evaluating…"
   placeholder messages, ~1/4s. Deploying a second app (`bobbers`) into the same
-  workspace (`T0952RZRZ0X`) against the same `MODASTACK_EVENT_SERVER` overwrote
+  workspace (`T0952RZRZ0X`) against the same `BOBI_EVENT_SERVER` overwrote
   modabot's stored `bot_id`, so modabot's own placeholder messages stopped
   matching `selfBotId` → it replied to itself → loop. The circuit breaker that
   should have capped it never fired.
@@ -147,7 +147,7 @@ single-bot record so `modabot` keeps working without a redeploy.
       from the client (Python resolves it).
 
 ### Python / client + config
-- [x] `register_slack_workspaces` (`modastack/events/server.py`) resolves
+- [x] `register_slack_workspaces` (`bobi/events/server.py`) resolves
       `app_id` (`bots.info`) and passes `app_id` + `signing_secret`.
 - [x] slack service in both `agent.yaml`s gains
       `signing_secret: ${SLACK_SIGNING_SECRET}`; deploy materializes it as a Fly

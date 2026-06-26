@@ -12,7 +12,7 @@ import pytest
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
-from modastack.brain import (
+from bobi.brain import (
     AssistantText,
     BrainSession,
     ClaudeBrain,
@@ -20,7 +20,7 @@ from modastack.brain import (
     TurnResult,
     get_brain,
 )
-from modastack.brain.claude import _ClaudeSession, _result_to_turn
+from bobi.brain.claude import _ClaudeSession, _result_to_turn
 
 
 # --- registry / selector ---------------------------------------------------
@@ -42,8 +42,8 @@ def test_unknown_brain_kind_fails_loud():
 
 
 def test_get_brain_resolves_from_env(monkeypatch):
-    """An explicit kind wins; otherwise MODASTACK_BRAIN; otherwise the default."""
-    from modastack.brain import BRAIN_ENV
+    """An explicit kind wins; otherwise BOBI_BRAIN; otherwise the default."""
+    from bobi.brain import BRAIN_ENV
 
     monkeypatch.setenv(BRAIN_ENV, "claude")
     assert get_brain().name == "claude"          # env supplies it
@@ -53,7 +53,7 @@ def test_get_brain_resolves_from_env(monkeypatch):
 
 
 def test_set_process_brain():
-    from modastack.brain import BRAIN_ENV, set_process_brain
+    from bobi.brain import BRAIN_ENV, set_process_brain
 
     # set_process_brain mutates os.environ directly (so it propagates to child
     # processes), so monkeypatch can't track it — save/restore explicitly.
@@ -74,17 +74,17 @@ def test_set_process_brain():
 
 def test_config_parses_brain(tmp_path):
     """agent.yaml `brain:` round-trips into Config + the brain_kind helper."""
-    from modastack.config import Config
+    from bobi.config import Config
 
-    (tmp_path / ".modastack").mkdir()
-    (tmp_path / ".modastack" / "agent.yaml").write_text(
+    (tmp_path / ".bobi").mkdir()
+    (tmp_path / ".bobi" / "agent.yaml").write_text(
         "agent: t\nbrain:\n  kind: codex\n  model: gpt-5-codex\n"
     )
     cfg = Config.load(tmp_path)
     assert cfg.brain == {"kind": "codex", "model": "gpt-5-codex"}
     assert cfg.brain_kind == "codex"
     # Absent brain → empty + the framework default downstream.
-    (tmp_path / ".modastack" / "agent.yaml").write_text("agent: t\n")
+    (tmp_path / ".bobi" / "agent.yaml").write_text("agent: t\n")
     assert Config.load(tmp_path).brain_kind == ""
 
 

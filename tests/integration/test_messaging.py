@@ -18,12 +18,12 @@ pytestmark = pytest.mark.claude
 class TestSessionMessaging:
     """Test messaging between live Claude Code sessions."""
 
-    def test_nonblocking_message(self, modastack_env):
+    def test_nonblocking_message(self, bobi_env):
         """Send a non-blocking message to a session."""
-        from modastack.session import Session
-        from modastack.inbox import deliver
+        from bobi.session import Session
+        from bobi.inbox import deliver
 
-        session = Session("test-nb-msg", cwd=str(modastack_env.project_path))
+        session = Session("test-nb-msg", cwd=str(bobi_env.project_path))
         try:
             assert session.start("You are a test agent. Respond briefly to any message.")
 
@@ -35,12 +35,12 @@ class TestSessionMessaging:
         finally:
             session.stop()
 
-    def test_blocking_message(self, modastack_env):
+    def test_blocking_message(self, bobi_env):
         """Send a blocking message and get the response."""
-        from modastack.session import Session
-        from modastack.inbox import deliver
+        from bobi.session import Session
+        from bobi.inbox import deliver
 
-        session = Session("test-block-msg", cwd=str(modastack_env.project_path))
+        session = Session("test-block-msg", cwd=str(bobi_env.project_path))
         try:
             assert session.start(
                 "You are a test agent. When asked a math question, "
@@ -55,12 +55,12 @@ class TestSessionMessaging:
         finally:
             session.stop()
 
-    def test_multiple_messages(self, modastack_env):
+    def test_multiple_messages(self, bobi_env):
         """Send several blocking messages in sequence."""
-        from modastack.session import Session
-        from modastack.inbox import deliver
+        from bobi.session import Session
+        from bobi.inbox import deliver
 
-        session = Session("test-multi-msg", cwd=str(modastack_env.project_path))
+        session = Session("test-multi-msg", cwd=str(bobi_env.project_path))
         try:
             assert session.start("You are a test agent. Respond briefly to any message.")
 
@@ -76,13 +76,13 @@ class TestSessionMessaging:
         finally:
             session.stop()
 
-    def test_session_to_session(self, modastack_env):
+    def test_session_to_session(self, bobi_env):
         """One session messages another session."""
-        from modastack.session import Session
-        from modastack.inbox import deliver
+        from bobi.session import Session
+        from bobi.inbox import deliver
 
-        agent_a = Session("test-agent-a", cwd=str(modastack_env.project_path))
-        agent_b = Session("test-agent-b", cwd=str(modastack_env.project_path))
+        agent_a = Session("test-agent-a", cwd=str(bobi_env.project_path))
+        agent_b = Session("test-agent-b", cwd=str(bobi_env.project_path))
 
         try:
             assert agent_a.start(
@@ -106,12 +106,12 @@ class TestSessionMessaging:
             agent_a.stop()
             agent_b.stop()
 
-    def test_blocking_timeout(self, modastack_env):
+    def test_blocking_timeout(self, bobi_env):
         """Blocking deliver times out when session is stopped."""
-        from modastack.session import Session
-        from modastack.inbox import deliver
+        from bobi.session import Session
+        from bobi.inbox import deliver
 
-        session = Session("test-timeout-msg", cwd=str(modastack_env.project_path))
+        session = Session("test-timeout-msg", cwd=str(bobi_env.project_path))
         try:
             assert session.start("You are a test agent.")
 
@@ -125,15 +125,15 @@ class TestSessionMessaging:
         finally:
             session.stop()
 
-    def test_on_response_callback(self, modastack_env):
+    def test_on_response_callback(self, bobi_env):
         """The on_response callback fires for every response."""
-        from modastack.session import Session
-        from modastack.inbox import deliver
+        from bobi.session import Session
+        from bobi.inbox import deliver
 
         responses = []
         session = Session(
             "test-callback-msg",
-            cwd=str(modastack_env.project_path),
+            cwd=str(bobi_env.project_path),
             on_response=lambda text: responses.append(text),
         )
         try:

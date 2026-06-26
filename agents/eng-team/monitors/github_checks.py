@@ -1,6 +1,6 @@
 """GitHub SDLC checks — PR conflict detection and stale PR monitoring.
 
-These are domain-specific checks shipped with modastack's SDLC use case.
+These are domain-specific checks shipped with bobi's SDLC use case.
 Custom checks follow the same pattern: define functions that return
 lists of Condition objects, then register them in a CHECKS dict.
 """
@@ -13,7 +13,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from modastack.monitors.schema import Condition
+from bobi.monitors.schema import Condition
 
 log = logging.getLogger(__name__)
 

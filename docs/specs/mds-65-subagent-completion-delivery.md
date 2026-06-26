@@ -1,12 +1,12 @@
 # MDS-65 — Sub-agent completions never reach the launcher
 
 **Status:** SPEC — awaiting human (Zach) approval. Do not implement until approved.
-**Type:** Framework fix (modastack runtime). Medium+, multi-file.
-**Files:** `modastack/subagent.py`, `modastack/events/subscriptions.py`,
-`modastack/cli.py`, `modastack/workflow/orchestrator.py`, `modastack/sdk.py`,
-`modastack/session.py` (re-import only), plus new modules `modastack/transient.py`
+**Type:** Framework fix (bobi runtime). Medium+, multi-file.
+**Files:** `bobi/subagent.py`, `bobi/events/subscriptions.py`,
+`bobi/cli.py`, `bobi/workflow/orchestrator.py`, `bobi/sdk.py`,
+`bobi/session.py` (re-import only), plus new modules `bobi/transient.py`
 and a reconciler + tests.
-**Observed on:** modastack 0.28.0 (current latest), gtm-team deployment.
+**Observed on:** bobi 0.28.0 (current latest), gtm-team deployment.
 **Baseline:** reconciled against `main` @ `d36fbd6` (post-#444). See §1.1.
 
 ---
@@ -30,7 +30,7 @@ workaround.
 ### 1.1 Relationship to #444 (merged — what is already fixed)
 
 PR #444 (`[#443] fix: transient 529/turn error no longer wedges a session`, merged
-to `main` @ `d36fbd6`) lands in **`modastack/session.py`** — the *persistent
+to `main` @ `d36fbd6`) lands in **`bobi/session.py`** — the *persistent
 manager session*. It makes the **launcher's own turn loop** survive a transient
 turn-level API error: a `529`/`5xx`/`429`/timeout no longer drops the session into
 the terminal `error` state (which had deafened the agent until restart), and the
@@ -57,11 +57,11 @@ not via duplicated retry logic.
 **Single-source the transient classifier (reviewer recommendation, @underminedsk
 on #445).** #444 introduced the canonical "what counts as transient" set
 (`TRANSIENT_API_STATUSES`) and the classifier `Session._is_transient_turn_error()`
-inside `modastack/session.py` — but the classifier is today a `Session` *method*
+inside `bobi/session.py` — but the classifier is today a `Session` *method*
 coupled to `self._last_api_error_status` / `self._last_response`, so the
 spawn/workflow path cannot reuse it without importing the persistent-session
 class or re-deriving a second copy. MDS-65 therefore **lifts the shared
-definitions into a small `modastack/transient.py` helper** (the status set + a
+definitions into a small `bobi/transient.py` helper** (the status set + a
 pure `is_transient_api_error(status, text="")` function + the `TURN_RETRY_BASE` /
 `TURN_RETRY_MAX_ATTEMPTS` budget constants), and has `session.py` re-import them
 (behaviour-preserving — `Session._is_transient_turn_error()` becomes a thin
@@ -174,7 +174,7 @@ missing subscription are all in the runtime and cannot be reached from topology.
 ## 3. Scope
 
 ### In scope
-- **New module `modastack/transient.py`**: lift #444's `TRANSIENT_API_STATUSES`,
+- **New module `bobi/transient.py`**: lift #444's `TRANSIENT_API_STATUSES`,
   a pure `is_transient_api_error(status, text="")` classifier, and the
   `TURN_RETRY_BASE` / `TURN_RETRY_MAX_ATTEMPTS` budget constants into one shared
   home; have `session.py` re-import them (behaviour-preserving). Single-sources
@@ -188,7 +188,7 @@ missing subscription are all in the runtime and cannot be reached from topology.
 - `orchestrator.py`: honest + `requested_by`-carrying terminal emit in the
   `finally` block (no unconditional `session.completed` after a failure).
 - `sdk.py`: terminal-status vocabulary on the registry; reconciler reads/writes.
-- New module `modastack/reconcile.py` (or `subagent` helpers) for the dead-man
+- New module `bobi/reconcile.py` (or `subagent` helpers) for the dead-man
   backstop.
 - Tests for every codepath above (see §5).
 
@@ -218,7 +218,7 @@ missing subscription are all in the runtime and cannot be reached from topology.
   persistent-session layer). Per the reviewer (@underminedsk, #445), the residual
   concern — two divergent copies of "what is transient" / the retry budget — is
   resolved by lifting #444's classifier + budget into the shared
-  `modastack/transient.py` (in scope above; §4.3), not by adding a second retry
+  `bobi/transient.py` (in scope above; §4.3), not by adding a second retry
   loop. See §1.1.)
 - **D2 — reconciler trigger.** Recommended: event-driven sweep on manager wake +
   a bounded grace period past each run's declared `timeout`
@@ -239,7 +239,7 @@ missing subscription are all in the runtime and cannot be reached from topology.
 
 ### 4.1 Subscribe the entry point (RC #1)
 
-Add to `modastack/events/subscriptions.py`:
+Add to `bobi/events/subscriptions.py`:
 
 ```python
 LIFECYCLE_EVENTS = ("agent/session.completed", "agent/session.failed")
@@ -262,7 +262,7 @@ def lifecycle_subscription_keys() -> list[str]:
 Wire into `cli.py` immediately after the monitor block (`cli.py:225-227`):
 
 ```python
-from modastack.events.subscriptions import lifecycle_subscription_keys
+from bobi.events.subscriptions import lifecycle_subscription_keys
 for key in lifecycle_subscription_keys():
     if key not in subscribe:
         subscribe.append(key)
@@ -313,10 +313,10 @@ and can re-dispatch at the orchestration layer.
 
 **What MDS-65 *does* do here (reviewer recommendation, @underminedsk on #445):**
 single-source the classifier so the two paths never drift. Extract a small
-`modastack/transient.py`:
+`bobi/transient.py`:
 
 ```python
-# modastack/transient.py
+# bobi/transient.py
 TURN_RETRY_BASE = 2.0
 TURN_RETRY_MAX_ATTEMPTS = 2
 
@@ -341,7 +341,7 @@ def is_transient_api_error(status: int | None, text: str = "") -> bool:
 —
 
 ```python
-from modastack.transient import (
+from bobi.transient import (
     TRANSIENT_API_STATUSES, TURN_RETRY_BASE, TURN_RETRY_MAX_ATTEMPTS,
     is_transient_api_error,
 )
@@ -387,7 +387,7 @@ running."
 
 ### 4.6 Reconciler / dead-man backstop
 
-New logic (module `modastack/reconcile.py` or `subagent` helpers):
+New logic (module `bobi/reconcile.py` or `subagent` helpers):
 
 - **Input:** the registry's `state.json` records, each carrying `started_at`,
   `status`, `pid`, `phase`, `requested_by`, and the run's declared `timeout`
@@ -465,7 +465,7 @@ chosen so honesty/durability land before the subscription that exposes them.
 
 - **Phase 0 — shared transient classifier + terminal vocabulary + durable
   persistence (RC#2/#3 core).** First, the behaviour-preserving extraction:
-  create `modastack/transient.py` (§4.3) and re-point `session.py` at it
+  create `bobi/transient.py` (§4.3) and re-point `session.py` at it
   (`tests/test_session.py` must stay green; add a unit test for the free
   `is_transient_api_error`). Then write the RC#2/#3 failing tests; add the
   terminal-status vocabulary (D1) + `_persist_terminal` helper; make

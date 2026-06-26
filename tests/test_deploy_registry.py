@@ -11,15 +11,15 @@ from pathlib import Path
 
 import pytest
 
-from modastack import deploy as D
-from modastack import registry
+from bobi import deploy as D
+from bobi import registry
 
 
 # --- fixtures ----------------------------------------------------------------
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    monkeypatch.setattr("modastack.paths._root", tmp_path)
+    monkeypatch.setattr("bobi.paths._root", tmp_path)
     return tmp_path
 
 

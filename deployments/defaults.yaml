@@ -6,16 +6,16 @@
 # each per-instance file stays minimal. Precedence (low → high):
 #   built-in defaults  ‹  THIS FILE  ‹  deployments/<name>.yaml  ‹  CLI flags
 #
-# `modastack deploy <name>` merges these itself, so the command is self-contained.
+# `bobi deploy <name>` merges these itself, so the command is self-contained.
 
-# Fleet namespace. App name = "<fleet>-<name>"; also stamped MODASTACK_FLEET (the
+# Fleet namespace. App name = "<fleet>-<name>"; also stamped BOBI_FLEET (the
 # authoritative fleet-membership key the GitOps reconcile enumerates by).
 #
 # This repo's fleet is `ci` — the release pipeline's SELF-GATE canary ONLY. The
 # production agent teams (eng-team) moved to their own repo, moda-labs/
 # moda-agent-teams, which owns the `moda` fleet. Two repos, one Fly org, two
 # fleets that never cross-enumerate (fleet_list confirms by the exact
-# MODASTACK_FLEET stamp, so even a name-prefix overlap is safe).
+# BOBI_FLEET stamp, so even a name-prefix overlap is safe).
 fleet: ci
 
 # Tenant = the GitHub Environment the GitOps Action binds for a deployment's
@@ -26,7 +26,7 @@ tenant: canary
 
 # Where instances phone home (outbound WSS only). Omit to use the built-in
 # shared moda-labs Worker.
-event_server: https://modastack-events.modalabs.workers.dev
+event_server: https://bobi-events.modalabs.workers.dev
 
 # Shared machine sizing — override per-instance for heavier teams.
 region: iad

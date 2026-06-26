@@ -1,12 +1,12 @@
-# Modastack Competitive Landscape Analysis
+# Bobi Competitive Landscape Analysis
 
 *June 2026*
 
-## What Modastack Is
+## What Bobi Is
 
 A thin, event-driven multi-agent orchestrator. Events come in (GitHub, Linear, Slack), a persistent coordinator agent reasons about them, and sub-agents get dispatched via declarative YAML workflows. Domain-agnostic — SDLC is the reference implementation, but the same framework runs content review, research, ops runbooks, or anything else. All domain logic lives in agent teams (`agents/<pack>/`).
 
-**Core design principle:** Do one thing well. Modastack is not a memory system, a tool registry, an integration platform, or an agent runtime. It's the coordination layer that sits on top of whatever agents and tools you already have.
+**Core design principle:** Do one thing well. Bobi is not a memory system, a tool registry, an integration platform, or an agent runtime. It's the coordination layer that sits on top of whatever agents and tools you already have.
 
 ---
 
@@ -20,7 +20,7 @@ The agentic AI market hit $7.84B in 2025, projected to reach $52.6B by 2030 (44%
 
 | Category | Examples | Crowded? |
 |---|---|---|
-| **Thin orchestrators** — event-driven coordinator + sub-agent dispatch | Modastack, Symphony, Factory.ai | **Least crowded** |
+| **Thin orchestrators** — event-driven coordinator + sub-agent dispatch | Bobi, Symphony, Factory.ai | **Least crowded** |
 | **Heavyweight harnesses** — general-purpose platforms (memory, tools, integrations, UI) | OpenClaw, Hermes, Paperclip | Growing fast |
 | **Single-agent coding tools** — one agent per task, issue-to-PR | Devin, Copilot Agent, Jules, OpenHands | Very crowded |
 | **IDE agents** — agent mode inside an editor | Cursor, Windsurf, Augment Code, Kiro | Very crowded |
@@ -28,7 +28,7 @@ The agentic AI market hit $7.84B in 2025, projected to reach $52.6B by 2030 (44%
 | **Review/quality gates** — AI code review, test generation | CodeRabbit, Qodo, Greptile, Ellipsis | Crowded |
 | **Generic agent infra** — orchestration frameworks, protocols | CrewAI, LangGraph, MS Agent Framework | Crowded |
 
-Modastack is a thin orchestrator. Skills frameworks (GStack, Superpowers) are complementary — Modastack uses them as agent tools. Review tools can be integrated as workflow nodes.
+Bobi is a thin orchestrator. Skills frameworks (GStack, Superpowers) are complementary — Bobi uses them as agent tools. Review tools can be integrated as workflow nodes.
 
 ---
 
@@ -38,7 +38,7 @@ Modastack is a thin orchestrator. Skills frameworks (GStack, Superpowers) are co
 
 Elixir-based orchestrator that polls Linear, maps issues to agent workspaces, requires CI "proof of work" before merge. Open source (Apache 2.0). Reported ~500% PR increase.
 
-| | Symphony | Modastack |
+| | Symphony | Bobi |
 |---|---|---|
 | Runtime | Elixir/OTP (crash isolation) | Python + Claude SDK |
 | Events | Polls Linear (30s) | Webhooks + WebSocket, cursor-based replay |
@@ -53,7 +53,7 @@ Elixir-based orchestrator that polls Linear, maps issues to agent workspaces, re
 
 Multi-droid coordinator with specialized agents (Code, Review, Docs, Test, Knowledge). $200M+ raised at $1.5B. Enterprise customers (Nvidia, Adobe, Morgan Stanley). Hosted SaaS, $0-$2K/month.
 
-| | Factory.ai | Modastack |
+| | Factory.ai | Bobi |
 |---|---|---|
 | Knowledge | Persistent codebase index (Knowledge Droid) | Agents re-explore per task |
 | Domain scope | SDLC only | Any (agent teams) |
@@ -62,7 +62,7 @@ Multi-droid coordinator with specialized agents (Code, Review, Docs, Test, Knowl
 | Deployment | SaaS | Self-hosted |
 | Config | Limited | Three-tier (repo → user → built-in) |
 
-**Verdict:** Factory is the well-funded commercial competitor. Modastack wins on transparency, self-hosting, domain flexibility. Factory wins on scale, enterprise features, Knowledge Droid.
+**Verdict:** Factory is the well-funded commercial competitor. Bobi wins on transparency, self-hosting, domain flexibility. Factory wins on scale, enterprise features, Knowledge Droid.
 
 ---
 
@@ -74,17 +74,17 @@ Multi-droid coordinator with specialized agents (Code, Review, Docs, Test, Knowl
 
 **OpenHands** — Open-source autonomous coding agent. Best benchmarks (72% SWE-Bench). Single agent, not a coordinator.
 
-**GStack / Superpowers** — Skills frameworks for Claude Code. Complementary, not competitive. They define *what* agents do; Modastack defines *when* and *how* agents are orchestrated.
+**GStack / Superpowers** — Skills frameworks for Claude Code. Complementary, not competitive. They define *what* agents do; Bobi defines *when* and *how* agents are orchestrated.
 
-**Paperclip** — Agent control plane modeling a company (org charts, budgets, governance). 68K+ stars, MIT. Both domain-agnostic, but different weight class: Paperclip is a company simulation; Modastack is a thin coordinator. Per-agent budget enforcement and immutable audit trails are Paperclip's unique strengths.
+**Paperclip** — Agent control plane modeling a company (org charts, budgets, governance). 68K+ stars, MIT. Both domain-agnostic, but different weight class: Paperclip is a company simulation; Bobi is a thin coordinator. Per-agent budget enforcement and immutable audit trails are Paperclip's unique strengths.
 
-**CrewAI / LangGraph / MS Agent Framework** — Generic orchestration frameworks. Full frameworks where you define agents, memory, and tools inside them. Modastack wraps existing agents rather than replacing them. Different weight class.
+**CrewAI / LangGraph / MS Agent Framework** — Generic orchestration frameworks. Full frameworks where you define agents, memory, and tools inside them. Bobi wraps existing agents rather than replacing them. Different weight class.
 
-**Hermes / OpenClaw** — Heavyweight general-purpose harnesses. They try to be everything (memory, tools, 50+ integrations, messaging, smart home). Modastack is deliberately thin. They are the agent; Modastack coordinates agents.
+**Hermes / OpenClaw** — Heavyweight general-purpose harnesses. They try to be everything (memory, tools, 50+ integrations, messaging, smart home). Bobi is deliberately thin. They are the agent; Bobi coordinates agents.
 
 ---
 
-## What Makes Modastack Unique
+## What Makes Bobi Unique
 
 1. **Thin coordinator architecture** — Event bus + persistent coordinator + workflow dispatch. Nothing else. Doesn't try to be a memory system, tool registry, or agent runtime.
 
@@ -98,15 +98,15 @@ Multi-droid coordinator with specialized agents (Code, Review, Docs, Test, Knowl
 
 6. **Structured handoff protocol** — YAML frontmatter + markdown files carry context between workflow steps. A pragmatic implementation of what A2A is formalizing.
 
-7. **Self-hosted, CLI-driven** — `modastack message`, `consult`, `spawn`, `status`. No vendor lock-in.
+7. **Self-hosted, CLI-driven** — `bobi message`, `consult`, `spawn`, `status`. No vendor lock-in.
 
 ---
 
 ## Integration with Heavyweight Harnesses
 
-Modastack shouldn't build what OpenClaw, Hermes, and Paperclip already have:
+Bobi shouldn't build what OpenClaw, Hermes, and Paperclip already have:
 
-| They have | Modastack shouldn't build |
+| They have | Bobi shouldn't build |
 |---|---|
 | General-purpose tools (search, places API, databases, crypto, IoT) | Tool catalogs |
 | Consumer messaging (WhatsApp, Telegram, Discord, Signal) | Messaging integrations |
@@ -116,11 +116,11 @@ Modastack shouldn't build what OpenClaw, Hermes, and Paperclip already have:
 
 ### How to integrate
 
-**Harness agents as workers** — Modastack dispatches tasks; OpenClaw/Hermes agents execute using their tool catalogs and report back. Modastack gets 50+ integrations for free.
+**Harness agents as workers** — Bobi dispatches tasks; OpenClaw/Hermes agents execute using their tool catalogs and report back. Bobi gets 50+ integrations for free.
 
-**Harness as control channel** — Users interact via WhatsApp/Telegram/Discord (through a harness) → messages route to Modastack's coordinator → workflows dispatch → results flow back. Consumer-facing reach without building messaging.
+**Harness as control channel** — Users interact via WhatsApp/Telegram/Discord (through a harness) → messages route to Bobi's coordinator → workflows dispatch → results flow back. Consumer-facing reach without building messaging.
 
-**Shared tools via MCP** — Harnesses expose tool catalogs as MCP servers. Modastack's sub-agents connect to them. No direct integration needed.
+**Shared tools via MCP** — Harnesses expose tool catalogs as MCP servers. Bobi's sub-agents connect to them. No direct integration needed.
 
 ### What to build for this
 
@@ -151,7 +151,7 @@ Modastack shouldn't build what OpenClaw, Hermes, and Paperclip already have:
 
 ## Positioning Matrix
 
-|  | Modastack | Symphony | Factory.ai | Paperclip | Devin | OpenClaw/Hermes |
+|  | Bobi | Symphony | Factory.ai | Paperclip | Devin | OpenClaw/Hermes |
 |---|---|---|---|---|---|---|
 | **Type** | Thin orchestrator | Thin orchestrator | Thin orchestrator | Heavyweight harness | Single agent | Heavyweight harness |
 | **Philosophy** | Events → coordinator → dispatch | Poll → pipeline → merge | Coordinator → droids | Company simulation | Autonomous VM | Everything platform |
@@ -168,7 +168,7 @@ Modastack shouldn't build what OpenClaw, Hermes, and Paperclip already have:
 
 ## Positioning
 
-> Modastack is a thin, event-driven multi-agent orchestrator. Events in, coordinator reasons, sub-agents dispatch, results route back. Unlike heavyweight harnesses that bundle everything into one system, Modastack is the coordination layer on top of whatever agents and tools you already have. Unlike single-agent tools, it coordinates teams. Domain-agnostic by design.
+> Bobi is a thin, event-driven multi-agent orchestrator. Events in, coordinator reasons, sub-agents dispatch, results route back. Unlike heavyweight harnesses that bundle everything into one system, Bobi is the coordination layer on top of whatever agents and tools you already have. Unlike single-agent tools, it coordinates teams. Domain-agnostic by design.
 
 ---
 

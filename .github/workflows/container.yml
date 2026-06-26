@@ -38,20 +38,20 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # conftest under tests/integration imports modastack, so the package must
+      # conftest under tests/integration imports bobi, so the package must
       # be importable on the runner even though the tests only shell out to docker.
       - name: Install test runner
         run: pip install -e ".[dev]"
 
       - name: Build instance image
-        run: docker build -t modastack:ci .
+        run: docker build -t bobi:ci .
 
       - name: Run container contract tests
         # The image is prebuilt above; the fixture reuses it via the env var
         # instead of rebuilding. Contract checks only — the live round-trip is
         # the separate step below.
         env:
-          MODASTACK_TEST_IMAGE: modastack:ci
+          BOBI_TEST_IMAGE: bobi:ci
         run: pytest tests/integration/test_container_image.py -m "docker and not live" -v --timeout=400
 
       # The live round-trip spins up an EPHEMERAL event server (the real Worker
@@ -91,6 +91,6 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository ||
           contains(github.event.pull_request.labels.*.name, 'ci:live')
         env:
-          MODASTACK_TEST_IMAGE: modastack:ci
+          BOBI_TEST_IMAGE: bobi:ci
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: pytest tests/integration/test_container_image.py -m "docker and live" -v --timeout=500

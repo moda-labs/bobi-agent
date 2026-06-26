@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from modastack.sdk import _sessions_dir
+from bobi.sdk import _sessions_dir
 from .conftest import requires_claude
 
 pytestmark = pytest.mark.claude
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.claude
 @pytest.mark.timeout(120)
 class TestAdhocAgentLaunch:
 
-    def test_adhoc_cli_returns_immediately(self, modastack_env, cli_run, clean_session):
+    def test_adhoc_cli_returns_immediately(self, bobi_env, cli_run, clean_session):
         clean_session("wf-adhoc-test-repo-101")
 
         start = time.monotonic()
@@ -37,7 +37,7 @@ class TestAdhocAgentLaunch:
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert elapsed < 5, f"adhoc took {elapsed:.1f}s — should return immediately"
 
-    def test_adhoc_agent_completes(self, modastack_env, cli_run, clean_session):
+    def test_adhoc_agent_completes(self, bobi_env, cli_run, clean_session):
         """Launch via CLI (subprocess finds repo from cwd) and poll for completion."""
         clean_session("wf-adhoc-test-repo-102")
 
@@ -66,7 +66,7 @@ class TestAdhocAgentLaunch:
         assert (session_dir / "state.json").exists()
         assert (session_dir / "log.jsonl").exists()
 
-    def test_adhoc_session_state_fields(self, modastack_env, cli_run, clean_session):
+    def test_adhoc_session_state_fields(self, bobi_env, cli_run, clean_session):
         """Verify the session state file has the expected fields after completion."""
         clean_session("wf-adhoc-test-repo-103")
 
@@ -101,7 +101,7 @@ class TestAdhocAgentLaunch:
 @pytest.mark.timeout(180)
 class TestMultiStepWorkflowLaunch:
 
-    def test_two_step_cli_returns_immediately(self, modastack_env, cli_run, clean_session):
+    def test_two_step_cli_returns_immediately(self, bobi_env, cli_run, clean_session):
         clean_session("wf-two-step-test-repo-201")
 
         start = time.monotonic()
@@ -117,19 +117,19 @@ class TestMultiStepWorkflowLaunch:
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert elapsed < 5
 
-    def test_two_step_workflow_runs_both_steps(self, modastack_env, clean_session):
-        from modastack.workflow.schema import load_workflow
-        from modastack.workflow.orchestrator import run_workflow, make_session_name
+    def test_two_step_workflow_runs_both_steps(self, bobi_env, clean_session):
+        from bobi.workflow.schema import load_workflow
+        from bobi.workflow.orchestrator import run_workflow, make_session_name
 
         session_name = make_session_name("two-step", "test-repo", "202")
         clean_session(session_name)
 
-        wf_file = modastack_env.workflows_dir / "two-step.yaml"
+        wf_file = bobi_env.workflows_dir / "two-step.yaml"
         wf = load_workflow(wf_file)
 
         result = run_workflow(
             wf, task="Run two-step test #202", repo="test-repo",
-            cwd=str(modastack_env.project_path), run_key="202",
+            cwd=str(bobi_env.project_path), run_key="202",
             timeout=120, interactive=False,
         )
 
