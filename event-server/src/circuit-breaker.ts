@@ -77,6 +77,10 @@ export function isExemptFromBreaker(event: NormalizedEvent): boolean {
 export function conversationKey(event: NormalizedEvent): string | null {
 	const payload = event.payload as Record<string, unknown> | undefined;
 	const fields = event.fields as Record<string, unknown> | undefined;
+	const payloadString = (key: string): string => {
+		const value = payload?.[key];
+		return typeof value === "string" ? value.trim() : "";
+	};
 
 	if (event.source === "slack") {
 		// Slack: thread_ts identifies a conversation (thread). If no thread,
@@ -100,6 +104,20 @@ export function conversationKey(event: NormalizedEvent): string | null {
 		// Fall back to repo-level for events without an issue/PR (e.g. push)
 		if (repo) return `github:${repo}`;
 		return null;
+	}
+
+	if (event.source === "monitor") {
+		// Monitor findings are often batched by one scheduled run but emitted as
+		// separate actionable findings. Key by the monitor plus the scheduler's
+		// stable finding identity so one audit pass with several distinct
+		// findings does not look like a self-reinforcing event loop.
+		const monitor = payloadString("monitor");
+		const findingKey = payloadString("finding_key") || payloadString("key");
+		if (monitor && findingKey) {
+			return `monitor:${encodeURIComponent(monitor)}:${encodeURIComponent(findingKey)}`;
+		}
+		if (monitor) return `monitor:${encodeURIComponent(monitor)}`;
+		return `monitor:${encodeURIComponent(event.type)}`;
 	}
 
 	// Fallback for custom/linear events: use the event type as a coarse key.
