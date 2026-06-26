@@ -38,7 +38,7 @@ plan/spec text or when you must pass the diff explicitly.
 ## Notes
 
 - Treat the output as advice, not a verdict — you judge what to act on.
-- Never paste secrets/tokens into the prompt; the CLI reads creds from env
-  (`OPENAI_API_KEY` in `.modastack/.env`).
+- Never paste secrets/tokens into the prompt. In API-key mode, Modastack
+  materializes `~/.codex/auth.json` from `OPENAI_API_KEY` before launch.
 - If `codex` is missing or unauthed the `requires:` preflight blocks dispatch —
   surface that, don't silently skip.

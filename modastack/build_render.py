@@ -166,7 +166,7 @@ def render_team_deps_script(cfg: Config) -> str:
         for entry in cfg.requires:
             lines += [
                 f"echo {shlex.quote('verify ' + entry.name)}",
-                f"{as_user} {shlex.quote(entry.check)}",
+                f"{as_user} {shlex.quote('MODASTACK_VERIFY_PHASE=build; ' + entry.check)}",
             ]
         lines.append("")
 
