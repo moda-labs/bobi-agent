@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.35.1 — 2026-06-27
+
+Patch release for the Bobi cutover release path.
+
+### Changed
+- **Framework releases are canary-specific (#544).** The `bobi-agent` release
+  workflow now builds and smokes only the permanent `ci-canary`, then publishes
+  PyPI/Homebrew. Generic `deployments/*.yaml` reconciliation is example-only in
+  this repo and remains the responsibility of fleet repos such as
+  `moda-agents`.
+- **Codex test is example-only (#543, #544).** The former active `codex-test`
+  deployment is now a manual example so Codex-brain validation can be separated
+  from SSH/local-team delivery validation.
+
+### Fixed
+- **Forced rebuild deploys cover the team-url path (#542).** Existing
+  `team-url:` deployments now rebuild the image when `bobi deploy --rebuild` is
+  requested before reinstalling the package.
+- **Release deploy reconciliation can request rebuilds (#541).** The generic
+  deployment workflow example accepts and passes through a `rebuild` input for
+  fleet repos that intentionally reconcile package content after a framework
+  image update.
+
 ## 0.35.0 — 2026-06-27
 
 Breaking Bobi cutover release: the framework is now published and operated as
