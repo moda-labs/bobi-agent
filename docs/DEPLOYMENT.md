@@ -430,7 +430,7 @@ branch, since tag pushes run from the tagged commit) or **`workflow_dispatch`**
 
 > **Delivery in CI.** Both delivery modes run from CI. **ssh-push (`team:`)** works
 > with an **org-scoped** Fly token (`fly tokens create org` *can* `fly ssh`) — this
-> is how moda-agent-teams reconciles eng-team in place (`updating instance
+> is how moda-agents reconciles eng-team in place (`updating instance
 > 'moda-eng-team' in place (ssh-push)`), pushing the team definition to the volume
 > and reloading. **`team-url` (HTTPS-fetch)** is the alternative when you'd rather
 > not give CI ssh, or to first-boot a dark instance with no SSH at all
@@ -574,7 +574,7 @@ Wire your repo once (or let `deploy-init` do 1–2 and print 3–4):
 2. `deployments/<team>.yaml` with `team:` (local package → **ssh-push**) **or**
    `team-url:` (published `.tar.gz` → **HTTPS-fetch**). Both work in CI: an
    **org-scoped** Fly token (`fly tokens create org`) *can* `fly ssh`, so ssh-push
-   reconciles in place from the Action — proven by moda-agent-teams updating
+   reconciles in place from the Action — proven by moda-agents updating
    eng-team (`updating instance 'moda-eng-team' in place (ssh-push)`). Reach for
    `team-url` when you'd rather not give CI ssh, or to provision a dark instance
    with no SSH at all. Set `tenant:` (or inherit `defaults.yaml`).
@@ -596,7 +596,7 @@ bobi checkout it falls back to the deploy assets bundled in the wheel
 `pip install bobi==<pin>` is fully self-sufficient. That means your teams can
 live in their **own private repo** that never carries framework source — the
 "outside user runs their own teams on Fly" shape. The reference example is
-**`moda-labs/moda-agent-teams`** (it owns the `moda` fleet; this framework repo
+**`moda-labs/moda-agents`** (it owns the `moda` fleet; this framework repo
 keeps only its `ci` self-gate canary). The split model:
 
 - **One Fly org, two (or more) fleets.** Fleets are distinguished by the exact

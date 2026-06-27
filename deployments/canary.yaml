@@ -3,7 +3,7 @@
 # An always-on instance that revalidates the whole deploy path on every release:
 # the GitOps thin client → `bobi deploy` → the base image → the event
 # server. It is the ONLY deployment in this repo — the production agent teams
-# moved to moda-labs/moda-agent-teams (the `moda` fleet), leaving this repo's
+# moved to moda-labs/moda-agents (the `moda` fleet), leaving this repo's
 # `ci` fleet as the release self-gate alone.
 #
 # Runs the published, dependency-free smoke team via team-url (HTTPS-fetch): the

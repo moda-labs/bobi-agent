@@ -82,13 +82,13 @@ including:
 If PyPI was just published, allow a short propagation delay before installing
 the new version from another repo.
 
-## 3. Bump `moda-agent-teams`
+## 3. Bump `moda-agents`
 
 The Moda fleet has its own deploy pin. Update it after the `bobi` release
 is available on PyPI.
 
 ```bash
-cd ~/dev/moda-agent-teams
+cd ~/dev/moda-agents
 git switch main
 git pull --ff-only
 git status --short
@@ -119,9 +119,9 @@ git commit -m "ops: bump bobi deploy pin to <version>"
 git push origin main
 
 gh workflow run "Deploy agent teams" --ref main -f rebuild=true
-gh run list --repo moda-labs/moda-agent-teams --workflow "Deploy agent teams" \
+gh run list --repo moda-labs/moda-agents --workflow "Deploy agent teams" \
   --limit 3 --json databaseId,status,conclusion,url
-gh run watch <run-id> --repo moda-labs/moda-agent-teams --interval 20
+gh run watch <run-id> --repo moda-labs/moda-agents --interval 20
 ```
 
 The deploy run should show green jobs for:
@@ -240,7 +240,7 @@ Before handing off, capture:
 
 - bobi release URL
 - release workflow run URL
-- moda-agent-teams deploy run URL
+- moda-agents deploy run URL
 - Slack marker and thread timestamp
 - whether Eng Team replied with the correct app/user IDs
 - any residual issues, such as duplicate final replies or slow startup

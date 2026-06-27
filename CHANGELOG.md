@@ -370,7 +370,7 @@ Agent teams become a **composable package ecosystem**. A team can declare
 composition at install/deploy time. Completes the bobi side of epic **#453**
 (Team distribution & composition): #446 (resolution) + #451 (merge) + the #452
 `eng-team` extraction. Ships the framework support the private
-`moda-agent-teams` cutover needs.
+`moda-agents` cutover needs.
 
 ### Added
 - **`from:` team inheritance, composed at install/deploy (#446, #451).** A team
@@ -398,7 +398,7 @@ composition at install/deploy time. Completes the bobi side of epic **#453**
   review/test/QA gate) so any org can derive a house team with
   `from: eng-team` instead of forking ~2,000 lines. Moda's operational team
   moves to a thin `moda-eng-team` overlay (Linear, the gstack/codex toolchain,
-  TS/Next house style, release policy) in the private `moda-agent-teams` repo.
+  TS/Next house style, release policy) in the private `moda-agents` repo.
 - **Agent teams are no longer bundled into the framework wheel.** Teams are
   versioned registry packages now; baking a frozen copy into the wheel pinned a
   team to the framework release and fought independent team versioning.

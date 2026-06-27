@@ -371,7 +371,7 @@ until we deliberately re-pin it.**
    takes the unchanged local path.
 4. **Migrate our own fleet deliberately, one instance at a time.** Once Phase 3
    is proven on a canary/smoke deploy, switch the eng-team fleet
-   (`moda-agent-teams`) to a pinned `team: eng-team@<version>` in a separate,
+   (`moda-agents`) to a pinned `team: eng-team@<version>` in a separate,
    reviewed change — **not part of this PR.** Because the pin is immutable, the
    first pinned deploy rebuilds the team-flavored image once (deps-hash may
    differ from the checked-in copy's), then stabilizes. Roll canary → prod,
@@ -496,17 +496,17 @@ This ticket is one of a cluster reshaping how teams ship. Explicit interactions:
 
 ### #436 — `ci-fleet-rename` / drop eng-team deployment (MERGED)
 - Moved the self-gate fleet to `ci` and dropped the in-repo eng-team prod
-  deployment; eng-team prod now lives in the standalone **`moda-agent-teams`**
-  repo. This spec is what lets `moda-agent-teams` deploy eng-team **by pin** with
+  deployment; eng-team prod now lives in the standalone **`moda-agents`**
+  repo. This spec is what lets `moda-agents` deploy eng-team **by pin** with
   no checked-in copy and no CI repo-clone hack — the motivating case in the
   issue. The §5.2-step-4 fleet migration is the concrete follow-through, done as a
-  separate change in `moda-agent-teams`, not here.
+  separate change in `moda-agents`, not here.
 
 ### Net: our own fleet
 - #436 (where our fleet lives) + #438 (wheel ships no teams) + #439 (BYOR deploy
   scaffold) + **#440 (this — versioned pin)** together move us to: *eng-team
   lives once in `bobi/agents/eng-team`, is published as immutable versioned
-  packages, and is deployed from `moda-agent-teams` by `team: eng-team@<version>`.*
+  packages, and is deployed from `moda-agents` by `team: eng-team@<version>`.*
   Per §5.2 the migration of the live fleet is **deliberate and out of this PR**,
   so merging #440 cannot by itself redeploy or disturb running director/lead
   sessions.
@@ -526,7 +526,7 @@ phased commits. Lead's call at implementation time; this spec covers all three.
    `install`/`agents update` `@version`; tests.
 3. **Phase 3 PR** — `deploy.py` `resolve_team_dir()` (name@version + fetch);
    wire the four `local_package_dir` callers; tests.
-4. **(separate, not in scope)** Migrate `moda-agent-teams` fleet to a pinned
+4. **(separate, not in scope)** Migrate `moda-agents` fleet to a pinned
    `team: eng-team@<version>` (§5.2 step 4).
 
 ---
