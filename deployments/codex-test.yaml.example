@@ -1,4 +1,16 @@
-# Throwaway MVP deployment: a Codex-brained agent on a dedicated Fly app (#485).
+# Manual example deployment: a Codex-brained agent on a dedicated Fly app (#485).
+#
+# This file is intentionally `.yaml.example`, not `.yaml`, so release
+# reconciliation does not deploy it by default. The old active `codex-test`
+# deployment mixed two independent validation concerns:
+#
+# 1. Codex as the agent brain.
+# 2. Local `team:` delivery over Fly SSH (`ssh-push`).
+#
+# Keep those as separate canaries/tests. This example remains useful for manual
+# Codex runtime experiments once a Slack app, login channel, and subscription
+# auth ceremony are intentionally wired.
+#
 # App name = <fleet>-<name> = ci-codex-test (fleet from deployments/defaults.yaml).
 #
 # ChatGPT-subscription auth: NO OPENAI_API_KEY in secrets — first boot runs the

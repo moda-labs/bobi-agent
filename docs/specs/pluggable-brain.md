@@ -335,12 +335,13 @@ unit-tested + shellcheck-clean:
 3. `provision-instance.sh`: `--brain` arg → `BOBI_BRAIN` in the instance
    `[env]`; brain-aware auth-key invariants + login fallback hint.
 
-**MVP deployment created:** `agents/codex-test/` (minimal Slack-only single-manager
-team, `brain: {kind: codex}` + `tool_library: [codex]`) and
-`deployments/codex-test.yaml` (app `ci-codex-test`, `auth: subscription`). Deploy
-is `bobi deploy codex-test --login-channel <private-channel>` once a Slack
-app + a Fly app + the ChatGPT device login are in place — the first boot runs the
-codex device-auth bootstrap.
+**MVP deployment example created:** `agents/codex-test/` (minimal Slack-only
+single-manager team, `brain: {kind: codex}`) and
+`deployments/codex-test.yaml.example` (app `ci-codex-test`,
+`auth: subscription`). It is intentionally example-only, not part of the release
+deploy matrix. Deploy manually with `bobi deploy codex-test --login-channel
+<private-channel>` once a Slack app, a Fly app, and the ChatGPT device login are
+in place — the first boot runs the codex device-auth bootstrap.
 
 (Alternative to the device-flow: provision `~/.codex/auth.json` directly as a
 volume file — the refresh token keeps it alive — if an interactive Slack ceremony

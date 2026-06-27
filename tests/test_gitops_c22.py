@@ -7,8 +7,9 @@ GitOps workflows. The shell helpers are exercised for real (bash subprocess with
 a stubbed `fleet_exists`, so no Fly calls); the workflows are parsed and
 asserted, so the load-bearing decisions break loudly if someone regresses them:
 
-  * deploy-agent-teams is a THIN CLIENT — the reconcile business logic lives in
-    `bobi deploy` (idempotent provision-or-update), not the YAML;
+  * deploy-agent-teams.yml.example is a THIN CLIENT for fleet repos — the
+    reconcile business logic lives in `bobi deploy` (idempotent
+    provision-or-update), not the YAML;
   * each instance is stamped BOBI_FLEET + BOBI_INSTANCE (the
     SaaS-extensible fleet/tenant keys — the app name is only a hint);
   * --blank provisions a team-less instance whose entrypoint waits for an
@@ -16,7 +17,8 @@ asserted, so the load-bearing decisions break loudly if someone regresses them:
   * the secret interface is per-key `<TEAM>__<KEY>` secrets in a per-tenant
     GitHub Environment, filtered from toJSON(secrets) (#385 — no opaque blob);
   * deletions never auto-deploy — orphaned apps surface for human destroy;
-  * release rollout builds one image and reuses it across the fleet.
+  * release rollout is canary-specific in this repo; fleet repos own generic
+    deployment reconciliation.
 
 The deploy ENGINE itself (config precedence, delivery selection, secret
 validation) is unit-tested in test_deploy.py.
@@ -36,7 +38,7 @@ PROVISION_SH = REPO / "scripts" / "provision-instance.sh"
 DESTROY_SH = REPO / "scripts" / "destroy-instance.sh"
 CANARY_SMOKE_SH = REPO / "scripts" / "canary-smoke.sh"
 HOMEBREW_SMOKE_SH = REPO / "scripts" / "smoke-homebrew-bottles.sh"
-WF_TEAMS = REPO / ".github" / "workflows" / "deploy-agent-teams.yml"
+WF_TEAMS = REPO / ".github" / "workflows" / "deploy-agent-teams.yml.example"
 WF_RELEASE = REPO / ".github" / "workflows" / "release.yml"
 
 
@@ -241,12 +243,20 @@ def _step_scripts(job: dict) -> str:
 
 
 def test_workflows_parse_and_actionlint_clean():
-    # Sanity: both load. (actionlint runs in CI; this guards YAML at least.)
+    # Sanity: release workflow and example workflow both load. (actionlint runs
+    # in CI for active workflows; this guards YAML at least.)
     assert _load(WF_TEAMS)["name"]
     assert _load(WF_RELEASE)["name"]
 
 
-# --- deploy-agent-teams.yml invariants (thin client over `bobi deploy`) -------
+# --- deploy-agent-teams.yml.example invariants (thin client over `bobi deploy`) -
+
+def test_framework_repo_does_not_register_generic_deploy_workflow():
+    """The framework repo release path owns only ci-canary. Generic
+    deployments/*.yaml reconciliation is example-only here and belongs in
+    fleet-owning repos such as moda-agents."""
+    assert not (REPO / ".github" / "workflows" / "deploy-agent-teams.yml").exists()
+    assert WF_TEAMS.exists()
 
 def test_teams_is_callable_and_not_release_triggered():
     """The reconcile is invoked by the release pipeline via workflow_call (so the
@@ -265,19 +275,14 @@ def test_teams_is_callable_and_not_release_triggered():
     assert "branches" not in (on.get("push") or {})
 
 
-def test_release_pipeline_deploys_teams_after_the_fleet_roll():
-    """The single gated pipeline ends by reconciling package content + secrets onto
-    the rolled image, by CALLING the reusable deploy-agent-teams workflow. Image
-    (roll-fleet) always precedes the package/secret reconcile."""
+def test_release_pipeline_does_not_run_generic_deployment_matrix():
+    """The framework release is canary-specific. It must not call the generic
+    deployments/*.yaml reconciler, because example/experimental deployments in
+    this repo should not silently become release gates."""
     jobs = _jobs(_load(WF_RELEASE))
-    assert "roll-fleet" in jobs
-    deploy_teams = jobs["deploy-teams"]
-    # ordered after the image roll and the Homebrew bottle smoke
-    assert deploy_teams["needs"] == ["roll-fleet", "update-homebrew"]
-    # reuses the standalone reconcile workflow (one implementation, two entry points)
-    assert deploy_teams["uses"] == "./.github/workflows/deploy-agent-teams.yml"
-    # forwards FLY_API_TOKEN + per-tenant Environment secrets to the called workflow
-    assert deploy_teams["secrets"] == "inherit"
+    assert "roll-fleet" not in jobs
+    assert "deploy-teams" not in jobs
+    assert "deploy-agent-teams.yml" not in yaml.dump(jobs)
 
 
 def test_teams_is_a_thin_client_no_business_logic_in_yaml():
@@ -358,8 +363,8 @@ def test_release_triggers_on_published_release():
 
 
 def test_release_builds_the_wheel_once_and_uploads_it():
-    """The wheel is built ONCE (build-wheel) and uploaded, so the canary, the fleet,
-    and PyPI all run the exact same artifact."""
+    """The wheel is built ONCE (build-wheel) and uploaded, so the canary and PyPI
+    run the exact same artifact."""
     jobs = _jobs(_load(WF_RELEASE))
     bw = jobs["build-wheel"]
     assert "python -m build" in _step_scripts(bw)
@@ -381,19 +386,16 @@ def test_release_canary_is_built_from_the_wheel_and_smoked():
     smoke = CANARY_SMOKE_SH.read_text()
     assert 'bobi agent \\"\\$BOBI_INSTANCE\\" ask' in smoke and "CANARY-OK" in smoke
     assert "aborting release" in smoke
-    # round-trips live config + resolves the built image digest (reused by roll-fleet)
+    # round-trips live config and swaps only the canary image.
     assert "config save" in script and "-c " in script and " -o " not in script
-    assert "registry.fly.io/" in script and "Digest" in script
 
 
-def test_release_publish_is_gated_on_the_canary_not_the_fleet_roll():
-    """PyPI is irreversible, so publish waits on the canary gate — but NOT on the
-    fleet roll, so a flaky non-canary instance can't block an already-proven
-    publish. Publish reuses the SAME artifact the canary ran (no rebuild)."""
+def test_release_publish_is_gated_on_the_canary():
+    """PyPI is irreversible, so publish waits on the canary gate. Publish reuses
+    the SAME artifact the canary ran (no rebuild)."""
     jobs = _jobs(_load(WF_RELEASE))
     publish = jobs["publish"]
     assert publish["needs"] == "build-canary"      # gated on the canary
-    assert publish["needs"] != "roll-fleet"        # NOT on the fleet roll
     assert publish["environment"] == "pypi"        # trusted-publishing env
     # publishes the proven bytes: downloads the artifact, never rebuilds
     assert "download-artifact" in _uses_blob(publish)
@@ -401,23 +403,15 @@ def test_release_publish_is_gated_on_the_canary_not_the_fleet_roll():
     assert any("pypi-publish" in (s.get("uses") or "") for s in _steps(publish))
 
 
-def test_release_reuses_canary_image_and_is_team_aware():
-    """roll-fleet reuses the canary's wheel image digest for generic instances; a
-    team-flavored instance rebuilds its OWN image from the wheel + its TEAM_DEPS
-    hook (rolling the generic image onto it would strip its baked tools, C24 #368)."""
-    roll = _jobs(_load(WF_RELEASE))["roll-fleet"]
-    assert roll["needs"] == "build-canary"
-    script = _step_scripts(roll)
-    assert "scripts/fleet.sh list" in script
-    assert "--image" in script                       # generic: reuse the digest
-    assert "render-team-deps.py" in script           # team-flavored detection
-    assert "TEAM_DEPS=" in script and "BOBI_BUILD=wheel" in script  # team rebuild from wheel
-    assert "config save" in script and "-c " in script and " -o " not in script
-
-
-def test_release_isolates_per_app_failures():
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["roll-fleet"])
-    assert "fails+=(" in script  # collect, don't abort the fleet
+def test_release_targets_only_the_ci_canary():
+    """The framework repo should build/smoke the permanent ci-canary, not scan the
+    whole ci fleet and pick another app."""
+    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-canary"])
+    assert '-canary' in script
+    assert "scripts/fleet.sh list" not in script
+    assert "render-team-deps.py" not in script
+    assert "scripts/canary-smoke.sh" in script
+    assert "bobi ui --app \"$canary\" --check" in script
     # load-bearing flags from the provisioner (one-volume + zstd boot bug)
     assert "--ha=false" in script
     assert "--depot=false" in script
@@ -428,14 +422,13 @@ def test_release_publishes_to_pypi_only_after_the_canary():
     (trusted publishing can't run from a reusable workflow), all behind the canary.
     The event server (a Cloudflare Worker, no dependency on the published wheel)
     deploys BEFORE the canary so event-server-only fixes are live when the canary
-    runs its functional gate against the live event bus; the canary therefore needs
-    deploy-event-server, while PyPI publish + the fleet roll stay gated on the
-    proven canary."""
+    runs its functional gate against the live event bus."""
     jobs = _jobs(_load(WF_RELEASE))
     assert jobs["deploy-event-server"]["needs"] == ["subscription-login-smoke", "build-wheel"]
     assert "deploy-event-server" in jobs["build-canary"]["needs"]
     assert jobs["update-homebrew"]["needs"] == "publish"
-    assert jobs["deploy-teams"]["needs"] == ["roll-fleet", "update-homebrew"]
+    assert "roll-fleet" not in jobs
+    assert "deploy-teams" not in jobs
 
 
 def test_release_smokes_homebrew_bottle_urls_after_dispatch():

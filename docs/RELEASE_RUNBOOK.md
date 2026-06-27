@@ -226,14 +226,6 @@ Expected:
 - `Delivering 1 event(s) to moda-director-project`
 - Slack `chat.postMessage` `200 OK`
 
-Optional cross-routing check:
-
-```bash
-fly logs -a ci-codex-test --no-tail | tail -n 100
-```
-
-The Eng Team marker should not appear in Codex Test logs.
-
 ## 6. Closeout
 
 Before handing off, capture:
