@@ -1,6 +1,6 @@
 """Integration tests for manager start/stop lifecycle.
 
-Exercises the full bobi start → status → stop cycle via the CLI
+Exercises the full named start → status → stop cycle via the CLI
 against the isolated install. Requires the `claude` CLI.
 """
 

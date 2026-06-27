@@ -1,4 +1,4 @@
-"""Tests for the `bobi ui` agent dashboard server — security, the agent
+"""Tests for the Bobi Agent dashboard server — security, the agent
 cards, and the blocking chat endpoint. Driven by Starlette's TestClient with
 injected `registry_fn`/`deliver_fn`: no live team, no event server."""
 

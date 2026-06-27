@@ -74,7 +74,7 @@ class TestDeterministicBodies:
 
     def test_venn_services_declare_the_shared_key(self):
         # A team using Venn-backed services must declare venn_api_key so
-        # `bobi start` resolves it from the env / .env (else preflight
+        # Named start resolves it from the env / .env (else preflight
         # fails "venn — no API key" despite the key being set).
         s = SetupState(team_name="inbox-monitor")
         s.spec.goal = "Watch the inbox."

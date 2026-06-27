@@ -3,7 +3,7 @@
 _resolve_address("manager") used to look up the literal role "manager" —
 any pack whose entry point has a different role name (research_manager,
 director, ...) had a broken interactive loop: the session was running
-with a live inbox, but `bobi ask` reported "No active manager
+with a live inbox, but the named ask command reported "No active manager
 session found". Found live-testing the market-research pack.
 """
 

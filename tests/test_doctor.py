@@ -1,4 +1,4 @@
-"""Tests for bobi doctor health checks."""
+"""Tests for named doctor health checks."""
 
 from pathlib import Path
 from unittest.mock import patch

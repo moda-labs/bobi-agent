@@ -1,4 +1,4 @@
-"""Integration tests for bobi kb — end-to-end with real embedding model.
+"""Integration tests for named KB commands — end-to-end with real embedding model.
 
 Exercises the full KB lifecycle: create, add (text + file), search (FTS +
 hybrid), info, list, and remove. The embedding sidecar auto-starts on first
@@ -204,4 +204,4 @@ class TestEmbeddingSidecar:
                 alive = True
             except ProcessLookupError:
                 alive = False
-            assert not alive, "Sidecar should be dead after bobi stop"
+            assert not alive, "Sidecar should be dead after stopping the agent"

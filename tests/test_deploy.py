@@ -430,7 +430,7 @@ def test_outage_unset_required_secret_is_restored_on_update(repo, recorder, monk
 def test_existing_app_syncs_reconciled_secrets_to_volume_env(repo, recorder,
                                                             monkeypatch):
     """A rotated Fly secret must also refresh the persisted volume .env. Codex
-    tool shells can lose inherited env and fall back to .bobi/.env, so Fly
+    tool shells can lose inherited env and fall back to run/.env, so Fly
     secrets alone are not enough (#501)."""
     monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
     monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
@@ -446,7 +446,7 @@ def test_existing_app_syncs_reconciled_secrets_to_volume_env(repo, recorder,
         c for c in recorder
         if "ssh" in c["cmd"] and "/opt/venv/bin/python -c" in " ".join(c["cmd"])
     ]
-    assert syncs, "expected deploy to refresh /data/project/.bobi/.env"
+    assert syncs, "expected deploy to refresh the volume run/.env"
     payload = json.loads(syncs[0]["input"].decode())
     assert payload["set"]["SLACK_BOT_TOKEN"] == "xoxb-new"
     assert payload["set"]["ANTHROPIC_API_KEY"] == "sk-ant"

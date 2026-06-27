@@ -264,7 +264,7 @@ Target: `bobi/setup/webui/static/app.css` + `index.html` + `app.js`.
       keep the switch as clay-only for now).
 - [ ] Swap the titlebar/rail `.brand .mk` glyph for the centered probe mark (§1);
       set chip bg `#201A14`.
-- [ ] Update wordmark text `bobi → bobi` (keep `setup` qualifier).
+- [ ] Update wordmark text to `Bobi` (keep `setup` qualifier).
 - [ ] Re-point slab tokens to the warm-void values (no violet undertone).
 - [ ] Ship `bobi-mark.svg` as favicon; update `<title>`.
 - [ ] Verify retro-on and retro-off both read; check focus rings and `--ok`/`--err`.

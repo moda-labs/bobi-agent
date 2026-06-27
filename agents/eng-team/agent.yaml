@@ -30,7 +30,7 @@ services:
       # share one workspace (each app signs with its own secret).
       signing_secret: ${SLACK_SIGNING_SECRET}
 
-# Host-level dependencies. Checked by `bobi doctor` and enforced
+# Host-level dependencies. Checked by `bobi agent <name> doctor` and enforced
 # at dispatch time — agents cannot launch if a required dep is broken.
 # Core requires only the GitHub CLI (its default tracker interface); an
 # overlay appends its own toolchain (review/QA/codegen) via list-merge.
@@ -38,7 +38,7 @@ requires:
   - name: gh
     why: "GitHub CLI — the primary interface for issues, PRs, and CI status (tools/github.md). Auth via GH_TOKEN."
     check: "command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1"
-    fix: "see https://cli.github.com/manual/installation (apt repo or binary); authenticate by setting GH_TOKEN in .bobi/.env"
+    fix: "see https://cli.github.com/manual/installation (apt repo or binary); authenticate by setting GH_TOKEN in run/.env"
 
 # Container build (C24 team-flavored images): bake the host tools the `requires`
 # gate above demands into a per-team image, so a dark Fly instance can actually

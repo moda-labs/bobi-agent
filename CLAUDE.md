@@ -21,58 +21,60 @@ pip install -e ".[dev]"
 ## Commands
 
 ```bash
-bobi setup                   # interactive onboarding: design, build, and install a team
-bobi install <path>          # install an agent team from a local path or registry
-bobi start                   # start the installed agent
-bobi stop                    # stop the running instance
-bobi restart                 # stop and restart
-bobi start --fresh           # wipe session and start clean
-
-bobi agents launch -w W --role R --task T  # launch an agent
-bobi agents list             # list active agents
-bobi agents show <id>        # inspect a specific agent
-bobi agents cancel <id>      # cancel a running agent
-bobi agents browse           # browse remote agent registry
-bobi agents update <name>    # update agent teams from remote
+bobi setup                              # interactive onboarding
+bobi agents install <path> --name <name> # install a Bobi Agent package
+bobi agents list                       # list installed Bobi Agents
+bobi agents browse                     # browse remote agent registry
+bobi agents update <name>              # update agent packages from remote
 bobi agents add-registry <repo>  # add a remote registry
 
-bobi ask "question"          # ask an agent, block until response
-bobi message "text"          # inject a message into any session
-bobi compact                 # flush + rotate a session's context now (default: manager)
-bobi status                  # show active agents
-bobi events                  # show recent events and decisions
-bobi transcript show <sess>  # session transcript
-bobi transcript search <q>   # search conversation history
-bobi doctor                  # system health check
+bobi agent <name> start             # start the named Bobi Agent
+bobi agent <name> stop              # stop the running instance
+bobi agent <name> restart           # stop and restart
+bobi agent <name> start --fresh     # wipe session and start clean
+bobi agent <name> status            # show manager and sub-agent status
+bobi agent <name> doctor            # system health check
 
-bobi workflows list          # list available workflows
-bobi workflows status        # show active workflow runs
-bobi workflows validate <f>  # validate a workflow YAML
-bobi monitors list           # list background monitors
-bobi monitors add <name>     # add a monitor
-bobi monitors pause <name>   # disable a monitor
-bobi monitors remove <name>  # remove a user-added monitor
-bobi roles list              # list available agent roles
-bobi create-slack-bot        # generate a Slack app manifest + one-click create link
+bobi agent <name> subagents launch -w W --role R --task T
+bobi agent <name> subagents list
+bobi agent <name> subagents show <id>
+bobi agent <name> subagents cancel <id>
 
-bobi kb create <name>        # create a named knowledge base
-bobi kb add <name> --file F  # index a file into a KB
-bobi kb add <name> --text T  # add inline text to a KB
-bobi kb search <name> "q"    # hybrid FTS + semantic search
-bobi kb list                 # list all knowledge bases
-bobi kb info <name>          # show KB statistics
-bobi kb remove <name>        # delete a knowledge base
+bobi agent <name> ask "question"    # ask the manager, block until response
+bobi agent <name> message "text"    # inject a message into a session
+bobi agent <name> compact           # flush + rotate a session's context
+bobi agent <name> events            # recent events and decisions
+bobi agent <name> transcript show <sess>
+bobi agent <name> transcript search <q>
 
-bobi costs                   # show cost attribution by provider
-bobi costs --by model        # group by model
-bobi costs --by role         # group by agent role
-bobi costs --by session      # group by session
+bobi agent <name> workflows list
+bobi agent <name> workflows status
+bobi agent <name> workflows validate <f>
+bobi agent <name> monitors list
+bobi agent <name> monitors add <monitor>
+bobi agent <name> monitors pause <monitor>
+bobi agent <name> monitors remove <monitor>
+bobi agent <name> roles list
+
+bobi agent <name> kb create <kb>
+bobi agent <name> kb add <kb> --file F
+bobi agent <name> kb add <kb> --text T
+bobi agent <name> kb search <kb> "q"
+bobi agent <name> kb list
+bobi agent <name> kb info <kb>
+bobi agent <name> kb remove <kb>
+
+bobi agent <name> costs
+bobi agent <name> costs --by model
+bobi agent <name> costs --by role
+bobi agent <name> costs --by session
 
 bobi skill                   # print the bobi usage guide
 bobi skill <name>            # print a specific skill guide
 
-bobi event-server start      # start the local event server
-bobi event-server stop       # stop the local event server
+bobi create-slack-bot        # generate a Slack app manifest + one-click create link
+bobi agent <name> event-server start      # start the local event server
+bobi agent <name> event-server stop       # stop the local event server
 ```
 
 ## Architecture
@@ -85,7 +87,7 @@ webhook ingestion for GitHub, Linear, Slack, and any custom source.
 ```
 bobi/                        # Framework (Python package)
 ├── cli.py                        # Click CLI entrypoint
-├── config.py                     # Per-project config (.bobi/agent.yaml)
+├── config.py                     # Runtime config (run/package/agent.yaml)
 ├── session.py                    # Brain session + inbox drain loop
 ├── subagent.py                   # Agent executor (blocking + detached)
 ├── sdk.py                        # Session registry, activity logging
@@ -119,7 +121,7 @@ bobi/                        # Framework (Python package)
     ├── checks.py                 # Native check runners (pr_conflicts, stale_prs)
     └── scheduler.py              # Interval scheduler; sole dedup + publish path for findings
 
-skills/                           # Claude Code skill files (also in bobi/skills/ as package data)
+skills/                           # Canonical Claude Code skill files
 ├── create-agent.md               # Guide for designing new agent teams
 ├── bobi.md                  # Guide for using bobi
 ├── linear-setup.md               # Linear API key setup
@@ -144,20 +146,22 @@ agents/                           # Agent teams (portable agent definitions)
                                   # Moda's house team = `from: eng-team` +
                                   # overlay, in the private moda-agent-teams repo.
 
-.bobi/                       # Per-project installed agent + runtime state
-├── agent.yaml                    # Installed config (check-in-able, ${VAR} refs for secrets)
-├── .env                          # Secrets (gitignored, created by `bobi install`)
-├── .gitignore                    # Ignores .env
-├── roles/                        # Installed role prompts
-├── tools/                        # Installed tool guides
-├── workflows/                    # Installed + project workflows
-├── monitors/                     # Installed + project monitors
-├── context/                      # Installed reference files (read on demand)
-├── sessions/                     # Agent session state
-└── state/                        # PID files, logs, event server state
-
-workspace/                        # User-owned domain files + agent work products
-                                  # (seeded once from the team's workspace/)
+$BOBI_HOME/                       # Defaults to ~/.bobi; env-var configurable
+├── config.yaml                   # Machine-level registry/config
+├── cache/                        # Registry packages and build artifacts
+└── agents/<name>/
+    ├── src/                      # Editable Bobi Agent source by default
+    └── run/                      # Runtime root, exported as BOBI_ROOT
+        ├── package/              # Frozen installed package
+        │   ├── agent.yaml
+        │   ├── roles/
+        │   ├── tools/
+        │   ├── workflows/
+        │   ├── monitors/
+        │   └── context/
+        ├── state/                # Sessions, pid files, logs, policy, KBs
+        ├── workspace/            # User-owned domain files and outputs
+        └── .env                  # Runtime credentials
 ```
 
 ### Agent teams
@@ -166,15 +170,16 @@ A portable bundle of role prompts, workflows, monitors, and tool guides.
 Teams are the distribution unit — install one and get a working agent
 for a domain.
 
-**Resolution order:**
-1. `<project>/agents/<name>/` — project-level (checked in)
-2. `<project>/.bobi/agents/<name>/` — local agents (overrides + cached)
+**Resolution order.** An install source can be a local source directory,
+local `.tar.gz`, public `.tar.gz` URL, or registry name. Registry packages are
+cached under `$BOBI_HOME/cache/agents/`; installed named agents live under
+`$BOBI_HOME/agents/<name>/`.
 
 **Inheritance (`from:`).** A team may declare `from: <base-team>` and contribute
 only its delta — Docker-style composition (`bobi/compose.py`, #446/#451). At
 **install/deploy time**, compose walks the `from:` chain (`base → … → leaf`,
 local-always-wins + fail-fast on a pin mismatch) and freezes one flat
-`.bobi/` image: prose surfaces (agent.md, ROLE.md) **concatenate** in chain
+`run/package/` image: prose surfaces (agent.md, ROLE.md) **concatenate** in chain
 order (`replace: true` frontmatter to override); structured surfaces (tools,
 workflows, monitors, agent.yaml) **deep-merge by key** (`build` deps accrete,
 `prune:` removes inherited items). Nothing downstream learns about layers — the
@@ -184,9 +189,9 @@ registry-only at locked versions for reproducible CI/deploy. The pristine
 `from: eng-team` + an overlay in the private `moda-agent-teams` repo.
 
 **Role prompts** are read by the runtime resolver from the frozen
-`<project>/.bobi/roles/<role>/ROLE.md` — which is now compose **output**.
-Customize by editing the leaf team source (or adding a `replace: true` overlay
-ROLE.md), not by dropping an override into `.bobi/`.
+`$BOBI_HOME/agents/<agent>/run/package/roles/<role>/ROLE.md` — which is compose
+**output**. Customize by editing the leaf team source (or adding a
+`replace: true` overlay ROLE.md), then reinstall.
 
 **Tools** are markdown service guides in `tools/`. All tools load into
 every role's context. In a `from:` chain, later layers' tools override
@@ -204,21 +209,21 @@ consumed at compose and never emitted. See `docs/specs/416-tool-library.md`.
 
 **Context** files in `context/` are team-shipped reference content
 (rubrics, methodology, examples). Installed frozen to
-`.bobi/context/`; agents get an index (path + first line) in their
+`run/package/context/`; agents get an index (path + first line) in their
 prompt and read files on demand — contents are never inlined.
 
 **Workspace** files in `workspace/` are user-owned domain content and
-agent work products. Install seeds `<project>/workspace/` from the
-team's `workspace/` — each file is copied only if absent, so reinstall
-never overwrites user edits. What lives there is defined by role
-prompts, not the framework.
+agent work products. Install seeds
+`$BOBI_HOME/agents/<agent>/run/workspace/` from the team's `workspace/` — each
+file is copied only if absent, so reinstall never overwrites user edits. What
+lives there is defined by role prompts, not the framework.
 
 ### Workflows
 
 YAML DAGs with three step types: **prompt** (agent executes + writes
 handoff), **route** (deterministic branch on handoff value), **await**
 (suspend until external event). Loaded exclusively from the installed
-pack image at `.bobi/workflows/`.
+pack image at `run/package/workflows/`.
 
 See `skills/create-agent.md` for the full YAML reference.
 
@@ -237,7 +242,7 @@ The **`policy-curator`** (`curator: true`) is the one flavor whose check
 agent **writes an artifact** instead of returning a verdict: it distills new
 agent transcripts (windowed on `messages.id` since a success-advanced cursor,
 under a per-run input cap) into the team-scoped, capped, rewritten-in-place
-`.bobi/state/policy.md` — the curated learning substrate that replaces the
+`run/state/policy.md` — the curated learning substrate that replaces the
 old append-only decision log, injected read-only into every agent's prompt as
 `## Team Policy`. On a rewrite it publishes `policy.updated`; delivery is
 passive by default (agents re-read on their next prompt), with an inbox push
@@ -251,7 +256,7 @@ the one inside it structurally cannot (#464):
 ```
 Fly Machines init (machine restart policy)     ← outermost backstop (process death)
   └─ bobi supervise (self-heal watchdog)   ← restarts a wedged DIRECTOR
-       └─ bobi start (manager process)
+       └─ bobi agent <name> start (manager process)
             └─ director session (claude subprocess)
                  └─ stall-recovery (director→ENGINEER)  ← restarts wedged engineers
 ```
@@ -276,26 +281,25 @@ Fly Machines init (machine restart policy)     ← outermost backstop (process d
 ### Handoff contract
 
 Each workflow step writes a handoff to
-`<project>/.bobi/sessions/<session>/handoff-<step>.yaml`.
+`$BOBI_HOME/agents/<agent>/run/state/sessions/<session>/handoff-<step>.yaml`.
 The orchestrator validates required fields and injects values into
 the variable context for downstream steps.
 
 ### Config
 
-All config is per-project. No global `~/.bobi/` directory — each
-project is fully self-contained.
+`BOBI_HOME` is the single low-level home root. It is configurable only by
+environment variable and defaults to `~/.bobi`. Runtime identity is selected
+by the named-agent CLI or inherited `BOBI_ROOT`; code does not infer a Bobi
+Agent from the current working directory.
 
-- `.bobi/agent.yaml` — check-in-able. Declares agent, roles,
-  services, entry point, monitors. Secrets use `${ENV_VAR}` references.
-  Optional `brain: {kind: claude|codex|…}` picks the agent brain (#485;
-  default claude).
-- `.bobi/.env` — gitignored. Holds `SLACK_BOT_TOKEN`,
-  `LINEAR_API_KEY`, `VENN_API_KEY`, etc. Created by `bobi install`.
-- `.bobi/roles/`, `tools/`, `workflows/`, `monitors/` — installed
-  from the agent team by `bobi install`.
-
-Per-project overrides in `.bobi/` for roles, workflows, monitors,
-and tools.
+- `$BOBI_HOME/config.yaml` — machine-level registry/config.
+- `run/package/agent.yaml` — frozen installed package config. Declares agent,
+  roles, services, entry point, monitors, and `${ENV_VAR}` references.
+- `run/.env` — runtime credentials for that named agent. Created by
+  `bobi agents install`.
+- `run/package/roles/`, `tools/`, `workflows/`, `monitors/`, `context/` —
+  generated install output. Edit source in `src/` or another explicit source
+  directory and reinstall.
 
 ## Tests
 

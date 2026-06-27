@@ -1,6 +1,6 @@
 version: "1.0.0"
 
-# Entry point role for `bobi start`.
+# Entry point role for `bobi agent <name> start`.
 entry_point: assistant
 chat: slack
 max_concurrent_agents: 3

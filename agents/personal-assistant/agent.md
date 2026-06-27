@@ -61,7 +61,7 @@ dependency (`requires:`) and is baked into the team's container image
 
 The two watch monitors are proactive by design but gated hard against noise
 and silenced during quiet hours (see `assistant-context.md`). Pause either
-in `.bobi/monitors.yaml` if you want a purely reactive assistant.
+in `run/package/monitors.yaml` if you want a purely reactive assistant.
 
 ## The autonomy policy
 

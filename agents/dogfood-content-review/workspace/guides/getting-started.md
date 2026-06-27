@@ -16,36 +16,29 @@ uv tool install bobi
 
 ## Setup
 
-1. Navigate to your repo:
+1. Install an agent team into a named machine-wide slot:
    ```bash
-   cd ~/dev/your-repo
+   bobi agents install eng-team --name eng
    ```
 
-2. Install an agent team (from the directory that will own the
-   installation — this creates the single `.bobi/` with
-   `agent.yaml` inside):
+2. Start the manager:
    ```bash
-   bobi install eng-team
+   bobi agent eng start
    ```
 
-3. Start the manager:
+3. Verify it's running:
    ```bash
-   bobi start
-   ```
-
-4. Verify it's running:
-   ```bash
-   bobi status
+   bobi agent eng status
    ```
 
 ## First task
 
 1. Create a GitHub issue in your repo with the `agent` label
 2. The manager picks it up and runs the appropriate workflow
-3. Watch progress with `bobi log manager`
+3. Watch progress with `bobi agent eng transcript show manager`
 
 ## Troubleshooting
 
-- **"no Bobi installation found"**: run from inside the installation tree — the directory where `bobi install` created `.bobi/agent.yaml`
-- **Manager not responding**: Check `bobi doctor` for diagnostics
-- **No events arriving**: Verify event server with `bobi event-server status`
+- **"No Bobi Agent runtime selected"**: use a named command such as `bobi agent eng status`
+- **Manager not responding**: check `bobi agent eng doctor` for diagnostics
+- **No events arriving**: verify the event server with `bobi agent eng event-server status`

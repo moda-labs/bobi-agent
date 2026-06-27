@@ -200,7 +200,7 @@ CHECKS = {
 
 @dataclass
 class BobiInstall:
-    """Paths and ports for an isolated bobi installation."""
+    """Paths and ports for an isolated Bobi home."""
     repo_path: Path
     state_dir: Path
     sessions_dir: Path
@@ -210,7 +210,7 @@ class BobiInstall:
 
 @pytest.fixture
 def bobi_install(tmp_path, monkeypatch):
-    """Create a fully isolated bobi installation in a temp directory.
+    """Create a fully isolated Bobi home in a temp directory.
 
     Binds a canonical runtime root under BOBI_HOME so tests never touch the
     user's real ~/.bobi directory.

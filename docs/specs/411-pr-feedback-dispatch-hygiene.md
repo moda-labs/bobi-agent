@@ -507,9 +507,9 @@ cd event-server && <adapter test cmd>                          # adapter field t
 8. Workflow (e, #412): add the approval-gated `route` + `await` between the spec and implement steps in
    `agents/eng-team/workflows/issue-lifecycle.yaml` (advance only on `reviewDecision == APPROVED`;
    fail-closed on unresolved). Write the failing workflow-routing test first (confirm red), then wire
-   the route. Run `bobi workflows validate`.
+   the route. Run `bobi agent <name> workflows validate`.
 9. Extend the integration test (including the #423 / self-cascade case); run full suite +
-   `bobi workflows validate`.
+   `bobi agent <name> workflows validate`.
 10. `/review`; fix everything it finds.
 11. Open the impl PR against `main` (it — not this spec PR — carries `Fixes #411` and `Fixes #412`).
 

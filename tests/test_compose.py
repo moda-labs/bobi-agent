@@ -612,7 +612,7 @@ def test_reinstall_drops_stale_surface_files(tmp_path, monkeypatch):
 
 def test_reinstall_keeps_uncontributed_project_dirs(tmp_path, monkeypatch):
     """A surface NO layer contributes is left untouched on reinstall — so a
-    project-added `.bobi/workflows/*.yaml` survives (pre-compose semantics)."""
+    runtime-added `run/package/workflows/*.yaml` survives."""
     from bobi.cli import _install_pack
     proj = tmp_path
     (proj / "agents").mkdir()
@@ -632,7 +632,7 @@ def test_reinstall_keeps_uncontributed_project_dirs(tmp_path, monkeypatch):
 
 
 def test_install_versioned_from_team_fetches_base_from_registry(tmp_path, monkeypatch):
-    """The end-to-end new-system path: `bobi install over@2.0.0` for a team
+    """The end-to-end new-system path: installing `over@2.0.0` for a team
     whose agent.yaml declares `from: core@1.0.0` composes by fetching the
     *versioned base* from the registry — proving versioned tarballs (#440),
     resolution (#446) and merge (#451) work together for install/setup.

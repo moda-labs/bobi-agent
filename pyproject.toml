@@ -68,6 +68,9 @@ packages = ["bobi"]
 "event-server/package.json" = "bobi/event-server/package.json"
 "event-server/package-lock.json" = "bobi/event-server/package-lock.json"
 "event-server/tsconfig.json" = "bobi/event-server/tsconfig.json"
+# Author skill guides once at repo-root skills/. Wheels receive those
+# exact files under bobi/skills/ so `bobi skill ...` works without a checkout.
+"skills" = "bobi/skills"
 # Agent teams are NOT bundled into the wheel — they are versioned packages
 # fetched from the registry (`name@version`, #440/#446/#451). Baking a frozen
 # copy into the framework wheel would pin a team to the framework release and
@@ -92,7 +95,7 @@ packages = ["bobi"]
 # Agent teams are deliberately NOT shipped in the distribution (wheel or sdist) —
 # they're fetched from the registry as versioned packages (see the wheel
 # force-include note above).
-include = ["bobi", "event-server", "Dockerfile", "docker",
+include = ["bobi", "event-server", "skills", "Dockerfile", "docker",
            "scripts", "README.md", "CHANGELOG.md"]
 exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
 

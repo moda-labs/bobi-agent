@@ -5,7 +5,7 @@ non-root agent, no Node, native `claude` CLI on PATH, fastembed model baked in,
 and the entrypoint's auth-mode guards. They build the image once per session.
 
 The full acceptance criterion — a `docker run` reaching a healthy manager that
-completes one `bobi ask` round-trip against the real API — needs live
+completes one named ask round-trip against the real API — needs live
 credentials and is covered by ``test_image_ask_roundtrip`` (skipped unless
 ANTHROPIC_API_KEY is present).
 
@@ -262,7 +262,7 @@ SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "smoke-team"
 @pytest.mark.timeout(600)
 def test_image_ask_roundtrip(image: str, tmp_path: Path):
     """C8 acceptance, live: an empty volume + api_key auth + a reachable event
-    server reaches a healthy manager that completes one `bobi ask`
+    server reaches a healthy manager that completes one named ask
     round-trip against the real API.
 
     Spins up an EPHEMERAL event server (the real Worker code via `wrangler dev`,

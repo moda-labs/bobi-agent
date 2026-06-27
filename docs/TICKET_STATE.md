@@ -9,14 +9,14 @@ file is the single place to get the lay of the land without re-reading every
 issue, so prefer compact state summaries over ticket-level detail.
 
 - **Last reviewed:** 2026-06-26 (**17 open issues, 1 open PR** — #538 for #526 is open; reconciled against live GitHub after the bobi rename PR merged. Active clusters: **Unified agent dashboard** (#525 design + #526/#527/#528/#529 prep), **runtime/fleet bugs** (#518/#520), **brain/runtime portability** (#485/#484/#481), **Tool library** (#515 with #428/#398 ready), **User accounts** (#239), **Containerization** (#395), **Chat SDK** (#190), and release protocol compatibility (#427). Since the prior review, #479/#489/#496/#498/#507/#513/#519/#521/#530 closed; #526-#529 remain dashboard-independent prep tickets.)
-- **Prev reviewed:** 2026-06-26 (**28 open issues** — filed the **Unified agent dashboard** track: design record **#525** (merge `bobi setup` + `bobi ui` into one dashboard → onboarding → monitor app) plus four **do-now prep carve-outs** that are good regardless of the dashboard and shrink the eventual merge PR: **#526** canonical `~/.bobi/agents/<team>/` directory layout, **#527** shared web-server harness, **#528** consolidated design tokens, **#529** service-core extraction (CLI + web as thin adapters). The frontend-framework decision (vanilla vs lightweight framework) gates the *merge*, not the prep. New track added to "Tracks at a glance".)
+- **Prev reviewed:** 2026-06-26 (**28 open issues** — filed the **Unified agent dashboard** track: design record **#525** (merge `bobi setup` + `bobi agent <name> ui` into one dashboard → onboarding → monitor app) plus four **do-now prep carve-outs** that are good regardless of the dashboard and shrink the eventual merge PR: **#526** canonical `~/.bobi/agents/<team>/` directory layout, **#527** shared web-server harness, **#528** consolidated design tokens, **#529** service-core extraction (CLI + web as thin adapters). The frontend-framework decision (vanilla vs lightweight framework) gates the *merge*, not the prep. New track added to "Tracks at a glance".)
 - **Prev reviewed:** 2026-06-25 (**16 open issues** — filed #515 as the Tool library epic and cleaned #428/#398 into shovel-ready implementation tickets; #493 and #499 closed while reconciling. Earlier today: consolidated containerization into #395 and closed #378/#215/#394 as duplicate tracking tickets; split #239 out as **User accounts**; collapsed Chat SDK into #190 and closed #201/#202/#203/#204; #488 closed after PR #491. Active clusters: Codex-brain rollout (#485 plus #479/#484/#481/#498/#507/#513), Tool library (#515 with #428/#398 ready), user accounts (#239), shared event-server hardening (#489), and Slack event polish (#496). **PR state:** #489/#496/#498/#507 have PRs up; #513/#428/#398 are status:todo; #481 is assigned and moving. **Closed/stale table refs corrected:** #416, #456, #327, #378, #394, #215, #488, #493, #499 are closed; #501/#502 remain closed in 0.34.1.)
-- **Prev reviewed:** 2026-06-25 (**23 open issues after closing #501/#502** — 0.34.1 bugfix release cut from #500/#503. **Closed:** #501 stale persisted `.bobi/.env` secrets on Fly volumes, and #502 Slack workspace-level DM cross-delivery between bots. Both shipped in PR #503; #500 shipped the Codex shell PATH fix.)
-- **Prev reviewed:** 2026-06-25 (**25 open issues** — filed live Codex fleet incident follow-ups: **#501** stale persisted `.bobi/.env` secrets on Fly volumes can make tool shells use the wrong Slack bot, and **#502** workspace-level Slack DM routing can cross-deliver inbound events between bots. #501 is outbound credential drift; #502 is inbound webhook routing isolation.)
+- **Prev reviewed:** 2026-06-25 (**23 open issues after closing #501/#502** — 0.34.1 bugfix release cut from #500/#503. **Closed:** #501 stale persisted `run/.env` secrets on Fly volumes, and #502 Slack workspace-level DM cross-delivery between bots. Both shipped in PR #503; #500 shipped the Codex shell PATH fix.)
+- **Prev reviewed:** 2026-06-25 (**25 open issues** — filed live Codex fleet incident follow-ups: **#501** stale persisted `run/.env` secrets on Fly volumes can make tool shells use the wrong Slack bot, and **#502** workspace-level Slack DM routing can cross-deliver inbound events between bots. #501 is outbound credential drift; #502 is inbound webhook routing isolation.)
 - **Prev reviewed:** 2026-06-24 (**17 open issues** — filed **epic #485 "Pluggable agent brain"** (Claude/Codex/Gemini/Grok behind one `BrainClient`; spec `pluggable-brain.md`; Phase 0 Codex spike done). Self-contained epic — work breakdown is in-issue checkboxes, no child tickets. New track added to "Tracks at a glance".)
 - **Prev reviewed:** 2026-06-24 (**16 open issues** — full table reconciliation against `gh issue list` + Linear. Header had been bumped for the #453 cutover but the body tables still showed the 2026-06-22 state; this pass fixes that. **Closed since last real table refresh, moved to "Recently closed":** #285, #397, #403, #411, #412, #417, #418, #425, #426, #433, #443, #454 — i.e. the **CLI-first cleanup track, the Codex track, and the Reliability track are all DONE**. **New tracks added:** Tool/Capability library (#416 cli, #428 skill, #398 mcp) and a curator-monitor one-off (#456, assigned to `bobi`). **Linear sync gap flagged:** MDS-47/48/49 still Backlog but their GitHub twins (#285, #363) are closed — they describe the retired gateway-harness/MCP-shim architecture; epic MDS-42 likely needs re-scoping.)
 - **Prev reviewed:** 2026-06-24 (15 open issues. **Epic #453 "Team distribution & composition" — ✅ DONE + CUTOVER LIVE**; #440/#446/#451/#452/#453 all CLOSED. bobi 0.31.0 ships `from:` composition; live `moda-eng-team` runs the composed team. _(prior:_ **PR [#457](https://github.com/moda-labs/bobi-agent/pull/457)** (`epic-453-team-compose`). #446 + #451 = the `from:` compose mechanism (`bobi/compose.py`: resolution local-always-wins + fail-fast + `--pinned`; merge prose-concat + structured-deep-merge; deploy flatten; publish guard; 34 tests). #452 = pristine `agents/eng-team-core` extracted + monolith `agents/eng-team` DELETED + tests re-pointed; **regression bar met** (composed moda-eng-team ≡ today's eng-team). Overlay `moda-eng-team` (`from: eng-team-core`) committed to **private moda-agent-teams** branch `moda-eng-team-overlay` (additive; live app untouched). Full unit suite green (2116). **Remaining = the release-gated CUTOVER**: merge #457 → cut a bobi release (publishes `eng-team-core@1.0.0` to the registry) → merge the moda-agent-teams overlay PR → flip `deployments/eng-team.yaml` to `team: moda-eng-team` + delete the private monolith + deploy. Specs: `team-from-resolution.md`, `team-compose-merge.md`, `eng-team-core-split.md`.)
-- **Prev reviewed:** 2026-06-22 (after **v0.28.0 released** — #409/#326/#321/#329/#323/#325 shipped + CLOSED; 23 open issues; **#425 filed** = resume-wedge bug; **#426/#427 filed** from the release.yml review (#426 = deploy-event-server concurrency tweak, #427 = lib↔event-server protocol compat); **#433 filed + PR #434** = context-rotation metric bug (measured input_tokens only → never fired under prompt caching; manager ran to ~424K) + new `bobi compact`; **#440 filed + ASSIGNED to `bobi`** = registry-based team install/deploy via versioned `name@version` packages (single-source-of-truth enabler for eng-team); assigned to `bobi`: #285/#397/#426/#440)
+- **Prev reviewed:** 2026-06-22 (after **v0.28.0 released** — #409/#326/#321/#329/#323/#325 shipped + CLOSED; 23 open issues; **#425 filed** = resume-wedge bug; **#426/#427 filed** from the release.yml review (#426 = deploy-event-server concurrency tweak, #427 = lib↔event-server protocol compat); **#433 filed + PR #434** = context-rotation metric bug (measured input_tokens only → never fired under prompt caching; manager ran to ~424K) + new `bobi agent <name> compact`; **#440 filed + ASSIGNED to `bobi`** = registry-based team install/deploy via versioned `name@version` packages (single-source-of-truth enabler for eng-team); assigned to `bobi`: #285/#397/#426/#440)
 - **How to refresh:** `gh issue list --state open --limit 200` → reconcile the
   tables below; update "Last reviewed" and the open-count.
 
@@ -62,7 +62,7 @@ apps in one workspace.
 
 | Issue | What | Status |
 |---|---|---|
-| #501 | Deploy reconcile leaves stale `.bobi/.env` secrets on Fly volume | ✅ **CLOSED — fixed in PR #503 / release 0.34.1.** Existing-app deploy now syncs reconciled Fly secrets into `/data/project/.bobi/.env` and removes pruned keys from that file. |
+| #501 | Deploy reconcile leaves stale `run/.env` secrets on Fly volume | ✅ **CLOSED — fixed in PR #503 / release 0.34.1.** Existing-app deploy now syncs reconciled Fly secrets into `/data/project/run/.env` and removes pruned keys from that file. |
 | #502 | Slack workspace-level DM routing can cross-deliver events between bots | ✅ **CLOSED — fixed in PR #503 / release 0.34.1.** Slack events and subscriptions now use app-qualified topics (`slack:<team>:app:<app>`) so DMs route to the matching Slack app. |
 
 ## Codex brain rollout / runtime portability — epic #485
@@ -146,7 +146,7 @@ Account/user identity is tracked separately in #239.
 
 | Issue | What | Status |
 |---|---|---|
-| #395 | Containerization: deployed instances and scale | 🟡 **OPEN EPIC.** Owns build-once team images, `bobi remote`/attach tooling, loop circuit breaker, spend governor, and per-deployment identity follow-ups. Deferred until there is a real scale/debug/safety driver. |
+| #395 | Containerization: deployed instances and scale | 🟡 **OPEN EPIC.** Owns build-once team images, remote attach tooling, loop circuit breaker, spend governor, and per-deployment identity follow-ups. Deferred until there is a real scale/debug/safety driver. |
 | #378 / #215 / #394 | Former child tickets for build-once images, loop-safety, and remote attach | ✅ **CLOSED 2026-06-25 as duplicate tracking tickets.** Scope preserved in #395. |
 
 ## Chat SDK / ChannelAdapter — epic #190 ⏸️
@@ -183,7 +183,7 @@ foundation; #515 now tracks the full CLI/skill/MCP catalog.
 ## Unified agent dashboard — NEW track 🟡
 
 Close the gap between the two existing local web apps — the creation/onboarding UI
-(`bobi setup`, `setup/webui/`) and the monitoring UI (`bobi ui`,
+(`bobi setup`, `setup/webui/`) and the monitoring UI (`bobi agent <name> ui`,
 `agentui/`) — into **one app**: opens as a dashboard of your teams, leads into the
 existing onboarding flow, **installs + launches + returns home**, and click-through
 to the existing monitor. Goal: never need the CLI except to start the app; keep the
@@ -206,7 +206,7 @@ decision** (stay vanilla vs a lightweight component framework) — not yet ticke
 
 - **CLI-first connection cleanup** — #397 (image-gen → baked OpenAI CLI) + #403 (deleted `inject.py`/`codex_server.py`/`ConnectionEntry`/the `connections:` block). The middle MCP-shim layer is gone; two clean layers remain (baked CLIs + team-brought MCP). Both CLOSED 2026-06-22.
 - **Codex integration (MDS-42 B)** — #285 shipped CLI-first (`codex exec` shell-out + `tools/codex.md`, NOT the `codex_exec` MCP tool). CLOSED. ⚠️ **Linear MDS-47 still Backlog** with the stale MCP-tool spec — needs closing/re-scoping.
-- **Reliability (post-#409)** — #433/#454 (context-rotation metric: sum cache_read+cache_creation+input, not input_tokens; + `bobi compact`), #443 (transient 529 no longer wedges a session), #425 (resume-wedge). All CLOSED.
+- **Reliability (post-#409)** — #433/#454 (context-rotation metric: sum cache_read+cache_creation+input, not input_tokens; + `bobi agent <name> compact`), #443 (transient 529 no longer wedges a session), #425 (resume-wedge). All CLOSED.
 
 ---
 
@@ -251,7 +251,7 @@ unresolved design decision, verifiable without infra/credentials the bot lacks.*
 | #454 | Rotation metric over-counted (summed cache_read across a turn) → false "rotation pending" + wedge — fixed in v0.30.0, prod rolled. CLOSED 2026-06-23. |
 | #443 | Transient 529/turn error permanently wedged a session (deaf until restart) — CLOSED 2026-06-23. |
 | #425 | Resumed manager session could wedge (deaf to inbox while reporting "ready") — CLOSED 2026-06-22. |
-| #433 | Context rotation never fired under prompt caching (measured input_tokens) + new `bobi compact` — CLOSED 2026-06-22. |
+| #433 | Context rotation never fired under prompt caching (measured input_tokens) + new `bobi agent <name> compact` — CLOSED 2026-06-22. |
 | #426 | Decoupled `deploy-event-server` from PyPI publish in release.yml — CLOSED 2026-06-22. |
 | #412 | issue-lifecycle auto-advanced past the spec-approval gate — CLOSED 2026-06-22. |
 | #411 | pr-feedback auto-dispatched on bot comments / draft spec PRs — CLOSED 2026-06-22. |

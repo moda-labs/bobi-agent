@@ -105,7 +105,7 @@ def test_create_app_url_embeds_valid_manifest_json():
 
 
 def test_cli_works_without_an_install_and_falls_back_to_cloud(tmp_path):
-    """The command must run before `bobi install` exists — no root, no
+    """The command must run before any install exists — no root, no
     error; it falls back to the bobi cloud event server."""
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):

@@ -11,10 +11,9 @@ This module centralizes:
   - locating the Playwright Chromium and the browse binary,
   - launching Chromium to detect the sandbox failure,
   - applying (and persisting) the sysctl fix with sudo,
-  - the individual health checks behind `bobi doctor`.
+  - the individual health checks behind the named doctor command.
 
-The `bobi doctor` command and
-build on the functions here.
+The doctor command builds on the functions here.
 """
 
 from __future__ import annotations
@@ -53,7 +52,7 @@ SANDBOX_ERROR_MARKERS = (
 FIX_COMMAND = f"sudo sysctl -w {USERNS_SYSCTL}=0"
 FIX_HINT = (
     f"Run `{FIX_COMMAND}` (and persist it to {SYSCTL_CONF_PATH}), "
-    f"or re-run `bobi doctor --browser --fix` to apply it interactively."
+    f"or re-run `bobi agent <name> doctor --browser --fix` to apply it interactively."
 )
 
 
@@ -141,7 +140,7 @@ def apply_sandbox_fix(persist: bool = True) -> tuple[bool, str]:
     return True, f"Applied and persisted to {SYSCTL_CONF_PATH}."
 
 
-# --- Individual health checks (used by `bobi doctor`) -----------------
+# --- Individual health checks used by doctor -------------------------------
 
 
 def check_playwright_installed() -> CheckResult:
@@ -245,7 +244,7 @@ def check_browse_daemon(timeout: int = 60) -> CheckResult:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".html", prefix="bobi-doctor-", delete=False
         ) as fh:
-            fh.write("<!doctype html><title>bobi doctor</title>"
+            fh.write("<!doctype html><title>bobi health check</title>"
                      "<h1>browse ok</h1>")
             tmp = Path(fh.name)
 

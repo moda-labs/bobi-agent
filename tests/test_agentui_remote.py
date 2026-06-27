@@ -1,4 +1,4 @@
-"""Tests for `bobi ui <deployment>` remote-proxy helper. The fly CLI calls
+"""Tests for the remote-proxy helper behind the named UI command. The fly CLI calls
 are mocked; we assert app resolution, token/port reads, command construction,
 and the run() orchestration (no real `fly` subprocess)."""
 

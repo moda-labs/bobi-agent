@@ -58,7 +58,7 @@ task to Codex.
 (keyed by `provider:model`). Surfaced via:
 
 ```bash
-bobi costs [--by model|role|session]
+bobi agent <name> costs [--by model|role|session]
 ```
 
 This is accounting; it applies regardless of which axis a model call came from.

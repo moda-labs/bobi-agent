@@ -1,7 +1,7 @@
 # Built-in monitor defaults — shipped with bobi.
 #
 # READ-ONLY at runtime. The manager never writes here.
-# Override or disable in your repo's .bobi/monitors.yaml.
+# Override or disable in your repo's run/package/monitors.yaml.
 monitors:
   - name: pr-conflict-check
     description: Check open PRs across all registered repos for merge conflicts

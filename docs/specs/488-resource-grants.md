@@ -262,7 +262,7 @@ surfacing. **Delivery (§3.5) remains the fail-closed security boundary**
 regardless — it re-checks the live grant for every event — so registration
 gating is the loud early layer and delivery is authoritative.
 
-The MINT path (`bobi start`'s first boot) registers `_bootstrap` and other
+The MINT path (`bobi agent <name> start`'s first boot) registers `_bootstrap` and other
 non-global topics, which are never gated; global topics arrive after the bubble
 exists and has authorized (§3.6), so mint is unaffected.
 

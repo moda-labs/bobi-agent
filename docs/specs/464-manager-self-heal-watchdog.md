@@ -102,15 +102,15 @@ rotation reconnect).
 The issue requires "a layer below the application that restarts a wedged
 manager regardless of why it wedged." Today the container `exec`s the manager
 directly as PID 1 (`docker/docker-entrypoint.sh:158`:
-`exec gosu … bobi start --foreground "$@"`), so **nothing in-container
+`exec gosu … bobi agent <name> start --foreground "$@"`), so **nothing in-container
 parents the manager** — only Fly's machine-level init does, and Fly only acts
 on process death, not on a live-but-wedged process.
 
 **Recommended (D1 = A): a thin supervisor parent — `bobi supervise`.**
 The entrypoint execs `bobi supervise -- --foreground "$@"` instead of
-`bobi start`. The supervisor:
+`bobi agent <name> start`. The supervisor:
 
-1. Spawns `bobi start --foreground …` as a **child process**.
+1. Spawns `bobi agent <name> start --foreground …` as a **child process**.
 2. Runs the watchdog **loop in the supervisor process itself** — the supervisor
    never runs the agent event loop, so it *cannot* wedge from the same cause.
 3. On a confirmed wedge → terminates the manager child (`SIGTERM`, grace,
@@ -217,7 +217,7 @@ Behavior:
 ```
 Fly Machines init (machine restart policy)        ← outermost backstop
   └─ bobi supervise (NEW: watchdog)          ← restarts the DIRECTOR
-       └─ bobi start (manager process)
+       └─ bobi agent <name> start (manager process)
             └─ director session (claude subprocess)
                  └─ stall-recovery (director→ENGINEER)   ← restarts engineers
 ```
@@ -424,7 +424,7 @@ restarting into the same wall.
 ### B. Watchdog / supervisor (`bobi/watchdog.py`, `bobi/cli.py`)
 
 1. `bobi supervise -- <start-args>`: `subprocess.Popen` the manager
-   (`bobi start <start-args>`), inheriting stdio (logs flow straight to the
+   (`bobi agent <name> start <start-args>`), inheriting stdio (logs flow straight to the
    container log). The forwarded args **must** include `--foreground` (the
    entrypoint already passes it) so the manager stays a supervisable child and
    does **not** daemonize out from under the supervisor.

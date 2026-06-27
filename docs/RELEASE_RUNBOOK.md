@@ -165,7 +165,7 @@ Known failure signatures:
 - `Invalid API key` before re-registration: stale event deployment credentials.
 - `Subscription update failed (...) — re-registering`: expected recovery path
   after stale credentials.
-- Canary `bobi ask` fails while opening the reply channel with
+- Canary `bobi agent <name> ask` fails while opening the reply channel with
   `POST /deployments` `500`: check the Cloudflare Worker tail. If it shows an
   internal Durable Object URL with `__bobi_internal=undefined`, the Worker
   is missing `INTERNAL_DO_SECRET`. Restore it with `wrangler secret put

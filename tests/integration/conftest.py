@@ -21,7 +21,7 @@ TEST_GRANTS_SECRET = "bobi-integration-test-grants"
 
 @dataclass
 class BobiEnv:
-    """Paths for an isolated bobi installation."""
+    """Paths for an isolated Bobi home."""
     home_dir: Path
     agent_name: str
     project_path: Path
@@ -35,7 +35,7 @@ class BobiEnv:
 
 @pytest.fixture(scope="session")
 def bobi_env(tmp_path_factory):
-    """Create a fully isolated bobi installation in a temp directory.
+    """Create a fully isolated Bobi home in a temp directory.
 
     Session-scoped: created once, shared across all integration tests.
     Includes a real git repo at the selected run root (for worktree support),

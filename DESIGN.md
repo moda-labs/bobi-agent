@@ -15,10 +15,10 @@
 ## Product context
 - **What:** a local web wizard a developer runs (`bobi setup`, served on
   `127.0.0.1`) to design, build, install, and later edit a portable
-  **agent-team package**. The editable team source lives in a machine-wide
-  library the user can change (default `~/bobi-agents/<team>/`), so a team
-  isn't tied to the cwd it installs into; **Finish** authors the source there
-  and installs a frozen image into the project's `.bobi/`.
+  **agent-team package**. The editable team source lives in the named agent's
+  `src/` directory by default (or another user-selected source directory), so a
+  team isn't tied to the cwd; **Finish** authors the source there and installs
+  a frozen image into that agent's `run/package/`.
 - **Who:** developers/engineers comfortable in IDEs and terminals. v1 of this
   product was a terminal REPL.
 - **Hard constraints:** fully **offline** — system fonts only, no CDN, no web
@@ -211,10 +211,9 @@ One calm screen, three tabs, each landing in the same chat+cards editor:
 dialog, so **Browse…** opens a small **server-side directory lister** (`/api/browse`),
 **rooted at the user's home** (the library and most dev repos live there; confined
 to home so the page can't list the whole filesystem) and returning absolute paths.
-Default source location is the `~/bobi-agents/` library; install still targets
-the project's `.bobi/` unchanged (a source outside the project copies in like
-a registry team). Anything outside home can still be typed into the location field.
-Source dirs are confined out of `.bobi/`.
+Default source location is `$BOBI_HOME/agents/<name>/src/`; install targets the
+same named agent's `run/package/`. Anything outside home can still be typed into
+the location field. Source dirs are kept separate from `run/`.
 
 ### The one screen — chat + the team as cards
 - **Left: the conversation.** A single centered chat. You say what you want in
@@ -309,8 +308,8 @@ framing, not "monitors": *"anything bobi should do on its own?"* Maps to
 - **Finish ends cleanly.** `/api/finish` marks the state complete and **stops the
   local setup server**, then the page transitions to a **static completion
   screen** (no server-dependent buttons left to strand the user) with the
-  `bobi start` command. Open-folder/file-browsing happen *before* Finish, while
-  the server is alive.
+  named `start` command. Open-folder/file-browsing happen *before* Finish,
+  while the server is alive.
 
 ### Modify mode is non-lossy
 Editing an existing team must never flatten the work that's already there.
@@ -421,11 +420,11 @@ inspecting proxies (Zscaler, etc.) whose root is in the keychain but not certifi
    build/install pipeline.
 3. **Command name.** `bobi setup` reads one-shot but the UI is also the
    re-entrant editor — may want a broader command later.
-4. ~~`bobi/` vs `.bobi/` proximity~~ — **SUPERSEDED (2026-06-16):** the
-   editable source moved to a machine-wide `~/bobi-agents/` library, so it no
-   longer sits one dotfile away from the project's `.bobi/` install target.
+4. ~~source/install proximity~~ — **SUPERSEDED (2026-06-26):** editable source
+   and runtime output now live in separate `src/` and `run/` directories under
+   the named agent slot.
 
-## Agent UI (runtime dashboard — `bobi ui`)
+## Agent UI (runtime dashboard — named `ui` command)
 
 A second, separate surface from the `setup` wizard: a minimal dashboard for a
 *running* team. One card per active agent session (manager + workers, read from
@@ -437,17 +436,17 @@ language verbatim**: warm light chrome for the roster + composer, the single dar
 CRT slab for the chat transcript (the machine writes in the dark), amber accent,
 mono labels, system fonts, no build step.
 
-- **Two run modes, one app.** Local (`bobi ui`) binds `127.0.0.1` + a
+- **Two run modes, one app.** Local `bobi agent <name> ui` binds `127.0.0.1` + a
   per-launch token and opens a browser, exactly like setup. In-container it's
   **on by default** (the entrypoint sets `BOBI_UI=1`; disable with
   `BOBI_UI=0`) — the manager binds the Fly **6PN** address in a daemon
-  thread, and `bobi ui <deployment>` resolves the app, reads the token off
+  thread, and the named `ui` command resolves the app, reads the token off
   the machine, runs `fly proxy`, and opens the browser. Being image behavior
   (not a per-instance flag) means existing instances get it on their next deploy
   — which is what lets the release canary gate on UI reachability.
 - **No public ingress.** The Fly box stays dark (no `[http_service]`); 6PN
   reachability via `fly proxy` is the trust boundary, and a token (env
-  `BOBI_UI_TOKEN`, else auto-written to `.bobi/state/ui.token`) is
+  `BOBI_UI_TOKEN`, else auto-written to `run/state/ui.token`) is
   defense-in-depth. In both modes the browser talks to *localhost*, so the same
   loopback Host guard + token check as setup applies unchanged.
 
@@ -471,11 +470,11 @@ mono labels, system fonts, no build step.
 | 2026-06-16 | **Real Venn catalog via the `venn` CLI** (CLI-first, REST fallback); non-Venn services → custom + authored `tools/*.md` | stop guessing what Venn supports; give custom services a real usage guide |
 | 2026-06-16 | **Auto-name from goal; rename moves the folder + updates `agent:`** | the name has to actually stick on disk |
 | 2026-06-16 | **OS system trust store (truststore) for Venn TLS** | works behind Zscaler-style inspecting proxies; certifi alone fails |
-| 2026-06-16 | Default team folder `bobi/` everywhere; keep `.bobi/` install target | one consistent, obvious location |
-| 2026-06-16 | **Editable source → machine-wide `~/bobi-agents/` library** (was cwd `bobi/`); install into project `.bobi/` unchanged | a team isn't tied to where it installs; stop littering the cwd |
+| 2026-06-16 | Default team folder `bobi/` everywhere; later superseded by named-agent `src/` + `run/` slots | one consistent, obvious location |
+| 2026-06-16 | **Editable source → machine-wide library**; later superseded by `$BOBI_HOME/agents/<name>/src/` | a team isn't tied to where it installs; stop littering the cwd |
 | 2026-06-16 | **Modify asks which folder to scan** (`/api/teams`); tab always enabled; folder picker re-rooted at `$HOME`, absolute paths | teams can live anywhere; pick the scan dir even when the library is empty |
 | 2026-06-16 | **Server-disconnect overlay** (ping heartbeat + fetch/SSE failure) + **Escape closes popups** | the page must stop pretending to be live when the local server dies |
-| 2026-06-16 | **Branding reverted to `bobi`** in the shipping UI; `bobbi` rebrand deferred to the whole-codebase rename | don't ship `bobbi` ahead of the rename; also fixed wrong commands/paths (`.bobbi/`→`.bobi/`, `bobbi <cmd>`→`bobi <cmd>`) |
-| 2026-06-23 | **Runtime Agent UI (`bobi ui`)**: cards per live agent + blocking click-to-chat; reuses the setup design language | a running team had no visual surface; private-via-`fly proxy` keeps the Fly box dark (no public ingress) |
+| 2026-06-16 | **Branding reverted to `bobi`** in the shipping UI; `bobbi` rebrand deferred to the whole-codebase rename | don't ship `bobbi` ahead of the rename; also fixed wrong command/path examples |
+| 2026-06-23 | **Runtime Agent UI**: cards per live agent + blocking click-to-chat; reuses the setup design language | a running team had no visual surface; private-via-`fly proxy` keeps the Fly box dark (no public ingress) |
 | 2026-06-18 | **Connections cascade gains an `mcp` rung** (native → venn → mcp → custom); hosted MCPs from a static registry wire into `agent.yaml` `mcp_servers:` (MOD-203) | a service Venn doesn't cover often ships a hosted MCP — wire it in directly instead of dropping to a hand-authored guide; live-search + CLI rungs deferred |
 ```

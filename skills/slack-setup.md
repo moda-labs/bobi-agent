@@ -1,107 +1,145 @@
 # Slack Setup
 
-Create a Slack bot that bobi uses to scan for work requests and post status updates.
+Create a Slack bot that bobi uses to receive work requests (mentions, DMs,
+thread replies) and post status updates. The bot talks to your **event server**
+(Cloudflare Worker or local Node.js) over the HTTP Events API — Slack POSTs
+events to `<event-server>/webhooks/slack`, and bobi replies via the Web API.
 
-**Time:** ~5 minutes. No code, no server, no OAuth redirect URI.
+**Time:** ~2 minutes — the app is stamped out from a manifest, so you don't
+hand-pick scopes or wire the event URL yourself.
 
-## 1. Create the app
-
-1. Go to https://api.slack.com/apps
-2. Click **Create New App** → **From scratch**
-3. Name it something like `Agent Dispatch` (or whatever you want)
-4. Pick your workspace
-5. Click **Create App**
-
-## 2. Add bot scopes
-
-1. In the left sidebar: **OAuth & Permissions**
-2. Scroll to **Scopes** → **Bot Token Scopes**
-3. Add these scopes:
-
-| Scope | Why |
-|-------|-----|
-| `channels:history` | Read messages in public channels |
-| `channels:read` | List public channels |
-| `chat:write` | Post status updates |
-| `files:read` | Access files shared in conversations |
-| `files:write` | Upload files and images to channels |
-| `im:history` | Read DMs to the bot (work requests) |
-| `im:read` | List DM conversations |
-| `users:read` | Resolve user names in messages |
-
-That's it. No user scopes needed.
-
-## 3. Install to workspace
-
-1. Scroll up to **OAuth Tokens for Your Workspace**
-2. Click **Install to Workspace**
-3. Review and **Allow**
-4. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
-
-## 4. Add the token to bobi
+## 1. Generate a manifest and create the app
 
 ```bash
-bobi init
-# Paste the xoxb- token when prompted for Slack bot token
+bobi create-slack-bot --app-name "Agent Dispatch"
 ```
 
-Or for named credentials (multiple workspaces):
+This prints a Slack app manifest plus a one-click create link. The request URL
+is filled in from your project config when run inside an install, otherwise the
+bobi cloud event server (override with `--event-server https://…`).
+
+Then create the app one of three ways:
+
+- **One click:** open the printed
+  `https://api.slack.com/apps?new_app=1&manifest_json=…` link, pick your
+  workspace, and click **Create**. Scopes + event subscriptions are prefilled.
+- **Slack CLI:** see [Create with the Slack CLI](#create-with-the-slack-cli).
+- **Manual:** https://api.slack.com/apps → **Create New App** → **From a
+  manifest**, paste the YAML.
+
+The manifest pins exactly the scopes and bot events the bobi Slack adapter
+consumes, so you never have to reason about them:
+
+| Bot event | Becomes | Scope(s) |
+|-----------|---------|----------|
+| `app_mention` | `slack.mention` | `app_mentions:read` |
+| `message.im` | `slack.dm` | `im:history`, `im:read` |
+| `message.mpim` | `slack.dm` | `mpim:history` |
+| `message.channels` / `message.groups` (with `thread_ts`) | `slack.thread_reply` | `channels:history` / `groups:history` |
+
+Plus `chat:write` (post replies), `files:read`/`files:write` (attachments), and
+`users:read` (resolve names).
+
+## 2. Install to workspace
+
+1. On the app page: **Install App** → **Install to Workspace**
+2. Review and **Allow**
+3. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
+4. (Recommended) On **Basic Information**, copy the **Signing Secret** — set it
+   as `SLACK_SIGNING_SECRET` on the event server so it verifies inbound requests.
+
+> Slack verifies the event **Request URL** with a `url_verification` challenge
+> the moment you create or reinstall the app, so your event server must be
+> reachable then. For local dev, start it first:
+> `bobi agent <name> event-server start`.
+
+## 3. Add the token to bobi
+
+Install or reinstall the Bobi Agent that needs Slack. `bobi agents install`
+prompts for any missing `${VAR}` credentials and writes them to that named
+agent's `run/.env`.
 
 ```bash
-# Edit directly
-cat >> ~/.config/bobi/credentials.yaml << 'EOF'
-my-workspace:
-  linear_api_key: "lin_api_..."
-  slack_bot_token: "xoxb-..."
-EOF
+bobi agents install <source> --name <name>
+# Paste the xoxb- token when prompted for SLACK_BOT_TOKEN
 ```
 
-## 5. Invite the bot to channels
+For non-interactive installs, provide the value in the environment:
 
-The bot can only post to (and read from) channels it's a member of.
+```bash
+SLACK_BOT_TOKEN=xoxb-... bobi agents install <source> --name <name> --non-interactive
+```
 
-In Slack, go to each channel you want to use (e.g., `#eng-agents`) and type:
+In `agent.yaml`, the bot token is referenced as a `${VAR}`:
+
+```yaml
+services:
+  - name: slack
+    events: true
+    credentials:
+      bot_token: ${SLACK_BOT_TOKEN}
+```
+
+## 4. Invite the bot to channels
+
+The bot only sees (and posts to) channels it's a member of. In each channel:
 
 ```
 /invite @Agent Dispatch
 ```
 
-## 6. Enable DMs for work requests
+DMs work out of the box — the manifest enables the Messages tab.
 
-For the bot to receive work via DM:
+## Create with the Slack CLI
 
-1. In your Slack app settings: **App Home** (left sidebar)
-2. Under **Show Tabs**, enable **Messages Tab**
-3. Check **Allow users to send Slash commands and messages from the messages tab**
+Useful if you live in the [Slack CLI](https://api.slack.com/automation/cli) or
+want to script app creation. Write the manifest to a file, then create from it:
 
-Now anyone can DM the bot with "fix the login bug on repo-x" and dispatch will pick it up on the next cycle.
+```bash
+bobi create-slack-bot --app-name "Agent Dispatch" --format json -o manifest.json
 
-## That's it
+# Validate, then create the app from the manifest:
+slack manifest validate --manifest manifest.json
+slack create agent-dispatch --manifest manifest.json
+```
 
-No OAuth redirect server. No ngrok. No callback URL. The bot token is a static credential that works with the Slack Web API. Dispatch polls on each cron cycle — no WebSocket or Events API needed.
+The same `manifest.json` is the single source of truth — regenerate it whenever
+your event server URL changes and re-apply, rather than editing scopes by hand
+in the Slack UI.
+
+### Provision many apps programmatically
+
+For multitenant setups (one Slack app per deployment, all pointed at one shared
+event server), generate a manifest per tenant and POST it to the Slack
+[App Manifest API](https://api.slack.com/reference/manifests#apps_manifest) with
+a configuration token — no clicks:
+
+```bash
+bobi create-slack-bot --app-name "Tenant A" \
+  --event-server https://bobi-events.modalabs.workers.dev \
+  --format json -o tenant-a.json
+# then: POST tenant-a.json to apps.manifest.create with your config token
+```
 
 ## Multiple workspaces
 
-If you have repos across different Slack workspaces, create one app per workspace and store each token as a named credential:
+Create one app per workspace (each gets its own `xoxb-` token) and store each as
+a named credential:
 
 ```yaml
 # ~/.config/bobi/credentials.yaml
 workspace-a:
   slack_bot_token: "xoxb-workspace-a-token"
-  linear_api_key: "lin_api_team_a"
-
 workspace-b:
   slack_bot_token: "xoxb-workspace-b-token"
-  linear_api_key: "lin_api_team_b"
 ```
-
-Then reference the appropriate workspace when configuring your project.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| Bot can't post to channel | `/invite @Agent Dispatch` in that channel |
-| Bot can't read DMs | Enable Messages Tab in App Home settings |
-| `not_authed` error | Token expired or wrong — regenerate in OAuth & Permissions |
-| Bot posts but no one sees it | Check the channel name in your Slack config |
+| Slack rejects the Request URL on create | Event server unreachable — start it (`bobi agent <name> event-server start`) and reinstall the app |
+| Bot receives nothing | Event subscriptions disabled, or the bot isn't in the channel — reinstall from the manifest and `/invite` it |
+| Bot can't post to a channel | `/invite @your-bot` in that channel |
+| `not_authed` error | Token expired or wrong — reinstall and copy a fresh `xoxb-` token |
+| Inbound events `401`/ignored | `SLACK_SIGNING_SECRET` on the event server doesn't match the app's signing secret |

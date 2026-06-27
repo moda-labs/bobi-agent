@@ -1,4 +1,4 @@
-"""Unit tests for the bobi kb CLI commands."""
+"""Unit tests for named KB CLI commands."""
 
 import json
 from pathlib import Path

@@ -12,7 +12,7 @@
 
 ## 1. Problem
 
-`bobi start` / `restart` / `doctor` run a preflight that connects to each configured MCP
+`bobi agent <name> start` / `restart` / `doctor` run a preflight that connects to each configured MCP
 server and reports its health. For **stdio** servers, the preflight is wrong in two distinct ways:
 
 ### MDS-63 — single-poll race: healthy stdio servers false-fail as `pending`
@@ -205,7 +205,7 @@ Per CLAUDE.md (**production bug = integration-test gap**): each fix gets a regre
   `CheckResult` (`required=False`).
 - **Full suite:** `pytest tests/ --ignore=tests/integration/` (unit, ~30s) before push; integration
   tests before merge.
-- **Manual smoke:** with a bare-name stdio MCP installed in `~/.local/bin`, `bobi restart`
+- **Manual smoke:** with a bare-name stdio MCP installed in `~/.local/bin`, `bobi agent <name> restart`
   reports it healthy *and* a real agent run actually sees its tools (the MDS-64 repro, now green
   for the right reason); a slow-spawning stdio server no longer false-fails as `pending` (MDS-63
   repro).

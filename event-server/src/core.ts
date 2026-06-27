@@ -40,7 +40,7 @@ export interface DeploymentRecord {
 	identities?: Record<string, unknown>;
 }
 
-// A trust bubble. Minted once per `bobi start`; every deployment of that
+// A trust bubble. Minted once per named agent start; every deployment of that
 // instance JOINs it. The key signs publishes and join-registrations to prove
 // bubble membership. See bobi/config.py:load_or_mint_bubble.
 export interface BubbleRecord {
@@ -232,7 +232,7 @@ export function createTopicEvent(
 	// Fallback: the topic path itself acts as the subscription key, plus the
 	// source-qualified form (e.g. "monitor/support.email") so subscriptions
 	// written as the full event string match too. Publishers strip the source
-	// to the body when POSTing (see bobi events/publish.py) — without
+	// to the body when POSTing (see the Python event publisher) — without
 	// this, "source/type" subscriptions silently never match (#235).
 	if (topics.length === 0) {
 		topics.push(topic);
@@ -693,7 +693,7 @@ export async function handleSlackWebhook(
 
 // Register a deployment into a bubble — MINT or JOIN.
 //   MINT (no bubble-signing headers): server generates a fresh bubble + key,
-//     returns the key ONCE (over TLS). Used only by `bobi start`'s
+//     returns the key ONCE (over TLS). Used only by named agent start's
 //     one-time bootstrap.
 //   JOIN (signed with an existing bubble's key): server verifies the signature
 //     against THAT bubble's stored key and attaches the deployment to it. Every

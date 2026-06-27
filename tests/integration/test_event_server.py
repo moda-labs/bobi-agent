@@ -940,7 +940,7 @@ def _live_subscriber(base_url: str, dep_id: str, api_key: str, timeout: float = 
 
 
 class TestBubbleIsolation:
-    """Bubbles minted per `bobi start` must NOT overlap on a shared event
+    """Bubbles minted per named start must NOT overlap on a shared event
     server — whether many VMs hit one server or several local instances from
     different dirs do. Exercised end to end against the real local.ts server.
     """
@@ -1094,7 +1094,7 @@ class TestSchedulerEndToEnd:
         base_url, *_ = event_server
 
         # Point the (session-scoped) project at this test server; restore
-        # after, and drop publish's per-project URL cache both ways.
+        # after, and drop publish's runtime URL cache both ways.
         agent_yaml = bobi_env.package_dir / "agent.yaml"
         original = agent_yaml.read_text()
         agent_yaml.write_text(original + f"\nevent_server_url: {base_url}\n")

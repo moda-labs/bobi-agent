@@ -1,228 +1,129 @@
 # Using Bobi
 
-Guide the user through running, operating, and extending bobi —
-the event-driven AI agent framework.
+Guide the user through running, operating, and extending Bobi Agents.
+Bobi is an event-driven framework for persistent AI agent teams. Domain
+behavior comes from Bobi Agent packages: roles, workflows, monitors,
+tools, context files, and workspace templates.
 
-## What bobi is
+## Directory Model
 
-Bobi is a framework for running persistent AI agent teams. Agents
-are symmetric nodes that subscribe to event topics and receive events
-via a centralized event server. All domain behavior comes from agent
-packs (role prompts, workflows, monitors) — the framework has no
-topology opinions.
+`BOBI_HOME` is the only user-configurable home location. It is set by
+environment variable and defaults to `~/.bobi`.
 
-## Quick start
-
-```bash
-# Install
-uv tool install bobi
-
-# Start an agent team
-bobi start <pack-name>
-
-# Stop
-bobi stop
-
-# Restart fresh (wipes manager session)
-bobi start <pack-name> --fresh
+```text
+$BOBI_HOME/
+├── config.yaml
+└── agents/
+    └── <name>/
+        ├── src/              # editable Bobi Agent source
+        └── run/              # selected runtime root
+            ├── package/      # installed frozen package
+            ├── state/        # sessions, logs, pid files, policy
+            ├── workspace/    # user-owned domain files and outputs
+            └── .env          # runtime credentials
 ```
 
-## Core commands
-
-### Agent management
+Runtime commands are scoped to one installed Bobi Agent:
 
 ```bash
-bobi agents launch -w <workflow> --role <role> --task "context"
 bobi agents list
-bobi agents show <id>
-bobi agents cancel <id>
+bobi agents install ./agents/eng-team --name eng
+bobi agent eng start
+bobi agent eng status
+bobi agent eng ask "what's the status?"
 ```
 
-### Communication
+## Machine Commands
 
 ```bash
-bobi message "text"       # inject into any session
-bobi ask "question"       # ask and block for response
-
-# Slack
-bobi slack-reply -w <workspace> -c <channel> "message"
-bobi slack-reply -w <workspace> -c <channel> -t <thread-ts> "threaded reply"
+bobi setup <name>                     # design/build/install a Bobi Agent
+bobi agents install <source> --name <name>
+bobi agents list
+bobi agents browse
+bobi agents update <name>
+bobi agents add-registry <repo>
 ```
 
-`slack-reply` converts Markdown to Slack formatting (`**bold**` → `*bold*`,
-links, headings). Messages over 3000 chars are truncated. Requires
-`slack.bot_token` in `~/.bobi/config.yaml`.
+`<source>` can be a local source directory, local `.tar.gz`, public
+`.tar.gz` URL, or registry name.
 
-### Observability
+## Runtime Commands
 
 ```bash
-bobi status               # active engineer sessions
-bobi events               # recent events and decisions
-bobi transcript show <s>  # session transcript
-bobi transcript search q  # search history
-bobi doctor               # system health check
+bobi agent <name> start
+bobi agent <name> stop
+bobi agent <name> restart
+bobi agent <name> start --fresh
+bobi agent <name> status
+bobi agent <name> doctor
+
+bobi agent <name> ask "question"
+bobi agent <name> message "text"
+bobi agent <name> compact
+bobi agent <name> events
+
+bobi agent <name> transcript show manager
+bobi agent <name> transcript search "query"
+bobi agent <name> costs
 ```
 
-### Workflows
+## Sub-Agents
+
+Sub-agents are child executions launched by a Bobi Agent runtime. Use
+them for delegated work and workflow steps.
 
 ```bash
-bobi workflows list       # available workflows
-bobi workflows status     # active workflow runs
-bobi workflows validate f # validate a workflow YAML
+bobi agent <name> subagents launch -w adhoc --role engineer --task "Fix CI"
+bobi agent <name> subagents list
+bobi agent <name> subagents show <id>
+bobi agent <name> subagents cancel <id>
 ```
 
-### Monitors
+## Package Surfaces
+
+Installed package files live under `run/package/`:
+
+```text
+package/
+├── agent.yaml
+├── agent.md
+├── roles/<role>/ROLE.md
+├── tools/*.md
+├── workflows/*.yaml
+├── monitors/defaults.yaml
+└── context/*.md
+```
+
+Edit the source under `$BOBI_HOME/agents/<name>/src/` or the
+user-chosen source directory, then reinstall. Runtime state and
+credentials live under `run/` and should not be edited into package
+source.
+
+## Common Tasks
 
 ```bash
-bobi monitors list        # list all monitors (merged across tiers)
-bobi monitors add <name>  # add a monitor
-bobi monitors pause <n>   # disable a monitor
-bobi monitors remove <n>  # remove a user-added monitor
+# Create a new Bobi Agent interactively
+bobi setup support
+
+# Install a checked-out team source
+bobi agents install ~/agent-teams/support --name support
+
+# Run and talk to it
+bobi agent support start
+bobi agent support ask "summarize the current queue"
+
+# Inspect operation
+bobi agent support status
+bobi agent support events
+bobi agent support transcript show manager
 ```
 
-### Roles and registry
+## Rules of Thumb
 
-```bash
-bobi roles list                    # available roles
-bobi agents browse                 # browse remote registry
-bobi agents update <name>          # update from remote
-bobi agents add-registry <repo>    # add a remote registry
-```
-
-### Knowledge base
-
-```bash
-bobi kb create <name>                  # create a named KB
-bobi kb add <name> --file <path>       # index a file
-bobi kb add <name> --text "..."        # add inline text
-bobi kb search <name> "query"          # hybrid FTS + semantic search
-bobi kb search <name> "q" --mode fts   # keyword-only search
-bobi kb list                           # list all KBs
-bobi kb info <name>                    # show stats
-bobi kb remove <name>                  # delete a KB
-```
-
-Each KB is a separate SQLite database at `.bobi/kb/<name>.db` with
-FTS5 for keyword search and sqlite-vec for semantic search. An embedding
-sidecar (fastembed/ONNX) auto-starts on first use and stays alive
-between commands. `bobi stop` tears it down.
-
-Agent teams use KBs for domain-specific retrieval — index Google Docs,
-Slack history, emails, or any text source into a named KB, then search
-it from agent tools.
-
-### Event server
-
-```bash
-bobi event-server start   # start local event server
-bobi event-server stop    # stop local event server
-```
-
-## Architecture overview
-
-```
-Event sources (GitHub, Slack, Linear, etc.)
-    │
-    ▼
-Event Server (Cloudflare Worker or local Node.js)
-    │ WebSocket pub/sub
-    ▼
-Subscribing Agents (symmetric nodes)
-    │
-    ▼
-Outputs (PRs, messages, reports, deployments)
-```
-
-Key concepts:
-- **Agent team**: portable bundle of roles, workflows, monitors, tools
-- **Symmetric node**: any agent can subscribe to any topic — no hierarchy in framework
-- **Event server**: centralized pub/sub (topic-based)
-- **Workflow**: YAML DAG defining multi-step processes
-- **Monitor**: scheduled polling for conditions no webhook covers
-- **Handoff**: YAML contract between workflow steps
-
-## Configuration
-
-### Machine-wide (`~/.bobi/config.yaml`)
-
-Service credentials and connection URLs (not checked in):
-
-```yaml
-slack:
-  bot_token: xoxb-...
-event_server:
-  url: https://bobi-events.example.workers.dev
-linear:
-  api_key: lin_api_...
-registries:
-  - moda-labs/bobi-agents
-```
-
-### Per-project overrides (`.bobi/`)
-
-```
-.bobi/
-├── roles/<role>.md          # Override a role prompt
-├── tools/<service>.md       # Override a tool guide
-├── workflows/<name>.yaml    # Override a workflow
-└── monitors/defaults.yaml   # Override monitors
-```
-
-Resolution order (most specific wins):
-1. `.bobi/` in project
-2. Agent team directory
-3. User cache (`~/.bobi/agents/`)
-
-## Common tasks
-
-### Start a new project with bobi
-
-1. Install: `uv tool install bobi`
-2. Create or fetch an agent team into `agents/<name>/`
-3. Configure `~/.bobi/config.yaml` with credentials
-4. Run: `bobi start <name>`
-
-### Debug a running system
-
-```bash
-bobi doctor              # check health
-bobi status              # who's running
-bobi events              # what happened recently
-bobi transcript search "error"  # find issues in history
-```
-
-### Customize behavior for a project
-
-Create `.bobi/` overrides in the project root. These take precedence
-over the pack's built-in files without modifying the pack itself.
-
-### Add a new workflow
-
-Write a YAML file in `.bobi/workflows/` or the pack's `workflows/`
-directory. Use `bobi workflows validate <file>` to check syntax.
-
-### Add a monitor
-
-```bash
-bobi monitors add stale-prs --interval 2h --description "Check for PRs open > 3 days"
-```
-
-Or add to `monitors/defaults.yaml` in the pack.
-
-## Troubleshooting
-
-| Symptom | Check |
-|---|---|
-| Agent not responding to events | `bobi events` — is the event arriving? |
-| Workflow stuck | `bobi workflows status` — which step? |
-| Agent crashed | `bobi agents list` — status column |
-| Event server down | `bobi event-server start` |
-| Credentials failing | `bobi doctor` — checks service connectivity |
-
-## Tips
-
-- Use `--fresh` to wipe state when things get confused
-- Monitors are for polling gaps — prefer webhooks when available
-- Role prompts are the primary lever for behavior — invest time in them
-- Handoff fields are contracts between steps; change them carefully
-- The `adhoc` workflow catches anything that doesn't match a specific trigger
+- Use the `agents` command group for machine-wide Bobi Agent management.
+- Use the named `agent` command group for runtime operations.
+- Use `subagents` for child agent executions.
+- Put source-controlled team definitions in `src/` or another explicit
+  source directory.
+- Treat `run/package/` as generated install output and `run/state/` as
+  mutable runtime state.

@@ -10,10 +10,10 @@ directly to the detached child process.
   credentials remain available to child agents.
 - Tool lookup path: `PATH` is normalized by `agent_spawn_env()` before launch,
   keeping MCP preflight and runtime command lookup identical.
-- Installed credential file: `.bobi/.env` is merged into the child env
+- Installed credential file: `run/.env` is merged into the child env
   without overriding explicit parent process values.
 - Credential variables: any credential present in the parent environment or
-  `.bobi/.env` is propagated, including brain/tool/service credentials
+  `run/.env` is propagated, including brain/tool/service credentials
   such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `VENN_API_KEY`, `GH_TOKEN`,
   `GITHUB_TOKEN`, `LINEAR_API_KEY`, and `SLACK_BOT_TOKEN`.
 
@@ -34,7 +34,7 @@ directly to the detached child process.
 - Team brain selection is not inherited from an ambient `BOBI_BRAIN` when
   the installed team declares `brain.kind`.
 - An ambient `BOBI_BRAIN` is not inherited by default-brain teams.
-- `.bobi/.env` values do not override variables explicitly set in the
+- `run/.env` values do not override variables explicitly set in the
   parent process environment.
 
 When a new runtime value must flow into child agents, add it to

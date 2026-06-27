@@ -342,7 +342,7 @@ class TestValidateConfig:
     def test_pack_with_optional_venn_service_starts_degraded(self, tmp_path):
         # github (native, zero-config) + an unconfigured venn service explicitly
         # marked required: false: validate_config must return ok=True so
-        # `bobi start` proceeds and the optional service degrades.
+        # Named start proceeds and the optional service degrades.
         config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\

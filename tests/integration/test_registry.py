@@ -1,7 +1,7 @@
 """Integration tests for the agent team registry.
 
 Exercises install-from-registry, update checking, cache listing,
-and multi-registry resolution against an isolated bobi install.
+and multi-registry resolution against an isolated Bobi home.
 Network calls are stubbed to avoid GitHub dependency in CI.
 """
 

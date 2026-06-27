@@ -94,7 +94,7 @@ server's topic routing like any other event:
 - **`check:`** — a native Python runner in `*_checks.py` (`pr_conflicts`,
   `stale_prs`, `disk_free`).
 - **description-only** — launches a short-lived, **non-interactive check agent**
-  out-of-band (`bobi agents launch --wait`) that *observes and returns a
+  out-of-band (`bobi agent <name> subagents launch --wait`) that *observes and returns a
   verdict only*; the scheduler converts the verdict to conditions.
 
 > **Note on "monitors generate content":** the monitor record itself still only *fires an
@@ -113,7 +113,7 @@ effective monitor's event topic** at startup (`cli.py` →
 what to do with it.
 
 ### 2.3 Closest prior art — the shipped `team-status-roundup` default
-`.bobi/monitors/defaults.yaml` already ships a scheduled-notification monitor
+`run/package/monitors/defaults.yaml` already ships a scheduled-notification monitor
 that is *structurally identical* to what we need, minus weekly recurrence:
 
 ```yaml
@@ -135,7 +135,7 @@ schedule whose event an agent reacts to.** The only thing it cannot yet express 
   no way to say "Sundays only." `interval: 7d` is **not** a substitute: it anchors to
   `last_run` (drifts off "Sunday night"), fires immediately on first sight, and a
   manager restart re-anchors it.
-- **CLI can't express wall-clock/weekly scheduling.** `bobi monitors add` only
+- **CLI can't express wall-clock/weekly scheduling.** `bobi agent <name> monitors add` only
   exposes `--interval`/`--description`/`--event`/`--check`/`--url`. `at:`, `tz:`,
   `notify:`, and (proposed) weekday gating are YAML-edit-only today.
 
@@ -225,11 +225,11 @@ This is intentionally the **smallest** framework change that satisfies the ticke
 "`at:` + a weekday filter," reusing existing tz/dedup logic, adding no catch-up.
 
 ### 4.3 CLI: expose wall-clock + weekly scheduling
-Extend `bobi monitors add` with `--at`, `--tz`, `--days`, and `--notify` so a
+Extend `bobi agent <name> monitors add` with `--at`, `--tz`, `--days`, and `--notify` so a
 user can do:
 
 ```bash
-bobi monitors add weekly-prep-doc \
+bobi agent <name> monitors add weekly-prep-doc \
   --at 21:00 --days sun --tz America/Los_Angeles \
   --notify --event monitor/prep.weekly_due \
   --description "Every Sunday night, run the prep-doc skill to assemble and deliver next week's prep doc"
@@ -284,8 +284,8 @@ single source of truth for the task and owns every use-case decision:
 ### 5.3 Where it ships (**D6 = one per project; D7 = skill-based**)
 - The **framework** ships only the generic `days:` capability + CLI + use-case-neutral docs.
 - The **skill markdown and the example monitor ship in the agent package** (e.g. the
-  eng-team package), installed to the project under `.bobi/` like other package
-  content. v1 targets **one configured prep-doc monitor per project** (project-level
+  eng-team package), installed under `run/package/` like other package
+  content. v1 targets **one configured prep-doc monitor per named agent** (agent-level
   monitors, not per-end-user). The use case is delivered **via the skill-based approach** —
   not as a forced framework default and not via a special recipe mechanism: it is simply a
   monitor + skill that the agent package provides and the user can adopt/edit.
@@ -293,8 +293,8 @@ single source of truth for the task and owns every use-case decision:
 > **Open — needs confirmation (new convention introduced by this re-architecture):** agent
 > packages today resolve `roles/`, `tools/`, `context/`, `workflows/`, `monitors/`, and
 > `workspace/` (see CLAUDE.md), but there is **no established home for a task skill inside
-> an agent package**. Proposed: ship it at `agents/<team>/skills/<name>.md`, installed to
-> `.bobi/skills/`, and reference it by that path from the monitor `description`. The
+> an agent package**. Proposed: ship it at `agents/<team>/skills/<name>.md`, install it
+> under `run/package/skills/`, and reference it by that path from the monitor `description`. The
 > exact location and the discovery/resolution mechanism (how the agent locates and invokes
 > the referenced skill — plain prose path vs. an installed Claude Code `/skill`) are the two
 > genuinely-open points (§7). Flagging rather than silently picking.
@@ -374,7 +374,7 @@ These were *created* by the re-architecture and are not yet pinned (flagged, not
 
 1. **Skill location in the agent package.** Agent packages have no established `skills/`
    home today. Proposed: `agents/<team>/skills/<name>.md` → installed to
-   `.bobi/skills/`. Needs a yes/where.
+   `run/package/skills/`. Needs a yes/where.
 2. **Skill discovery / invocation mechanism.** How the consuming agent locates and runs the
    referenced skill — a plain prose path in the monitor `description` that the agent reads,
    vs. an installed Claude Code `/skill` the agent invokes. Affects packaging and the

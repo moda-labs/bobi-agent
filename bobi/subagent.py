@@ -862,7 +862,7 @@ def launch_agent(
         names = ", ".join(e.name for e, _ in req_failures)
         raise RuntimeError(
             f"Required dependency check failed: {names}. "
-            f"Run `bobi doctor` for details and fix commands."
+            f"Run `bobi agent <name> doctor` for details and fix commands."
         )
 
     # Preflight: spend governor — cap agent invocations per rolling hour
@@ -1293,7 +1293,7 @@ def _run_agent_entry(args: dict) -> None:
         raise RuntimeError(
             "spawn args blob has no 'root' — the spawning process is running "
             "older code than what is installed on disk. Restart the manager "
-            "(bobi restart) after upgrading, then re-dispatch."
+            "after upgrading, then re-dispatch."
         )
     bind_root(Path(args["root"]))
     project_root = bobi_root()

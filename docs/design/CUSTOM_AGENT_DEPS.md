@@ -103,7 +103,7 @@ Today this team **provisions but cannot work**:
 
 1. `requires[].check` runs at **dispatch time** (`subagent.py:check_requires`) and
    *blocks agent launch* if it fails — so the tools must genuinely be present.
-2. `requires[].fix` is only ever run **interactively** (`bobi doctor` →
+2. `requires[].fix` is only ever run **interactively** (`bobi agent <name> doctor` →
    `click.confirm`, `cli.py:1303`). Nothing auto-runs it; a dark container has no
    TTY, so that path can never fire.
 3. The C8 image **deliberately ships no Node/npm** (`Dockerfile`: the `claude` CLI
@@ -121,7 +121,7 @@ first-class, team-agnostic mechanism.
   any team's tools. The dependency declaration travels *with the team*, in the
   team directory, like prompts and workflows.
 - **Operator-agnostic** (design §9.1): works for the moda-labs GitOps fleet **and**
-  the solo `bobi install <url>` + `provision-instance.sh` path.
+  the solo `bobi agents install <url>` + `provision-instance.sh` path.
 - **Build once, deploy many** (§2): the per-team image is the unit; the
   provisioner/release deploy it by reference — which the C22 release flow already
   does (`fly deploy --image`).
@@ -278,7 +278,7 @@ deploy-by-ref mechanic. This is purely additive.
   is fine for the first-party `agents/` repo. For *third-party* teams (future SaaS),
   arbitrary build steps are a supply-chain surface → sandbox the build or restrict
   to an allowlisted declarative subset. **Note now, don't solve in MVP.**
-- **Dev-box parity:** the same `build:` spec could drive `bobi doctor --fix`
+- **Dev-box parity:** the same `build:` spec could drive `bobi agent <name> doctor --fix`
   (run the install steps locally), so a contributor's laptop matches the container.
   Nice-to-have, not MVP.
 - **Base-image size:** adding Node to `bobi-base` for the common case vs

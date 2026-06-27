@@ -705,7 +705,7 @@ class TestCommandMonitor:
 
 class TestDefaultSpawnCheckEntryPoint:
     """Regression tests for #212: monitor spawn checks use entry_point
-    for --role, matching how `bobi start` resolves the role."""
+    for --role, matching how named start resolves the role."""
 
     def test_entry_point_used_for_role(self, tmp_path, monkeypatch):
         """entry_point from agent.yaml produces --role <entry_point>

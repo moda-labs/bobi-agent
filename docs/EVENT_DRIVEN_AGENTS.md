@@ -195,7 +195,7 @@ through the same session.
 The foundation is the CLI. One command creates an agent:
 
 ```bash
-bobi agents launch \
+bobi agent <name> subagents launch \
   --role oncall \
   --task "Monitor production and respond to incidents" \
   --subscribe pagerduty,sentry,github:org/infra
@@ -207,10 +207,10 @@ also always reachable:
 
 ```bash
 # Ask it a question (blocks until response)
-bobi ask "What's the status of the current incident?"
+bobi agent <name> ask "What's the status of the current incident?"
 
 # Inject context (fire-and-forget)
-bobi message "The deploy was rolled back manually, stand down"
+bobi agent <name> message "The deploy was rolled back manually, stand down"
 ```
 
 The CLI is built primarily for agent consumption, not just humans.
@@ -219,7 +219,7 @@ status, read their transcripts, and diagnose problems — using the
 same CLI commands a human would. This means agents can build and
 manage their own networks: a director agent can launch project leads,
 monitor their progress with `bobi agents list` and
-`bobi transcript show`, and intervene when something stalls.
+`bobi agent <name> transcript show`, and intervene when something stalls.
 
 Agents message each other the same way — synchronously (block until
 response) or asynchronously (fire and forget). The framework doesn't
@@ -227,19 +227,19 @@ impose a topology. You build whatever shape the problem needs:
 
 ```bash
 # Star: manager delegates to specialists
-bobi agents launch --role manager --subscribe github:org/repo
-bobi agents launch --role frontend --task "Handle UI changes"
-bobi agents launch --role backend --task "Handle API changes"
+bobi agent <name> subagents launch --role manager --subscribe github:org/repo
+bobi agent <name> subagents launch --role frontend --task "Handle UI changes"
+bobi agent <name> subagents launch --role backend --task "Handle API changes"
 
 # Chain: pipeline stages
-bobi agents launch --role triage --subscribe linear:ENG
-bobi agents launch --role spec --subscribe triage/handoff
-bobi agents launch --role implement --subscribe spec/handoff
+bobi agent <name> subagents launch --role triage --subscribe linear:ENG
+bobi agent <name> subagents launch --role spec --subscribe triage/handoff
+bobi agent <name> subagents launch --role implement --subscribe spec/handoff
 
 # Mesh: peers share findings
-bobi agents launch --role researcher --subscribe topic/security
-bobi agents launch --role researcher --subscribe topic/security
-bobi agents launch --role synthesizer --subscribe topic/security
+bobi agent <name> subagents launch --role researcher --subscribe topic/security
+bobi agent <name> subagents launch --role researcher --subscribe topic/security
+bobi agent <name> subagents launch --role synthesizer --subscribe topic/security
 ```
 
 There's no structural difference between a "manager" and a "worker"
@@ -406,7 +406,7 @@ each step to the LLM. The workflow is deterministic; the work inside
 each step is not.
 
 ```yaml
-# .bobi/workflows/incident-response.yaml
+# run/package/workflows/incident-response.yaml
 name: incident-response
 trigger: "PagerDuty alert fires for a production service"
 steps:
@@ -430,16 +430,15 @@ then diagnosed, then fixed. The steps are known — what varies is the
 reasoning within each step. Workflows encode the process; agents
 bring the judgment.
 
-Workflows are loaded from three tiers — built-in defaults, user-level
-overrides, and per-project definitions — so teams customize behavior
-without forking the framework.
+Workflows are loaded from the installed package plus user-owned workspace
+definitions, so teams customize behavior without forking the framework.
 
 ### Agent teams: creating your own agents
 
-Creating a purpose-built agent is a single command:
+Creating a purpose-built agent starts with setup:
 
 ```bash
-bobi agents create customer-support
+bobi setup customer-support
 ```
 
 This launches an interactive session with a builder agent that walks
@@ -449,13 +448,12 @@ it should notify you, and when it should ask for your input versus
 acting autonomously. The builder generates a complete agent team
 written to disk, ready to launch.
 
-You can also skip the interactive flow if you already know what you
-want:
+You can also build a package directly with the create-agent skill if you already
+know what you want, then install it into a named slot:
 
 ```bash
-bobi agents create incident-responder \
-  --task "Build an oncall agent that triages PagerDuty alerts, \
-          investigates using Datadog, and posts findings to Slack"
+bobi agents install agents/incident-responder --name incident-responder
+bobi agent incident-responder start
 ```
 
 The result is an agent team — a portable bundle of everything an
@@ -615,7 +613,7 @@ event_sources:
   - linear
 
 # Or subscribe via CLI:
-# bobi start eng-team --subscribe github:moda-labs/bobi
+# bobi agent eng-team start --subscribe github:moda-labs/bobi
 ```
 
 The event server maintains a subscription index in KV. When an event
@@ -637,7 +635,7 @@ bobi agents update eng-team
 
 # Start the agent
 cd my-project
-bobi start eng-team
+bobi agent eng-team start
 
 # The agent is now:
 # - Subscribed to GitHub, Slack, and Linear events
@@ -645,14 +643,13 @@ bobi start eng-team
 # - Ready to execute workflows when events arrive
 ```
 
-Adding a new event source with an MCP gateway:
+Adding a new event source with an MCP gateway means declaring the tool/service
+in the Bobi Agent package, reinstalling, then adding monitors or workflows that
+use it:
 
 ```bash
-# Connect an MCP gateway for additional services
-bobi connect gateway venn --token $VENN_TOKEN
-
 # Add a monitor that polls via MCP
-bobi monitors add sentry_errors \
+bobi agent <name> monitors add sentry_errors \
   --tool sentry_list_issues \
   --args '{"project": "my-app", "query": "is:unresolved firstSeen:-5m"}' \
   --key-field id \

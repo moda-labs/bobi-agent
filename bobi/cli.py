@@ -71,8 +71,8 @@ def _detect_project_root(cwd: Path | None = None) -> Path:
     """Resolve and bind an already-selected runtime root.
 
     This only honors inherited ``BOBI_ROOT`` or an explicit runtime root. It
-    does not walk cwd; interactive runtime commands should be invoked through
-    ``bobi agent <name> ...`` so the agent group can bind identity once.
+    requires an explicit runtime root; interactive runtime commands should be
+    invoked through the named-agent CLI so the agent group can bind identity once.
     """
     bound = paths.bound_root()
     if bound is not None:
@@ -2078,7 +2078,11 @@ def skill(name):
         bobi skill create-agent   # print the agent creation guide
         bobi skill linear-setup   # print the Linear setup guide
     """
-    skills_dir = _PACKAGE_DIR / "skills"
+    # In a source checkout, the repo-level skills/ directory is canonical.
+    # Wheels bundle that same directory into bobi/skills/ via pyproject
+    # force-include, so installed users do not need a repo checkout.
+    repo_skills = _PACKAGE_DIR.parent / "skills"
+    skills_dir = repo_skills if repo_skills.is_dir() else _PACKAGE_DIR / "skills"
     path = skills_dir / f"{name}.md"
     if not path.exists():
         available = [f.stem for f in skills_dir.glob("*.md")] if skills_dir.exists() else []
@@ -3069,7 +3073,7 @@ def kb_create(name):
     """Create a new knowledge base.
 
     Usage:
-        bobi kb create docs
+        bobi agent <name> kb create docs
     """
     from bobi.kb.store import KBStore
     _ensure_root_bound()
@@ -3090,8 +3094,8 @@ def kb_add(name, file_path, text):
     """Add content to a knowledge base.
 
     Usage:
-        bobi kb add docs --file README.md
-        bobi kb add docs --text "Important fact"
+        bobi agent <name> kb add docs --file README.md
+        bobi agent <name> kb add docs --text "Important fact"
     """
     from bobi.kb.store import KBStore
     from bobi.kb.embedder import embed
@@ -3100,7 +3104,7 @@ def kb_add(name, file_path, text):
     try:
         store = KBStore(name)
     except FileNotFoundError:
-        click.echo(f"KB '{name}' does not exist. Create it first: bobi kb create {name}", err=True)
+        click.echo(f"KB '{name}' does not exist. Create it first with the named kb create command.", err=True)
         raise SystemExit(1)
 
     if file_path:
@@ -3127,9 +3131,9 @@ def kb_search(name, query, limit, mode):
     """Search a knowledge base.
 
     Usage:
-        bobi kb search docs "authentication flow"
-        bobi kb search docs "login bug" --limit 5
-        bobi kb search docs "exact phrase" --mode fts
+        bobi agent <name> kb search docs "authentication flow"
+        bobi agent <name> kb search docs "login bug" --limit 5
+        bobi agent <name> kb search docs "exact phrase" --mode fts
     """
     from bobi.kb.store import KBStore
     from bobi.kb.embedder import embed
@@ -3162,14 +3166,14 @@ def kb_list():
     """List all knowledge bases.
 
     Usage:
-        bobi kb list
+        bobi agent <name> kb list
     """
     from bobi.kb.store import KBStore
     _ensure_root_bound()
 
     kbs = KBStore.list_kbs()
     if not kbs:
-        click.echo("No knowledge bases. Create one with: bobi kb create <name>")
+        click.echo("No knowledge bases. Create one with the named kb create command.")
         return
     for k in kbs:
         click.echo(f"  {k['name']:20s} {k['entry_count']} entries  {k['created_at'][:19]}")
@@ -3181,7 +3185,7 @@ def kb_info(name):
     """Show knowledge base statistics.
 
     Usage:
-        bobi kb info docs
+        bobi agent <name> kb info docs
     """
     from bobi.kb.store import KBStore
     _ensure_root_bound()
@@ -3211,7 +3215,7 @@ def kb_remove(name):
     """Delete a knowledge base.
 
     Usage:
-        bobi kb remove docs
+        bobi agent <name> kb remove docs
     """
     from bobi.kb.store import KBStore
     _ensure_root_bound()
@@ -3242,10 +3246,10 @@ def costs(group_by):
     Aggregates total_cost_usd and model_usage from all session state files.
 
     Usage:
-        bobi costs
-        bobi costs --by model
-        bobi costs --by role
-        bobi costs --by session
+        bobi agent <name> costs
+        bobi agent <name> costs --by model
+        bobi agent <name> costs --by role
+        bobi agent <name> costs --by session
     """
     from .costs import rollup_costs, format_costs
 

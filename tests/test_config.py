@@ -1,4 +1,4 @@
-"""Tests for per-project config loading from agent.yaml."""
+"""Tests for runtime config loading from agent.yaml."""
 
 import os
 from pathlib import Path

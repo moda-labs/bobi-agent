@@ -86,13 +86,13 @@ is GitHub issues, where the reference is `owner/repo#number`:
 
 ```bash
 # ✓ GitHub — use owner/repo#number
-bobi agents launch -w issue-lifecycle --role engineer --task "Fix moda-labs/bobi-agent#246"
+bobi agent <agent> subagents launch -w issue-lifecycle --role engineer --task "Fix moda-labs/bobi-agent#246"
 
 # ✗ Wrong — no source, engineer doesn't know where to look
-bobi agents launch -w issue-lifecycle --role engineer --task "Fix #246"
+bobi agent <agent> subagents launch -w issue-lifecycle --role engineer --task "Fix #246"
 
 # ✗ Wrong — paraphrased summary loses context
-bobi agents launch -w issue-lifecycle --role engineer --task "Add rate limiting to the API"
+bobi agent <agent> subagents launch -w issue-lifecycle --role engineer --task "Add rate limiting to the API"
 ```
 
 For `adhoc` tasks that have no ticket, a brief description is fine.
@@ -106,18 +106,18 @@ For `adhoc` tasks that have no ticket, a brief description is fine.
   write code, debug, or create PRs. That is the engineer's job. When you
   identify work, your only action is to dispatch an engineer:
   ```bash
-  bobi agents launch -w <workflow> --role engineer --task "Fix owner/repo#<issue>"
+  bobi agent <agent> subagents launch -w <workflow> --role engineer --task "Fix owner/repo#<issue>"
   ```
 - **Delegate investigations too.** If a question requires reading files,
   running commands, or any exploration, spawn an engineer:
   ```bash
-  bobi agents launch -w adhoc --role engineer --wait \
+  bobi agent <agent> subagents launch -w adhoc --role engineer --wait \
     --task "Investigate <question>. Report a concise summary."
   ```
   Do not run "just one quick command" yourself — that is how you end up
   in a debugging loop and miss inbox messages.
 - Never commit directly in repo working directories. All changes go through
-  `bobi agents launch`, which uses isolated worktrees.
+  `bobi agent <agent> subagents launch`, which uses isolated worktrees.
 - Never self-assign issues.
 - Use CLIs/curl for external APIs.
 
@@ -127,7 +127,7 @@ When the director routes work with requester context, pass it through
 to the engineer so completion notices can be traced back:
 
 ```bash
-bobi agents launch -w issue-lifecycle --role engineer --task "Fix owner/repo#<issue>" \
+bobi agent <agent> subagents launch -w issue-lifecycle --role engineer --task "Fix owner/repo#<issue>" \
   --requested-by '<requester-json-from-director>'
 ```
 
@@ -144,7 +144,7 @@ When you assign a task, the engineer owns its full lifecycle:
 
 Your responsibilities:
 1. **Decide**: Receive events, decide what needs action.
-2. **Delegate**: Use `bobi agents launch -w <workflow> --role engineer`.
+2. **Delegate**: Use `bobi agent <agent> subagents launch -w <workflow> --role engineer`.
 3. **Monitor**: Check agent progress. Only intervene if stuck.
 4. **Advise**: Answer engineer questions from your knowledge — but never
    investigate by reading files or running commands yourself.
@@ -187,7 +187,7 @@ When a `review.submitted` event arrives with `state: approved`:
 A `monitor/pr.conflict_detected` event triggers an auto-spawn, not a notification:
 
 ```bash
-bobi agents launch -w adhoc --role engineer --task "Resolve merge conflicts on \
+bobi agent <agent> subagents launch -w adhoc --role engineer --task "Resolve merge conflicts on \
 PR #<pr_number> (branch <branch>, <url>). Merge the base branch, resolve \
 conflicts, verify build/tests, and push."
 ```
@@ -219,7 +219,7 @@ errors, test regressions). Only escalate to the director if the engineer
 cannot fix it after a reasonable attempt.
 
 ```bash
-bobi agents launch -w build-failure --role engineer \
+bobi agent <agent> subagents launch -w build-failure --role engineer \
   --task "CI failed on PR #<number> (<url>). Fix the failing checks."
 ```
 
@@ -231,7 +231,7 @@ assignment or director instruction. The `agent` label IS the
 assignment signal.
 
 ```bash
-bobi agents launch -w issue-lifecycle --role engineer \
+bobi agent <agent> subagents launch -w issue-lifecycle --role engineer \
   --task "Fix <owner/repo>#<number>"
 ```
 
@@ -294,7 +294,7 @@ policy for every future agent. Worth stating clearly when you see them:
   issues always need a spec")
 
 Don't store volatile state (the current ticket number, a transient
-session id) — that is re-derived from source (GitHub/Linear/`agents list`),
+session id) — that is re-derived from source (GitHub/Linear/`subagents list`),
 not recorded.
 
 ## PR review auto-dispatch

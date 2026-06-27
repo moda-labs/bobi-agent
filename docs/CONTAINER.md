@@ -18,7 +18,7 @@ entirely in the mounted volume and env vars — see
 | `DISABLE_AUTOUPDATER=1` | freeze the CLI at the built version (the image is the unit of update) |
 | fastembed model baked at `HF_HOME=/opt/bobi/models` | cold-start speed; no first-run download |
 | `gosu` (privilege drop); no `tini` | Fly injects its own PID-1 init (reaps zombies / forwards signals); tini-on-Fly is a known boot-failure trigger. For other runtimes, use `docker run --init`. |
-| `bobi start --foreground` entrypoint | container mode (C2) |
+| `bobi agent <name> start --foreground` entrypoint | container mode (C2) |
 
 The agent's `$HOME` stays on the **image** (`/home/bobi`), so baked team
 tools (`~/dev/gstack`, skills) are read in place. Claude's durable state is
@@ -76,7 +76,7 @@ docker run --rm -v bobi-a:/data \
 ```
 
 **First-boot login is automated (C23).** When the volume has no credentials,
-the entrypoint runs `bobi login-bootstrap` before starting the manager:
+the entrypoint runs `bobi agent <name> login-bootstrap` before starting the manager:
 it drives `claude auth login --claudeai` under a pty, posts the OAuth URL to
 the private Slack channel `BOBI_LOGIN_CHANNEL`, and waits for you to paste
 the auth code back **in that channel** — the code arrives as a normal
@@ -113,7 +113,7 @@ invalidate each other.
 ## Health
 
 The manager exposes `GET /health` on a localhost port written to
-`/data/project/.bobi/state/manager-health.port`. The image `HEALTHCHECK`
+`/data/project/run/state/manager-health.port`. The image `HEALTHCHECK`
 (and Fly script checks) read that file and probe the endpoint:
 
 ```bash
@@ -129,7 +129,7 @@ docker run -d --name c8 -v "$(mktemp -d):/data" \
   -e BOBI_TEAM=eng-team -e BOBI_EVENT_SERVER=https://... \
   bobi:dev
 # wait for healthy, then:
-docker exec c8 bobi ask "Reply with: pong"
+docker exec c8 bobi agent <name> ask "Reply with: pong"
 ```
 
 `tests/integration/test_container_image.py` automates the image-contract
@@ -158,7 +158,7 @@ back up first). The script header documents the operator-agnostic flags and the
 
 `tests/fixtures/smoke-team` is the zero-secret smoke target — it needs only
 `BOBI_EVENT_SERVER` (no service tokens, no `requires`, no monitors), so an
-instance reaches a healthy manager and answers one `bobi ask` with nothing
+instance reaches a healthy manager and answers one `bobi agent <name> ask` with nothing
 but an Anthropic credential. The `team-packages` workflow publishes it to the
 rolling `teams-latest` release, so a full provisioner → boot → ask round-trip is:
 
@@ -205,7 +205,7 @@ secrets) and is the seam a token broker later fills. Team Environments must have
   no `<fleet>-<team>` app yet → runs the provisioner with the team's
   `BOBI_ENV`. No manual step beyond the one-time Environment secret.
 - **Edit a team** → push changes under an existing `agents/<team>/`. The matching
-  instance is updated in place: `bobi install <teams-latest-url>` over
+  instance is updated in place: `bobi agents install <teams-latest-url>` over
   `fly ssh` (workspace-safe reinstall — *not* `agents update`, which can't
   resolve a `url:`-sourced pack) then `fly machine restart`. The volume's
   `agent.yaml` and workspace edits survive.
