@@ -4,276 +4,242 @@
 [![PyPI](https://img.shields.io/pypi/v/bobi)](https://pypi.org/project/bobi/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Bobi is a CLI toolkit that provides the building blocks for creating proactive agent teams: agents that are both human-responsive, and can act autonomously in response to real-world events like GitHub PRs, Slack messages, ticket updates, or incoming emails. You define the roles and functionality of your agent team, and Bobi builds and runs it for you.
+**Bobi is a lightweight library for building and running purposeful multi-agent
+systems** — proactive agents that don't just answer when you message them, but
+subscribe to the outside world (GitHub PRs, Slack messages, ticket updates,
+incoming email, any webhook) and act on their own when something changes. Agents
+coordinate, delegate, and spawn sub-agents to get real work done.
 
-Under the hood, every agent is a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) session — which means the entire system runs on a flat-rate Claude Pro or Max plan with no per-token API costs. API key usage is also supported.
+Every agent runs on [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+or [OpenAI Codex](https://developers.openai.com/codex/cli/), so it all runs on the
+flat-rate subscription you already pay for — no per-token API bills (API keys work
+too).
+
+## What you can build
+
+You define what an agent is for; the framework has no opinion. A few shapes it
+takes:
+
+- **Engineering org** — triage issues, open PRs through a required review-and-CI
+  workflow, and watch for merge conflicts and stale PRs across repos. Bundled as
+  the [`eng-team`](agents/eng-team/) reference agent.
+- **Personal assistant** — watch your inbox and calendar, draft replies, and
+  surface only what needs a decision.
+- **Customer support** — triage tickets, answer from a knowledge base, and
+  escalate what it can't close.
+- **Sales automation** — enrich inbound leads, keep the CRM current, and follow up
+  on schedule.
 
 ## Installation
 
-### Prerequisites
+### What you need
 
-Install and authenticate [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — this is the reasoning engine that powers every agent:
+- Python 3.11+, Git, Node.js + npm
+- [`uv`](https://astral.sh/uv/) (or `pipx`)
+
+You don't clone this repo to run Bobi — it's a published package. Install the CLI
+and go.
+
+### 1) Set up an agent runtime
+
+Bobi runs each agent on **Claude Code** (default) or **OpenAI Codex**. For Claude
+Code:
 
 ```bash
 npm install -g @anthropic-ai/claude-code
 claude
 ```
 
-Follow the prompts to log in with your Anthropic account (Pro, Max, or API key).
+Log in with your Anthropic account (Pro, Max, or API key). To use Codex, install
+and authenticate the `codex` CLI and set `brain: {kind: codex}` in your agent's
+`agent.yaml`.
 
-### Install Bobi
+### 2) Install Bobi
 
-Once Claude Code is set up, paste this into your Claude Code session:
+```bash
+uv tool install bobi          # or: brew install moda-labs/bobi-agent/bobi
+```
+
+Or, from a Claude Code session:
 
 ```plaintext
 Install bobi using https://raw.githubusercontent.com/moda-labs/bobi-agent/main/scripts/install.sh
-```
-
-Or install manually:
-
-```bash
-uv tool install bobi
-```
-
-On macOS you can also use Homebrew:
-
-```bash
-brew install moda-labs/bobi-agent/bobi
 ```
 
 See [scripts/install.sh](scripts/install.sh) for what the installer does.
 
 ## Quick Start
 
-```bash
-# Go from an idea to a runnable agent team, interactively
-bobi setup
+`eng-team` is the reference agent that ships with Bobi — install it to see a full
+one, or build your own for any domain (below).
 
-# Install and start a pre-built agent
+```bash
+# Install the reference engineering agent and start it
 bobi agents install eng-team --name eng-team
 bobi agent eng-team start
 
-# Or launch a single ad-hoc agent
-bobi agent <name> subagents launch --role engineer --task "Fix the login bug"
+# Ask the manager a question (blocks until it responds)
+bobi agent eng-team ask "What can I help with right now?"
 
-# Talk to running agents
-bobi agent <name> ask "What's the status of issue #42?"
-bobi agent <name> message "Skip the integration tests, just ship it"
+# Hand it a one-off task
+bobi agent eng-team subagents launch --role engineer --task "Fix the login bug"
 ```
 
-## Agent Teams
+Prefer to design your own agent from scratch? Run the interactive wizard, or have
+your chat assistant walk you through it:
 
-An agent team is everything an agent needs to operate in a domain: role prompts, workflows, monitors, tools, and extra context/content.
-
+```bash
+bobi setup            # go from an idea to a runnable agent, interactively
 ```
-agents/eng-team/                   # ← browse the reference team at agents/eng-team/
-├── defaults.yaml           # entry role, event sources
-├── roles/
-│   ├── director/ROLE.md    # engineering director
-│   ├── project_lead/ROLE.md
-│   └── engineer/ROLE.md
-├── workflows/
-│   ├── issue-lifecycle.yaml
-│   ├── pr-feedback.yaml
-│   └── build-failure.yaml
-├── monitors/
-│   └── defaults.yaml       # watch for PR conflicts, stale PRs
-└── tools/
-    ├── github.md           # service interaction guides
-    ├── linear.md
-    └── slack.md
-```
-
-### Creating Your Own Agents
-
-Run the following prompt in your chat assistant of choice (ChatGPT, Claude, etc) to launch a guided process that will help you generate your own agent team:
 
 ```plaintext
 Read https://raw.githubusercontent.com/moda-labs/bobi-agent/main/skills/create-agent.md and help me build a bobi agent
 ```
 
-### Agent Team Registry
+### Add integrations (optional)
 
-Bobi maintains an agent team registry at [`agents/`](agents/). Install teams from our registry, or maintain your own private registry and add it to your local installation of Bobi:
-
-```bash
-bobi agents browse                     # see available teams from all registries
-bobi agents update eng-team             # install or update
-bobi agents add-registry myorg/agents  # add a private registry
-```
-
-If you think you have a general-purpose agent you'd like to share with the world, we encourage you to open a PR with it and add it to the global registry!
-
-## Architecture
-
-The topology below is just one example — the [`eng-team`](agents/eng-team/) agent team for software teams. The event server and monitor scheduler, and agent messaging system are infrastructure that every deployment gets.
-
-The topology of agents, including their roles, relationships to each other, and events they are subscribed to is completely defined by the agent team.
-```
-─ GitHub · Slack · Linear · any webhooks
-                 │ 
-                 ▼
-    ┌───────────────────────────┐
-    │       Event Server        │
-    │  (Cloudflare or local)    │
-    │                           │
-    │  pub/sub · cursor replay  │
-    └─────────────┬─────────────┘
-                  │ WebSocket
-┌─────────────────┼──────────────────────────────────────┐
-│ Agent Teamage   │                                      │
-│                 │          ┌──────────────────────┐    │
-│                 │          │      Monitors        │    │
-│                 │          │    (runs locally)    │    │
-│                 │          │  pr_conflicts  15m   │    │
-│                 │          │  stale_prs     2h    │    │
-│                 │          │  deploy_drift  1h    │    │
-│                 │          └──────────┬───────────┘    │
-│                 ▼                     │                │
-│       ┌──────────────────────────┐    │                │
-│       │        Director     ◄─────────┘                │
-│       │       (persistent)       │                     │
-│       └─────┬──────────────┬─────┘                     │
-│             │              │                           │
-│             ▼              ▼                           │
-│    ┌──────────────┐ ┌──────────────┐                   │
-│    │ Project Lead │ │ Project Lead │                   │
-│    │ (persistent) │ │ (persistent) │                   │
-│    │   (repo-a)   │ │   (repo-b)   │                   │
-│    └──────┬───────┘ └──────┬───────┘                   │
-│           │                │                           │
-│      ┌────┴────┐      ┌────┴────┐                      │
-│      ▼         ▼      ▼         ▼                      │
-│   ┌──────┐ ┌──────┐ ┌──────┐ ┌──────────────┐          │
-│   │ task │ │ task │ │ task │ │   workflow   │          │
-│   │agent │ │agent │ │agent │ │  (YAML DAG)  │          │
-│   └──────┘ └──────┘ └──────┘ │ step → step  │          │
-│                              └──────────────┘          │
-└────────────────────────────────────────────────────────┘
-```
-
-## Event Server
-
-Agents receive real-world events (GitHub, Slack, Linear, custom webhooks) through a centralized event server. Three options:
-
-| | Local | Self-hosted Cloudflare | Hosted (coming soon) |
-|---|---|---|---|
-| Setup | `bobi agent <name> event-server start` | Deploy the worker yourself | Sign up at [bobi.dev](https://bobi.dev) |
-| Hosting | Runs on your machine | Your Cloudflare account, always on | Managed by Moda Labs |
-| Webhook routing | Requires [ngrok](https://ngrok.com/) or similar tunnel | Stable URL, no tunnel | Stable URL, no tunnel |
-| GitHub/Slack apps | Create your own | Create your own | Install our pre-built apps |
-| Storage | In-memory | Durable Objects (persistent) | Durable Objects (persistent) |
-| Best for | Local dev, quick experimentation | Self-hosted production | Fastest path to production |
-
-## Monitors
-
-Not every event comes from a webhook. Monitors are scheduled checks that detect conditions the outside world doesn't notify you about — merge conflicts, stale PRs, deploy drift, SLA breaches — and inject them into the same event bus as webhooks.
-
-```yaml
-# monitors/defaults.yaml
-monitors:
-  - name: pr_conflicts
-    description: Check for PRs with merge conflicts
-    interval: 15m
-    event: monitor/pr.conflict_detected
-    check: pr_conflicts              # native Python check function
-
-  - name: stale_prs
-    description: PRs open longer than 3 days with no activity
-    interval: 2h
-    event: monitor/pr.stale_detected
-```
-
-A monitor with a `check:` field runs a deterministic native function — fast, deduplicated, no LLM needed. A monitor without one spawns a short-lived agent that evaluates the description and posts an event only if it finds something. Either way, the resulting event is indistinguishable from a webhook — subscribing agents handle it the same way.
+To trigger agents from Slack or let them act on Linear, the agent needs
+credentials. `bobi agents install` prompts for any secrets the agent's
+`agent.yaml` references and writes them to `run/.env` (never commit this file).
+Then start the event server so webhooks can reach your agents:
 
 ```bash
-bobi agent <name> monitors list              # see all active monitors
-bobi agent <name> monitors add stale-deploys --interval 1h --description "Deploys older than 24h"
-bobi agent <name> monitors pause pr_conflicts
+bobi agent eng-team event-server start    # receive webhooks locally
+bobi create-slack-bot --app-name "Bobi"   # generate a Slack app to create
 ```
 
-## Workflows
+Step-by-step guides: **[Slack setup](skills/slack-setup.md)** ·
+**[Linear setup](skills/linear-setup.md)**.
 
-Knowledge work often requires multi-step workflows where LLM variation or skipping steps is not acceptable.  For example, in software development, you want to require that all changes go through an automated code review and that CI passes before opening PRs.
+## Under the hood
 
-Workflows are YAML DAGs that force agents to follow pre-built recipes in order.  Each workflow step can also route to a different role (e.g. `engineer` vs `security-reviewer`) to provide better context for each step.
-
-Here is an example YAML:
-
-```yaml
-name: incident-response
-trigger: "PagerDuty alert fires for a production service"
-steps:
-  - name: triage
-    agent: oncall
-    prompt: "Assess severity, check recent deploys, identify affected services"
-    handoff:
-      required: [severity, affected_services]
-
-  - name: route
-    if: "severity == critical"
-    goto: escalate
-    else: investigate
-
-  - name: investigate
-    agent: engineer
-    prompt: "Find root cause using logs, metrics, and traces"
-```
-
-You normally don't have to build these YAML files by hand — the [create-agent](skills/create-agent.md) skill will guide you through the process.
-
-## CLI
+- **It's a CLI all the way down.** `bobi` launches agents from your terminal — and
+  each agent launches *its own* sub-agents through the same CLI. A manager spawns
+  project leads, a project lead spawns task agents, every level using the same
+  commands. That recursion is the entire execution model.
+- **No topology opinions.** Bobi ships no org chart. Roles, relationships, and
+  who-subscribes-to-what are defined entirely by the agent.
+- **Built-in event server.** A topic-based pub/sub bus (run locally or on your own
+  Cloudflare account) ingests webhooks from GitHub, Slack, Linear, and anything
+  else, then fans them out to the agents subscribed to each topic.
+- **Runtime-agnostic brains.** Each agent is a Claude Code or OpenAI Codex
+  session; choose per agent with `brain: {kind: claude|codex}`.
+- **Deterministic workflows.** YAML DAGs force multi-step work through a fixed
+  recipe with role routing — code review before merge, CI before PRs — instead of
+  trusting the model to remember.
+- **Monitors.** Scheduled checks detect conditions no webhook fires for (merge
+  conflicts, stale PRs, deploy drift) and inject them onto the same bus.
+- **Observability.** Full session transcripts, an event-and-decision log, cost
+  accounting, and a `doctor` health check.
 
 ```bash
-# Agents
-bobi agent <name> subagents launch -w <workflow> --role <role> --task "context"
-bobi agents list
-bobi agent <name> subagents show <id>
-bobi agent <name> subagents cancel <id>
+# Launch and operate agents
+bobi agent <name> start
+bobi agent <name> subagents launch --role <role> --task "context"
 
-# Communication
+# Talk to running agents
 bobi agent <name> ask "question"          # blocks until response
 bobi agent <name> message "update"        # fire-and-forget
 
-# Observability
+# Observe
 bobi agent <name> status                  # active agents
 bobi agent <name> events                  # recent events and decisions
 bobi agent <name> transcript show <sess>  # session transcript
 bobi agent <name> doctor                  # system health check
-
-# Workflows & monitors
-bobi agent <name> workflows list
-bobi agent <name> monitors list
-bobi agent <name> roles list
 ```
 
-## Configuration
+Full command reference: [skills/bobi.md](skills/bobi.md).
 
-See the setup guides for [Slack](skills/slack-setup.md) and [Linear](skills/linear-setup.md).
+## Mental model
 
-`BOBI_HOME` is the single low-level home root. It defaults to `~/.bobi` and is
-configurable only by environment variable. Each named Bobi Agent lives under
-`$BOBI_HOME/agents/<name>/`, with editable source in `src/`, installed package
-files in `run/package/`, mutable state in `run/state/`, workspace files in
-`run/workspace/`, and credentials in `run/.env`.
+Bobi has a small surface area to learn:
 
-`agent.yaml` is the package config file (roles, services, monitors,
-credentials); secrets use `${ENV_VAR}` references resolved from the
-environment, with `run/.env` loaded at startup:
+- **Agents are installable packages.** An agent is a portable bundle of roles,
+  workflows, monitors, and tool guides. You install one by name, path, URL, or
+  from a registry — like installing a dependency — and get a working agent for a
+  domain.
+- **Source is editable; the runtime image is frozen.** You edit an agent's source
+  files, then reinstall to regenerate the frozen package image the runtime
+  actually reads. Reinstalling never clobbers your runtime state or workspace.
+- **Everything lives under one home directory.** `$BOBI_HOME` (default `~/.bobi`)
+  holds every named agent: editable source in `src/`, the installed package in
+  `run/package/`, mutable state in `run/state/`, your files in `run/workspace/`,
+  and credentials in `run/.env`.
 
-```yaml
-# run/package/agent.yaml
-services:
-  - name: slack
-    bot_token: ${SLACK_BOT_TOKEN}
-  - name: linear
-    api_key: ${LINEAR_API_KEY}
-event_server_url: https://bobi-events.example.workers.dev
+## Deployment
+
+A proactive agent is only as available as the machine it runs on. Locally, your
+agent works when your laptop is open; in the cloud, it works **24/7** — reacting to
+a PR at 2am or a support ticket on the weekend without you in the loop. That
+always-on shift is the real productivity unlock, and Bobi makes it one command.
+
+`bobi deploy` packages your agent into an immutable container image and runs it as
+an always-on instance on a cloud VM — no Dockerfile to write, no server to
+configure.
+
+```bash
+bobi deploy eng-team
 ```
 
-Custom roles, workflows, monitors, and tools are source-package changes. Edit
-the source under `src/` or another explicit source directory, then reinstall so
-`run/package/` is regenerated.
+The command provisions the machine, ships the image, and starts the agent; run it
+again and it updates the instance in place. Behind it:
+
+- **Immutable image.** The framework, a pinned agent runtime, and the embedding
+  model are baked into one image — the image is the unit of update.
+- **Durable state.** Credentials and session transcripts live on a mounted volume,
+  so they survive image updates and the agent resumes where it left off.
+- **Self-managing.** A machine restart policy plus a supervision watchdog keep the
+  agent alive without babysitting.
+- **GitOps for fleets.** `bobi deploy-init` scaffolds a GitHub Action that
+  reconciles `deployments/*.yaml` against running instances on every release — git
+  is the desired state, `bobi deploy` closes the gap, one instance at a time.
+
+We target [Fly](https://fly.io) Machines specifically because they suspend and
+resume in ~500ms in response to an incoming event — so an idle agent scales to
+zero and wakes on the next webhook instead of burning a VM around the clock. You
+get 24/7 availability without paying for 24/7 idle. It works from the installed
+CLI alone — no framework checkout. Full runbook:
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); image details:
+[docs/CONTAINER.md](docs/CONTAINER.md).
+
+## Security
+
+Bobi's event server is a direct front door to a model's prompt: every event it
+delivers becomes input an agent acts on. So neither subscribing to a topic nor
+publishing onto one can be open. Bobi gates both with a signed **trust-bubble**
+model:
+
+- **Bubble membership (HMAC).** Each named agent mints a *trust bubble* on first
+  start; every deployment of that agent joins it with the bubble's key. Each
+  publish and join is signed with HMAC-SHA256 over a canonical
+  `(timestamp, nonce, method, path, body)` string and verified server-side within
+  a ±5-minute replay window. Only bubble members can put events on the bus.
+- **Proof of access for external topics.** Before a bubble may subscribe to a
+  global webhook topic (`github:owner/repo`, `linear:team`, `slack:workspace`),
+  the event server verifies an upstream credential *once* — a GitHub repo read, a
+  Linear team read, a Slack workspace registration — and stores only the resulting
+  grant, never the credential. The grant is the source of truth at delivery, so a
+  bubble can never receive another org's events without proving it controls that
+  resource.
+- **Protect the bubble key.** The bubble's private key lives on the machine
+  running the agent and grants the ability to act as that agent on the bus. Treat
+  it like any other credential — it sits under `run/`, and you should never commit
+  it or copy it off the host.
+- **Local by default.** The local event server runs on your machine; nothing
+  leaves it until you connect a remote event server or messaging integration.
+  Installing an agent runs its prompts against your credentials, so review an
+  agent before installing it — the same way you'd review a dependency.
+
+## Documentation
+
+| Goal | Read |
+|---|---|
+| Run and operate Bobi | [skills/bobi.md](skills/bobi.md) — full CLI reference |
+| Build your own agent | [skills/create-agent.md](skills/create-agent.md) · [docs/BUILDING_AGENT_TEAMS.md](docs/BUILDING_AGENT_TEAMS.md) |
+| Understand the model | [docs/EVENT_DRIVEN_AGENTS.md](docs/EVENT_DRIVEN_AGENTS.md) — why event-driven agents |
+| Onboard an agent | [docs/AGENT_TEAM_ONBOARDING.md](docs/AGENT_TEAM_ONBOARDING.md) |
+| Connect Slack / Linear | [skills/slack-setup.md](skills/slack-setup.md) · [skills/linear-setup.md](skills/linear-setup.md) |
+| Deploy to production | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) · [docs/CONTAINER.md](docs/CONTAINER.md) |
 
 ## Development
 
