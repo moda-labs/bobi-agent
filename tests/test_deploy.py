@@ -531,6 +531,26 @@ def test_team_url_existing_app_updates_in_place(repo, recorder, monkeypatch):
     assert any("machine\nrestart\n48ed1234" in c for c in joined)
 
 
+def test_team_url_rebuild_flag_rebuilds_before_update(repo, recorder, monkeypatch):
+    """--rebuild must also refresh an existing team-url image before the
+    in-place package reinstall. This is the release canary path."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
+    monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
+    monkeypatch.setattr(D, "_fly_machine_ids", lambda app: ["48ed1234"])
+    (repo / "deployments" / "eng.yaml").write_text(
+        "team-url: https://r/eng.tar.gz\n"
+    )
+    D.deploy(repo, "eng", {"rebuild": True})
+    joined = _flat(recorder)
+    assert any("provision-instance.sh" in c
+               and "--team-url" in c
+               and "https://r/eng.tar.gz" in c for c in joined)
+    assert any("bobi agents install https://r/eng.tar.gz" in c
+               and "--name \"$BOBI_INSTANCE\"" in c
+               and "--non-interactive" in c for c in joined)
+    assert any("machine\nrestart\n48ed1234" in c for c in joined)
+
+
 def test_ssh_push_new_app_provisions_blank_then_pushes(repo, recorder, monkeypatch, tmp_path):
     monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")

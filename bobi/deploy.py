@@ -1216,6 +1216,8 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
                         "may fail. If so, set it manually, e.g.:\n"
                         "    export DOCKER_HOST=unix://$HOME/.docker/run/docker.sock")
 
+        forced_rebuild = bool((overrides or {}).get("rebuild"))
+
         if cfg.delivery == "ssh-push":
             pkg = resolve_team_dir(project_path, cfg.team)
             if not deployed:
@@ -1225,8 +1227,7 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
                      extra_env=build_env)
                 # Entrypoint is waiting; the push releases it (no restart needed).
                 push_team(app, pkg, restart=False)
-            elif _should_rebuild(project_path, cfg, app,
-                                 forced=bool((overrides or {}).get("rebuild"))):
+            elif _should_rebuild(project_path, cfg, app, forced=forced_rebuild):
                 # Deps changed (or --rebuild): rebuild the image on the existing
                 # app — provision-instance.sh is idempotent (skips create, just
                 # re-deploys) and never touches the volume's project files — then
@@ -1245,6 +1246,11 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
                 _run([*base, "--team-url", cfg.team_url, "--yes"],
                      cwd=assets.run_cwd, extra_env=build_env)
             else:
+                if forced_rebuild:
+                    log.info("rebuilding instance '%s' image in place (team-url)...",
+                             app)
+                    _run([*base, "--team-url", cfg.team_url, "--yes"],
+                         cwd=assets.run_cwd, extra_env=build_env)
                 log.info("updating instance '%s' in place (team-url)...", app)
                 update_team_url(app, cfg.team_url)
 
