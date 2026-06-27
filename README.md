@@ -193,9 +193,13 @@ again and it updates the instance in place. Behind it:
   reconciles `deployments/*.yaml` against running instances on every release — git
   is the desired state, `bobi deploy` closes the gap, one instance at a time.
 
-Currently targets [Fly](https://fly.io) Machines, and works from the installed CLI
-alone — no framework checkout. Full runbook: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md);
-image details: [docs/CONTAINER.md](docs/CONTAINER.md).
+We target [Fly](https://fly.io) Machines specifically because they suspend and
+resume in ~500ms in response to an incoming event — so an idle agent scales to
+zero and wakes on the next webhook instead of burning a VM around the clock. You
+get 24/7 availability without paying for 24/7 idle. It works from the installed
+CLI alone — no framework checkout. Full runbook:
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); image details:
+[docs/CONTAINER.md](docs/CONTAINER.md).
 
 ## Security
 
