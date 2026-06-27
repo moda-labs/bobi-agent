@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.35.2 — 2026-06-27
+
+Patch release for the Bobi release gate.
+
+### Fixed
+- **Release canary UI smoke uses the scoped CLI.** The canary workflow now runs
+  `bobi agent canary ui --app "$canary" --check`, matching the named-agent CLI
+  introduced in the Bobi cutover. The previous top-level `bobi ui` command no
+  longer exists, so the v0.35.1 GitHub release gate stopped after the functional
+  canary ask and before PyPI/Homebrew publishing.
+
 ## 0.35.1 — 2026-06-27
 
 Patch release for the Bobi cutover release path.
