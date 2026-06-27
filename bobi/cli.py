@@ -205,6 +205,9 @@ def main():
 @click.pass_context
 def agent(ctx, name):
     """Operate on one installed Bobi Agent runtime."""
+    if ctx.invoked_subcommand == "ui":
+        ctx.obj = {"agent": name, "root": None}
+        return
     root = _bind_agent_runtime(name)
     ctx.obj = {"agent": name, "root": root}
 
@@ -1204,7 +1207,8 @@ def setup(name, model, resume):
 @click.option("--no-browser", is_flag=True, help="Don't open a browser window.")
 @click.option("--check", is_flag=True,
               help="Remote: probe /api/agents through the tunnel once and exit (a smoke check).")
-def ui(name, app, local_port, remote_port, no_browser, check):
+@click.pass_context
+def ui(ctx, name, app, local_port, remote_port, no_browser, check):
     """View and chat with an agent team's agents in a web UI.
 
     \b
@@ -1226,7 +1230,10 @@ def ui(name, app, local_port, remote_port, no_browser, check):
 
     # Local mode: bind the registry + event-server root so the cross-process
     # `deliver` behind the chat reaches the same team start command runs.
-    project_path = _detect_project_root()
+    selected = ""
+    if ctx.parent is not None and isinstance(ctx.parent.obj, dict):
+        selected = str(ctx.parent.obj.get("agent") or "")
+    project_path = _bind_agent_runtime(selected) if selected else _detect_project_root()
     from bobi.sdk import set_project_root
     set_project_root(project_path)
     from bobi.agentui import server as agentui_server

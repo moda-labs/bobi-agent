@@ -54,6 +54,29 @@ def test_missing_agent_errors_without_cwd_fallback(tmp_path, monkeypatch):
     assert "package/agent.yaml" in result.output
 
 
+def test_agent_ui_app_does_not_require_local_install(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+    calls = []
+
+    def fake_run(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr("bobi.agentui.remote.run", fake_run)
+    result = CliRunner().invoke(
+        main, ["agent", "canary", "ui", "--app", "ci-canary", "--check"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [{
+        "name": None,
+        "app": "ci-canary",
+        "local_port": None,
+        "remote_port": None,
+        "open_browser": True,
+        "check": True,
+    }]
+
+
 def test_agents_list_without_installs_is_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     result = CliRunner().invoke(main, ["agents", "list"])

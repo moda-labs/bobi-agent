@@ -88,6 +88,7 @@ def _patch_run(monkeypatch, *, exists=True, token="tok", rport=8080):
 
 def test_run_happy_path(monkeypatch):
     _patch_run(monkeypatch)
+    monkeypatch.setattr(remote, "_free_local_port", lambda: 18081, raising=False)
     started, opened = {}, {}
     def fake_popen(cmd, **kw):
         started["cmd"] = cmd
@@ -98,8 +99,22 @@ def test_run_happy_path(monkeypatch):
 
     rc = remote.run(name=None, app="moda-eng-team", open_browser=True)
     assert rc == 0
-    assert started["cmd"] == ["fly", "proxy", "8080:8080", "-a", "moda-eng-team"]
-    assert opened["url"] == "http://localhost:8080/?n=tok"
+    assert started["cmd"] == ["fly", "proxy", "18081:8080", "-a", "moda-eng-team"]
+    assert opened["url"] == "http://localhost:18081/?n=tok"
+
+
+def test_run_default_local_port_uses_free_port(monkeypatch):
+    _patch_run(monkeypatch, rport=8080)
+    monkeypatch.setattr(remote, "_free_local_port", lambda: 19001, raising=False)
+    started = {}
+    monkeypatch.setattr(remote.subprocess, "Popen",
+                        lambda cmd, **kw: started.setdefault("cmd", cmd) is None or _FakeProc())
+    monkeypatch.setattr(remote.webbrowser, "open", lambda u: None)
+
+    rc = remote.run(app="x", open_browser=False)
+
+    assert rc == 0
+    assert started["cmd"] == ["fly", "proxy", "19001:8080", "-a", "x"]
 
 
 def test_run_local_port_override(monkeypatch):

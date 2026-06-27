@@ -83,6 +83,12 @@ def proxy_command(app: str, local_port: int, remote_port: int) -> list[str]:
     return [_fly(), "proxy", f"{local_port}:{remote_port}", "-a", app]
 
 
+def _free_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
 def _port_open(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
@@ -140,7 +146,7 @@ def run(name: str | None = None, *, app: str | None = None,
               "be enabled there — redeploy with BOBI_UI=1 (provisioned "
               "instances set it automatically).", file=sys.stderr)
         return 1
-    lport = local_port or rport
+    lport = local_port or _free_local_port()
 
     print(f"  Tunneling to {target} (remote :{rport}) …")
     proc = subprocess.Popen(proxy_command(target, lport, rport))
