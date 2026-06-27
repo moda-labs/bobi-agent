@@ -270,6 +270,11 @@ class TestListRemote:
 
 class TestMultiRegistry:
 
+    def test_default_registry_points_at_public_bobi_agent_repo(self):
+        from bobi.registry import DEFAULT_REPO
+
+        assert DEFAULT_REPO == "moda-labs/bobi-agent"
+
     def test_all_registries_includes_user_added(self, bobi_env):
         from bobi import paths
         from bobi.registry import _all_registries
@@ -281,7 +286,7 @@ class TestMultiRegistry:
         config_path.write_text(yaml.dump(data))
 
         registries = _all_registries(bobi_env.project_path)
-        assert "moda-labs/bobi" in registries  # default
+        assert "moda-labs/bobi-agent" in registries  # default
         assert "myorg/my-agents" in registries
 
     def test_registries_deduplicates(self, bobi_env):
@@ -290,8 +295,8 @@ class TestMultiRegistry:
 
         config_path = paths.ensure_global_config()
         data = yaml.safe_load(config_path.read_text()) or {}
-        data["registries"] = ["moda-labs/bobi"]  # duplicate of default
+        data["registries"] = ["moda-labs/bobi-agent"]  # duplicate of default
         config_path.write_text(yaml.dump(data))
 
         registries = _all_registries(bobi_env.project_path)
-        assert registries.count("moda-labs/bobi") == 1
+        assert registries.count("moda-labs/bobi-agent") == 1

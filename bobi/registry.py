@@ -18,7 +18,7 @@ from bobi import paths
 
 log = logging.getLogger(__name__)
 
-DEFAULT_REPO = "moda-labs/bobi"
+DEFAULT_REPO = "moda-labs/bobi-agent"
 GITHUB_RAW = "https://raw.githubusercontent.com"
 # The single rolling GitHub release that holds every published team asset:
 # rolling `<team>.tar.gz` (clobbered each main push) + immutable

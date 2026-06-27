@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.35.4 — 2026-06-27
+
+Patch release for fleet deploys after the Bobi repo rename.
+
+### Fixed
+- **Inherited agent teams resolve from the live public registry.** The default
+  team registry now points at `moda-labs/bobi-agent` instead of the old
+  `moda-labs/bobi` slug, fixing `bobi deploy` for teams such as `eng-team` and
+  `personal-assistant` that inherit from public base teams.
+
 ## 0.35.3 — 2026-06-27
 
 Patch release for the remote Agent UI release gate.

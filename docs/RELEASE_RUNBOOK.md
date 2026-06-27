@@ -63,10 +63,10 @@ gh release create v<version> --target main --title "v<version>" --notes-file -
 Watch it to completion:
 
 ```bash
-gh run list --repo moda-labs/bobi --workflow release.yml --limit 3 \
+gh run list --repo moda-labs/bobi-agent --workflow release.yml --limit 3 \
   --json databaseId,displayTitle,status,conclusion,url
 
-gh run watch <run-id> --repo moda-labs/bobi --interval 20
+gh run watch <run-id> --repo moda-labs/bobi-agent --interval 20
 ```
 
 Do not continue to the Moda fleet pin until the release workflow is green,
