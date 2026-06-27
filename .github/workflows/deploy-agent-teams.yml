@@ -65,6 +65,11 @@ on:
         description: "Git ref to reconcile from (default: the triggering ref)"
         type: string
         required: false
+      rebuild:
+        description: "Force an image rebuild before reconciling package content."
+        type: boolean
+        required: false
+        default: false
   # Standalone team-package deploy without a framework release: push a `deploy-*`
   # tag. Ships a team-definition or secret edit live with NO image rebuild. Tag
   # pushes run from the TAGGED commit (any branch), so this also drives the branch
@@ -78,6 +83,11 @@ on:
       only:
         description: "Reconcile only this deployment name (default: all active)"
         required: false
+      rebuild:
+        description: "Force an image rebuild before reconciling package content."
+        required: false
+        type: boolean
+        default: false
 
 # Serialize fleet reconciliation so two pushes can't race on the same app.
 concurrency:
@@ -182,6 +192,7 @@ jobs:
           # All secrets in scope (this tenant Environment + repo/org). `secrets`
           # has no dynamic key access, so we dump it as JSON and filter in the step.
           ALL_SECRETS: ${{ toJSON(secrets) }}
+          REBUILD: ${{ inputs.rebuild && '1' || '' }}
         run: |
           set -euo pipefail
           name="${{ matrix.entry.name }}"
@@ -203,7 +214,7 @@ jobs:
           # prune of undeclared keys, identity stamps) is the primitive's job. Prune
           # is on by default — the Environment is the source of truth; the engine
           # accepts --no-prune to disable it.
-          bobi deploy "$name" --env-file "$envfile"
+          bobi deploy "$name" --env-file "$envfile" ${REBUILD:+--rebuild}
 
   orphans:
     # Report Fly apps in the fleet that no longer have a deployments/ file, so a
