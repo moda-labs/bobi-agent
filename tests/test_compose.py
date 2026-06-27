@@ -535,6 +535,7 @@ def test_deploy_resolve_team_dir_passthrough_no_from(project):
 
 REPO = Path(__file__).resolve().parents[1]
 ENG_TEAM_CORE = REPO / "agents" / "eng-team"
+ENG_TEAM_CORE_VERSION = yaml.safe_load((ENG_TEAM_CORE / "agent.yaml").read_text())["version"]
 
 
 def test_eng_team_core_installs_standalone(tmp_path):
@@ -566,7 +567,7 @@ def test_synthetic_outside_org_overlay_composes(tmp_path):
     shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team")
     acme = proj / "agents" / "acme-eng-team"
     _write(acme / "agent.yaml",
-           'from: eng-team@1.1.0\nversion: "0.1.0"\n'
+           f'from: eng-team@{ENG_TEAM_CORE_VERSION}\nversion: "0.1.0"\n'
            'services:\n  - {name: jira, required: true}\n'
            'build:\n  npm: [some-linter]\n')
     _write(acme / "roles" / "engineer" / "ROLE.md",
