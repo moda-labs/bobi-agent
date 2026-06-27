@@ -44,7 +44,7 @@ Monitor flavors:
   - Native check (`check:` field) — a deterministic Python runner in
     checks.py that the scheduler calls directly.
   - Description-only — the scheduler launches a short-lived, non-interactive
-    check agent out-of-band (via `bobi agents launch`), captures its
+    check agent out-of-band (via `bobi agent <name> subagents launch`), captures its
     verdict, and converts it into conditions. The check agent only observes
     and reports — dedup and publishing happen here, on the same path as
     every other flavor. The manager never sees the check process itself.
@@ -163,7 +163,7 @@ def _default_publish(event: str, data: dict) -> bool:
 def _parse_verdict(output: str) -> dict | None:
     """Extract the trailing verdict JSON a check process printed, or None.
 
-    `bobi agents launch --wait` prints the check's verdict as a single
+    `bobi agent <name> subagents launch --wait` prints the check's verdict as a single
     JSON line ({"success": ..., "finding": ...}). None means the process
     produced no parseable verdict — an indeterminate run, never "all clear".
     """
@@ -183,7 +183,7 @@ def _parse_verdict(output: str) -> dict | None:
 def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
     """Launch a non-interactive check subprocess and report its verdict.
 
-    Runs `bobi agents launch --wait` out-of-band so the scheduler thread
+    Runs `bobi agent <name> subagents launch --wait` out-of-band so the scheduler thread
     is never blocked, captures the check's stdout, and hands the trailing
     verdict JSON (or None) to ``on_verdict`` from a waiter thread when the
     process exits. The check agent only observes — converting the verdict to
@@ -201,9 +201,11 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
         except Exception:
             pass
 
+    from bobi import paths
+    root = paths.bobi_root()
     cmd = [
         sys.executable, "-m", "bobi.cli",
-        "agents", "launch",
+        "agent", paths.agent_name_for_root(root), "subagents", "launch",
         "-w", "adhoc",
         *(["--role", role] if role else []),
         "--non-interactive",
@@ -211,7 +213,6 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
         "--task", monitor.description or monitor.name,
     ]
 
-    from bobi import paths
     log_path = paths.state_dir() / "manager.log"
 
     try:
@@ -221,7 +222,7 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
             # to be started from.
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf,
                                     text=True, start_new_session=True,
-                                    cwd=str(paths.bobi_root()))
+                                    cwd=str(root))
     except OSError as e:
         log.error(f"Failed to spawn check for monitor {monitor.name}: {e}")
         return
@@ -260,9 +261,11 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> No
     scheduler — not the agent — owns the cursor advance and the publish.
     """
     role = getattr(monitor, "role", "") or ""
+    from bobi import paths
+    root = paths.bobi_root()
     cmd = [
         sys.executable, "-m", "bobi.cli",
-        "agents", "launch",
+        "agent", paths.agent_name_for_root(root), "subagents", "launch",
         "-w", "adhoc",
         *(["--role", role] if role else []),
         "--non-interactive",
@@ -270,14 +273,13 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> No
         "--task", task,
     ]
 
-    from bobi import paths
     log_path = paths.state_dir() / "manager.log"
 
     try:
         with open(log_path, "a") as lf:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf,
                                     text=True, start_new_session=True,
-                                    cwd=str(paths.bobi_root()))
+                                    cwd=str(root))
     except OSError as e:
         log.error(f"Failed to spawn curator for monitor {monitor.name}: {e}")
         on_result(None)
@@ -636,13 +638,13 @@ class MonitorScheduler:
 
     def _load_curator_prompt(self, root) -> str:
         """The curator agent's working instructions. Team override first
-        (<project>/.bobi/prompts/curator.md), framework default otherwise —
+        (<run>/package/prompts/curator.md), framework default otherwise —
         "what counts as durable" is domain-flavored (Q1), so a team can replace
         it without touching the framework."""
         from bobi import paths
         from bobi.prompts import CURATOR_PATH
         if root:
-            override = paths.bobi_dir(root) / "prompts" / "curator.md"
+            override = paths.package_dir(root) / "prompts" / "curator.md"
             try:
                 if override.is_file():
                     return override.read_text()

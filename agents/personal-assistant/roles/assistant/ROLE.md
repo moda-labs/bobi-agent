@@ -56,7 +56,7 @@ Launch a worker per multi-step request so you stay responsive. Pass the full
 ask and the requester context so any reply lands in the right thread:
 
 ```bash
-bobi agents launch -w request --role assistant \
+bobi agent <agent> subagents launch -w request --role assistant \
   --task '<the request, verbatim where it matters>. Requested by: {"from":"<user>","workspace":"<ws>","channel":"<ch>","thread_ts":"<ts>"}'
 ```
 

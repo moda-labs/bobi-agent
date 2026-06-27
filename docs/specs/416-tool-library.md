@@ -80,7 +80,7 @@ requires:                       # spliced into agent.yaml `requires:` (list-merg
   - name: codex
     why: "Delegate a coding sub-task to the Codex CLI (tools/codex.md)."
     check: "command -v codex >/dev/null 2>&1 && { test -n \"${OPENAI_API_KEY:-}\" || codex --version >/dev/null 2>&1; }"
-    fix: "npm install -g @openai/codex@0.142.0 && (codex auth login || echo 'Set OPENAI_API_KEY in .bobi/.env')"
+    fix: "npm install -g @openai/codex@0.142.0 && (codex auth login || echo 'Set OPENAI_API_KEY in run/.env')"
 build:                          # spliced into agent.yaml `build:` (list-accrete + de-dupe)
   npm: ["@openai/codex@0.142.0"]
 ```

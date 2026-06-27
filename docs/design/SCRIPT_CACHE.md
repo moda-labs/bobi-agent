@@ -27,7 +27,7 @@ foundation) · Linear MDS-52 (epic), MDS-53.
 > The scheduler rewrites `monitor_state.json` wholesale from an in-memory dict
 > every tick, so a check runner writing the same file would be clobbered (a race).
 > The content `sha256` + capability envelope + observability counters therefore
-> live in `.bobi/state/scripts/<name>.state.json`, co-located with the
+> live in `run/state/scripts/<name>.state.json`, co-located with the
 > script they protect. The §3.3 TOCTOU check and §3.4 envelope check read from
 > this sidecar (still "trusted state", just a dedicated file).
 
@@ -196,8 +196,9 @@ Even a validated script runs constrained, so a validator miss can't do damage:
   self-heal storms. Instead, **redirect writable roots to disposable scratch**:
   run in a fresh `tempfile.mkdtemp()` as CWD with `HOME`, `XDG_*`, and `TMPDIR`
   all pointed *into* that scratch dir, and a **bounded** `RLIMIT_FSIZE` (e.g.
-  10 MB). Tools that need a cache work; nothing can touch the repo, `.bobi/`,
-  or the real `$HOME`, and the whole scratch tree is deleted after the run.
+  10 MB). Tools that need a cache work; nothing can touch the repo, Bobi
+  runtime directories, or the real `$HOME`, and the whole scratch tree is
+  deleted after the run.
 - **`RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_NPROC`, `RLIMIT_CORE=0`** via `preexec_fn`
   — bound memory, CPU, fork-bombs, core dumps.
 - **Re-verify before every unattended run (TOCTOU).** Validation happens at *pin*
@@ -218,9 +219,9 @@ Whether an agent-generated script may run unattended *the first time* without a
 human looking at it. Three modes, selected by a `script_cache.approval` policy:
 
 - **`review` (recommended default)** — a newly generated/regenerated script is
-  written to `.bobi/state/scripts/pending/<name>.sh`, **not** activated. A
+  written to `run/state/scripts/pending/<name>.sh`, **not** activated. A
   `monitor/script.review_requested` event fires (the human sees the diff and the
-  validator report). Until a human promotes it (`bobi monitors approve-script
+  validator report). Until a human promotes it (`bobi agent <name> monitors approve-script
   <name>`), the monitor keeps using the **agent runtime** each tick — correct
   results, just not yet $0. Once approved, it's pinned and the fast path engages.
 - **`auto`** — a script that passes the §3.2 validator + §3.5 smoke run is pinned
@@ -279,7 +280,7 @@ A pinned script is regenerated when, and only when:
    `sha256(prompt + id_field + relevant extra)`. On mismatch (the human edited
    the monitor), the script is treated as stale and regenerated. This is how
    "monitor config changes invalidate the cache."
-4. **Explicit invalidation** — `bobi monitors recache <name>` deletes the
+4. **Explicit invalidation** — `bobi agent <name> monitors recache <name>` deletes the
    active script; next tick regenerates.
 
 Optional `max_age` (default **unset** — determinism over freshness): when set, a
@@ -328,7 +329,7 @@ The agent may emit a different script each run, so we pin:
 
 - A candidate becomes the **active** script only after passing §3.2 validation
   **and** a §3.5 smoke run, then via **atomic rename** (`os.replace`) into
-  `.bobi/state/scripts/<name>.sh`. A partial/garbage script never becomes
+  `run/state/scripts/<name>.sh`. A partial/garbage script never becomes
   active.
 - Once active, the script is **immutable and the agent is never called again**
   until an invalidation condition (§4) fires. Steady state is pure `subprocess`.
@@ -358,8 +359,8 @@ Rolling per-monitor counters in `monitor_state.json`: `cached_runs`,
 `fallback_runs`, `total_agent_cost_usd`, `last_mode`, `last_regen_at`,
 `script_regen_fails`. Surfaced by:
 
-- `bobi monitors list` — shows `mode` + cumulative savings per monitor.
-- `bobi costs --by role` — agent-runtime spend already attributes to
+- `bobi agent <name> monitors list` — shows `mode` + cumulative savings per monitor.
+- `bobi agent <name> costs --by role` — agent-runtime spend already attributes to
   `role=monitor` (no change needed); cached ticks add nothing, which *is* the
   win made visible.
 - One log line per tick: `script_cache <name>: mode=cached cost=$0 (saved ~$X
@@ -379,7 +380,7 @@ Rolling per-monitor counters in `monitor_state.json`: `cached_runs`,
   returns both this tick's items and a written candidate script.
 - `_validate_script()`, the §3.3 sandbox runner, the pin/atomic-rename + approval
   queue, the circuit breaker, and the observability counters.
-- CLI: `bobi monitors recache <name>`, `bobi monitors approve-script
+- CLI: `bobi agent <name> monitors recache <name>`, `bobi agent <name> monitors approve-script
   <name>` (+ `list` showing mode/savings).
 - `prompt` and `id_field` ride in `Monitor.extra` — **no schema change** (they're
   already non-reserved keys; verified in `monitors/schema.py`).

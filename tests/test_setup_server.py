@@ -8,6 +8,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from bobi import paths
 from bobi.setup import services
 from bobi.setup.state import SetupState, Stage
 from bobi.setup.webui import server
@@ -43,31 +44,41 @@ def _client(state, project, **kw):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_environ():
+def _isolate_environ(tmp_path):
     """Saving a credential writes the secret into ``os.environ`` (actions.py
     ``save_credential`` does ``os.environ[var] = value``) so the live setup
     process can use it immediately. ``monkeypatch`` can't undo that direct app
     write, so without isolation a saved ``VENN_API_KEY``/token bleeds into later
     tests and changes their build/author behavior. Snapshot and restore the
-    environment around every test in this module."""
+    environment around every test in this module. Also isolate BOBI_HOME so
+    setup never touches the real machine-wide agent library."""
     import os
     saved = dict(os.environ)
+    home = tmp_path / ".bobi"
+    home.mkdir()
+    os.environ["BOBI_HOME"] = str(home)
+    os.environ.pop("BOBI_ROOT", None)
+    paths.bind_root(None)
     yield
+    paths.bind_root(None)
     os.environ.clear()
     os.environ.update(saved)
 
 
 @pytest.fixture
-def project(tmp_path):
-    return tmp_path
+def project():
+    run = paths.agent_run_root("setup-test")
+    run.mkdir(parents=True, exist_ok=True)
+    paths.workspace_dir(run).mkdir(parents=True, exist_ok=True)
+    return run
 
 
 @pytest.fixture
-def home(tmp_path):
-    """A stand-in for the user's home, so the ~/bobi-agents library and the
+def home():
+    """A stand-in for BOBI_HOME, so the agent library and the
     folder picker stay off the real filesystem. Pass home_root=home to _client."""
-    h = tmp_path / "home"
-    h.mkdir()
+    h = paths.home_dir()
+    h.mkdir(exist_ok=True)
     return h
 
 
@@ -313,7 +324,7 @@ class TestConnect:
             "value": "xoxb-secret-value-1234"})
         assert r.status_code == 200
         assert r.json()["saved"] is True
-        env = (project / ".bobi" / ".env").read_text()
+        env = (project / ".env").read_text()
         assert "SLACK_BOT_TOKEN=xoxb-secret-value-1234" in env
         # the secret never appears in the response
         assert "xoxb-secret-value-1234" not in r.text
@@ -385,7 +396,7 @@ class TestVennSetup:
         data = c.post("/api/venn/connect", json={"key": "venn_good"}).json()
         assert data["ok"] is True and "gmail" in data["servers"]
         # the verified key is now persisted
-        env = (project / ".bobi" / ".env").read_text()
+        env = (project / ".env").read_text()
         assert "VENN_API_KEY=venn_good" in env
 
     def test_connect_bad_key_not_saved(self, project, monkeypatch):
@@ -394,7 +405,7 @@ class TestVennSetup:
         c = _client(SetupState(), project)
         data = c.post("/api/venn/connect", json={"key": "venn_bad"}).json()
         assert data["ok"] is False
-        envf = project / ".bobi" / ".env"
+        envf = project / ".env"
         assert not envf.exists() or "VENN_API_KEY" not in envf.read_text()
 
     def test_apply_reconciles_toggles(self, project):
@@ -445,7 +456,7 @@ class TestBuildInstall:
         s.spec.services = [{"name": "github"}]
         return s
 
-    def test_build_pour_then_validate_then_install(self, project):
+    def test_build_pour_then_validate_then_install(self, project, home):
         state = self._ready_state()
         c = _client(state, project, stream_fn=_fake_author())
 
@@ -453,14 +464,14 @@ class TestBuildInstall:
         assert r.status_code == 200
         assert "event: file_start" in r.text
         assert "event: state" in r.text
-        assert (project / "agents" / "triage-bot" / "agent.yaml").exists()
+        assert (home / "agents" / "triage-bot" / "src" / "agent.yaml").exists()
 
         v = c.post("/api/validate").json()
         assert v["passed"] is True
 
         i = c.post("/api/install").json()
         assert i["installed"] == "triage-bot"
-        assert (project / ".bobi" / "agent.yaml").exists()
+        assert (project / "package" / "agent.yaml").exists()
 
     def test_install_blocked_when_unvalidated(self, project):
         state = self._ready_state()
@@ -599,7 +610,7 @@ class TestPanelEdits:
         assert any((x.get("name") or "").lower() == "posthog" for x in s.spec.services)
         # the key landed in .env, never in the response
         assert "ph_secret_123" not in r.text
-        assert "POSTHOG_API_KEY=ph_secret_123" in (project / ".bobi" / ".env").read_text()
+        assert "POSTHOG_API_KEY=ph_secret_123" in (project / ".env").read_text()
 
     def test_mcp_add_rejects_oauth(self, project):
         # OAuth-authed MCPs aren't supported yet — only api_key / none.
@@ -696,7 +707,7 @@ class TestPanelEdits:
                    for x in s.spec.services)
         # the value landed in .env as a ${VAR} ref, never in the response
         assert "sk_123" not in r.text
-        env_text = (project / ".bobi" / ".env").read_text()
+        env_text = (project / ".env").read_text()
         assert "SUBSTACK_API_KEY=sk_123" in env_text
 
     def test_mcp_add_stdio_requires_command(self, project):
@@ -771,7 +782,7 @@ class TestPanelEdits:
         entry = s.spec.mcp_servers["substack_mcp"]
         assert entry["args"][-2] == "/y"                      # edit applied
         assert entry["env_vars"] == ["SUBSTACK_COOKIE"]       # declaration kept
-        env_text = (project / ".bobi" / ".env").read_text()
+        env_text = (project / ".env").read_text()
         assert "SUBSTACK_COOKIE=sek" in env_text              # secret preserved
 
     def test_edit_rename_rekeys_without_leaving_stale_entry(self, project, monkeypatch):
@@ -966,7 +977,7 @@ class TestPanelEdits:
         assert card["status"] == "needs_auth"
         assert "SUBSTACK_API_KEY" in card["note"]
         assert card["summary"] == "substack-mcp"
-        envf = project / ".bobi" / ".env"
+        envf = project / ".env"
         assert not envf.exists() or "BOBI_X" not in envf.read_text()
 
 
@@ -999,11 +1010,11 @@ class TestReviewFiles:
         calls = []
         monkeypatch.setattr(subprocess, "Popen",
                             lambda argv, *a, **k: calls.append(argv))
-        _, c = self._built(project)
+        s, c = self._built(project)
         r = c.post("/api/reveal")
         assert r.status_code == 200 and r.json()["ok"] is True
         # launched the OS file manager on the team's source dir
-        assert calls and str(project / "agents" / "triage-bot") in calls[0]
+        assert calls and str(paths.agent_source_dir(s.team_name)) in calls[0]
 
     def test_reveal_404_when_no_source_yet(self, project, monkeypatch):
         import subprocess
@@ -1020,7 +1031,7 @@ class TestReviewFiles:
                                       "content": "# edited\n"})
         assert r.status_code == 200
         assert s.validated is False
-        assert (project / "agents" / "triage-bot" / "agent.md").read_text() \
+        assert (paths.agent_source_dir("triage-bot") / "agent.md").read_text() \
             == "# edited\n"
 
     def test_write_rejects_escape(self, project):
@@ -1061,9 +1072,8 @@ class TestHome:
 
 # --- intro: create / open + location -------------------------------------
 
-def _seed_team(project, name="legacy-bot", *, parent="agents"):
-    """Write a minimal valid team source under <project>/<parent>/<name>/."""
-    src = project / parent / name
+def _write_team_source(src, name="legacy-bot"):
+    """Write a minimal valid team source at src."""
     (src / "roles" / "lead").mkdir(parents=True)
     (src / "agent.yaml").write_text(
         "agent: " + name + "\nversion: 0.1.0\nentry_point: lead\n"
@@ -1073,9 +1083,14 @@ def _seed_team(project, name="legacy-bot", *, parent="agents"):
     return src
 
 
+def _seed_team(project, name="legacy-bot", *, parent="agents"):
+    """Write a minimal valid team source under <project>/<parent>/<name>/."""
+    return _write_team_source(project / parent / name, name)
+
+
 def _seed_library_team(home, name="legacy-bot"):
-    """Write a minimal valid team source into the ~/bobi-agents library."""
-    return _seed_team(home / "bobi-agents", name, parent=".")
+    """Write a minimal valid team source into the BOBI_HOME agent library."""
+    return _write_team_source(home / "agents" / name / "src", name)
 
 
 class TestListTeamsIn:
@@ -1101,22 +1116,21 @@ class TestListTeamsIn:
 
 class TestIntro:
     def test_intro_scans_the_library_by_default(self, project, home):
-        # The default scan + create location is the machine-wide library
-        # (~/bobi-agents), not the cwd — a team isn't tied to where it installs.
+        # The default scan location is the machine-wide Bobi Agent library, not
+        # the cwd — a source isn't tied to where setup was launched.
         _seed_library_team(home, "legacy-bot")
         c = _client(SetupState(), project, home_root=home)
         data = c.get("/api/intro").json()
         names = {t["name"] for t in data["teams"]}
         assert "legacy-bot" in names
-        library = str((home / "bobi-agents").resolve())
-        assert data["default_location"] == library
+        library = str((home / "agents").resolve())
+        assert data["default_location"] == str((home / "agents" / "new-agent" / "src").resolve())
         assert data["scan_dir"] == library
 
     def test_intro_finds_team_at_library_root(self, project, home):
-        # The library folder itself may be a team (create writes straight into
-        # its named subfolder, but a flat layout is fine too) — show the
-        # agent.yaml name, not the folder name.
-        src = home / "bobi-agents"
+        # A scanned folder itself may be a team — show the agent.yaml name, not
+        # the folder name.
+        src = home / "agents"
         (src / "roles" / "aide").mkdir(parents=True)
         (src / "agent.yaml").write_text(
             "agent: personal-assistant\nversion: 0.1.0\nentry_point: aide\n")
@@ -1163,7 +1177,7 @@ class TestIntro:
         _seed_library_team(home, "legacy-bot")
         c = _client(SetupState(), project, home_root=home)
         d = c.get("/api/teams").json()
-        assert d["dir"] == str((home / "bobi-agents").resolve())
+        assert d["dir"] == str((home / "agents").resolve())
         assert "legacy-bot" in {t["name"] for t in d["teams"]}
 
     def test_teams_accepts_relative_path_under_home(self, project, home):
@@ -1175,7 +1189,7 @@ class TestIntro:
         assert "triage-bot" in {t["name"] for t in d["teams"]}
 
     def test_start_open_rejects_fork_inside_source(self, project, home):
-        src = home / "bobi-agents" / "pa"
+        src = home / "agents" / "pa" / "src"
         src.mkdir(parents=True)
         (src / "agent.yaml").write_text("agent: pa\n")
         c = _client(SetupState(), project, home_root=home)
@@ -1201,7 +1215,7 @@ class TestIntro:
         d = r.json()
         assert d["stage"] == "design"
         assert d["mode"] == "create"
-        assert d["source_dir"] == "agent-teams/my-triage-team"
+        assert d["source_dir"] == str((paths.home_dir() / "agent-teams" / "my-triage-team").resolve())
         assert d["team_name"] == "my-triage-team"
 
     def test_start_open_reverse_fills_and_copies(self, project, home):
@@ -1219,8 +1233,8 @@ class TestIntro:
         assert {s["name"] for s in d["spec"]["services"]} == {"github"}
         assert d["chat"] == "slack"
         assert d["spec"]["readiness"]["goal"] == "enough"
-        # source copied into the working location (relative → under the project)
-        assert (project / "agent-teams" / "legacy-bot" / "agent.yaml").is_file()
+        # source copied into the working location (relative → under BOBI_HOME)
+        assert (home / "agent-teams" / "legacy-bot" / "agent.yaml").is_file()
         # the chat opens with a recap of what the team already does (not the
         # blank "what do you want to build?" greeting)
         assert d["messages"], "expected a seeded summary message"
@@ -1230,16 +1244,16 @@ class TestIntro:
         assert "github" in opener["content"]      # its services are recapped
         assert "Slack" in opener["content"]        # its chat channel is recapped
 
-    def test_start_rejects_bobi_location(self, project):
+    def test_start_rejects_source_inside_run(self, project):
         c = _client(SetupState(), project)
         r = c.post("/api/start", json={"mode": "create",
-                                       "location": ".bobi/team"})
+                                       "location": str(project / "src")})
         assert r.status_code == 400
 
     def test_start_open_unknown_team_400(self, project, home):
         c = _client(SetupState(), project, home_root=home)
         r = c.post("/api/start", json={
-            "mode": "open", "team_path": str(home / "bobi-agents" / "ghost"),
+            "mode": "open", "team_path": str(home / "agents" / "ghost" / "src"),
             "location": "agent-teams/ghost"})
         assert r.status_code == 400  # not a team (no agent.yaml)
 
@@ -1262,7 +1276,7 @@ class TestIntro:
         # the existing team's source is untouched (not merged/overwritten)
         assert (existing / "agent.md").read_text() == keep
 
-    def test_start_registry_fetches_and_reverse_fills(self, project, monkeypatch):
+    def test_start_registry_fetches_and_reverse_fills(self, project, home, monkeypatch):
         # The registry fetch is stubbed: it materializes a team at `dest`,
         # mirroring registry.fetch + copy_into without hitting the network.
         from bobi.setup import open_mode
@@ -1281,7 +1295,7 @@ class TestIntro:
         # Registry-derived teams use the non-lossy edit path (mode "open").
         assert d["mode"] == "open"
         assert d["spec"]["goal"]
-        assert (project / "bobi" / "eng-team" / "agent.yaml").is_file()
+        assert (home / "bobi" / "eng-team" / "agent.yaml").is_file()
 
     def test_start_registry_refuses_to_clobber_an_existing_team(self, project, home):
         # Selecting a (bundled/registry) template into a location already holding
@@ -1317,8 +1331,8 @@ class TestIntro:
     def test_browse_defaults_to_library(self, project, home):
         c = _client(SetupState(), project, home_root=home)
         d = c.get("/api/browse").json()  # no path → the library, created on demand
-        assert d["path"] == str((home / "bobi-agents").resolve())
-        assert (home / "bobi-agents").is_dir()
+        assert d["path"] == str((home / "agents").resolve())
+        assert (home / "agents").is_dir()
 
     def test_browse_confined_to_home(self, project, home):
         c = _client(SetupState(), project, home_root=home)
@@ -1334,13 +1348,15 @@ class TestIntro:
         assert r.status_code == 404
 
     def test_browse_survives_library_taken_by_a_file(self, project, home):
-        # If ~/bobi-agents already exists as a FILE, the lazy mkdir must
+        # If the canonical agents root already exists as a FILE, the lazy mkdir must
         # not 500 the GET — it falls back to listing home.
-        (home / "bobi-agents").write_text("not a dir")
-        (home / "work").mkdir()
-        c = _client(SetupState(), project, home_root=home)
+        alt_home = home.parent / "browse-home"
+        alt_home.mkdir()
+        (alt_home / "agents").write_text("not a dir")
+        (alt_home / "work").mkdir()
+        c = _client(SetupState(), project, home_root=alt_home)
         d = c.get("/api/browse").json()
-        assert d["path"] == str(home.resolve())   # fell back to home
+        assert d["path"] == str(alt_home.resolve())   # fell back to home
         assert "work" in d["dirs"]
 
     def test_rename_sets_team_name(self, project):
@@ -1358,7 +1374,7 @@ class TestIntro:
         # modify/registry put the source at <location>/<team-name>; renaming
         # must move that folder and repoint source_dir so the folder on disk
         # matches the new name.
-        src = project / "bobi" / "a-personal-assistant-team"
+        src = paths.home_dir() / "bobi" / "a-personal-assistant-team"
         src.mkdir(parents=True)
         (src / "agent.yaml").write_text("agent: a-personal-assistant-team\n")
         st = SetupState(stage=Stage.DESIGN, team_name="a-personal-assistant-team",
@@ -1367,12 +1383,12 @@ class TestIntro:
         d = c.post("/api/rename", json={"name": "personal-assistant"}).json()
         assert d["team_name"] == "personal-assistant"
         assert d["source_dir"] == "bobi/personal-assistant"
-        assert (project / "bobi" / "personal-assistant" / "agent.yaml").is_file()
-        assert not (project / "bobi" / "a-personal-assistant-team").exists()
+        assert (paths.home_dir() / "bobi" / "personal-assistant" / "agent.yaml").is_file()
+        assert not (paths.home_dir() / "bobi" / "a-personal-assistant-team").exists()
 
     def test_rename_leaves_non_team_named_folder_alone(self, project):
         # create's folder is "bobi", not named after the team — left as chosen.
-        (project / "bobi").mkdir()
+        (paths.home_dir() / "bobi").mkdir()
         st = SetupState(stage=Stage.DESIGN, team_name="triage", source_dir="bobi")
         c = _client(st, project)
         d = c.post("/api/rename", json={"name": "triage-bot"}).json()
@@ -1380,10 +1396,10 @@ class TestIntro:
         assert d["source_dir"] == "bobi"
 
     def test_rename_conflict_when_target_folder_exists(self, project):
-        (project / "bobi" / "old").mkdir(parents=True)
-        (project / "bobi" / "taken").mkdir(parents=True)
+        (paths.home_dir() / "bobi" / "old").mkdir(parents=True)
+        (paths.home_dir() / "bobi" / "taken").mkdir(parents=True)
         st = SetupState(stage=Stage.DESIGN, team_name="old", source_dir="bobi/old")
         c = _client(st, project)
         r = c.post("/api/rename", json={"name": "taken"})
         assert r.status_code == 409
-        assert (project / "bobi" / "old").exists()  # original untouched
+        assert (paths.home_dir() / "bobi" / "old").exists()  # original untouched

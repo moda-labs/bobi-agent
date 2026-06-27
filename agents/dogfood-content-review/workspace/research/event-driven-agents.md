@@ -22,7 +22,7 @@ which delivery path an event took.
 
 ## Sources
 
-- bobi event-server implementation (event-server/src/)
+- bobi agent <name> event-server implementation (event-server/src/)
 - bobi monitor scheduler (bobi/monitors/scheduler.py)
 - CloudEvents specification (https://cloudevents.io/)
 

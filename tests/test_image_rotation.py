@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from bobi import paths
 from bobi.sdk import (
     SessionEntry, SessionRegistry, compute_manifest_hash,
     check_image_rotation, save_session_id, load_session_id,
@@ -18,14 +19,17 @@ from bobi.sdk import (
 
 @pytest.fixture
 def tmp_registry(tmp_path, monkeypatch):
-    monkeypatch.setattr("bobi.paths._root", tmp_path)
-    (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
-    return SessionRegistry()
+    paths.bind_root(None)
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text("agent: test\n")
+    paths.bind_root(tmp_path)
+    yield SessionRegistry()
+    paths.bind_root(None)
 
 
 def _write_manifest(project: Path, files: dict[str, str]) -> None:
     """Write an install-manifest.json with the given file hashes."""
-    manifest = project / ".bobi" / "install-manifest.json"
+    manifest = paths.install_manifest_path(project)
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps({
         "agent": "test-team",
@@ -70,12 +74,12 @@ class TestComputeManifestHash:
         assert h1 == h2
 
     def test_uses_project_root_when_no_path(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        paths.bind_root(tmp_path)
         _write_manifest(tmp_path, {"x.md": "hash"})
         assert compute_manifest_hash() != ""
 
     def test_handles_malformed_json(self, tmp_path):
-        manifest = tmp_path / ".bobi" / "install-manifest.json"
+        manifest = paths.install_manifest_path(tmp_path)
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text("not json")
         assert compute_manifest_hash(tmp_path) == ""
@@ -109,8 +113,8 @@ class TestSessionEntryImageHash:
 class TestCheckImageRotation:
     def test_rotates_when_hash_changes(self, tmp_path, monkeypatch):
         """Session is cleared when manifest hash differs from stored stamp."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
+        paths.bind_root(tmp_path)
+        paths.sessions_dir(tmp_path)
 
         registry = SessionRegistry()
         session_name = "moda-manager-proj"
@@ -131,8 +135,8 @@ class TestCheckImageRotation:
 
     def test_no_rotation_when_hash_matches(self, tmp_path, monkeypatch):
         """Session preserved when manifest hasn't changed."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
+        paths.bind_root(tmp_path)
+        paths.sessions_dir(tmp_path)
 
         registry = SessionRegistry()
         session_name = "moda-manager-proj"
@@ -150,8 +154,8 @@ class TestCheckImageRotation:
 
     def test_no_rotation_when_no_prior_hash(self, tmp_path, monkeypatch):
         """First run (empty stored hash) does not rotate."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
+        paths.bind_root(tmp_path)
+        paths.sessions_dir(tmp_path)
 
         registry = SessionRegistry()
         session_name = "moda-manager-proj"
@@ -168,16 +172,16 @@ class TestCheckImageRotation:
 
     def test_no_rotation_when_no_saved_session(self, tmp_path, monkeypatch):
         """No session ID → nothing to rotate."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
+        paths.bind_root(tmp_path)
+        paths.sessions_dir(tmp_path)
 
         _write_manifest(tmp_path, {"a.md": "hash"})
         assert check_image_rotation("nonexistent", tmp_path) is False
 
     def test_no_rotation_when_no_manifest(self, tmp_path, monkeypatch):
         """Without an install manifest, rotation never fires."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
+        paths.bind_root(tmp_path)
+        paths.sessions_dir(tmp_path)
 
         session_name = "moda-manager-proj"
         save_session_id(session_name, "session-id-111")
@@ -192,8 +196,8 @@ class TestCheckImageRotation:
 class TestSubagentImageStamp:
     def test_stamp_written_at_registration(self, tmp_path, monkeypatch):
         """SessionEntry should carry the current manifest hash."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
+        paths.bind_root(tmp_path)
+        paths.sessions_dir(tmp_path)
 
         _write_manifest(tmp_path, {"tools/github.md": "abc"})
         expected_hash = compute_manifest_hash(tmp_path)
@@ -208,8 +212,8 @@ class TestSubagentImageStamp:
 
     def test_stale_subagent_rotated_on_mismatch(self, tmp_path, monkeypatch):
         """Sub-agent session ID cleared when image hash differs."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
+        paths.bind_root(tmp_path)
+        paths.sessions_dir(tmp_path)
 
         registry = SessionRegistry()
         session_name = "wf-lifecycle-proj-42"
@@ -241,9 +245,8 @@ class TestSubagentImageStamp:
 
     def test_backward_compat_old_state_no_image_hash(self, tmp_path, monkeypatch):
         """Old state.json without image_hash field loads cleanly."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        sessions_dir = tmp_path / ".bobi" / "sessions"
-        sessions_dir.mkdir(parents=True)
+        paths.bind_root(tmp_path)
+        sessions_dir = paths.sessions_dir(tmp_path)
 
         # Write a state.json that predates the image_hash field
         session_dir = sessions_dir / "old-session"

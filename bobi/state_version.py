@@ -1,4 +1,4 @@
-"""State format version marker (.bobi/state/format_version).
+"""State format version marker (<run>/state/format_version).
 
 Volumes outlive images — when the on-disk state format changes, a newer
 bobi must know whether it can read the persisted state and an older

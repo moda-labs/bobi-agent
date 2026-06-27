@@ -49,15 +49,16 @@ See [scripts/install.sh](scripts/install.sh) for what the installer does.
 # Go from an idea to a runnable agent team, interactively
 bobi setup
 
-# Start a pre-built agent
-bobi start eng-team 
+# Install and start a pre-built agent
+bobi agents install eng-team --name eng-team
+bobi agent eng-team start
 
 # Or launch a single ad-hoc agent
-bobi agents launch --role engineer --task "Fix the login bug"
+bobi agent <name> subagents launch --role engineer --task "Fix the login bug"
 
 # Talk to running agents
-bobi ask "What's the status of issue #42?"
-bobi message "Skip the integration tests, just ship it"
+bobi agent <name> ask "What's the status of issue #42?"
+bobi agent <name> message "Skip the integration tests, just ship it"
 ```
 
 ## Agent Teams
@@ -157,7 +158,7 @@ Agents receive real-world events (GitHub, Slack, Linear, custom webhooks) throug
 
 | | Local | Self-hosted Cloudflare | Hosted (coming soon) |
 |---|---|---|---|
-| Setup | `bobi event-server start` | Deploy the worker yourself | Sign up at [bobi.dev](https://bobi.dev) |
+| Setup | `bobi agent <name> event-server start` | Deploy the worker yourself | Sign up at [bobi.dev](https://bobi.dev) |
 | Hosting | Runs on your machine | Your Cloudflare account, always on | Managed by Moda Labs |
 | Webhook routing | Requires [ngrok](https://ngrok.com/) or similar tunnel | Stable URL, no tunnel | Stable URL, no tunnel |
 | GitHub/Slack apps | Create your own | Create your own | Install our pre-built apps |
@@ -186,9 +187,9 @@ monitors:
 A monitor with a `check:` field runs a deterministic native function — fast, deduplicated, no LLM needed. A monitor without one spawns a short-lived agent that evaluates the description and posts an event only if it finds something. Either way, the resulting event is indistinguishable from a webhook — subscribing agents handle it the same way.
 
 ```bash
-bobi monitors list              # see all active monitors
-bobi monitors add stale-deploys --interval 1h --description "Deploys older than 24h"
-bobi monitors pause pr_conflicts
+bobi agent <name> monitors list              # see all active monitors
+bobi agent <name> monitors add stale-deploys --interval 1h --description "Deploys older than 24h"
+bobi agent <name> monitors pause pr_conflicts
 ```
 
 ## Workflows
@@ -225,39 +226,43 @@ You normally don't have to build these YAML files by hand — the [create-agent]
 
 ```bash
 # Agents
-bobi agents launch -w <workflow> --role <role> --task "context"
+bobi agent <name> subagents launch -w <workflow> --role <role> --task "context"
 bobi agents list
-bobi agents show <id>
-bobi agents cancel <id>
+bobi agent <name> subagents show <id>
+bobi agent <name> subagents cancel <id>
 
 # Communication
-bobi ask "question"          # blocks until response
-bobi message "update"        # fire-and-forget
+bobi agent <name> ask "question"          # blocks until response
+bobi agent <name> message "update"        # fire-and-forget
 
 # Observability
-bobi status                  # active agents
-bobi events                  # recent events and decisions
-bobi transcript show <sess>  # session transcript
-bobi doctor                  # system health check
+bobi agent <name> status                  # active agents
+bobi agent <name> events                  # recent events and decisions
+bobi agent <name> transcript show <sess>  # session transcript
+bobi agent <name> doctor                  # system health check
 
 # Workflows & monitors
-bobi workflows list
-bobi monitors list
-bobi roles list
+bobi agent <name> workflows list
+bobi agent <name> monitors list
+bobi agent <name> roles list
 ```
 
 ## Configuration
 
 See the setup guides for [Slack](skills/slack-setup.md) and [Linear](skills/linear-setup.md).
 
-There is exactly one `.bobi/` directory per installation — created by
-`bobi install` at the directory you run it from — holding both config
-and state. `agent.yaml` is the single config file (roles, services,
-monitors, credentials); secrets use `${ENV_VAR}` references resolved from
-the environment, with `.bobi/.env` loaded at startup:
+`BOBI_HOME` is the single low-level home root. It defaults to `~/.bobi` and is
+configurable only by environment variable. Each named Bobi Agent lives under
+`$BOBI_HOME/agents/<name>/`, with editable source in `src/`, installed package
+files in `run/package/`, mutable state in `run/state/`, workspace files in
+`run/workspace/`, and credentials in `run/.env`.
+
+`agent.yaml` is the package config file (roles, services, monitors,
+credentials); secrets use `${ENV_VAR}` references resolved from the
+environment, with `run/.env` loaded at startup:
 
 ```yaml
-# .bobi/agent.yaml
+# run/package/agent.yaml
 services:
   - name: slack
     bot_token: ${SLACK_BOT_TOKEN}
@@ -266,10 +271,9 @@ services:
 event_server_url: https://bobi-events.example.workers.dev
 ```
 
-Custom roles, workflows, monitors, and tools live under the same
-`.bobi/` and take priority over the agent team defaults. There is no
-global `~/.bobi/` and no per-repo config — repos managed by the
-installation stay clean.
+Custom roles, workflows, monitors, and tools are source-package changes. Edit
+the source under `src/` or another explicit source directory, then reinstall so
+`run/package/` is regenerated.
 
 ## Development
 

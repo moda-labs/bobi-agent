@@ -5,7 +5,8 @@
 #
 # Each team directory (one holding an `agent.yaml`) becomes `<out>/<team>.tar.gz`,
 # which extracts to a single `<team>/` dir containing `agent.yaml` — exactly the
-# shape `bobi install <url>` / `registry.fetch_from_url` expect. Upload the
+# shape `bobi agents install <url> --name <name>` / `registry.fetch_from_url`
+# expect. Upload the
 # results somewhere publicly fetchable and pass the URL as `--team-url` (or
 # BOBI_TEAM_URL) so a dark instance can pull its team at first boot.
 #

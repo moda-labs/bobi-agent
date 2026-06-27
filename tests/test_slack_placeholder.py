@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from bobi import http as pooled
+from bobi import paths
 from bobi.slack import (
     post_slack_message,
     update_slack_message,
@@ -53,7 +54,7 @@ def _make_mock_client(response_data, *, requests_log=None, side_effect=None):
 
 def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
     """Set up project config with a Slack bot token."""
-    config_dir = tmp_path / ".bobi"
+    config_dir = paths.package_dir(tmp_path)
     config_dir.mkdir(parents=True)
     if slack_bot_token:
         yaml = (
@@ -65,8 +66,8 @@ def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
         )
     else:
         yaml = "entry_point: manager\n"
-    (config_dir / "agent.yaml").write_text(yaml)
-    monkeypatch.chdir(tmp_path)
+    paths.agent_yaml_path(tmp_path).write_text(yaml)
+    monkeypatch.setenv("BOBI_ROOT", str(tmp_path))
 
 
 def _make_slack_event(channel="C123", thread_ts="171.42",

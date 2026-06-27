@@ -49,7 +49,7 @@ From the issue's design-decisions comment (treated as binding, not re-litigated 
 
 - The other monitor records in `eng-team/monitors/defaults.yaml` (`pr-conflict-check`, `stale-pr-check`, `disk-free-check`, `team-status-roundup`) stay team-declared. Only `policy-curator` moves to the framework. (Their *check runners* are already framework code; their *records* are team SDLC defaults — a separate decision, not this issue.)
 - The curator's runtime behavior (windowing, cap, cursor, `## Team Policy` injection) — unchanged.
-- The runtime `MonitorRegistry` read path — unchanged (it already reads the composed `.bobi/monitors/defaults.yaml`, which is where the seed lands).
+- The runtime `MonitorRegistry` read path — unchanged (it already reads the composed `run/package/monitors/defaults.yaml`, which is where the seed lands).
 - No version bump / CHANGELOG edit (feature-PR policy).
 
 ---
@@ -58,7 +58,7 @@ From the issue's design-decisions comment (treated as binding, not re-litigated 
 
 ### 4.1 Where the seed goes: compose, as a synthetic base layer
 
-`compose()` is the single chokepoint for **every** install and deploy — a team with no `from:` still "composes to a single-layer image" (`cli.py`), and `deploy.py` composes too. The runtime `MonitorRegistry` reads only the composed `.bobi/monitors/defaults.yaml` (`registry.py`, no framework fallback). So seeding at compose time:
+`compose()` is the single chokepoint for **every** install and deploy — a team with no `from:` still "composes to a single-layer image" (`cli.py`), and `deploy.py` composes too. The runtime `MonitorRegistry` reads only the composed `run/package/monitors/defaults.yaml` (`registry.py`, no framework fallback). So seeding at compose time:
 
 - reaches **all** teams (decision 3),
 - lands in the one place runtime already reads (no registry change), and

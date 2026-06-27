@@ -1,7 +1,7 @@
 """Workflow dispatcher — surfaces workflows to the manager for semantic matching.
 
 Workflows resolve exclusively from the installed pack image:
-  <project>/.bobi/workflows/
+  <run>/package/workflows/
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ class WorkflowDispatcher:
 
     def load_all_workflows(self, project_path: Path | None = None,
                            agent_name: str | None = None):
-        """Load workflows from the installed pack at .bobi/workflows/.
+        """Load workflows from the installed pack at run/package/workflows/.
 
         With no explicit project_path this reads from the bound
         installation root — an unbound process raises rather than

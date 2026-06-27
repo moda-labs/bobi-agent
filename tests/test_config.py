@@ -1,4 +1,4 @@
-"""Tests for per-project config loading from agent.yaml."""
+"""Tests for runtime config loading from agent.yaml."""
 
 import os
 from pathlib import Path
@@ -16,7 +16,7 @@ def test_defaults_when_no_config(tmp_path):
 
 
 def _write_agent_yaml(tmp_path, body):
-    d = tmp_path / ".bobi"
+    d = tmp_path / "package"
     d.mkdir(parents=True, exist_ok=True)
     (d / "agent.yaml").write_text(dedent(body))
 
@@ -91,7 +91,7 @@ def test_deployment_state_is_per_session(tmp_path):
 
 
 def test_loads_agent_yaml(tmp_path):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         version: "1.0.0"
@@ -129,7 +129,7 @@ def test_agent_yaml_env_var_interpolation(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_BOT_TOKEN", "xoxb-from-env")
     monkeypatch.setenv("TEST_VENN_KEY", "venn_from_env")
 
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -148,7 +148,7 @@ def test_agent_yaml_env_var_interpolation(tmp_path, monkeypatch):
 
 
 def test_agent_yaml_missing_env_var_becomes_empty(tmp_path):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -162,7 +162,7 @@ def test_agent_yaml_missing_env_var_becomes_empty(tmp_path):
 
 
 def test_agent_yaml_services_as_strings(tmp_path):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -209,7 +209,7 @@ def test_service_required_string_form_defaults_false(tmp_path):
 
 
 def test_agent_yaml_monitors(tmp_path):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -230,7 +230,7 @@ def test_agent_yaml_monitors(tmp_path):
 
 
 def test_agent_yaml_mcp_servers(tmp_path):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -260,7 +260,7 @@ def test_agent_yaml_mcp_servers(tmp_path):
 def test_mcp_servers_env_var_interpolation(tmp_path, monkeypatch):
     monkeypatch.setenv("CRM_TOKEN", "secret-123")
 
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -280,9 +280,9 @@ def test_mcp_servers_env_var_interpolation(tmp_path, monkeypatch):
 
 
 def test_load_dotenv(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
-    (config_dir / ".env").write_text("MY_TOKEN=secret123\nOTHER_KEY=abc\n")
+    (tmp_path / ".env").write_text("MY_TOKEN=secret123\nOTHER_KEY=abc\n")
 
     monkeypatch.delenv("MY_TOKEN", raising=False)
     monkeypatch.delenv("OTHER_KEY", raising=False)
@@ -297,9 +297,9 @@ def test_load_dotenv(tmp_path, monkeypatch):
 
 
 def test_load_dotenv_does_not_override_existing(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
-    (config_dir / ".env").write_text("MY_TOKEN=from-dotenv\n")
+    (tmp_path / ".env").write_text("MY_TOKEN=from-dotenv\n")
 
     monkeypatch.setenv("MY_TOKEN", "from-env")
     load_dotenv(tmp_path)
@@ -308,9 +308,9 @@ def test_load_dotenv_does_not_override_existing(tmp_path, monkeypatch):
 
 
 def test_load_dotenv_skips_comments_and_blanks(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
-    (config_dir / ".env").write_text("# comment\n\nVALID=yes\n")
+    (tmp_path / ".env").write_text("# comment\n\nVALID=yes\n")
 
     monkeypatch.delenv("VALID", raising=False)
     load_dotenv(tmp_path)
@@ -319,9 +319,9 @@ def test_load_dotenv_skips_comments_and_blanks(tmp_path, monkeypatch):
 
 
 def test_load_dotenv_strips_quotes(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
-    (config_dir / ".env").write_text("SINGLE='quoted'\nDOUBLE=\"quoted\"\n")
+    (tmp_path / ".env").write_text("SINGLE='quoted'\nDOUBLE=\"quoted\"\n")
 
     monkeypatch.delenv("SINGLE", raising=False)
     monkeypatch.delenv("DOUBLE", raising=False)
@@ -337,7 +337,7 @@ def test_load_dotenv_missing_file(tmp_path):
 
 
 def test_find_required_env_vars(tmp_path):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         services:
@@ -358,7 +358,7 @@ def test_find_required_env_vars_no_config(tmp_path):
 
 def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
     """Full integration: .env values resolve through ${VAR} in agent.yaml."""
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -367,7 +367,7 @@ def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
             credentials:
               bot_token: ${TEST_DOTENV_TOKEN}
     """))
-    (config_dir / ".env").write_text("TEST_DOTENV_TOKEN=xoxb-from-dotenv\n")
+    (tmp_path / ".env").write_text("TEST_DOTENV_TOKEN=xoxb-from-dotenv\n")
 
     monkeypatch.delenv("TEST_DOTENV_TOKEN", raising=False)
     load_dotenv(tmp_path)
@@ -377,7 +377,7 @@ def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
 
 
 def test_venn_services_property(tmp_path):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         entry_point: manager
@@ -398,7 +398,7 @@ def test_venn_services_property(tmp_path):
 
 
 def test_credential_returns_value(tmp_path):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         services:
@@ -423,7 +423,7 @@ def test_credential_missing_service():
 
 
 def test_credential_missing_key(tmp_path):
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         services:
@@ -438,7 +438,7 @@ def test_credential_missing_key(tmp_path):
 
 def test_service_config_credentials_parsed(tmp_path):
     """ServiceConfig.credentials dict is populated from agent.yaml."""
-    config_dir = tmp_path / ".bobi"
+    config_dir = tmp_path / "package"
     config_dir.mkdir()
     (config_dir / "agent.yaml").write_text(dedent("""
         services:

@@ -1,7 +1,7 @@
 """Integration tests for the agent team registry.
 
 Exercises install-from-registry, update checking, cache listing,
-and multi-registry resolution against an isolated bobi install.
+and multi-registry resolution against an isolated Bobi home.
 Network calls are stubbed to avoid GitHub dependency in CI.
 """
 
@@ -19,7 +19,7 @@ import yaml
 # ---------------------------------------------------------------------------
 
 def _build_tarball(name: str, agent_yaml: dict, extra_files: dict[str, str] | None = None) -> bytes:
-    """Build an in-memory .tar.gz that mimics a GitHub repo tarball.
+    """Build an in-memory .tar.gz that mimics a per-team release asset.
 
     Structure: <prefix>/agents/<name>/agent.yaml (+ any extras).
     """
@@ -100,7 +100,7 @@ class TestRegistryFetch:
         responses = {
             "registry.yaml": registry_yaml,
             "agents/test-team/agent.yaml": yaml.dump(agent_cfg),
-            "tarball": tarball,
+            "teams-latest/test-team-1.0.0.tar.gz": tarball,
         }
 
         project = bobi_env.project_path
@@ -113,7 +113,9 @@ class TestRegistryFetch:
 
         meta = _read_meta(project, "test-team")
         assert meta["version"] == "1.0.0"
-        assert meta["source"] == "github:moda-labs/bobi"
+        assert meta["source"].endswith(
+            "/moda-labs/bobi/releases/download/teams-latest/test-team-1.0.0.tar.gz"
+        )
 
     def test_fetch_not_found_raises(self, bobi_env):
         from bobi.registry import fetch
@@ -121,12 +123,12 @@ class TestRegistryFetch:
         responses = {
             "registry.yaml": _build_registry_yaml({}),
             "agent.yaml": None,
-            "tarball": None,
+            "teams-latest/nonexistent.tar.gz": None,
         }
 
         project = bobi_env.project_path
         with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
-            with pytest.raises(RuntimeError, match="not found"):
+            with pytest.raises(RuntimeError, match="no published asset"):
                 fetch(project, "nonexistent", repo="moda-labs/bobi")
 
     def test_fetch_overwrites_existing(self, bobi_env):
@@ -144,7 +146,7 @@ class TestRegistryFetch:
             tarball = _build_tarball("evolving-team", agent_cfg)
             responses = {
                 "agent.yaml": yaml.dump(agent_cfg),
-                "tarball": tarball,
+                f"teams-latest/evolving-team-{version}.tar.gz": tarball,
             }
             with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
                 fetch(project, "evolving-team", repo="moda-labs/bobi")
@@ -170,7 +172,7 @@ class TestCheckUpdate:
         tarball = _build_tarball("upd-team", agent_cfg)
         responses = {
             "agent.yaml": yaml.dump(agent_cfg),
-            "tarball": tarball,
+            "teams-latest/upd-team-1.0.0.tar.gz": tarball,
         }
         with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
             fetch(project, "upd-team", repo="moda-labs/bobi")
@@ -192,7 +194,7 @@ class TestCheckUpdate:
         tarball = _build_tarball("same-team", agent_cfg)
         responses = {
             "agent.yaml": yaml.dump(agent_cfg),
-            "tarball": tarball,
+            "teams-latest/same-team-1.0.0.tar.gz": tarball,
         }
         with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
             fetch(project, "same-team", repo="moda-labs/bobi")
@@ -217,7 +219,7 @@ class TestListCached:
             tarball = _build_tarball(name, agent_cfg)
             responses = {
                 "agent.yaml": yaml.dump(agent_cfg),
-                "tarball": tarball,
+                f"teams-latest/{name}-1.0.0.tar.gz": tarball,
             }
             with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
                 fetch(project, name, repo="moda-labs/bobi")
@@ -227,8 +229,9 @@ class TestListCached:
         assert "alpha-team" in names
         assert "beta-team" in names
 
-    def test_empty_cache(self, tmp_path):
+    def test_empty_cache(self, tmp_path, monkeypatch):
         from bobi.registry import list_cached
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
         assert list_cached(tmp_path) == []
 
 
@@ -268,11 +271,12 @@ class TestListRemote:
 class TestMultiRegistry:
 
     def test_all_registries_includes_user_added(self, bobi_env):
+        from bobi import paths
         from bobi.registry import _all_registries
 
-        # Add a custom registry to the config
-        config_path = bobi_env.project_path / ".bobi" / "agent.yaml"
-        data = yaml.safe_load(config_path.read_text())
+        # Add a custom registry to the machine config.
+        config_path = paths.ensure_global_config()
+        data = yaml.safe_load(config_path.read_text()) or {}
         data["registries"] = ["myorg/my-agents"]
         config_path.write_text(yaml.dump(data))
 
@@ -281,10 +285,11 @@ class TestMultiRegistry:
         assert "myorg/my-agents" in registries
 
     def test_registries_deduplicates(self, bobi_env):
+        from bobi import paths
         from bobi.registry import _all_registries
 
-        config_path = bobi_env.project_path / ".bobi" / "agent.yaml"
-        data = yaml.safe_load(config_path.read_text())
+        config_path = paths.ensure_global_config()
+        data = yaml.safe_load(config_path.read_text()) or {}
         data["registries"] = ["moda-labs/bobi"]  # duplicate of default
         config_path.write_text(yaml.dump(data))
 

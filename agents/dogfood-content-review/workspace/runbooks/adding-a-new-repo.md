@@ -13,19 +13,19 @@ A new repo needs AI agent management.
 
 ## Steps
 
-1. **Navigate to the repo**
+1. **Choose the named Bobi Agent**
    ```bash
-   cd ~/dev/new-repo
+   bobi agents list
    ```
 
 2. **Check the installation**
-   New repos don't get their own bobi setup — there is exactly one
-   `.bobi/` per installation, at the root where `bobi install`
-   was run. Clone the repo under that root and keep the checkout clean
-   (no `.bobi/` inside it).
+   New repos don't get their own cwd-scoped setup. They are managed by a
+   named Bobi Agent under `BOBI_HOME`; keep the repo checkout clean and point
+   the agent's workflows or tasks at the repo path explicitly.
 
 3. **Configure task tracking**
-   Edit `.bobi/agent.yaml` at the installation root:
+   Edit the Bobi Agent source and reinstall so `run/package/agent.yaml` is
+   regenerated:
    ```yaml
    task_tracking:
      system: github-issues  # or "linear"
@@ -35,7 +35,7 @@ A new repo needs AI agent management.
 
 4. **Set up event delivery**
    ```bash
-   bobi event-server start
+   bobi agent <name> event-server start
    ```
    Then add the webhook URL to your GitHub repo settings:
    - URL: `http://localhost:8080/webhooks/github`
@@ -44,20 +44,20 @@ A new repo needs AI agent management.
 
 5. **Start the manager**
    ```bash
-   bobi start
+   bobi agent <name> start
    ```
 
 6. **Verify with doctor**
    ```bash
-   bobi doctor
+   bobi agent <name> doctor
    ```
    All checks should pass.
 
 ## Custom roles and workflows
 
 If the default engineering workflows don't fit, create custom ones:
-- `.bobi/agents/<role>.md` — agent role prompts
-- `.bobi/workflows/<name>.yaml` — custom workflow definitions
+- `roles/<role>/ROLE.md` in the source package — agent role prompts
+- `run/package/workflows/<name>.yaml` — custom workflow definitions
 
 See the bobi docs for the workflow YAML reference.
 

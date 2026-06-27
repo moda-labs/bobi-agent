@@ -146,8 +146,8 @@ def slack_config(tmp_path, monkeypatch):
 
     monkeypatch.setattr(paths, "_root", None, raising=False)
     project = tmp_path / "proj"
-    (project / ".bobi").mkdir(parents=True)
-    (project / ".bobi" / "agent.yaml").write_text(
+    paths.package_dir(project).mkdir(parents=True)
+    paths.agent_yaml_path(project).write_text(
         "agent: test\n"
         "event_server_url: wss://example\n"
         "services:\n"

@@ -71,13 +71,13 @@ class TestStatusGlyph:
 class TestCheckEntryPoint:
 
     def test_valid_role(self, tmp_path):
-        (tmp_path / ".bobi" / "roles" / "director").mkdir(parents=True)
+        (tmp_path / "package" / "roles" / "director").mkdir(parents=True)
         cfg = Config(entry_point="director")
         result = _check_entry_point(cfg, tmp_path)
         assert result.ok
 
     def test_missing_role(self, tmp_path):
-        (tmp_path / ".bobi" / "roles" / "engineer").mkdir(parents=True)
+        (tmp_path / "package" / "roles" / "engineer").mkdir(parents=True)
         cfg = Config(entry_point="director")
         result = _check_entry_point(cfg, tmp_path)
         assert not result.ok
@@ -278,7 +278,7 @@ class TestCheckMcpServers:
 class TestValidateConfig:
 
     def test_minimal_valid_config(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\
             entry_point: manager
@@ -342,8 +342,8 @@ class TestValidateConfig:
     def test_pack_with_optional_venn_service_starts_degraded(self, tmp_path):
         # github (native, zero-config) + an unconfigured venn service explicitly
         # marked required: false: validate_config must return ok=True so
-        # `bobi start` proceeds and the optional service degrades.
-        config_dir = tmp_path / ".bobi"
+        # Named start proceeds and the optional service degrades.
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\
             entry_point: manager
@@ -364,7 +364,7 @@ class TestValidateConfig:
         # Mirrors the dogfood-content-review decision (#329 / PR #405): a venn
         # service marked required: true (dogfood's email) hard-blocks startup
         # when its credential is missing — it does NOT degrade.
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\
             entry_point: manager

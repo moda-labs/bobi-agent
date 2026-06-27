@@ -493,7 +493,7 @@ def user_mcp_card(key: str, cfg: dict, project: Path) -> dict:
     """A Connect card for a user-defined custom MCP connection — either a remote
     server (name + URL) or a local command-based one (name + command, stdio).
     We do NOT verify the connection here — the agent actually connects at
-    `bobi start`, where mcp_servers are probed. So this never claims
+    `bobi agent <name> start`, where mcp_servers are probed. So this never claims
     "connected"; it reports what's been set and flags what's still needed."""
     from bobi.setup.actions import read_env
     auth = cfg.get("auth", "none")

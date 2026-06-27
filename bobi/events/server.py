@@ -58,7 +58,7 @@ def health(base_url: str, timeout: float = 2) -> dict | None:
 
     Returns the parsed health payload when the server reports ok, else None.
     The single definition of "what counts as healthy" — used by ensure_running,
-    `bobi stop`, `bobi event-server status`, and doctor.
+    `bobi agent <name> stop`, `bobi agent <name> event-server status`, and doctor.
     """
     from bobi import http as pooled
 
@@ -136,6 +136,9 @@ def ensure_running(port: int, webhook_secret: str = "",
             return "skipped"
 
     if health(f"http://localhost:{port}"):
+        if project_path is not None:
+            from bobi import paths
+            (paths.state_dir(project_path) / "event-server.port").write_text(str(port))
         log.info(f"Event server already running on port {port}")
         return "connected"
 
@@ -177,6 +180,7 @@ def ensure_running(port: int, webhook_secret: str = "",
     for _ in range(30):
         time.sleep(0.5)
         if health(f"http://localhost:{port}"):
+            (state / "event-server.port").write_text(str(port))
             log.info(f"Event server started on port {port} (pid {proc.pid})")
             return "started"
     log.error("Event server failed to start within 15 seconds")

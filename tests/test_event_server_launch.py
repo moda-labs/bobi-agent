@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
+from bobi import paths
 from bobi.events import server as es
 
 
@@ -70,9 +71,8 @@ class TestEnsureRunningRemoteGuard:
     """ensure_running must refuse to start Node when event_server_url is remote."""
 
     def _write_agent_yaml(self, tmp_path, url):
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "agent.yaml").write_text(
+        paths.package_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.agent_yaml_path(tmp_path).write_text(
             f"agent: test\nevent_server_url: {url}\n"
         )
 

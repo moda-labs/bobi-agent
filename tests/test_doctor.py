@@ -1,9 +1,11 @@
-"""Tests for bobi doctor health checks."""
+"""Tests for named doctor health checks."""
 
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from bobi import paths
 
 
 # --- CheckResult ---
@@ -39,9 +41,9 @@ class TestCheckCLI:
 class TestCheckProjectConfig:
 
     def test_passes_when_exists(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir()
-        (config_dir / "agent.yaml").write_text("entry_point: manager\nevent_server_url: https://events.test\n")
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "entry_point: manager\nevent_server_url: https://events.test\n")
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
             from bobi.doctor import _check_local_config
             r = _check_local_config()
@@ -55,72 +57,36 @@ class TestCheckProjectConfig:
         assert "missing" in r.detail
 
 
-# --- Single .bobi root ---
+# --- Runtime layout ---
 
-class TestCheckSingleRoot:
+class TestCheckRuntimeLayout:
 
-    def test_passes_with_only_root_bobi(self, tmp_path):
-        (tmp_path / ".bobi" / "worktrees" / "x").mkdir(parents=True)
-        (tmp_path / "jobtack").mkdir()
+    def test_passes_with_canonical_runtime(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text("agent: test\n")
+        paths.state_dir(tmp_path)
+        paths.workspace_dir(tmp_path).mkdir()
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
-            from bobi.doctor import _check_single_root
-            r = _check_single_root()
+            from bobi.doctor import _check_runtime_layout
+            r = _check_runtime_layout()
         assert r.ok
+        assert str(tmp_path) in r.detail
 
-    def test_flags_stray_in_repo_checkout(self, tmp_path):
-        (tmp_path / ".bobi").mkdir()
-        (tmp_path / "jobtack" / ".bobi" / "state").mkdir(parents=True)
-        (tmp_path / "repos" / "other" / ".bobi").mkdir(parents=True)
+    def test_flags_missing_package_config(self, tmp_path):
+        paths.state_dir(tmp_path)
+        paths.workspace_dir(tmp_path).mkdir()
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
-            from bobi.doctor import _check_single_root
-            r = _check_single_root()
+            from bobi.doctor import _check_runtime_layout
+            r = _check_runtime_layout()
         assert not r.ok
-        assert "jobtack" in r.detail
-        assert "repos/other" in r.detail
-        assert "state-only" in r.detail
+        assert "package/agent.yaml" in r.detail
 
-    def test_flags_stray_at_any_depth(self, tmp_path):
-        """Depth must not bound the scan — monorepo packages and worktree
-        layouts nest .bobi leftovers 3+ levels down."""
-        (tmp_path / ".bobi").mkdir()
-        deep = tmp_path / "repos" / "org" / "app" / ".bobi"
-        deep.mkdir(parents=True)
-        with patch("bobi.doctor.bound_root", return_value=tmp_path):
-            from bobi.doctor import _check_single_root
-            r = _check_single_root()
-        assert not r.ok
-        assert "repos/org/app" in r.detail
-
-    def test_classifies_nested_install_as_capture_risk(self, tmp_path):
-        """A stray containing agent.yaml CAPTURES root resolution — it must
-        be called out separately from removable state-only leftovers."""
-        (tmp_path / ".bobi").mkdir()
-        nested = tmp_path / "checkout" / ".bobi"
-        nested.mkdir(parents=True)
-        (nested / "agent.yaml").write_text("name: rogue\n")
-        with patch("bobi.doctor.bound_root", return_value=tmp_path):
-            from bobi.doctor import _check_single_root
-            r = _check_single_root()
-        assert not r.ok
-        assert "checkout" in r.detail
-        assert "CAPTURE" in r.detail
-        assert "hijack" in r.hint
-
-    def test_ignores_roots_own_bobi_subtree(self, tmp_path):
-        """worktrees/sessions inside the root's own .bobi aren't strays,
-        even when a checkout inside it carries a .bobi dir."""
-        stray_in_worktree = tmp_path / ".bobi" / "worktrees" / ".bobi"
-        stray_in_worktree.mkdir(parents=True)
-        with patch("bobi.doctor.bound_root", return_value=tmp_path):
-            from bobi.doctor import _check_single_root
-            r = _check_single_root()
-        assert r.ok
-
-    def test_passes_without_bound_root(self):
+    def test_fails_without_bound_root(self):
         with patch("bobi.doctor.bound_root", return_value=None):
-            from bobi.doctor import _check_single_root
-            r = _check_single_root()
-        assert r.ok
+            from bobi.doctor import _check_runtime_layout
+            r = _check_runtime_layout()
+        assert not r.ok
+        assert "no Bobi Agent runtime" in r.detail
 
 
 # --- Package requires ---
@@ -130,7 +96,7 @@ class TestCheckPackageRequires:
 
     def _write_config(self, tmp_path, requires_yaml):
         from textwrap import dedent
-        config_dir = tmp_path / ".bobi"
+        config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "agent.yaml").write_text(dedent(f"""
             entry_point: manager
@@ -164,7 +130,7 @@ class TestCheckPackageRequires:
         assert "run setup" in results[0].hint
 
     def test_no_requires(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
+        config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "agent.yaml").write_text("entry_point: manager\n")
         with patch("bobi.doctor.bound_root", return_value=tmp_path):

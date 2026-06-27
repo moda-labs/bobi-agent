@@ -624,7 +624,8 @@ class TestConfigAutoDispatch:
     """Config.load parses auto_dispatch rules from agent.yaml."""
 
     def test_auto_dispatch_parsed_from_yaml(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
+        from bobi import paths
+        config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(
             "agent: test\n"
@@ -644,7 +645,8 @@ class TestConfigAutoDispatch:
         assert cfg.auto_dispatch[0]["workflow"] == "pr-feedback"
 
     def test_auto_dispatch_defaults_to_empty(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
+        from bobi import paths
+        config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text("agent: test\n")
         from bobi.config import Config

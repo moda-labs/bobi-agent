@@ -10,7 +10,7 @@ Two storage tiers, merged most-general to most-specific (later tiers
 override earlier ones by `name`):
 
   1. Built-in defaults  — agent team monitors/defaults.yaml (shipped, read-only)
-  2. Project-specific   — <project>/.bobi/monitors.yaml
+  2. Package-specific   — <run>/package/monitors.yaml
 """
 
 from pathlib import Path

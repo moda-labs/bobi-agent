@@ -15,17 +15,19 @@ That's it. Personal API keys have access to all teams/projects your account can 
 
 ## 2. Add the key to bobi
 
+Install or reinstall the Bobi Agent that needs Linear. `bobi agents install`
+prompts for any missing `${VAR}` credentials and writes them to that named
+agent's `run/.env`.
+
 ```bash
-bobi init
-# Paste the lin_api_ key when prompted for Linear API key
+bobi agents install <source> --name <name>
+# Paste the lin_api_ key when prompted for LINEAR_API_KEY
 ```
 
-Or for named credentials:
+For non-interactive installs, provide the value in the environment:
 
-```yaml
-# ~/.config/bobi/credentials.yaml
-default:
-  linear_api_key: "lin_api_..."
+```bash
+LINEAR_API_KEY=lin_api_... bobi agents install <source> --name <name> --non-interactive
 ```
 
 ## 3. Configure your project
@@ -47,15 +49,14 @@ Dispatch only picks up issues in `Triage` or `Unstarted` states. Once it starts 
 
 ## Multiple Linear teams
 
-If you work across different Linear organizations, create separate API keys for each and store them as named credentials:
+If you work across different Linear organizations, create separate API keys and
+install separate named Bobi Agents with different `run/.env` values.
 
-```yaml
-# ~/.config/bobi/credentials.yaml
-work:
-  linear_api_key: "lin_api_work_org_key"
-
-personal:
-  linear_api_key: "lin_api_personal_org_key"
+```bash
+BOBI_HOME=~/.bobi-work LINEAR_API_KEY=lin_api_work_org_key \
+  bobi agents install <source> --name work --non-interactive
+BOBI_HOME=~/.bobi-personal LINEAR_API_KEY=lin_api_personal_org_key \
+  bobi agents install <source> --name personal --non-interactive
 ```
 
 Then reference the appropriate workspace when configuring your projects.

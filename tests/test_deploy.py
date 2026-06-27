@@ -430,7 +430,7 @@ def test_outage_unset_required_secret_is_restored_on_update(repo, recorder, monk
 def test_existing_app_syncs_reconciled_secrets_to_volume_env(repo, recorder,
                                                             monkeypatch):
     """A rotated Fly secret must also refresh the persisted volume .env. Codex
-    tool shells can lose inherited env and fall back to .bobi/.env, so Fly
+    tool shells can lose inherited env and fall back to run/.env, so Fly
     secrets alone are not enough (#501)."""
     monkeypatch.setattr(D, "fly_app_exists", lambda app: True)
     monkeypatch.setattr(D, "fly_instance_running", lambda app: True)
@@ -446,7 +446,7 @@ def test_existing_app_syncs_reconciled_secrets_to_volume_env(repo, recorder,
         c for c in recorder
         if "ssh" in c["cmd"] and "/opt/venv/bin/python -c" in " ".join(c["cmd"])
     ]
-    assert syncs, "expected deploy to refresh /data/project/.bobi/.env"
+    assert syncs, "expected deploy to refresh the volume run/.env"
     payload = json.loads(syncs[0]["input"].decode())
     assert payload["set"]["SLACK_BOT_TOKEN"] == "xoxb-new"
     assert payload["set"]["ANTHROPIC_API_KEY"] == "sk-ant"
@@ -525,7 +525,9 @@ def test_team_url_existing_app_updates_in_place(repo, recorder, monkeypatch):
     D.deploy(repo, "eng")
     joined = _flat(recorder)
     assert not any("provision-instance.sh" in c for c in joined)  # no re-provision
-    assert any("bobi install \"https://r/eng.tar.gz\"" in c for c in joined)
+    assert any("bobi agents install https://r/eng.tar.gz" in c
+               and "--name \"$BOBI_INSTANCE\"" in c
+               and "--non-interactive" in c for c in joined)
     assert any("machine\nrestart\n48ed1234" in c for c in joined)
 
 
@@ -541,8 +543,9 @@ def test_ssh_push_new_app_provisions_blank_then_pushes(repo, recorder, monkeypat
     assert "--team" not in prov.replace("--team-url", "")  # neither team nor team-url
     # team pushed: base64 onto the volume, then install from the tarball
     assert any("base64 -d" in c for c in joined)
-    assert any("bobi install /data/incoming-team.tar.gz --non-interactive" in c
-               for c in joined)
+    assert any("bobi agents install /data/incoming-team.tar.gz" in c
+               and "--name \"$BOBI_INSTANCE\"" in c
+               and "--non-interactive" in c for c in joined)
     # NEW provision releases the waiting entrypoint — no restart.
     assert not any("machine\nrestart" in c for c in joined)
 
@@ -556,7 +559,8 @@ def test_ssh_push_existing_app_pushes_and_restarts(repo, recorder, monkeypatch):
     D.deploy(repo, "eng-team")
     joined = _flat(recorder)
     assert not any("provision-instance.sh" in c for c in joined)
-    assert any("bobi install /data/incoming-team.tar.gz" in c for c in joined)
+    assert any("bobi agents install /data/incoming-team.tar.gz" in c
+               and "--name \"$BOBI_INSTANCE\"" in c for c in joined)
     # reload after reinstall — `fly machine restart` needs an explicit machine ID
     # non-interactively (a bare `-a <app>` errors; caught in the live e2e).
     assert any("machine\nrestart\n48ed1234" in c for c in joined)
@@ -734,7 +738,8 @@ def test_ssh_push_deps_drift_rebuilds_in_place(repo, recorder, monkeypatch):
     # rebuilds the image on the existing app (idempotent provision, blank)…
     assert any("provision-instance.sh" in c and "--blank" in c for c in joined)
     # …then refreshes the definition + reloads
-    assert any("bobi install /data/incoming-team.tar.gz" in c for c in joined)
+    assert any("bobi agents install /data/incoming-team.tar.gz" in c
+               and "--name \"$BOBI_INSTANCE\"" in c for c in joined)
 
 
 def test_ssh_push_deps_match_takes_fast_path(repo, recorder, monkeypatch):
@@ -747,7 +752,8 @@ def test_ssh_push_deps_match_takes_fast_path(repo, recorder, monkeypatch):
     D.deploy(repo, "eng-team")
     joined = _flat(recorder)
     assert not any("provision-instance.sh" in c for c in joined)  # no rebuild
-    assert any("bobi install /data/incoming-team.tar.gz" in c for c in joined)
+    assert any("bobi agents install /data/incoming-team.tar.gz" in c
+               and "--name \"$BOBI_INSTANCE\"" in c for c in joined)
 
 
 def test_ssh_push_deps_unknown_stamp_hot_pushes(repo, recorder, monkeypatch):
@@ -856,7 +862,7 @@ def test_half_provisioned_app_reprovisions_not_ssh_updates(repo, recorder, monke
     # re-provisions (rebuilds the image) — provision-instance.sh is idempotent
     assert any("provision-instance.sh" in c and "--team-url" in c for c in joined)
     # does NOT try to ssh-install into a dead app
-    assert not any("bobi install \"https://r/eng.tar.gz\"" in c for c in joined)
+    assert not any("bobi agents install https://r/eng.tar.gz" in c for c in joined)
 
 
 def test_destroy_resolves_app_and_passes_yes(repo, recorder, monkeypatch):

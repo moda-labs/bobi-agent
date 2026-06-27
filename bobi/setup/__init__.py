@@ -6,8 +6,9 @@ stage machine; the wizard owns navigation and every deterministic action
 (conversation → spec) and the Build pour (spec → pack files). See
 `webui/server.py` for the app and launcher.
 
-Like `bobi install`, setup targets its literal cwd — it CREATES
-the installation root, so it never calls paths.resolve_root().
+Setup creates or resumes one named Bobi Agent under BOBI_HOME. The
+editable source defaults to <BOBI_HOME>/agents/<name>/src, while the
+installed runtime lives at <BOBI_HOME>/agents/<name>/run.
 """
 
 from __future__ import annotations

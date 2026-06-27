@@ -7,6 +7,6 @@ from pathlib import Path
 
 
 def run_ui(project_path: Path, *, open_browser: bool = True) -> int:
-    """Foreground entry point for the `bobi ui` command."""
+    """Foreground entry point for the `bobi agent <name> ui` command."""
     from bobi.agentui import server
     return server.serve(project_path, mode="local", open_browser=open_browser)

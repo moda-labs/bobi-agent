@@ -1,6 +1,6 @@
 """Tests for frozen-image pack install.
 
-.bobi/ mimics a runtime installation: install regenerates it
+run/package/ mimics a runtime installation: install regenerates it
 verbatim from the pack source — no merge with prior installed state.
 Variance enters via ${VAR}/.env only. The install manifest lets doctor
 flag hand-edits before a reinstall silently destroys them.
@@ -13,9 +13,17 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
+from bobi import paths
 from bobi.cli import _install_pack, _write_install_gitignore, main
 from bobi.config import parse_env_file
 from bobi.doctor import _check_install_integrity
+
+
+@pytest.fixture(autouse=True)
+def _clear_bound_root():
+    paths.bind_root(None)
+    yield
+    paths.bind_root(None)
 
 
 @pytest.fixture
@@ -47,7 +55,7 @@ def project(tmp_path):
 
 def test_install_writes_pack_yaml_verbatim_plus_name(pack, project):
     _install_pack(pack, project)
-    cfg = yaml.safe_load((project / ".bobi" / "agent.yaml").read_text())
+    cfg = yaml.safe_load((paths.agent_yaml_path(project)).read_text())
     assert cfg["entry_point"] == "manager"
     assert cfg["event_server"] == "${BOBI_EVENT_SERVER}"
     assert cfg["agent"] == "my-team"
@@ -56,35 +64,35 @@ def test_install_writes_pack_yaml_verbatim_plus_name(pack, project):
 def test_reinstall_discards_hand_edits(pack, project):
     """The installed image is frozen — reinstall restores pack content."""
     _install_pack(pack, project)
-    installed = project / ".bobi" / "agent.yaml"
+    installed = paths.agent_yaml_path(project)
     cfg = yaml.safe_load(installed.read_text())
     cfg["entry_point"] = "director"
     cfg["subscribe"] = ["github:o/r"]
     installed.write_text(yaml.dump(cfg))
-    (project / ".bobi" / "roles" / "manager" / "ROLE.md").write_text("edited\n")
+    (paths.roles_dir(project) / "manager" / "ROLE.md").write_text("edited\n")
 
     _install_pack(pack, project)
 
     cfg = yaml.safe_load(installed.read_text())
     assert cfg["entry_point"] == "manager"
     assert "subscribe" not in cfg
-    role = project / ".bobi" / "roles" / "manager" / "ROLE.md"
+    role = paths.roles_dir(project) / "manager" / "ROLE.md"
     assert role.read_text() == "# Manager\n"
 
 
 def test_install_is_idempotent(pack, project):
     _install_pack(pack, project)
-    first = (project / ".bobi" / "agent.yaml").read_text()
-    manifest_first = (project / ".bobi" / "install-manifest.json").read_text()
+    first = (paths.agent_yaml_path(project)).read_text()
+    manifest_first = (paths.install_manifest_path(project)).read_text()
     _install_pack(pack, project)
-    assert (project / ".bobi" / "agent.yaml").read_text() == first
-    assert (project / ".bobi" / "install-manifest.json").read_text() == manifest_first
+    assert (paths.agent_yaml_path(project)).read_text() == first
+    assert (paths.install_manifest_path(project)).read_text() == manifest_first
 
 
 def test_manifest_covers_installed_files(pack, project):
     _install_pack(pack, project)
     manifest = json.loads(
-        (project / ".bobi" / "install-manifest.json").read_text())
+        (paths.install_manifest_path(project)).read_text())
     assert manifest["agent"] == "my-team"
     assert manifest["frozen"] is True
     assert "agent.yaml" in manifest["files"]
@@ -95,12 +103,12 @@ def test_manifest_covers_installed_files(pack, project):
 def test_local_source_gitignore_covers_image(pack, project):
     _install_pack(pack, project)
     _write_install_gitignore(project, local_source=True)
-    entries = (project / ".bobi" / ".gitignore").read_text().splitlines()
+    entries = (paths.package_dir(project) / ".gitignore").read_text().splitlines()
     for artifact in ["agent.yaml", "agent.md", "roles/", "install-manifest.json",
                      ".gitignore"]:
         assert artifact in entries
     _write_install_gitignore(project, local_source=False)
-    entries = (project / ".bobi" / ".gitignore").read_text().splitlines()
+    entries = (paths.package_dir(project) / ".gitignore").read_text().splitlines()
     assert "agent.yaml" not in entries
     assert "install-manifest.json" in entries
 
@@ -110,12 +118,12 @@ class TestContextInstall:
 
     def test_context_installs_to_dot_bobi(self, pack, project):
         _install_pack(pack, project)
-        installed = project / ".bobi" / "context" / "style-guide.md"
+        installed = paths.context_dir(project) / "style-guide.md"
         assert installed.read_text().startswith("# House style guide")
 
     def test_reinstall_restores_context_edits(self, pack, project):
         _install_pack(pack, project)
-        installed = project / ".bobi" / "context" / "style-guide.md"
+        installed = paths.context_dir(project) / "style-guide.md"
         installed.write_text("edited\n")
         _install_pack(pack, project)
         assert installed.read_text().startswith("# House style guide")
@@ -123,10 +131,10 @@ class TestContextInstall:
     def test_context_in_manifest_and_gitignore(self, pack, project):
         _install_pack(pack, project)
         manifest = json.loads(
-            (project / ".bobi" / "install-manifest.json").read_text())
+            (paths.install_manifest_path(project)).read_text())
         assert "context/style-guide.md" in manifest["files"]
         _write_install_gitignore(project, local_source=True)
-        entries = (project / ".bobi" / ".gitignore").read_text().splitlines()
+        entries = (paths.package_dir(project) / ".gitignore").read_text().splitlines()
         assert "context/" in entries
 
 
@@ -136,36 +144,36 @@ class TestWorkspaceSeed:
 
     def test_workspace_seeds_to_project_root(self, pack, project):
         _install_pack(pack, project)
-        seeded = project / "workspace" / "domain-context.md"
+        seeded = paths.workspace_dir(project) / "domain-context.md"
         assert seeded.read_text().startswith("# Domain context")
-        assert (project / "workspace" / "briefs").is_dir()
+        assert (paths.workspace_dir(project) / "briefs").is_dir()
 
     def test_reinstall_preserves_workspace_edits(self, pack, project):
         _install_pack(pack, project)
-        seeded = project / "workspace" / "domain-context.md"
+        seeded = paths.workspace_dir(project) / "domain-context.md"
         seeded.write_text("user filled this in\n")
         _install_pack(pack, project)
         assert seeded.read_text() == "user filled this in\n"
 
     def test_reinstall_seeds_only_missing_files(self, pack, project):
         _install_pack(pack, project)
-        (project / "workspace" / "domain-context.md").unlink()
+        (paths.workspace_dir(project) / "domain-context.md").unlink()
         (pack / "workspace" / "new-template.md").write_text("new\n")
         _install_pack(pack, project)
-        assert (project / "workspace" / "domain-context.md").exists()
-        assert (project / "workspace" / "new-template.md").read_text() == "new\n"
+        assert (paths.workspace_dir(project) / "domain-context.md").exists()
+        assert (paths.workspace_dir(project) / "new-template.md").read_text() == "new\n"
 
     def test_workspace_not_in_manifest(self, pack, project):
         _install_pack(pack, project)
         manifest = json.loads(
-            (project / ".bobi" / "install-manifest.json").read_text())
+            (paths.install_manifest_path(project)).read_text())
         assert not any(p.startswith("workspace") for p in manifest["files"])
 
     def test_pack_without_workspace_seeds_nothing(self, pack, project):
         import shutil
         shutil.rmtree(pack / "workspace")
         _install_pack(pack, project)
-        assert not (project / "workspace").exists()
+        assert not (paths.workspace_dir(project)).exists()
 
 
 class TestPromptSections:
@@ -176,7 +184,7 @@ class TestPromptSections:
         _install_pack(pack, project)
         prompt = resolve_agent_prompt("manager", project)
         assert "## Context files" in prompt
-        assert "`.bobi/context/style-guide.md` — House style guide" in prompt
+        assert "`package/context/style-guide.md` — House style guide" in prompt
         # Index only — contents are read on demand, never inlined.
         assert "Write tersely." not in prompt
 
@@ -185,7 +193,7 @@ class TestPromptSections:
         _install_pack(pack, project)
         prompt = resolve_agent_prompt("manager", project)
         assert "## Workspace" in prompt
-        assert "`workspace/`" in prompt
+        assert f"`{paths.workspace_dir(project)}`" in prompt
 
     def test_sections_absent_without_context_or_workspace(self, pack, project):
         import shutil
@@ -201,7 +209,8 @@ class TestPromptSections:
 class TestDoctorIntegrity:
 
     def _set_root(self, project, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", project)
+        paths.bind_root(None)
+        paths.bind_root(project)
 
     def test_clean_install_passes(self, pack, project, monkeypatch):
         _install_pack(pack, project)
@@ -212,8 +221,8 @@ class TestDoctorIntegrity:
 
     def test_drift_is_flagged(self, pack, project, monkeypatch):
         _install_pack(pack, project)
-        (project / ".bobi" / "agent.yaml").write_text("agent: edited\n")
-        (project / ".bobi" / "workflows" / "adhoc.yaml").unlink()
+        (paths.agent_yaml_path(project)).write_text("agent: edited\n")
+        (paths.workflows_dir(project) / "adhoc.yaml").unlink()
         self._set_root(project, monkeypatch)
         result = _check_install_integrity()
         assert not result.ok
@@ -222,14 +231,14 @@ class TestDoctorIntegrity:
 
     def test_downloaded_pack_is_editable(self, pack, project, monkeypatch):
         _install_pack(pack, project, local_source=False)
-        (project / ".bobi" / "agent.yaml").write_text("agent: edited\n")
+        (paths.agent_yaml_path(project)).write_text("agent: edited\n")
         self._set_root(project, monkeypatch)
         result = _check_install_integrity()
         assert result.ok
         assert "editable" in result.detail
 
     def test_no_manifest_is_ok(self, project, monkeypatch):
-        (project / ".bobi").mkdir()
+        paths.package_dir(project).mkdir(parents=True)
         self._set_root(project, monkeypatch)
         assert _check_install_integrity().ok
 
@@ -254,22 +263,21 @@ class TestNonInteractiveInstall:
 
     def test_env_vars_written_to_dotenv(self, pack_with_creds, tmp_path, monkeypatch):
         """With --non-interactive, env vars present in os.environ are
-        written to .bobi/.env without prompting."""
-        project = tmp_path / "proj"
-        project.mkdir()
-        monkeypatch.chdir(project)
+        written to run/.env without prompting."""
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
         monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
         monkeypatch.setenv("MY_API_KEY", "sk-test-123")
 
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["install", str(pack_with_creds), "--non-interactive"],
+            ["agents", "install", str(pack_with_creds), "--non-interactive"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output
 
-        env = parse_env_file(project / ".bobi" / ".env")
+        env = parse_env_file(home / "agents" / "my-team" / "run" / ".env")
         assert env["BOBI_EVENT_SERVER"] == "wss://events.example.com"
         assert env["MY_API_KEY"] == "sk-test-123"
 
@@ -278,16 +286,15 @@ class TestNonInteractiveInstall:
         (a bare ${VAR}) must fail fast with a non-zero exit and a clear message
         — never exit 0 into a broken start. (Completing without hanging also
         proves it never blocked on input.)"""
-        project = tmp_path / "proj"
-        project.mkdir()
-        monkeypatch.chdir(project)
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
         monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
         monkeypatch.delenv("MY_API_KEY", raising=False)
 
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["install", str(pack_with_creds), "--non-interactive"],
+            ["agents", "install", str(pack_with_creds), "--non-interactive"],
         )
         assert result.exit_code == 1, result.output
         assert "MY_API_KEY" in result.output
@@ -307,30 +314,28 @@ class TestNonInteractiveInstall:
         )
         pack_dir.joinpath("agent.md").write_text("# opt-team\n")
 
-        project = tmp_path / "proj"
-        project.mkdir()
-        monkeypatch.chdir(project)
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
         monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
         monkeypatch.delenv("OPTIONAL_MODEL", raising=False)
 
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["install", str(pack_dir), "--non-interactive"],
+            ["agents", "install", str(pack_dir), "--non-interactive"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output
-        env = parse_env_file(project / ".bobi" / ".env")
+        env = parse_env_file(home / "agents" / "opt-team" / "run" / ".env")
         assert env["BOBI_EVENT_SERVER"] == "wss://events.example.com"
 
     def test_existing_env_file_preserved(self, pack_with_creds, tmp_path, monkeypatch):
         """Vars already in .env are kept; env vars supplement them."""
-        project = tmp_path / "proj"
-        project.mkdir()
-        monkeypatch.chdir(project)
-        dot_moda = project / ".bobi"
-        dot_moda.mkdir(parents=True)
-        (dot_moda / ".env").write_text("MY_API_KEY=existing-key\n")
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        env_file = home / "agents" / "my-team" / "run" / ".env"
+        env_file.parent.mkdir(parents=True)
+        env_file.write_text("MY_API_KEY=existing-key\n")
 
         monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
         monkeypatch.delenv("MY_API_KEY", raising=False)
@@ -338,20 +343,19 @@ class TestNonInteractiveInstall:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["install", str(pack_with_creds), "--non-interactive"],
+            ["agents", "install", str(pack_with_creds), "--non-interactive"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output
 
-        env = parse_env_file(project / ".bobi" / ".env")
+        env = parse_env_file(env_file)
         assert env["MY_API_KEY"] == "existing-key"
         assert env["BOBI_EVENT_SERVER"] == "wss://events.example.com"
 
     def test_interactive_default_still_prompts(self, pack_with_creds, tmp_path, monkeypatch):
         """Without --non-interactive, install still prompts (baseline)."""
-        project = tmp_path / "proj"
-        project.mkdir()
-        monkeypatch.chdir(project)
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
         monkeypatch.delenv("BOBI_EVENT_SERVER", raising=False)
         monkeypatch.delenv("MY_API_KEY", raising=False)
 
@@ -359,7 +363,7 @@ class TestNonInteractiveInstall:
         # Provide empty input to satisfy prompts without hanging.
         result = runner.invoke(
             main,
-            ["install", str(pack_with_creds)],
+            ["agents", "install", str(pack_with_creds)],
             input="\n\n",
         )
         assert result.exit_code == 0

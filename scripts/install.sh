@@ -16,4 +16,5 @@ echo "Installing bobi..."
 uv tool install bobi
 
 echo ""
-echo "Done. Run 'bobi start <agent-pack>' to get started."
+echo "Done. Run 'bobi setup <name>' to create a Bobi Agent, or"
+echo "'bobi agents install <source> --name <name>' to install one."

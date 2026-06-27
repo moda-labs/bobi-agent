@@ -1,4 +1,4 @@
-"""The `bobi ui` web server — a minimal dashboard for a *running* team.
+"""The `bobi agent <name> ui` web server — a minimal dashboard for a *running* team.
 
 Shows one card per active agent session (manager + workers) and lets you open
 a chat panel to talk to any of them directly. The chat is **blocking
@@ -8,7 +8,7 @@ no token streaming surface to expose.
 
 Two run modes share one FastAPI app (only the bind + token source differ):
 
-- **local** (`bobi ui`): binds ``127.0.0.1:0`` in the foreground, mints a
+- **local** (`bobi agent <name> ui`): binds ``127.0.0.1:0`` in the foreground, mints a
   per-launch token, opens a browser. The operator's machine is the trust
   boundary, exactly like `bobi setup`.
 - **container** (:func:`start_in_thread`, started by the manager when
@@ -54,7 +54,8 @@ def _safe_name(name: str) -> bool:
 
 
 def _chat_log_path(project: Path, name: str) -> Path:
-    return project / ".bobi" / "sessions" / name / "webui-chat.jsonl"
+    from bobi import paths
+    return paths.sessions_dir(project) / name / "webui-chat.jsonl"
 
 
 def read_chat(project: Path, name: str, limit: int = CHAT_HISTORY_LIMIT) -> list[dict]:
@@ -187,15 +188,19 @@ def ordered_agents(entries, *, manager_name: str = "") -> list:
 
 
 def _resolve_manager_name(project: Path) -> str:
-    """Best-effort name of the entry-point (manager) session — `moda-<role>-<proj>`
-    — matching `cli._manager_session_name`. Never raises; an empty string just
+    """Best-effort entry-point session name matching `cli._manager_session_name`.
+
+    Never raises; an empty string just
     means no card gets the manager badge."""
     try:
+        from bobi import paths
         from bobi.config import Config
         role = Config.load(project).entry_point or "manager"
+        agent_name = paths.agent_name_for_root(project)
     except Exception:
         role = "manager"
-    return f"moda-{role}-{project.name}"
+        agent_name = project.name
+    return f"bobi-{agent_name}-{role}"
 
 
 # --- app -----------------------------------------------------------------
@@ -327,13 +332,14 @@ def build_app(project: Path, *, token: str, registry_fn=None, deliver_fn=None,
 
 def serve(project: Path, *, mode: str = "local", open_browser: bool = True,
           chat_timeout: int = DEFAULT_CHAT_TIMEOUT) -> int:
-    """Run the UI in the foreground (the `bobi ui` command). Binds
+    """Run the UI in the foreground (the `bobi agent <name> ui` command). Binds
     ``127.0.0.1:0``, mints a per-launch token, hands the socket to uvicorn."""
     import secrets
     import threading
     import webbrowser
 
     import uvicorn
+    from bobi import paths
 
     token = secrets.token_urlsafe(24)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -347,7 +353,11 @@ def serve(project: Path, *, mode: str = "local", open_browser: bool = True,
 
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-    print(f"\n  bobi ui is running at {url}\n  (Ctrl-C to stop)\n")
+    try:
+        agent_name = paths.agent_name_for_root(project)
+    except Exception:
+        agent_name = "<name>"
+    print(f"\n  bobi agent {agent_name} ui is running at {url}\n  (Ctrl-C to stop)\n")
 
     try:
         server.run(sockets=[sock])

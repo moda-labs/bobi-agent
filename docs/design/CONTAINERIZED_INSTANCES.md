@@ -94,7 +94,7 @@ From the codebase audit. One instance's process tree, all localhost:
 
 | Process | Source | Notes |
 |---|---|---|
-| Manager (Python) | `cli.py:248-341` | PID file `.bobi/state/manager.pid`; spawns the rest. In containers, runs as PID 1 via `--foreground` |
+| Manager (Python) | `cli.py:248-341` | PID file `run/state/manager.pid`; spawns the rest. In containers, runs as PID 1 via `--foreground` |
 | Manager's persistent Claude session | `session.py:196` via `claude-agent-sdk` → `claude` CLI subprocess | `permission_mode="bypassPermissions"` (`session.py:189`) |
 | Subagents | `subagent.py:522-591`, detached | one `claude` process each; **no concurrency cap today** (C3) |
 | Per-session inboxes | `inbox.py`, `events/drain.py` | in-memory queues, **no HTTP server / no ports** — messages arrive as `inbox/<session>` events over the event-server subscription/drain path; `deliver(wait=True)` is pub/sub request-reply (#269) |
@@ -102,10 +102,11 @@ From the codebase audit. One instance's process tree, all localhost:
 | Local Node event server | `events/server.py:82-134`, port 8080 | **not run in deployed instances** — they point at the Worker via `event_server_url` (C6) |
 | Monitor scheduler | `monitors/scheduler.py:143-148` daemon thread | interval loop; gets a remote-tick mode in Phase 2 (C17) |
 
-State layout (everything per-project, which is why containerization is
-clean): `.bobi/` holds config, sessions, KB sqlite DBs, event cursor
-(`state/cursor.json`), monitor dedup (`state/monitor_state.json`),
-`history.db`. Outside the project dir: `~/.claude/projects/` (Claude Code
+State layout (everything under the named agent's `run/`, which is why
+containerization is clean): `run/package/` holds config, and `run/state/`
+holds sessions, KB sqlite DBs, event cursor (`cursor.json`), monitor dedup
+(`monitor_state.json`), and `history.db`. Outside the runtime root:
+`~/.claude/projects/` (Claude Code
 transcripts — **required for session resume**, `session.py:184`), and the
 fastembed model cache (embedding model). Both land on the volume by setting
 `HOME` to a volume path; the C8 image instead pre-seeds the model cache at
@@ -156,7 +157,7 @@ Event server: the existing Worker. Local Node event server is not deployed
 in instances.
 
 Interaction (internal phase): Slack via the existing integration, plus
-`fly ssh console -a <app> bobi ask|status|events`. The future dashboard
+`fly ssh console -a <app> bobi agent <name> ask|status|events`. The future dashboard
 talks over the event bus (`user_message` events in, activity mirroring out)
 — see §9; nothing is built for it now.
 
@@ -188,7 +189,7 @@ as deferred ticket D1.
 ## 6. Credentials (the separation principle)
 
 The instance-side contract is **env vars only**, which already exists:
-`.bobi/.env` / process env resolved through `${VAR}` refs
+`run/.env` / process env resolved through `${VAR}` refs
 (`config.py:41-74`). This design adds **nothing** auth-related inside the
 instance.
 
@@ -281,9 +282,9 @@ it's watching. Three-part fix:
 1. Ephemerality contract in `prompts/base.md`: machine stops when idle;
    never background-loop or sleep-to-wait; register a monitor or schedule
    instead.
-2. New primitive `bobi schedule "<prompt>" --in <dur>` — one-shot
-   wake-up (a `count=1` monitor backed by a DO alarm). Converts the whole
-   watch-script class into durable state.
+2. New scheduled-prompt primitive — one-shot wake-up (a `count=1` monitor
+   backed by a DO alarm). Converts the whole watch-script class into durable
+   state.
 3. Manager quiescence protocol: idle ⇔ no active sessions, no running
    subagents, empty inboxes, no due monitors, **no live keepalive leases**.
    Leases (TTL'd, via manager endpoint or lease file) let legitimate
@@ -455,7 +456,7 @@ inline it — implementer's choice.
 torch absent from the deployment dependency set.
 
 **C5 — Non-interactive install / first-boot provisioning path.**
-`bobi install <team> --non-interactive`: no prompts, secrets assumed
+`bobi agents install <team> --non-interactive`: no prompts, secrets assumed
 present in env, suitable for an entrypoint to run when the volume is empty.
 *Accept:* fresh empty dir + env vars → `install --non-interactive` →
 `start --foreground` works end-to-end with no TTY.
@@ -466,7 +467,7 @@ remote URL means no Node requirement at runtime.
 *Accept:* instance with remote URL runs in an image with no Node installed.
 
 **C7 — State format version marker.**
-Write `.bobi/state/format_version`; check on startup, refuse (with a
+Write `run/state/format_version`; check on startup, refuse (with a
 clear message) on unknown-newer, hook point for future migrations. Cheap
 now, painful retrofit later (volumes outlive images).
 *Accept:* version written on init; mismatch path covered by a unit test.
@@ -476,14 +477,14 @@ now, painful retrofit later (volumes outlive images).
 **C8 — Container image.**
 Python 3.11+, `bobi` from source/wheel, **pinned** `claude` CLI version
 on `PATH`, fastembed model pre-downloaded (set `FASTEMBED_CACHE_PATH`, or
-`HF_HOME` which the sidecar bridges, to an image path seeded at build), **non-root user**, `tini` + `bobi start --foreground`
+`HF_HOME` which the sidecar bridges, to an image path seeded at build), **non-root user**, `tini` + `bobi agent <name> start --foreground`
 entrypoint, no Node. Verify headless SDK auth via `ANTHROPIC_API_KEY` and
 that `bypassPermissions` works as the non-root user (root would require
 `IS_SANDBOX=1` — do not run as root). Support both auth modes (§6.1) via
 `BOBI_AUTH`; in subscription mode assert `ANTHROPIC_API_KEY` is unset
 (precedence gotcha) and use volume credentials.
 *Accept:* `docker run` with a mounted empty volume + env vars reaches a
-healthy manager that completes one `bobi ask` round-trip against the
+healthy manager that completes one `bobi agent <name> ask` round-trip against the
 real API; subscription mode reaches the same state from a volume holding
 valid `.credentials.json`.
 
@@ -521,7 +522,7 @@ a **fresh personal Fly account** with no moda-labs-specific config; runbook
 (including the bring-your-own-Worker steps) in the script header.
 
 **C11 — Backup script.**
-Nightly: `.bobi/` (minus `state/*.pid`, logs), `workspace/`,
+Nightly: `run/` (minus pid files and logs), `workspace/`,
 `~/.claude/projects/` → object storage (S3 — deliberately outside Fly, so
 tenant state is never hostage to the platform), per-instance prefix,
 simple retention. Fly volume snapshots are single-host, daily, ~5-day
@@ -562,7 +563,7 @@ dirs:
   with unpopulated secrets provisions but sits unhealthy until filled —
   same seam D2 plugs into).
 - **Changed team** → re-pull the team on the matching instance with
-  `bobi install <teams-latest-url>` (then restart), not `bobi
+  `bobi agents install <teams-latest-url>` (then restart), not `bobi
   agents update`: a container first-boots from `BOBI_TEAM_URL`, so its
   installed pack records `source = url:…`, which the registry-based `agents
   update` path does not resolve. `install <url>` re-runs the same
@@ -625,8 +626,8 @@ no double-fire across a wake.
 only on findings. The "nothing happened" path must not boot a VM.
 *Accept:* stale-PR scenario wakes the instance; clean poll does not.
 
-**C19 — `bobi schedule "<prompt>" --in <dur>`.** One-shot wake-up as a
-`count=1` monitor backed by a DO alarm; delivers the prompt as an event.
+**C19 — Scheduled prompt primitive.** One-shot wake-up as a `count=1` monitor
+backed by a DO alarm; delivers the prompt as an event.
 *Accept:* schedule from inside a session, stop the machine, wake fires and
 the prompt reaches the session.
 

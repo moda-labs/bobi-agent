@@ -33,7 +33,7 @@ When routing work to a project lead on behalf of a Slack user, include
 the requester context so completion notices go back to the right thread:
 
 ```bash
-bobi message --to <project-lead-session> \
+bobi agent <agent> message --to <project-lead-session> \
   'Work on: <task>. Requested by: {"from":"<user>","workspace":"<ws>","channel":"<ch>","thread_ts":"<ts>"}'
 ```
 
@@ -49,7 +49,7 @@ bloat. Two live sources define it:
 - **Your configured GitHub subscriptions** — the `github:<org>/<repo>`
   topics you are subscribed to. Each managed repo has one. This is the
   canonical, declarative list of repos under your oversight.
-- **`bobi agents list`** — the live set of running project leads.
+- **`bobi agent <agent> subagents list`** — the live set of running project leads.
 
 A repo is *managed* if you're subscribed to its `github:<org>/<repo>`
 topic. A lead is *legitimate* if it corresponds to a managed repo.
@@ -65,20 +65,20 @@ subscriptions against live agent state before processing any events:
 
 1. **Derive managed repos** from your configured GitHub subscriptions —
    the `github:<org>/<repo>` topics you are subscribed to.
-2. **Check live agents**: `bobi agents list`
+2. **Check live agents**: `bobi agent <agent> subagents list`
 3. **For each managed repo** with no running project lead: relaunch a
    fresh lead subscribed to that repo's GitHub events and tracker grouping.
    ```bash
-   cd <path> && bobi agents launch \
+   bobi agent <agent> subagents launch \
      -w adhoc \
      --role project_lead \
-     --task "You are the project lead for <repo-name>. Monitor events, manage issues, dispatch engineers. Report significant events to the director." \
+     --task "You are the project lead for <repo-name> at <repo-path>. Monitor events, manage issues, dispatch engineers. Report significant events to the director." \
      --persistent \
      --subscribe github:<org>/<repo> \
      --subscribe <tracker-subscription>
    ```
 4. **For each running lead** that does NOT correspond to a managed repo:
-   this is stale — cancel it with `bobi agents cancel <session>`.
+   this is stale — cancel it with `bobi agent <agent> subagents cancel <session>`.
 5. **Post a brief startup summary** to Slack: which repos are managed,
    which leads were relaunched.
 
@@ -110,10 +110,10 @@ like "start managing jobtack — it's at ~/dev/jobtack":
    subscription if none applies — e.g. when the repo's own GitHub issues
    are the tracker):
    ```bash
-   cd <repo-path> && bobi agents launch \
+   bobi agent <agent> subagents launch \
      -w adhoc \
      --role project_lead \
-     --task "You are the project lead for <repo-name>. Monitor events, manage issues, dispatch engineers. Report significant events to the director." \
+     --task "You are the project lead for <repo-name> at <repo-path>. Monitor events, manage issues, dispatch engineers. Report significant events to the director." \
      --persistent \
      --subscribe github:<org>/<repo> \
      --subscribe <tracker-subscription>
@@ -127,7 +127,6 @@ like "start managing jobtack — it's at ~/dev/jobtack":
 6. **Make it durable, if it's a lasting team fact.** Don't write any file
    yourself. Just **state it plainly in your transcript** — what was
    onboarded, who requested it (Slack user_id), and when — so the
-   `policy-curator` can fold it into the read-only `## Team Policy`. For
    example: "Onboarded jobtack (tracker JOB) at Zach's request (U0952RZRZ0X),
    2026-06-10."
 
@@ -135,8 +134,8 @@ like "start managing jobtack — it's at ~/dev/jobtack":
 
 When asked to stop managing a repo:
 
-1. Find the project lead session: `bobi agents list`
-2. Cancel it: `bobi agents cancel <session-name>`
+1. Find the project lead session: `bobi agent <agent> subagents list`
+2. Cancel it: `bobi agent <agent> subagents cancel <session-name>`
 3. Confirm on Slack.
 4. **Note the offboard plainly in your transcript** for provenance — what
    was offboarded, who asked, and when — so the `policy-curator` can update
@@ -149,7 +148,7 @@ from a written record:
 
 1. Your configured GitHub subscriptions (`github:<org>/<repo>` topics) are
    the canonical set of managed repos.
-2. `bobi agents list` annotates each with live status (running, idle,
+2. `bobi agent <agent> subagents list` annotates each with live status (running, idle,
    missing).
 3. Report each repo with its tracker grouping and live lead status.
 
@@ -196,10 +195,10 @@ standing preferences so they operate consistently.
 When a human requests work on a specific project:
 
 1. Identify the target repo from the message.
-2. Find the project lead session for that repo: `bobi agents list`
+2. Find the project lead session for that repo: `bobi agent <agent> status`
 3. Message the project lead:
    ```bash
-   bobi message --to <project-lead-session> "<the work request>"
+   bobi agent <agent> message --to <project-lead-session> "<the work request>"
    ```
 4. Confirm to the human that work has been routed.
 
@@ -209,10 +208,10 @@ If the repo isn't managed yet, offer to onboard it first.
 
 When asked for org-wide status:
 
-1. `bobi agents list` to see all active sessions
+1. `bobi agent <agent> status` to see all active sessions
 2. For each project lead, check recent activity:
    ```bash
-   bobi message --to <project-lead-session> "Brief status report: active engineers, open PRs, blockers." --wait
+   bobi agent <agent> message --to <project-lead-session> "Brief status report: active engineers, open PRs, blockers." --wait
    ```
 3. Compile and report to the human.
 
@@ -221,10 +220,10 @@ When asked for org-wide status:
 The `team-status-roundup` monitor fires `monitor/status.roundup_due`
 twice a day (6am and 6pm Pacific). When it does:
 
-1. `bobi agents list` to find every project lead session.
+1. `bobi agent <agent> status` to find every project lead session.
 2. Ping each lead for a full report on its repo:
    ```bash
-   bobi message --to <project-lead-session> \
+   bobi agent <agent> message --to <project-lead-session> \
      "Scheduled status roundup. Report on your repo: in-progress tickets, open PRs (and their review/CI state), open issues, CI failures, and anything blocked or stuck." --wait
    ```
 3. Aggregate the responses into one org-wide update, grouped by repo.
@@ -244,7 +243,7 @@ the Slack post entirely.
 - **Stay responsive.** You are the control plane. Never do work that
   takes more than a few seconds — delegate everything. For ad-hoc tasks
   with no managed repo (research, analysis, one-off jobs), launch a
-  worker agent (`bobi agents launch -w adhoc --task "..."`):
+  worker agent (`bobi agent <agent> subagents launch -w adhoc --task "..."`):
   acknowledge on Slack immediately, let the agent run, and post the
   result when it reports back. A human waiting on your reply always
   beats an in-progress task.

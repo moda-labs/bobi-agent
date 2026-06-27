@@ -9,12 +9,13 @@ import httpx
 from click.testing import CliRunner
 
 from bobi.cli import main
+from bobi import paths
 from bobi import http as pooled
 
 
 def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
     """Set up project config with a Slack bot token."""
-    config_dir = tmp_path / ".bobi"
+    config_dir = paths.package_dir(tmp_path)
     config_dir.mkdir(parents=True)
     if slack_bot_token:
         yaml = (
@@ -26,8 +27,8 @@ def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
         )
     else:
         yaml = "entry_point: manager\n"
-    (config_dir / "agent.yaml").write_text(yaml)
-    monkeypatch.chdir(tmp_path)
+    paths.agent_yaml_path(tmp_path).write_text(yaml)
+    monkeypatch.setenv("BOBI_ROOT", str(tmp_path))
 
 
 def _mock_client(handler):

@@ -177,7 +177,7 @@ on its own judgment with rationale for veto.
    (`events/client.py`, `events/subscriptions.py`). Don't let them drift — that
    was the #163/#166 lesson.
 3. **Migration is breaking — plan it explicitly.** Installed teams have
-   `.bobi/agent.yaml` (services, credentials, subscribe lists) and
+   `run/package/agent.yaml` (services, credentials, subscribe lists) and
    workflow YAML that reference the current contract. The reference team
    (`agents/eng-team` or `software_team`) and the dogfood team
    (`dogfood-content-review`) must both migrate as part of the change, and the dogfood
@@ -505,7 +505,7 @@ What ships, with no compatibility layer:
   field stays — it's one line, and it makes the *next* contract change
   debuggable.
 - Loader reads only the `services:` + `credentials:` format. Legacy
-  `slack:`/`linear:` blocks are simply unknown keys; `bobi install`
+  `slack:`/`linear:` blocks are simply unknown keys; `bobi agents install`
   regenerates agent.yaml.
 - State readers read only `run_key`. In-flight workflow runs and session
   state from v1 are discarded by the `--fresh` re-install (accepted: at
@@ -523,19 +523,19 @@ Reference migrations (in the same change):
    coordinate with that branch so it lands already on v2 or migrates
    immediately after.
 3. `dogfood-content-review` — **decided 2026-06-10: the bobi-dogfood repo is
-   retired.** Isolated per-project installs make a standing dogfood repo
+   retired.** Isolated named-agent installs make a standing dogfood repo
    unnecessary: the pack moves into `agents/dogfood-content-review/` in this repo
-   and the battery installs it into throwaway temp projects instead
+   and the battery installs it into throwaway temp Bobi homes instead
    (ticket D in §7, which also carries the v2 migration + email-service
    routing verification). Full dogfood battery (manager lifecycle, ask
    round-trip, webhook→manager pipeline) must pass.
 
 Cutover runbook (per deployment, prod EC2 + dogfood):
-1. `bobi stop`
+1. `bobi agent <name> stop`
 2. Deploy the v2 event server (worker / local)
 3. Upgrade the CLI (`uv tool upgrade bobi` / pull + reinstall)
-4. `bobi install <team>` (regenerates `.bobi/` config) +
-   `bobi start --fresh`
+4. `bobi agents install <team>` (regenerates `run/package/`) +
+   `bobi agent <name> start --fresh`
 
 The only degradation window is between steps 2 and 4 *if a deployment is
 left running against a v2 server*: old clients still receive and route
@@ -576,7 +576,7 @@ The three coding tickets touch **disjoint file-sets**:
   `state.py` / `monitors/` / `cli.py`.
   *Gate:* unit + integration.
 - **D (#180). chore: absorb dogfood-content-review + retire bobi-dogfood** —
-  (decided 2026-06-10: isolated per-project installs make a standing
+  (decided 2026-06-10: isolated named-agent installs make a standing
   dogfood repo unnecessary). Move `agents/dogfood-content-review/` from
   bobi-dogfood into this repo's `agents/` (+ `registry.yaml`);
   migrate it to v2 in the same diff; re-point its `context.content_dirs`

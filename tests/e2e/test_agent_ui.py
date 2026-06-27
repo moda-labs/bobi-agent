@@ -1,4 +1,4 @@
-"""E2E: drive the bobi agent UI (`bobi ui`) in a real browser.
+"""E2E: drive the named Bobi Agent UI in a real browser.
 
 Like the setup e2e, but for the running-team dashboard: boots
 ``agentui.server.build_app`` in-process on a loopback port with a **fake

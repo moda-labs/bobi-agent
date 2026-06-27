@@ -1,4 +1,4 @@
-"""Integration tests for bobi kb — end-to-end with real embedding model.
+"""Integration tests for named KB commands — end-to-end with real embedding model.
 
 Exercises the full KB lifecycle: create, add (text + file), search (FTS +
 hybrid), info, list, and remove. The embedding sidecar auto-starts on first
@@ -118,7 +118,7 @@ class TestKBLifecycle:
         assert "list-beta" in result.stdout
 
     def test_list_empty(self, cli_run, bobi_env):
-        kb_dir = bobi_env.project_path / ".bobi" / "kb"
+        kb_dir = bobi_env.state_dir / "kb"
         had_files = list(kb_dir.glob("list-*")) if kb_dir.exists() else []
         result = cli_run("kb", "list")
         assert result.returncode == 0
@@ -204,4 +204,4 @@ class TestEmbeddingSidecar:
                 alive = True
             except ProcessLookupError:
                 alive = False
-            assert not alive, "Sidecar should be dead after bobi stop"
+            assert not alive, "Sidecar should be dead after stopping the agent"

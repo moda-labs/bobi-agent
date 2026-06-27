@@ -155,6 +155,7 @@ def test_runtime_home_fully_coincides_with_config_dir(team_image: str):
             "-v", f"{vol}:/data",
             "-e", "ANTHROPIC_API_KEY=sk-not-real",
             "-e", "BOBI_AUTH=api_key",
+            "-e", "BOBI_AGENT=pytest",
             team_image,
         )
         assert up.returncode == 0, up.stderr
@@ -206,9 +207,9 @@ def test_codex_runtime_sees_baked_team_skills(team_image: str):
     try:
         seed = _run("docker", "run", "--rm", "-v", f"{vol}:/data",
                     "--entrypoint", "sh", team_image, "-c",
-                    "mkdir -p /data/project/.bobi /data/codex/skills/.system/existing "
+                    "mkdir -p /data/.bobi/agents/pytest/run/package /data/codex/skills/.system/existing "
                     "/data/custom-review "
-                    "&& printf 'agent: pytest-team\\nbrain:\\n  kind: codex\\n' > /data/project/.bobi/agent.yaml "
+                    "&& printf 'agent: pytest-team\\nbrain:\\n  kind: codex\\n' > /data/.bobi/agents/pytest/run/package/agent.yaml "
                     "&& echo keep > /data/codex/skills/.system/existing/SKILL.md "
                     "&& ln -s /data/custom-review /data/codex/skills/review "
                     "&& ln -s /opt/bobi/skills/removed-old /data/codex/skills/removed-old")
@@ -219,6 +220,7 @@ def test_codex_runtime_sees_baked_team_skills(team_image: str):
             "-v", f"{vol}:/data",
             "-e", "OPENAI_API_KEY=sk-not-real",
             "-e", "BOBI_AUTH=api_key",
+            "-e", "BOBI_AGENT=pytest",
             team_image,
         )
         assert up.returncode == 0, up.stderr

@@ -209,7 +209,7 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
     if mcps:
         cfg["mcp_servers"] = mcps
     # Venn-backed services authenticate with the one shared key — declare it so
-    # `bobi start` resolves it from the environment / .env (else preflight
+    # `bobi agent <name> start` resolves it from the environment / run/.env (else preflight
     # reports "venn — no API key" despite the key being set).
     if has_venn_services(state, catalog):
         cfg["venn_api_key"] = "${VENN_API_KEY}"
@@ -576,26 +576,19 @@ async def author_pack(state: SetupState, project: Path, *,
     from bobi.setup.actions import ActionError, team_source_dir
     state.team_name = derive_team_name(state)
     pack = team_source_dir(project, state)
-    # Create-mode collision guard: a fresh team auto-named from the goal lands in
-    # the shared `~/bobi-agents/` library, where slugs collide (two "support
-    # bot" sessions both → support-bot). Refuse to author over a DIFFERENT team
-    # we haven't claimed this session, so the second create can't silently
-    # overwrite the first one's source. Once claimed (source_dir already points
-    # at this concrete folder) or in open/modify mode (edit-in-place by design),
-    # re-authoring is fine.
-    claimed = bool(state.source_dir) and Path(state.source_dir).name == state.team_name
+    # Create-mode collision guard: the first build of a fresh setup must not
+    # overwrite an existing source tree at the canonical location. Once the
+    # exact source_dir is persisted, re-authoring the same in-progress setup is
+    # allowed. Open/modify mode is edit-in-place by design.
+    claimed = bool(state.source_dir)
     if state.mode == "create" and not claimed and open_mode.is_team(pack):
         raise ActionError(
             f"a team named '{state.team_name}' already exists at {pack} — "
             f"rename this team (the ✎ pencil by its name) or pick another "
             f"location, so you don't overwrite it.")
-    # Persist the concrete location (create resolved <base>/<name>) so the Done
-    # screen, /api/files, install, and list_teams_in all agree on it. A source
-    # in the home library lives outside the project, so it stays absolute.
-    try:
-        state.source_dir = pack.relative_to(project).as_posix()
-    except ValueError:
-        state.source_dir = str(pack)
+    # Persist the exact source directory so /api/files, install, and future
+    # build runs agree on the same path.
+    state.source_dir = str(pack)
     editing = state.mode != "create"
     # Classify services against Venn's real catalog (live when a key is present)
     # so custom services get an authored tools guide and the right credentials.

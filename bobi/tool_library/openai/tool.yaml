@@ -7,7 +7,7 @@ requires:
   - name: openai
     why: "Generate images with `openai images generate` via the OpenAI CLI (tools/openai.md). Auth via OPENAI_API_KEY."
     check: "command -v openai >/dev/null 2>&1 && openai --version >/dev/null 2>&1"
-    fix: "python3 -m venv /opt/openai-cli && /opt/openai-cli/bin/pip install openai==2.43.0 && ln -sf /opt/openai-cli/bin/openai /usr/local/bin/openai && echo 'Set OPENAI_API_KEY in .bobi/.env'"
+    fix: "python3 -m venv /opt/openai-cli && /opt/openai-cli/bin/pip install openai==2.43.0 && ln -sf /opt/openai-cli/bin/openai /usr/local/bin/openai && echo 'Set OPENAI_API_KEY in run/.env'"
 build:
   # Isolated venv so the CLI's deps never collide with the framework's, then
   # symlink the entrypoint onto PATH.

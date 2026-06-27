@@ -117,7 +117,7 @@ class TestDirectorStartupReconciliation:
         )
 
     def test_checks_live_agents(self):
-        assert "bobi agents list" in self.lower, (
+        assert "bobi agent <agent> subagents list" in self.lower, (
             "Director prompt must check live agents during reconciliation"
         )
 
@@ -203,8 +203,8 @@ class TestDirectorListFromLiveSource:
         listing_pos = self.lower.find("listing managed repos")
         assert listing_pos != -1
         listing_text = self.lower[listing_pos:listing_pos + 800]
-        assert "bobi agents list" in listing_text, (
-            "Listing must annotate live status from bobi agents list"
+        assert "bobi agent <agent> subagents list" in listing_text, (
+            "Listing must annotate live status from subagents list"
         )
 
 

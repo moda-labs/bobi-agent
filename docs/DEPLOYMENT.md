@@ -63,12 +63,12 @@ instances share **one image**; identity lives entirely in the volume + env.
 
 First boot (the entrypoint): create the volume layout, install the team
 (`BOBI_TEAM_URL` or `BOBI_TEAM`), then `exec gosu` to the `bobi`
-user running `bobi start --foreground` (PID 1). The instance **self-mints its
+user running `bobi agent <name> start --foreground` (PID 1). The instance **self-mints its
 event-bus bubble and self-registers every session** (#240) — the provisioner never
 touches `deployment_id`/`api_key`.
 
 With **neither** team var set on an empty volume the entrypoint enters a
-**wait-for-team** state: it polls for `.bobi/agent.yaml` instead of crashing.
+**wait-for-team** state: it polls for `run/package/agent.yaml` instead of crashing.
 That is the ssh-push hook — the instance boots blank and holds while
 `bobi deploy` pushes a local team onto the volume (next section); the moment
 the team lands, it proceeds to start. (This is the C9-adjacent first-boot change.)
@@ -96,12 +96,12 @@ the team lands, it proceeds to start. (This is the C9-adjacent first-boot change
 6. **`--wait-timeout 10m`.** First boot installs the team and warms the model past
    the default 5-minute machine-state wait.
 7. **`[[mounts]]` array form** in the generated config (canonical).
-8. **`fly ssh` admin lands in `/`**, but `bobi` finds its project by walking
-   up from cwd — so admin commands must `cd` first, as the volume's uid-10001
-   owner:
+8. **`fly ssh` admin lands in `/`**, and runtime identity is explicit. Admin
+   commands should set the same home/root environment as the instance and call
+   the named-agent CLI as the volume's uid-10001 owner:
    ```
    fly ssh console -a <app> --command \
-     'gosu bobi env HOME=/home/bobi CLAUDE_CONFIG_DIR=/data/claude bash -c "cd /data/project && bobi <cmd>"'
+     'gosu bobi env HOME=/home/bobi BOBI_HOME=/data/bobi CLAUDE_CONFIG_DIR=/data/claude bobi agent <name> status'
    ```
 9. **Concurrent `fly deploy --remote-only` builds race on the org's single shared
    remote builder** (`failed to parse daemon host "unix:///var/run/docker.sock":
@@ -140,7 +140,7 @@ CLI flags  ›  deployments/<name>.yaml  ›  deployments/defaults.yaml  ›  bu
 | "I built it, ship it" — no hosting (single dev, or CI from its own checkout) | enterprise / SaaS / anyone publishing tarballs |
 
 The ssh-push push: `base64` the built tarball onto `/data` over `fly ssh`, then
-`bobi install <tarball> --non-interactive` as the volume owner (reads secrets
+`bobi agents install <tarball> --non-interactive` as the volume owner (reads secrets
 from the Fly-injected env, fails loudly on a gap). On a **new** instance this
 releases the wait-for-team loop (no restart); on an **existing** one it's a
 workspace-safe reinstall + `fly machine restart` to reload.
@@ -501,7 +501,7 @@ instance image installs bobi from PyPI). Pick where it runs:
 
 | | event server | drive it with |
 |---|---|---|
-| **7.1 Local** | bundled, loopback (no cloud) | `bobi start` |
+| **7.1 Local** | bundled, loopback (no cloud) | `bobi agent <name> start` |
 | **7.2 Fly, self-service** | a Cloudflare Worker | `bobi deploy` from your laptop |
 | **7.2 Fly, CI** | a Cloudflare Worker | a release / `deploy-*` tag → GitHub Actions |
 
@@ -512,13 +512,13 @@ instance image installs bobi from PyPI). Pick where it runs:
 ```
 uv tool install bobi
 bobi setup                  # design + install a team in a browser UI…
-#   …or grab a bundled one:   bobi install eng-team
-bobi start                  # runs your agent — and a local event server
+#   …or grab a bundled one:   bobi agents install eng-team
+bobi agent <name> start                  # runs your agent — and a local event server
                                  # (loopback) by default. No cloud, no accounts.
 ```
 The only credential you need is your Anthropic auth (`ANTHROPIC_API_KEY`, or a
-Claude subscription) — `bobi install` prompts for whatever a team requires.
-Talk to it with `bobi ask "…"` / `bobi message`; add `monitors` for
+Claude subscription) — `bobi agents install` prompts for whatever a team requires.
+Talk to it with `bobi agent <name> ask "…"` / `bobi agent <name> message`; add `monitors` for
 scheduled reactions. (Inbound webhooks from GitHub/Slack need a public URL — host
 it on Fly for that, or front the local server with a tunnel.)
 
@@ -619,8 +619,7 @@ bobi deploy <name> [--env-file ./x.env]        # provision or update (idempotent
 bobi destroy <name> [--yes]                     # tear down (removes volume!)
 scripts/fleet.sh list <fleet>                        # what's running
 fly logs -a <app> ; fly status -a <app>              # observe
-fly ssh console -a <app> --command 'gosu bobi env HOME=/home/bobi \
-  CLAUDE_CONFIG_DIR=/data/claude bash -c "cd /data/project && bobi status"'  # admin
+fly ssh console -a <app> --command "gosu bobi env HOME=/home/bobi BOBI_HOME=/data/bobi CLAUDE_CONFIG_DIR=/data/claude bobi agent <name> status"
 ```
 Both GitOps workflows also accept `workflow_dispatch` for manual re-runs.
 
@@ -633,7 +632,7 @@ Both GitOps workflows also accept `workflow_dispatch` for manual re-runs.
 - *Changed `team-url` team didn't update* → confirm the in-place path used
   `install <url>`, not `agents update`, and that `teams-latest` republished (§6).
 - *ssh-push instance stuck "waiting for a pushed team"* → the blank provision
-  succeeded but the push didn't land `.bobi/agent.yaml`; check `fly logs` and
+  succeeded but the push didn't land `run/package/agent.yaml`; check `fly logs` and
   re-run `bobi deploy <name>` (idempotent — it re-pushes).
 - *Instance boots but agents won't dispatch* → a team with a `requires:` gate whose
   tools aren't in the image (e.g. eng-team's gstack/codex). That's the C24 gap —
@@ -683,7 +682,7 @@ bubble/account) is #239 (auth-v2), part of the multitenant phase, not this.
 
 C10 + C22 were verified **live on Fly**, then torn down:
 - Single instance: empty volume → image build → boot → first-boot team install from
-  URL → healthy manager → `bobi ask` self-registers on the real Worker →
+  URL → healthy manager → `bobi agent <name> ask` self-registers on the real Worker →
   `pong`. (The `team-url` delivery path, unchanged by the deploy refactor except
   the added `BOBI_INSTANCE` stamp.)
 - Two-instance fleet (C22): provision both, `fleet.sh list`/`classify` against real
@@ -696,7 +695,7 @@ The deploy refactor adds the **ssh-push** path, **verified live on Fly**
 - Blank provision (app + 15 GB volume + staged secret); `fly deploy` returns on the
   blank machine reaching **started** — it does *not* hang on the image healthcheck.
 - `BOBI_INSTANCE` confirmed in the live `[env]` (next to `BOBI_FLEET`).
-- base64 push over `fly ssh` → `bobi install /data/…tar.gz --non-interactive`
+- base64 push over `fly ssh` → `bobi agents install /data/…tar.gz --non-interactive`
   (secrets read from the Fly-injected env — confirmed available in the ssh session)
   → the wait-for-team entrypoint detects the team and starts the manager (`status`
   shows it running).

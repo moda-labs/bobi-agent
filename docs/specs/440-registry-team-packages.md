@@ -30,7 +30,7 @@ honors a version:
    `https://api.github.com/repos/{repo}/tarball/main` — the *entire* repo at
    whatever `main` is right now — and extracts one `agents/<name>/` subdir. There
    is no `version` parameter. `registry.yaml` carries a `version:` per team that
-   the download never honors. `bobi install eng-team` gives you "whatever is
+   the download never honors. `bobi agents install eng-team` gives you "whatever is
    on main this second" — unpinnable and irreproducible.
 
 2. **Deploy can't consume a registry team as a first-class team.**
@@ -213,7 +213,7 @@ callers unaffected):
   `"unknown"` when pinned) and `source` (the asset URL).
 
 **CLI** (`bobi/cli.py`)
-- `bobi install <name>[@version]` (`cli.py:568`): parse a trailing
+- `bobi agents install <name>[@version]` (`cli.py:568`): parse a trailing
   `@version` off the registry-name branch (the URL / local-archive / local-dir
   branches are unaffected — an `@` only has meaning on the bare-name branch).
   Pass `version` through to `fetch`.
@@ -279,7 +279,7 @@ resolver** so every consumer inherits it.
 ### 3.4 Caching location for deploy fetches
 
 Deploy resolution fetches into the **project cache** (`paths.agents_dir`), the
-same place `install` populates, so a machine that has run `bobi install
+same place `install` populates, so a machine that has run `bobi agents install
 eng-team@1.1.0` and then `bobi deploy` reuses the cached package with no
 second download. (D-3 in §4: an isolated deploy-only cache vs. the shared install
 cache. Recommend shared — fewer moving parts, and the immutable pin makes
@@ -354,7 +354,7 @@ until we deliberately re-pin it.**
    on `teams-latest`. **No consumer reads them yet** → zero runtime change to any
    running instance. Verify a couple of `<team>-<version>.tar.gz` assets exist and
    are immutable (re-run is a no-op).
-2. **Land Phase 2** (fetch/install). Effect: `bobi install` and `agents
+2. **Land Phase 2** (fetch/install). Effect: `bobi agents install` and `agents
    update` *can* pin, and unpinned install now pulls the per-team latest asset.
    Running deployed instances are **unaffected** (they don't re-install
    themselves). A developer's `install eng-team` now resolves the published latest
@@ -419,7 +419,7 @@ Write each test **failing first**, then implement.
   fetches that per-team asset (assert URL), not the repo tarball.
 - **Fetch (fallback):** asset 404 → falls back to repo tarball with a logged
   warning; still installs.
-- **Install CLI:** `bobi install eng-team@1.1.0` populates cache + pins
+- **Install CLI:** `bobi agents install eng-team@1.1.0` populates cache + pins
   meta; `install eng-team` (latest) works; `@version` ignored/irrelevant on URL
   and local-path branches.
 - **`agents update name@version`** pins; bare name updates to latest.

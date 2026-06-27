@@ -1,7 +1,7 @@
 """Cost attribution and rollup for multi-model sessions.
 
 Provides a price table for providers that don't return cost directly,
-and rollup functions for the `bobi costs` CLI command.
+and rollup functions for the named cost-attribution CLI command.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
     """Aggregate costs across all session state files.
 
     Args:
-        sessions_dir: Path to .bobi/sessions/
+        sessions_dir: Path to <run>/state/sessions/
         group_by: One of "provider", "model", "session", "role"
     """
     summary = CostSummary()

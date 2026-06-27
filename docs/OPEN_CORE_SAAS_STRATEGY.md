@@ -84,7 +84,7 @@ split** — also the most common modern open-source-SaaS architecture
 - The framework itself (already published to PyPI).
 - The containerized runtime image (the C8 work).
 - **Single-instance provisioning** — `scripts/provision-instance.sh`, the Fly
-  machine config, `bobi install <url>`. This is valuable as a credibility
+  machine config, `bobi agents install <url>`. This is valuable as a credibility
   and self-host signal; hiding it buys nothing because it only provisions *one*
   bubble.
 - A reference deploy (Compose / single Fly app) so anyone can self-host one
@@ -94,7 +94,7 @@ split** — also the most common modern open-source-SaaS architecture
 - The **fleet orchestrator** — provisions/tears-down/upgrades *many* instances,
   assigns subdomains, manages quotas. A *superset* of the provision script, not a
   copy.
-- **Billing, metering, usage attribution.** (`bobi costs` is the local view;
+- **Billing, metering, usage attribution.** (`bobi agent <name> costs` is the local view;
   the aggregated cross-tenant version is the SaaS asset.)
 - The **hosted dashboard UI + backend**, multi-tenant auth, SSO/RBAC/audit.
 - Anything touching other customers' data or your infra credentials.
@@ -124,7 +124,7 @@ Adopt **pattern 2 + 3 combined, deferring open-core (pattern 1)**:
    enterprise features (SSO, audit logs, RBAC) that genuinely differ from the OSS
    runtime.
 
-Net effect: the `bobi install <url>` / Fly provision story stays fully open
+Net effect: the `bobi agents install <url>` / Fly provision story stays fully open
 (great for trust and self-hosters), while the genuinely SaaS-only assets
 (multi-tenant provisioning, billing, dashboard) stay private, and licensing — not
 secrecy — protects against a competitor reselling the work.

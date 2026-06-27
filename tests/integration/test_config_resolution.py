@@ -22,9 +22,9 @@ class TestDotenvResolution:
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         monkeypatch.delenv("LINEAR_API_KEY", raising=False)
 
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
-        (config_dir / ".env").write_text(
+        (tmp_path / ".env").write_text(
             "SLACK_BOT_TOKEN=xoxb-dotenv-token\n"
             "LINEAR_API_KEY=lin_key_from_dotenv\n"
         )
@@ -49,9 +49,9 @@ class TestDotenvResolution:
         """Real environment variables take precedence over .env values."""
         monkeypatch.setenv("MY_TOKEN", "from-real-env")
 
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
-        (config_dir / ".env").write_text("MY_TOKEN=from-dotenv\n")
+        (tmp_path / ".env").write_text("MY_TOKEN=from-dotenv\n")
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager
             venn_api_key: ${MY_TOKEN}
@@ -64,7 +64,7 @@ class TestDotenvResolution:
 
     def test_missing_env_var_resolves_empty(self, tmp_path):
         """An unset ${VAR} resolves to empty string, not a crash."""
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager
@@ -81,7 +81,7 @@ class TestDeploymentState:
     """Deployment state round-trip: save → load → per-session isolation."""
 
     def test_roundtrip(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
 
         from bobi.config import save_deployment_state, load_deployment_state
@@ -93,7 +93,7 @@ class TestDeploymentState:
         assert state["api_key"] == "key-1"
 
     def test_per_session_isolation(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
 
         from bobi.config import save_deployment_state, load_deployment_state
@@ -116,7 +116,7 @@ class TestChannelParsing:
         """Comma-separated channel string from ${VAR} is parsed to list."""
         monkeypatch.setenv("MY_CHANNELS", "C001,C002,C003")
 
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager
@@ -134,7 +134,7 @@ class TestChannelParsing:
 
     def test_list_channels_literal(self, tmp_path):
         """YAML list channels are preserved as-is."""
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager

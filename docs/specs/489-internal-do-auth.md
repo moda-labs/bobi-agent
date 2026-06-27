@@ -83,7 +83,7 @@ body, and the secret is never exposed to clients.
   added to `local.ts`. (See "Local/dev" below for the one place the local *Worker*
   test path needs a value.)
 - Bubble auth (#487), resource grants (#488), deployment auth — different layers.
-- Any propagation of the secret to Fly apps, agent teams, `.bobi/.env`,
+- Any propagation of the secret to Fly apps, agent teams, `run/.env`,
   bubble state, or user/account credentials. **The secret lives only in the
   Cloudflare event-server deployment.**
 - Rotation tooling / multiple-secret support. A single secret, rotated by

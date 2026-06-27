@@ -9,6 +9,8 @@ from pathlib import Path
 
 from unittest.mock import patch
 
+from bobi import paths
+
 
 def _write_policy(state_dir: Path, body: str) -> Path:
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -75,20 +77,17 @@ class TestFormatPolicyPrompt:
 
 class TestPolicyPaths:
     def test_policy_path_under_state(self, tmp_path):
-        from bobi import paths
-        assert paths.policy_path(tmp_path) == tmp_path / ".bobi" / "state" / "policy.md"
+        assert paths.policy_path(tmp_path) == tmp_path / "state" / "policy.md"
 
     def test_cursor_path_under_state(self, tmp_path):
-        from bobi import paths
         assert paths.policy_cursor_path(tmp_path) == (
-            tmp_path / ".bobi" / "state" / "policy_cursor"
+            tmp_path / "state" / "policy_cursor"
         )
 
     def test_policy_path_does_not_mkdir(self, tmp_path):
-        from bobi import paths
         _ = paths.policy_path(tmp_path)
         # path-only constructor must not create the state dir (read-only safe)
-        assert not (tmp_path / ".bobi" / "state").exists()
+        assert not (tmp_path / "state").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +96,7 @@ class TestPolicyPaths:
 
 class TestStartupPromptInjection:
     def _install_role(self, tmp_path):
-        roles_dir = tmp_path / ".bobi" / "roles" / "director"
+        roles_dir = paths.roles_dir(tmp_path) / "director"
         roles_dir.mkdir(parents=True)
         (roles_dir / "ROLE.md").write_text("# Director\nYou direct things.")
 
@@ -109,7 +108,7 @@ class TestStartupPromptInjection:
     def test_injects_team_policy(self, tmp_path):
         from bobi.prompts.resolver import build_startup_prompt
         self._install_role(tmp_path)
-        state = tmp_path / ".bobi" / "state"
+        state = paths.state_path(tmp_path)
         _write_policy(state, "## Facts\n\nThis repo uses GitHub.\n\n## Decisions\n\n"
                              "Chose squash merges.")
         result = build_startup_prompt("director", tmp_path, agent_name="test",
@@ -129,9 +128,8 @@ class TestStartupPromptInjection:
 
 class TestSubagentPolicyInjection:
     def test_load_policy_prompt_reads_team_policy(self, tmp_path, monkeypatch):
-        from bobi import paths
         import bobi.subagent as subagent
-        state = tmp_path / ".bobi" / "state"
+        state = paths.state_path(tmp_path)
         _write_policy(state, "## Decisions\n\nKey decision recorded.")
         monkeypatch.setattr(paths, "state_path", lambda *a, **k: state)
         out = subagent._load_policy_prompt()
@@ -139,10 +137,9 @@ class TestSubagentPolicyInjection:
         assert "Key decision recorded." in out
 
     def test_load_policy_prompt_empty_when_absent(self, tmp_path, monkeypatch):
-        from bobi import paths
         import bobi.subagent as subagent
         monkeypatch.setattr(paths, "state_path",
-                            lambda *a, **k: tmp_path / ".bobi" / "state")
+                            lambda *a, **k: tmp_path / "state")
         assert subagent._load_policy_prompt() == ""
 
 
@@ -154,7 +151,7 @@ class TestDoctorPolicyCheck:
         assert r.ok
 
     def test_ok_when_policy_present(self, tmp_path):
-        state = tmp_path / ".bobi" / "state"
+        state = paths.state_path(tmp_path)
         _write_policy(state, "## Facts\n\nsmall and bounded")
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
             from bobi.doctor import _check_policy
@@ -164,7 +161,7 @@ class TestDoctorPolicyCheck:
 
     def test_flags_oversized_policy(self, tmp_path):
         from bobi.memory import MAX_POLICY_CHARS
-        state = tmp_path / ".bobi" / "state"
+        state = paths.state_path(tmp_path)
         _write_policy(state, "x" * (MAX_POLICY_CHARS + 100))
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
             from bobi.doctor import _check_policy

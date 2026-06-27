@@ -1,7 +1,7 @@
 """Team policy (#456) and the legacy per-agent decision log.
 
 The team's durable, curated knowledge lives in a single, team-scoped
-``.bobi/state/policy.md`` — two sections (``## Facts`` / ``## Decisions``)
+``<run>/state/policy.md`` — two sections (``## Facts`` / ``## Decisions``)
 maintained out-of-band by the policy-curator monitor and injected read-only into
 every agent's prompt. ``load_policy`` / ``format_policy_prompt`` are that path.
 

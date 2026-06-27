@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from bobi import paths
 from bobi.workflow.schema import (
     Workflow, StepDef, HandoffContract, load_workflow,
 )
@@ -19,6 +20,14 @@ from bobi.workflow.orchestrator import (
     make_session_name,
 )
 from bobi.workflow.state import WorkflowRun
+
+
+def _bind_runtime_root(root: Path, monkeypatch) -> Path:
+    paths.package_dir(root).mkdir(parents=True, exist_ok=True)
+    paths.agent_yaml_path(root).write_text("agent: test\nentry_point: manager\n")
+    monkeypatch.setattr(paths, "_root", None)
+    paths.bind_root(root)
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -140,10 +149,8 @@ class TestHandoffValidation:
 
 class TestReadHandoff:
     def test_reads_yaml(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
-        session_dir = tmp_path / "wf-test-42"
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        session_dir = paths.sessions_dir(root) / "wf-test-42"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("complexity: medium\nneeds_spec: true\n")
         result = _read_handoff("wf-test-42", "setup")
@@ -151,16 +158,12 @@ class TestReadHandoff:
         assert result["needs_spec"] is True
 
     def test_missing_handoff_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
+        _bind_runtime_root(tmp_path / "_repo", monkeypatch)
         assert _read_handoff("wf-test-999", "setup") == {}
 
     def test_step_specific_handoffs(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
-        session_dir = tmp_path / "wf-test-1"
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        session_dir = paths.sessions_dir(root) / "wf-test-1"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("worktree: /tmp/wt\n")
         (session_dir / "handoff-pickup.yaml").write_text("complexity: medium\n")
@@ -178,7 +181,7 @@ class TestBuildStepPrompt:
         """Prompt building reads handoffs via the session registry, which
         needs a bound root — bind explicitly, don't rely on leakage from
         earlier tests."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        _bind_runtime_root(tmp_path, monkeypatch)
 
     def test_includes_handoff_contract(self):
         step = StepDef(name="setup", prompt="Do work",
@@ -274,7 +277,7 @@ class FakeClient:
 class TestRunWorkflow:
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        _bind_runtime_root(tmp_path, monkeypatch)
 
     def _mock_asyncio_run(self, workflow, **kwargs):
         """Run the workflow with a mocked SDK client."""
@@ -310,9 +313,8 @@ class TestRunWorkflow:
         assert result is True
 
     def test_route_step_branches(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        sessions = paths.sessions_dir(root)
 
         # Write handoff during the fake agent's response (simulating the
         # agent writing it after the triage step runs, not before)
@@ -320,7 +322,7 @@ class TestRunWorkflow:
         def _patched_init(self_client):
             original_init(self_client)
             # Write to the session dir handoff path
-            d = tmp_path / "wf-t-r-1"
+            d = sessions / "wf-t-r-1"
             d.mkdir(parents=True, exist_ok=True)
             (d / "handoff-triage.yaml").write_text("needs_spec: true\n")
         monkeypatch.setattr(FakeClient, "__init__", _patched_init)
@@ -375,7 +377,7 @@ class TestHonestTerminalEmit:
 
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        _bind_runtime_root(tmp_path, monkeypatch)
 
     def _run_capture(self, workflow, client_cls, **kwargs):
         cwd = kwargs.get("cwd", "/tmp")
@@ -432,11 +434,9 @@ class TestHonestTerminalEmit:
         workflow.suspended but NEITHER session.completed NOR session.failed —
         else the (now-subscribed) manager is told the agent finished while it
         waits for the external event."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_r")
-        (tmp_path / "_r" / ".bobi" / "state" / "workflow" / "runs").mkdir(
-            parents=True, exist_ok=True)
-        (tmp_path / "_r" / ".bobi" / "sessions").mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_r")
+        root = _bind_runtime_root(tmp_path / "_r", monkeypatch)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        paths.sessions_dir(root)
 
         wf = Workflow(name="t", steps=[StepDef(name="wait", await_event="approval")])
         result, emits = self._run_capture(
@@ -474,12 +474,9 @@ class TestAwaitStep:
             return run_workflow(workflow, **kwargs)
 
     def test_await_suspends_workflow(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".bobi" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True, exist_ok=True)
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="spec", prompt="write spec"),
@@ -498,12 +495,9 @@ class TestAwaitStep:
         assert run.run_key == "1"
 
     def test_resume_continues_from_suspended_step(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True)
-        tmp_path = tmp_path / "_repo" / ".bobi" / "sessions"
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".bobi" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True, exist_ok=True)
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
 
         run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
         run.status = "waiting"
@@ -542,15 +536,15 @@ class TestAwaitStep:
         assert reloaded.status == "completed"
 
     def test_find_waiting_returns_none_when_no_match(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".bobi" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True, exist_ok=True)
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        paths.sessions_dir(root)
         assert WorkflowRun.find_waiting("approval") is None
 
     def test_find_waiting_filters_by_run_key(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        (tmp_path / "_repo" / ".bobi" / "state" / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "_repo" / ".bobi" / "sessions").mkdir(parents=True, exist_ok=True)
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        paths.sessions_dir(root)
 
         run = WorkflowRun.create("t", {"data": {"run_key": "42"}})
         run.status = "waiting"
@@ -569,7 +563,7 @@ class TestQAPhase:
     """Tests for the QA phase added after the PR step."""
 
     def test_issue_lifecycle_has_qa_step(self):
-        wf_path = Path(__file__).parent.parent / ".bobi" / "workflows" / "issue-lifecycle.yaml"
+        wf_path = Path(__file__).parent.parent / "agents" / "eng-team" / "workflows" / "issue-lifecycle.yaml"
         if not wf_path.exists():
             pytest.skip("issue-lifecycle.yaml not in worktree")
         wf = load_workflow(wf_path)
@@ -580,7 +574,7 @@ class TestQAPhase:
         assert "qa_findings" in qa_step.handoff.optional
 
     def test_pickup_step_has_frontend_optional(self):
-        wf_path = Path(__file__).parent.parent / ".bobi" / "workflows" / "issue-lifecycle.yaml"
+        wf_path = Path(__file__).parent.parent / "agents" / "eng-team" / "workflows" / "issue-lifecycle.yaml"
         if not wf_path.exists():
             pytest.skip("issue-lifecycle.yaml not in worktree")
         wf = load_workflow(wf_path)
@@ -590,7 +584,7 @@ class TestQAPhase:
         assert "has_frontend" in pickup.handoff.optional
 
     def test_qa_step_runs_after_pr(self):
-        wf_path = Path(__file__).parent.parent / ".bobi" / "workflows" / "issue-lifecycle.yaml"
+        wf_path = Path(__file__).parent.parent / "agents" / "eng-team" / "workflows" / "issue-lifecycle.yaml"
         if not wf_path.exists():
             pytest.skip("issue-lifecycle.yaml not in worktree")
         wf = load_workflow(wf_path)
@@ -601,9 +595,8 @@ class TestQAPhase:
 
     def test_qa_workflow_with_frontend(self, tmp_path, monkeypatch):
         """Full workflow: frontend project runs QA step."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        sessions = tmp_path / "_repo" / ".bobi" / "sessions"
-        sessions.mkdir(parents=True)
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        sessions = paths.sessions_dir(root)
 
         original_init = FakeClient.__init__
 
@@ -640,9 +633,8 @@ class TestQAPhase:
 
     def test_qa_step_skipped_by_agent_for_backend(self, tmp_path, monkeypatch):
         """Backend project: QA step still runs but agent reports not_applicable."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        sessions = tmp_path / "_repo" / ".bobi" / "sessions"
-        sessions.mkdir(parents=True)
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        sessions = paths.sessions_dir(root)
 
         original_init = FakeClient.__init__
 
@@ -771,8 +763,7 @@ class TestTryResumeForEvent:
 
 class TestResumeWorkflowTimestamps:
     def test_resume_sets_started_at_on_run(self, tmp_path, monkeypatch):
-        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        _bind_runtime_root(tmp_path, monkeypatch)
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
         monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
@@ -823,9 +814,8 @@ class TestResumeWorkflowTimestamps:
 
 class TestHandoffEdgeCases:
     def test_corrupted_yaml_returns_empty(self, tmp_path, monkeypatch):
-        sessions_dir = tmp_path / ".bobi" / "sessions"
-        sessions_dir.mkdir(parents=True)
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        _bind_runtime_root(tmp_path, monkeypatch)
+        sessions_dir = paths.sessions_dir(tmp_path)
         session_dir = sessions_dir / "wf-test-corrupt"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text(": : : invalid yaml [[[")
@@ -833,9 +823,8 @@ class TestHandoffEdgeCases:
         assert result == {}
 
     def test_empty_file_returns_empty(self, tmp_path, monkeypatch):
-        sessions_dir = tmp_path / ".bobi" / "sessions"
-        sessions_dir.mkdir(parents=True)
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        _bind_runtime_root(tmp_path, monkeypatch)
+        sessions_dir = paths.sessions_dir(tmp_path)
         session_dir = sessions_dir / "wf-test-empty"
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("")

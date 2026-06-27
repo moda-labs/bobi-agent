@@ -45,7 +45,7 @@
   // (Ctrl-C, closed terminal, crash) the UI must say so and stop pretending to
   // be live — every action would silently fail otherwise. A heartbeat plus
   // fetch-failure detection flips a blocking overlay; it clears itself if the
-  // server comes back (e.g. `bobi setup --resume`).
+  // server comes back (e.g. `bobi setup <name> --resume`).
   let _finished = false;        // set when the user intentionally finishes
   let _disconnected = false;
   function markDisconnected() {
@@ -59,7 +59,7 @@
       <div class="disc-dot"></div>
       <h2>Setup server disconnected</h2>
       <p>The local <code>bobi setup</code> server stopped — closed, interrupted, or crashed. Nothing here works until it's back.</p>
-      <div class="disc-cmd"><span class="pr">$</span> bobi setup --resume</div>
+      <div class="disc-cmd"><span class="pr">$</span> bobi setup &lt;name&gt; --resume</div>
       <p class="disc-sub">Run that in your terminal — this page reconnects on its own. Your progress is saved.</p></div>`;
     document.body.appendChild(ov);
   }
@@ -130,7 +130,7 @@
   // The homepage (team hub) isn't a setup stage — it's a client view shown at
   // stage `start` for returning users, and after Finish via the Done button.
   let atHome = false;
-  let homeLibrary = "";   // the ~/bobi-agents library; cached from /api/home for import
+  let homeLibrary = "";   // the BOBI_HOME/agents library; cached from /api/home for import
   async function refresh() { S = await getJSON("/api/state"); render(); }
   async function boot() {
     S = await getJSON("/api/state");
@@ -339,7 +339,7 @@
 
       <section class="isec">
         <div class="isec-head"><span class="isec-num">1</span><h2 class="isec-title">Where to set it up</h2></div>
-        <p class="isec-lede">bobi keeps your team's editable source here, then installs it into this project's <code>.bobi/</code> when you finish.</p>
+        <p class="isec-lede">bobi keeps your team's editable source here, then installs it into the selected agent's <code>run/package/</code> when you finish.</p>
         <div class="locbox">
           <span class="locbox-path" id="loc-path" title="${esc(introLoc)}">${esc(introLoc)}</span>
           <button type="button" class="btn ghost xs" id="loc-change">Change…</button>
@@ -1249,10 +1249,13 @@
   }
 
   // --- done --------------------------------------------------------------
+  function agentCommandName() {
+    return slugify(S.team_name) || "new-agent";
+  }
   function talkHint() {
     if (S.chat === "slack") return `<p class="lede">Talk to it in Slack — message the bot in your channel.</p>`;
     if (S.chat === "telegram") return `<p class="lede">Talk to it in Telegram.</p>`;
-    return `<p class="lede">Talk to it from the terminal: <code>bobi ask "what's the status?"</code></p>`;
+    return `<p class="lede">Talk to it from the terminal: <code>bobi agent ${esc(agentCommandName())} ask "what's the status?"</code></p>`;
   }
   // Group flat relative paths (agent.yaml, roles/director/ROLE.md, …) into a
   // nested folder tree so the preview reads like the on-disk structure. Each
@@ -1289,7 +1292,7 @@
   async function renderDone() {
     setPanes("1fr");
     const spec = S.spec;
-    const where = S.source_dir || "agents/" + S.team_name;
+    const where = S.source_dir || "$BOBI_HOME/agents/" + S.team_name + "/src";
     const counts = `${spec.roles.length || 1} role(s) · ${spec.autonomous.length} automation(s) · ${spec.services.length} service(s)`;
     $("#main").innerHTML = `<main class="filesdone">
       <header class="fd-head">
@@ -1354,11 +1357,13 @@
   // link to cloud docs, and head to the homepage.
   function renderFinished() {
     setPanes("1fr");
+    const agentName = agentCommandName();
+    const startCmd = `bobi agent ${agentName} start`;
     $("#main").innerHTML = `<main class="done-wrap">
       <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
       <div class="eyebrow">All set</div>
       <h1>${esc(S.team_name || "your team")} is ready</h1>
-      <p class="lede">Installed into <code>.bobi/</code>. We are legion.</p>
+      <p class="lede">Installed into <code>run/package/</code>.</p>
 
       <p class="done-h">Run it — pick where</p>
       <p class="lede">Your team needs an agent harness wherever it runs. Locally it reuses the Claude Code login you already have; in the cloud the instance gets its own.</p>
@@ -1367,7 +1372,7 @@
         <div class="deploy-opt">
           <div class="deploy-head"><span class="deploy-tag">Local</span><span class="deploy-sub">on this machine</span></div>
           <p class="deploy-lede">Open a fresh terminal and turn your team on.</p>
-          <div class="cmd"><span class="pr">$</span> <span class="cmd-text">bobi start</span>
+          <div class="cmd"><span class="pr">$</span> <span class="cmd-text">${esc(startCmd)}</span>
             <button class="cmd-copy" id="copy-start" title="Copy">Copy</button></div>
         </div>
         <div class="deploy-opt">
@@ -1382,7 +1387,7 @@
       <div class="actions" style="margin-top:26px"><button class="btn primary" id="done-home">Done →</button></div>
     </main>`;
     $("#copy-start").addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText("bobi start"); toast("Copied."); }
+      try { await navigator.clipboard.writeText(startCmd); toast("Copied."); }
       catch { toast("Copy failed — select the command manually."); }
     });
     $("#copy-deploy").addEventListener("click", async () => {

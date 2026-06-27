@@ -92,7 +92,7 @@ class TestRequiresGating:
 
     def test_passing_requires(self, tmp_path):
         """All passing checks return success."""
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager
@@ -112,7 +112,7 @@ class TestRequiresGating:
 
     def test_failing_requires_blocks(self, tmp_path):
         """A failing check is reported as failed."""
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager

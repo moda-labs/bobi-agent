@@ -59,28 +59,30 @@ class TestAgentsList:
         result = cli_run("agents", "list")
         assert result.returncode == 0
 
-    def test_agents_show_nonexistent(self, cli_run):
-        result = cli_run("agents", "show", "NONEXISTENT-999")
+    def test_subagents_show_nonexistent(self, cli_run):
+        result = cli_run("subagents", "show", "NONEXISTENT-999")
         # Should fail gracefully
-        assert result.returncode != 0 or "not found" in result.stdout.lower() or "no" in result.stdout.lower()
+        assert result.returncode == 0
+        assert "no sub-agent found" in result.stdout.lower()
 
-    def test_agents_cancel_nonexistent(self, cli_run):
-        result = cli_run("agents", "cancel", "NONEXISTENT-999")
-        assert result.returncode != 0 or "not found" in result.stdout.lower() or "no" in result.stdout.lower()
+    def test_subagents_cancel_nonexistent(self, cli_run):
+        result = cli_run("subagents", "cancel", "NONEXISTENT-999")
+        assert result.returncode == 0
+        assert "no running sub-agent" in result.stdout.lower()
 
 
 class TestAgentsLaunch:
 
     def test_launch_missing_workflow(self, cli_run):
         result = cli_run(
-            "agents", "launch",
+            "subagents", "launch",
             "--role", "engineer", "--task", "X",
         )
         assert result.returncode != 0
 
     def test_launch_missing_role(self, cli_run):
         result = cli_run(
-            "agents", "launch",
+            "subagents", "launch",
             "-w", "adhoc", "--task", "X",
         )
         assert result.returncode != 0
@@ -137,7 +139,7 @@ class TestMonitors:
         assert result.returncode == 0
         assert "test-monitor" in result.stdout
 
-        monitors_file = bobi_env.project_path / ".bobi" / "monitors.yaml"
+        monitors_file = bobi_env.package_dir / "monitors.yaml"
         assert monitors_file.exists()
         assert "test-monitor" in monitors_file.read_text()
 
@@ -180,80 +182,45 @@ class TestSlackReply:
         assert "workspace" in result.stderr.lower() or "required" in result.stderr.lower()
 
 
-class TestOutsideProject:
-    """CLI commands run from a directory with no .bobi/.
-
-    These tests must strip BOBI_ROOT from the subprocess env —
-    bind_root() now propagates it (#249), and a stale value from a prior
-    test would make resolve_root() short-circuit to the wrong root.
-    """
+class TestMachineScopedCLI:
+    """Top-level commands are machine-scoped; runtime commands require
+    `bobi agent <name> ...`."""
 
     @staticmethod
-    def _clean_env():
-        """Env dict without BOBI_ROOT so the subprocess walks from cwd."""
+    def _clean_env(tmp_path):
+        """Env dict without BOBI_ROOT and with an isolated BOBI_HOME."""
         env = {**os.environ}
         env.pop("BOBI_ROOT", None)
+        env["BOBI_HOME"] = str(tmp_path / "home")
         return env
 
-    def _run_outside(self, *args, tmp_path_factory=None, tmp_dir=None):
-        cwd = str(tmp_dir)
-        return subprocess.run(
-            [sys.executable, "-m", "bobi.cli", *args],
-            capture_output=True, text=True, timeout=10,
-            cwd=cwd, env=self._clean_env(),
-        )
-
-    def test_status_outside_project(self, tmp_path):
+    def test_top_level_runtime_command_removed(self, tmp_path):
         result = subprocess.run(
             [sys.executable, "-m", "bobi.cli", "status"],
             capture_output=True, text=True, timeout=10,
-            cwd=str(tmp_path), env=self._clean_env(),
+            cwd=str(tmp_path), env=self._clean_env(tmp_path),
         )
-        # No installation → clean usage error, never an invented root.
         assert result.returncode != 0
-        assert "no bobi installation" in (result.stdout + result.stderr).lower()
+        combined = result.stdout + result.stderr
+        assert "no such command" in combined.lower()
+        assert "Traceback" not in combined
 
-    def test_agents_list_outside_project(self, tmp_path):
+    def test_agents_list_is_machine_scoped(self, tmp_path):
         result = subprocess.run(
             [sys.executable, "-m", "bobi.cli", "agents", "list"],
             capture_output=True, text=True, timeout=10,
-            cwd=str(tmp_path), env=self._clean_env(),
+            cwd=str(tmp_path), env=self._clean_env(tmp_path),
+        )
+        assert result.returncode == 0
+        assert "no bobi agents installed" in result.stdout.lower()
+
+    def test_missing_named_agent_errors_cleanly(self, tmp_path):
+        result = subprocess.run(
+            [sys.executable, "-m", "bobi.cli", "agent", "missing", "status"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(tmp_path), env=self._clean_env(tmp_path),
         )
         combined = result.stdout + result.stderr
         assert result.returncode != 0
-        assert "no bobi installation" in combined.lower()
-
-    def test_doctor_outside_project(self, tmp_path):
-        result = subprocess.run(
-            [sys.executable, "-m", "bobi.cli", "doctor"],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(tmp_path), env=self._clean_env(),
-        )
-        # doctor is advisory: it runs anywhere and reports the missing
-        # installation per-check instead of refusing to start.
-        combined = result.stdout + result.stderr
-        assert "no project detected" in combined.lower()
-
-    def test_transcript_outside_project(self, tmp_path):
-        """Group-level binding: transcript subcommands fail with a clean
-        usage error, not a raw 'root not bound' RuntimeError."""
-        result = subprocess.run(
-            [sys.executable, "-m", "bobi.cli", "transcript", "sessions"],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(tmp_path), env=self._clean_env(),
-        )
-        combined = result.stdout + result.stderr
-        assert result.returncode != 0
-        assert "no bobi installation" in combined.lower()
-        assert "Traceback" not in combined
-
-    def test_workflows_status_outside_project(self, tmp_path):
-        result = subprocess.run(
-            [sys.executable, "-m", "bobi.cli", "workflows", "status"],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(tmp_path), env=self._clean_env(),
-        )
-        combined = result.stdout + result.stderr
-        assert result.returncode != 0
-        assert "no bobi installation" in combined.lower()
+        assert "bobi agent 'missing' is not installed" in combined.lower()
         assert "Traceback" not in combined

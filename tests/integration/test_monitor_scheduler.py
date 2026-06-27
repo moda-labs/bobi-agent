@@ -38,8 +38,8 @@ class TestMonitorRegistryLoading:
     """MonitorRegistry loads and merges defaults + project monitors."""
 
     def test_loads_project_monitors(self, tmp_path):
-        """Monitors from .bobi/monitors.yaml are loaded."""
-        config_dir = tmp_path / ".bobi"
+        """Monitors from run/package/monitors.yaml are loaded."""
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text("entry_point: manager\n")
         (config_dir / "monitors.yaml").write_text(yaml.dump({
@@ -56,7 +56,7 @@ class TestMonitorRegistryLoading:
 
     def test_project_disables_default(self, tmp_path):
         """enabled: false in project config disables a default monitor."""
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         monitors_dir = config_dir / "monitors"
         monitors_dir.mkdir(parents=True)
 

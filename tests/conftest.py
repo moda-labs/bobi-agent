@@ -74,24 +74,15 @@ def _reset_paths_root():
     any test that binds via a real code path (CLI invoke, _run_agent_entry)
     poisons every later test that binds a different tmp root.
 
-    Must also clear BOBI_ROOT from os.environ since bind_root() now
-    propagates it (#249) — a stale env var causes resolve_root() to
-    short-circuit to a prior test's root instead of walking from cwd.
-
-    The inherited-pin snapshot (#375) is frozen at import, so an ambient
-    BOBI_ROOT in the CI/dev shell would otherwise short-circuit every
-    in-process resolve_root for the whole session. Neutralize it per-test
-    (None = no inherited pin → walk from cwd); tests that need a pin set it
-    explicitly. The original snapshot is restored on teardown.
+    Must also clear BOBI_ROOT from os.environ since bind_root() propagates it
+    to children; a stale env var causes resolve_root() to select a prior
+    test's runtime root.
     """
     from bobi import paths
     before = paths._root
     env_before = os.environ.get("BOBI_ROOT")
-    snapshot_before = paths._inherited_root_env
-    paths._inherited_root_env = None
     yield
     paths._root = before
-    paths._inherited_root_env = snapshot_before
     if env_before is None:
         os.environ.pop("BOBI_ROOT", None)
     else:
@@ -125,7 +116,7 @@ TEST_AGENT_NAME = "test-agent"
 
 
 def _install_test_agent(config_dir: Path) -> None:
-    """Create installed agent state in .bobi/ (simulates `bobi install`)."""
+    """Create installed package state in run/package/."""
     for subdir in ["roles/director", "roles/project_lead", "roles/engineer",
                     "workflows", "monitors"]:
         (config_dir / subdir).mkdir(parents=True, exist_ok=True)
@@ -209,7 +200,7 @@ CHECKS = {
 
 @dataclass
 class BobiInstall:
-    """Paths and ports for an isolated bobi installation."""
+    """Paths and ports for an isolated Bobi home."""
     repo_path: Path
     state_dir: Path
     sessions_dir: Path
@@ -219,23 +210,26 @@ class BobiInstall:
 
 @pytest.fixture
 def bobi_install(tmp_path, monkeypatch):
-    """Create a fully isolated bobi installation in a temp directory.
+    """Create a fully isolated Bobi home in a temp directory.
 
-    Binds the paths root so all per-project path resolution points at tmp_path.
-    No global ~/.bobi directory is created or referenced.
+    Binds a canonical runtime root under BOBI_HOME so tests never touch the
+    user's real ~/.bobi directory.
 
     Creates a self-contained test agent team so tests never depend on
     remote-fetched packs or the user's cache.
     """
-    repo_path = tmp_path / "repo"
+    home = tmp_path / "home"
+    agents_dir = home / "agents"
+    repo_path = agents_dir / TEST_AGENT_NAME / "run"
+    config_dir = repo_path / "package"
+    state_dir = repo_path / "state"
+    sessions_dir = state_dir / "sessions"
+    workspace_dir = repo_path / "workspace"
 
-    config_dir = repo_path / ".bobi"
-    state_dir = config_dir / "state"
-    sessions_dir = config_dir / "sessions"
-    agents_dir = config_dir / "agents"
+    monkeypatch.setenv("BOBI_HOME", str(home))
 
-    for d in [config_dir, state_dir, sessions_dir, agents_dir]:
-        d.mkdir(parents=True)
+    for d in [config_dir, state_dir, sessions_dir, agents_dir, workspace_dir]:
+        d.mkdir(parents=True, exist_ok=True)
 
     _install_test_agent(config_dir)
 
@@ -248,7 +242,9 @@ def bobi_install(tmp_path, monkeypatch):
         ],
     }))
 
-    monkeypatch.setattr("bobi.paths._root", repo_path)
+    from bobi import paths
+    paths.bind_root(None)
+    paths.bind_root(repo_path)
 
     return BobiInstall(
         repo_path=repo_path,

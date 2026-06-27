@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from bobi import paths
 from bobi.sdk import SessionEntry
 from bobi.subagent import (
     AgentResult,
@@ -30,13 +31,18 @@ def tmp_cwd():
     shutil.rmtree(d, ignore_errors=True)
 
 
+def _write_agent_yaml(root: Path, body: str = "agent: t\nentry_point: x\n") -> None:
+    paths.package_dir(root).mkdir(parents=True, exist_ok=True)
+    paths.agent_yaml_path(root).write_text(body)
+
+
 class TestBuildPrompt:
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
         """_build_prompt reads handoffs via the session registry, which
         requires a bound root — don't depend on one leaking from tests
         that ran earlier."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        paths.bind_root(tmp_path)
 
     def test_includes_phase_and_issue(self):
         prompt = _build_prompt("pickup", "AGD-12")
@@ -172,10 +178,10 @@ class TestCheckRequires:
     def test_returns_pass_for_healthy_deps(self, tmp_path):
         from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True)
-        (config_dir / "agent.yaml").write_text(
-            "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n")
+        _write_agent_yaml(
+            tmp_path,
+            "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n",
+        )
         results = check_requires(tmp_path)
         assert len(results) == 1
         assert results[0][1] is True
@@ -183,10 +189,10 @@ class TestCheckRequires:
     def test_returns_fail_for_broken_deps(self, tmp_path):
         from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True)
-        (config_dir / "agent.yaml").write_text(
-            "entry_point: x\nrequires:\n  - name: bad\n    check: 'false'\n")
+        _write_agent_yaml(
+            tmp_path,
+            "entry_point: x\nrequires:\n  - name: bad\n    check: 'false'\n",
+        )
         results = check_requires(tmp_path)
         assert len(results) == 1
         assert results[0][1] is False
@@ -194,14 +200,14 @@ class TestCheckRequires:
     def test_cache_hit_within_ttl(self, tmp_path):
         from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True)
-        (config_dir / "agent.yaml").write_text(
-            "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n")
+        _write_agent_yaml(
+            tmp_path,
+            "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n",
+        )
         # First call populates cache
         check_requires(tmp_path)
         # Overwrite config to make check fail — cache should still return pass
-        (config_dir / "agent.yaml").write_text(
+        paths.agent_yaml_path(tmp_path).write_text(
             "entry_point: x\nrequires:\n  - name: ok\n    check: 'false'\n")
         results = check_requires(tmp_path)
         assert results[0][1] is True  # cached pass, not fresh fail
@@ -210,17 +216,17 @@ class TestCheckRequires:
         import time as _time
         from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True)
-        (config_dir / "agent.yaml").write_text(
-            "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n")
+        _write_agent_yaml(
+            tmp_path,
+            "entry_point: x\nrequires:\n  - name: ok\n    check: 'true'\n",
+        )
         check_requires(tmp_path)
         # Manually expire the cache entry
         key = str(tmp_path)
         ts, cached = _requires_cache[key]
         _requires_cache[key] = (ts - 300, cached)  # 5 min ago
         # Now change config
-        (config_dir / "agent.yaml").write_text(
+        paths.agent_yaml_path(tmp_path).write_text(
             "entry_point: x\nrequires:\n  - name: bad\n    check: 'false'\n")
         results = check_requires(tmp_path)
         assert results[0][1] is False  # re-ran, got fresh fail
@@ -228,9 +234,7 @@ class TestCheckRequires:
     def test_empty_requires(self, tmp_path):
         from bobi.subagent import check_requires, _requires_cache
         _requires_cache.clear()
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True)
-        (config_dir / "agent.yaml").write_text("entry_point: x\n")
+        _write_agent_yaml(tmp_path, "entry_point: x\n")
         results = check_requires(tmp_path)
         assert results == []
 
@@ -248,11 +252,11 @@ class TestAlertRequiresFailure:
     def test_posts_to_slack(self, mock_post, tmp_path):
         from bobi.config import RequiresEntry
         from bobi.subagent import _alert_requires_failure
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True)
-        (config_dir / "agent.yaml").write_text(
+        _write_agent_yaml(
+            tmp_path,
             "entry_point: x\nservices:\n  - name: slack\n    channels: [C123]\n"
-            "    credentials:\n      bot_token: xoxb-test\n")
+            "    credentials:\n      bot_token: xoxb-test\n",
+        )
         failures = [(RequiresEntry(name="gstack", check="false",
                                    why="skills needed", fix="run setup"), "check failed")]
         _alert_requires_failure(tmp_path, failures)
@@ -264,11 +268,11 @@ class TestAlertRequiresFailure:
     def test_slack_failure_does_not_crash(self, mock_post, tmp_path):
         from bobi.config import RequiresEntry
         from bobi.subagent import _alert_requires_failure
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True)
-        (config_dir / "agent.yaml").write_text(
+        _write_agent_yaml(
+            tmp_path,
             "entry_point: x\nservices:\n  - name: slack\n    channels: [C123]\n"
-            "    credentials:\n      bot_token: xoxb-test\n")
+            "    credentials:\n      bot_token: xoxb-test\n",
+        )
         failures = [(RequiresEntry(name="gstack", check="false",
                                    why="skills", fix="setup"), "failed")]
         # Should not raise
@@ -277,9 +281,7 @@ class TestAlertRequiresFailure:
     def test_no_slack_service_does_not_crash(self, tmp_path):
         from bobi.config import RequiresEntry
         from bobi.subagent import _alert_requires_failure
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True)
-        (config_dir / "agent.yaml").write_text("entry_point: x\n")
+        _write_agent_yaml(tmp_path, "entry_point: x\n")
         failures = [(RequiresEntry(name="gstack", check="false",
                                    why="skills", fix="setup"), "failed")]
         # Should not raise
@@ -293,7 +295,8 @@ class TestLaunchAgent:
     def bound_root(self, tmp_path, monkeypatch):
         """launch_agent reads the bound installation root; binding is the
         spawning process's job, so tests bind explicitly."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        _write_agent_yaml(tmp_path)
+        paths.bind_root(tmp_path)
 
     @patch("bobi.subagent.check_requires", return_value=[])
     @patch("bobi.subagent.get_registry")
@@ -373,7 +376,8 @@ class TestLaunchAgent:
         """The spawner's bound root travels in the args blob — the child
         inherits its identity instead of inferring it from cwd."""
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        _write_agent_yaml(tmp_path)
+        paths.bind_root(tmp_path)
         repo = tmp_path / "repos" / "jobtack"
         repo.mkdir(parents=True)
 
@@ -394,13 +398,12 @@ class TestLaunchAgent:
     ):
         """A codex-backed project lead must not inherit the default Claude brain."""
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
         monkeypatch.setenv("BOBI_BRAIN", "claude")
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True)
-        (config_dir / "agent.yaml").write_text(
+        _write_agent_yaml(
+            tmp_path,
             "agent: eng-team\nbrain:\n  kind: codex\n"
         )
+        paths.bind_root(tmp_path)
 
         from bobi.subagent import launch_agent
         launch_agent(
@@ -440,8 +443,7 @@ class TestRunAgentEntryRootBinding:
         monkeypatch.setattr("bobi.paths._root", None)
         root = tmp_path / "dev"
         repo = root / "jobtack"
-        (root / ".bobi").mkdir(parents=True)
-        (root / ".bobi" / "agent.yaml").write_text("name: t\n")
+        _write_agent_yaml(root, "name: t\n")
         repo.mkdir()
 
         from bobi.subagent import _run_agent_entry
@@ -461,8 +463,8 @@ class TestRunAgentEntryRootBinding:
         monkeypatch.setenv("BOBI_BRAIN", "claude")
         root = tmp_path / "dev"
         repo = root / "jobtack"
-        (root / ".bobi").mkdir(parents=True)
-        (root / ".bobi" / "agent.yaml").write_text(
+        _write_agent_yaml(
+            root,
             "name: t\nbrain:\n  kind: codex\n"
         )
         repo.mkdir()
@@ -484,8 +486,7 @@ class TestRunAgentEntryRootBinding:
         monkeypatch.setenv("BOBI_BRAIN", "codex")
         root = tmp_path / "dev"
         repo = root / "jobtack"
-        (root / ".bobi").mkdir(parents=True)
-        (root / ".bobi" / "agent.yaml").write_text("name: t\n")
+        _write_agent_yaml(root, "name: t\n")
         repo.mkdir()
 
         from bobi.brain import BRAIN_ENV

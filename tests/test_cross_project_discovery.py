@@ -1,25 +1,20 @@
-"""Tests for agent discovery under the single .bobi root.
+"""Tests for explicit Bobi Agent runtime binding.
 
-Covers:
-- find_runtime_root live-manager detection (nested-start guard)
-- _sessions_dir always under the explicitly bound installation root
-- Agents in repo checkouts sharing the registry via explicit binding
-- list_agents merging in-memory and registry sources
-- Nested runtime prevention in the start command
-- CLI from a repo checkout resolving to the installation root
+Runtime identity no longer comes from cwd or a project-local `.bobi` walk-up.
+Processes bind one selected run root, and session state lives under that root's
+state/ directory.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import tempfile
-import shutil
+from dataclasses import asdict
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
+from bobi import paths
 from bobi.sdk import (
     SessionEntry,
     SessionRegistry,
@@ -31,49 +26,31 @@ from bobi.sdk import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 @pytest.fixture
-def tree(tmp_path):
-    """Create a directory tree simulating a director + child repo layout.
-
-    ~/dev/                  ← director (parent)
-    ~/dev/.bobi/
-    ~/dev/.bobi/state/
-    ~/dev/jobtack/          ← child repo
-    ~/dev/jobtack/.bobi/
-    ~/dev/jobtack/.bobi/state/
-    """
-    parent = tmp_path / "dev"
-    parent.mkdir()
-    (parent / ".bobi" / "state").mkdir(parents=True)
-    (parent / ".bobi" / "sessions").mkdir(parents=True)
-    (parent / ".bobi" / "agent.yaml").write_text("name: test-agent\n")
-
-    child = parent / "jobtack"
-    child.mkdir()
-    (child / ".bobi" / "state").mkdir(parents=True)
-
-    return parent, child
+def run_root(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "agents" / "eng" / "run"
+    (root / "package").mkdir(parents=True)
+    (root / "package" / "agent.yaml").write_text("agent: test-agent\n")
+    (root / "state").mkdir()
+    (root / "workspace" / "repo").mkdir(parents=True)
+    monkeypatch.setenv("BOBI_HOME", str(home))
+    return root
 
 
 @pytest.fixture(autouse=True)
-def reset_project_root():
-    """Reset the global project root after each test."""
+def reset_registry():
     import bobi.sdk as sdk
-    from bobi import paths
-    old = paths._root
+    old_root = paths.bound_root()
+    old_registry = sdk._registry
+    paths.bind_root(None)
     sdk._registry = None
     yield
-    paths._root = old
-    sdk._registry = None
+    paths.bind_root(None)
+    if old_root is not None:
+        paths.bind_root(old_root)
+    sdk._registry = old_registry
 
-
-# ---------------------------------------------------------------------------
-# Tests: _pid_file_alive
-# ---------------------------------------------------------------------------
 
 class TestPidFileAlive:
     def test_no_file(self, tmp_path):
@@ -86,7 +63,6 @@ class TestPidFileAlive:
 
     def test_dead_pid(self, tmp_path):
         pid_file = tmp_path / "manager.pid"
-        # PID 99999999 almost certainly doesn't exist
         pid_file.write_text("99999999")
         assert _pid_file_alive(pid_file) is False
 
@@ -96,294 +72,88 @@ class TestPidFileAlive:
         assert _pid_file_alive(pid_file) is True
 
 
-# ---------------------------------------------------------------------------
-# Tests: find_runtime_root
-# ---------------------------------------------------------------------------
-
 class TestFindRuntimeRoot:
-    def test_finds_parent_with_live_manager(self, tree):
-        parent, child = tree
-        # Simulate a live manager in parent
-        pid_file = parent / ".bobi" / "state" / "manager.pid"
-        pid_file.write_text(str(os.getpid()))
+    def test_finds_live_bound_root(self, run_root):
+        paths.manager_pid_path(run_root).write_text(str(os.getpid()))
+        set_project_root(run_root)
 
-        result = find_runtime_root(child)
-        assert result == parent
+        assert find_runtime_root() == run_root
 
-    def test_finds_self_with_live_manager(self, tree):
-        parent, child = tree
-        pid_file = parent / ".bobi" / "state" / "manager.pid"
-        pid_file.write_text(str(os.getpid()))
+    def test_finds_live_ancestor_runtime(self, run_root):
+        paths.manager_pid_path(run_root).write_text(str(os.getpid()))
+        deep_repo = run_root / "workspace" / "repo" / "src"
+        deep_repo.mkdir()
 
-        result = find_runtime_root(parent)
-        assert result == parent
+        assert find_runtime_root(deep_repo) == run_root
 
-    def test_returns_none_when_no_manager(self, tree):
-        _, child = tree
-        result = find_runtime_root(child)
-        assert result is None
+    def test_returns_none_without_live_manager(self, run_root):
+        assert find_runtime_root(run_root / "workspace" / "repo") is None
 
-    def test_returns_none_with_stale_pid(self, tree):
-        parent, child = tree
-        pid_file = parent / ".bobi" / "state" / "manager.pid"
-        pid_file.write_text("99999999")  # dead PID
+    def test_returns_none_when_unbound(self):
+        assert find_runtime_root(None) is None
 
-        result = find_runtime_root(child)
-        assert result is None
-
-    def test_returns_none_when_start_is_none(self):
-        from bobi import paths
-        old = paths._root
-        paths._root = None
-        try:
-            assert find_runtime_root(None) is None
-        finally:
-            paths._root = old
-
-    def test_uses_project_root_as_default(self, tree):
-        parent, _ = tree
-        pid_file = parent / ".bobi" / "state" / "manager.pid"
-        pid_file.write_text(str(os.getpid()))
-
-        set_project_root(parent)
-        result = find_runtime_root()  # no explicit start
-        assert result == parent
-
-    def test_prefers_closest_ancestor(self, tmp_path):
-        """When multiple ancestors have live managers, returns the closest."""
-        grandparent = tmp_path / "a"
-        parent = grandparent / "b"
-        child = parent / "c"
-        for d in (grandparent, parent, child):
-            (d / ".bobi" / "state").mkdir(parents=True)
-
-        # Both grandparent and parent have live managers
-        (grandparent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
-        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
-
-        # From child, should find parent (closest)
-        result = find_runtime_root(child)
-        assert result == parent
-
-
-# ---------------------------------------------------------------------------
-# Tests: _sessions_dir is always the bound root
-# ---------------------------------------------------------------------------
 
 class TestSessionsDirBoundRoot:
-    def test_uses_bound_root(self, tree):
-        parent, _ = tree
-        set_project_root(parent)
-        sd = _sessions_dir()
-        assert sd == parent / ".bobi" / "sessions"
+    def test_uses_bound_run_root(self, run_root):
+        set_project_root(run_root)
+        assert _sessions_dir() == run_root / "state" / "sessions"
 
-    def test_no_walk_up_even_with_live_ancestor_manager(self, tree):
-        """Sessions never escape the bound root. The old walk-up to a live
-        manager.pid let a mis-bound agent scatter state across repo
-        checkouts; binding is explicit now, so the bound root is final."""
-        parent, child = tree
-        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
-
-        set_project_root(child)
-        sd = _sessions_dir()
-        assert sd == child / ".bobi" / "sessions"
-
-    def test_raises_without_project_root(self):
-        set_project_root(None)
+    def test_raises_without_bound_root(self):
         with pytest.raises(RuntimeError, match="not bound"):
             _sessions_dir()
 
 
-# ---------------------------------------------------------------------------
-# Tests: SessionRegistry cross-project visibility
-# ---------------------------------------------------------------------------
-
-class TestRegistryCrossProject:
-    def test_agent_working_in_child_visible_from_parent(self, tree):
-        parent, child = tree
-        # Manager at parent
-        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
-
-        # Sub-agent works in the child repo but binds the installation
-        # root its spawner passed — identity is inherited, not inferred.
-        set_project_root(parent)
+class TestSessionRegistry:
+    def test_agent_working_in_workspace_uses_bound_runtime_registry(self, run_root):
+        work_repo = run_root / "workspace" / "repo"
+        set_project_root(run_root)
         registry = SessionRegistry()
 
         entry = SessionEntry(
             name="agent-42-implement",
             session_id="sess-abc",
-            role="",
             run_key="42",
             phase="implement",
-            project="jobtack",
-            cwd=str(child),
+            cwd=str(work_repo),
             status="running",
             pid=os.getpid(),
         )
         registry.register(entry)
 
-        # Verify it was written to parent's sessions dir
-        assert (parent / ".bobi" / "sessions" / "agent-42-implement" / "state.json").exists()
-        # NOT in child's sessions dir
-        assert not (child / ".bobi" / "sessions" / "agent-42-implement" / "state.json").exists()
+        state_file = run_root / "state" / "sessions" / entry.name / "state.json"
+        assert state_file.exists()
+        assert json.loads(state_file.read_text())["cwd"] == str(work_repo)
 
-        # Now switch perspective: director sets project root to parent
-        set_project_root(parent)
         import bobi.sdk as sdk
-        sdk._registry = None  # reset singleton
-        director_registry = SessionRegistry()
-        active = director_registry.list_active()
-        names = [e.name for e in active]
-        assert "agent-42-implement" in names
+        sdk._registry = None
+        found = get_registry().get(entry.name)
+        assert found is not None
+        assert found.session_id == "sess-abc"
 
-    def test_agent_registered_locally_without_manager(self, tree):
-        _, child = tree
-        # No manager running anywhere
-
-        set_project_root(child)
-        registry = SessionRegistry()
-
-        entry = SessionEntry(
-            name="agent-99-spec",
-            session_id="",
-            role="",
-            status="running",
-            pid=os.getpid(),
-        )
-        registry.register(entry)
-
-        # Should be in child's own sessions dir
-        assert (child / ".bobi" / "sessions" / "agent-99-spec" / "state.json").exists()
-
-
-# ---------------------------------------------------------------------------
-# Tests: list_agents registry discovery
-# ---------------------------------------------------------------------------
-
-class TestListAgentsRegistry:
-    def test_includes_registry_agents(self, tree):
-        parent, child = tree
-        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
-
-        set_project_root(parent)
-
-        # Manually create a session entry on disk (simulating a detached agent)
-        session_dir = parent / ".bobi" / "sessions" / "agent-42-implement"
+    def test_list_agents_reads_bound_registry(self, run_root):
+        set_project_root(run_root)
+        session_dir = run_root / "state" / "sessions" / "agent-42-implement"
         session_dir.mkdir(parents=True)
         entry = SessionEntry(
             name="agent-42-implement",
             session_id="sess-x",
-            role="",
-            run_key="42",
-            phase="implement",
-            project="jobtack",
-            cwd=str(child),
-            status="running",
-            pid=os.getpid(),
-        )
-        from dataclasses import asdict
-        (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
-
-        from bobi.subagent import list_agents
-        agents = list_agents()
-        assert len(agents) >= 1
-        names = [a.get("name") for a in agents]
-        assert "agent-42-implement" in names
-
-    def test_excludes_managers_from_registry(self, tree):
-        parent, _ = tree
-        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
-
-        set_project_root(parent)
-
-        # Create a manager session entry on disk
-        session_dir = parent / ".bobi" / "sessions" / "moda-manager-dev"
-        session_dir.mkdir(parents=True)
-        entry = SessionEntry(
-            name="moda-manager-dev",
-            role="manager",
-            status="running",
-            pid=os.getpid(),
-        )
-        from dataclasses import asdict
-        (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
-
-        from bobi.subagent import list_agents
-        agents = list_agents()
-        names = [a.get("name") for a in agents]
-        assert "moda-manager-dev" not in names
-
-
-# ---------------------------------------------------------------------------
-# Tests: Nested runtime prevention
-# ---------------------------------------------------------------------------
-
-class TestNestedRuntimePrevention:
-    def test_start_rejects_when_ancestor_has_manager(self, tree):
-        parent, child = tree
-        # Manager running at parent
-        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
-
-        # Create agent.yaml in child so start doesn't fail for missing agent
-        (child / ".bobi" / "agent.yaml").write_text("agent: software_team\n")
-
-        from click.testing import CliRunner
-        from bobi.cli import main
-
-        runner = CliRunner()
-        with patch("bobi.cli._detect_project_root", return_value=child):
-            result = runner.invoke(main, ["start"])
-
-        assert result.exit_code == 1
-        assert "already running" in result.output.lower() or "already running" in (result.output + (result.stderr_bytes or b'').decode()).lower()
-
-    def test_start_allows_when_no_ancestor_manager(self, tree):
-        """start should proceed normally when no ancestor has a running manager."""
-        _, child = tree
-        # No manager running at parent
-
-        # We just verify the nested-runtime check passes (not the full start flow)
-        from bobi.sdk import find_runtime_root
-        ancestor = find_runtime_root(child.parent)
-        assert ancestor is None  # no blocking ancestor
-
-
-# ---------------------------------------------------------------------------
-# Tests: CLI from a repo checkout reaches the installation registry
-# ---------------------------------------------------------------------------
-
-class TestMessageRoutingCrossProject:
-    def test_cli_from_child_resolves_root_and_finds_agent(self, tree):
-        """A human running the CLI inside a repo checkout binds the
-        installation root (agent.yaml walk-up), so the registry they see
-        is the manager's — the child's stray state dir doesn't fork it."""
-        parent, child = tree
-        (parent / ".bobi" / "state" / "manager.pid").write_text(str(os.getpid()))
-
-        # Register an agent in parent's sessions dir
-        session_dir = parent / ".bobi" / "sessions" / "agent-42-implement"
-        session_dir.mkdir(parents=True)
-        entry = SessionEntry(
-            name="agent-42-implement",
-            session_id="sess-abc",
-            role="",
             run_key="42",
             phase="implement",
             status="running",
             pid=os.getpid(),
         )
-        from dataclasses import asdict
         (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
 
-        # CLI entry points bind via the agent.yaml walk-up, not raw cwd —
-        # the child's .bobi here is state-only, so resolution must
-        # pass over it and land on the installed root.
-        from bobi.paths import resolve_root
-        set_project_root(resolve_root(child))
-        import bobi.sdk as sdk
-        sdk._registry = None
+        from bobi.subagent import list_agents
+        assert [a.get("name") for a in list_agents()] == ["agent-42-implement"]
 
-        registry = get_registry()
-        found = registry.get("agent-42-implement")
-        assert found is not None
-        assert found.session_id == "sess-abc"
+    def test_managers_are_excluded_from_agent_list(self, run_root):
+        set_project_root(run_root)
+        session_dir = run_root / "state" / "sessions" / "bobi-manager-eng"
+        session_dir.mkdir(parents=True)
+        entry = SessionEntry(name="bobi-manager-eng", role="manager",
+                             status="running", pid=os.getpid())
+        (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
+
+        from bobi.subagent import list_agents
+        assert list_agents() == []

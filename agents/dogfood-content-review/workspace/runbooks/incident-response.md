@@ -12,38 +12,38 @@
 1. **Check manager status**
    ```bash
    cd ~/dev/<repo>
-   bobi status
+   bobi agent <name> status
    ```
    Expected: "Manager: running (session ...)"
 
 2. **Check event server**
    ```bash
-   bobi event-server status
+   bobi agent <name> event-server status
    ```
    Expected: "Event server: running on port 8080"
 
 3. **Review recent events**
    ```bash
-   bobi events
+   bobi agent <name> events
    ```
    Look for missing events or delivery failures.
 
 4. **Check manager log**
    ```bash
-   bobi log manager
+   tail -n 200 "$BOBI_HOME/agents/<name>/run/state/manager.log"
    ```
    Look for errors, stuck decision loops, or unexpected behavior.
 
 5. **Restart if needed**
    ```bash
-   bobi restart
+   bobi agent <name> restart
    ```
    This preserves the session — the manager resumes where it left off.
 
 6. **Force restart (last resort)**
    ```bash
-   bobi stop --force
-   bobi start
+   bobi agent <name> stop --force
+   bobi agent <name> start
    ```
    This kills the process and starts fresh.
 

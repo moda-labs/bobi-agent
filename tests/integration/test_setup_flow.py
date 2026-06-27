@@ -19,6 +19,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from bobi import paths
 from bobi.setup.state import SetupState
 from bobi.setup.webui import server
 from .conftest import requires_claude
@@ -28,9 +29,11 @@ pytestmark = pytest.mark.claude
 NONCE = "integration-nonce"
 
 
-def _fresh_project(tmp_path: Path) -> Path:
-    project = tmp_path / "setup-project"
-    project.mkdir()
+def _fresh_project(tmp_path: Path, monkeypatch) -> Path:
+    home = tmp_path / "home"
+    monkeypatch.setenv("BOBI_HOME", str(home))
+    project = home / "agents" / "setup-integration" / "run"
+    project.mkdir(parents=True)
     subprocess.run(["git", "init"], cwd=project, capture_output=True, check=True)
     return project
 
@@ -63,8 +66,8 @@ def _events(sse_text: str) -> list[tuple[str, dict]]:
 @requires_claude
 @pytest.mark.timeout(900)
 class TestCreateFlow:
-    def test_idea_to_installed_pack(self, tmp_path):
-        project = _fresh_project(tmp_path)
+    def test_idea_to_installed_pack(self, tmp_path, monkeypatch):
+        project = _fresh_project(tmp_path, monkeypatch)
         state = SetupState()
         c = _client(state, project)
 
@@ -89,7 +92,7 @@ class TestCreateFlow:
         assert any(p.startswith("roles/") for p in authored)
 
         team = state.team_name
-        pack = project / "agents" / team
+        pack = Path(state.source_dir)
         cfg = yaml.safe_load((pack / "agent.yaml").read_text())
         entry = cfg["entry_point"]
         role_text = (pack / "roles" / entry / "ROLE.md").read_text()
@@ -106,7 +109,7 @@ class TestCreateFlow:
         i = c.post("/api/install").json()
         assert i["installed"] == team
         installed = yaml.safe_load(
-            (project / ".bobi" / "agent.yaml").read_text())
+            paths.agent_yaml_path(project).read_text())
         assert installed.get("agent") == team
-        assert (project / ".bobi" / "install-manifest.json").exists()
-        assert (project / ".bobi" / ".gitignore").exists()
+        assert paths.install_manifest_path(project).exists()
+        assert (paths.package_dir(project) / ".gitignore").exists()

@@ -175,7 +175,7 @@ async def test_no_rotation_below_cap(bobi_install):
 
 @pytest.mark.asyncio
 async def test_compact_sentinel_requests_rotation_without_querying_model(bobi_install):
-    """`bobi compact` delivers a sentinel that flags rotation, not a prompt."""
+    """The compact command delivers a sentinel that flags rotation, not a prompt."""
     s = Session(name="test-compact", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._set_state("waiting_input")

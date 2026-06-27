@@ -15,6 +15,7 @@ from bobi.cli import main
 
 
 def test_install_pins_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     calls = []
     monkeypatch.setattr(registry, "fetch",
                         lambda pp, name, *, version=None, repo=None:
@@ -23,24 +24,26 @@ def test_install_pins_version(tmp_path, monkeypatch):
     with runner.isolated_filesystem(temp_dir=tmp_path):
         # _resolve_agent_pack returns None → exits right after fetch; we only
         # care that the version was parsed and forwarded.
-        runner.invoke(main, ["install", "eng-team@1.1.0", "--non-interactive"])
+        runner.invoke(main, ["agents", "install", "eng-team@1.1.0", "--non-interactive"])
     assert calls == [("eng-team", "1.1.0")]
 
 
 def test_install_bare_name_is_latest(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     calls = []
     monkeypatch.setattr(registry, "fetch",
                         lambda pp, name, *, version=None, repo=None:
                         calls.append((name, version)))
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        runner.invoke(main, ["install", "eng-team", "--non-interactive"])
+        runner.invoke(main, ["agents", "install", "eng-team", "--non-interactive"])
     assert calls == [("eng-team", None)]
 
 
 def test_install_url_branch_does_not_split_on_at(tmp_path, monkeypatch):
     """A URL containing `@` must NOT be parsed as name@version — it routes to
     fetch_from_url untouched."""
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     seen = {}
     monkeypatch.setattr(registry, "fetch_from_url",
                         lambda pp, url, name=None: seen.update(url=url) or (
@@ -49,7 +52,7 @@ def test_install_url_branch_does_not_split_on_at(tmp_path, monkeypatch):
         AssertionError("registry.fetch must not run for a URL install")))
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        runner.invoke(main, ["install",
+        runner.invoke(main, ["agents", "install",
                              "https://example.com/teams/eng@v1.tar.gz",
                              "--non-interactive"])
     assert seen.get("url") == "https://example.com/teams/eng@v1.tar.gz"

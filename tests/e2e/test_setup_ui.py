@@ -12,8 +12,8 @@ GOAL_MSG = "triage our github issues and route to the right engineer"
 
 
 def _seed_library_team(home, name="legacy-bot"):
-    """Write a minimal valid team source into the ~/bobi-agents library."""
-    src = home / "bobi-agents" / name
+    """Write a minimal valid team source into the BOBI_HOME/agents library."""
+    src = home / "agents" / name / "src"
     (src / "roles" / "lead").mkdir(parents=True)
     (src / "agent.yaml").write_text(
         "agent: " + name + "\nversion: 0.1.0\nentry_point: lead\n"
@@ -110,12 +110,12 @@ def test_finish_builds_to_file_browser(page, bobi_url):
     page.locator("#fd-tree .tnode", has_text="agent.yaml").click()
     expect(page.locator("#fd-code")).to_contain_text("agent:")
     # Finish lands on the completion screen offering two deployment paths —
-    # local (`bobi start`) and cloud (the Fly provisioner) — plus a Done
+    # local (`bobi agent <name> start`) and cloud (the Fly provisioner) — plus a Done
     # button into the team hub (the server stays alive — it's re-entrant now).
     page.click("#fd-finish")
     expect(page.locator(".done-wrap")).to_be_visible(timeout=10_000)
     expect(page.locator(".deploy-opt", has_text="Local")).to_contain_text(
-        "bobi start")
+        "bobi agent")
     expect(page.locator(".deploy-opt", has_text="Cloud")).to_contain_text(
         "provision-instance.sh")
     expect(page.locator("#done-home")).to_be_visible()
@@ -246,8 +246,8 @@ def test_welcome_leads_to_intro_with_custom_and_starts_editor(page, bobi_url):
     expect(page.locator(".uni-panel .up-title")).to_have_text("Your team")
 
 
-def test_change_location_picker_updates_fyi(page, bobi_url):
-    page.goto(bobi_url)
+def test_change_location_picker_updates_fyi(page, bobi):
+    page.goto(bobi.url)
     page.click("#welcome-go")
     expect(page.locator("#loc-path")).to_be_visible()
     page.click("#loc-change")
@@ -255,13 +255,14 @@ def test_change_location_picker_updates_fyi(page, bobi_url):
     # Opens in the (empty) library; step up to home, which has real folders.
     # Drilling into one updates the FYI line with that folder's absolute path.
     page.click(".pnode.up")
-    target = page.locator(".pnode:not(.up)").first
+    expect(page.locator("#pick-path")).to_have_text(str(bobi.home))
+    target_path = str(bobi.home / "projects")
+    target = page.locator(".pnode", has_text="projects")
     expect(target).to_be_visible()
-    name = target.inner_text().replace("📁", "").strip()
     target.click()
     page.click("#pick-use")
     expect(page.locator(".picker")).to_have_count(0)
-    expect(page.locator("#loc-path")).to_contain_text(name)
+    expect(page.locator("#loc-path")).to_have_text(target_path)
 
 
 def test_escape_closes_popup(page, bobi_url):

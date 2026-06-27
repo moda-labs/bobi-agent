@@ -47,7 +47,7 @@ ROTATION_RECONNECT_TIMEOUT = 120.0
 ROTATION_MAX_RECONNECT_ATTEMPTS = 3
 ROTATION_RECONNECT_BACKOFF = 2.0
 
-# Control sentinel for `bobi compact` (#433). Delivered as an inbox
+# Control sentinel for the named compact command (#433). Delivered as an inbox
 # message body; the run loop recognizes it, flags rotation, and never forwards
 # it to the model. An exact-match constant, so a human message can't trip it.
 COMPACT_SENTINEL = "\x00__bobi_compact__\x00"
@@ -580,7 +580,7 @@ class Session:
                 self.inbox.respond(msg, "session not ready")
             return
 
-        # `bobi compact` control signal — flag a forced rotation and let
+        # Compact control signal — flag a forced rotation and let
         # the idle loop flush + rotate. Never forward it to the model.
         if msg.text == COMPACT_SENTINEL:
             log.info("Session '%s' received compact request — rotation pending", self.name)

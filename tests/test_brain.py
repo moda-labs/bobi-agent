@@ -75,16 +75,17 @@ def test_set_process_brain():
 def test_config_parses_brain(tmp_path):
     """agent.yaml `brain:` round-trips into Config + the brain_kind helper."""
     from bobi.config import Config
+    from bobi import paths
 
-    (tmp_path / ".bobi").mkdir()
-    (tmp_path / ".bobi" / "agent.yaml").write_text(
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text(
         "agent: t\nbrain:\n  kind: codex\n  model: gpt-5-codex\n"
     )
     cfg = Config.load(tmp_path)
     assert cfg.brain == {"kind": "codex", "model": "gpt-5-codex"}
     assert cfg.brain_kind == "codex"
     # Absent brain → empty + the framework default downstream.
-    (tmp_path / ".bobi" / "agent.yaml").write_text("agent: t\n")
+    paths.agent_yaml_path(tmp_path).write_text("agent: t\n")
     assert Config.load(tmp_path).brain_kind == ""
 
 

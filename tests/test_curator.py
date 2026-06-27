@@ -390,7 +390,7 @@ class TestPolicyUpdatedDelivery:
             "payload": {"summary": "reversed a decision", "urgent": True},
         }])
         assert len(delivered) == 1
-        assert "Re-read .bobi/state/policy.md" in delivered[0].text
+        assert "Re-read run/state/policy.md" in delivered[0].text
         assert "reversed a decision" in delivered[0].text
 
     def test_bare_topic_also_matched(self):

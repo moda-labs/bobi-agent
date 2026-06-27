@@ -5,7 +5,7 @@ non-root agent, no Node, native `claude` CLI on PATH, fastembed model baked in,
 and the entrypoint's auth-mode guards. They build the image once per session.
 
 The full acceptance criterion — a `docker run` reaching a healthy manager that
-completes one `bobi ask` round-trip against the real API — needs live
+completes one named ask round-trip against the real API — needs live
 credentials and is covered by ``test_image_ask_roundtrip`` (skipped unless
 ANTHROPIC_API_KEY is present).
 
@@ -108,7 +108,10 @@ def test_fastembed_model_baked(image: str):
 def test_api_key_mode_requires_key(image: str):
     """api_key mode with no ANTHROPIC_API_KEY fails fast, before touching the volume."""
     proc = _run(
-        "docker", "run", "--rm", "-e", "BOBI_AUTH=api_key", image,
+        "docker", "run", "--rm",
+        "-e", "BOBI_AUTH=api_key",
+        "-e", "BOBI_AGENT=pytest",
+        image,
     )
     assert proc.returncode != 0
     assert "ANTHROPIC_API_KEY is unset" in (proc.stdout + proc.stderr)
@@ -122,6 +125,7 @@ def test_subscription_mode_rejects_api_key(image: str):
     proc = _run(
         "docker", "run", "--rm",
         "-e", "BOBI_AUTH=subscription",
+        "-e", "BOBI_AGENT=pytest",
         "-e", "ANTHROPIC_API_KEY=sk-ant-should-not-be-here",
         image,
     )
@@ -133,7 +137,10 @@ def test_subscription_mode_rejects_api_key(image: str):
 @pytest.mark.timeout(120)
 def test_unknown_auth_mode_rejected(image: str):
     proc = _run(
-        "docker", "run", "--rm", "-e", "BOBI_AUTH=bogus", image,
+        "docker", "run", "--rm",
+        "-e", "BOBI_AUTH=bogus",
+        "-e", "BOBI_AGENT=pytest",
+        image,
     )
     assert proc.returncode != 0
     assert "unknown BOBI_AUTH" in (proc.stdout + proc.stderr)
@@ -171,6 +178,7 @@ def test_empty_volume_without_team_waits_for_push(image: str, tmp_path: Path):
         up = _run(
             "docker", "run", "-d", "--name", name,
             "-e", "BOBI_AUTH=api_key",
+            "-e", "BOBI_AGENT=pytest",
             "-e", "ANTHROPIC_API_KEY=sk-ant-test",
             "-v", f"{vol}:/data",
             image,
@@ -214,6 +222,7 @@ def test_unresolvable_team_fails_loudly(image: str, tmp_path: Path):
         up = _run(
             "docker", "run", "-d", "--name", name,
             "-e", "BOBI_AUTH=api_key",
+            "-e", "BOBI_AGENT=pytest",
             "-e", "ANTHROPIC_API_KEY=sk-ant-test",
             "-e", "BOBI_TEAM=does-not-exist-anywhere",
             "-v", f"{vol}:/data",
@@ -253,7 +262,7 @@ SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "smoke-team"
 @pytest.mark.timeout(600)
 def test_image_ask_roundtrip(image: str, tmp_path: Path):
     """C8 acceptance, live: an empty volume + api_key auth + a reachable event
-    server reaches a healthy manager that completes one `bobi ask`
+    server reaches a healthy manager that completes one named ask
     round-trip against the real API.
 
     Spins up an EPHEMERAL event server (the real Worker code via `wrangler dev`,
@@ -295,6 +304,7 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
             "docker", "run", "-d", "--name", name,
             "--network", "host",
             "-e", "BOBI_AUTH=api_key",
+            "-e", "BOBI_AGENT=smoke",
             "-e", f"ANTHROPIC_API_KEY={os.environ['ANTHROPIC_API_KEY']}",
             "-e", f"BOBI_EVENT_SERVER={container_es_url}",
             "-e", "BOBI_TEAM=/mnt/team",
@@ -320,12 +330,11 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
             time.sleep(5)
         assert status == "healthy", f"never became healthy (last={status!r})"
 
-        # Run as the bobi user: the entrypoint chowns the volume to that
-        # uid, and resolve_root (#249) skips a .bobi/ not owned by the
-        # current uid — so a root `docker exec` would not find the install.
+        # Run as the bobi user from the selected runtime root.
         ask = _run(
-            "docker", "exec", "-u", "bobi", "-w", "/data/project", name,
-            "bobi", "ask", "Reply with the single word: pong",
+            "docker", "exec", "-u", "bobi",
+            "-w", "/data/.bobi/agents/smoke/run", name,
+            "bobi", "agent", "smoke", "ask", "Reply with the single word: pong",
             timeout=180,
         )
         if ask.returncode != 0 or "pong" not in ask.stdout.lower():

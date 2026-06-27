@@ -10,7 +10,7 @@ Design (from the implementation handoff):
   call must present, and a **Host guard** (mitigates DNS rebinding). The
   page is served with the nonce embedded; the browser echoes it back as a
   header. Secrets never enter the LLM loop — credential values arrive on a
-  dedicated `/api/credential` POST and go straight to `.env`.
+  dedicated `/api/credential` POST and go straight to run/.env.
 
 `build_app` is pure (state + project in, app out) so it's driven directly
 by Starlette's TestClient with an injected fake `stream_fn` — no network,
@@ -31,6 +31,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import (FileResponse, JSONResponse, Response,
                                StreamingResponse)
 
+from bobi import paths
 from bobi.setup.state import STAGE_ORDER, SetupState, Stage
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -84,18 +85,14 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
               model: str | None = None, stream_fn=None,
               home_root: Path | None = None):
     """Construct the FastAPI app. `stream_fn` overrides the LLM source
-    (tests inject a fake). `home_root` is the user's home (defaults to
-    `Path.home()`) — it roots the
-    `~/bobi-agents` team-source library and the folder picker; tests point it
-    at a tmpdir."""
+    (tests inject a fake). `home_root` overrides the Bobi home for tests."""
     app = FastAPI()
     app.state.stream_fn = stream_fn
     app.state.model = model
-    # The machine-wide library of editable team sources. A team isn't tied to
-    # the cwd it's installed into, so its source defaults here rather than
-    # littering whatever directory setup runs in.
-    home = (home_root or Path.home()).resolve()
-    library = home / "bobi-agents"
+    # The machine-wide library of Bobi Agent slots. Editable sources default to
+    # <home>/agents/<name>/src; setup scans this root.
+    home = (home_root or paths.home_dir()).resolve()
+    library = home / "agents"
 
     def _within_home(raw: str, default: Path) -> tuple[Path, bool]:
         """Resolve a user-supplied path and confine it to the home tree — the
@@ -174,9 +171,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         from bobi.setup import open_mode
         # Create defaults the team source into the library; Modify defaults to
         # scanning the same library, but the user can point the scan elsewhere
-        # (a project repo, a thumb drive, wherever) via /api/teams. Install
-        # still targets the project's .bobi/ unchanged — a source outside the
-        # project copies in like a registry team (see actions.install_team).
+        # (another source tree, a thumb drive, wherever) via /api/teams. Install
+        # always targets the selected Bobi Agent's run/package directory; a
+        # source outside the default library copies in like a registry team.
         from bobi.setup.actions import team_source_dir
         teams = open_mode.list_teams_in(library)
         # A team can be authored anywhere the user points /api/start (the chosen
@@ -188,8 +185,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             seen = {t["path"] for t in teams}
             teams += [t for t in open_mode.list_teams_in(src)
                       if t["path"] not in seen]
+        default_source = paths.agent_source_dir(state.team_name or "new-agent")
         return {"teams": teams,
-                "default_location": str(library),
+                "default_location": str(default_source),
                 "scan_dir": str(library)}
 
     @app.get("/api/teams")
@@ -227,7 +225,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # the whole filesystem. Paths are absolute. Anything outside home can
         # still be typed into the location field directly.
         # Best-effort create so the library is navigable on day one; never let
-        # a read-only home or a file already named `bobi-agents` turn a GET
+        # a read-only home or a file already named `agents` turn a GET
         # into a 500 — just fall back to listing home.
         try:
             library.mkdir(parents=True, exist_ok=True)
@@ -294,13 +292,13 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         if not location:
             return JSONResponse({"error": "choose a location for the team"},
                                 status_code=400)
-        loc = Path(location)
-        abs_loc = (loc if loc.is_absolute() else project / loc).resolve()
-        dot = paths.bobi_dir(project).resolve()
-        if abs_loc == dot or dot in abs_loc.parents:
-            return JSONResponse({"error": "pick a location outside .bobi/"},
+        loc = Path(location).expanduser()
+        abs_loc = (loc if loc.is_absolute() else home / loc).resolve()
+        run_root = project.resolve()
+        if abs_loc == run_root or run_root in abs_loc.parents:
+            return JSONResponse({"error": "pick a source location outside run/"},
                                 status_code=400)
-        state.source_dir = location
+        state.source_dir = str(abs_loc)
         state.finished = False   # starting/opening a team begins a fresh session
         # Both modify-local and from-registry land in the same non-lossy
         # edit-in-place authoring path; only create authors from scratch.
@@ -353,6 +351,11 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         else:
             name = (payload.get("name") or "").strip()
             state.team_name = slug(name) if name else ""
+            if open_mode.is_team(abs_loc):
+                return JSONResponse(
+                    {"error": f"a team already exists at {abs_loc} — open it "
+                     "from the hub, or choose another source directory."},
+                    status_code=409)
         state.stage = Stage.DESIGN
         state.save(project)
         return JSONResponse(serialize_state(state))
@@ -1123,7 +1126,7 @@ def serve(project: Path, *, model: str | None = None,
     if resume:
         state = SetupState.load(project)
         if state is None or state.finished:
-            print("No setup in progress to resume — run `bobi setup`.")
+            print("No setup in progress to resume — run `bobi setup <name>`.")
             return 1
     if state is None:
         SetupState.clear(project)

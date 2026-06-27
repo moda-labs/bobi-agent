@@ -98,7 +98,7 @@ Multi-droid coordinator with specialized agents (Code, Review, Docs, Test, Knowl
 
 6. **Structured handoff protocol** — YAML frontmatter + markdown files carry context between workflow steps. A pragmatic implementation of what A2A is formalizing.
 
-7. **Self-hosted, CLI-driven** — `bobi message`, `consult`, `spawn`, `status`. No vendor lock-in.
+7. **Self-hosted, CLI-driven** — `bobi agent <name> message`, `consult`, `spawn`, `status`. No vendor lock-in.
 
 ---
 

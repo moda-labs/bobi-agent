@@ -3,12 +3,12 @@
 # None has a native `check:` runner — each is evaluated by a short-lived
 # check agent that reads the description, looks through Venn, and posts its
 # event. Override, retime, or disable any of these in your repo's
-# .bobi/monitors.yaml. The two watch monitors are proactive but gated
+# run/package/monitors.yaml. The two watch monitors are proactive but gated
 # hard against noise and silent during the principal's quiet hours; pause
 # them for a purely reactive assistant.
 monitors:
   # The morning briefing. Time-of-day + timezone — retime to the principal's
-  # morning in .bobi/monitors.yaml (and match the tz to their context).
+  # morning in run/package/monitors.yaml (and match the tz to their context).
   - name: daily-briefing
     description: >
       It is the morning-briefing cadence. Always emit the briefing event so

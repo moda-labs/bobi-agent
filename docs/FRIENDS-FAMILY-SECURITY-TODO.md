@@ -58,7 +58,7 @@ server is used.
     `event-server/src/index.ts::createKVStorage`.
   - Secret handling: `INTERNAL_DO_SECRET` is a Cloudflare Worker secret only
     (`wrangler secret put INTERNAL_DO_SECRET`); do not propagate it to Fly,
-    Bubble, agent-team env, or `.bobi/.env`.
+    Bubble, agent-team env, or `run/.env`.
 
 - [ ] Add public admission control for `POST /deployments`.
   - Current risk: unsigned deployment minting is fine for bootstrap, but public
@@ -78,9 +78,9 @@ server is used.
     mode `0600`; add a regression test.
 
 - [ ] Add a doctor/preflight warning for permissive secret-file modes.
-  - Current risk: users may already have `.env` or `.bobi/.env` readable by
+  - Current risk: users may already have `.env` or `run/.env` readable by
     group/world.
-  - Expected fix: `bobi doctor` warns, and ideally offers the exact
+  - Expected fix: `bobi agent <name> doctor` warns, and ideally offers the exact
     `chmod 600 ...` remediation.
 
 ## Medium Priority Hardening

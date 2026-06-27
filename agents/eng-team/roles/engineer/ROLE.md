@@ -93,7 +93,7 @@ configured for.
 ### Where to find ticket info
 
 The handoff file contains (its absolute path is provided in your task
-prompt — sessions live under the installation root's `.bobi/sessions/`,
+prompt — sessions live under the installation root's `run/state/sessions/`,
 never relative to your working directory):
 - `issue_id`: the ticket identifier (e.g., BET-10)
 - `task_id`: the unique identifier needed for API calls

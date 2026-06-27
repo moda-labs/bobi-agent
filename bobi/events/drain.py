@@ -207,7 +207,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                     id=_msg_id(),
                     sender="policy-curator",
                     text=(f"policy.md updated — {summary}\n"
-                          "Re-read .bobi/state/policy.md and reconcile any "
+                          "Re-read run/state/policy.md and reconcile any "
                           "in-flight plan against it."),
                 ))
             else:

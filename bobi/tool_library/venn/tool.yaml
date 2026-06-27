@@ -7,7 +7,7 @@ requires:
   - name: venn
     why: "Reach external services (email, calendar, CRM) via the Venn CLI (tools/venn.md). Auth via VENN_API_KEY."
     check: "command -v venn >/dev/null 2>&1 && venn --help >/dev/null 2>&1"
-    fix: "python3 -m venv /opt/venn-cli && /opt/venn-cli/bin/pip install venn-cli==0.2.0 && ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn && echo 'Set VENN_API_KEY in .bobi/.env'"
+    fix: "python3 -m venv /opt/venn-cli && /opt/venn-cli/bin/pip install venn-cli==0.2.0 && ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn && echo 'Set VENN_API_KEY in run/.env'"
 build:
   # venn-cli is a Python package; install into an isolated venv so its deps never
   # collide with the framework's, then symlink the entrypoint onto PATH.

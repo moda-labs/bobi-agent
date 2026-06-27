@@ -2,9 +2,9 @@
 #
 # provision-instance.sh — stand up one bobi instance on Fly Machines (C10 / #340).
 #
-# A bobi instance is: one container image + one persistent volume (mounted
-# as project root and $HOME) + a set of env vars + an outbound WSS connection to
-# one event-server deployment. Nothing reaches in; it reaches out only.
+# A bobi instance is: one container image + one persistent volume (mounted at
+# /data, with BOBI_HOME=/data/.bobi) + a set of env vars + an outbound WSS
+# connection to one event-server deployment. Nothing reaches in; it reaches out only.
 # See docs/design/CONTAINERIZED_INSTANCES.md §2 (the instance contract).
 #
 # This script creates the Fly app, the volume, the secrets, and the machine, then
@@ -20,7 +20,7 @@
 #   * It never writes the volume's agent.yaml. After first boot installs the team
 #     (entrypoint, BOBI_TEAM), the volume config is the source of truth — a
 #     reprovision must not clobber workspace edits (that's why this only sets env
-#     + secrets, never project files).
+#     + secrets, never Bobi Agent runtime files).
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # OPERATOR-AGNOSTIC (design §9.1): no moda-labs assumptions are baked in.
@@ -105,7 +105,8 @@
 #                        instead of Fly's remote builder. The path used on a
 #                        macOS/Docker-Desktop laptop where the remote builder is
 #                        unreliable; DOCKER_HOST must point at the daemon (#387).
-#   --volume-name NAME   Volume name. Default: data (mounted at /data).
+#   --volume-name NAME   Volume name. Default: data (mounted at /data; Bobi
+#                        state defaults to /data/.bobi).
 #   --yes                Skip the confirmation prompt.
 #   -h, --help           Show this help.
 #
@@ -466,9 +467,7 @@ echo
 log "Done. Instance '$APP' is provisioning."
 echo "  Logs   : $FLY logs -a $APP"
 echo "  Status : $FLY status -a $APP"
-# An ssh session lands in / (WORKDIR), but bobi discovers the project by
-# walking up from cwd — so cd into it (as the volume's uid-10001 owner) first.
-echo "  Admin  : $FLY ssh console -a $APP --command 'gosu bobi env HOME=/home/bobi CLAUDE_CONFIG_DIR=/data/claude bash -c \"cd /data/project && bobi status\"'"
+echo "  Admin  : $FLY ssh console -a $APP --command 'gosu bobi env HOME=/home/bobi BOBI_HOME=/data/.bobi CLAUDE_CONFIG_DIR=/data/claude bobi agent $INSTANCE status'"
 if [ "$AUTH" = "subscription" ]; then
   echo
   echo "  Subscription first boot: the entrypoint posts a login URL to the private"

@@ -86,14 +86,47 @@ def _post_event_signed(base_url: str, topic: str, body_dict: dict,
 
 
 def _has_wrangler() -> bool:
-    """Check whether wrangler is available (npm ci'd in event-server/)."""
+    """Check whether wrangler is installed and runnable for this platform."""
     wrangler = PACKAGE_ROOT / "event-server" / "node_modules" / ".bin" / "wrangler"
-    return wrangler.exists()
+    if not wrangler.exists():
+        return False
+    try:
+        subprocess.run(
+            [str(wrangler), "--version"],
+            cwd=str(PACKAGE_ROOT / "event-server"),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+
+def _node_major() -> int:
+    try:
+        proc = subprocess.run(
+            ["node", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return 0
+    raw = proc.stdout.strip().lstrip("v")
+    try:
+        return int(raw.split(".", 1)[0])
+    except (ValueError, IndexError):
+        return 0
 
 
 def _event_server_backends():
     """Return the list of backend IDs to parametrize over."""
-    backends = ["local"]
+    backends = []
+    if _node_major() >= 20:
+        backends.append("local")
     # wrangler backend is opt-in via the BOBI_TEST_WRANGLER env var or
     # when wrangler is already installed in event-server/node_modules.
     if os.environ.get("BOBI_TEST_WRANGLER") == "1" or _has_wrangler():
@@ -907,7 +940,7 @@ def _live_subscriber(base_url: str, dep_id: str, api_key: str, timeout: float = 
 
 
 class TestBubbleIsolation:
-    """Bubbles minted per `bobi start` must NOT overlap on a shared event
+    """Bubbles minted per named start must NOT overlap on a shared event
     server — whether many VMs hit one server or several local instances from
     different dirs do. Exercised end to end against the real local.ts server.
     """
@@ -1061,8 +1094,8 @@ class TestSchedulerEndToEnd:
         base_url, *_ = event_server
 
         # Point the (session-scoped) project at this test server; restore
-        # after, and drop publish's per-project URL cache both ways.
-        agent_yaml = bobi_env.project_path / ".bobi" / "agent.yaml"
+        # after, and drop publish's runtime URL cache both ways.
+        agent_yaml = bobi_env.package_dir / "agent.yaml"
         original = agent_yaml.read_text()
         agent_yaml.write_text(original + f"\nevent_server_url: {base_url}\n")
         publish_mod._es_url_cache.clear()

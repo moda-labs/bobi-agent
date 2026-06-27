@@ -12,8 +12,9 @@ bobi's follow-up and a calm UI cue, but it never gates. The only hard
 floors are structural — goal must be non-empty to author anything at
 Build, a fresh validation to Install, an install to finish.
 
-State is checkpointed to .bobi/state/setup.json after every change
-so an interrupted setup resumes with `bobi setup --resume`.
+State is checkpointed under the selected Bobi Agent's run/state directory
+after every change so an interrupted setup resumes with
+`bobi setup --resume`.
 
 v1 is the **create** spine. Open mode (editing an existing pack) reuses
 these same stages and is deferred to M2 — `mode` carries the seam.
@@ -81,7 +82,7 @@ class Spec:
     #   - local (stdio): {"command", "args" (list[str]), "type": "stdio",
     #     "env_vars" (list[str] of env-var NAMES the command needs), "label"}
     # Secret VALUES never live here — only `${VAR}` references; the values go
-    # to .bobi/.env.
+    # to run/.env.
     mcp_servers: dict = field(default_factory=dict)
 
     # Autonomous is "enough" only once explicitly confirmed — even when the
@@ -113,9 +114,8 @@ class SetupState:
     stage: Stage = Stage.START
     mode: str = "create"             # "create" | "open"
     team_name: str = ""
-    # Where the team source lives — a real, owned folder (e.g.
-    # agent-teams/<name>/), authored/edited here and installed into .bobi/
-    # at Finish. Empty falls back to agents/<team_name> (legacy/tests).
+    # Where the team source lives. Empty means the canonical
+    # <BOBI_HOME>/agents/<team_name>/src path.
     source_dir: str = ""
     chat: str = ""                   # how you talk to the team: "cli"|"slack"|"telegram"
     spec: Spec = field(default_factory=Spec)
