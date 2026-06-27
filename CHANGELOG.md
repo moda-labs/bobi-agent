@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.35.3 — 2026-06-27
+
+Patch release for the remote Agent UI release gate.
+
+### Fixed
+- **Remote Agent UI checks work from clean machines.** `bobi agent <name> ui
+  --app <fly-app> --check` no longer requires the named agent to be installed in
+  the caller's local `BOBI_HOME`; local runtime binding is still enforced for
+  local UI mode and other agent-scoped commands.
+- **Remote Agent UI tunnels avoid local port collisions.** When `--port` is not
+  supplied, the tunnel now picks a free localhost port instead of assuming the
+  remote UI port is also free locally. This fixes release runners or operator
+  machines that already have something listening on `localhost:8080`.
+
 ## 0.35.2 — 2026-06-27
 
 Patch release for the Bobi release gate.
