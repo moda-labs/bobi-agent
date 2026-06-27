@@ -31,6 +31,10 @@ bobi agent dogfood status
    ```bash
    export DOGFOOD_AGENT=dogfood
    export BOBI_HOME=$(mktemp -d /tmp/bobi-dogfood-home-XXXXXX)
+   export DOGFOOD_EVENT_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+   export BOBI_EVENT_SERVER="http://localhost:$DOGFOOD_EVENT_PORT"
+   export BOBI_ES_TEST_GRANTS_SECRET="bobi-dogfood-test-grants"
+   export VENN_API_KEY="${VENN_API_KEY:-dummy}"
    bobi agents install "$REPO/agents/dogfood-content-review" \
      --name "$DOGFOOD_AGENT" --non-interactive
    ```
@@ -49,10 +53,28 @@ bobi agent dogfood status
    bobi agent "$DOGFOOD_AGENT" stop 2>/dev/null || true
    bobi agent "$DOGFOOD_AGENT" event-server stop 2>/dev/null || true
    ```
-   Verify port 8080 is free before event-server tests:
+   Verify the selected test port is free before event-server tests:
    ```bash
-   curl -s -m 2 http://localhost:8080/health && lsof -nP -iTCP:8080 -sTCP:LISTEN
+   curl -s -m 2 "http://localhost:$DOGFOOD_EVENT_PORT/health" \
+     && lsof -nP -iTCP:"$DOGFOOD_EVENT_PORT" -sTCP:LISTEN
    ```
+
+## Deployment Fidelity
+
+The default dogfood battery is a **local named-agent deployment**: it installs a
+team into an isolated `BOBI_HOME`, starts the runtime by name, boots a real
+manager/Claude session, and drives the same event-server registration and
+delivery paths a deployed instance uses.
+
+It is not, by itself, a Fly machine rollout. To emulate production deployment
+fully, also run the container/Fly sections:
+
+- Worker parity: run `pytest tests/integration/test_event_server.py` when
+  wrangler is installed.
+- Container parity: run the Docker/team-image integration tests relevant to the
+  change.
+- Fly rollout: run Section 10 only with `BOBI_DOGFOOD_FLY=1`; report it as
+  **not covered** when skipped.
 
 ## Phase 2: Feature Scan
 
@@ -63,7 +85,9 @@ Before running tests, scan the current code and update this file if it drifts.
 2. Read `event-server/src/local.ts` and `event-server/src/index.ts` route tables.
 3. Read `bobi/paths.py` and `bobi/config.py`; all runtime paths must derive
    from `BOBI_HOME` + named agent slot.
-4. Report new, removed, and unchanged behavior. Add inline tests for new
+4. Compare workflow CLI output to `bobi.prompts.resolver.list_workflows(...)`
+   rather than a lower-level workflow module.
+5. Report new, removed, and unchanged behavior. Add inline tests for new
    features and remove tests for deleted ones.
 
 ## Phase 3: Test Battery
@@ -81,7 +105,8 @@ TEST 1.4: $DOGFOOD_RUN/state and $DOGFOOD_RUN/workspace exist
 TEST 1.5: Config.load(Path("$DOGFOOD_RUN")) → cfg.agent == "dogfood-content-review"
 TEST 1.6: paths.agent_name_for_root(Path("$DOGFOOD_RUN")) == "$DOGFOOD_AGENT"
 TEST 1.7: paths.resolve_root_for_agent("$DOGFOOD_AGENT") == Path("$DOGFOOD_RUN").resolve()
-TEST 1.8: paths.agent_yaml_path(Path("$DOGFOOD_RUN")) == "$DOGFOOD_PACKAGE/agent.yaml"
+TEST 1.8: paths.agent_yaml_path(Path("$DOGFOOD_RUN")).resolve()
+          == Path("$DOGFOOD_PACKAGE/agent.yaml").resolve()
 TEST 1.9: config.parse_env_file("$DOGFOOD_RUN/.env") → dict
 TEST 1.10: BOBI_ROOT="$DOGFOOD_RUN" bobi agent "$DOGFOOD_AGENT" status does not depend on cwd
 ```
@@ -102,8 +127,8 @@ TEST 1.15: monitor topic subscriptions include "email/received" from the
 All runtime commands are scoped by name.
 
 ```
-TEST 2.1: bobi agent "$DOGFOOD_AGENT" start → banner with slot, pid, package, workflows, monitors, logs
-TEST 2.2: $DOGFOOD_STATE/manager.pid exists, numeric, kill -0 succeeds
+TEST 2.1: bobi agent "$DOGFOOD_AGENT" start → banner with bobi version, slot, pid, package, workflows, monitors, logs
+TEST 2.2: wait up to 15s for $DOGFOOD_STATE/manager.pid to exist, be numeric, and kill -0 succeeds
 TEST 2.3: bobi agent "$DOGFOOD_AGENT" start again → "Already running"
 TEST 2.4: bobi agent "$DOGFOOD_AGENT" status after ~10s → manager shown as running
 TEST 2.5: bobi agent "$DOGFOOD_AGENT" stop → stopped; pid file removed
@@ -116,23 +141,27 @@ TEST 2.9: bobi agent missing status → clean error naming the missing package/a
 ### Section 3: Local Event Server
 
 ```
-TEST 3.1: bobi agent "$DOGFOOD_AGENT" event-server start → running on port
-TEST 3.2: GET /health → {"status":"ok","mode":"local","deployments":N}
-TEST 3.3: bobi agent "$DOGFOOD_AGENT" event-server status → running on port 8080
-TEST 3.4: POST /deployments {"name":...,"subscriptions":["github:test/dogfood"]}
-          → 201 with deployment_id + api_key
+TEST 3.1: bobi agent "$DOGFOOD_AGENT" event-server start --port "$DOGFOOD_EVENT_PORT" → running on selected port
+TEST 3.2: GET "http://localhost:$DOGFOOD_EVENT_PORT/health" → {"status":"ok","mode":"local","deployments":N}
+TEST 3.3: bobi agent "$DOGFOOD_AGENT" event-server status → running on "$DOGFOOD_EVENT_PORT"
+TEST 3.4a: POST /deployments {"name":...,"subscriptions":["github:test/dogfood"]}
+           without a grant → 400 unauthorized_topics
+TEST 3.4b: mint bootstrap deployment, seed a test resource grant for
+           github:test/dogfood, then signed POST /deployments with that
+           bubble → 201 with deployment_id + api_key
 TEST 3.5: /health deployments count incremented
 TEST 3.6: POST /webhooks/github with matching repository.full_name → delivered_to >= 1
 TEST 3.7: malformed GitHub payloads return 400
 TEST 3.8: Slack url_verification echoes challenge
 TEST 3.9: Slack retry header returns {"ok":true} and is not routed
-TEST 3.10: PUT /deployments/$DEP/subscriptions with Bearer $KEY adds subscriptions
+TEST 3.10: PUT /deployments/$DEP/subscriptions with Bearer $KEY and {"add":["email"]} adds subscriptions
 TEST 3.11: invalid JSON body returns 400
 TEST 3.12: bad bearer token returns 403
 TEST 3.13: WebSocket subscribe receives connected, live event, and replay frames
 TEST 3.14: bad WebSocket token is rejected
-TEST 3.15: POST /events/<topic> responds with delivered_to
-TEST 3.16: bobi agent "$DOGFOOD_AGENT" event-server stop → stopped; port 8080 freed
+TEST 3.15a: unsigned POST /events/<topic> → 403
+TEST 3.15b: bubble-signed POST /events/<topic> responds with delivered_to
+TEST 3.16: bobi agent "$DOGFOOD_AGENT" event-server stop → stopped; selected port freed
 ```
 
 ### Section 3b: Cloudflare Worker Parity
@@ -140,7 +169,7 @@ TEST 3.16: bobi agent "$DOGFOOD_AGENT" event-server stop → stopped; port 8080 
 Skip if `event-server/node_modules/.bin/wrangler` is missing.
 
 ```
-TEST 3b.1: wrangler dev --port 8787 boots and /health returns ok
+TEST 3b.1: wrangler dev on a free port boots and /health returns ok
 TEST 3b.2: POST /deployments unsigned → 201 with deployment_id, api_key, bubble_id, bubble_key
 TEST 3b.3: signed POST /events/inbox/<name> → delivered_to >= 1
 TEST 3b.4: unsigned POST /events/<topic> → 403
@@ -150,14 +179,14 @@ TEST 3b.7: matching GitHub webhook → delivered_to >= 1
 TEST 3b.8: DELETE deployment with api_key → 200; wrong key → 403
 ```
 
-Teardown: stop wrangler/workerd and verify port 8787 is free.
+Teardown: stop wrangler/workerd and verify the selected wrangler port is free.
 
 ### Section 4: Workflows and Roles
 
 ```
 TEST 4.1: bobi agent "$DOGFOOD_AGENT" workflows list → dogfood workflows from run/package/workflows
 TEST 4.2: built-in workflows such as adhoc also appear
-TEST 4.3: prompts.resolver.list_workflows(Path("$DOGFOOD_RUN")) matches the CLI menu
+TEST 4.3: bobi.prompts.resolver.list_workflows(Path("$DOGFOOD_RUN")) matches the CLI menu
 TEST 4.4: workflow.schema.load_workflow("$DOGFOOD_PACKAGE/workflows/<workflow>.yaml") parses
 TEST 4.5: bobi agent "$DOGFOOD_AGENT" workflows validate <yaml> → exit 0
 TEST 4.6: bobi agent "$DOGFOOD_AGENT" workflows status → exit 0
@@ -206,16 +235,20 @@ TEST 8.3: parse_interval("bad") raises ValueError
 ### Section 9: Event Pipeline
 
 ```
-TEST 9.1: With event server and manager running, POST a synthetic GitHub issue
-          event for a subscribed repo → delivered_to >= 1
+TEST 9.1: With event server and manager running, start with
+          --subscribe github:test/dogfood and seed/authorize the test GitHub
+          resource, then POST a synthetic GitHub issue event for that repo
+          → delivered_to >= 1
 TEST 9.2: Within ~15s, manager.log contains event delivery evidence
 TEST 9.3: bobi agent "$DOGFOOD_AGENT" transcript show manager → event appears in activity
-TEST 9.4: Clean up by stopping the manager and event server; pid files gone and port 8080 free
+TEST 9.4: Clean up by stopping the manager and event server; pid files gone and selected port free
 ```
 
 ### Section 10: Fly Deployment Lifecycle
 
-Skip unless `fly auth whoami` succeeds and `BOBI_DOGFOOD_FLY=1`.
+This is the only section that validates real Fly deployment behavior. Skip
+unless `fly auth whoami` succeeds and `BOBI_DOGFOOD_FLY=1`; if skipped, report
+that Fly rollout was not covered by the dogfood run.
 
 ```
 TEST 10.1: bobi deploy <throwaway> --team-url <smoke-team-url> --fleet mdftest → boots

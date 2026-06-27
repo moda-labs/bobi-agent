@@ -90,6 +90,62 @@ def _project_state_dir(project_path: Path) -> Path:
     return paths.state_dir(project_path)
 
 
+def _parse_local_event_server_port(url: str) -> int | None:
+    """Return the local event-server port from a URL, or None for remote URLs."""
+    if not url:
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+        return None
+    return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def _event_server_port_file(project_path: Path) -> Path:
+    return _project_state_dir(project_path) / "event-server.port"
+
+
+def _selected_local_event_server_port(
+    project_path: Path,
+    override: int | None = None,
+) -> int:
+    """Port for the selected runtime's local event server.
+
+    Explicit CLI overrides win, then a live runtime's remembered start port,
+    then the configured local event_server_url, then the default 8080.
+    """
+    if override is not None:
+        return override
+
+    pid_file = _project_state_dir(project_path) / "event-server.pid"
+    port_file = _event_server_port_file(project_path)
+    if pid_file.exists() and port_file.exists():
+        try:
+            return int(port_file.read_text().strip())
+        except (OSError, ValueError):
+            pass
+
+    try:
+        from .config import Config
+        configured = Config.load(project_path).event_server_url
+    except Exception:
+        configured = ""
+    if configured:
+        port = _parse_local_event_server_port(configured)
+        if port is not None:
+            return port
+
+    if port_file.exists():
+        try:
+            return int(port_file.read_text().strip())
+        except (OSError, ValueError):
+            pass
+    return 8080
+
+
 def _ensure_root_bound() -> Path:
     """Bind the installation root if no entry point has yet — the call is
     for its side effect. Raises a clean UsageError outside an install."""
@@ -1284,14 +1340,18 @@ def stop(force):
     else:
         click.echo("No PID file found — bobi is not running.")
 
-    _ensure_root_bound()
+    project_path = _ensure_root_bound()
     from bobi.kb.embedder import stop as stop_embedder
     stop_embedder()
 
     # Check if the local event server is still running
     from bobi.events.server import health
-    if health("http://localhost:8080"):
-        click.echo("Event server is still running. Use `bobi agent <name> event-server stop` to stop it.")
+    es_port = _selected_local_event_server_port(project_path)
+    if health(f"http://localhost:{es_port}"):
+        click.echo(
+            f"Event server is still running on port {es_port}. "
+            "Use `bobi agent <name> event-server stop` to stop it."
+        )
 
 
 @main.command()
@@ -2698,10 +2758,11 @@ def event_server_cmd():
 @click.option("--port", default=None, type=int, help="Override webhook port")
 def event_server_start(foreground, port):
     """Start the local event server."""
-    es_port = port or 8080
+    project_path = _detect_project_root()
+    es_port = _selected_local_event_server_port(project_path, port)
 
     from bobi.events.server import ensure_running
-    result = ensure_running(es_port, project_path=_detect_project_root())
+    result = ensure_running(es_port, project_path=project_path)
     if result == "skipped":
         click.echo("Remote event_server_url configured — local server not needed.", err=True)
         return
@@ -2731,8 +2792,10 @@ def event_server_stop():
         click.echo("Not inside a bobi project.", err=True)
         raise SystemExit(1)
     pid_file = _project_state_dir(project_path) / "event-server.pid"
+    port_file = _event_server_port_file(project_path)
     if not pid_file.exists():
         click.echo("Event server is not running")
+        port_file.unlink(missing_ok=True)
         return
     pid = int(pid_file.read_text().strip())
     try:
@@ -2741,6 +2804,7 @@ def event_server_stop():
     except ProcessLookupError:
         click.echo("Event server was not running (stale PID file)")
     pid_file.unlink(missing_ok=True)
+    port_file.unlink(missing_ok=True)
 
 
 @event_server_cmd.command("restart")
@@ -2758,7 +2822,17 @@ def event_server_restart(ctx, port):
 def event_server_status():
     """Show event server status."""
     from bobi.events.server import health
-    es_port = 8080
+    project_path = _detect_project_root()
+    try:
+        from .config import Config
+        configured = Config.load(project_path).event_server_url
+    except Exception:
+        configured = ""
+    if configured and _parse_local_event_server_port(configured) is None:
+        click.echo(f"Event server: remote ({configured})")
+        return
+
+    es_port = _selected_local_event_server_port(project_path)
     data = health(f"http://localhost:{es_port}")
     if data:
         click.echo(f"Event server: running on port {es_port}")

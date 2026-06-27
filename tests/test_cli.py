@@ -212,6 +212,65 @@ class TestEventsCommand:
         assert "new_pr" in result.output
 
 
+class TestEventServerCommand:
+    def test_status_uses_selected_runtime_port_file(self, bobi_install, monkeypatch):
+        (bobi_install.state_dir / "event-server.pid").write_text("12345")
+        (bobi_install.state_dir / "event-server.port").write_text("58405")
+
+        seen = []
+
+        def fake_health(url):
+            seen.append(url)
+            if url == "http://localhost:58405":
+                return {"status": "ok", "mode": "local", "deployments": 2}
+            return None
+
+        monkeypatch.setattr("bobi.events.server.health", fake_health)
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert "running on port 58405" in result.output
+        assert seen == ["http://localhost:58405"]
+
+    def test_start_uses_configured_local_event_server_port(self, bobi_install, monkeypatch):
+        paths.agent_yaml_path(bobi_install.repo_path).write_text(
+            "agent: test-agent\n"
+            "entry_point: director\n"
+            "event_server: http://localhost:17777\n"
+        )
+        called = {}
+
+        def fake_ensure_running(port, project_path=None):
+            called["port"] = port
+            called["project_path"] = project_path
+            return "connected"
+
+        monkeypatch.setattr("bobi.events.server.ensure_running", fake_ensure_running)
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "start"])
+
+        assert result.exit_code == 0, result.output
+        assert called == {"port": 17777, "project_path": bobi_install.repo_path}
+        assert "port 17777" in result.output
+
+    def test_stop_warning_uses_selected_runtime_port(self, bobi_install, monkeypatch):
+        (bobi_install.state_dir / "event-server.port").write_text("58405")
+
+        def fake_health(url):
+            assert url == "http://localhost:58405"
+            return {"status": "ok", "mode": "local", "deployments": 1}
+
+        monkeypatch.setattr("bobi.events.server.health", fake_health)
+
+        result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "stop"])
+
+        assert result.exit_code == 0, result.output
+        assert "Event server is still running on port 58405" in result.output
+
+
 class TestSetupCommand:
     def _home(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
