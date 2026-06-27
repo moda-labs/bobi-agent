@@ -59,16 +59,6 @@ or event delivery.
 CI failure or production bug means there is an integration test gap. Add a
 failing integration test that reproduces the problem before fixing the behavior.
 
-## Documentation Work
-
-For the MOD-212 documentation effort, start with the public onboarding path:
-
-- Improve `README.md` first.
-- Then clean up `docs/` so user-facing docs are discoverable and design/spec
-  material is separated from setup documentation.
-- Then make `CLAUDE.md` point to this file once `AGENTS.md` is the canonical
-  agent instruction file.
-
 ## Design System
 
 Before any visual or UX decision on the `bobi setup` web UI, read `DESIGN.md`.
